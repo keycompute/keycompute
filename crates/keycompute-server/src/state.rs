@@ -2,12 +2,15 @@
 //!
 //! AppState 定义（DB Pool, Redis, 各模块 Handle）
 
+use std::sync::Arc;
+
 /// 应用状态
 #[derive(Debug, Clone)]
 pub struct AppState {
-    // TODO: 添加各模块服务
+    /// 限流服务
+    pub rate_limiter: Arc<keycompute_ratelimit::RateLimitService>,
+    // TODO: 添加其他模块服务
     // pub auth: Arc<keycompute_auth::AuthService>,
-    // pub rate_limiter: Arc<dyn keycompute_ratelimit::RateLimiter>,
     // pub pricing: Arc<keycompute_pricing::PricingService>,
     // pub routing: Arc<keycompute_routing::RoutingEngine>,
     // pub runtime: Arc<keycompute_runtime::RuntimeManager>,
@@ -18,7 +21,9 @@ pub struct AppState {
 impl AppState {
     /// 创建新的应用状态
     pub fn new() -> Self {
-        Self {}
+        Self {
+            rate_limiter: Arc::new(keycompute_ratelimit::RateLimitService::default_memory()),
+        }
     }
 }
 
