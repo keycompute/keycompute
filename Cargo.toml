@@ -11,7 +11,9 @@ members = [
 [workspace.dependencies]
 dioxus = { version = "0.7.1" }
 
-# workspace
+# workspace crates
 keycompute-types = { path = "crates/keycompute-types" }
+keycompute-provider-trait = { path = "crates/llm-provider/keycompute-provider-trait" }
+keycompute-openai = { path = "crates/llm-provider/keycompute-openai" }
 ui = { path = "packages/ui" }
 api = { path = "packages/api" }

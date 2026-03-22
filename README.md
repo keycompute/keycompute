@@ -57,7 +57,7 @@ cargo fmt --check
 |:---:|:---|:---:|
 | P0 | keycompute-types, keycompute-observability | ✅ |
 | P1 | keycompute-db | ✅ |
-| P2 | Provider Trait, OpenAI Adapter | ⏳ |
+| P2 | Provider Trait, OpenAI Adapter | ✅ |
 | P3 | keycompute-runtime | ⏳ |
 | P4 | Auth, RateLimit, Pricing, Routing | ⏳ |
 | P5 | llm-gateway | ⏳ |

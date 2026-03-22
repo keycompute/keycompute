@@ -1,14 +1,10 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! OpenAI Provider Adapter
+//!
+//! OpenAI API 的 Provider 适配器实现，作为参考实现和 OpenAI-compatible Provider 的基类。
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod adapter;
+pub mod protocol;
+pub mod stream;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use adapter::OpenAIProvider;
+pub use protocol::{OpenAIRequest, OpenAIResponse, OpenAIStreamResponse};
