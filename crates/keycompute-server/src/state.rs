@@ -5,7 +5,7 @@
 use keycompute_auth::{ApiKeyValidator, AuthService};
 use keycompute_billing::BillingService;
 use keycompute_provider_trait::ProviderAdapter;
-use keycompute_runtime::AccountStateStore;
+use keycompute_runtime::{AccountStateStore, ProviderHealthStore};
 use keycompute_routing::RoutingEngine;
 use llm_gateway::{GatewayBuilder, GatewayExecutor};
 use std::collections::HashMap;
@@ -20,8 +20,10 @@ pub struct AppState {
     pub rate_limiter: Arc<keycompute_ratelimit::RateLimitService>,
     /// 定价服务
     pub pricing: Arc<keycompute_pricing::PricingService>,
-    /// 运行时状态存储
+    /// 运行时状态存储（账号状态）
     pub account_states: Arc<AccountStateStore>,
+    /// Provider 健康状态存储
+    pub provider_health: Arc<ProviderHealthStore>,
     /// 路由引擎
     pub routing: Arc<RoutingEngine>,
     /// Gateway 执行器（唯一执行层）
@@ -37,6 +39,7 @@ impl std::fmt::Debug for AppState {
             .field("rate_limiter", &"<RateLimitService>")
             .field("pricing", &"<PricingService>")
             .field("account_states", &self.account_states)
+            .field("provider_health", &"<ProviderHealthStore>")
             .field("routing", &"<RoutingEngine>")
             .field("gateway", &"<GatewayExecutor>")
             .field("billing", &"<BillingService>")
@@ -56,9 +59,13 @@ impl AppState {
 
         // 创建运行时状态存储
         let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
 
-        // 创建路由引擎
-        let routing_engine = Arc::new(RoutingEngine::new(Arc::clone(&account_states)));
+        // 创建路由引擎（集成 ProviderHealthStore）
+        let routing_engine = Arc::new(RoutingEngine::new(
+            Arc::clone(&account_states),
+            Arc::clone(&provider_health),
+        ));
 
         // 创建 Gateway 执行器
         let gateway = Arc::new(
@@ -76,6 +83,7 @@ impl AppState {
             rate_limiter: Arc::new(keycompute_ratelimit::RateLimitService::default_memory()),
             pricing: Arc::new(pricing_service),
             account_states: Arc::clone(&account_states),
+            provider_health,
             routing: routing_engine,
             gateway,
             billing,
@@ -93,9 +101,13 @@ impl AppState {
 
         // 创建运行时状态存储
         let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
 
-        // 创建路由引擎
-        let routing_engine = Arc::new(RoutingEngine::new(Arc::clone(&account_states)));
+        // 创建路由引擎（集成 ProviderHealthStore）
+        let routing_engine = Arc::new(RoutingEngine::new(
+            Arc::clone(&account_states),
+            Arc::clone(&provider_health),
+        ));
 
         // 创建 Gateway 执行器，使用自定义 Provider
         let mut builder = GatewayBuilder::new();
@@ -112,6 +124,7 @@ impl AppState {
             rate_limiter: Arc::new(keycompute_ratelimit::RateLimitService::default_memory()),
             pricing: Arc::new(pricing_service),
             account_states: Arc::clone(&account_states),
+            provider_health,
             routing: routing_engine,
             gateway,
             billing,
