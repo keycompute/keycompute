@@ -17,7 +17,7 @@ pub use stream::StreamEvent;
 ///
 /// 所有 LLM Provider 必须实现此 trait，提供统一的上游调用接口
 #[async_trait]
-pub trait ProviderAdapter: Send + Sync {
+pub trait ProviderAdapter: Send + Sync + std::fmt::Debug {
     /// Provider 名称
     fn name(&self) -> &'static str;
 

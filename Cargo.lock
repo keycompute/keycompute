@@ -3389,6 +3389,21 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 [[package]]
 name = "llm-gateway"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "futures",
+ "keycompute-provider-trait",
+ "keycompute-runtime",
+ "keycompute-types",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "lock_api"

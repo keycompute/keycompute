@@ -59,8 +59,8 @@ cargo fmt --check
 | P1 | keycompute-db | ✅ |
 | P2 | Provider Trait, OpenAI Adapter | ✅ |
 | P3 | keycompute-runtime | ✅ |
-| P4 | Auth, RateLimit, Pricing, Routing | ⏳ |
-| P5 | llm-gateway | ⏳ |
+| P4 | Auth, RateLimit, Pricing, Routing | ✅ |
+| P5 | llm-gateway | ✅ |
 | P6 | Billing, Distribution | ⏳ |
 | P7 | keycompute-server | ⏳ |
 | P8 | 其他 Provider | ⏳ |
