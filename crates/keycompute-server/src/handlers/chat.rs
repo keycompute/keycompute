@@ -392,15 +392,19 @@ fn create_gateway_stream_with_billing(
                     yield Ok(Event::default().data(data));
                 }
                 keycompute_provider_trait::StreamEvent::Done => {
-                    // 流正常结束，触发计费
-                    let _ = billing.finalize_and_save(&ctx, &provider_name, account_id, &status).await;
+                    // 流正常结束，触发计费和分销
+                    let _ = billing.finalize_and_trigger_distribution(
+                        &ctx, &provider_name, account_id, &status, None, None
+                    ).await;
                     yield Ok(Event::default().data("[DONE]"));
                     break;
                 }
                 keycompute_provider_trait::StreamEvent::Error { message } => {
-                    // 流出错，标记状态并触发计费
+                    // 流出错，标记状态并触发计费和分销
                     status = "error".to_string();
-                    let _ = billing.finalize_and_save(&ctx, &provider_name, account_id, &status).await;
+                    let _ = billing.finalize_and_trigger_distribution(
+                        &ctx, &provider_name, account_id, &status, None, None
+                    ).await;
 
                     let error_chunk = serde_json::json!({
                         "error": { "message": message }
@@ -412,14 +416,16 @@ fn create_gateway_stream_with_billing(
             }
         }
 
-        // 如果流意外结束（没有 Done 或 Error 事件），也触发计费
+        // 如果流意外结束（没有 Done 或 Error 事件），也触发计费和分销
         if status == "success" {
             tracing::warn!(
                 request_id = %ctx.request_id,
                 "Stream ended without Done/Error event, triggering billing"
             );
             status = "incomplete".to_string();
-            let _ = billing.finalize_and_save(&ctx, &provider_name, account_id, &status).await;
+            let _ = billing.finalize_and_trigger_distribution(
+                &ctx, &provider_name, account_id, &status, None, None
+            ).await;
         }
     }
 }

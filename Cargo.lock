@@ -3148,6 +3148,7 @@ dependencies = [
  "bigdecimal",
  "chrono",
  "keycompute-db",
+ "keycompute-distribution",
  "keycompute-types",
  "rust_decimal",
  "sqlx",
@@ -3185,10 +3186,12 @@ name = "keycompute-distribution"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bigdecimal",
  "chrono",
  "keycompute-db",
  "keycompute-types",
  "rust_decimal",
+ "sqlx",
  "tokio",
  "tracing",
  "uuid",

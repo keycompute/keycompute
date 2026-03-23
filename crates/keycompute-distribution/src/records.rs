@@ -4,7 +4,10 @@
 
 use crate::{DistributionContext, DistributionLevel, calculator::DistributionShare};
 use chrono::{DateTime, Utc};
+use keycompute_db::CreateDistributionRecordRequest;
 use rust_decimal::Decimal;
+use sqlx::PgPool;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 分销记录
@@ -60,13 +63,29 @@ impl DistributionRecord {
 }
 
 /// 分销服务
-#[derive(Debug, Clone, Default)]
-pub struct DistributionService;
+#[derive(Clone)]
+pub struct DistributionService {
+    /// 数据库连接池（可选）
+    pool: Option<Arc<PgPool>>,
+}
+
+impl std::fmt::Debug for DistributionService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DistributionService")
+            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .finish()
+    }
+}
 
 impl DistributionService {
-    /// 创建新的分销服务
+    /// 创建新的分销服务（无数据库连接）
     pub fn new() -> Self {
-        Self
+        Self { pool: None }
+    }
+
+    /// 创建带数据库连接的分销服务
+    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+        Self { pool: Some(pool) }
     }
 
     /// 处理分销
@@ -101,6 +120,67 @@ impl DistributionService {
         let max_amount = ctx.user_amount * max_ratio;
         total_share <= max_amount
     }
+
+    /// 处理分销并保存到数据库
+    ///
+    /// 根据分成记录生成分销记录并写入数据库
+    pub async fn process_and_save(
+        &self,
+        ctx: &DistributionContext,
+        shares: &[DistributionShare],
+    ) -> keycompute_types::Result<Vec<keycompute_db::DistributionRecord>> {
+        // 生成分销记录
+        let records = self.process_distribution(ctx, shares);
+
+        // 如果没有数据库连接，返回空
+        let Some(pool) = &self.pool else {
+            tracing::debug!("No database pool, skipping distribution save");
+            return Ok(vec![]);
+        };
+
+        // 转换为数据库请求并保存
+        let mut saved_records = Vec::with_capacity(records.len());
+        for record in records {
+            let req = CreateDistributionRecordRequest {
+                usage_log_id: record.usage_log_id,
+                tenant_id: record.tenant_id,
+                beneficiary_id: record.beneficiary_id,
+                share_amount: decimal_to_bigdecimal(&record.share_amount),
+                share_ratio: decimal_to_bigdecimal(&record.share_ratio),
+            };
+
+            match keycompute_db::DistributionRecord::create(pool, &req).await {
+                Ok(saved) => {
+                    tracing::info!(
+                        usage_log_id = %record.usage_log_id,
+                        beneficiary_id = %record.beneficiary_id,
+                        share_amount = %record.share_amount,
+                        "Distribution record saved"
+                    );
+                    saved_records.push(saved);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        usage_log_id = %record.usage_log_id,
+                        error = %e,
+                        "Failed to save distribution record"
+                    );
+                    return Err(keycompute_types::KeyComputeError::DatabaseError(format!(
+                        "Failed to save distribution record: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        Ok(saved_records)
+    }
+}
+
+/// 将 Decimal 转换为 BigDecimal
+fn decimal_to_bigdecimal(value: &Decimal) -> bigdecimal::BigDecimal {
+    let s = value.to_string();
+    s.parse().unwrap_or(bigdecimal::BigDecimal::from(0))
 }
 
 /// 分销记录构建器

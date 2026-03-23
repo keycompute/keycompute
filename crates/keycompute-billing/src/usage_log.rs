@@ -6,6 +6,9 @@ use crate::calculator::calculate_amount;
 use crate::usage_source::UsageSource;
 use chrono::{DateTime, Utc};
 use keycompute_db::{CreateUsageLogRequest, UsageLog};
+use keycompute_distribution::{
+    DistributionContext, DistributionService, calculator::calculate_shares,
+};
 use keycompute_types::{KeyComputeError, RequestContext, Result};
 use rust_decimal::Decimal;
 use sqlx::PgPool;
@@ -17,12 +20,18 @@ use uuid::Uuid;
 pub struct BillingService {
     /// 数据库连接池（可选）
     pool: Option<Arc<PgPool>>,
+    /// 分销服务（可选）
+    distribution: Option<DistributionService>,
 }
 
 impl std::fmt::Debug for BillingService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BillingService")
             .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field(
+                "distribution",
+                &self.distribution.as_ref().map(|_| "DistributionService"),
+            )
             .finish()
     }
 }
@@ -30,12 +39,29 @@ impl std::fmt::Debug for BillingService {
 impl BillingService {
     /// 创建新的计费服务（无数据库连接）
     pub fn new() -> Self {
-        Self { pool: None }
+        Self {
+            pool: None,
+            distribution: None,
+        }
     }
 
     /// 创建带数据库连接的计费服务
     pub fn with_pool(pool: Arc<PgPool>) -> Self {
-        Self { pool: Some(pool) }
+        Self {
+            pool: Some(Arc::clone(&pool)),
+            distribution: Some(DistributionService::with_pool(Arc::clone(&pool))),
+        }
+    }
+
+    /// 创建带数据库连接和自定义分销服务的计费服务
+    pub fn with_pool_and_distribution(
+        pool: Arc<PgPool>,
+        distribution: DistributionService,
+    ) -> Self {
+        Self {
+            pool: Some(pool),
+            distribution: Some(distribution),
+        }
     }
 
     /// 流结束后执行结算
@@ -169,6 +195,80 @@ impl BillingService {
         );
 
         Ok(saved_log)
+    }
+
+    /// 流结束后执行结算并触发分销
+    ///
+    /// 输入: usage + pricing_snapshot + request metadata
+    /// 输出: 写入数据库后的 UsageLog，并触发 Distribution 处理
+    pub async fn finalize_and_trigger_distribution(
+        &self,
+        ctx: &RequestContext,
+        provider_name: &str,
+        account_id: Uuid,
+        status: &str,
+        level1_beneficiary_id: Option<Uuid>,
+        level2_beneficiary_id: Option<Uuid>,
+    ) -> Result<UsageLog> {
+        // 先执行结算并保存 usage_log
+        let usage_log = self
+            .finalize_and_save(ctx, provider_name, account_id, status)
+            .await?;
+
+        // 触发分销处理
+        if let Some(distribution) = &self.distribution {
+            let user_amount = bigdecimal_to_decimal(&usage_log.user_amount);
+
+            // 创建分销上下文
+            let dist_ctx = DistributionContext::new(
+                usage_log.id,
+                ctx.tenant_id,
+                user_amount,
+                &usage_log.currency,
+            );
+
+            // 计算分成（使用默认比例 3% / 2%）
+            let level1_ratio =
+                Decimal::from_f64_retain(0.03).unwrap_or(Decimal::from(3) / Decimal::from(100));
+            let level2_ratio =
+                Decimal::from_f64_retain(0.02).unwrap_or(Decimal::from(2) / Decimal::from(100));
+
+            let shares = calculate_shares(
+                user_amount,
+                level1_ratio,
+                level2_ratio,
+                level1_beneficiary_id.unwrap_or_else(Uuid::nil),
+                level2_beneficiary_id,
+            );
+
+            // 处理并保存分销记录
+            match distribution.process_and_save(&dist_ctx, &shares).await {
+                Ok(records) => {
+                    tracing::info!(
+                        request_id = %ctx.request_id,
+                        usage_log_id = %usage_log.id,
+                        distribution_records = records.len(),
+                        "Distribution processed successfully"
+                    );
+                }
+                Err(e) => {
+                    // 分销失败不影响主计费流程，只记录错误
+                    tracing::error!(
+                        request_id = %ctx.request_id,
+                        usage_log_id = %usage_log.id,
+                        error = %e,
+                        "Distribution processing failed"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                request_id = %ctx.request_id,
+                "No distribution service configured, skipping distribution"
+            );
+        }
+
+        Ok(usage_log)
     }
 }
 
@@ -466,4 +566,10 @@ fn decimal_to_bigdecimal(value: &Decimal) -> bigdecimal::BigDecimal {
     // Decimal -> String -> BigDecimal
     let s = value.to_string();
     s.parse().unwrap_or(bigdecimal::BigDecimal::from(0))
+}
+
+/// 将 BigDecimal 转换为 Decimal
+fn bigdecimal_to_decimal(value: &bigdecimal::BigDecimal) -> Decimal {
+    let s = value.to_string();
+    s.parse().unwrap_or(Decimal::from(0))
 }
