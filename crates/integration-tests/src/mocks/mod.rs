@@ -7,6 +7,9 @@ use uuid::Uuid;
 /// 模拟 Provider Adapter
 pub mod provider;
 
+/// 模拟 HTTP Transport
+pub mod http_transport;
+
 /// 模拟数据库
 pub mod database;
 

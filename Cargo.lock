@@ -2936,6 +2936,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "bytes",
  "chrono",
  "dashmap",
  "futures",
