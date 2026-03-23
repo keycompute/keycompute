@@ -3180,6 +3180,19 @@ dependencies = [
 [[package]]
 name = "keycompute-deepseek"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "keycompute-openai",
+ "keycompute-provider-trait",
+ "keycompute-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "keycompute-distribution"
@@ -3199,14 +3212,6 @@ dependencies = [
 
 [[package]]
 name = "keycompute-gemini"
-version = "0.1.0"
-
-[[package]]
-name = "keycompute-glm"
-version = "0.1.0"
-
-[[package]]
-name = "keycompute-minimax"
 version = "0.1.0"
 
 [[package]]
@@ -3322,6 +3327,7 @@ dependencies = [
  "keycompute-auth",
  "keycompute-billing",
  "keycompute-db",
+ "keycompute-deepseek",
  "keycompute-distribution",
  "keycompute-observability",
  "keycompute-openai",
@@ -3357,6 +3363,10 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
 ]
+
+[[package]]
+name = "keycompute-vllm"
+version = "0.1.0"
 
 [[package]]
 name = "keycompute-wechatpay"

@@ -92,8 +92,8 @@ impl RoutingEngine {
             pool: None,
             providers: vec![
                 "openai".to_string(),
-                "claude".to_string(),
                 "deepseek".to_string(),
+                "claude".to_string(),
             ],
             config: RoutingConfig::default(),
         }
@@ -113,8 +113,8 @@ impl RoutingEngine {
             pool: Some(pool),
             providers: vec![
                 "openai".to_string(),
-                "claude".to_string(),
                 "deepseek".to_string(),
+                "claude".to_string(),
             ],
             config: RoutingConfig::default(),
         }
@@ -134,8 +134,8 @@ impl RoutingEngine {
             pool: None,
             providers: vec![
                 "openai".to_string(),
-                "claude".to_string(),
                 "deepseek".to_string(),
+                "claude".to_string(),
             ],
             config,
         }
@@ -156,8 +156,8 @@ impl RoutingEngine {
             pool: Some(pool),
             providers: vec![
                 "openai".to_string(),
-                "claude".to_string(),
                 "deepseek".to_string(),
+                "claude".to_string(),
             ],
             config,
         }

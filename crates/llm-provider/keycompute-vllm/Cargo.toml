@@ -1,5 +1,5 @@
 [package]
-name = "keycompute-glm"
+name = "keycompute-vllm"
 version = "0.1.0"
 edition = "2024"
 

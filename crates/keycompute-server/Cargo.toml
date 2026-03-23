@@ -17,6 +17,7 @@ keycompute-observability = { workspace = true }
 llm-gateway = { workspace = true }
 keycompute-provider-trait = { workspace = true }
 keycompute-openai = { workspace = true }
+keycompute-deepseek = { workspace = true }
 
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }

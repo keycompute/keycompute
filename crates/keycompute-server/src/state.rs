@@ -76,10 +76,11 @@ impl AppState {
             Arc::clone(&cooldown),
         ));
 
-        // 创建 Gateway 执行器
+        // 创建 Gateway 执行器，注册所有 Provider
         let gateway = Arc::new(
             GatewayBuilder::new()
                 .add_provider("openai", Arc::new(keycompute_openai::OpenAIProvider::new()))
+                .add_provider("deepseek", Arc::new(keycompute_deepseek::DeepSeekProvider::new()))
                 .build(),
         );
 
@@ -122,10 +123,11 @@ impl AppState {
             Arc::clone(&pool),
         ));
 
-        // 创建 Gateway 执行器
+        // 创建 Gateway 执行器，注册所有 Provider
         let gateway = Arc::new(
             GatewayBuilder::new()
                 .add_provider("openai", Arc::new(keycompute_openai::OpenAIProvider::new()))
+                .add_provider("deepseek", Arc::new(keycompute_deepseek::DeepSeekProvider::new()))
                 .build(),
         );
 
