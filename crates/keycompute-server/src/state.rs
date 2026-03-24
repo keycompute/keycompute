@@ -188,8 +188,7 @@ impl AppState {
             }
             #[cfg(feature = "redis")]
             RateLimitBackendConfig::Redis { url } => {
-                let rate_config = RateLimitConfig::default();
-                keycompute_ratelimit::RateLimitService::new_redis(url, rate_config)
+                keycompute_ratelimit::RateLimitService::new_redis(url)
                     .expect("Failed to create Redis rate limiter")
             }
             #[cfg(not(feature = "redis"))]

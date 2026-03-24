@@ -3,9 +3,7 @@
 //! 验证限流模块在各场景下的行为
 
 use integration_tests::common::VerificationChain;
-use keycompute_ratelimit::{
-    MemoryRateLimiter, RateLimitConfig, RateLimitKey, RateLimitService, RateLimiter,
-};
+use keycompute_ratelimit::{MemoryRateLimiter, RateLimitKey, RateLimitService, RateLimiter};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -14,29 +12,16 @@ use uuid::Uuid;
 async fn test_ratelimit_basic_flow() {
     let mut chain = VerificationChain::new();
 
-    // 1. 创建限流配置
-    let config = RateLimitConfig {
-        rpm_limit: 10,
-        tpm_limit: 1000,
-        concurrency_limit: 5,
-    };
-    chain.add_step(
-        "keycompute-ratelimit",
-        "RateLimitConfig::new",
-        format!("RPM: {}, TPM: {}", config.rpm_limit, config.tpm_limit),
-        config.rpm_limit == 10,
-    );
-
-    // 2. 创建内存限流器
-    let limiter = Arc::new(MemoryRateLimiter::new(config.clone()));
+    // 1. 创建内存限流器（参数已硬编码）
+    let limiter = Arc::new(MemoryRateLimiter::new());
     chain.add_step(
         "keycompute-ratelimit",
         "MemoryRateLimiter::new",
-        "Memory rate limiter created",
-        true,
+        format!("RPM limit: {}", limiter.rpm_limit()),
+        limiter.rpm_limit() == 60,
     );
 
-    // 3. 创建限流键
+    // 2. 创建限流键
     let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     chain.add_step(
         "keycompute-ratelimit",
@@ -45,7 +30,7 @@ async fn test_ratelimit_basic_flow() {
         !key.tenant_id.is_nil(),
     );
 
-    // 4. 检查限流（应该通过）
+    // 3. 检查限流（应该通过）
     let allowed = limiter.check(&key).await.unwrap();
     chain.add_step(
         "keycompute-ratelimit",
@@ -54,7 +39,7 @@ async fn test_ratelimit_basic_flow() {
         allowed,
     );
 
-    // 5. 记录请求
+    // 4. 记录请求
     limiter.record(&key).await.unwrap();
     chain.add_step(
         "keycompute-ratelimit",
@@ -151,43 +136,18 @@ fn test_ratelimit_key_dimensions() {
     assert!(chain.all_passed());
 }
 
-/// 测试限流配置边界
+/// 测试限流参数常量
 #[test]
 fn test_ratelimit_config_boundaries() {
     let mut chain = VerificationChain::new();
 
-    // 1. 默认配置
-    let default_config = RateLimitConfig::default();
+    // 限流参数已硬编码为常量，验证默认行为
+    let limiter = MemoryRateLimiter::new();
     chain.add_step(
         "keycompute-ratelimit",
-        "RateLimitConfig::default_rpm",
-        format!("Default RPM: {}", default_config.rpm_limit),
-        default_config.rpm_limit == 60,
-    );
-    chain.add_step(
-        "keycompute-ratelimit",
-        "RateLimitConfig::default_tpm",
-        format!("Default TPM: {}", default_config.tpm_limit),
-        default_config.tpm_limit == 10000,
-    );
-    chain.add_step(
-        "keycompute-ratelimit",
-        "RateLimitConfig::default_concurrency",
-        format!("Default concurrency: {}", default_config.concurrency_limit),
-        default_config.concurrency_limit == 10,
-    );
-
-    // 2. 自义配置
-    let custom_config = RateLimitConfig {
-        rpm_limit: 100,
-        tpm_limit: 50000,
-        concurrency_limit: 20,
-    };
-    chain.add_step(
-        "keycompute-ratelimit",
-        "RateLimitConfig::custom",
-        format!("Custom RPM: {}", custom_config.rpm_limit),
-        custom_config.rpm_limit == 100,
+        "MemoryRateLimiter::rpm_limit",
+        format!("RPM limit: {}", limiter.rpm_limit()),
+        limiter.rpm_limit() == 60,
     );
 
     chain.print_report();

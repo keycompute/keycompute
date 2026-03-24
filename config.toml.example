@@ -48,32 +48,6 @@ jwt_expiry_secs = 3600
 # API Key 密钥（生产环境必须修改！）
 api_key_secret = "change-me-in-production"
 
-# ==================== 限流配置 ====================
-[ratelimit]
-# 每分钟请求数限制
-rpm_limit = 60
-# 每分钟 Token 数限制
-tpm_limit = 10000
-# 并发请求限制
-concurrency_limit = 10
-# 限流窗口大小（秒）
-window_secs = 60
-
-# ==================== 路由配置 ====================
-[routing]
-# 成本权重（0.0 - 1.0）
-cost_weight = 0.3
-# 延迟权重
-latency_weight = 0.25
-# 成功率权重
-success_weight = 0.25
-# 健康评分权重
-health_weight = 0.2
-# 不健康 Provider 惩罚分数
-unhealthy_penalty = 100.0
-# 高延迟阈值（毫秒）
-high_latency_threshold_ms = 1000
-
 # ==================== Gateway 配置 ====================
 [gateway]
 # 最大重试次数

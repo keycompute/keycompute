@@ -12,37 +12,13 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Provider 评分配置
-///
-/// 用于 Layer1 模型路由的评分权重
-#[derive(Debug, Clone)]
-pub struct RoutingConfig {
-    /// 成本权重 (0.0 - 1.0)
-    pub cost_weight: f64,
-    /// 延迟权重 (0.0 - 1.0)
-    pub latency_weight: f64,
-    /// 成功率权重 (0.0 - 1.0)
-    pub success_weight: f64,
-    /// 健康评分权重 (0.0 - 1.0)
-    pub health_weight: f64,
-    /// 不健康 Provider 的惩罚分数
-    pub unhealthy_penalty: f64,
-    /// 高延迟阈值（毫秒）
-    pub high_latency_threshold_ms: u64,
-}
-
-impl Default for RoutingConfig {
-    fn default() -> Self {
-        Self {
-            cost_weight: 0.3,
-            latency_weight: 0.25,
-            success_weight: 0.25,
-            health_weight: 0.2,
-            unhealthy_penalty: 100.0,
-            high_latency_threshold_ms: 1000,
-        }
-    }
-}
+/// 路由权重常量（硬编码，不可通过配置修改）
+const COST_WEIGHT: f64 = 0.3;
+const LATENCY_WEIGHT: f64 = 0.25;
+const SUCCESS_WEIGHT: f64 = 0.25;
+const HEALTH_WEIGHT: f64 = 0.2;
+const UNHEALTHY_PENALTY: f64 = 100.0;
+const HIGH_LATENCY_THRESHOLD_MS: u64 = 1000;
 
 /// 路由引擎
 ///
@@ -61,8 +37,6 @@ pub struct RoutingEngine {
     pool: Option<Arc<PgPool>>,
     /// 可用 Provider 列表
     providers: Vec<String>,
-    /// 路由配置
-    config: RoutingConfig,
 }
 
 impl std::fmt::Debug for RoutingEngine {
@@ -73,7 +47,6 @@ impl std::fmt::Debug for RoutingEngine {
             .field("cooldown", &"CooldownManager")
             .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
             .field("providers", &self.providers)
-            .field("config", &self.config)
             .finish()
     }
 }
@@ -96,7 +69,6 @@ impl RoutingEngine {
                 "vllm".to_string(),
                 "claude".to_string(),
             ],
-            config: RoutingConfig::default(),
         }
     }
 
@@ -118,52 +90,6 @@ impl RoutingEngine {
                 "vllm".to_string(),
                 "claude".to_string(),
             ],
-            config: RoutingConfig::default(),
-        }
-    }
-
-    /// 创建带自定义配置的路由引擎
-    pub fn with_config(
-        account_states: Arc<AccountStateStore>,
-        provider_health: Arc<ProviderHealthStore>,
-        cooldown: Arc<CooldownManager>,
-        config: RoutingConfig,
-    ) -> Self {
-        Self {
-            account_states,
-            provider_health,
-            cooldown,
-            pool: None,
-            providers: vec![
-                "openai".to_string(),
-                "deepseek".to_string(),
-                "vllm".to_string(),
-                "claude".to_string(),
-            ],
-            config,
-        }
-    }
-
-    /// 创建带数据库连接和自定义配置的路由引擎
-    pub fn with_pool_and_config(
-        account_states: Arc<AccountStateStore>,
-        provider_health: Arc<ProviderHealthStore>,
-        cooldown: Arc<CooldownManager>,
-        pool: Arc<PgPool>,
-        config: RoutingConfig,
-    ) -> Self {
-        Self {
-            account_states,
-            provider_health,
-            cooldown,
-            pool: Some(pool),
-            providers: vec![
-                "openai".to_string(),
-                "deepseek".to_string(),
-                "vllm".to_string(),
-                "claude".to_string(),
-            ],
-            config,
         }
     }
 
@@ -264,8 +190,6 @@ impl RoutingEngine {
     /// 基于架构公式：score = 0.3*cost + 0.25*latency + 0.25*(1-success) + 0.2*(1-health)
     /// 同时考虑 ProviderHealthStore 中的实时健康状态
     fn score_provider(&self, provider: &str, pricing: &PricingSnapshot) -> f64 {
-        let cfg = &self.config;
-
         // 1. 成本评分 (0-100，越低越好)
         let cost_score = self.calculate_cost_score(pricing);
 
@@ -294,16 +218,15 @@ impl RoutingEngine {
         let unhealthy_penalty = health
             .as_ref()
             .filter(|h| !h.healthy)
-            .map(|_| cfg.unhealthy_penalty)
+            .map(|_| UNHEALTHY_PENALTY)
             .unwrap_or(0.0);
 
         // 7. 综合评分（加权平均）
-        let total_weight =
-            cfg.cost_weight + cfg.latency_weight + cfg.success_weight + cfg.health_weight;
-        let normalized_score = (cfg.cost_weight * cost_score
-            + cfg.latency_weight * latency_score
-            + cfg.success_weight * success_score
-            + cfg.health_weight * health_score)
+        let total_weight = COST_WEIGHT + LATENCY_WEIGHT + SUCCESS_WEIGHT + HEALTH_WEIGHT;
+        let normalized_score = (COST_WEIGHT * cost_score
+            + LATENCY_WEIGHT * latency_score
+            + SUCCESS_WEIGHT * success_score
+            + HEALTH_WEIGHT * health_score)
             / total_weight;
 
         let final_score = normalized_score + unhealthy_penalty;
@@ -343,8 +266,6 @@ impl RoutingEngine {
 
     /// 计算延迟评分
     fn calculate_latency_score(&self, latency_ms: u64) -> f64 {
-        let threshold = self.config.high_latency_threshold_ms;
-
         if latency_ms == 0 {
             // 无延迟数据，返回中等分数
             50.0
@@ -352,7 +273,7 @@ impl RoutingEngine {
             10.0 // 优秀
         } else if latency_ms < 300 {
             30.0 // 良好
-        } else if latency_ms < threshold {
+        } else if latency_ms < HIGH_LATENCY_THRESHOLD_MS {
             60.0 // 一般
         } else {
             90.0 // 较差
@@ -592,16 +513,6 @@ impl RoutingEngine {
     pub fn remove_provider(&mut self, provider: &str) {
         self.providers.retain(|p| p != provider);
     }
-
-    /// 获取路由配置
-    pub fn config(&self) -> &RoutingConfig {
-        &self.config
-    }
-
-    /// 更新路由配置
-    pub fn set_config(&mut self, config: RoutingConfig) {
-        self.config = config;
-    }
 }
 
 #[cfg(test)]
@@ -719,25 +630,16 @@ mod tests {
     }
 
     #[test]
-    fn test_routing_config() {
-        let config = RoutingConfig {
-            cost_weight: 0.4,
-            latency_weight: 0.3,
-            success_weight: 0.2,
-            health_weight: 0.1,
-            unhealthy_penalty: 50.0,
-            high_latency_threshold_ms: 500,
-        };
-
-        let account_states = Arc::new(AccountStateStore::new());
-        let provider_health = Arc::new(ProviderHealthStore::new());
-        let cooldown = Arc::new(CooldownManager::new());
-        let mut engine = RoutingEngine::new(account_states, provider_health, cooldown);
-
-        engine.set_config(config.clone());
-
-        assert_eq!(engine.config().cost_weight, 0.4);
-        assert_eq!(engine.config().high_latency_threshold_ms, 500);
+    fn test_routing_constants() {
+        // 验证路由权重常量总和为 1.0
+        let total = COST_WEIGHT + LATENCY_WEIGHT + SUCCESS_WEIGHT + HEALTH_WEIGHT;
+        assert!(
+            (total - 1.0).abs() < 0.001,
+            "Routing weights should sum to 1.0"
+        );
+        assert_eq!(COST_WEIGHT, 0.3);
+        assert_eq!(LATENCY_WEIGHT, 0.25);
+        assert_eq!(UNHEALTHY_PENALTY, 100.0);
     }
 
     #[test]

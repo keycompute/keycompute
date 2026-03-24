@@ -16,6 +16,13 @@ pub mod redis;
 #[cfg(feature = "redis")]
 pub use redis::RedisRateLimiter;
 
+/// 限流参数常量（硬编码，不可通过配置修改）
+pub(crate) const RPM_LIMIT: u32 = 60;
+pub(crate) const WINDOW_SECS: u64 = 60;
+/// 并发请求限制（供未来使用）
+#[allow(dead_code)]
+const CONCURRENCY_LIMIT: u32 = 10;
+
 /// 限流键
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct RateLimitKey {
@@ -34,27 +41,6 @@ impl RateLimitKey {
             tenant_id,
             user_id,
             api_key_id,
-        }
-    }
-}
-
-/// 限流配置
-#[derive(Debug, Clone)]
-pub struct RateLimitConfig {
-    /// 每分钟请求数限制
-    pub rpm_limit: u32,
-    /// 每分钟 Token 数限制
-    pub tpm_limit: u32,
-    /// 并发请求限制
-    pub concurrency_limit: u32,
-}
-
-impl Default for RateLimitConfig {
-    fn default() -> Self {
-        Self {
-            rpm_limit: 60,
-            tpm_limit: 10000,
-            concurrency_limit: 10,
         }
     }
 }
@@ -116,31 +102,24 @@ pub trait RateLimiter: Send + Sync + std::fmt::Debug {
     /// 记录请求（通过后调用）
     async fn record(&self, key: &RateLimitKey) -> Result<()>;
 
-    /// 获取当前限流配置
-    fn config(&self) -> &RateLimitConfig;
+    /// 获取 RPM 限制
+    fn rpm_limit(&self) -> u32;
 }
 
 /// 内存限流器
 #[derive(Debug)]
 pub struct MemoryRateLimiter {
-    config: RateLimitConfig,
     counters: DashMap<RateLimitKey, RateCounter>,
     window_size: Duration,
 }
 
 impl MemoryRateLimiter {
     /// 创建新的内存限流器
-    pub fn new(config: RateLimitConfig) -> Self {
+    pub fn new() -> Self {
         Self {
-            config,
             counters: DashMap::new(),
-            window_size: Duration::from_secs(60),
+            window_size: Duration::from_secs(WINDOW_SECS),
         }
-    }
-
-    /// 创建默认配置的限流器
-    pub fn default() -> Self {
-        Self::new(RateLimitConfig::default())
     }
 
     /// 清理过期计数器
@@ -157,6 +136,12 @@ impl MemoryRateLimiter {
     }
 }
 
+impl Default for MemoryRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl RateLimiter for MemoryRateLimiter {
     async fn check(&self, key: &RateLimitKey) -> Result<bool> {
@@ -170,7 +155,7 @@ impl RateLimiter for MemoryRateLimiter {
         }
 
         let count = counter.count();
-        Ok(count < self.config.rpm_limit as u64)
+        Ok(count < RPM_LIMIT as u64)
     }
 
     async fn record(&self, key: &RateLimitKey) -> Result<()> {
@@ -179,8 +164,8 @@ impl RateLimiter for MemoryRateLimiter {
         Ok(())
     }
 
-    fn config(&self) -> &RateLimitConfig {
-        &self.config
+    fn rpm_limit(&self) -> u32 {
+        RPM_LIMIT
     }
 }
 
@@ -252,8 +237,8 @@ impl RateLimitService {
 #[cfg(feature = "redis")]
 impl RateLimitService {
     /// 创建 Redis 限流服务
-    pub fn new_redis(redis_url: &str, config: RateLimitConfig) -> Result<Self> {
-        let limiter = RedisRateLimiter::new(redis_url, config)?;
+    pub fn new_redis(redis_url: &str) -> Result<Self> {
+        let limiter = RedisRateLimiter::new(redis_url)?;
         Ok(Self::new(
             std::sync::Arc::new(limiter),
             RateLimitBackend::Redis,
@@ -261,12 +246,8 @@ impl RateLimitService {
     }
 
     /// 创建带前缀的 Redis 限流服务
-    pub fn new_redis_with_prefix(
-        redis_url: &str,
-        config: RateLimitConfig,
-        prefix: impl Into<String>,
-    ) -> Result<Self> {
-        let limiter = RedisRateLimiter::with_prefix(redis_url, config, prefix)?;
+    pub fn new_redis_with_prefix(redis_url: &str, prefix: impl Into<String>) -> Result<Self> {
+        let limiter = RedisRateLimiter::with_prefix(redis_url, prefix)?;
         Ok(Self::new(
             std::sync::Arc::new(limiter),
             RateLimitBackend::Redis,
@@ -285,10 +266,10 @@ mod tests {
     }
 
     #[test]
-    fn test_rate_limit_config_default() {
-        let config = RateLimitConfig::default();
-        assert_eq!(config.rpm_limit, 60);
-        assert_eq!(config.tpm_limit, 10000);
+    fn test_rate_limit_constants() {
+        assert_eq!(RPM_LIMIT, 60);
+        assert_eq!(CONCURRENCY_LIMIT, 10);
+        assert_eq!(WINDOW_SECS, 60);
     }
 
     #[tokio::test]
@@ -302,9 +283,7 @@ mod tests {
         // 记录请求
         limiter.record(&key).await.unwrap();
 
-        // 检查计数（get_counter 返回的是克隆，需要重新获取）
-        // 由于 DashMap 返回的是 RefMut，克隆后修改不会同步
-        // 这里只验证记录操作没有报错
+        // 检查仍应通过（未达到限制）
         assert!(limiter.check(&key).await.unwrap());
     }
 

@@ -13,18 +13,14 @@ pub mod auth;
 pub mod database;
 pub mod gateway;
 pub mod provider;
-pub mod ratelimit;
 pub mod redis;
-pub mod routing;
 pub mod server;
 
 pub use auth::AuthConfig;
 pub use database::DatabaseConfig;
 pub use gateway::{GatewayConfig, ProxyConfig};
 pub use provider::ProviderConfig;
-pub use ratelimit::RateLimitConfig;
 pub use redis::RedisConfig;
-pub use routing::RoutingConfig;
 pub use server::ServerConfig;
 
 /// 全局应用配置
@@ -38,10 +34,6 @@ pub struct AppConfig {
     pub redis: Option<RedisConfig>,
     /// 认证配置
     pub auth: AuthConfig,
-    /// 限流配置
-    pub ratelimit: RateLimitConfig,
-    /// 路由配置
-    pub routing: RoutingConfig,
     /// Gateway 配置
     pub gateway: GatewayConfig,
     /// Provider 配置
@@ -165,18 +157,6 @@ impl AppConfig {
             .set_default("auth.jwt_issuer", "keycompute")?
             .set_default("auth.jwt_expiry_secs", 3600)?
             .set_default("auth.api_key_secret", "change-me-in-production")?
-            // 限流默认值
-            .set_default("ratelimit.rpm_limit", 60)?
-            .set_default("ratelimit.tpm_limit", 10000)?
-            .set_default("ratelimit.concurrency_limit", 10)?
-            .set_default("ratelimit.window_secs", 60)?
-            // 路由默认值
-            .set_default("routing.cost_weight", 0.3)?
-            .set_default("routing.latency_weight", 0.25)?
-            .set_default("routing.success_weight", 0.25)?
-            .set_default("routing.health_weight", 0.2)?
-            .set_default("routing.unhealthy_penalty", 100.0)?
-            .set_default("routing.high_latency_threshold_ms", 1000)?
             // Gateway 默认值
             .set_default("gateway.max_retries", 3)?
             .set_default("gateway.timeout_secs", 120)?
@@ -210,16 +190,6 @@ impl AppConfig {
             ));
         }
 
-        // 验证权重总和（应该接近 1.0）
-        let total_weight = self.routing.cost_weight
-            + self.routing.latency_weight
-            + self.routing.success_weight
-            + self.routing.health_weight;
-
-        if (total_weight - 1.0).abs() > 0.01 {
-            tracing::warn!("路由权重总和为 {}，建议调整为 1.0", total_weight);
-        }
-
         Ok(())
     }
 }
@@ -231,8 +201,6 @@ impl Default for AppConfig {
             database: DatabaseConfig::default(),
             redis: None,
             auth: AuthConfig::default(),
-            ratelimit: RateLimitConfig::default(),
-            routing: RoutingConfig::default(),
             gateway: GatewayConfig::default(),
             provider: ProviderConfig::default(),
         }
@@ -248,7 +216,6 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.server.port, 3000);
         assert_eq!(config.server.bind_addr, "0.0.0.0");
-        assert_eq!(config.ratelimit.rpm_limit, 60);
     }
 
     #[test]

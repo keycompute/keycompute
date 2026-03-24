@@ -3,7 +3,7 @@
 //! 验证双层路由：Layer1 模型路由 + Layer2 账号路由
 
 use integration_tests::common::VerificationChain;
-use keycompute_routing::{RoutingConfig, RoutingEngine};
+use keycompute_routing::RoutingEngine;
 use keycompute_runtime::{AccountStateStore, CooldownManager, CooldownReason, ProviderHealthStore};
 use keycompute_types::{PricingSnapshot, RequestContext};
 use rust_decimal::Decimal;
@@ -277,60 +277,25 @@ async fn test_routing_account_cooldown() {
     assert!(chain.all_passed());
 }
 
-/// 测试路由配置
+/// 测试路由权重常量
 #[test]
 fn test_routing_config() {
     let mut chain = VerificationChain::new();
 
-    // 1. 默认配置
-    let default_config = RoutingConfig::default();
-    chain.add_step(
-        "keycompute-routing",
-        "RoutingConfig::default_cost_weight",
-        format!("Cost weight: {}", default_config.cost_weight),
-        default_config.cost_weight == 0.3,
-    );
-    chain.add_step(
-        "keycompute-routing",
-        "RoutingConfig::default_latency_weight",
-        format!("Latency weight: {}", default_config.latency_weight),
-        default_config.latency_weight == 0.25,
-    );
-    chain.add_step(
-        "keycompute-routing",
-        "RoutingConfig::default_success_weight",
-        format!("Success weight: {}", default_config.success_weight),
-        default_config.success_weight == 0.25,
-    );
-    chain.add_step(
-        "keycompute-routing",
-        "RoutingConfig::default_health_weight",
-        format!("Health weight: {}", default_config.health_weight),
-        default_config.health_weight == 0.2,
-    );
-
-    // 2. 自定义配置
-    let custom_config = RoutingConfig {
-        cost_weight: 0.4,
-        latency_weight: 0.3,
-        success_weight: 0.2,
-        health_weight: 0.1,
-        unhealthy_penalty: 50.0,
-        high_latency_threshold_ms: 500,
-    };
-
+    // 路由权重已硬编码，验证引擎可以正常创建和工作
     let account_states = Arc::new(AccountStateStore::new());
     let provider_health = Arc::new(ProviderHealthStore::new());
     let cooldown = Arc::new(CooldownManager::new());
-    let mut engine = RoutingEngine::new(account_states, provider_health, cooldown);
-
-    engine.set_config(custom_config.clone());
+    let engine = RoutingEngine::new(account_states, provider_health, cooldown);
 
     chain.add_step(
         "keycompute-routing",
-        "RoutingEngine::set_config",
-        format!("Custom cost weight: {}", engine.config().cost_weight),
-        engine.config().cost_weight == 0.4,
+        "RoutingEngine::new_with_hardcoded_weights",
+        format!(
+            "Configured providers: {}",
+            engine.configured_providers().len()
+        ),
+        engine.configured_providers().len() == 4,
     );
 
     chain.print_report();
