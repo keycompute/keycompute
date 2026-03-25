@@ -26,6 +26,7 @@ keycompute-openai = { path = "crates/llm-provider/keycompute-openai" }
 keycompute-deepseek = { path = "crates/llm-provider/keycompute-deepseek" }
 keycompute-vllm = { path = "crates/llm-provider/keycompute-vllm" }
 keycompute-claude = { path = "crates/llm-provider/keycompute-claude" }
+keycompute-ollama = { path = "crates/llm-provider/keycompute-ollama" }
 llm-gateway = { path = "crates/llm-gateway" }
 keycompute-billing = { path = "crates/keycompute-billing" }
 keycompute-distribution = { path = "crates/keycompute-distribution" }

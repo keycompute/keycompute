@@ -19,6 +19,7 @@ keycompute-server = { workspace = true }
 keycompute-provider-trait = { workspace = true }
 keycompute-openai = { workspace = true }
 keycompute-claude = { workspace = true }
+keycompute-ollama = { workspace = true }
 llm-gateway = { workspace = true }
 
 # 测试依赖

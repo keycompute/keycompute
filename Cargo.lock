@@ -3041,6 +3041,7 @@ dependencies = [
  "keycompute-db",
  "keycompute-distribution",
  "keycompute-observability",
+ "keycompute-ollama",
  "keycompute-openai",
  "keycompute-pricing",
  "keycompute-provider-trait",
@@ -3375,6 +3376,18 @@ dependencies = [
 [[package]]
 name = "keycompute-ollama"
 version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "keycompute-provider-trait",
+ "keycompute-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-test",
+]
 
 [[package]]
 name = "keycompute-openai"
@@ -3483,6 +3496,7 @@ dependencies = [
  "keycompute-deepseek",
  "keycompute-distribution",
  "keycompute-observability",
+ "keycompute-ollama",
  "keycompute-openai",
  "keycompute-pricing",
  "keycompute-provider-trait",

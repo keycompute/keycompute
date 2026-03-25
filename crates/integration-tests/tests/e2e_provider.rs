@@ -4,6 +4,7 @@
 
 use integration_tests::common::VerificationChain;
 use keycompute_claude::ClaudeProvider;
+use keycompute_ollama::OllamaProvider;
 use keycompute_openai::OpenAIProvider;
 use keycompute_provider_trait::{ProviderAdapter, StreamEvent, UpstreamRequest};
 
@@ -257,6 +258,87 @@ fn test_provider_claude() {
         "ClaudeProvider::supports_model_short_name",
         format!("Supports claude-3-5-sonnet: {}", supports_short_name),
         supports_short_name,
+    );
+
+    chain.print_report();
+    assert!(chain.all_passed());
+}
+
+/// 测试 Ollama Provider
+#[test]
+fn test_provider_ollama() {
+    let mut chain = VerificationChain::new();
+
+    // 1. 创建 Ollama Provider
+    let provider = OllamaProvider::new();
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::new",
+        "Ollama provider created",
+        true,
+    );
+
+    // 2. 检查名称
+    let name = provider.name();
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::name",
+        format!("Provider name: {}", name),
+        name == "ollama",
+    );
+
+    // 3. 检查支持的模型
+    let models = provider.supported_models();
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::supported_models",
+        format!("Supported models count: {}", models.len()),
+        !models.is_empty(),
+    );
+
+    // 4. 检查 Llama 3.2 支持
+    let supports_llama = provider.supports_model("llama3.2");
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::supports_model_llama",
+        format!("Supports llama3.2: {}", supports_llama),
+        supports_llama,
+    );
+
+    // 5. 检查 Mistral 支持
+    let supports_mistral = provider.supports_model("mistral");
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::supports_model_mistral",
+        format!("Supports mistral: {}", supports_mistral),
+        supports_mistral,
+    );
+
+    // 6. 检查 Qwen 支持
+    let supports_qwen = provider.supports_model("qwen2.5:7b");
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::supports_model_qwen",
+        format!("Supports qwen2.5:7b: {}", supports_qwen),
+        supports_qwen,
+    );
+
+    // 7. 检查不支持的模型
+    let supports_unknown = provider.supports_model("gpt-4o");
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::supports_model_unknown",
+        format!("Supports gpt-4o: {}", supports_unknown),
+        !supports_unknown,
+    );
+
+    // 8. 检查默认端点
+    let default_endpoint = keycompute_ollama::OLLAMA_DEFAULT_ENDPOINT;
+    chain.add_step(
+        "keycompute-ollama",
+        "OllamaProvider::default_endpoint",
+        format!("Default endpoint: {}", default_endpoint),
+        default_endpoint == "http://localhost:11434/api/chat",
     );
 
     chain.print_report();
