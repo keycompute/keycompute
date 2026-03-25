@@ -12,6 +12,7 @@ use std::path::Path;
 pub mod auth;
 pub mod crypto;
 pub mod database;
+pub mod email;
 pub mod gateway;
 pub mod redis;
 pub mod server;
@@ -19,6 +20,7 @@ pub mod server;
 pub use auth::AuthConfig;
 pub use crypto::CryptoConfig;
 pub use database::DatabaseConfig;
+pub use email::EmailConfig;
 pub use gateway::{GatewayConfig, ProxyConfig};
 pub use redis::RedisConfig;
 pub use server::ServerConfig;
@@ -38,6 +40,8 @@ pub struct AppConfig {
     pub gateway: GatewayConfig,
     /// 加密配置（可选）
     pub crypto: Option<CryptoConfig>,
+    /// 邮件服务配置
+    pub email: EmailConfig,
 }
 
 /// 配置加载错误
@@ -197,6 +201,7 @@ impl Default for AppConfig {
             auth: AuthConfig::default(),
             gateway: GatewayConfig::default(),
             crypto: None,
+            email: EmailConfig::default(),
         }
     }
 }
@@ -204,6 +209,7 @@ impl Default for AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_default_config() {
@@ -213,11 +219,17 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_config_from_env() {
         // 注意：这个测试会读取实际的环境变量
         // 使用 unsafe 因为 set_var/remove_var 在 Rust 2024 中是 unsafe
         unsafe {
             std::env::set_var("KC__SERVER__PORT", "8080");
+            std::env::set_var("KC__EMAIL__SMTP_HOST", "localhost");
+            std::env::set_var("KC__EMAIL__SMTP_USERNAME", "test");
+            std::env::set_var("KC__EMAIL__SMTP_PASSWORD", "test");
+            std::env::set_var("KC__EMAIL__FROM_ADDRESS", "test@localhost");
+            std::env::set_var("KC__EMAIL__VERIFICATION_BASE_URL", "http://localhost");
         }
 
         let config = AppConfig::from_env().expect("应该从环境变量加载配置");
@@ -226,14 +238,25 @@ mod tests {
         // 清理
         unsafe {
             std::env::remove_var("KC__SERVER__PORT");
+            std::env::remove_var("KC__EMAIL__SMTP_HOST");
+            std::env::remove_var("KC__EMAIL__SMTP_USERNAME");
+            std::env::remove_var("KC__EMAIL__SMTP_PASSWORD");
+            std::env::remove_var("KC__EMAIL__FROM_ADDRESS");
+            std::env::remove_var("KC__EMAIL__VERIFICATION_BASE_URL");
         }
     }
 
     #[test]
+    #[serial]
     fn test_crypto_config_from_env() {
-        // 设置 crypto 环境变量
+        // 设置 crypto 和 email 环境变量
         unsafe {
             std::env::set_var("KC__CRYPTO__SECRET_KEY", "dGVzdC1rZXktZnJvbS1lbnY=");
+            std::env::set_var("KC__EMAIL__SMTP_HOST", "localhost");
+            std::env::set_var("KC__EMAIL__SMTP_USERNAME", "test");
+            std::env::set_var("KC__EMAIL__SMTP_PASSWORD", "test");
+            std::env::set_var("KC__EMAIL__FROM_ADDRESS", "test@localhost");
+            std::env::set_var("KC__EMAIL__VERIFICATION_BASE_URL", "http://localhost");
         }
 
         let config = AppConfig::from_env().expect("应该从环境变量加载配置");
@@ -247,6 +270,11 @@ mod tests {
         // 清理
         unsafe {
             std::env::remove_var("KC__CRYPTO__SECRET_KEY");
+            std::env::remove_var("KC__EMAIL__SMTP_HOST");
+            std::env::remove_var("KC__EMAIL__SMTP_USERNAME");
+            std::env::remove_var("KC__EMAIL__SMTP_PASSWORD");
+            std::env::remove_var("KC__EMAIL__FROM_ADDRESS");
+            std::env::remove_var("KC__EMAIL__VERIFICATION_BASE_URL");
         }
     }
 }

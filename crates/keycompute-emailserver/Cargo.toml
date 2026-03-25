@@ -4,3 +4,27 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+keycompute-config = { path = "../keycompute-config" }
+keycompute-types = { path = "../keycompute-types" }
+
+# 异步运行时
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+
+# SMTP 客户端
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1-rustls-tls",
+] }
+
+# 序列化
+serde = { version = "1", features = ["derive"] }
+
+# 错误处理
+thiserror = "1"
+
+# 日志
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
