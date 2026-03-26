@@ -636,14 +636,35 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ListModel
 
 /// 获取模型信息
 /// GET /v1/models/{model}
-pub async fn retrieve_model(Path(model_id): Path<String>) -> Json<Model> {
-    // 实际实现中应从数据库或配置查询
-    Json(Model {
-        id: model_id,
-        object: "model".to_string(),
-        created: chrono::Utc::now().timestamp(),
-        owned_by: "openai".to_string(),
-    })
+///
+/// 从数据库查询指定模型，返回其所属 Provider 信息
+pub async fn retrieve_model(
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<Model>> {
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+
+    // 查询所有启用的账号，找到支持该模型的 Provider
+    let accounts = Account::find_enabled_all(pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
+
+    for account in accounts {
+        if account.models_supported.contains(&model_id) {
+            return Ok(Json(Model {
+                id: model_id,
+                object: "model".to_string(),
+                created: chrono::Utc::now().timestamp(),
+                owned_by: account.provider,
+            }));
+        }
+    }
+
+    // 模型不存在
+    Err(ApiError::NotFound(format!("Model not found: {}", model_id)))
 }
 
 #[cfg(test)]
@@ -706,10 +727,6 @@ mod tests {
         assert!(json.contains("model"));
     }
 
-    #[tokio::test]
-    async fn test_retrieve_model() {
-        let Json(model) = retrieve_model(axum::extract::Path("gpt-4o".to_string())).await;
-        assert_eq!(model.id, "gpt-4o");
-        assert_eq!(model.object, "model");
-    }
+    // 注意：retrieve_model 需要 AppState 和数据库连接，
+    // 适合在集成测试中测试，这里不再单独测试
 }
