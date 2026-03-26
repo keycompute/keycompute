@@ -5,7 +5,7 @@
 use crate::calculator::calculate_amount;
 use crate::usage_source::UsageSource;
 use chrono::{DateTime, Utc};
-use keycompute_db::{CreateUsageLogRequest, UsageLog};
+use keycompute_db::{CreateUsageLogRequest, UsageLog, UserBalance};
 use keycompute_distribution::{
     DistributionContext, DistributionService, calculator::calculate_shares,
 };
@@ -202,10 +202,14 @@ impl BillingService {
     /// 输入: usage + pricing_snapshot + request metadata
     /// 输出: 写入数据库后的 UsageLog，并触发 Distribution 处理
     ///
-    /// 分销逻辑：
-    /// 1. 查询用户的推荐关系（user_referrals 表）
-    /// 2. 查询租户的分销规则（tenant_distribution_rules 表）
-    /// 3. 计算分成并保存
+    /// 计费流程：
+    /// 1. 计算费用并写入 usage_logs 表
+    /// 2. 扣除用户余额（记录欠费但不影响执行结果）
+    /// 3. 查询用户的推荐关系（user_referrals 表）
+    /// 4. 查询租户的分销规则（tenant_distribution_rules 表）
+    /// 5. 计算分成并保存
+    ///
+    /// 架构约束：Billing 不反向影响执行结果，余额扣除失败仅记录错误
     pub async fn finalize_and_trigger_distribution(
         &self,
         ctx: &RequestContext,
@@ -219,10 +223,43 @@ impl BillingService {
             .finalize_and_save(ctx, provider_name, account_id, status)
             .await?;
 
+        let user_amount = bigdecimal_to_decimal(&usage_log.user_amount);
+
+        // 扣除用户余额
+        if let Some(pool) = &self.pool {
+            match self
+                .deduct_user_balance(pool, user_id, user_amount, usage_log.id, &ctx.model)
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        request_id = %ctx.request_id,
+                        user_id = %user_id,
+                        amount = %user_amount,
+                        "User balance deducted successfully"
+                    );
+                }
+                Err(e) => {
+                    // 根据架构约束，Billing 不反向影响执行结果
+                    // 扣除失败时仅记录错误，不抛出异常
+                    tracing::error!(
+                        request_id = %ctx.request_id,
+                        user_id = %user_id,
+                        amount = %user_amount,
+                        error = %e,
+                        "Failed to deduct user balance (recorded as debt)"
+                    );
+                }
+            }
+        } else {
+            tracing::debug!(
+                request_id = %ctx.request_id,
+                "No database pool configured, skipping balance deduction"
+            );
+        }
+
         // 触发分销处理
         if let (Some(distribution), Some(pool)) = (&self.distribution, &self.pool) {
-            let user_amount = bigdecimal_to_decimal(&usage_log.user_amount);
-
             // 创建分销上下文
             let dist_ctx = DistributionContext::new(
                 usage_log.id,
@@ -331,6 +368,67 @@ impl BillingService {
         }
 
         Ok(usage_log)
+    }
+
+    /// 扣除用户余额
+    ///
+    /// 在事务中执行余额扣除，如果余额不足则记录错误
+    async fn deduct_user_balance(
+        &self,
+        pool: &Arc<PgPool>,
+        user_id: Uuid,
+        amount: Decimal,
+        usage_log_id: Uuid,
+        model_name: &str,
+    ) -> Result<()> {
+        // 开启事务
+        let mut tx = pool.begin().await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to begin transaction: {}", e))
+        })?;
+
+        // 执行余额扣除
+        let result = UserBalance::consume(
+            &mut tx,
+            user_id,
+            amount,
+            Some(usage_log_id),
+            Some(&format!("API调用: {}", model_name)),
+        )
+        .await;
+
+        match result {
+            Ok((updated_balance, _transaction)) => {
+                // 提交事务
+                tx.commit().await.map_err(|e| {
+                    KeyComputeError::DatabaseError(format!("Failed to commit transaction: {}", e))
+                })?;
+
+                tracing::debug!(
+                    user_id = %user_id,
+                    amount = %amount,
+                    new_balance = %updated_balance.available_balance,
+                    "Balance deducted successfully"
+                );
+
+                Ok(())
+            }
+            Err(sqlx::Error::RowNotFound) => {
+                // 余额不足，回滚事务
+                tx.rollback().await.ok();
+                Err(KeyComputeError::ValidationError(format!(
+                    "Insufficient balance for user {}: required {}",
+                    user_id, amount
+                )))
+            }
+            Err(e) => {
+                // 其他错误，回滚事务
+                tx.rollback().await.ok();
+                Err(KeyComputeError::DatabaseError(format!(
+                    "Failed to deduct balance: {}",
+                    e
+                )))
+            }
+        }
     }
 
     /// 检查是否已配置数据库连接
