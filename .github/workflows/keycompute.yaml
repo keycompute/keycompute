@@ -1,0 +1,126 @@
+name: keycompute-coverage-test
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://postgres:password@localhost:5432/keycompute
+  REDIS_URL: redis://localhost:6379
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: keycompute
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Setup configuration file
+        working-directory: ./key_compute
+        run: |
+          cp config.toml.example config.toml
+          sed -i 's|url = "postgres://localhost/keycompute"|url = "postgres://postgres:password@localhost:5432/keycompute"|g' config.toml
+          sed -i 's|url = "redis://127.0.0.1:6379"|url = "redis://localhost:6379"|g' config.toml
+
+      - name: Build project
+        working-directory: ./key_compute
+        run: cargo build --verbose
+
+      - name: Run unit tests
+        working-directory: ./key_compute
+        run: cargo test --lib --verbose
+
+      - name: Run integration tests
+        working-directory: ./key_compute
+        run: cargo test --package integration-tests --verbose
+        env:
+          KC__DATABASE__URL: postgres://postgres:password@localhost:5432/keycompute
+          KC__REDIS__URL: redis://localhost:6379
+          KC__AUTH__JWT_SECRET: test-jwt-secret-for-ci
+
+      - name: Generate coverage report
+        working-directory: ./key_compute
+        run: |
+          cargo install cargo-tarpaulin
+          cargo tarpaulin --package integration-tests --out Xml --output-dir coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          directory: ./key_compute/coverage
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  clippy-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Run clippy
+        working-directory: ./key_compute
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  fmt-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        working-directory: ./key_compute
+        run: cargo fmt --all --check

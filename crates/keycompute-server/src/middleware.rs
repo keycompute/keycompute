@@ -487,6 +487,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::Request;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_cors_layer() {
