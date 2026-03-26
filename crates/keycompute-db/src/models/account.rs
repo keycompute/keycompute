@@ -124,6 +124,17 @@ impl Account {
         Ok(accounts)
     }
 
+    /// 查找所有启用的账号（系统级，不限租户）
+    pub async fn find_enabled_all(pool: &sqlx::PgPool) -> Result<Vec<Account>, sqlx::Error> {
+        let accounts = sqlx::query_as::<_, Account>(
+            "SELECT * FROM accounts WHERE enabled = TRUE ORDER BY priority DESC",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        Ok(accounts)
+    }
+
     /// 查找支持指定模型的账号
     pub async fn find_by_model(
         pool: &sqlx::PgPool,

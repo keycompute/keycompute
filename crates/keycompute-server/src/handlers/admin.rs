@@ -12,6 +12,10 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use keycompute_db::models::account::{
+    Account, CreateAccountRequest as DbCreateAccountRequest,
+    UpdateAccountRequest as DbUpdateAccountRequest,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -226,27 +230,43 @@ pub struct AccountInfo {
 /// GET /api/v1/accounts
 pub async fn list_accounts(
     auth: AuthExtractor,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<Json<Vec<AccountInfo>>> {
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
-    let accounts = vec![AccountInfo {
-        id: Uuid::new_v4(),
-        name: "OpenAI Primary".to_string(),
-        provider: "openai".to_string(),
-        api_key_preview: "sk-***1234".to_string(),
-        base_url: None,
-        models: vec!["gpt-4".to_string(), "gpt-3.5-turbo".to_string()],
-        rpm_limit: 60,
-        current_rpm: 12,
-        is_active: true,
-        is_healthy: true,
-        priority: 100,
-        created_at: "2024-01-01T00:00:00Z".to_string(),
-        last_used_at: Some("2024-01-15T10:30:00Z".to_string()),
-    }];
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+
+    let db_accounts = Account::find_by_tenant(pool, auth.tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
+
+    let accounts: Vec<AccountInfo> = db_accounts
+        .into_iter()
+        .map(|acc| AccountInfo {
+            id: acc.id,
+            name: acc.name,
+            provider: acc.provider,
+            api_key_preview: acc.upstream_api_key_preview,
+            base_url: if acc.endpoint.is_empty() {
+                None
+            } else {
+                Some(acc.endpoint)
+            },
+            models: acc.models_supported,
+            rpm_limit: acc.rpm_limit,
+            current_rpm: 0, // TODO: 从 account_states 获取实时 RPM
+            is_active: acc.enabled,
+            is_healthy: true, // TODO: 从 provider_health 获取健康状态
+            priority: acc.priority,
+            created_at: acc.created_at.to_rfc3339(),
+            last_used_at: acc.updated_at.to_rfc3339().into(),
+        })
+        .collect();
 
     Ok(Json(accounts))
 }
@@ -268,20 +288,59 @@ pub struct CreateAccountRequest {
 /// POST /api/v1/accounts
 pub async fn create_account(
     auth: AuthExtractor,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<CreateAccountRequest>,
 ) -> Result<Json<serde_json::Value>> {
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+
+    // 加密 API Key（如果配置了加密密钥）
+    let (encrypted_key, key_preview) =
+        if let Some(_crypto) = keycompute_runtime::crypto::global_crypto() {
+            let encrypted = keycompute_runtime::crypto::encrypt_api_key(&req.api_key)
+                .map_err(|e| ApiError::Internal(format!("Failed to encrypt API key: {}", e)))?;
+            (
+                encrypted.into_inner(),
+                keycompute_runtime::crypto::ApiKeyCrypto::create_preview(&req.api_key),
+            )
+        } else {
+            // 未配置加密，直接存储明文
+            (
+                req.api_key.clone(),
+                format!("{}****", &req.api_key[..req.api_key.len().min(3)]),
+            )
+        };
+
+    let db_req = DbCreateAccountRequest {
+        tenant_id: auth.tenant_id,
+        provider: req.provider.clone(),
+        name: req.name.clone(),
+        endpoint: req.base_url.clone().unwrap_or_default(),
+        upstream_api_key_encrypted: encrypted_key,
+        upstream_api_key_preview: key_preview,
+        rpm_limit: req.rpm_limit,
+        tpm_limit: None,
+        priority: req.priority,
+        models_supported: req.models.clone(),
+    };
+
+    let account = Account::create(pool, &db_req)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to create account: {}", e)))?;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Account created",
-        "account_id": Uuid::new_v4(),
-        "name": req.name,
-        "provider": req.provider,
-        "models": req.models,
+        "account_id": account.id,
+        "name": account.name,
+        "provider": account.provider,
+        "models": account.models_supported,
         "created_by": auth.user_id,
     })))
 }
@@ -304,17 +363,66 @@ pub struct UpdateAccountRequest {
 pub async fn update_account(
     auth: AuthExtractor,
     Path(account_id): Path<Uuid>,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<UpdateAccountRequest>,
 ) -> Result<Json<serde_json::Value>> {
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+
+    // 查找现有账号
+    let existing = Account::find_by_id(pool, account_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
+
+    // 处理 API Key 加密
+    let (encrypted_key, key_preview) = if let Some(ref key) = req.api_key {
+        if let Some(_crypto) = keycompute_runtime::crypto::global_crypto() {
+            let encrypted = keycompute_runtime::crypto::encrypt_api_key(key)
+                .map_err(|e| ApiError::Internal(format!("Failed to encrypt API key: {}", e)))?;
+            (
+                Some(encrypted.into_inner()),
+                Some(keycompute_runtime::crypto::ApiKeyCrypto::create_preview(
+                    key,
+                )),
+            )
+        } else {
+            (
+                Some(key.clone()),
+                Some(format!("{}****", &key[..key.len().min(3)])),
+            )
+        }
+    } else {
+        (None, None)
+    };
+
+    let db_req = DbUpdateAccountRequest {
+        name: req.name.clone(),
+        endpoint: req.base_url.clone(),
+        upstream_api_key_encrypted: encrypted_key,
+        upstream_api_key_preview: key_preview,
+        rpm_limit: req.rpm_limit,
+        tpm_limit: None,
+        priority: req.priority,
+        enabled: req.is_active,
+        models_supported: req.models.clone(),
+    };
+
+    let updated = existing
+        .update(pool, &db_req)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to update account: {}", e)))?;
+
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Account updated",
-        "account_id": account_id,
+        "account_id": updated.id,
         "updated_fields": {
             "name": req.name,
             "models": req.models,
@@ -330,11 +438,27 @@ pub async fn update_account(
 pub async fn delete_account(
     auth: AuthExtractor,
     Path(account_id): Path<Uuid>,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
+
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+
+    // 查找并删除账号
+    let existing = Account::find_by_id(pool, account_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
+
+    existing
+        .delete(pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to delete account: {}", e)))?;
 
     Ok(Json(serde_json::json!({
         "success": true,

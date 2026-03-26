@@ -14,6 +14,7 @@ use axum::{
     response::sse::{Event, Sse},
 };
 use futures::stream::Stream;
+use keycompute_db::models::account::Account;
 use keycompute_ratelimit::{RateLimitConfig, RateLimitKey};
 use keycompute_types::{Message, RequestContext, UsageAccumulator};
 use serde::{Deserialize, Serialize};
@@ -576,50 +577,61 @@ pub struct ListModelsResponse {
 
 /// 列出所有模型
 /// GET /v1/models
-pub async fn list_models() -> Json<ListModelsResponse> {
-    let models = vec![
-        Model {
-            id: "gpt-4o".to_string(),
-            object: "model".to_string(),
-            created: 1715367049,
-            owned_by: "openai".to_string(),
-        },
-        Model {
-            id: "gpt-4o-mini".to_string(),
-            object: "model".to_string(),
-            created: 1721172741,
-            owned_by: "openai".to_string(),
-        },
-        Model {
-            id: "gpt-4-turbo".to_string(),
-            object: "model".to_string(),
-            created: 1712361441,
-            owned_by: "openai".to_string(),
-        },
-        Model {
-            id: "gpt-3.5-turbo".to_string(),
-            object: "model".to_string(),
-            created: 1677649963,
-            owned_by: "openai".to_string(),
-        },
-        Model {
-            id: "claude-3-5-sonnet-20241022".to_string(),
-            object: "model".to_string(),
-            created: 1728000000,
-            owned_by: "anthropic".to_string(),
-        },
-        Model {
-            id: "deepseek-chat".to_string(),
-            object: "model".to_string(),
-            created: 1704067200,
-            owned_by: "deepseek".to_string(),
-        },
-    ];
+/// 从数据库聚合所有启用的 Provider 账号支持的模型列表
+pub async fn list_models(State(state): State<AppState>) -> Result<Json<ListModelsResponse>> {
+    let mut model_set = std::collections::HashSet::new();
+    let mut provider_map = std::collections::HashMap::new();
 
-    Json(ListModelsResponse {
+    // 尝试从数据库获取模型列表
+    if let Some(pool) = state.pool.as_ref() {
+        // 查询所有启用的账号（不限制 tenant_id，使用系统级查询）
+        if let Ok(accounts) = Account::find_enabled_all(pool).await {
+            for account in accounts {
+                for model in account.models_supported {
+                    model_set.insert(model.clone());
+                    provider_map.insert(model, account.provider.clone());
+                }
+            }
+        }
+    }
+
+    // 如果数据库中没有模型，使用默认模型列表（向后兼容）
+    if model_set.is_empty() {
+        model_set.insert("gpt-4o".to_string());
+        model_set.insert("gpt-4o-mini".to_string());
+        model_set.insert("gpt-4-turbo".to_string());
+        model_set.insert("gpt-3.5-turbo".to_string());
+        model_set.insert("claude-3-5-sonnet-20241022".to_string());
+        model_set.insert("deepseek-chat".to_string());
+
+        provider_map.insert("gpt-4o".to_string(), "openai".to_string());
+        provider_map.insert("gpt-4o-mini".to_string(), "openai".to_string());
+        provider_map.insert("gpt-4-turbo".to_string(), "openai".to_string());
+        provider_map.insert("gpt-3.5-turbo".to_string(), "openai".to_string());
+        provider_map.insert(
+            "claude-3-5-sonnet-20241022".to_string(),
+            "anthropic".to_string(),
+        );
+        provider_map.insert("deepseek-chat".to_string(), "deepseek".to_string());
+    }
+
+    let models: Vec<Model> = model_set
+        .into_iter()
+        .map(|id| Model {
+            id: id.clone(),
+            object: "model".to_string(),
+            created: chrono::Utc::now().timestamp(),
+            owned_by: provider_map
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string()),
+        })
+        .collect();
+
+    Ok(Json(ListModelsResponse {
         object: "list".to_string(),
         data: models,
-    })
+    }))
 }
 
 /// 获取模型信息

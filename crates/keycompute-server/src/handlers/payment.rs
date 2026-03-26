@@ -159,7 +159,7 @@ pub async fn create_payment_order(
     }
 
     // 获取数据库连接池
-    let pool = state
+    let _pool = state
         .pool
         .as_ref()
         .ok_or(ApiError::Internal("数据库未配置".to_string()))?;
@@ -353,7 +353,7 @@ pub async fn get_my_balance(
 ///
 /// POST /api/v1/payments/sync/{out_trade_no}
 pub async fn sync_payment_order(
-    auth: AuthExtractor,
+    _auth: AuthExtractor,
     State(state): State<AppState>,
     Path(out_trade_no): Path<String>,
 ) -> Result<Json<SyncOrderResponse>> {
