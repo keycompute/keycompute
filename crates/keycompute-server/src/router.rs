@@ -21,11 +21,14 @@ use crate::{
         create_api_key,
         create_distribution_rule,
         create_payment_order,
+        // 定价管理（Admin）
+        create_pricing,
         // 调试接口
         debug_routing,
         delete_account,
         delete_api_key,
         delete_distribution_rule,
+        delete_pricing,
         delete_user,
         // 认证相关
         forgot_password_handler,
@@ -62,6 +65,8 @@ use crate::{
         list_models,
         list_my_api_keys,
         list_my_payment_orders,
+        // 定价管理
+        list_pricing,
         list_tenants,
         login_handler,
         refresh_account,
@@ -70,10 +75,12 @@ use crate::{
         resend_verification_handler,
         reset_password_handler,
         retrieve_model,
+        set_default_pricing,
         sync_payment_order,
         test_account,
         update_account,
         update_distribution_rule,
+        update_pricing,
         update_profile,
         update_system_settings,
         update_user,
@@ -194,19 +201,27 @@ pub fn create_router(state: AppState) -> Router {
             put(update_distribution_rule).delete(delete_distribution_rule),
         );
 
+    // 定价管理（仅 Admin）
+    let admin_pricing_routes = Router::new()
+        .route("/api/v1/pricing", get(list_pricing).post(create_pricing))
+        .route(
+            "/api/v1/pricing/{id}",
+            put(update_pricing).delete(delete_pricing),
+        )
+        .route("/api/v1/pricing/batch-defaults", post(set_default_pricing))
+        .route("/api/v1/pricing/calculate", post(calculate_cost));
+
     // 合并管理路由并添加限流
     let admin_routes = admin_user_routes
         .merge(admin_account_routes)
         .merge(admin_tenant_routes)
         .merge(admin_settings_routes)
         .merge(admin_distribution_routes)
+        .merge(admin_pricing_routes)
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
     // ==================== 5. 定价和账单 API ====================
     let billing_routes = Router::new()
-        // 定价查询（公开或限流）
-        .route("/api/v1/pricing", get(get_pricing))
-        .route("/api/v1/pricing/calculate", post(calculate_cost))
         // 账单记录（用户看自己的，Admin 看所有）
         .route("/api/v1/billing/records", get(list_billing_records))
         .route("/api/v1/billing/stats", get(get_billing_stats))

@@ -42,9 +42,10 @@ pub use user::{
 
 // 管理功能
 pub use admin::{
-    create_account, delete_account, delete_user, get_system_settings, get_user_by_id,
-    list_accounts, list_all_api_keys, list_all_users, list_tenants, refresh_account, test_account,
-    update_account, update_system_settings, update_user, update_user_balance,
+    create_account, create_pricing, delete_account, delete_pricing, delete_user,
+    get_system_settings, get_user_by_id, list_accounts, list_all_api_keys, list_all_users,
+    list_pricing, list_tenants, refresh_account, set_default_pricing, test_account, update_account,
+    update_pricing, update_system_settings, update_user, update_user_balance,
 };
 
 // 定价和账单

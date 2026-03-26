@@ -3662,6 +3662,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "bigdecimal",
  "chrono",
  "futures",
  "keycompute-alipay",
