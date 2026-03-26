@@ -87,6 +87,38 @@ impl User {
         Ok(users)
     }
 
+    /// 查找所有用户（Admin 全局查询）
+    ///
+    /// 支持分页，按创建时间倒序排列
+    pub async fn find_all(
+        pool: &sqlx::PgPool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<User>, sqlx::Error> {
+        let users = sqlx::query_as::<_, User>(
+            r#"
+            SELECT * FROM users
+            ORDER BY created_at DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(users)
+    }
+
+    /// 统计用户总数
+    pub async fn count_all(pool: &sqlx::PgPool) -> Result<i64, sqlx::Error> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users")
+            .fetch_one(pool)
+            .await?;
+
+        Ok(count.0)
+    }
+
     /// 更新用户
     pub async fn update(
         &self,

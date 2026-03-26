@@ -10,7 +10,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use bigdecimal::BigDecimal;
 use keycompute_db::models::account::{
@@ -47,15 +47,59 @@ pub struct AdminUserInfo {
     pub last_login_at: Option<String>,
 }
 
+/// 用户列表查询参数
+#[derive(Debug, Deserialize)]
+pub struct UserListQueryParams {
+    /// 租户 ID 过滤（可选）
+    pub tenant_id: Option<Uuid>,
+    /// 角色过滤（可选）
+    pub role: Option<String>,
+    /// 搜索关键词（邮箱或名称）
+    pub search: Option<String>,
+    /// 页码（从 1 开始）
+    #[serde(default = "default_page")]
+    pub page: i64,
+    /// 每页数量
+    #[serde(default = "default_page_size")]
+    pub page_size: i64,
+}
+
+fn default_page() -> i64 {
+    1
+}
+
+fn default_page_size() -> i64 {
+    20
+}
+
+/// 用户列表响应（带分页信息）
+#[derive(Debug, Serialize)]
+pub struct UserListResponse {
+    pub users: Vec<AdminUserInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+}
+
 /// 列出所有用户
 ///
 /// GET /api/v1/users
-/// 支持查询参数：?tenant_id=xxx&role=xxx&search=xxx
+///
+/// 支持查询参数：
+/// - tenant_id: 租户 ID 过滤
+/// - role: 角色过滤
+/// - search: 搜索关键词
+/// - page: 页码（默认 1）
+/// - page_size: 每页数量（默认 20）
+///
+/// Admin 可以查询所有租户的用户
 pub async fn list_all_users(
     auth: AuthExtractor,
     State(state): State<AppState>,
-) -> Result<Json<Vec<AdminUserInfo>>> {
-    // 检查权限（简化实现，实际应使用中间件）
+    Query(params): Query<UserListQueryParams>,
+) -> Result<Json<UserListResponse>> {
+    // 检查权限
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
@@ -65,26 +109,64 @@ pub async fn list_all_users(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    // 查询租户下的所有用户
-    let users = User::find_by_tenant(pool, auth.tenant_id)
+    // 计算分页偏移量
+    let offset = (params.page - 1) * params.page_size;
+
+    // 查询所有用户（Admin 全局查询）
+    let users = User::find_all(pool, params.page_size, offset)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query users: {}", e)))?;
 
-    // 获取租户名称
-    let tenant = Tenant::find_by_id(pool, auth.tenant_id)
+    // 统计用户总数
+    let total = User::count_all(pool)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query tenant: {}", e)))?;
-    let tenant_name = tenant
-        .map(|t| t.name)
-        .unwrap_or_else(|| "Unknown".to_string());
+        .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
 
+    // 预加载所有租户到 HashMap（避免 N+1 查询）
+    let tenants = Tenant::find_all(pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query tenants: {}", e)))?;
+    let tenant_map: std::collections::HashMap<Uuid, String> =
+        tenants.into_iter().map(|t| (t.id, t.name)).collect();
+
+    // 构建用户信息列表
     let mut result = Vec::new();
     for user in users {
+        // 应用过滤条件
+        if let Some(filter_tenant_id) = params.tenant_id {
+            if user.tenant_id != filter_tenant_id {
+                continue;
+            }
+        }
+        if let Some(ref filter_role) = params.role {
+            if &user.role != filter_role {
+                continue;
+            }
+        }
+        if let Some(ref search) = params.search {
+            let search_lower = search.to_lowercase();
+            let email_match = user.email.to_lowercase().contains(&search_lower);
+            let name_match = user
+                .name
+                .as_ref()
+                .map(|n| n.to_lowercase().contains(&search_lower))
+                .unwrap_or(false);
+            if !email_match && !name_match {
+                continue;
+            }
+        }
+
         // 获取用户余额
         let balance = UserBalance::find_by_user(pool, user.id)
             .await
             .ok()
             .flatten();
+
+        // 从缓存获取租户名称
+        let tenant_name = tenant_map
+            .get(&user.tenant_id)
+            .cloned()
+            .unwrap_or_else(|| "Unknown".to_string());
 
         result.push(AdminUserInfo {
             id: user.id,
@@ -92,7 +174,7 @@ pub async fn list_all_users(
             name: user.name.clone(),
             role: user.role.clone(),
             tenant_id: user.tenant_id,
-            tenant_name: tenant_name.clone(),
+            tenant_name,
             balance: balance
                 .as_ref()
                 .map(|b| b.available_balance.to_f64().unwrap_or(0.0))
@@ -102,7 +184,16 @@ pub async fn list_all_users(
         });
     }
 
-    Ok(Json(result))
+    // 计算总页数
+    let total_pages = (total + params.page_size - 1) / params.page_size;
+
+    Ok(Json(UserListResponse {
+        users: result,
+        total,
+        page: params.page,
+        page_size: params.page_size,
+        total_pages,
+    }))
 }
 
 /// 获取指定用户信息
