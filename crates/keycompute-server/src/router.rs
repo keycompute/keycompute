@@ -48,8 +48,6 @@ use crate::{
         get_my_usage,
         get_my_usage_stats,
         get_payment_order,
-        // 定价和账单
-        get_pricing,
         get_provider_health,
         get_system_settings,
         get_user_by_id,

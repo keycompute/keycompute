@@ -12,11 +12,12 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use keycompute_auth::ProduceAiKeyValidator;
+use keycompute_auth::{PasswordHasher, PasswordValidator, ProduceAiKeyValidator};
 use keycompute_db::models::{
     api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
     usage_log::UsageLog,
     user::User,
+    user_credential::UserCredential,
 };
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -115,15 +116,64 @@ pub struct ChangePasswordRequest {
 /// PUT /api/v1/me/password
 pub async fn change_password(
     auth: AuthExtractor,
+    State(state): State<AppState>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    // 实际实现中应验证当前密码并更新
-    // 注意：这里应该调用 auth 服务进行密码修改
-    if req.new_password.len() < 8 {
-        return Err(ApiError::BadRequest(
-            "Password must be at least 8 characters".to_string(),
-        ));
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+
+    // 1. 验证新密码格式
+    let validator = PasswordValidator::new();
+    if let Err(e) = validator.validate(&req.new_password) {
+        return Err(ApiError::BadRequest(format!(
+            "New password does not meet requirements: {}",
+            e
+        )));
     }
+
+    // 2. 获取用户凭证
+    let credential = UserCredential::find_by_user_id(pool, auth.user_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query credential: {}", e)))?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "User credential not found for user: {}",
+                auth.user_id
+            ))
+        })?;
+
+    // 3. 验证当前密码
+    let hasher = PasswordHasher::new();
+    let is_valid = hasher
+        .verify(&req.current_password, &credential.password_hash)
+        .map_err(|e| ApiError::Auth(format!("Password verification failed: {}", e)))?;
+
+    if !is_valid {
+        return Err(ApiError::Auth("Current password is incorrect".to_string()));
+    }
+
+    // 4. 哈希新密码
+    let new_password_hash = hasher
+        .hash(&req.new_password)
+        .map_err(|e| ApiError::Internal(format!("Failed to hash new password: {}", e)))?;
+
+    // 5. 更新数据库
+    let update_req = keycompute_db::models::user_credential::UpdateUserCredentialRequest {
+        password_hash: Some(new_password_hash),
+        ..Default::default()
+    };
+
+    credential
+        .update(pool, &update_req)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to update password: {}", e)))?;
+
+    tracing::info!(
+        user_id = %auth.user_id,
+        "Password changed successfully"
+    );
 
     Ok(Json(serde_json::json!({
         "success": true,
