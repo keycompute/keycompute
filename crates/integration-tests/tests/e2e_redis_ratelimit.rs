@@ -15,6 +15,11 @@ fn get_redis_url() -> String {
     std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
 }
 
+/// 生成唯一的测试标识符
+fn generate_test_id() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
 /// 测试 Redis 连接
 #[tokio::test]
 async fn test_redis_connection() {
@@ -103,15 +108,17 @@ async fn test_distributed_ratelimit_basic() {
 async fn test_distributed_ratelimit_exceeded() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
 
-    // 创建 Redis 限流服务
-    let service = match RateLimitService::new_redis(&redis_url) {
-        Ok(s) => s,
-        Err(_) => {
-            println!("Warning: Redis not available, skipping test");
-            return;
-        }
-    };
+    // 创建带测试隔离前缀的 Redis 限流服务
+    let service =
+        match RateLimitService::new_redis_with_prefix(&redis_url, format!("test-{}", test_id)) {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Warning: Redis not available, skipping test");
+                return;
+            }
+        };
 
     // 创建限流键，使用非常低的限制
     let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
@@ -153,9 +160,11 @@ async fn test_distributed_ratelimit_exceeded() {
 async fn test_multi_instance_sync() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+    let prefix = format!("test-{}", test_id);
 
-    // 创建两个独立的 Redis 限流服务实例
-    let service1 = match RateLimitService::new_redis(&redis_url) {
+    // 创建两个独立的 Redis 限流服务实例（使用相同前缀共享状态）
+    let service1 = match RateLimitService::new_redis_with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -163,7 +172,7 @@ async fn test_multi_instance_sync() {
         }
     };
 
-    let service2 = match RateLimitService::new_redis(&redis_url) {
+    let service2 = match RateLimitService::new_redis_with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -238,15 +247,17 @@ async fn test_multi_instance_sync() {
 async fn test_multi_tenant_isolation() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
 
-    // 创建 Redis 限流服务
-    let service = match RateLimitService::new_redis(&redis_url) {
-        Ok(s) => s,
-        Err(_) => {
-            println!("Warning: Redis not available, skipping test");
-            return;
-        }
-    };
+    // 创建带测试隔离前缀的 Redis 限流服务
+    let service =
+        match RateLimitService::new_redis_with_prefix(&redis_url, format!("test-{}", test_id)) {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Warning: Redis not available, skipping test");
+                return;
+            }
+        };
 
     // 创建两个不同租户的用户
     let tenant1 = Uuid::new_v4();
@@ -303,9 +314,13 @@ async fn test_multi_tenant_isolation() {
 async fn test_redis_ratelimit_with_prefix() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
 
-    // 创建带不同前缀的两个限流服务
-    let service1 = match RateLimitService::new_redis_with_prefix(&redis_url, "test-prefix-1") {
+    // 创建带不同前缀的两个限流服务（包含测试ID确保隔离）
+    let service1 = match RateLimitService::new_redis_with_prefix(
+        &redis_url,
+        format!("test-{}-prefix-1", test_id),
+    ) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -313,7 +328,10 @@ async fn test_redis_ratelimit_with_prefix() {
         }
     };
 
-    let service2 = match RateLimitService::new_redis_with_prefix(&redis_url, "test-prefix-2") {
+    let service2 = match RateLimitService::new_redis_with_prefix(
+        &redis_url,
+        format!("test-{}-prefix-2", test_id),
+    ) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -361,15 +379,17 @@ async fn test_redis_ratelimit_with_prefix() {
 async fn test_concurrent_distributed_ratelimit() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
 
-    // 创建 Redis 限流服务
-    let service = match RateLimitService::new_redis(&redis_url) {
-        Ok(s) => Arc::new(s),
-        Err(_) => {
-            println!("Warning: Redis not available, skipping test");
-            return;
-        }
-    };
+    // 创建带测试隔离前缀的 Redis 限流服务
+    let service =
+        match RateLimitService::new_redis_with_prefix(&redis_url, format!("test-{}", test_id)) {
+            Ok(s) => Arc::new(s),
+            Err(_) => {
+                println!("Warning: Redis not available, skipping test");
+                return;
+            }
+        };
 
     // 使用相同的限流键
     let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
