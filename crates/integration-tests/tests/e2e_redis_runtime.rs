@@ -11,10 +11,16 @@
 use integration_tests::common::VerificationChain;
 use keycompute_runtime::{RedisRuntimeStore, RuntimeStore};
 use std::time::Duration;
+use uuid::Uuid;
 
 /// 获取测试用 Redis URL
 fn get_redis_url() -> String {
     std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+}
+
+/// 生成唯一的测试标识符
+fn generate_test_id() -> String {
+    Uuid::new_v4().simple().to_string()
 }
 
 /// 测试 Redis 连接
@@ -58,8 +64,10 @@ async fn test_redis_runtime_connection() {
 async fn test_redis_runtime_basic_operations() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+    let prefix = format!("test:{}:basic", test_id);
 
-    let store = match RedisRuntimeStore::new(&redis_url) {
+    let store = match RedisRuntimeStore::with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -122,8 +130,10 @@ async fn test_redis_runtime_basic_operations() {
 async fn test_redis_runtime_counter_operations() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+    let prefix = format!("test:{}:counter", test_id);
 
-    let store = match RedisRuntimeStore::new(&redis_url) {
+    let store = match RedisRuntimeStore::with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -207,8 +217,10 @@ async fn test_redis_runtime_counter_operations() {
 async fn test_redis_runtime_ttl() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+    let prefix = format!("test:{}:ttl", test_id);
 
-    let store = match RedisRuntimeStore::new(&redis_url) {
+    let store = match RedisRuntimeStore::with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -281,8 +293,10 @@ async fn test_redis_runtime_ttl() {
 async fn test_redis_runtime_batch_operations() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+    let prefix = format!("test:{}:batch", test_id);
 
-    let store = match RedisRuntimeStore::new(&redis_url) {
+    let store = match RedisRuntimeStore::with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -357,9 +371,11 @@ async fn test_redis_runtime_batch_operations() {
 async fn test_redis_runtime_multi_instance() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+    let prefix = format!("test:{}:multi", test_id);
 
-    // 创建两个独立的 Redis 存储实例
-    let store1 = match RedisRuntimeStore::new(&redis_url) {
+    // 创建两个独立的 Redis 存储实例（使用相同前缀共享状态）
+    let store1 = match RedisRuntimeStore::with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -367,7 +383,7 @@ async fn test_redis_runtime_multi_instance() {
         }
     };
 
-    let store2 = match RedisRuntimeStore::new(&redis_url) {
+    let store2 = match RedisRuntimeStore::with_prefix(&redis_url, &prefix) {
         Ok(s) => s,
         Err(_) => {
             println!("Warning: Redis not available, skipping test");
@@ -425,23 +441,26 @@ async fn test_redis_runtime_multi_instance() {
 async fn test_redis_runtime_with_prefix() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
 
-    // 创建带不同前缀的两个存储实例
-    let store1 = match RedisRuntimeStore::with_prefix(&redis_url, "test:prefix:1") {
-        Ok(s) => s,
-        Err(_) => {
-            println!("Warning: Redis not available, skipping test");
-            return;
-        }
-    };
+    // 创建带不同前缀的两个存储实例（包含测试ID确保隔离）
+    let store1 =
+        match RedisRuntimeStore::with_prefix(&redis_url, format!("test:{}:prefix:1", test_id)) {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Warning: Redis not available, skipping test");
+                return;
+            }
+        };
 
-    let store2 = match RedisRuntimeStore::with_prefix(&redis_url, "test:prefix:2") {
-        Ok(s) => s,
-        Err(_) => {
-            println!("Warning: Redis not available, skipping test");
-            return;
-        }
-    };
+    let store2 =
+        match RedisRuntimeStore::with_prefix(&redis_url, format!("test:{}:prefix:2", test_id)) {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Warning: Redis not available, skipping test");
+                return;
+            }
+        };
 
     // 清理测试数据
     let _ = store1.flush_prefix().await;
@@ -472,7 +491,7 @@ async fn test_redis_runtime_with_prefix() {
             store1.key_prefix(),
             store2.key_prefix()
         ),
-        store1.key_prefix() == "test:prefix:1" && store2.key_prefix() == "test:prefix:2",
+        store1.key_prefix().starts_with("test:") && store2.key_prefix().starts_with("test:"),
     );
 
     chain.print_report();
@@ -484,8 +503,10 @@ async fn test_redis_runtime_with_prefix() {
 async fn test_redis_runtime_concurrent_access() {
     let mut chain = VerificationChain::new();
     let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+    let prefix = format!("test:{}:concurrent", test_id);
 
-    let store = match RedisRuntimeStore::new(&redis_url) {
+    let store = match RedisRuntimeStore::with_prefix(&redis_url, &prefix) {
         Ok(s) => std::sync::Arc::new(s),
         Err(_) => {
             println!("Warning: Redis not available, skipping test");

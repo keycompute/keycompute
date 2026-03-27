@@ -373,17 +373,20 @@ impl RateLimitService {
         config: &RateLimitConfig,
     ) -> Result<()> {
         // 使用 limiter 的原子方法（分布式后端会覆盖实现）
-        self.limiter.check_and_record_with_config(key, config).await.map_err(|e| {
-            if matches!(e, KeyComputeError::RateLimitExceeded) {
-                tracing::warn!(
-                    tenant_id = %key.tenant_id,
-                    user_id = %key.user_id,
-                    rpm_limit = config.rpm_limit,
-                    "RPM limit exceeded"
-                );
-            }
-            e
-        })
+        self.limiter
+            .check_and_record_with_config(key, config)
+            .await
+            .map_err(|e| {
+                if matches!(e, KeyComputeError::RateLimitExceeded) {
+                    tracing::warn!(
+                        tenant_id = %key.tenant_id,
+                        user_id = %key.user_id,
+                        rpm_limit = config.rpm_limit,
+                        "RPM limit exceeded"
+                    );
+                }
+                e
+            })
     }
 
     /// 仅检查不限流
