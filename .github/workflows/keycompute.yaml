@@ -86,6 +86,9 @@ jobs:
       - name: Run unit tests
         run: cargo test --lib --workspace --exclude desktop --exclude mobile --verbose
 
+      - name: Run client-api integration tests
+        run: cargo test --package client-api --tests --verbose
+
       - name: Run integration tests
         run: cargo test --package integration-tests --tests --verbose
         env:
