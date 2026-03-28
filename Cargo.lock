@@ -647,8 +647,6 @@ name = "client-api"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "keycompute-db",
- "keycompute-types",
  "reqwest",
  "serde",
  "serde_json",

@@ -6,7 +6,7 @@ use crate::config::ClientConfig;
 use crate::error::{ClientError, Result};
 use reqwest::{Client, Method, RequestBuilder, Response};
 use serde::{Serialize, de::DeserializeOwned};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 /// HTTP 客户端
@@ -19,7 +19,7 @@ pub struct ApiClient {
 struct ClientInner {
     client: Client,
     config: ClientConfig,
-    auth_token: tokio::sync::RwLock<Option<String>>,
+    auth_token: RwLock<Option<String>>,
 }
 
 impl ApiClient {
@@ -36,32 +36,32 @@ impl ApiClient {
             inner: Arc::new(ClientInner {
                 client,
                 config,
-                auth_token: tokio::sync::RwLock::new(None),
+                auth_token: RwLock::new(None),
             }),
         })
     }
 
     /// 设置认证 Token
-    pub async fn set_token(&self, token: impl Into<String>) {
-        let mut guard = self.inner.auth_token.write().await;
+    pub fn set_token(&self, token: impl Into<String>) {
+        let mut guard = self.inner.auth_token.write().expect("RwLock poisoned");
         *guard = Some(token.into());
     }
 
     /// 清除认证 Token
-    pub async fn clear_token(&self) {
-        let mut guard = self.inner.auth_token.write().await;
+    pub fn clear_token(&self) {
+        let mut guard = self.inner.auth_token.write().expect("RwLock poisoned");
         *guard = None;
     }
 
     /// 获取当前 Token
-    pub async fn get_token(&self) -> Option<String> {
-        let guard = self.inner.auth_token.read().await;
+    pub fn get_token(&self) -> Option<String> {
+        let guard = self.inner.auth_token.read().expect("RwLock poisoned");
         guard.clone()
     }
 
     /// 检查是否已认证
-    pub async fn is_authenticated(&self) -> bool {
-        self.get_token().await.is_some()
+    pub fn is_authenticated(&self) -> bool {
+        self.get_token().is_some()
     }
 
     /// 发送 GET 请求
@@ -225,7 +225,7 @@ impl OpenAiClient {
             inner: Arc::new(ClientInner {
                 client,
                 config,
-                auth_token: tokio::sync::RwLock::new(None),
+                auth_token: RwLock::new(None),
             }),
         })
     }
