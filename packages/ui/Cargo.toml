@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 dioxus = { workspace = true }
+charming = { version = "0.4", features = ["wasm"] }
 
