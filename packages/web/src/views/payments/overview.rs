@@ -85,7 +85,7 @@ pub fn PaymentsOverview() -> Element {
                                                 td {
                                                     span { class: "badge badge-{order.status}", "{order.status}" }
                                                 }
-                                                td { "{order.id}" }
+                                                td { "{order.created_at}" }
                                             }
                                         }
                                     }

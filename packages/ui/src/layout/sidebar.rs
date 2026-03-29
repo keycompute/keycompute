@@ -175,12 +175,15 @@ fn SidebarNavItem(item: NavItem, collapsed: bool, current_path: String) -> Eleme
     };
     let label = item.label.clone();
     let path = item.path.clone();
+    let nav = use_navigator();
 
     rsx! {
-        a {
+        button {
             class: "{item_class}",
-            href: "{path}",
             title: "{title_attr}",
+            onclick: move |_| {
+                nav.push(path.as_str());
+            },
             span { class: "sidebar-item-icon", {icon_el} }
             span { class: "sidebar-item-label", "{label}" }
         }
