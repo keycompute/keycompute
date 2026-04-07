@@ -13,7 +13,13 @@ use uuid::Uuid;
 fn create_test_engine() -> RoutingEngine {
     let account_states = Arc::new(AccountStateStore::new());
     let provider_health = Arc::new(ProviderHealthStore::new());
-    RoutingEngine::new(account_states, provider_health)
+    let providers = vec![
+        "openai".to_string(),
+        "deepseek".to_string(),
+        "claude".to_string(),
+        "gemini".to_string(),
+    ];
+    RoutingEngine::new(account_states, provider_health, providers)
 }
 
 /// 创建测试用的请求上下文
@@ -109,7 +115,8 @@ async fn test_routing_provider_health() {
     provider_health.record_success("openai", 150);
     provider_health.record_failure("claude");
 
-    let engine = RoutingEngine::new(account_states, provider_health.clone());
+    let providers = vec!["openai".to_string(), "claude".to_string()];
+    let engine = RoutingEngine::new(account_states, provider_health.clone(), providers);
 
     chain.add_step(
         "keycompute-routing",
@@ -158,7 +165,8 @@ async fn test_routing_provider_cooldown() {
     let account_states = Arc::new(AccountStateStore::new());
     let provider_health = Arc::new(ProviderHealthStore::new());
 
-    let engine = RoutingEngine::new(account_states.clone(), provider_health);
+    let providers = vec!["test".to_string()];
+    let engine = RoutingEngine::new(account_states.clone(), provider_health, providers);
 
     // 2. 初始状态检查
     let account_id = Uuid::new_v4();
@@ -221,7 +229,8 @@ async fn test_routing_account_cooldown() {
     let account_states = Arc::new(AccountStateStore::new());
     let provider_health = Arc::new(ProviderHealthStore::new());
 
-    let engine = RoutingEngine::new(account_states.clone(), provider_health);
+    let providers = vec!["test".to_string()];
+    let engine = RoutingEngine::new(account_states.clone(), provider_health, providers);
 
     // 2. 测试账号冷却
     let account_id = Uuid::new_v4();
@@ -274,7 +283,13 @@ fn test_routing_config() {
     // 路由权重已硬编码，验证引擎可以正常创建和工作
     let account_states = Arc::new(AccountStateStore::new());
     let provider_health = Arc::new(ProviderHealthStore::new());
-    let engine = RoutingEngine::new(account_states, provider_health);
+    let providers = vec![
+        "a".to_string(),
+        "b".to_string(),
+        "c".to_string(),
+        "d".to_string(),
+    ];
+    let engine = RoutingEngine::new(account_states, provider_health, providers);
 
     chain.add_step(
         "keycompute-routing",
@@ -304,7 +319,8 @@ async fn test_routing_unhealthy_provider_filtering() {
         provider_health.record_failure("claude");
     }
 
-    let engine = RoutingEngine::new(account_states, provider_health.clone());
+    let providers = vec!["openai".to_string(), "claude".to_string()];
+    let engine = RoutingEngine::new(account_states, provider_health.clone(), providers);
 
     // 3. 检查 claude 健康状态
     let claude_healthy = engine.is_provider_healthy("claude");

@@ -354,7 +354,8 @@ async fn test_health_and_cooldown_integration() {
     );
 
     // 5. 创建路由引擎验证过滤
-    let engine = RoutingEngine::new(account_states, provider_health.clone());
+    let providers = vec![provider_name.to_string(), "other".to_string()];
+    let engine = RoutingEngine::new(account_states, provider_health.clone(), providers);
 
     let healthy_providers = engine.healthy_providers();
     chain.add_step(

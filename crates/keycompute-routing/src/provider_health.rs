@@ -53,11 +53,16 @@ impl ProviderHealth {
         self.success_requests += 1;
         self.last_success_at = Some(Instant::now());
 
-        // 更新平均延迟（简单移动平均）
+        // 更新平均延迟（指数加权移动平均 EWMA）
+        // alpha = 0.3 表示新样本占 30%，历史占 70%
+        // 这样对突发延迟更敏感，同时保持一定平滑性
+        const ALPHA: f64 = 0.3;
         if self.avg_latency_ms == 0 {
             self.avg_latency_ms = latency_ms;
         } else {
-            self.avg_latency_ms = (self.avg_latency_ms + latency_ms) / 2;
+            let current = self.avg_latency_ms as f64;
+            let new = latency_ms as f64;
+            self.avg_latency_ms = (ALPHA * new + (1.0 - ALPHA) * current) as u64;
         }
 
         self.update_success_rate();
@@ -253,9 +258,16 @@ mod tests {
         assert_eq!(health.success_requests, 1);
         assert_eq!(health.avg_latency_ms, 100);
 
+        // 使用 EWMA 算法 (alpha=0.3): 0.3 * 200 + 0.7 * 100 = 60 + 70 = 130
         health.record_success(200);
         assert_eq!(health.total_requests, 2);
-        assert_eq!(health.avg_latency_ms, 150);
+        assert_eq!(health.avg_latency_ms, 130);
+
+        // 验证 EWMA 对突发延迟更敏感
+        // 第三次请求：0.3 * 300 + 0.7 * 130 = 90 + 91 = 181
+        health.record_success(300);
+        assert_eq!(health.total_requests, 3);
+        assert_eq!(health.avg_latency_ms, 181);
     }
 
     #[test]

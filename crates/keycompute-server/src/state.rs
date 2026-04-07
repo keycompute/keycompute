@@ -188,10 +188,14 @@ impl AppState {
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
 
+        // 获取 Provider 名称列表（与 Gateway 使用一致的列表）
+        let provider_names = crate::providers::get_provider_names();
+
         // 创建路由引擎（集成 ProviderHealthStore 和 AccountStateStore）
         let routing_engine = Arc::new(RoutingEngine::new(
             Arc::clone(&account_states),
             Arc::clone(&provider_health),
+            provider_names,
         ));
 
         // 创建 Internal HTTP Proxy（统一上游连接管理，支持配置）
@@ -200,21 +204,12 @@ impl AppState {
             &config.gateway,
         ));
 
-        // 创建 Gateway 执行器，注册所有 Provider，集成 HTTP Proxy
-        let gateway = Arc::new(
-            GatewayBuilder::new()
-                .add_provider("openai", Arc::new(keycompute_openai::OpenAIProvider::new()))
-                .add_provider(
-                    "deepseek",
-                    Arc::new(keycompute_deepseek::DeepSeekProvider::new()),
-                )
-                .add_provider("vllm", Arc::new(keycompute_vllm::VllmProvider::new()))
-                .add_provider("claude", Arc::new(keycompute_claude::ClaudeProvider::new()))
-                .add_provider("ollama", Arc::new(keycompute_ollama::OllamaProvider::new()))
-                .add_provider("gemini", Arc::new(keycompute_gemini::GeminiProvider::new()))
-                .with_http_proxy(Arc::clone(&http_proxy))
-                .build(),
-        );
+        // 创建 Gateway 执行器，使用 providers 模块统一的 Provider 列表
+        let mut gateway_builder = GatewayBuilder::new().with_http_proxy(Arc::clone(&http_proxy));
+        for (name, adapter) in crate::providers::get_provider_adapters() {
+            gateway_builder = gateway_builder.add_provider(name, adapter);
+        }
+        let gateway = Arc::new(gateway_builder.build());
 
         // 创建计费服务
         let billing = Arc::new(BillingService::new());
@@ -320,11 +315,15 @@ impl AppState {
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
 
+        // 获取 Provider 名称列表（与 Gateway 使用一致的列表）
+        let provider_names = crate::providers::get_provider_names();
+
         // 创建带数据库连接的路由引擎
         let routing_engine = Arc::new(RoutingEngine::with_pool(
             Arc::clone(&account_states),
             Arc::clone(&provider_health),
             Arc::clone(&pool),
+            provider_names,
         ));
 
         // 创建 Internal HTTP Proxy（统一上游连接管理，支持配置）
@@ -333,21 +332,12 @@ impl AppState {
             &config.gateway,
         ));
 
-        // 创建 Gateway 执行器，注册所有 Provider，集成 HTTP Proxy
-        let gateway = Arc::new(
-            GatewayBuilder::new()
-                .add_provider("openai", Arc::new(keycompute_openai::OpenAIProvider::new()))
-                .add_provider(
-                    "deepseek",
-                    Arc::new(keycompute_deepseek::DeepSeekProvider::new()),
-                )
-                .add_provider("vllm", Arc::new(keycompute_vllm::VllmProvider::new()))
-                .add_provider("claude", Arc::new(keycompute_claude::ClaudeProvider::new()))
-                .add_provider("ollama", Arc::new(keycompute_ollama::OllamaProvider::new()))
-                .add_provider("gemini", Arc::new(keycompute_gemini::GeminiProvider::new()))
-                .with_http_proxy(Arc::clone(&http_proxy))
-                .build(),
-        );
+        // 创建 Gateway 执行器，使用 providers 模块统一的 Provider 列表
+        let mut gateway_builder = GatewayBuilder::new().with_http_proxy(Arc::clone(&http_proxy));
+        for (name, adapter) in crate::providers::get_provider_adapters() {
+            gateway_builder = gateway_builder.add_provider(name, adapter);
+        }
+        let gateway = Arc::new(gateway_builder.build());
 
         // 创建带数据库连接的计费服务
         let billing = Arc::new(BillingService::with_pool(Arc::clone(&pool)));
@@ -419,10 +409,14 @@ impl AppState {
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
 
+        // 从自定义 providers 中提取名称列表
+        let provider_names: Vec<String> = providers.keys().cloned().collect();
+
         // 创建路由引擎（集成 ProviderHealthStore 和 AccountStateStore）
         let routing_engine = Arc::new(RoutingEngine::new(
             Arc::clone(&account_states),
             Arc::clone(&provider_health),
+            provider_names,
         ));
 
         // 创建 Internal HTTP Proxy（支持配置）

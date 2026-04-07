@@ -56,43 +56,42 @@ impl std::fmt::Debug for RoutingEngine {
 
 impl RoutingEngine {
     /// 创建新的路由引擎（无数据库连接）
+    ///
+    /// # 参数
+    /// - `account_states`: 账号状态存储
+    /// - `provider_health`: Provider 健康状态存储
+    /// - `providers`: Provider 名称列表（从外部传入，确保与 Gateway 一致）
     pub fn new(
         account_states: Arc<AccountStateStore>,
         provider_health: Arc<ProviderHealthStore>,
+        providers: Vec<String>,
     ) -> Self {
         Self {
             account_states,
             provider_health,
             pool: None,
-            providers: vec![
-                "openai".to_string(),
-                "deepseek".to_string(),
-                "vllm".to_string(),
-                "claude".to_string(),
-                "ollama".to_string(),
-                "gemini".to_string(),
-            ],
+            providers,
         }
     }
 
     /// 创建带数据库连接的路由引擎
+    ///
+    /// # 参数
+    /// - `account_states`: 账号状态存储
+    /// - `provider_health`: Provider 健康状态存储
+    /// - `pool`: 数据库连接池
+    /// - `providers`: Provider 名称列表（从外部传入，确保与 Gateway 一致）
     pub fn with_pool(
         account_states: Arc<AccountStateStore>,
         provider_health: Arc<ProviderHealthStore>,
         pool: Arc<PgPool>,
+        providers: Vec<String>,
     ) -> Self {
         Self {
             account_states,
             provider_health,
             pool: Some(pool),
-            providers: vec![
-                "openai".to_string(),
-                "deepseek".to_string(),
-                "vllm".to_string(),
-                "claude".to_string(),
-                "ollama".to_string(),
-                "gemini".to_string(),
-            ],
+            providers,
         }
     }
 
@@ -638,13 +637,20 @@ mod tests {
     fn create_test_engine() -> RoutingEngine {
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        RoutingEngine::new(account_states, provider_health)
+        let providers = vec![
+            "openai".to_string(),
+            "deepseek".to_string(),
+            "claude".to_string(),
+            "gemini".to_string(),
+        ];
+        RoutingEngine::new(account_states, provider_health, providers)
     }
 
     #[tokio::test]
     async fn test_routing_engine_new() {
         let engine = create_test_engine();
 
+        // 验证 Provider 数量与传入的测试列表一致（4个）
         assert_eq!(engine.configured_providers().len(), 4);
     }
 
@@ -688,7 +694,8 @@ mod tests {
         provider_health.record_success("openai", 150);
         provider_health.record_failure("claude");
 
-        let engine = RoutingEngine::new(account_states, provider_health);
+        let providers = vec!["openai".to_string(), "claude".to_string()];
+        let engine = RoutingEngine::new(account_states, provider_health, providers);
 
         // 检查健康状态
         assert!(engine.is_provider_healthy("openai"));
@@ -710,7 +717,8 @@ mod tests {
             provider_health.record_failure("claude");
         }
 
-        let engine = RoutingEngine::new(account_states, provider_health);
+        let providers = vec!["openai".to_string(), "claude".to_string()];
+        let engine = RoutingEngine::new(account_states, provider_health, providers);
 
         // claude 应该被标记为不健康
         assert!(!engine.is_provider_healthy("claude"));
@@ -772,7 +780,8 @@ mod tests {
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
 
-        let engine = RoutingEngine::new(account_states.clone(), provider_health);
+        let providers = vec!["test".to_string()];
+        let engine = RoutingEngine::new(account_states.clone(), provider_health, providers);
 
         let account_id = Uuid::new_v4();
 

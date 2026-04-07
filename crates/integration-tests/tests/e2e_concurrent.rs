@@ -52,7 +52,13 @@ fn create_test_context() -> RequestContext {
 fn create_test_engine() -> RoutingEngine {
     let account_states = Arc::new(AccountStateStore::new());
     let provider_health = Arc::new(ProviderHealthStore::new());
-    RoutingEngine::new(account_states, provider_health)
+    let providers = vec![
+        "openai".to_string(),
+        "deepseek".to_string(),
+        "claude".to_string(),
+        "gemini".to_string(),
+    ];
+    RoutingEngine::new(account_states, provider_health, providers)
 }
 
 // ============================================================================

@@ -26,6 +26,21 @@ pub const OLLAMA_DEFAULT_ENDPOINT: &str = "https://ollama.com/api/chat";
 
 /// Ollama 支持的模型列表（基于官方 Ollama Cloud 模型）
 pub const OLLAMA_MODELS: &[&str] = &[
+    // Llama 3.2
+    "llama3.2",
+    "llama3.2:latest",
+    "llama3.2:1b",
+    "llama3.2:3b",
+    // Mistral
+    "mistral",
+    "mistral:latest",
+    "mistral:7b",
+    // Gemma2
+    "gemma2",
+    "gemma2:latest",
+    "gemma2:2b",
+    "gemma2:9b",
+    "gemma2:27b",
     // GPT-OSS
     "gpt-oss",
     "gpt-oss:latest",
@@ -33,6 +48,16 @@ pub const OLLAMA_MODELS: &[&str] = &[
     "gpt-oss:120b",
     "gpt-oss:20b-cloud",
     "gpt-oss:120b-cloud",
+    // Qwen 2.5
+    "qwen2.5",
+    "qwen2.5:latest",
+    "qwen2.5:0.5b",
+    "qwen2.5:1.5b",
+    "qwen2.5:3b",
+    "qwen2.5:7b",
+    "qwen2.5:14b",
+    "qwen2.5:32b",
+    "qwen2.5:72b",
     // Qwen 3.5
     "qwen3.5",
     "qwen3.5:latest",
