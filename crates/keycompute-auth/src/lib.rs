@@ -17,7 +17,7 @@ pub use password::{
 
 pub use api_key::{ProduceAiKeyAuth, ProduceAiKeyValidator};
 pub use jwt::{JwtClaims, JwtValidator};
-pub use permission::{Permission, PermissionChecker};
+pub use permission::{AuthType, Permission, PermissionChecker, build_permissions};
 pub use user::{TenantConfig, TenantInfo, UserInfo, UserService};
 
 use keycompute_types::{KeyComputeError, Result};
@@ -84,8 +84,12 @@ impl AuthContext {
     }
 
     /// 检查是否有指定权限
+    ///
+    /// 权限检查完全基于权限列表，不基于角色。
+    /// 这确保了 API Key 认证（仅有 UseApi 权限）无法访问管理功能，
+    /// 即使该用户的角色是 admin。
     pub fn has_permission(&self, permission: &Permission) -> bool {
-        self.permissions.contains(permission) || self.role == "admin"
+        self.permissions.contains(permission)
     }
 
     /// 是否是管理员
@@ -278,12 +282,34 @@ mod tests {
         assert!(!ctx.has_permission(&Permission::ManageUsers));
     }
 
+    /// 测试 API Key 认证的 admin 用户不会有管理权限
+    /// API Key 仅用于 LLM 转发，即使角色是 admin，也只有 UseApi 权限
+    #[test]
+    fn test_auth_context_api_key_admin_no_admin_permissions() {
+        // 模拟 API Key 认证场景：admin 角色但只有 UseApi 权限
+        let ctx = AuthContext::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
+            .with_permissions(build_permissions(AuthType::ApiKey, "admin"));
+
+        // 角色检查仍然返回 true
+        assert!(ctx.is_admin());
+        // 但权限检查只基于权限列表
+        assert!(ctx.has_permission(&Permission::UseApi));
+        assert!(!ctx.has_permission(&Permission::ManageUsers));
+        assert!(!ctx.has_permission(&Permission::SystemAdmin));
+        assert!(!ctx.has_permission(&Permission::ManageBilling));
+    }
+
     #[test]
     fn test_auth_context_admin() {
-        let ctx = AuthContext::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
+        // 测试 admin 角色的权限检查
+        // 注意：权限检查完全基于权限列表，而非角色
+        // admin 权限应该通过 build_permissions(AuthType::Jwt, "admin") 构建
+        let ctx = AuthContext::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
+            .with_permissions(build_permissions(AuthType::Jwt, "admin"));
 
         assert!(ctx.is_admin());
         assert!(ctx.has_permission(&Permission::ManageUsers));
+        assert!(ctx.has_permission(&Permission::SystemAdmin));
     }
 
     #[test]

@@ -508,6 +508,8 @@ async fn test_auth_service_integration() {
 /// 测试权限检查
 #[test]
 fn test_permission_system() {
+    use keycompute_auth::{AuthType, build_permissions};
+
     let mut chain = VerificationChain::new();
 
     // 1. 权限字符串转换
@@ -533,19 +535,24 @@ fn test_permission_system() {
         has_api && !has_manage,
     );
 
-    // 3. 管理员权限
-    let admin_has_all =
-        keycompute_auth::PermissionChecker::check("admin", &user_perms, &Permission::ManageUsers);
+    // 3. 管理员权限（基于权限列表而非角色）
+    // 权限检查完全基于权限列表，admin 角色如果没有 ManageUsers 权限应该返回 false
+    let admin_perms = build_permissions(AuthType::Jwt, "admin");
+    let admin_has_manage =
+        keycompute_auth::PermissionChecker::check("admin", &admin_perms, &Permission::ManageUsers);
     chain.add_step(
         "keycompute-auth",
         "PermissionChecker::admin",
-        format!("Admin has all permissions: {}", admin_has_all),
-        admin_has_all,
+        format!(
+            "Admin (with JWT perms) has ManageUsers: {}",
+            admin_has_manage
+        ),
+        admin_has_manage,
     );
 
-    // 4. 预定义角色
-    let user_role = keycompute_auth::permission::roles::user();
-    let admin_role = keycompute_auth::permission::roles::tenant_admin();
+    // 4. 预定义角色（使用新的 build_permissions 函数）
+    let user_role = build_permissions(AuthType::Jwt, "user");
+    let admin_role = build_permissions(AuthType::Jwt, "tenant_admin");
 
     chain.add_step(
         "keycompute-auth",

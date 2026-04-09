@@ -8,7 +8,8 @@ use keycompute_types::{KeyComputeError, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{AuthContext, Permission};
+use crate::AuthContext;
+use crate::permission::{AuthType, build_permissions};
 
 /// JWT Claims
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,7 +161,8 @@ impl JwtValidator {
         );
 
         // 构建权限列表
-        let permissions = build_permissions(&claims.role);
+        // JWT 认证用于后台管理系统，根据角色分配不同的管理权限
+        let permissions = build_permissions(AuthType::Jwt, &claims.role);
 
         Ok(AuthContext {
             user_id,
@@ -217,34 +219,6 @@ impl JwtValidator {
     }
 }
 
-/// 根据角色构建权限列表
-fn build_permissions(role: &str) -> Vec<Permission> {
-    match role {
-        "admin" | "system" => vec![
-            Permission::UseApi,
-            Permission::ViewUsage,
-            Permission::ManageUsers,
-            Permission::ManageApiKeys,
-            Permission::ManageTenant,
-            Permission::ViewBilling,
-            Permission::ManageBilling,
-            Permission::ManagePricing,
-            Permission::ManageProviders,
-            Permission::SystemAdmin,
-        ],
-        "tenant_admin" => vec![
-            Permission::UseApi,
-            Permission::ViewUsage,
-            Permission::ManageApiKeys,
-            Permission::ManageUsers,
-            Permission::ManageTenant,
-            Permission::ViewBilling,
-        ],
-        "user" => vec![Permission::UseApi, Permission::ViewUsage],
-        _ => vec![Permission::UseApi],
-    }
-}
-
 impl Default for JwtValidator {
     fn default() -> Self {
         Self::new("default-secret", "keycompute")
@@ -254,6 +228,7 @@ impl Default for JwtValidator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::permission::Permission;
 
     #[test]
     fn test_jwt_claims_new() {
@@ -361,16 +336,17 @@ mod tests {
     }
 
     #[test]
-    fn test_build_permissions() {
-        let admin_perms = build_permissions("admin");
+    fn test_build_permissions_jwt() {
+        // JWT 认证的权限构建测试
+        let admin_perms = build_permissions(AuthType::Jwt, "admin");
         assert!(admin_perms.contains(&Permission::SystemAdmin));
         assert!(admin_perms.contains(&Permission::ManageUsers));
 
-        let tenant_admin_perms = build_permissions("tenant_admin");
+        let tenant_admin_perms = build_permissions(AuthType::Jwt, "tenant_admin");
         assert!(tenant_admin_perms.contains(&Permission::ManageApiKeys));
         assert!(!tenant_admin_perms.contains(&Permission::SystemAdmin));
 
-        let user_perms = build_permissions("user");
+        let user_perms = build_permissions(AuthType::Jwt, "user");
         assert!(user_perms.contains(&Permission::UseApi));
         assert!(!user_perms.contains(&Permission::ManageUsers));
     }

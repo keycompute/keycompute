@@ -10,7 +10,7 @@ use axum::{
     extract::FromRequestParts,
     http::{HeaderMap, request::Parts},
 };
-use keycompute_auth::AuthContext;
+use keycompute_auth::{AuthContext, Permission};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::sync::Arc;
@@ -29,6 +29,8 @@ pub struct AuthExtractor {
     pub produce_ai_key_id: Uuid,
     /// 用户角色
     pub role: String,
+    /// 用户权限列表
+    pub permissions: Vec<Permission>,
 }
 
 impl AuthExtractor {
@@ -44,7 +46,14 @@ impl AuthExtractor {
             tenant_id,
             produce_ai_key_id,
             role: role.into(),
+            permissions: Vec::new(),
         }
+    }
+
+    /// 创建带权限的认证提取器（用于测试）
+    pub fn with_permissions(mut self, permissions: Vec<Permission>) -> Self {
+        self.permissions = permissions;
+        self
     }
 
     /// 从 Authorization 头和 AuthService 解析
@@ -78,6 +87,7 @@ impl AuthExtractor {
             tenant_id: ctx.tenant_id,
             produce_ai_key_id: ctx.produce_ai_key_id,
             role: ctx.role,
+            permissions: ctx.permissions,
         }
     }
 

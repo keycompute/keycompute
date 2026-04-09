@@ -25,7 +25,7 @@ config.toml
 AGENTS.md
 CLAUDE.md
 .claude
-
+.qoder
 # 环境变量文件（含敏感密钥，禁止提交）
 .env
 .env.local

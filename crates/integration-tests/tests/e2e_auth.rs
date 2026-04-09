@@ -179,13 +179,31 @@ fn test_auth_permission_flow() {
         !has_manage,
     );
 
-    // 4. 管理员拥有所有权限
-    let admin_has_all = PermissionChecker::check("admin", &user_perms, &Permission::ManageUsers);
+    // 4. 权限检查完全基于权限列表，不基于角色
+    // admin 角色需要通过 build_permissions 获取完整权限
+    use keycompute_auth::{AuthType, build_permissions};
+    let admin_perms = build_permissions(AuthType::Jwt, "admin");
+    let admin_has_manage =
+        PermissionChecker::check("admin", &admin_perms, &Permission::ManageUsers);
     chain.add_step(
         "keycompute-auth",
-        "PermissionChecker::admin_has_all",
-        format!("Admin has all permissions: {}", admin_has_all),
-        admin_has_all,
+        "PermissionChecker::admin_has_manage",
+        format!(
+            "Admin (with JWT perms) has ManageUsers: {}",
+            admin_has_manage
+        ),
+        admin_has_manage,
+    );
+
+    // 5. 验证 API Key 认证的 admin 没有管理权限
+    let api_key_perms = build_permissions(AuthType::ApiKey, "admin");
+    let api_key_has_manage =
+        PermissionChecker::check("admin", &api_key_perms, &Permission::ManageUsers);
+    chain.add_step(
+        "keycompute-auth",
+        "PermissionChecker::api_key_no_manage",
+        format!("API Key admin has ManageUsers: {}", api_key_has_manage),
+        !api_key_has_manage,
     );
 
     chain.print_report();

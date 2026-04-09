@@ -9,7 +9,8 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{AuthContext, Permission};
+use crate::AuthContext;
+use crate::permission::{AuthType, build_permissions};
 
 /// Produce AI Key 验证器
 #[derive(Clone)]
@@ -187,25 +188,9 @@ impl ProduceAiKeyValidator {
         );
 
         // 构建权限列表
-        let permissions = match user.role.as_str() {
-            "admin" | "system" => vec![
-                Permission::UseApi,
-                Permission::ManageUsers,
-                Permission::ManageApiKeys,
-                Permission::ViewBilling,
-                Permission::ManageBilling,
-            ],
-            "tenant_admin" => vec![
-                Permission::UseApi,
-                Permission::ViewUsage,
-                Permission::ManageApiKeys,
-                Permission::ManageUsers,
-                Permission::ManageTenant,
-                Permission::ViewBilling,
-            ],
-            "user" => vec![Permission::UseApi, Permission::ViewBilling],
-            _ => vec![Permission::UseApi],
-        };
+        // API Key 认证仅有 UseApi 权限，用于转发请求到上游 LLM Provider
+        // 不包含任何系统管理权限（用户管理、计量计费、模块管理、系统设置等）
+        let permissions = build_permissions(AuthType::ApiKey, &user.role);
 
         Ok(AuthContext {
             user_id: user.id,

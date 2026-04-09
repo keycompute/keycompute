@@ -206,12 +206,9 @@ pub async fn require_permission(
 ) -> Result<Response> {
     use keycompute_auth::PermissionChecker;
 
-    // 获取用户权限列表（这里简化处理，实际应从数据库或缓存获取）
-    let user_permissions = if auth.is_admin() {
-        vec![Permission::SystemAdmin]
-    } else {
-        vec![Permission::UseApi, Permission::ViewUsage]
-    };
+    // 权限检查完全基于 AuthContext 中已构建的权限列表
+    // 权限在认证时已根据认证类型(API Key/JWT)和角色正确构建
+    let user_permissions = auth.permissions.clone();
 
     if !PermissionChecker::check(&auth.role, &user_permissions, &required_permission) {
         return Err(ApiError::Auth(format!(
