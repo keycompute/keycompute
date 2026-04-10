@@ -12,8 +12,8 @@ pub mod tracing;
 pub use host_monitor::{
     HealthStatus, HostMetrics, HostMonitor, SystemSnapshot, collect_host_metrics,
 };
-pub use logger::{init_dev_logger, init_logger};
-pub use metrics::{MetricsCollector, init_metrics};
+pub use logger::{init_dev_logger, init_logger, is_logger_initialized, try_init_logger};
+pub use metrics::{MetricsCollector, init_metrics, is_metrics_initialized};
 pub use tracing::{
     create_provider_span, create_request_span, create_stream_span, events, init_distributed_tracing,
 };

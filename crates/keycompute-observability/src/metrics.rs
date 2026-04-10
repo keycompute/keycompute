@@ -1,6 +1,19 @@
 use once_cell::sync::Lazy;
 use prometheus::{Counter, Histogram, IntCounter, IntGauge, Registry, histogram_opts, opts};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// 指标初始化状态标志
+static METRICS_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// 检查指标是否已初始化
+///
+/// 注意：此函数只检查本模块是否已调用过 `init_metrics()`，
+/// 不代表指标系统完全可用。如果外部代码直接访问 Lazy 静态变量，
+/// 指标可能在本函数返回 false 时已经部分初始化。
+pub fn is_metrics_initialized() -> bool {
+    METRICS_INITIALIZED.load(Ordering::SeqCst)
+}
 
 /// 全局指标注册表
 pub static REGISTRY: Lazy<Registry> = Lazy::new(Registry::new);
@@ -94,31 +107,39 @@ pub static OUTPUT_TOKENS_TOTAL: Lazy<Counter> = Lazy::new(|| {
 
 /// Provider 请求数
 pub static PROVIDER_REQUEST_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
-    CounterVec::new(
+    let vec = CounterVec::new(
         opts!(
             "keycompute_provider_request_total",
             "Total requests by provider"
         ),
         &["provider", "model"],
     )
-    .expect("failed to create provider_request_total counter")
+    .expect("failed to create provider_request_total counter");
+    REGISTRY
+        .register(Box::new(vec.clone()))
+        .expect("failed to register provider_request_total");
+    vec
 });
 
 /// Provider 错误数
 pub static PROVIDER_ERROR_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
-    CounterVec::new(
+    let vec = CounterVec::new(
         opts!(
             "keycompute_provider_error_total",
             "Total errors by provider"
         ),
         &["provider", "error_type"],
     )
-    .expect("failed to create provider_error_total counter")
+    .expect("failed to create provider_error_total counter");
+    REGISTRY
+        .register(Box::new(vec.clone()))
+        .expect("failed to register provider_error_total");
+    vec
 });
 
 /// Provider 延迟
 pub static PROVIDER_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
-    HistogramVec::new(
+    let vec = HistogramVec::new(
         histogram_opts!(
             "keycompute_provider_latency_seconds",
             "Provider request latency",
@@ -128,18 +149,26 @@ pub static PROVIDER_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
         ),
         &["provider", "model"],
     )
-    .expect("failed to create provider_latency histogram")
+    .expect("failed to create provider_latency histogram");
+    REGISTRY
+        .register(Box::new(vec.clone()))
+        .expect("failed to register provider_latency");
+    vec
 });
 
 // ==================== 计费指标 ====================
 
 /// 计费金额总计
 pub static BILLING_AMOUNT_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
-    CounterVec::new(
+    let vec = CounterVec::new(
         opts!("keycompute_billing_amount_total", "Total billing amount"),
         &["currency", "tenant_id"],
     )
-    .expect("failed to create billing_amount_total counter")
+    .expect("failed to create billing_amount_total counter");
+    REGISTRY
+        .register(Box::new(vec.clone()))
+        .expect("failed to register billing_amount_total");
+    vec
 });
 
 /// Fallback 次数
@@ -216,7 +245,19 @@ impl MetricsCollector {
 }
 
 /// 初始化所有指标（确保在程序启动时调用）
+///
+/// 此函数是线程安全的，可以安全地多次调用。如果指标已经初始化，
+/// 后续调用会跳过重复初始化。使用 `is_metrics_initialized()` 可以检查初始化状态。
 pub fn init_metrics() {
+    // 使用 compare_exchange 实现原子性的检查和设置，避免竞态条件
+    if METRICS_INITIALIZED
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        // 已经初始化过了，跳过
+        return;
+    }
+
     // 触发所有 Lazy 静态变量的初始化
     let _ = &*REQUEST_TOTAL;
     let _ = &*REQUEST_LATENCY;
@@ -225,6 +266,8 @@ pub fn init_metrics() {
     let _ = &*INPUT_TOKENS_TOTAL;
     let _ = &*OUTPUT_TOKENS_TOTAL;
     let _ = &*FALLBACK_TOTAL;
-
-    tracing::info!("Metrics initialized successfully");
+    let _ = &*PROVIDER_REQUEST_TOTAL;
+    let _ = &*PROVIDER_ERROR_TOTAL;
+    let _ = &*PROVIDER_LATENCY;
+    let _ = &*BILLING_AMOUNT_TOTAL;
 }
