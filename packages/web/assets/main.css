@@ -1,3 +1,5 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap");
+
 /* KeyCompute Web - 主样式入口
  * 此文件仅做全局基础重置，具体变量由 ui crate 的 AppShell 组件注入 */
 
@@ -32,4 +34,600 @@ button {
 
 input, textarea, select {
   font-family: inherit;
+}
+
+/* ── Login Experience ───────────────────────── */
+.kc-login-page {
+  --kc-login-bg-primary: #050a14;
+  --kc-login-bg-secondary: #0a1628;
+  --kc-login-surface: #0f2035;
+  --kc-login-surface-hover: #152a42;
+  --kc-login-accent: #00f0ff;
+  --kc-login-accent-glow: rgba(0, 240, 255, 0.15);
+  --kc-login-accent-secondary: #7b61ff;
+  --kc-login-text-primary: #e8f4fc;
+  --kc-login-text-secondary: #8899aa;
+  --kc-login-text-muted: #556677;
+  --kc-login-border: rgba(0, 240, 255, 0.1);
+  --kc-login-border-active: rgba(0, 240, 255, 0.4);
+  --kc-login-success: #00ff88;
+  --kc-login-error: #ff4466;
+  position: relative;
+  min-height: 100svh;
+  overflow: hidden;
+  background: var(--kc-login-bg-primary);
+  color: var(--kc-login-text-primary);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.kc-login-bg-grid {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(0, 240, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 240, 255, 0.03) 1px, transparent 1px);
+  background-size: 60px 60px;
+  animation: kc-login-grid-move 20s linear infinite;
+}
+
+.kc-login-bg-glow {
+  position: fixed;
+  z-index: 0;
+  width: 600px;
+  height: 600px;
+  border-radius: 999px;
+  filter: blur(120px);
+  opacity: 0.15;
+  pointer-events: none;
+}
+
+.kc-login-glow-one {
+  top: -200px;
+  right: -100px;
+  background: var(--kc-login-accent);
+  animation: kc-login-float-one 15s ease-in-out infinite;
+}
+
+.kc-login-glow-two {
+  bottom: -200px;
+  left: -100px;
+  background: var(--kc-login-accent-secondary);
+  animation: kc-login-float-two 18s ease-in-out infinite;
+}
+
+.kc-login-container {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  width: 100%;
+  min-height: 100svh;
+}
+
+.kc-login-brand-panel {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  overflow: hidden;
+  padding: 4rem;
+}
+
+.kc-login-brand-content {
+  max-width: 500px;
+  animation: kc-login-fade-in-up 0.8s ease-out;
+}
+
+.kc-login-logo {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.kc-login-logo-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border-radius: 12px;
+  background: linear-gradient(135deg, var(--kc-login-accent), var(--kc-login-accent-secondary));
+  box-shadow: 0 0 40px rgba(0, 240, 255, 0.16);
+}
+
+.kc-login-logo-icon::before {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  content: "";
+  background: var(--kc-login-bg-primary);
+  border-radius: 50%;
+}
+
+.kc-login-logo-icon::after {
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  content: "";
+  background: var(--kc-login-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--kc-login-accent);
+}
+
+.kc-login-logo-text {
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  background: linear-gradient(90deg, var(--kc-login-text-primary), var(--kc-login-accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.kc-login-tagline {
+  margin: 0 0 1.5rem;
+  color: var(--kc-login-text-primary);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(2rem, 4vw, 2.5rem);
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.04em;
+}
+
+.kc-login-tagline span {
+  background: linear-gradient(90deg, var(--kc-login-accent), var(--kc-login-accent-secondary));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.kc-login-description {
+  max-width: 32rem;
+  margin: 0 0 2rem;
+  color: var(--kc-login-text-secondary);
+  font-size: 1.1rem;
+  line-height: 1.7;
+}
+
+.kc-login-features {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.kc-login-feature-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  color: var(--kc-login-accent);
+  font-size: 0.85rem;
+  font-weight: 500;
+  background: var(--kc-login-surface);
+  border: 1px solid var(--kc-login-border);
+  border-radius: 999px;
+  transition: transform 0.3s ease, border-color 0.3s ease, background 0.3s ease;
+}
+
+.kc-login-feature-badge:hover {
+  background: var(--kc-login-surface-hover);
+  border-color: var(--kc-login-border-active);
+  transform: translateY(-2px);
+}
+
+.kc-login-feature-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--kc-login-accent);
+  border-radius: 50%;
+  box-shadow: 0 0 8px var(--kc-login-accent);
+}
+
+.kc-login-panel {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 480px;
+  padding: 2rem;
+}
+
+.kc-login-card {
+  position: relative;
+  width: 100%;
+  max-width: 400px;
+  padding: 2.5rem;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--kc-login-surface) 94%, transparent);
+  border: 1px solid var(--kc-login-border);
+  border-radius: 20px;
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.28);
+  animation: kc-login-card-entry 0.6s ease-out 0.3s both;
+}
+
+.kc-login-card::before {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 4px;
+  content: "";
+  background: linear-gradient(90deg, var(--kc-login-accent), var(--kc-login-accent-secondary));
+}
+
+.kc-login-header {
+  margin-bottom: 2rem;
+  text-align: center;
+}
+
+.kc-login-title {
+  margin: 0 0 0.5rem;
+  color: var(--kc-login-text-primary);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1.5rem;
+  font-weight: 600;
+}
+
+.kc-login-subtitle {
+  margin: 0;
+  color: var(--kc-login-text-secondary);
+  font-size: 0.9rem;
+}
+
+.kc-login-status {
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  font-size: 0.9rem;
+  border-radius: 10px;
+  animation: kc-login-shake 0.5s ease;
+}
+
+.kc-login-status-error {
+  color: var(--kc-login-error);
+  background: rgba(255, 68, 102, 0.1);
+  border: 1px solid rgba(255, 68, 102, 0.3);
+}
+
+.kc-login-form-group {
+  position: relative;
+  margin-bottom: 1.5rem;
+}
+
+.kc-login-form-label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: var(--kc-login-text-secondary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  transition: color 0.3s ease;
+}
+
+.kc-login-form-group:focus-within .kc-login-form-label {
+  color: var(--kc-login-accent);
+}
+
+.kc-login-form-input {
+  width: 100%;
+  padding: 1rem 1.25rem;
+  color: var(--kc-login-text-primary);
+  font-family: inherit;
+  font-size: 1rem;
+  background: var(--kc-login-bg-secondary);
+  border: 1px solid var(--kc-login-border);
+  border-radius: 12px;
+  outline: none;
+  transition: border-color 0.3s ease, box-shadow 0.3s ease, background 0.3s ease;
+}
+
+.kc-login-password-input {
+  padding-right: 3.2rem;
+}
+
+.kc-login-form-input::placeholder {
+  color: var(--kc-login-text-muted);
+}
+
+.kc-login-form-input:hover {
+  background: var(--kc-login-surface-hover);
+  border-color: var(--kc-login-border-active);
+}
+
+.kc-login-form-input:focus {
+  border-color: var(--kc-login-accent);
+  box-shadow: 0 0 0 3px var(--kc-login-accent-glow);
+}
+
+.kc-login-input-glow {
+  position: absolute;
+  bottom: 0;
+  left: 10%;
+  width: 80%;
+  height: 1px;
+  pointer-events: none;
+  background: var(--kc-login-accent);
+  box-shadow: 0 0 10px var(--kc-login-accent);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.kc-login-form-group:focus-within .kc-login-input-glow {
+  opacity: 1;
+}
+
+.kc-login-password-wrapper {
+  position: relative;
+}
+
+.kc-login-toggle-password {
+  position: absolute;
+  top: 50%;
+  right: 1rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.25rem;
+  color: var(--kc-login-text-muted);
+  background: transparent;
+  border: 0;
+  transform: translateY(-50%);
+  transition: color 0.3s ease;
+}
+
+.kc-login-toggle-password:hover {
+  color: var(--kc-login-accent);
+}
+
+.kc-login-form-options {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 2rem;
+  font-size: 0.9rem;
+}
+
+.kc-login-remember {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--kc-login-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.kc-login-remember input {
+  display: none;
+}
+
+.kc-login-checkbox-custom {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--kc-login-border);
+  border-radius: 4px;
+  transition: background 0.3s ease, border-color 0.3s ease;
+}
+
+.kc-login-checkbox-custom::after {
+  color: var(--kc-login-bg-primary);
+  font-size: 0.7rem;
+  font-weight: 700;
+  content: "✓";
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.kc-login-remember input:checked + .kc-login-checkbox-custom {
+  background: var(--kc-login-accent);
+  border-color: var(--kc-login-accent);
+}
+
+.kc-login-remember input:checked + .kc-login-checkbox-custom::after {
+  opacity: 1;
+}
+
+.kc-login-forgot,
+.kc-login-signup-link {
+  position: relative;
+  padding: 0;
+  color: var(--kc-login-accent);
+  font: inherit;
+  font-weight: 500;
+  background: transparent;
+  border: 0;
+}
+
+.kc-login-forgot::after,
+.kc-login-signup-link::after {
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 0;
+  height: 1px;
+  content: "";
+  background: var(--kc-login-accent);
+  transition: width 0.3s ease;
+}
+
+.kc-login-forgot:hover::after,
+.kc-login-signup-link:hover::after {
+  width: 100%;
+}
+
+.kc-login-button {
+  position: relative;
+  width: 100%;
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  overflow: hidden;
+  color: var(--kc-login-bg-primary);
+  font-family: "Space Grotesk", sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  background: linear-gradient(135deg, var(--kc-login-accent), var(--kc-login-accent-secondary));
+  border: 0;
+  border-radius: 12px;
+  transition: transform 0.3s ease, box-shadow 0.3s ease, opacity 0.2s ease;
+}
+
+.kc-login-button::before {
+  position: absolute;
+  inset: 0 auto 0 -100%;
+  width: 100%;
+  content: "";
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+  transition: left 0.5s ease;
+}
+
+.kc-login-button:hover:not(:disabled) {
+  box-shadow: 0 10px 30px rgba(0, 240, 255, 0.3);
+  transform: translateY(-2px);
+}
+
+.kc-login-button:hover:not(:disabled)::before {
+  left: 100%;
+}
+
+.kc-login-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.kc-login-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.kc-login-signup {
+  color: var(--kc-login-text-secondary);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.kc-login-signup-link {
+  margin-left: 0.25rem;
+}
+
+.kc-login-tech-circles {
+  position: absolute;
+  right: 2rem;
+  bottom: 2rem;
+  z-index: 0;
+  opacity: 0.1;
+}
+
+.kc-login-circle {
+  position: absolute;
+  border: 1px solid var(--kc-login-accent);
+  border-radius: 50%;
+}
+
+.kc-login-circle-one {
+  right: 0;
+  bottom: 0;
+  width: 200px;
+  height: 200px;
+  animation: kc-login-pulse 4s ease-in-out infinite;
+}
+
+.kc-login-circle-two {
+  right: 25px;
+  bottom: 25px;
+  width: 150px;
+  height: 150px;
+  animation: kc-login-pulse 4s ease-in-out infinite 1s;
+}
+
+.kc-login-circle-three {
+  right: 50px;
+  bottom: 50px;
+  width: 100px;
+  height: 100px;
+  animation: kc-login-pulse 4s ease-in-out infinite 2s;
+}
+
+@keyframes kc-login-grid-move {
+  from { transform: translate(0, 0); }
+  to { transform: translate(60px, 60px); }
+}
+
+@keyframes kc-login-float-one {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(-50px, 50px) scale(1.1); }
+}
+
+@keyframes kc-login-float-two {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(50px, -30px) scale(1.05); }
+}
+
+@keyframes kc-login-fade-in-up {
+  from { opacity: 0; transform: translateY(30px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes kc-login-card-entry {
+  from { opacity: 0; transform: translateX(30px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes kc-login-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-5px); }
+  40%, 80% { transform: translateX(5px); }
+}
+
+@keyframes kc-login-pulse {
+  0%, 100% { opacity: 0.1; transform: scale(1); }
+  50% { opacity: 0.2; transform: scale(1.05); }
+}
+
+@media (max-width: 1024px) {
+  .kc-login-page {
+    overflow-y: auto;
+  }
+
+  .kc-login-container {
+    flex-direction: column;
+    min-height: 100svh;
+  }
+
+  .kc-login-brand-panel {
+    padding: 3rem 2rem 1rem;
+    text-align: center;
+  }
+
+  .kc-login-logo,
+  .kc-login-features {
+    justify-content: center;
+  }
+
+  .kc-login-panel {
+    width: 100%;
+    padding: 2rem;
+  }
+
+  .kc-login-tech-circles {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .kc-login-brand-panel {
+    padding: 2rem 1.5rem 0.75rem;
+  }
+
+  .kc-login-card {
+    padding: 2rem 1.5rem;
+  }
+
+  .kc-login-form-options {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
 }

@@ -23,6 +23,7 @@ target
 config.toml
 
 AGENTS.md
+agent.md
 CLAUDE.md
 .claude
 .qoder
