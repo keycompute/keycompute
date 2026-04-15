@@ -10,11 +10,11 @@ from openai import OpenAI
 
 # API_URL = "https://api.deepseek.com/v1"
 # API_KEY = "sk-70f08cda30ee4e56bd0d27223dec522f"
-API_MODEL = "deepseek-chat"
+# API_MODEL = "deepseek-chat"
 
 API_URL = "http://192.168.100.100:3000/v1"
-API_KEY = "sk-e53734645ff1414fa308a394c474f0004559314290bb4eca"
-API_MODEL = "kimi-k2.5"
+API_KEY = "sk-5f65b519de874eb9a9a2a97f1a12d1c972e6bed188664d24"
+API_MODEL = "deepseek-chat"
 
 client = OpenAI(base_url=API_URL, api_key=API_KEY)
 

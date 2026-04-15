@@ -13,8 +13,8 @@ import requests
 # API_MODEL = "deepseek-chat"
 
 API_URL = "http://192.168.100.100:3000/v1/chat/completions"
-API_KEY = "sk-e53734645ff1414fa308a394c474f0004559314290bb4eca"
-API_MODEL = "kimi-k2.5"
+API_KEY = "sk-5f65b519de874eb9a9a2a97f1a12d1c972e6bed188664d24"
+API_MODEL = "deepseek-chat"
 
 
 def chat():
