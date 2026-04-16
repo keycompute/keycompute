@@ -119,24 +119,30 @@ pub struct ProviderStatusInfo {
 /// Provider 健康响应
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderHealthResponse {
-    pub providers: HashMap<String, ProviderHealth>,
-}
-
-/// Provider 健康状态
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderHealth {
-    pub status: String,
-    pub last_check: Option<String>,
-    pub latency_ms: Option<i64>,
-    pub error: Option<String>,
+    pub healthy_providers: Vec<String>,
+    pub account_count: usize,
 }
 
 /// 网关状态
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayStatus {
-    pub status: String,
-    pub uptime_seconds: i64,
-    pub version: String,
+    pub available: bool,
+    pub providers: Vec<GatewayProvider>,
+    pub config: GatewayConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayProvider {
+    pub name: String,
+    pub supported_models: Vec<String>,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayConfig {
+    pub max_retries: u32,
+    pub timeout_secs: u64,
+    pub enable_fallback: bool,
 }
 
 /// 网关统计
@@ -145,8 +151,17 @@ pub struct GatewayStats {
     pub total_requests: i64,
     pub successful_requests: i64,
     pub failed_requests: i64,
-    pub average_latency_ms: f64,
-    pub active_connections: i32,
+    pub fallback_count: i64,
+    pub avg_latency_ms: u64,
+    pub provider_stats: HashMap<String, ProviderStats>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderStats {
+    pub requests: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub avg_latency_ms: u64,
 }
 
 /// 健康检查响应

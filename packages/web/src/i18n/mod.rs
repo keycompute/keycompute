@@ -5,7 +5,7 @@ pub use en::EN;
 pub use zh::ZH;
 
 /// 语言枚举
-#[derive(Clone, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Default)]
 #[allow(dead_code)]
 pub enum Lang {
     #[default]
@@ -32,6 +32,7 @@ impl Lang {
 }
 
 /// 国际化结构体，通过 `.t(key)` 获取翻译文本
+#[derive(Clone, Copy)]
 pub struct I18n {
     lang: Lang,
 }

@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::api_client::with_auto_refresh;
 use crate::services::user_service;
 use crate::stores::auth_store::AuthStore;
@@ -9,6 +10,7 @@ use crate::stores::user_store::{UserInfo, UserStore};
 
 #[component]
 pub fn UserProfile() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut user_store = use_context::<UserStore>();
 
@@ -56,6 +58,11 @@ pub fn UserProfile() -> Element {
         .as_ref()
         .map(|u| u.role.clone())
         .unwrap_or_default();
+    let user_id = user_info.as_ref().map(|u| u.id.clone()).unwrap_or_default();
+    let tenant_id = user_info
+        .as_ref()
+        .map(|u| u.tenant_id.clone())
+        .unwrap_or_default();
     let avatar = user_info.as_ref().map(|u| u.avatar_char()).unwrap_or('U');
     let has_user = user_info.is_some();
     drop(user_info);
@@ -94,12 +101,12 @@ pub fn UserProfile() -> Element {
                         role: updated.role,
                         tenant_id: updated.tenant_id.to_string(),
                     });
-                    save_msg.set(Some("保存成功".to_string()));
+                    save_msg.set(Some(i18n.t("profile.saved").to_string()));
                     edit_mode.set(false);
                     saving.set(false);
                 }
                 Err(e) => {
-                    save_error.set(Some(format!("保存失败：{e}")));
+                    save_error.set(Some(format!("{}：{e}", i18n.t("profile.save_failed"))));
                     saving.set(false);
                 }
             }
@@ -111,7 +118,10 @@ pub fn UserProfile() -> Element {
             class: "page-container",
             div {
                 class: "page-header",
-                h1 { class: "page-title", "个人资料" }
+                div {
+                    h1 { class: "page-title", {i18n.t("page.profile")} }
+                    p { class: "page-description", {i18n.t("profile.page_desc")} }
+                }
             }
 
             if let Some(msg) = save_msg() {
@@ -119,22 +129,36 @@ pub fn UserProfile() -> Element {
             }
 
             div {
-                class: "card",
+                class: "card profile-card",
                 if has_user {
                     div {
-                        class: "profile-avatar",
-                        span { class: "avatar-char", "{avatar}" }
+                        class: "profile-hero",
+                        div {
+                            class: "profile-avatar",
+                            span { class: "avatar-char", "{avatar}" }
+                        }
+                        div {
+                            class: "profile-hero-copy",
+                            h2 { class: "profile-name", "{display_name}" }
+                            p { class: "profile-email", "{email}" }
+                            div {
+                                class: "profile-badges",
+                                span { class: "profile-badge", "{role}" }
+                                span { class: "profile-badge profile-badge-muted", "{i18n.t(\"profile.tenant\")} {tenant_id}" }
+                            }
+                        }
                     }
 
                     if edit_mode() {
                         // 编辑模式
                         form {
+                            class: "profile-form",
                             onsubmit: on_save,
                             div {
-                                class: "profile-info",
+                                class: "profile-info-grid",
                                 div {
-                                    class: "form-group",
-                                    label { class: "form-label", "姓名" }
+                                    class: "profile-field profile-field-editable",
+                                    label { class: "form-label", {i18n.t("auth.name")} }
                                     input {
                                         class: "form-input",
                                         r#type: "text",
@@ -143,63 +167,79 @@ pub fn UserProfile() -> Element {
                                     }
                                 }
                                 div {
-                                    class: "form-group",
-                                    label { class: "form-label", "邮箱" }
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("auth.email")} }
                                     p { class: "form-value text-muted", "{email}" }
                                 }
                                 div {
-                                    class: "form-group",
-                                    label { class: "form-label", "角色" }
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("table.role")} }
                                     p { class: "form-value", "{role}" }
                                 }
-                                if let Some(err) = save_error() {
-                                    div { class: "alert alert-error", "{err}" }
-                                }
                                 div {
-                                    class: "form-actions",
-                                    button {
-                                        class: "btn btn-ghost",
-                                        r#type: "button",
-                                        onclick: move |_| edit_mode.set(false),
-                                        "取消"
-                                    }
-                                    button {
-                                        class: "btn btn-primary",
-                                        r#type: "submit",
-                                        disabled: saving(),
-                                        if saving() { "保存中..." } else { "保存" }
-                                    }
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("profile.user_id")} }
+                                    p { class: "form-value profile-mono", "{user_id}" }
+                                }
+                            }
+                            if let Some(err) = save_error() {
+                                div { class: "alert alert-error", "{err}" }
+                            }
+                            div {
+                                class: "form-actions profile-actions",
+                                button {
+                                    class: "btn btn-ghost",
+                                    r#type: "button",
+                                    onclick: move |_| edit_mode.set(false),
+                                    {i18n.t("form.cancel")}
+                                }
+                                button {
+                                    class: "btn btn-primary",
+                                    r#type: "submit",
+                                    disabled: saving(),
+                                    if saving() { {i18n.t("form.saving")} } else { {i18n.t("form.save")} }
                                 }
                             }
                         }
                     } else {
                         // 展示模式
                         div {
-                            class: "profile-info",
+                            class: "profile-body",
                             div {
-                                class: "form-group",
-                                label { class: "form-label", "姓名" }
-                                p { class: "form-value", "{display_name}" }
+                                class: "profile-info-grid",
+                                div {
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("auth.name")} }
+                                    p { class: "form-value", "{display_name}" }
+                                }
+                                div {
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("auth.email")} }
+                                    p { class: "form-value", "{email}" }
+                                }
+                                div {
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("table.role")} }
+                                    p { class: "form-value", "{role}" }
+                                }
+                                div {
+                                    class: "profile-field",
+                                    label { class: "form-label", {i18n.t("profile.user_id")} }
+                                    p { class: "form-value profile-mono", "{user_id}" }
+                                }
                             }
                             div {
-                                class: "form-group",
-                                label { class: "form-label", "邮箱" }
-                                p { class: "form-value", "{email}" }
-                            }
-                            div {
-                                class: "form-group",
-                                label { class: "form-label", "角色" }
-                                p { class: "form-value", "{role}" }
-                            }
-                            button {
-                                class: "btn btn-secondary",
-                                onclick: on_edit_start,
-                                "编辑资料"
+                                class: "profile-actions",
+                                button {
+                                    class: "btn btn-secondary",
+                                    onclick: on_edit_start,
+                                    {i18n.t("profile.edit")}
+                                }
                             }
                         }
                     }
                 } else {
-                    div { class: "empty-state", p { "加载中..." } }
+                    div { class: "empty-state", p { {i18n.t("table.loading")} } }
                 }
             }
         }

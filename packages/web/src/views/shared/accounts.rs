@@ -3,6 +3,7 @@ use ui::{Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Pagination, Tab
 
 const PAGE_SIZE: usize = 20;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::{account_service, api_client::with_auto_refresh, debug_service};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
@@ -18,6 +19,14 @@ const PROVIDERS: &[(&str, &str)] = &[
     ("vllm", "vLLM"),
     ("ollama", "Ollama"),
 ];
+
+fn provider_label(provider: &str) -> &str {
+    PROVIDERS
+        .iter()
+        .find(|(value, _)| *value == provider)
+        .map(|(_, label)| *label)
+        .unwrap_or(provider)
+}
 
 /// 根据 provider 获取默认模型列表
 fn default_models_for(provider: &str) -> Vec<String> {
@@ -165,15 +174,15 @@ fn default_models_for(provider: &str) -> Vec<String> {
 }
 
 /// 根据 provider 获取模型提示文本
-fn models_placeholder_for(provider: &str) -> &'static str {
+fn models_placeholder_key_for(provider: &str) -> &'static str {
     match provider {
-        "openai" => "如: gpt-4o, gpt-4o-mini, gpt-4-turbo",
-        "claude" => "如: claude-3-5-sonnet-latest, claude-3-opus-latest",
-        "deepseek" => "如: deepseek-chat, deepseek-coder",
-        "gemini" => "如: gemini-1.5-pro, gemini-1.5-flash",
-        "vllm" => "输入 vLLM 支持的模型名称，多个用逗号分隔",
-        "ollama" => "输入 Ollama 模型名称，多个用逗号分隔",
-        _ => "输入模型名称，多个用逗号分隔",
+        "openai" => "accounts.models_placeholder_openai",
+        "claude" => "accounts.models_placeholder_claude",
+        "deepseek" => "accounts.models_placeholder_deepseek",
+        "gemini" => "accounts.models_placeholder_gemini",
+        "vllm" => "accounts.models_placeholder_vllm",
+        "ollama" => "accounts.models_placeholder_ollama",
+        _ => "accounts.models_placeholder_default",
     }
 }
 
@@ -183,6 +192,7 @@ fn models_placeholder_for(provider: &str) -> &'static str {
 /// - Admin：管理 LLM Provider 渠道，支持测试连接、刷新状态
 #[component]
 pub fn Accounts() -> Element {
+    let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let is_admin = user_store
         .info
@@ -194,7 +204,7 @@ pub fn Accounts() -> Element {
     if is_admin {
         rsx! { AdminAccountsView {} }
     } else {
-        rsx! { NoPermissionView { resource: "账号管理" } }
+        rsx! { NoPermissionView { resource: i18n.t("page.accounts").to_string() } }
     }
 }
 
@@ -202,6 +212,7 @@ pub fn Accounts() -> Element {
 
 #[component]
 fn AdminAccountsView() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut ui_store = use_context::<UiStore>();
     let mut show_create = use_signal(|| false);
@@ -252,7 +263,7 @@ fn AdminAccountsView() -> Element {
                     ui.show_success(&resp.message);
                 }
                 Err(e) => {
-                    ui.show_error(format!("重置失败：{}", e));
+                    ui.show_error(format!("{}: {}", i18n.t("accounts.reset_failed"), e));
                 }
             }
             resetting.set(false);
@@ -266,7 +277,7 @@ fn AdminAccountsView() -> Element {
         let api_base = create_api_base();
         let models_str = create_models_input();
         if name.is_empty() || provider.is_empty() || api_key_val.is_empty() {
-            *error_msg.write() = "请填写必填项".to_string();
+            *error_msg.write() = i18n.t("accounts.fill_required").to_string();
             return;
         }
         // 解析模型列表（逗号分隔，去空格，去空项）
@@ -300,10 +311,10 @@ fn AdminAccountsView() -> Element {
                     create_models_input.write().clear();
                     page.set(1);
                     accounts.restart();
-                    ui_store.show_success("渠道已创建");
+                    ui_store.show_success(i18n.t("accounts.created"));
                 }
                 Err(e) => {
-                    *error_msg.write() = format!("创建失败：{}", e);
+                    *error_msg.write() = format!("{}: {}", i18n.t("accounts.create_failed"), e);
                 }
             }
             *saving.write() = false;
@@ -318,7 +329,7 @@ fn AdminAccountsView() -> Element {
         let base_val = edit_api_base();
         let active = edit_is_active();
         if name_val.trim().is_empty() {
-            *edit_error.write() = "渠道名称不能为空".to_string();
+            *edit_error.write() = i18n.t("accounts.name_required").to_string();
             return;
         }
         let token = auth_store.token().unwrap_or_default();
@@ -339,20 +350,41 @@ fn AdminAccountsView() -> Element {
                 Ok(_) => {
                     show_edit.set(false);
                     accounts.restart();
-                    ui_store.show_success("渠道已更新");
+                    ui_store.show_success(i18n.t("accounts.updated"));
                 }
                 Err(e) => {
-                    *edit_error.write() = format!("更新失败：{}", e);
+                    *edit_error.write() = format!("{}: {}", i18n.t("accounts.update_failed"), e);
                 }
             }
             edit_saving.set(false);
         });
     };
 
+    let reset_health_label = if resetting() {
+        i18n.t("accounts.resetting")
+    } else {
+        i18n.t("accounts.reset_health")
+    };
+    let create_save_label = if saving() {
+        i18n.t("form.saving")
+    } else {
+        i18n.t("form.save")
+    };
+    let edit_save_label = if edit_saving() {
+        i18n.t("form.saving")
+    } else {
+        i18n.t("form.save")
+    };
+    let delete_confirm_label = if deleting() {
+        i18n.t("accounts.deleting")
+    } else {
+        i18n.t("accounts.confirm_delete")
+    };
+
     rsx! {
         div { class: "page-header",
-            h1 { class: "page-title", "账号管理" }
-            p { class: "page-description", "管理 LLM Provider 渠道，配置 API Key 和模型映射" }
+            h1 { class: "page-title", {i18n.t("page.accounts")} }
+            p { class: "page-description", {i18n.t("accounts.subtitle")} }
         }
 
         div { class: "toolbar",
@@ -362,7 +394,7 @@ fn AdminAccountsView() -> Element {
                     size: ButtonSize::Small,
                     loading: resetting(),
                     onclick: on_reset_health,
-                    if resetting() { "重置中..." } else { "重置健康状态" }
+                    "{reset_health_label}"
                 }
             }
             div { class: "toolbar-right",
@@ -370,16 +402,16 @@ fn AdminAccountsView() -> Element {
                     variant: ButtonVariant::Primary,
                     size: ButtonSize::Small,
                     onclick: move |_| *show_create.write() = true,
-                    "+ 新增渠道"
+                    {i18n.t("accounts.add_channel")}
                 }
             }
         }
 
         {
             let (is_empty, empty_text) = match accounts() {
-                None => (true, "加载中..."),
-                Some(Err(_)) => (true, "加载失败"),
-                Some(Ok(ref l)) if l.is_empty() => (true, "暂无渠道配置，请点击「新增渠道」添加"),
+                None => (true, i18n.t("table.loading")),
+                Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                Some(Ok(ref l)) if l.is_empty() => (true, i18n.t("accounts.empty")),
                 _ => (false, ""),
             };
             let total = accounts().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0);
@@ -390,86 +422,180 @@ fn AdminAccountsView() -> Element {
                 .map(|l| l.into_iter().skip(start).take(PAGE_SIZE).collect())
                 .unwrap_or_default();
             rsx! {
-                Table {
-                    empty: is_empty,
-                    empty_text: empty_text.to_string(),
-                    col_count: 5,
-                    thead {
-                        tr {
-                            TableHead { "渠道名称" }
-                            TableHead { "Provider" }
-                            TableHead { "状态" }
-                            TableHead { "创建时间" }
-                            TableHead { "操作" }
+                div { class: "accounts-table-shell",
+                    div { class: "accounts-table-intro",
+                        div {
+                            h2 { class: "accounts-table-title", {i18n.t("accounts.table_title")} }
+                            p { class: "accounts-table-subtitle", {i18n.t("accounts.table_subtitle")} }
                         }
+                        div { class: "accounts-table-meta", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"accounts.channels_suffix\")}" }
                     }
-                    tbody {
-                        if accounts().and_then(|r| r.ok()).is_some() {
-                            for acc in paged_list.iter() {
-                                tr {
-                                    td { "{acc.name}" }
-                                    td { "{acc.provider}" }
-                                    td {
-                                        if acc.is_active {
-                                            Badge { variant: BadgeVariant::Success, "已启用" }
-                                        } else {
-                                            Badge { variant: BadgeVariant::Neutral, "已禁用" }
+                    Table {
+                        class: "accounts-table".to_string(),
+                        empty: is_empty,
+                        empty_text: empty_text.to_string(),
+                        col_count: 6,
+                        thead {
+                            tr {
+                                TableHead { {i18n.t("accounts.channel")} }
+                                TableHead { {i18n.t("accounts.provider_model")} }
+                                TableHead { {i18n.t("accounts.runtime_status")} }
+                                TableHead { {i18n.t("accounts.rate_quota")} }
+                                TableHead { {i18n.t("common.time")} }
+                                TableHead { {i18n.t("table.actions")} }
+                            }
+                        }
+                        tbody {
+                            if accounts().and_then(|r| r.ok()).is_some() {
+                                for acc in paged_list.iter() {
+                                    tr {
+                                        td {
+                                            div { class: "account-cell-main",
+                                                div { class: "account-name-row",
+                                                    span { class: "account-name", "{acc.name}" }
+                                                    span { class: "account-id", "#{acc.id.chars().take(8).collect::<String>()}" }
+                                                }
+                                                div { class: "account-subline",
+                                                    span { class: "account-secret-label", {i18n.t("accounts.key_preview")} }
+                                                    code { class: "account-key-preview", "{acc.api_key_preview}" }
+                                                }
+                                                if let Some(api_base) = &acc.api_base {
+                                                    p { class: "account-endpoint", "{api_base}" }
+                                                } else {
+                                                    p { class: "account-endpoint account-endpoint-muted", {i18n.t("accounts.default_endpoint")} }
+                                                }
+                                            }
                                         }
-                                    }
-                                    td { { format_time(&acc.created_at) } }
-                                    td {
-                                        div { class: "btn-group",
-                                            Button {
-                                                variant: ButtonVariant::Ghost,
-                                                size: ButtonSize::Small,
-                                                onclick: {
-                                                    let id = acc.id.clone();
-                                                    let name = acc.name.clone();
-                                                    let active = acc.is_active;
-                                                    move |_| {
-                                                        edit_id.set(id.clone());
-                                                        edit_name.set(name.clone());
-                                                        edit_api_key.set(String::new());
-                                                        edit_api_base.set(String::new());
-                                                        edit_is_active.set(active);
-                                                        *edit_error.write() = String::new();
-                                                        show_edit.set(true);
+                                        td {
+                                            div { class: "account-provider-cell",
+                                                span {
+                                                    class: "account-provider-badge account-provider-{acc.provider}",
+                                                    "{provider_label(&acc.provider)}"
+                                                }
+                                                p { class: "account-provider-code", "{acc.provider}" }
+                                                div { class: "account-models",
+                                                    if acc.models.is_empty() {
+                                                        span { class: "account-model-chip account-model-chip-muted", {i18n.t("accounts.no_models")} }
+                                                    } else {
+                                                        for model in acc.models.iter().take(2) {
+                                                            span { class: "account-model-chip", "{model}" }
+                                                        }
+                                                        if acc.models.len() > 2 {
+                                                            span { class: "account-model-chip account-model-chip-muted", "+{acc.models.len() - 2}" }
+                                                        }
                                                     }
-                                                },
-                                                "编辑"
+                                                }
                                             }
-                                            Button {
-                                                variant: ButtonVariant::Ghost,
-                                                size: ButtonSize::Small,
-                                                onclick: {
-                                                    let id = acc.id.clone();
-                                                    move |_| {
-                                                        let token = auth_store.token().unwrap_or_default();
-                                                        let id = id.clone();
-                                                        spawn(async move {
-                                                            match account_service::test(&id, &token).await {
-                                                                Ok(_) => ui_store.show_success("连接测试成功"),
-                                                                Err(e) => ui_store.show_error(format!("测试失败：{}", e)),
+                                        }
+                                        td {
+                                            div { class: "account-status-stack",
+                                                div { class: "account-status-row",
+                                                    if acc.is_active {
+                                                        Badge { variant: BadgeVariant::Success, {i18n.t("common.enabled")} }
+                                                    } else {
+                                                        Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
+                                                    }
+                                                    if acc.is_healthy {
+                                                        Badge { variant: BadgeVariant::Success, {i18n.t("system.healthy")} }
+                                                    } else {
+                                                        Badge { variant: BadgeVariant::Warning, {i18n.t("dashboard.pending_check")} }
+                                                    }
+                                                }
+                                                p { class: "account-status-note",
+                                                    if acc.is_active && acc.is_healthy {
+                                                        {i18n.t("accounts.route_ready")}
+                                                    } else if acc.is_active {
+                                                        {i18n.t("accounts.enabled_but_unhealthy")}
+                                                    } else {
+                                                        {i18n.t("accounts.not_routed")}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div { class: "account-rpm-cell",
+                                                div { class: "account-rpm-metric",
+                                                    span { class: "account-rpm-current", "{acc.current_rpm}" }
+                                                    span { class: "account-rpm-divider", "/" }
+                                                    span { class: "account-rpm-limit", "{acc.rpm_limit}" }
+                                                }
+                                                p { class: "account-rpm-label", {i18n.t("accounts.rpm_label")} }
+                                            }
+                                        }
+                                        td {
+                                            div { class: "account-time-cell",
+                                                div { class: "account-time-block",
+                                                    span { class: "account-time-label", {i18n.t("common.created_at_label")} }
+                                                    span { class: "account-time-value", { format_time(&acc.created_at) } }
+                                                }
+                                                div { class: "account-time-block",
+                                                    span { class: "account-time-label", {i18n.t("accounts.last_used")} }
+                                                    span { class: "account-time-value",
+                                                        {
+                                                            if let Some(last_used) = &acc.last_used_at {
+                                                                format_time(last_used)
+                                                            } else {
+                                                                i18n.t("accounts.no_usage_record").to_string()
                                                             }
-                                                            accounts.restart();
-                                                        });
+                                                        }
                                                     }
-                                                },
-                                                "测试"
+                                                }
                                             }
-                                            Button {
-                                                variant: ButtonVariant::Danger,
-                                                size: ButtonSize::Small,
-                                                onclick: {
-                                                    let id = acc.id.clone();
-                                                    let name = acc.name.clone();
-                                                    move |_| {
-                                                        delete_id.set(id.clone());
-                                                        delete_name.set(name.clone());
-                                                        show_delete.set(true);
-                                                    }
-                                                },
-                                                "删除"
+                                        }
+                                        td {
+                                            div { class: "accounts-actions",
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let id = acc.id.clone();
+                                                        let name = acc.name.clone();
+                                                        let active = acc.is_active;
+                                                        move |_| {
+                                                            edit_id.set(id.clone());
+                                                            edit_name.set(name.clone());
+                                                            edit_api_key.set(String::new());
+                                                            edit_api_base.set(String::new());
+                                                            edit_is_active.set(active);
+                                                            *edit_error.write() = String::new();
+                                                            show_edit.set(true);
+                                                        }
+                                                    },
+                                                    {i18n.t("form.edit")}
+                                                }
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let id = acc.id.clone();
+                                                        move |_| {
+                                                            let token = auth_store.token().unwrap_or_default();
+                                                            let id = id.clone();
+                                                            spawn(async move {
+                                                                match account_service::test(&id, &token).await {
+                                                                    Ok(_) => ui_store.show_success(i18n.t("accounts.test_success")),
+                                                                    Err(e) => ui_store.show_error(format!("{}: {}", i18n.t("accounts.test_failed"), e)),
+                                                                }
+                                                                accounts.restart();
+                                                            });
+                                                        }
+                                                    },
+                                                    {i18n.t("accounts.test")}
+                                                }
+                                                Button {
+                                                    variant: ButtonVariant::Danger,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let id = acc.id.clone();
+                                                        let name = acc.name.clone();
+                                                        move |_| {
+                                                            delete_id.set(id.clone());
+                                                            delete_name.set(name.clone());
+                                                            show_delete.set(true);
+                                                        }
+                                                    },
+                                                    {i18n.t("form.delete")}
+                                                }
                                             }
                                         }
                                     }
@@ -477,13 +603,13 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                     }
-                }
-                div { class: "pagination",
-                    span { class: "pagination-info", "共 {total} 条" }
-                    Pagination {
-                        current: page(),
-                        total_pages,
-                        on_page_change: move |p| page.set(p),
+                    div { class: "pagination",
+                        span { class: "pagination-info", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
+                        Pagination {
+                            current: page(),
+                            total_pages,
+                            on_page_change: move |p| page.set(p),
+                        }
                     }
                 }
             }
@@ -497,7 +623,7 @@ fn AdminAccountsView() -> Element {
                     class: "modal",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "modal-header",
-                        h2 { class: "modal-title", "新增 LLM 渠道" }
+                        h2 { class: "modal-title", {i18n.t("accounts.create_title")} }
                         button {
                             class: "btn btn-ghost btn-sm",
                             r#type: "button",
@@ -512,16 +638,16 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "渠道名称 *" }
+                            label { class: "form-label", {i18n.t("accounts.channel_name")} }
                             input {
                                 class: "input-field",
-                                placeholder: "如 OpenAI 官方",
+                                placeholder: "{i18n.t(\"accounts.channel_name_placeholder\")}",
                                 value: "{create_name}",
                                 oninput: move |e| *create_name.write() = e.value(),
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "Provider *" }
+                            label { class: "form-label", {i18n.t("accounts.provider")} }
                             select {
                                 class: "input-field",
                                 value: "{create_provider}",
@@ -540,17 +666,17 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "支持模型（可选，留空使用默认）" }
+                            label { class: "form-label", {i18n.t("accounts.supported_models")} }
                             input {
                                 class: "input-field",
-                                placeholder: "{models_placeholder_for(&create_provider())}",
+                                placeholder: "{i18n.t(models_placeholder_key_for(&create_provider()))}",
                                 value: "{create_models_input}",
                                 oninput: move |e| *create_models_input.write() = e.value(),
                             }
-                            small { class: "form-hint", "多个模型用逗号分隔，留空则使用该 Provider 的默认模型" }
+                            small { class: "form-hint", {i18n.t("accounts.models_hint")} }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "API Key *" }
+                            label { class: "form-label", {i18n.t("accounts.api_key")} }
                             input {
                                 class: "input-field",
                                 r#type: "password",
@@ -560,7 +686,7 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "自定义 Base URL（可选）" }
+                            label { class: "form-label", {i18n.t("accounts.custom_base_url")} }
                             input {
                                 class: "input-field",
                                 placeholder: "https://api.openai.com/v1",
@@ -573,13 +699,13 @@ fn AdminAccountsView() -> Element {
                         Button {
                             variant: ButtonVariant::Ghost,
                             onclick: move |_| *show_create.write() = false,
-                            "取消"
+                            {i18n.t("form.cancel")}
                         }
                         Button {
                             variant: ButtonVariant::Primary,
                             loading: saving(),
                             onclick: on_submit,
-                            if saving() { "保存中..." } else { "保存" }
+                            "{create_save_label}"
                         }
                     }
                 }
@@ -593,7 +719,7 @@ fn AdminAccountsView() -> Element {
                     class: "modal",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "modal-header",
-                        h2 { class: "modal-title", "编辑 LLM 渠道" }
+                        h2 { class: "modal-title", {i18n.t("accounts.edit_title")} }
                         button {
                             class: "btn btn-ghost btn-sm",
                             r#type: "button",
@@ -608,7 +734,7 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "渠道名称 *" }
+                            label { class: "form-label", {i18n.t("accounts.channel_name")} }
                             input {
                                 class: "input-field",
                                 value: "{edit_name}",
@@ -616,17 +742,17 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "新 API Key（留空则不修改）" }
+                            label { class: "form-label", {i18n.t("accounts.new_api_key")} }
                             input {
                                 class: "input-field",
                                 r#type: "password",
-                                placeholder: "留空不修改当前 Key",
+                                placeholder: "{i18n.t(\"accounts.new_api_key_placeholder\")}",
                                 value: "{edit_api_key}",
                                 oninput: move |e| *edit_api_key.write() = e.value(),
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "自定义 Base URL（留空则不修改）" }
+                            label { class: "form-label", {i18n.t("accounts.custom_base_url_optional")} }
                             input {
                                 class: "input-field",
                                 placeholder: "https://api.openai.com/v1",
@@ -642,7 +768,7 @@ fn AdminAccountsView() -> Element {
                                     onchange: move |e| edit_is_active.set(e.checked()),
                                     style: "margin-right:6px",
                                 }
-                                "启用渠道"
+                                {i18n.t("accounts.enable_channel")}
                             }
                         }
                     }
@@ -650,13 +776,13 @@ fn AdminAccountsView() -> Element {
                         Button {
                             variant: ButtonVariant::Ghost,
                             onclick: move |_| show_edit.set(false),
-                            "取消"
+                            {i18n.t("form.cancel")}
                         }
                         Button {
                             variant: ButtonVariant::Primary,
                             loading: edit_saving(),
                             onclick: on_edit_save,
-                            if edit_saving() { "保存中..." } else { "保存" }
+                            "{edit_save_label}"
                         }
                     }
                 }
@@ -671,7 +797,7 @@ fn AdminAccountsView() -> Element {
                     class: "modal",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "modal-header",
-                        h2 { class: "modal-title", "确认删除" }
+                        h2 { class: "modal-title", {i18n.t("accounts.delete_confirm_title")} }
                         button {
                             class: "btn btn-ghost btn-sm",
                             r#type: "button",
@@ -681,16 +807,16 @@ fn AdminAccountsView() -> Element {
                     }
                     div { class: "modal-body",
                         p {
-                            "确定要删除渠道「"
+                            "{i18n.t(\"accounts.delete_confirm_prefix\")}"
                             strong { "{delete_name}" }
-                            "」吗？该操作不可恢复。"
+                            "{i18n.t(\"accounts.delete_confirm_suffix\")}"
                         }
                     }
                     div { class: "modal-footer",
                         Button {
                             variant: ButtonVariant::Ghost,
                             onclick: move |_| show_delete.set(false),
-                            "取消"
+                            {i18n.t("form.cancel")}
                         }
                         Button {
                             variant: ButtonVariant::Danger,
@@ -702,18 +828,18 @@ fn AdminAccountsView() -> Element {
                                 spawn(async move {
                                     match account_service::delete(&id, &token).await {
                                         Ok(_) => {
-                                            ui_store.show_success("渠道已删除");
+                                            ui_store.show_success(i18n.t("accounts.deleted"));
                                             accounts.restart();
                                         }
                                         Err(e) => {
-                                            ui_store.show_error(format!("删除失败：{}", e));
+                                            ui_store.show_error(format!("{}: {}", i18n.t("accounts.delete_failed"), e));
                                         }
                                     }
                                     deleting.set(false);
                                     show_delete.set(false);
                                 });
                             },
-                            if deleting() { "删除中..." } else { "确认删除" }
+                            "{delete_confirm_label}"
                         }
                     }
                 }
@@ -726,15 +852,19 @@ fn AdminAccountsView() -> Element {
 
 #[component]
 pub fn NoPermissionView(resource: String) -> Element {
+    let i18n = use_i18n();
+    let no_permission_desc = i18n
+        .t("accounts.no_permission_desc")
+        .replace("{resource}", &resource);
     rsx! {
         div { class: "page-header",
             h1 { class: "page-title", "{resource}" }
         }
         div { class: "empty-state",
             div { class: "empty-icon", "🔒" }
-            h3 { class: "empty-title", "暂无访问权限" }
+            h3 { class: "empty-title", {i18n.t("accounts.no_permission_title")} }
             p { class: "empty-description",
-                "您没有访问「{resource}」的权限，请联系管理员"
+                "{no_permission_desc}"
             }
         }
     }

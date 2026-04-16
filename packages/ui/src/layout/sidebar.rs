@@ -73,6 +73,10 @@ pub fn Sidebar(
     collapsed: Signal<bool>,
     mobile_open: Signal<bool>,
     #[props(default)] current_path: String,
+    #[props(default)] expand_sidebar_title: String,
+    #[props(default)] collapse_sidebar_title: String,
+    #[props(default)] expand_label: String,
+    #[props(default)] collapse_label: String,
 ) -> Element {
     let is_collapsed = collapsed();
     let is_mobile_open = mobile_open();
@@ -100,7 +104,10 @@ pub fn Sidebar(
             // Logo 区域
             div { class: "sidebar-logo",
                 div { class: "sidebar-logo-icon", "K" }
-                span { class: "sidebar-logo-text", "KeyCompute" }
+                div { class: "sidebar-logo-copy",
+                    span { class: "sidebar-logo-text", "KeyCompute" }
+                    span { class: "sidebar-logo-kicker", "AI Gateway" }
+                }
             }
 
             // 导航分组
@@ -125,14 +132,14 @@ pub fn Sidebar(
             div { class: "sidebar-footer",
                 button {
                     class: "sidebar-item",
-                    title: if is_collapsed { "展开侧边栏" } else { "折叠侧边栏" },
+                    title: if is_collapsed { expand_sidebar_title.clone() } else { collapse_sidebar_title.clone() },
                     onclick: move |_| {
                         let cur = collapsed();
                         *collapsed.write() = !cur;
                     },
                     span { class: "sidebar-item-icon", {toggle_icon} }
                     span { class: "sidebar-item-label",
-                        if is_collapsed { "展开" } else { "折叠" }
+                        if is_collapsed { {expand_label.clone()} } else { {collapse_label.clone()} }
                     }
                 }
             }

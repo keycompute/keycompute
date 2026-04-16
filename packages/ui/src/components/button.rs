@@ -77,11 +77,12 @@ pub fn Button(
     let full_class = full_class.trim().to_string();
 
     let is_disabled = disabled || loading;
+    let button_type = r#type;
 
     rsx! {
         button {
             class: "{full_class}",
-            r#type: "{r#type}",
+            r#type: "{button_type}",
             disabled: is_disabled,
             onclick: move |e| {
                 if !is_disabled {

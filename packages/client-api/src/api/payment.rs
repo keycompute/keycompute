@@ -27,7 +27,7 @@ impl PaymentApi {
         &self,
         req: &CreatePaymentOrderRequest,
         token: &str,
-    ) -> Result<PaymentOrderResponse> {
+    ) -> Result<CreatePaymentOrderResponse> {
         self.client
             .post_json("/api/v1/payments/orders", req, Some(token))
             .await
@@ -67,7 +67,7 @@ impl PaymentApi {
         &self,
         out_trade_no: &str,
         token: &str,
-    ) -> Result<PaymentOrderResponse> {
+    ) -> Result<SyncPaymentOrderResponse> {
         self.client
             .post_json(
                 &format!("/api/v1/payments/sync/{}", out_trade_no),
@@ -88,28 +88,24 @@ impl PaymentApi {
 /// 创建支付订单请求
 #[derive(Debug, Clone, Serialize)]
 pub struct CreatePaymentOrderRequest {
-    pub amount: f64,
-    pub currency: String,
-    pub description: Option<String>,
-    pub payment_method: String,
+    pub amount: String,
+    pub subject: String,
+    pub body: Option<String>,
+    pub payment_type: String,
 }
 
 impl CreatePaymentOrderRequest {
-    pub fn new(
-        amount: f64,
-        currency: impl Into<String>,
-        payment_method: impl Into<String>,
-    ) -> Self {
+    pub fn new(amount: f64, subject: impl Into<String>, payment_type: impl Into<String>) -> Self {
         Self {
-            amount,
-            currency: currency.into(),
-            description: None,
-            payment_method: payment_method.into(),
+            amount: format_amount(amount),
+            subject: subject.into(),
+            body: None,
+            payment_type: payment_type.into(),
         }
     }
 
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
+    pub fn with_body(mut self, body: impl Into<String>) -> Self {
+        self.body = Some(body.into());
         self
     }
 }
@@ -157,19 +153,48 @@ impl PaymentQueryParams {
     }
 }
 
+fn format_amount(amount: f64) -> String {
+    format!("{:.2}", amount)
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string()
+}
+
+/// 创建支付订单响应
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreatePaymentOrderResponse {
+    pub order_id: String,
+    pub out_trade_no: String,
+    pub payment_type: String,
+    pub pay_url: Option<String>,
+    pub qr_code: Option<String>,
+    pub qr_code_image_url: Option<String>,
+    pub expired_at: String,
+}
+
 /// 支付订单响应
 #[derive(Debug, Clone, Deserialize)]
 pub struct PaymentOrderResponse {
     pub id: String,
     pub out_trade_no: String,
-    pub amount: f64,
-    pub currency: String,
+    pub amount: String,
     pub status: String,
-    pub description: Option<String>,
+    pub subject: String,
+    pub body: Option<String>,
     pub payment_method: String,
     pub pay_url: Option<String>,
+    pub expired_at: String,
     pub paid_at: Option<String>,
     pub created_at: String,
+}
+
+/// 同步订单状态响应
+#[derive(Debug, Clone, Deserialize)]
+pub struct SyncPaymentOrderResponse {
+    pub order_id: String,
+    pub out_trade_no: String,
+    pub status: String,
+    pub changed: bool,
 }
 
 /// 支付订单摘要

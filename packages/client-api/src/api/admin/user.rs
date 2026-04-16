@@ -122,6 +122,16 @@ impl UpdateUserRequest {
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateUserResponse {
+    pub success: bool,
+    pub message: String,
+    pub user_id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: String,
+}
+
 /// 更新余额请求
 ///
 /// 后端使用 amount 的正负值表示操作：正数为充值，负数为扣减

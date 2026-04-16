@@ -3,6 +3,7 @@ use ui::{LineChart, LineSeriesData, Pagination};
 
 const PAGE_SIZE: usize = 20;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, usage_service};
 use crate::stores::auth_store::AuthStore;
 use crate::utils::time::format_time;
@@ -11,6 +12,7 @@ use std::collections::HashMap;
 /// 用量统计页面 - /usage
 #[component]
 pub fn Usage() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut page = use_signal(|| 1u32);
 
@@ -49,7 +51,7 @@ pub fn Usage() -> Element {
             (
                 x,
                 vec![LineSeriesData {
-                    name: "调用次数".to_string(),
+                    name: i18n.t("usage.calls").to_string(),
                     data: y,
                 }],
             )
@@ -62,37 +64,37 @@ pub fn Usage() -> Element {
             class: "page-container",
             div {
                 class: "page-header",
-                h1 { class: "page-title", "用量统计" }
-                p { class: "page-subtitle", "查看 API 调用记录与 Token 消耗" }
+                h1 { class: "page-title", {i18n.t("page.usage")} }
+                p { class: "page-subtitle", {i18n.t("usage.subtitle")} }
             }
 
             // 汇总卡片
             div { class: "stats-grid",
                 match stats() {
-                    None => rsx! { p { "加载中..." } },
-                    Some(Err(e)) => rsx! { p { "加载失败：{e}" } },
+                    None => rsx! { p { {i18n.t("table.loading")} } },
+                    Some(Err(e)) => rsx! { p { "{i18n.t(\"common.load_failed\")}：{e}" } },
                     Some(Ok(s)) => rsx! {
                         div { class: "stat-card",
                             div { class: "stat-body",
-                                p { class: "stat-title", "总调用次数" }
+                                p { class: "stat-title", {i18n.t("usage.total_calls")} }
                                 p { class: "stat-value", "{s.total_requests}" }
-                                p { class: "stat-label", "统计周期：{s.period}" }
+                                p { class: "stat-label", "{i18n.t(\"usage.period\")}：{s.period}" }
                             }
                         }
                         div { class: "stat-card",
                             div { class: "stat-body",
-                                p { class: "stat-title", "总 Token 数" }
+                                p { class: "stat-title", {i18n.t("usage.total_tokens")} }
                                 p { class: "stat-value", "{s.total_tokens}" }
                                 p { class: "stat-label",
-                                    "提示词：{s.total_prompt_tokens} / 补全：{s.total_completion_tokens}"
+                                    "{i18n.t(\"usage.prompt_tokens\")}：{s.total_prompt_tokens} / {i18n.t(\"usage.completion_tokens\")}：{s.total_completion_tokens}"
                                 }
                             }
                         }
                         div { class: "stat-card",
                             div { class: "stat-body",
-                                p { class: "stat-title", "累计费用" }
+                                p { class: "stat-title", {i18n.t("usage.total_cost")} }
                                 p { class: "stat-value", "¥{s.total_cost:.4}" }
-                                p { class: "stat-label", "按使用量计费" }
+                                p { class: "stat-label", {i18n.t("usage.usage_billed")} }
                             }
                         }
                     },
@@ -102,7 +104,7 @@ pub fn Usage() -> Element {
             // 调用趋势折线图
             if !chart_x.is_empty() {
                 div { class: "section",
-                    h2 { class: "section-title", "调用趋势" }
+                    h2 { class: "section-title", {i18n.t("usage.trend")} }
                     div { class: "chart-container",
                         LineChart {
                             id: "usage-line-chart",
@@ -118,24 +120,24 @@ pub fn Usage() -> Element {
 
             // 明细记录表格
             div { class: "section",
-                h2 { class: "section-title", "调用记录" }
+                h2 { class: "section-title", {i18n.t("usage.records")} }
                 match records() {
-                    None => rsx! { p { class: "loading-text", "加载中..." } },
-                    Some(Err(e)) => rsx! { p { class: "error-text", "加载失败：{e}" } },
+                    None => rsx! { p { class: "loading-text", {i18n.t("table.loading")} } },
+                    Some(Err(e)) => rsx! { p { class: "error-text", "{i18n.t(\"common.load_failed\")}：{e}" } },
                     Some(Ok(recs)) if recs.is_empty() => rsx! {
-                        p { class: "empty-text", "暂无记录" }
+                        p { class: "empty-text", {i18n.t("usage.no_records")} }
                     },
                     Some(Ok(recs)) => rsx! {
                         div { class: "table-container",
                             table { class: "data-table",
                                 thead {
                                     tr {
-                                        th { "时间" }
-                                        th { "模型" }
-                                        th { "提示词 Token" }
-                                        th { "补全 Token" }
-                                        th { "总 Token" }
-                                        th { "费用" }
+                                        th { {i18n.t("common.time")} }
+                                        th { {i18n.t("usage.model")} }
+                                        th { {i18n.t("usage.prompt_tokens")} }
+                                        th { {i18n.t("usage.completion_tokens")} }
+                                        th { {i18n.t("usage.total_token")} }
+                                        th { {i18n.t("common.cost")} }
                                     }
                                 }
                                 tbody {
@@ -170,7 +172,7 @@ pub fn Usage() -> Element {
                             let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
                             rsx! {
                                 div { class: "pagination",
-                                    span { class: "pagination-info", "共 {total} 条" }
+                                    span { class: "pagination-info", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
                                     Pagination {
                                         current: page(),
                                         total_pages,

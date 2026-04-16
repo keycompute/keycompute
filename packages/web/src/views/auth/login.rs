@@ -23,6 +23,13 @@ pub fn Login() -> Element {
     // 提前提取 &'static str，闭包只捕获 Copy 类型避免成为 FnOnce
     let t_fill_all = i18n.t("auth.fill_all");
     let t_login_failed = i18n.t("auth.login_failed");
+    let t_login_page_tagline_1 = i18n.t("login.tagline_1");
+    let t_login_page_tagline_highlight = i18n.t("login.tagline_highlight");
+    let t_login_page_tagline_2 = i18n.t("login.tagline_2");
+    let t_login_page_tagline_3 = i18n.t("login.tagline_3");
+    let t_login_page_desc = i18n.t("login.description");
+    let t_login_page_title = i18n.t("login.title");
+    let t_login_page_subtitle = i18n.t("login.subtitle");
 
     let on_submit = move |evt: Event<FormData>| {
         evt.prevent_default();
@@ -80,19 +87,24 @@ pub fn Login() -> Element {
                         }
                         h1 {
                             class: "kc-login-tagline",
-                            "为 "
-                            span { "AI 应用" }
-                            " 提供"
+                            "{t_login_page_tagline_1} "
+                            span { "{t_login_page_tagline_highlight}" }
+                            " {t_login_page_tagline_2}"
                             br {}
-                            "高性能算力中转"
+                            "{t_login_page_tagline_3}"
                         }
                         p {
                             class: "kc-login-description",
-                            "统一大模型接入、智能路由调度、实时计费结算与全链路可观测性。开箱即用的企业级 AI Token 管理平台。"
+                            "{t_login_page_desc}"
                         }
                         div {
                             class: "kc-login-features",
-                            for label in ["智能路由", "实时计费", "高可用性", "API 管理"] {
+                            for label in [
+                                i18n.t("login.feature_routing"),
+                                i18n.t("login.feature_billing"),
+                                i18n.t("login.feature_ha"),
+                                i18n.t("login.feature_api"),
+                            ] {
                                 div {
                                     class: "kc-login-feature-badge",
                                     div { class: "kc-login-feature-dot" }
@@ -115,8 +127,8 @@ pub fn Login() -> Element {
                         class: "kc-login-card",
                         div {
                             class: "kc-login-header",
-                            h2 { class: "kc-login-title", "登录您的账户" }
-                            p { class: "kc-login-subtitle", "管理您的 AI Token 与算力资源" }
+                            h2 { class: "kc-login-title", "{t_login_page_title}" }
+                            p { class: "kc-login-subtitle", "{t_login_page_subtitle}" }
                         }
 
                         if let Some(err) = error_msg() {
@@ -133,13 +145,13 @@ pub fn Login() -> Element {
                                 label {
                                     class: "kc-login-form-label",
                                     r#for: "kc-login-email",
-                                    "邮箱地址"
+                                    {i18n.t("login.email_label")}
                                 }
                                 input {
                                     id: "kc-login-email",
                                     class: "kc-login-form-input",
                                     r#type: "email",
-                                    placeholder: "admin@keycompute.local",
+                                    placeholder: "{i18n.t(\"auth.email_placeholder\")}",
                                     autocomplete: "email",
                                     required: true,
                                     value: "{email}",
@@ -153,7 +165,7 @@ pub fn Login() -> Element {
                                 label {
                                     class: "kc-login-form-label",
                                     r#for: "kc-login-password",
-                                    "密码"
+                                    {i18n.t("auth.password")}
                                 }
                                 div {
                                     class: "kc-login-password-wrapper",
@@ -161,7 +173,7 @@ pub fn Login() -> Element {
                                         id: "kc-login-password",
                                         class: "kc-login-form-input kc-login-password-input",
                                         r#type: "{password_type}",
-                                        placeholder: "••••••••",
+                                        placeholder: "{i18n.t(\"auth.password_placeholder\")}",
                                         autocomplete: "current-password",
                                         required: true,
                                         value: "{password}",
@@ -170,7 +182,7 @@ pub fn Login() -> Element {
                                     button {
                                         class: "kc-login-toggle-password",
                                         r#type: "button",
-                                        aria_label: if show_password() { "隐藏密码" } else { "显示密码" },
+                                        aria_label: if show_password() { i18n.t("login.hide_password") } else { i18n.t("login.show_password") },
                                         onclick: move |_| show_password.set(!show_password()),
                                         if show_password() {
                                             svg {
@@ -214,13 +226,13 @@ pub fn Login() -> Element {
                                         onclick: move |_| remember_me.set(!remember_me()),
                                     }
                                     div { class: "kc-login-checkbox-custom" }
-                                    span { "记住我" }
+                                    span { {i18n.t("auth.remember_me")} }
                                 }
                                 button {
                                     class: "kc-login-forgot",
                                     r#type: "button",
                                     onclick: move |_| { nav.push(Route::ForgotPassword {}); },
-                                    "忘记密码？"
+                                    {i18n.t("auth.forgot_password")}
                                 }
                             }
 
@@ -229,19 +241,19 @@ pub fn Login() -> Element {
                                 r#type: "submit",
                                 disabled: loading(),
                                 span {
-                                    if loading() { "验证中..." } else { "登录到控制台" }
+                                    if loading() { {i18n.t("login.verifying")} } else { {i18n.t("login.submit")} }
                                 }
                             }
                         }
 
                         div {
                             class: "kc-login-signup",
-                            "还没有账号？"
+                            {i18n.t("auth.no_account")}
                             button {
                                 class: "kc-login-signup-link",
                                 r#type: "button",
                                 onclick: move |_| { nav.push(Route::Register {}); },
-                                "立即注册"
+                                {i18n.t("auth.register_now")}
                             }
                         }
                     }

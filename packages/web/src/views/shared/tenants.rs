@@ -4,6 +4,7 @@ use ui::{Badge, BadgeVariant, Pagination, Table, TableHead};
 
 const PAGE_SIZE: usize = 20;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, tenant_service};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
@@ -16,6 +17,7 @@ use crate::views::shared::accounts::NoPermissionView;
 /// - Admin：查看全平台租户列表（调用 TenantApi）
 #[component]
 pub fn Tenants() -> Element {
+    let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
     let is_admin = user_store
@@ -26,7 +28,7 @@ pub fn Tenants() -> Element {
         .unwrap_or(false);
 
     if !is_admin {
-        return rsx! { NoPermissionView { resource: "租户管理" } };
+        return rsx! { NoPermissionView { resource: i18n.t("page.tenants").to_string() } };
     }
 
     let mut search = use_signal(String::new);
@@ -72,8 +74,8 @@ pub fn Tenants() -> Element {
 
     rsx! {
         div { class: "page-header",
-            h1 { class: "page-title", "租户管理" }
-            p { class: "page-description", "查看和管理平台所有租户信息" }
+            h1 { class: "page-title", {i18n.t("page.tenants")} }
+            p { class: "page-description", {i18n.t("tenants.subtitle")} }
         }
 
         div { class: "toolbar",
@@ -82,7 +84,7 @@ pub fn Tenants() -> Element {
                     input {
                         class: "input-field",
                         r#type: "search",
-                        placeholder: "搜索租户名称或 ID...",
+                        placeholder: "{i18n.t(\"tenants.search_placeholder\")}",
                         value: "{search}",
                         oninput: move |e| {
                             *search.write() = e.value();
@@ -95,9 +97,9 @@ pub fn Tenants() -> Element {
 
         {
             let (is_empty, empty_text) = match tenants() {
-                None => (true, "加载中..."),
-                Some(Err(_)) => (true, "加载失败"),
-                Some(Ok(_)) if filtered().is_empty() => (true, "暂无租户数据"),
+                None => (true, i18n.t("table.loading")),
+                Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                Some(Ok(_)) if filtered().is_empty() => (true, i18n.t("tenants.empty")),
                 _ => (false, ""),
             };
             rsx! {
@@ -107,10 +109,10 @@ pub fn Tenants() -> Element {
                     col_count: 4,
                     thead {
                         tr {
-                            TableHead { "租户 ID" }
-                            TableHead { "名称" }
-                            TableHead { "状态" }
-                            TableHead { "创建时间" }
+                            TableHead { {i18n.t("tenants.tenant_id")} }
+                            TableHead { {i18n.t("table.name")} }
+                            TableHead { {i18n.t("table.status")} }
+                            TableHead { {i18n.t("table.created_at")} }
                         }
                     }
                     tbody {
@@ -120,9 +122,9 @@ pub fn Tenants() -> Element {
                                 td { "{t.name}" }
                                 td {
                                     if t.is_active {
-                                        Badge { variant: BadgeVariant::Success, "活跃" }
+                                        Badge { variant: BadgeVariant::Success, {i18n.t("tenants.active")} }
                                     } else {
-                                        Badge { variant: BadgeVariant::Neutral, "已禁用" }
+                                        Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
                                     }
                                 }
                                 td { { format_time(&t.created_at) } }
@@ -135,7 +137,7 @@ pub fn Tenants() -> Element {
 
         div { class: "pagination",
             span { class: "pagination-info",
-                "共 { filtered().len() } 条"
+                "{i18n.t(\"common.total_items\")} {filtered().len()} {i18n.t(\"pricing.items_suffix\")}"
             }
             Pagination {
                 current: page(),

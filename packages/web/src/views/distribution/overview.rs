@@ -1,11 +1,13 @@
 use dioxus::prelude::*;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, distribution_service};
 use crate::stores::auth_store::AuthStore;
 use crate::utils::time::format_time;
 
 #[component]
 pub fn DistributionOverview() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
 
     // 收益数据
@@ -34,8 +36,8 @@ pub fn DistributionOverview() -> Element {
 
     let total_earnings = match earnings() {
         Some(Ok(ref e)) => format!("¥{}", e.total_earnings),
-        Some(Err(_)) => "加载失败".to_string(),
-        None => "加载中...".to_string(),
+        Some(Err(_)) => i18n.t("common.load_failed").to_string(),
+        None => i18n.t("table.loading").to_string(),
     };
     let available_earnings = match earnings() {
         Some(Ok(ref e)) => format!("¥{}", e.available_earnings),
@@ -51,8 +53,8 @@ pub fn DistributionOverview() -> Element {
     };
     let code_text = match referral_code() {
         Some(Ok(ref r)) => r.referral_code.clone(),
-        Some(Err(_)) => "获取失败".to_string(),
-        None => "加载中...".to_string(),
+        Some(Err(_)) => i18n.t("distribution.fetch_failed").to_string(),
+        None => i18n.t("table.loading").to_string(),
     };
     let invite_link = match referral_code() {
         Some(Ok(ref r)) => r.referral_link.clone(),
@@ -64,8 +66,8 @@ pub fn DistributionOverview() -> Element {
             class: "page-container",
             div {
                 class: "page-header",
-                h1 { class: "page-title", "分销管理" }
-                p { class: "page-subtitle", "查看您的分销收益和推荐记录" }
+                h1 { class: "page-title", {i18n.t("distribution.title")} }
+                p { class: "page-subtitle", {i18n.t("distribution.subtitle")} }
             }
 
             // 收益统计
@@ -73,25 +75,25 @@ pub fn DistributionOverview() -> Element {
                 class: "stats-grid",
                 div { class: "stat-card card",
                     div { class: "card-body",
-                        p { class: "stat-label", "总收益" }
+                        p { class: "stat-label", {i18n.t("distribution.total_earnings")} }
                         p { class: "stat-value", "{total_earnings}" }
                     }
                 }
                 div { class: "stat-card card",
                     div { class: "card-body",
-                        p { class: "stat-label", "可用余额" }
+                        p { class: "stat-label", {i18n.t("distribution.available_balance")} }
                         p { class: "stat-value", "{available_earnings}" }
                     }
                 }
                 div { class: "stat-card card",
                     div { class: "card-body",
-                        p { class: "stat-label", "待结算" }
+                        p { class: "stat-label", {i18n.t("distribution.pending")} }
                         p { class: "stat-value", "{pending_earnings}" }
                     }
                 }
                 div { class: "stat-card card",
                     div { class: "card-body",
-                        p { class: "stat-label", "推荐人数" }
+                        p { class: "stat-label", {i18n.t("distribution.referral_count")} }
                         p { class: "stat-value", "{referral_count}" }
                     }
                 }
@@ -100,19 +102,19 @@ pub fn DistributionOverview() -> Element {
             // 推荐码
             div { class: "card",
                 div { class: "card-header",
-                    h3 { class: "card-title", "我的推荐码" }
+                    h3 { class: "card-title", {i18n.t("distribution.my_referral_code")} }
                 }
                 div { class: "card-body",
                     div { class: "info-grid",
                         div { class: "info-item",
-                            span { class: "info-label", "推荐码" }
+                            span { class: "info-label", {i18n.t("distribution.referral_code")} }
                             span { class: "info-value",
                                 code { "{code_text}" }
                             }
                         }
                         if !invite_link.is_empty() {
                             div { class: "info-item",
-                                span { class: "info-label", "邀请链接" }
+                                span { class: "info-label", {i18n.t("distribution.invite_link")} }
                                 span { class: "info-value",
                                     a { href: "{invite_link}", target: "_blank", "{invite_link}" }
                                 }
@@ -125,16 +127,16 @@ pub fn DistributionOverview() -> Element {
             // 推荐列表
             div { class: "card",
                 div { class: "card-header",
-                    h3 { class: "card-title", "推荐用户" }
+                    h3 { class: "card-title", {i18n.t("distribution.referral_users")} }
                 }
                 div { class: "table-container",
                     table { class: "table",
                         thead {
                             tr {
-                                th { "用户" }
-                                th { "加入时间" }
-                                th { "消费总额" }
-                                th { "我的收益" }
+                                th { {i18n.t("distribution.user")} }
+                                th { {i18n.t("distribution.joined_at")} }
+                                th { {i18n.t("distribution.total_spent")} }
+                                th { {i18n.t("distribution.my_earnings")} }
                             }
                         }
                         tbody {
@@ -157,10 +159,10 @@ pub fn DistributionOverview() -> Element {
                                     }
                                 },
                                 Some(Err(_)) => rsx! {
-                                    tr { td { colspan: "4", class: "table-empty", "加载失败" } }
+                                    tr { td { colspan: "4", class: "table-empty", {i18n.t("common.load_failed")} } }
                                 },
                                 _ => rsx! {
-                                    tr { td { colspan: "4", class: "table-empty", "暂无推荐记录" } }
+                                    tr { td { colspan: "4", class: "table-empty", {i18n.t("distribution.no_referrals")} } }
                                 },
                             }
                         }

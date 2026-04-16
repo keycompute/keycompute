@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use ui::{Badge, BadgeVariant, Pagination, Table, TableHead};
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::{api_client::with_auto_refresh, billing_service, payment_service};
 use crate::stores::auth_store::AuthStore;
@@ -13,6 +14,7 @@ const PAGE_SIZE: usize = 20;
 /// 包含：账户余额、充値记录、账单统计、账单明细
 #[component]
 pub fn PaymentsOverview() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
 
     let nav = use_navigator();
@@ -53,12 +55,12 @@ pub fn PaymentsOverview() -> Element {
             class: "page-container",
             div {
                 class: "page-header",
-                h1 { class: "page-title", "支付与账单" }
-                p { class: "page-subtitle", "查看账户余额、充値记录与账单明细" }
+                h1 { class: "page-title", {i18n.t("payments.title")} }
+                p { class: "page-subtitle", {i18n.t("payments.subtitle")} }
                 button {
                     class: "btn btn-primary",
                     onclick: move |_| { nav.push(Route::Recharge {}); },
-                    "立即充値"
+                    {i18n.t("payments.recharge_now")}
                 }
             }
 
@@ -66,10 +68,10 @@ pub fn PaymentsOverview() -> Element {
             div { class: "stats-grid",
                 div {
                     class: "stat-card",
-                    p { class: "stat-title", "账户余额" }
+                    p { class: "stat-title", {i18n.t("payments.account_balance")} }
                     match balance() {
-                        None => rsx! { p { class: "stat-value", "加载中..." } },
-                        Some(Err(e)) => rsx! { p { class: "stat-value text-error", "错误: {e}" } },
+                        None => rsx! { p { class: "stat-value", {i18n.t("table.loading")} } },
+                        Some(Err(e)) => rsx! { p { class: "stat-value text-error", "{i18n.t(\"common.error\")}: {e}" } },
                         Some(Ok(b)) => rsx! {
                             p { class: "stat-value", "¥ {b.available_balance}" }
                         },
@@ -77,7 +79,7 @@ pub fn PaymentsOverview() -> Element {
                 }
                 div {
                     class: "stat-card",
-                    p { class: "stat-title", "冻结金额" }
+                    p { class: "stat-title", {i18n.t("payments.frozen_amount")} }
                     match balance() {
                         Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {b.frozen_balance}" } },
                         _ => rsx! { p { class: "stat-value", "—" } },
@@ -85,7 +87,7 @@ pub fn PaymentsOverview() -> Element {
                 }
                 div {
                     class: "stat-card",
-                    p { class: "stat-title", "总充值" }
+                    p { class: "stat-title", {i18n.t("payments.total_recharge")} }
                     match balance() {
                         Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {b.total_recharged}" } },
                         _ => rsx! { p { class: "stat-value", "—" } },
@@ -93,7 +95,7 @@ pub fn PaymentsOverview() -> Element {
                 }
                 div {
                     class: "stat-card",
-                    p { class: "stat-title", "总消耗" }
+                    p { class: "stat-title", {i18n.t("payments.total_consumed")} }
                     match balance() {
                         Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {b.total_consumed}" } },
                         _ => rsx! { p { class: "stat-value", "—" } },
@@ -102,19 +104,19 @@ pub fn PaymentsOverview() -> Element {
                 match usage_stats() {
                     Some(Ok(s)) => rsx! {
                         div { class: "stat-card",
-                            p { class: "stat-title", "用量请求数" }
+                            p { class: "stat-title", {i18n.t("payments.usage_requests")} }
                             p { class: "stat-value", "{s.total_requests}" }
                         }
                         div { class: "stat-card",
-                            p { class: "stat-title", "输入Tokens" }
+                            p { class: "stat-title", {i18n.t("payments.input_tokens")} }
                             p { class: "stat-value", "{s.input_tokens}" }
                         }
                         div { class: "stat-card",
-                            p { class: "stat-title", "输出Tokens" }
+                            p { class: "stat-title", {i18n.t("payments.output_tokens")} }
                             p { class: "stat-value", "{s.output_tokens}" }
                         }
                         div { class: "stat-card",
-                            p { class: "stat-title", "总费用" }
+                            p { class: "stat-title", {i18n.t("payments.total_cost")} }
                             p { class: "stat-value", "¥{s.total_cost:.2}" }
                         }
                     },
@@ -124,24 +126,24 @@ pub fn PaymentsOverview() -> Element {
 
             // ─── 充値记录 ───
             div { class: "section",
-                h2 { class: "section-title", "充値记录" }
+                h2 { class: "section-title", {i18n.t("payments.recharge_records")} }
                 match orders() {
-                    None => rsx! { div { class: "loading-state", "加载中..." } },
-                    Some(Err(e)) => rsx! { div { class: "alert alert-error", "加载失败：{e}" } },
+                    None => rsx! { div { class: "loading-state", {i18n.t("table.loading")} } },
+                    Some(Err(e)) => rsx! { div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}：{e}" } },
                     Some(Ok(list)) => {
                         if list.is_empty() {
-                            rsx! { div { class: "empty-state", p { "暂无充値记录" } } }
+                            rsx! { div { class: "empty-state", p { {i18n.t("payments.no_recharge_records")} } } }
                         } else {
                             rsx! {
                                 Table {
                                     col_count: 4,
                                     thead {
                                         tr {
-                                            TableHead { "订单号" }
-                                            TableHead { "金额" }
-                                            TableHead { "主题" }
-                                            TableHead { "状态" }
-                                            TableHead { "时间" }
+                                            TableHead { {i18n.t("payments.order_no")} }
+                                            TableHead { {i18n.t("common.amount")} }
+                                            TableHead { {i18n.t("payments.subject")} }
+                                            TableHead { {i18n.t("table.status")} }
+                                            TableHead { {i18n.t("common.time")} }
                                         }
                                     }
                                     tbody {
@@ -170,25 +172,25 @@ pub fn PaymentsOverview() -> Element {
 
             // ─── 用量明细 ───
             div { class: "section",
-                h2 { class: "section-title", "用量明细" }
+                h2 { class: "section-title", {i18n.t("payments.usage_details")} }
                 match usage_records() {
-                    None => rsx! { p { class: "loading-text", "加载中..." } },
-                    Some(Err(e)) => rsx! { p { class: "error-text", "加载失败：{e}" } },
+                    None => rsx! { p { class: "loading-text", {i18n.t("table.loading")} } },
+                    Some(Err(e)) => rsx! { p { class: "error-text", "{i18n.t(\"common.load_failed\")}：{e}" } },
                     Some(Ok(recs)) if recs.is_empty() => rsx! {
-                        p { class: "empty-text", "暂无用量记录" }
+                        p { class: "empty-text", {i18n.t("payments.no_usage_records")} }
                     },
                     Some(Ok(recs)) => rsx! {
                         div { class: "table-container",
                             table { class: "data-table",
                                 thead {
                                     tr {
-                                        th { "时间" }
-                                        th { "模型" }
-                                        th { "输入Tokens" }
-                                        th { "输出Tokens" }
-                                        th { "总Tokens" }
-                                        th { "费用" }
-                                        th { "状态" }
+                                        th { {i18n.t("common.time")} }
+                                        th { {i18n.t("usage.model")} }
+                                        th { {i18n.t("payments.input_tokens")} }
+                                        th { {i18n.t("payments.output_tokens")} }
+                                        th { {i18n.t("payments.total_tokens")} }
+                                        th { {i18n.t("common.cost")} }
+                                        th { {i18n.t("table.status")} }
                                     }
                                 }
                                 tbody {
@@ -221,7 +223,7 @@ pub fn PaymentsOverview() -> Element {
                             let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
                             rsx! {
                                 div { class: "pagination",
-                                    span { class: "pagination-info", "共 {total} 条" }
+                                    span { class: "pagination-info", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
                                     Pagination {
                                         current: page(),
                                         total_pages,

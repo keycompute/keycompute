@@ -1,8 +1,12 @@
 use dioxus::prelude::*;
-use ui::{Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Pagination, Table, TableHead};
+use ui::{
+    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Pagination, Table, TableHead,
+    icons::IconPlus,
+};
 
 const PAGE_SIZE: usize = 20;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, api_key_service, model_service};
 use crate::stores::auth_store::AuthStore;
 use crate::utils::time::format_time;
@@ -24,6 +28,7 @@ fn copy_to_clipboard(text: &str) {
 
 #[component]
 pub fn ApiKeyList() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut show_create = use_signal(|| false);
     let mut new_key_name = use_signal(String::new);
@@ -35,6 +40,7 @@ pub fn ApiKeyList() -> Element {
     let mut include_revoked = use_signal(|| false);
     // 复制状态
     let mut copied = use_signal(|| false);
+    let create_failed = i18n.t("api_keys.create_failed");
 
     // 获取模型列表（用于显示用法示例）
     let models = use_resource(move || async move { model_service::list_models().await.ok() });
@@ -68,7 +74,7 @@ pub fn ApiKeyList() -> Element {
                     keys.restart();
                 }
                 Err(e) => {
-                    create_error.set(Some(format!("创建失败：{e}")));
+                    create_error.set(Some(format!("{create_failed}：{e}")));
                     creating.set(false);
                 }
             }
@@ -86,22 +92,28 @@ pub fn ApiKeyList() -> Element {
 
     rsx! {
         div {
-            class: "page-container",
+            class: "page-container kc-api-page",
             div {
-                class: "page-header",
-                h1 { class: "page-title", "API Key 管理" }
-                Button {
-                    variant: ButtonVariant::Primary,
-                    onclick: move |_| {
-                        show_create.set(true);
-                        new_key_value.set(None);
-                    },
-                    "+ 创建 API Key"
+                class: "page-header kc-api-header",
+                div { class: "kc-api-heading",
+                    h1 { class: "page-title", {i18n.t("page.api_keys")} }
+                    p { class: "page-subtitle", {i18n.t("api_keys.subtitle")} }
+                }
+                div { class: "kc-api-actions",
+                    Button {
+                        variant: ButtonVariant::Primary,
+                        onclick: move |_| {
+                            show_create.set(true);
+                            new_key_value.set(None);
+                        },
+                        IconPlus { size: 16 }
+                        {i18n.t("api_keys.create")}
+                    }
                 }
             }
 
             // 筛选工具栏
-            div { class: "toolbar",
+            div { class: "toolbar kc-api-toolbar",
                 div { class: "toolbar-left",
                     div { class: "filter-tabs",
                         button {
@@ -112,7 +124,7 @@ pub fn ApiKeyList() -> Element {
                                 page.set(1);
                                 keys.restart();
                             },
-                            "活跃"
+                            {i18n.t("api_keys.active")}
                         }
                         button {
                             class: if include_revoked() { "filter-tab active" } else { "filter-tab" },
@@ -122,7 +134,7 @@ pub fn ApiKeyList() -> Element {
                                 page.set(1);
                                 keys.restart();
                             },
-                            "全部（含已撤销）"
+                            {i18n.t("api_keys.all_with_revoked")}
                         }
                     }
                 }
@@ -154,21 +166,21 @@ API_MODEL="{}""#,
                     );
                     let example_text_for_click = example_text.clone();
 
+                    let copied_label = i18n.t("api_keys.copied");
+                    let copy_hint = i18n.t("api_keys.copy_hint");
                     rsx! {
                         div {
-                            class: "alert alert-success",
-                            p { strong { "API Key 已创建，请妥善保存（仅显示一次）：" } }
+                            class: "alert alert-success kc-api-secret-alert",
+                            div { class: "kc-api-secret-topline",
+                                strong { {i18n.t("api_keys.created_title")} }
+                                span { {i18n.t("api_keys.created_once")} }
+                            }
                             code { class: "key-display", "{key}" }
-                            p { style: "margin-top: 12px; font-weight: bold;", "使用示例：" }
-                            div {
-                                style: "position: relative; margin-top: 8px;",
+                            p { class: "kc-api-secret-label", {i18n.t("api_keys.example")} }
+                            div { class: "kc-api-copy-block",
                                 pre {
-                                    style: if copied() {
-                                        "background: #e8f5e9; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 13px; cursor: pointer; border: 2px solid #4caf50;"
-                                    } else {
-                                        "background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 13px; cursor: pointer; border: 2px solid transparent;"
-                                    },
-                                    title: if copied() { "已复制!" } else { "点击复制" },
+                                    class: if copied() { "kc-api-example copied" } else { "kc-api-example" },
+                                    title: if copied() { copied_label } else { copy_hint },
                                     onclick: {
                                         let text = example_text_for_click.clone();
                                         move |_| {
@@ -184,19 +196,15 @@ API_MODEL="{}""#,
                                     },
                                     "{example_text}"
                                 }
-                                div {
-                                    style: "position: absolute; top: 8px; right: 8px; font-size: 12px; color: #666; pointer-events: none;",
+                                div { class: "kc-api-copy-hint",
                                     if copied() {
-                                        "✓ 已复制"
+                                        {copied_label}
                                     } else {
-                                        "点击复制"
+                                        {copy_hint}
                                     }
                                 }
                             }
-                            p {
-                                style: "margin-top: 8px; color: #666; font-size: 13px;",
-                                "将以上配置用于 OpenAI 兼容的 SDK 或工具中。"
-                            }
+                            p { class: "kc-api-secret-note", {i18n.t("api_keys.example_note")} }
                             Button {
                                 variant: ButtonVariant::Ghost,
                                 size: ButtonSize::Small,
@@ -204,7 +212,7 @@ API_MODEL="{}""#,
                                     new_key_value.set(None);
                                     copied.set(false);
                                 },
-                                "我已记录，关闭"
+                                {i18n.t("api_keys.close_saved")}
                             }
                         }
                     }
@@ -217,7 +225,7 @@ API_MODEL="{}""#,
                     class: "modal-overlay",
                     div {
                         class: "modal",
-                        h2 { class: "modal-title", "创建 API Key" }
+                        h2 { class: "modal-title", {i18n.t("api_keys.create_title")} }
                         if let Some(err) = create_error() {
                             div { class: "alert alert-error", "{err}" }
                         }
@@ -225,11 +233,11 @@ API_MODEL="{}""#,
                             onsubmit: on_create,
                             div {
                                 class: "form-group",
-                                label { class: "form-label", "名称" }
+                                label { class: "form-label", {i18n.t("api_keys.name")} }
                                 input {
                                     class: "form-input",
                                     r#type: "text",
-                                    placeholder: "为此 Key 取个名字",
+                                    placeholder: "{i18n.t(\"api_keys.name_placeholder\")}",
                                     value: "{new_key_name}",
                                     oninput: move |e| new_key_name.set(e.value()),
                                 }
@@ -240,13 +248,13 @@ API_MODEL="{}""#,
                                     variant: ButtonVariant::Ghost,
                                     r#type: "button".to_string(),
                                     onclick: move |_| show_create.set(false),
-                                    "取消"
+                                    {i18n.t("form.cancel")}
                                 }
                                 Button {
                                     variant: ButtonVariant::Primary,
                                     r#type: "submit".to_string(),
                                     loading: creating(),
-                                    if creating() { "创建中..." } else { "创建" }
+                                    if creating() { {i18n.t("api_keys.creating")} } else { {i18n.t("form.create")} }
                                 }
                             }
                         }
@@ -256,10 +264,10 @@ API_MODEL="{}""#,
 
             match keys() {
                 None => rsx! {
-                    div { class: "loading-state", "加载中..." }
+                    div { class: "loading-state", {i18n.t("table.loading")} }
                 },
                 Some(Err(e)) => rsx! {
-                    div { class: "alert alert-error", "加载失败：{e}" }
+                    div { class: "alert alert-error", "{i18n.t(\"api_keys.loading_failed\")}：{e}" }
                 },
                 Some(Ok(list)) => {
                     let total = list.len();
@@ -268,60 +276,86 @@ API_MODEL="{}""#,
                     let paged: Vec<_> = list.iter().skip(start).take(PAGE_SIZE).collect();
                     if paged.is_empty() && total == 0 {
                         rsx! {
-                            Table {
-                                col_count: 5,
-                                empty: true,
-                                empty_text: "暂无可用的 API Key，点击上方按钮创建".to_string(),
-                                thead { tr { TableHead { "" } } }
+                            div { class: "kc-api-table-panel",
+                                div { class: "kc-api-table-meta",
+                                    div {
+                                        span { {i18n.t("api_keys.registry")} }
+                                        strong { "0" }
+                                    }
+                                    p { {i18n.t("api_keys.empty_meta")} }
+                                }
+                                Table {
+                                    class: "kc-api-table".to_string(),
+                                    col_count: 5,
+                                    empty: true,
+                                    empty_text: i18n.t("api_keys.empty").to_string(),
+                                    thead { tr { TableHead { "" } } }
+                                }
                             }
                         }
                     } else {
                         rsx! {
-                            Table {
-                                col_count: 5,
-                                thead {
-                                    tr {
-                                        TableHead { "名称" }
-                                        TableHead { "前缀" }
-                                        TableHead { "状态" }
-                                        TableHead { "创建时间" }
-                                        TableHead { "操作" }
+                            div { class: "kc-api-table-panel",
+                                div { class: "kc-api-table-meta",
+                                    div {
+                                        span { {i18n.t("api_keys.registry")} }
+                                        strong { "{total}" }
+                                    }
+                                    p {
+                                        if include_revoked() {
+                                            {i18n.t("api_keys.all_meta")}
+                                        } else {
+                                            {i18n.t("api_keys.active_meta")}
+                                        }
                                     }
                                 }
-                                tbody {
-                                    for key in paged.iter() {
+                                Table {
+                                    class: "kc-api-table".to_string(),
+                                    col_count: 5,
+                                    thead {
                                         tr {
-                                            key: "{key.id}",
-                                            td { "{key.name}" }
-                                            td { code { "{key.key_preview}" } }
-                                            td {
-                                                Badge {
-                                                    variant: if key.revoked() { BadgeVariant::Error } else { BadgeVariant::Success },
-                                                    if key.revoked() { "已撤销" } else { "活跃" }
+                                            TableHead { {i18n.t("table.name")} }
+                                            TableHead { {i18n.t("api_keys.prefix")} }
+                                            TableHead { {i18n.t("table.status")} }
+                                            TableHead { {i18n.t("table.created_at")} }
+                                            TableHead { {i18n.t("table.actions")} }
+                                        }
+                                    }
+                                    tbody {
+                                        for key in paged.iter() {
+                                            tr {
+                                                key: "{key.id}",
+                                                td { class: "kc-api-key-name", "{key.name}" }
+                                                td { code { class: "kc-api-key-preview", "{key.key_preview}" } }
+                                                td {
+                                                    Badge {
+                                                        variant: if key.revoked() { BadgeVariant::Error } else { BadgeVariant::Success },
+                                                        if key.revoked() { {i18n.t("api_keys.revoked")} } else { {i18n.t("api_keys.active")} }
+                                                    }
                                                 }
-                                            }
-                                            td { { format_time(&key.created_at) } }
-                                            td {
-                                                Button {
-                                                    variant: ButtonVariant::Danger,
-                                                    size: ButtonSize::Small,
-                                                    onclick: {
-                                                        let id = key.id.to_string();
-                                                        move |_| on_delete(id.clone())
-                                                    },
-                                                    "删除"
+                                                td { { format_time(&key.created_at) } }
+                                                td {
+                                                    Button {
+                                                        variant: ButtonVariant::Danger,
+                                                        size: ButtonSize::Small,
+                                                        onclick: {
+                                                            let id = key.id.to_string();
+                                                            move |_| on_delete(id.clone())
+                                                        },
+                                                        {i18n.t("form.delete")}
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            div { class: "pagination",
-                                span { class: "pagination-info", "共 {total} 条" }
-                                Pagination {
-                                    current: page(),
-                                    total_pages,
-                                    on_page_change: move |p| page.set(p),
+                                div { class: "pagination kc-api-pagination",
+                                    span { class: "pagination-info", "{i18n.t(\"dashboard.total\")} {total}" }
+                                    Pagination {
+                                        current: page(),
+                                        total_pages,
+                                        on_page_change: move |p| page.set(p),
+                                    }
                                 }
                             }
                         }

@@ -1,16 +1,18 @@
 use dioxus::prelude::*;
 use ui::{Button, ButtonVariant};
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, settings_service};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
 
 /// 系统设置页面
 ///
-/// - 普通用户：无此页面入口（个人偏好通过导航栏按鈕切换，存 localStorage）
+/// - 普通用户：无此页面入口（个人偏好通过导航栏按钮切换，存 localStorage）
 /// - Admin：全局系统参数配置（调用 SettingsApi，需 Admin token）
 #[component]
 pub fn Settings() -> Element {
+    let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
     let is_admin = user_store
@@ -37,7 +39,6 @@ pub fn Settings() -> Element {
         }
     };
 
-    // 使用与后端一致的设置 key 名称
     let platform_name = get_val("site_name");
     let register_mode = get_val("registration_mode");
     let currency = get_val("default_currency");
@@ -46,109 +47,152 @@ pub fn Settings() -> Element {
     let email_verify = get_val("email_verification_required");
 
     rsx! {
-        div { class: "page-header",
-            h1 { class: "page-title", "系统设置" }
-            p { class: "page-description",
-                if is_admin { "配置平台全局系统参数" }
-                else { "查看系统运行配置（仅供参考）" }
-            }
-        }
-
-        if !is_admin {
-            div { class: "alert alert-info",
-                span { class: "alert-icon", "ℹ" }
-                div { class: "alert-content",
-                    p { class: "alert-body",
-                        "系统设置仅 Admin 可修改。个人语言/主题偏好请通过顶部导航栏右侧按鈕切换。"
-                    }
-                }
-            }
-        }
-
-        match settings() {
-            None => rsx! { p { class: "text-secondary", "加载中..." } },
-            Some(Err(_)) => rsx! { p { class: "text-secondary", "设置加载失败" } },
-            Some(Ok(_)) => rsx! {
-                if save_ok() {
-                    div { class: "alert alert-success",
-                        span { "✔ 设置已保存" }
-                    }
-                }
-                if !save_error().is_empty() {
-                    div { class: "alert alert-error",
-                        span { "{save_error}" }
-                    }
-                }
-
-                // 基础系统配置
-                div { class: "card",
-                    div { class: "card-header",
-                        h3 { class: "card-title", "基础配置" }
-                    }
-                    div { class: "card-body",
-                        div { class: "settings-grid",
-                            // 平台名称 - 任意字符串
-                            SettingItemText { label: "平台名称", setting_key: "site_name", value: platform_name.clone(), editable: is_admin, auth_store, save_ok, save_error }
-                            // 注册模式 - 可选项
-                            SettingItemSelect {
-                                label: "注册模式",
-                                setting_key: "registration_mode",
-                                value: register_mode.clone(),
-                                editable: is_admin,
-                                auth_store,
-                                save_ok,
-                                save_error,
-                                options: vec![
-                                    ("open".to_string(), "开放注册".to_string()),
-                                    ("invite".to_string(), "邀请注册".to_string()),
-                                    ("close".to_string(), "关闭注册".to_string()),
-                                ]
-                            }
-                            // 默认货币 - 可选项
-                            SettingItemSelect {
-                                label: "默认货币",
-                                setting_key: "default_currency",
-                                value: currency.clone(),
-                                editable: is_admin,
-                                auth_store,
-                                save_ok,
-                                save_error,
-                                options: vec![
-                                    ("CNY".to_string(), "人民币 (CNY)".to_string()),
-                                    ("USD".to_string(), "美元 (USD)".to_string()),
-                                ]
-                            }
-                            // 最低充值金额 - 数字
-                            SettingItemNumber { label: "最低充值金额", setting_key: "min_recharge_amount", value: min_recharge.clone(), editable: is_admin, auth_store, save_ok, save_error }
+        div { class: "page-container settings-console-page",
+            div { class: "page-header",
+                div {
+                    h1 { class: "page-title", {i18n.t("page.settings")} }
+                    p { class: "page-description",
+                        if is_admin {
+                            {i18n.t("settings.admin_desc")}
+                        } else {
+                            {i18n.t("settings.user_desc")}
                         }
                     }
                 }
+            }
 
-                // 安全配置
-                div { class: "card",
-                    div { class: "card-header",
-                        h3 { class: "card-title", "安全配置" }
-                    }
-                    div { class: "card-body",
-                        div { class: "settings-grid",
-                            // JWT Token 有效期 - 数字
-                            SettingItemNumber { label: "JWT Token 有效期（小时）", setting_key: "jwt_expire_hours", value: jwt_expire.clone(), editable: is_admin, auth_store, save_ok, save_error }
-                            // 邮箱验证 - 布尔值
-                            SettingItemToggle { label: "邮箱验证", setting_key: "email_verification_required", value: email_verify.clone(), editable: is_admin, auth_store, save_ok, save_error }
+            if !is_admin {
+                div { class: "alert alert-info",
+                    span { class: "alert-icon", "ℹ" }
+                    div { class: "alert-content",
+                        p { class: "alert-body",
+                            {i18n.t("settings.admin_only_hint")}
                         }
                     }
                 }
-            },
+            }
+
+            match settings() {
+                None => rsx! { p { class: "text-secondary", {i18n.t("table.loading")} } },
+                Some(Err(_)) => rsx! { p { class: "text-secondary", {i18n.t("settings.load_failed")} } },
+                Some(Ok(_)) => rsx! {
+                    if save_ok() {
+                        div { class: "alert alert-success",
+                            span { "✔ {i18n.t(\"settings.saved\")}" }
+                        }
+                    }
+                    if !save_error().is_empty() {
+                        div { class: "alert alert-error",
+                            span { "{save_error}" }
+                        }
+                    }
+
+                    div { class: "settings-console-stack",
+                        div { class: "settings-section-card",
+                            div { class: "settings-section-head",
+                                div {
+                                    h3 { class: "settings-section-title", {i18n.t("settings.basic_title")} }
+                                    p { class: "settings-section-description",
+                                        {i18n.t("settings.basic_desc")}
+                                    }
+                                }
+                            }
+                            div { class: "settings-section-body",
+                                SettingItemText {
+                                    label: i18n.t("settings.site_name_label").to_string(),
+                                    description: i18n.t("settings.site_name_desc").to_string(),
+                                    setting_key: "site_name",
+                                    value: platform_name.clone(),
+                                    editable: is_admin,
+                                    auth_store,
+                                    save_ok,
+                                    save_error
+                                }
+                                SettingItemSelect {
+                                    label: i18n.t("settings.registration_mode_label").to_string(),
+                                    description: i18n.t("settings.registration_mode_desc").to_string(),
+                                    setting_key: "registration_mode",
+                                    value: register_mode.clone(),
+                                    editable: is_admin,
+                                    auth_store,
+                                    save_ok,
+                                    save_error,
+                                    options: vec![
+                                        ("open".to_string(), i18n.t("settings.registration_open").to_string()),
+                                        ("invite".to_string(), i18n.t("settings.registration_invite").to_string()),
+                                        ("close".to_string(), i18n.t("settings.registration_close").to_string()),
+                                    ]
+                                }
+                                SettingItemSelect {
+                                    label: i18n.t("settings.default_currency_label").to_string(),
+                                    description: i18n.t("settings.default_currency_desc").to_string(),
+                                    setting_key: "default_currency",
+                                    value: currency.clone(),
+                                    editable: is_admin,
+                                    auth_store,
+                                    save_ok,
+                                    save_error,
+                                    options: vec![
+                                        ("CNY".to_string(), i18n.t("pricing.currency_cny").to_string()),
+                                        ("USD".to_string(), i18n.t("pricing.currency_usd").to_string()),
+                                    ]
+                                }
+                                SettingItemNumber {
+                                    label: i18n.t("settings.min_recharge_label").to_string(),
+                                    description: i18n.t("settings.min_recharge_desc").to_string(),
+                                    setting_key: "min_recharge_amount",
+                                    value: min_recharge.clone(),
+                                    editable: is_admin,
+                                    auth_store,
+                                    save_ok,
+                                    save_error
+                                }
+                            }
+                        }
+
+                        div { class: "settings-section-card",
+                            div { class: "settings-section-head",
+                                div {
+                                    h3 { class: "settings-section-title", {i18n.t("settings.security_title")} }
+                                    p { class: "settings-section-description",
+                                        {i18n.t("settings.security_desc")}
+                                    }
+                                }
+                            }
+                            div { class: "settings-section-body",
+                                SettingItemNumber {
+                                    label: i18n.t("settings.jwt_expire_label").to_string(),
+                                    description: i18n.t("settings.jwt_expire_desc").to_string(),
+                                    setting_key: "jwt_expire_hours",
+                                    value: jwt_expire.clone(),
+                                    editable: is_admin,
+                                    auth_store,
+                                    save_ok,
+                                    save_error
+                                }
+                                SettingItemToggle {
+                                    label: i18n.t("settings.email_verify_label").to_string(),
+                                    description: i18n.t("settings.email_verify_desc").to_string(),
+                                    setting_key: "email_verification_required",
+                                    value: email_verify.clone(),
+                                    editable: is_admin,
+                                    auth_store,
+                                    save_ok,
+                                    save_error
+                                }
+                            }
+                        }
+                    }
+                },
+            }
         }
     }
 }
 
-// ── 内部组件
-
-/// 文本输入设置项
 #[component]
 fn SettingItemText(
     label: String,
+    description: String,
     setting_key: String,
     value: String,
     editable: bool,
@@ -156,6 +200,7 @@ fn SettingItemText(
     mut save_ok: Signal<bool>,
     mut save_error: Signal<String>,
 ) -> Element {
+    let i18n = use_i18n();
     let mut edit_val = use_signal(|| value.clone());
     let mut saving = use_signal(|| false);
 
@@ -180,7 +225,8 @@ fn SettingItemText(
                     *saving.write() = false;
                 }
                 Err(e) => {
-                    *save_error.write() = format!("保存 {} 失败：{}", k, e);
+                    *save_error.write() =
+                        format!("{} {}：{}", i18n.t("settings.save_failed"), k, e);
                     *saving.write() = false;
                 }
             }
@@ -188,36 +234,41 @@ fn SettingItemText(
     };
 
     rsx! {
-        div { class: "setting-item",
-            span { class: "setting-label", "{label}" }
-            if editable {
-                div { class: "setting-input-row",
-                    input {
-                        class: "input-field",
-                        value: "{edit_val}",
-                        oninput: move |e| *edit_val.write() = e.value(),
-                    }
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        size: ui::ButtonSize::Small,
-                        loading: saving(),
-                        onclick: on_save,
-                        if saving() { "保存中..." } else { "保存" }
-                    }
+        div { class: "setting-row",
+            div { class: "setting-row-main",
+                div { class: "setting-row-meta",
+                    span { class: "setting-label", "{label}" }
+                    p { class: "setting-description", "{description}" }
                 }
-            } else {
-                span { class: "setting-value",
-                    if value.is_empty() { "—" } else { "{value}" }
+                if editable {
+                    div { class: "setting-input-row",
+                        input {
+                            class: "input-field setting-control",
+                            value: "{edit_val}",
+                            oninput: move |e| *edit_val.write() = e.value(),
+                        }
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            size: ui::ButtonSize::Small,
+                            loading: saving(),
+                            onclick: on_save,
+                            if saving() { {i18n.t("form.saving")} } else { {i18n.t("form.save")} }
+                        }
+                    }
+                } else {
+                    span { class: "setting-value setting-readonly",
+                        if value.is_empty() { "—" } else { "{value}" }
+                    }
                 }
             }
         }
     }
 }
 
-/// 数字输入设置项
 #[component]
 fn SettingItemNumber(
     label: String,
+    description: String,
     setting_key: String,
     value: String,
     editable: bool,
@@ -225,6 +276,7 @@ fn SettingItemNumber(
     mut save_ok: Signal<bool>,
     mut save_error: Signal<String>,
 ) -> Element {
+    let i18n = use_i18n();
     let mut edit_val = use_signal(|| value.clone());
     let mut saving = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
@@ -236,16 +288,15 @@ fn SettingItemNumber(
 
     let key = setting_key.clone();
     let on_save = move |_| {
-        // 验证输入值
         let val_str = edit_val();
         if let Ok(num) = val_str.parse::<f64>() {
             if num < 0.0 {
-                *error_msg.write() = "值不能为负数".to_string();
+                *error_msg.write() = i18n.t("settings.non_negative").to_string();
                 return;
             }
             *error_msg.write() = String::new();
         } else {
-            *error_msg.write() = "请输入有效的数字".to_string();
+            *error_msg.write() = i18n.t("settings.invalid_number").to_string();
             return;
         }
 
@@ -262,7 +313,8 @@ fn SettingItemNumber(
                     *saving.write() = false;
                 }
                 Err(e) => {
-                    *save_error.write() = format!("保存 {} 失败：{}", k, e);
+                    *save_error.write() =
+                        format!("{} {}：{}", i18n.t("settings.save_failed"), k, e);
                     *saving.write() = false;
                 }
             }
@@ -270,46 +322,51 @@ fn SettingItemNumber(
     };
 
     rsx! {
-        div { class: "setting-item",
-            span { class: "setting-label", "{label}" }
-            if editable {
-                div { class: "setting-input-col",
-                    div { class: "setting-input-row",
-                        input {
-                            class: "input-field",
-                            r#type: "number",
-                            min: "0",
-                            value: "{edit_val}",
-                            oninput: move |e| {
-                                *edit_val.write() = e.value();
-                                *error_msg.write() = String::new();
-                            },
-                        }
-                        Button {
-                            variant: ButtonVariant::Secondary,
-                            size: ui::ButtonSize::Small,
-                            loading: saving(),
-                            onclick: on_save,
-                            if saving() { "保存中..." } else { "保存" }
-                        }
-                    }
-                    if !error_msg().is_empty() {
-                        span { class: "error-text text-sm", "{error_msg}" }
-                    }
+        div { class: "setting-row",
+            div { class: "setting-row-main",
+                div { class: "setting-row-meta",
+                    span { class: "setting-label", "{label}" }
+                    p { class: "setting-description", "{description}" }
                 }
-            } else {
-                span { class: "setting-value",
-                    if value.is_empty() { "—" } else { "{value}" }
+                if editable {
+                    div { class: "setting-input-col",
+                        div { class: "setting-input-row",
+                            input {
+                                class: "input-field setting-control",
+                                r#type: "number",
+                                min: "0",
+                                value: "{edit_val}",
+                                oninput: move |e| {
+                                    *edit_val.write() = e.value();
+                                    *error_msg.write() = String::new();
+                                },
+                            }
+                            Button {
+                                variant: ButtonVariant::Secondary,
+                                size: ui::ButtonSize::Small,
+                                loading: saving(),
+                                onclick: on_save,
+                                if saving() { {i18n.t("form.saving")} } else { {i18n.t("form.save")} }
+                            }
+                        }
+                        if !error_msg().is_empty() {
+                            span { class: "error-text text-sm", "{error_msg}" }
+                        }
+                    }
+                } else {
+                    span { class: "setting-value setting-readonly",
+                        if value.is_empty() { "—" } else { "{value}" }
+                    }
                 }
             }
         }
     }
 }
 
-/// 下拉选择设置项
 #[component]
 fn SettingItemSelect(
     label: String,
+    description: String,
     setting_key: String,
     value: String,
     editable: bool,
@@ -318,6 +375,7 @@ fn SettingItemSelect(
     mut save_error: Signal<String>,
     options: Vec<(String, String)>,
 ) -> Element {
+    let i18n = use_i18n();
     let mut edit_val = use_signal(|| value.clone());
     let mut saving = use_signal(|| false);
 
@@ -342,7 +400,8 @@ fn SettingItemSelect(
                     *saving.write() = false;
                 }
                 Err(e) => {
-                    *save_error.write() = format!("保存 {} 失败：{}", k, e);
+                    *save_error.write() =
+                        format!("{} {}：{}", i18n.t("settings.save_failed"), k, e);
                     *saving.write() = false;
                 }
             }
@@ -350,42 +409,47 @@ fn SettingItemSelect(
     };
 
     rsx! {
-        div { class: "setting-item",
-            span { class: "setting-label", "{label}" }
-            if editable {
-                div { class: "setting-input-row",
-                    select {
-                        class: "input-field",
-                        onchange: move |e| *edit_val.write() = e.value(),
-                        for (opt_val, opt_label) in options.iter() {
-                            option {
-                                value: "{opt_val}",
-                                selected: *opt_val == edit_val(),
-                                "{opt_label}"
+        div { class: "setting-row",
+            div { class: "setting-row-main",
+                div { class: "setting-row-meta",
+                    span { class: "setting-label", "{label}" }
+                    p { class: "setting-description", "{description}" }
+                }
+                if editable {
+                    div { class: "setting-input-row",
+                        select {
+                            class: "input-field setting-control",
+                            onchange: move |e| *edit_val.write() = e.value(),
+                            for (opt_val, opt_label) in options.iter() {
+                                option {
+                                    value: "{opt_val}",
+                                    selected: *opt_val == edit_val(),
+                                    "{opt_label}"
+                                }
                             }
                         }
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            size: ui::ButtonSize::Small,
+                            loading: saving(),
+                            onclick: on_save,
+                            if saving() { {i18n.t("form.saving")} } else { {i18n.t("form.save")} }
+                        }
                     }
-                    Button {
-                        variant: ButtonVariant::Secondary,
-                        size: ui::ButtonSize::Small,
-                        loading: saving(),
-                        onclick: on_save,
-                        if saving() { "保存中..." } else { "保存" }
+                } else {
+                    span { class: "setting-value setting-readonly",
+                        if value.is_empty() { "—" } else { "{value}" }
                     }
-                }
-            } else {
-                span { class: "setting-value",
-                    if value.is_empty() { "—" } else { "{value}" }
                 }
             }
         }
     }
 }
 
-/// 开关切换设置项（布尔值）
 #[component]
 fn SettingItemToggle(
     label: String,
+    description: String,
     setting_key: String,
     value: String,
     editable: bool,
@@ -393,6 +457,7 @@ fn SettingItemToggle(
     mut save_ok: Signal<bool>,
     mut save_error: Signal<String>,
 ) -> Element {
+    let i18n = use_i18n();
     let mut edit_val = use_signal(|| value.clone());
     let mut saving = use_signal(|| false);
 
@@ -401,51 +466,58 @@ fn SettingItemToggle(
         *edit_val.write() = value_for_effect.clone();
     });
 
-    let key = setting_key.clone();
-    let mut on_save = move |new_val: String| {
-        let k = key.clone();
-        let token = auth_store.token().unwrap_or_default();
-        *saving.write() = true;
-        *save_ok.write() = false;
-        *save_error.write() = String::new();
-        spawn(async move {
-            let json_val = serde_json::Value::String(new_val);
-            match settings_service::update_by_key(&k, &json_val, &token).await {
-                Ok(_) => {
-                    *save_ok.write() = true;
-                    *saving.write() = false;
-                }
-                Err(e) => {
-                    *save_error.write() = format!("保存 {} 失败：{}", k, e);
-                    *saving.write() = false;
-                }
-            }
-        });
-    };
-
     let is_enabled = edit_val() == "true" || edit_val() == "1";
+    let key = setting_key.clone();
 
     rsx! {
-        div { class: "setting-item",
-            span { class: "setting-label", "{label}" }
-            if editable {
-                div { class: "setting-input-row",
-                    label { class: "toggle-switch",
-                        input {
-                            r#type: "checkbox",
-                            checked: is_enabled,
-                            onchange: move |e| {
-                                let new_val = if e.checked() { "true" } else { "false" };
-                                *edit_val.write() = new_val.to_string();
-                                on_save(new_val.to_string());
-                            },
-                        }
-                        span { class: "toggle-slider" }
-                    }
+        div { class: "setting-row",
+            div { class: "setting-row-main",
+                div { class: "setting-row-meta",
+                    span { class: "setting-label", "{label}" }
+                    p { class: "setting-description", "{description}" }
                 }
-            } else {
-                span { class: "setting-value",
-                    if is_enabled { "已启用" } else { "已禁用" }
+                if editable {
+                    div { class: "setting-toggle-row",
+                        label { class: "toggle-switch",
+                            input {
+                                r#type: "checkbox",
+                                checked: is_enabled,
+                                onchange: move |e| {
+                                    let new_val = if e.checked() { "true" } else { "false" };
+                                    *edit_val.write() = new_val.to_string();
+                                    let k = key.clone();
+                                    let token = auth_store.token().unwrap_or_default();
+                                    *saving.write() = true;
+                                    *save_ok.write() = false;
+                                    *save_error.write() = String::new();
+                                    spawn(async move {
+                                        let json_val = serde_json::Value::String(new_val.to_string());
+                                        match settings_service::update_by_key(&k, &json_val, &token).await {
+                                            Ok(_) => {
+                                                *save_ok.write() = true;
+                                                *saving.write() = false;
+                                            }
+                                            Err(e) => {
+                                                *save_error.write() =
+                                                    format!("{} {}：{}", i18n.t("settings.save_failed"), k, e);
+                                                *saving.write() = false;
+                                            }
+                                        }
+                                    });
+                                },
+                            }
+                            span { class: "toggle-slider" }
+                        }
+                        span {
+                            class: if is_enabled { "setting-toggle-state is-enabled" } else { "setting-toggle-state" },
+                            if saving() { {i18n.t("form.saving")} } else if is_enabled { {i18n.t("common.enabled")} } else { {i18n.t("common.disabled")} }
+                        }
+                    }
+                } else {
+                    span {
+                        class: if is_enabled { "setting-value setting-readonly is-enabled" } else { "setting-value setting-readonly" },
+                        if is_enabled { {i18n.t("common.enabled")} } else { {i18n.t("common.disabled")} }
+                    }
                 }
             }
         }

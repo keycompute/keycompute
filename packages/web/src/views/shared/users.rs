@@ -5,6 +5,7 @@ use client_api::{
 use dioxus::prelude::*;
 use ui::{Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Pagination, Table, TableHead};
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::api_client::{get_client, with_auto_refresh};
 use crate::stores::auth_store::AuthStore;
@@ -35,6 +36,7 @@ pub fn Users() -> Element {
 
 #[component]
 fn AdminUsersView() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut ui_store = use_context::<UiStore>();
     let mut search = use_signal(String::new);
@@ -117,12 +119,12 @@ fn AdminUsersView() -> Element {
             };
             match AdminApi::new(&client).update_user(&id, &req, &token).await {
                 Ok(_) => {
-                    ui_store.show_success("用户信息已更新");
+                    ui_store.show_success(i18n.t("users.updated"));
                     edit_user.set(None);
                     users.restart();
                 }
                 Err(e) => {
-                    ui_store.show_error(format!("更新失败：{e}"));
+                    ui_store.show_error(format!("{}: {e}", i18n.t("users.update_failed")));
                 }
             }
             edit_saving.set(false);
@@ -139,22 +141,33 @@ fn AdminUsersView() -> Element {
             let client = get_client();
             match AdminApi::new(&client).delete_user(&id, &token).await {
                 Ok(_) => {
-                    ui_store.show_success("用户已删除");
+                    ui_store.show_success(i18n.t("users.deleted"));
                     delete_user.set(None);
                     users.restart();
                 }
                 Err(e) => {
-                    ui_store.show_error(format!("删除失败：{e}"));
+                    ui_store.show_error(format!("{}: {e}", i18n.t("users.delete_failed")));
                 }
             }
             delete_saving.set(false);
         });
     };
 
+    let edit_save_label = if edit_saving() {
+        i18n.t("form.saving")
+    } else {
+        i18n.t("form.save")
+    };
+    let delete_button_label = if delete_saving() {
+        i18n.t("users.deleting")
+    } else {
+        i18n.t("users.confirm_delete")
+    };
+
     rsx! {
         div { class: "page-header",
-            h1 { class: "page-title", "用户管理" }
-            p { class: "page-description", "查看和管理平台所有注册用户" }
+            h1 { class: "page-title", {i18n.t("page.users")} }
+            p { class: "page-description", {i18n.t("users.subtitle")} }
         }
 
         div { class: "toolbar",
@@ -163,7 +176,7 @@ fn AdminUsersView() -> Element {
                     input {
                         class: "input-field",
                         r#type: "search",
-                        placeholder: "搜索邮箱或用户名...",
+                        placeholder: "{i18n.t(\"users.search_placeholder\")}",
                         value: "{search}",
                         oninput: move |e| {
                             *search.write() = e.value();
@@ -177,9 +190,9 @@ fn AdminUsersView() -> Element {
         div { class: "card",
             {
                 let (is_empty, empty_text) = match users() {
-                    None => (true, "加载中..."),
-                    Some(Err(_)) => (true, "加载失败"),
-                    Some(Ok(_)) if filtered_users().is_empty() => (true, "暂无用户数据"),
+                    None => (true, i18n.t("table.loading")),
+                    Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                    Some(Ok(_)) if filtered_users().is_empty() => (true, i18n.t("users.empty")),
                     _ => (false, ""),
                 };
                 rsx! {
@@ -189,11 +202,11 @@ fn AdminUsersView() -> Element {
                         col_count: 5,
                         thead {
                             tr {
-                                TableHead { "用户" }
-                                TableHead { "角色" }
-                                TableHead { "租户" }
-                                TableHead { "注册时间" }
-                                TableHead { "操作" }
+                                TableHead { {i18n.t("users.user")} }
+                                TableHead { {i18n.t("table.role")} }
+                                TableHead { {i18n.t("users.tenant")} }
+                                TableHead { {i18n.t("users.registered_at")} }
+                                TableHead { {i18n.t("table.actions")} }
                             }
                         }
                         tbody {
@@ -225,7 +238,7 @@ fn AdminUsersView() -> Element {
                                                         edit_user.set(Some(uu.clone()));
                                                     }
                                                 },
-                                                "编辑"
+                                                {i18n.t("form.edit")}
                                             }
                                             Button {
                                                 variant: ButtonVariant::Danger,
@@ -234,7 +247,7 @@ fn AdminUsersView() -> Element {
                                                     let uu = u.clone();
                                                     move |_| delete_user.set(Some(uu.clone()))
                                                 },
-                                                "删除"
+                                                {i18n.t("form.delete")}
                                             }
                                         }
                                     }
@@ -248,7 +261,7 @@ fn AdminUsersView() -> Element {
 
         div { class: "pagination",
             span { class: "pagination-info",
-                "共 { filtered_users().len() } 条"
+                "{i18n.t(\"common.total_items\")} {filtered_users().len()} {i18n.t(\"pricing.items_suffix\")}"
             }
             Pagination {
                 current: page(),
@@ -265,7 +278,7 @@ fn AdminUsersView() -> Element {
                     class: "modal",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "modal-header",
-                        h2 { class: "modal-title", "编辑用户" }
+                        h2 { class: "modal-title", {i18n.t("users.edit_title")} }
                         button {
                             class: "btn btn-ghost btn-sm",
                             r#type: "button",
@@ -275,22 +288,22 @@ fn AdminUsersView() -> Element {
                     }
                     div { class: "modal-body",
                         div { class: "form-group",
-                            label { class: "form-label", "显示名称" }
+                            label { class: "form-label", {i18n.t("users.display_name")} }
                             input {
                                 class: "input-field",
-                                placeholder: "留空则不修改",
+                                placeholder: "{i18n.t(\"users.display_name_placeholder\")}",
                                 value: "{edit_name}",
                                 oninput: move |e| *edit_name.write() = e.value(),
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "角色" }
+                            label { class: "form-label", {i18n.t("table.role")} }
                             select {
                                 class: "input-field",
                                 value: "{edit_role}",
                                 onchange: move |e| *edit_role.write() = e.value(),
-                                option { value: "user", "user（普通用户）" }
-                                option { value: "admin", "admin（管理员）" }
+                                option { value: "user", "{i18n.t(\"users.role_user\")}" }
+                                option { value: "admin", "{i18n.t(\"users.role_admin\")}" }
                             }
                         }
                     }
@@ -298,13 +311,13 @@ fn AdminUsersView() -> Element {
                         Button {
                             variant: ButtonVariant::Ghost,
                             onclick: move |_| edit_user.set(None),
-                            "取消"
+                            {i18n.t("form.cancel")}
                         }
                         Button {
                             variant: ButtonVariant::Primary,
                             loading: edit_saving(),
                             onclick: on_edit_save,
-                            if edit_saving() { "保存中..." } else { "保存" }
+                            "{edit_save_label}"
                         }
                     }
                 }
@@ -319,26 +332,26 @@ fn AdminUsersView() -> Element {
                     class: "modal",
                     onclick: move |e| e.stop_propagation(),
                     div { class: "modal-header",
-                        h2 { class: "modal-title", "确认删除" }
+                        h2 { class: "modal-title", {i18n.t("users.delete_confirm_title")} }
                     }
                     div { class: "modal-body",
                         p {
-                            "确定要删除用户 "
+                            "{i18n.t(\"users.delete_confirm_prefix\")} "
                             strong { { du.name.clone().unwrap_or_else(|| du.email.clone()) } }
-                            "（{du.email}）吗？此操作不可撤销。"
+                            " ({du.email}) {i18n.t(\"users.delete_confirm_suffix\")}"
                         }
                     }
                     div { class: "modal-footer",
                         Button {
                             variant: ButtonVariant::Ghost,
                             onclick: move |_| delete_user.set(None),
-                            "取消"
+                            {i18n.t("form.cancel")}
                         }
                         Button {
                             variant: ButtonVariant::Danger,
                             loading: delete_saving(),
                             onclick: on_delete_confirm,
-                            if delete_saving() { "删除中..." } else { "确认删除" }
+                            "{delete_button_label}"
                         }
                     }
                 }
@@ -351,6 +364,7 @@ fn AdminUsersView() -> Element {
 
 #[component]
 fn UserSelfView() -> Element {
+    let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let user_info = user_store.info.read();
     let nav = use_navigator();
@@ -370,32 +384,32 @@ fn UserSelfView() -> Element {
 
     rsx! {
         div { class: "page-header",
-            h1 { class: "page-title", "我的账户" }
-            p { class: "page-description", "查看和管理您的个人账户信息" }
+            h1 { class: "page-title", {i18n.t("users.self_title")} }
+            p { class: "page-description", {i18n.t("users.self_desc")} }
         }
 
         div { class: "card",
             div { class: "card-header",
-                h3 { class: "card-title", "账户信息" }
+                h3 { class: "card-title", {i18n.t("users.account_info")} }
                 Button {
                     variant: ButtonVariant::Secondary,
                     size: ButtonSize::Small,
                     onclick: move |_| { nav.push(Route::UserProfile {}); },
-                    "编辑资料"
+                    {i18n.t("profile.edit")}
                 }
             }
             div { class: "card-body",
                 div { class: "info-grid",
                     div { class: "info-item",
-                        span { class: "info-label", "显示名称" }
+                        span { class: "info-label", {i18n.t("users.display_name")} }
                         span { class: "info-value", "{display_name}" }
                     }
                     div { class: "info-item",
-                        span { class: "info-label", "邮笱" }
+                        span { class: "info-label", {i18n.t("table.email")} }
                         span { class: "info-value", "{email}" }
                     }
                     div { class: "info-item",
-                        span { class: "info-label", "角色" }
+                        span { class: "info-label", {i18n.t("table.role")} }
                         Badge { variant: BadgeVariant::Info, "{role}" }
                     }
                 }

@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::auth_service;
 
@@ -7,6 +8,7 @@ use crate::services::auth_service;
 /// 路由：/auth/reset-password/:token
 #[component]
 pub fn ResetPassword(token: String) -> Element {
+    let i18n = use_i18n();
     let nav = use_navigator();
 
     let mut password = use_signal(String::new);
@@ -23,15 +25,15 @@ pub fn ResetPassword(token: String) -> Element {
             let cfm = confirm();
 
             if pwd.is_empty() || cfm.is_empty() {
-                error_msg.set(Some("请填写所有字段".to_string()));
+                error_msg.set(Some(i18n.t("auth.fill_required").to_string()));
                 return;
             }
             if pwd != cfm {
-                error_msg.set(Some("两次输入的密码不一致".to_string()));
+                error_msg.set(Some(i18n.t("form.password_mismatch").to_string()));
                 return;
             }
             if pwd.len() < 8 {
-                error_msg.set(Some("密码长度至少 8 位".to_string()));
+                error_msg.set(Some(i18n.t("form.password_too_short").to_string()));
                 return;
             }
 
@@ -45,7 +47,7 @@ pub fn ResetPassword(token: String) -> Element {
                         success.set(true);
                     }
                     Err(e) => {
-                        error_msg.set(Some(format!("重置失败：{e}")));
+                        error_msg.set(Some(format!("{}：{e}", i18n.t("reset_password.failed"))));
                     }
                 }
                 submitting.set(false);
@@ -58,15 +60,15 @@ pub fn ResetPassword(token: String) -> Element {
             class: "auth-page",
             div {
                 class: "auth-card",
-                h1 { class: "auth-title", "重置密码" }
+                h1 { class: "auth-title", {i18n.t("auth.reset_password")} }
 
                 if success() {
                     div { class: "alert alert-success",
-                        p { "密码已重置成功！" }
+                        p { {i18n.t("reset_password.success")} }
                         button {
                             class: "btn btn-primary",
                             onclick: move |_| { nav.push(Route::Login {}); },
-                            "前往登录"
+                            {i18n.t("reset_password.go_login")}
                         }
                     }
                 } else {
@@ -77,22 +79,22 @@ pub fn ResetPassword(token: String) -> Element {
                     form {
                         onsubmit: on_submit,
                         div { class: "form-group",
-                            label { class: "form-label", "新密码" }
+                            label { class: "form-label", {i18n.t("account_settings.new_password")} }
                             input {
                                 class: "form-input",
                                 r#type: "password",
-                                placeholder: "请输入新密码（至少 8 位）",
+                                placeholder: "{i18n.t(\"account_settings.new_password_placeholder\")}",
                                 value: "{password}",
                                 oninput: move |e| password.set(e.value()),
                                 disabled: submitting(),
                             }
                         }
                         div { class: "form-group",
-                            label { class: "form-label", "确认密码" }
+                            label { class: "form-label", {i18n.t("auth.confirm_password")} }
                             input {
                                 class: "form-input",
                                 r#type: "password",
-                                placeholder: "请再次输入新密码",
+                                placeholder: "{i18n.t(\"account_settings.confirm_password_placeholder\")}",
                                 value: "{confirm}",
                                 oninput: move |e| confirm.set(e.value()),
                                 disabled: submitting(),
@@ -102,7 +104,7 @@ pub fn ResetPassword(token: String) -> Element {
                             class: "btn btn-primary btn-full",
                             r#type: "submit",
                             disabled: submitting(),
-                            if submitting() { "提交中..." } else { "确认重置" }
+                            if submitting() { {i18n.t("auth.sending")} } else { {i18n.t("reset_password.submit")} }
                         }
                     }
 
@@ -110,7 +112,7 @@ pub fn ResetPassword(token: String) -> Element {
                         button {
                             class: "link-btn",
                             onclick: move |_| { nav.push(Route::Login {}); },
-                            "返回登录"
+                            {i18n.t("auth.back_to_login")}
                         }
                     }
                 }

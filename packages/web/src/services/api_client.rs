@@ -10,7 +10,16 @@ use crate::stores::auth_store::AuthStore;
 /// ApiClient 内部持有 Arc，Clone 只是增加引用计数，开销极低
 static CLIENT: LazyLock<ApiClient> = LazyLock::new(|| {
     let base_url = option_env!("API_BASE_URL")
-        .unwrap_or("http://localhost:8080")
+        .unwrap_or({
+            #[cfg(debug_assertions)]
+            {
+                "http://localhost:3001"
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                ""
+            }
+        })
         .to_string();
     let config = ClientConfig::new(base_url);
     ApiClient::new(config).expect("Failed to create API client")

@@ -7,6 +7,8 @@ use crate::error::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+pub use super::common::MessageResponse;
+
 /// 设置 API 客户端
 #[derive(Debug, Clone)]
 pub struct SettingsApi {
@@ -33,14 +35,18 @@ impl SettingsApi {
         &self,
         settings: &HashMap<String, serde_json::Value>,
         token: &str,
-    ) -> Result<HashMap<String, SettingValue>> {
+    ) -> Result<MessageResponse> {
         self.client
             .put_json("/api/v1/settings", settings, Some(token))
             .await
     }
 
     /// 获取指定设置（Admin）
-    pub async fn get_system_setting_by_key(&self, key: &str, token: &str) -> Result<SettingValue> {
+    pub async fn get_system_setting_by_key(
+        &self,
+        key: &str,
+        token: &str,
+    ) -> Result<SystemSettingRecord> {
         self.client
             .get_json(&format!("/api/v1/settings/{}", key), Some(token))
             .await
@@ -54,7 +60,7 @@ impl SettingsApi {
         key: &str,
         value: &serde_json::Value,
         token: &str,
-    ) -> Result<SettingValue> {
+    ) -> Result<SystemSettingRecord> {
         // 将值包装在 { "value": ... } 结构中
         let payload = serde_json::json!({
             "value": value.as_str().unwrap_or(&value.to_string())
@@ -98,6 +104,15 @@ pub struct PublicSettings {
     pub about_content: Option<String>,
     pub terms_of_service_url: Option<String>,
     pub privacy_policy_url: Option<String>,
+}
+
+/// 单个系统设置记录
+#[derive(Debug, Clone, Deserialize)]
+pub struct SystemSettingRecord {
+    pub key: String,
+    pub value: String,
+    pub value_type: String,
+    pub description: Option<String>,
 }
 
 /// 设置值
