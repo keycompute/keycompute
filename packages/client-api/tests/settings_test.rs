@@ -45,8 +45,7 @@ async fn test_update_system_settings_success() {
     Mock::given(method("PUT"))
         .and(path("/api/v1/settings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "site_name": "Updated Name",
-            "maintenance_mode": true
+            "message": "Settings updated successfully"
         })))
         .mount(&mock_server)
         .await;
@@ -60,11 +59,8 @@ async fn test_update_system_settings_success() {
         .await;
 
     assert!(result.is_ok());
-    let settings = result.unwrap();
-    assert_eq!(
-        settings.get("site_name").unwrap().to_string_value(),
-        "Updated Name"
-    );
+    let response = result.unwrap();
+    assert_eq!(response.message, "Settings updated successfully");
 }
 
 #[tokio::test]
@@ -74,7 +70,12 @@ async fn test_get_system_setting_by_key_success() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/settings/site_name"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("KeyCompute")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "key": "site_name",
+            "value": "KeyCompute",
+            "value_type": "string",
+            "description": "Platform site name"
+        })))
         .mount(&mock_server)
         .await;
 
@@ -83,6 +84,9 @@ async fn test_get_system_setting_by_key_success() {
         .await;
 
     assert!(result.is_ok());
+    let record = result.unwrap();
+    assert_eq!(record.key, "site_name");
+    assert_eq!(record.value, "KeyCompute");
 }
 
 #[tokio::test]
@@ -92,7 +96,12 @@ async fn test_update_system_setting_by_key_success() {
 
     Mock::given(method("PUT"))
         .and(path("/api/v1/settings/site_name"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("New Site Name")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "key": "site_name",
+            "value": "New Site Name",
+            "value_type": "string",
+            "description": "Platform site name"
+        })))
         .mount(&mock_server)
         .await;
 
@@ -105,6 +114,9 @@ async fn test_update_system_setting_by_key_success() {
         .await;
 
     assert!(result.is_ok());
+    let record = result.unwrap();
+    assert_eq!(record.key, "site_name");
+    assert_eq!(record.value, "New Site Name");
 }
 
 #[tokio::test]

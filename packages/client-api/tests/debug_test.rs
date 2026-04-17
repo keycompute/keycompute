@@ -62,26 +62,8 @@ async fn test_get_provider_health_success() {
     Mock::given(method("GET"))
         .and(path("/debug/providers"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "providers": {
-                "openai": {
-                    "status": "healthy",
-                    "last_check": "2024-01-20T10:00:00Z",
-                    "latency_ms": 150,
-                    "error": null
-                },
-                "anthropic": {
-                    "status": "healthy",
-                    "last_check": "2024-01-20T10:00:00Z",
-                    "latency_ms": 200,
-                    "error": null
-                },
-                "gemini": {
-                    "status": "unhealthy",
-                    "last_check": "2024-01-20T09:55:00Z",
-                    "latency_ms": null,
-                    "error": "Connection timeout"
-                }
-            }
+            "healthy_providers": ["openai", "anthropic"],
+            "account_count": 3
         })))
         .mount(&mock_server)
         .await;
@@ -92,10 +74,9 @@ async fn test_get_provider_health_success() {
 
     assert!(result.is_ok());
     let health = result.unwrap();
-    assert!(health.providers.contains_key("openai"));
-    assert!(health.providers.contains_key("anthropic"));
-    assert_eq!(health.providers["openai"].status, "healthy");
-    assert_eq!(health.providers["gemini"].status, "unhealthy");
+    assert!(health.healthy_providers.contains(&"openai".to_string()));
+    assert!(health.healthy_providers.contains(&"anthropic".to_string()));
+    assert_eq!(health.account_count, 3);
 }
 
 #[tokio::test]
@@ -106,9 +87,19 @@ async fn test_get_gateway_status_success() {
     Mock::given(method("GET"))
         .and(path("/debug/gateway/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": "healthy",
-            "uptime_seconds": 86400,
-            "version": "0.1.0"
+            "available": true,
+            "providers": [
+                {
+                    "name": "openai",
+                    "supported_models": ["gpt-4o", "gpt-4o-mini"],
+                    "healthy": true
+                }
+            ],
+            "config": {
+                "max_retries": 3,
+                "timeout_secs": 120,
+                "enable_fallback": true
+            }
         })))
         .mount(&mock_server)
         .await;
@@ -119,9 +110,10 @@ async fn test_get_gateway_status_success() {
 
     assert!(result.is_ok());
     let status = result.unwrap();
-    assert_eq!(status.status, "healthy");
-    assert_eq!(status.uptime_seconds, 86400);
-    assert_eq!(status.version, "0.1.0");
+    assert!(status.available);
+    assert_eq!(status.providers.len(), 1);
+    assert_eq!(status.providers[0].name, "openai");
+    assert_eq!(status.config.max_retries, 3);
 }
 
 #[tokio::test]
@@ -135,8 +127,16 @@ async fn test_get_gateway_stats_success() {
             "total_requests": 100000,
             "successful_requests": 95000,
             "failed_requests": 5000,
-            "average_latency_ms": 125.5,
-            "active_connections": 42
+            "fallback_count": 120,
+            "avg_latency_ms": 125,
+            "provider_stats": {
+                "openai": {
+                    "requests": 70000,
+                    "successes": 68000,
+                    "failures": 2000,
+                    "avg_latency_ms": 110
+                }
+            }
         })))
         .mount(&mock_server)
         .await;
@@ -149,7 +149,9 @@ async fn test_get_gateway_stats_success() {
     let stats = result.unwrap();
     assert_eq!(stats.total_requests, 100000);
     assert_eq!(stats.successful_requests, 95000);
-    assert_eq!(stats.active_connections, 42);
+    assert_eq!(stats.fallback_count, 120);
+    assert_eq!(stats.avg_latency_ms, 125);
+    assert_eq!(stats.provider_stats["openai"].requests, 70000);
 }
 
 #[tokio::test]
