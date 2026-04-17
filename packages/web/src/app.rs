@@ -41,22 +41,20 @@ pub fn App() -> Element {
     use_effect(move || {
         // 依赖 auth_store 的认证状态，登录/登出时会重新执行
         let is_auth = auth_store.is_authenticated();
-        if is_auth {
-            if let Some(token) = auth_store.token() {
-                // 恢复 token 到 API 客户端
-                get_client().set_token(&token);
-                spawn(async move {
-                    if let Ok(user) = user_service::get_current_user(&token).await {
-                        *user_store.info.write() = Some(UserInfo {
-                            id: user.id.to_string(),
-                            email: user.email,
-                            name: user.name,
-                            role: user.role,
-                            tenant_id: user.tenant_id.to_string(),
-                        });
-                    }
-                });
-            }
+        if is_auth && let Some(token) = auth_store.token() {
+            // 恢复 token 到 API 客户端
+            get_client().set_token(&token);
+            spawn(async move {
+                if let Ok(user) = user_service::get_current_user(&token).await {
+                    *user_store.info.write() = Some(UserInfo {
+                        id: user.id.to_string(),
+                        email: user.email,
+                        name: user.name,
+                        role: user.role,
+                        tenant_id: user.tenant_id.to_string(),
+                    });
+                }
+            });
         }
     });
 
