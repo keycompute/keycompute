@@ -233,16 +233,10 @@ async fn test_sync_payment_order_success() {
     Mock::given(method("POST"))
         .and(path("/api/v1/payments/sync/PAY202401200001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "order_001",
+            "order_id": "order_001",
             "out_trade_no": "PAY202401200001",
-            "amount": 10.0,
-            "currency": "USD",
             "status": "paid",
-            "description": null,
-            "payment_method": "alipay",
-            "pay_url": null,
-            "paid_at": "2024-01-20T10:05:00Z",
-            "created_at": "2024-01-20T10:00:00Z"
+            "changed": true
         })))
         .mount(&mock_server)
         .await;
@@ -253,7 +247,9 @@ async fn test_sync_payment_order_success() {
 
     assert!(result.is_ok());
     let order = result.unwrap();
+    assert_eq!(order.order_id, "order_001");
     assert_eq!(order.status, "paid");
+    assert!(order.changed);
 }
 
 #[tokio::test]
