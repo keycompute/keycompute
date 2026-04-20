@@ -26,8 +26,6 @@ pub struct AdminSystemSettings {
     pub site_favicon_url: Option<String>,
 
     // 注册设置
-    pub allow_registration: bool,
-    pub email_verification_required: bool,
     pub default_user_quota: f64,
 
     // 限流设置
@@ -109,9 +107,7 @@ impl AdminSystemSettings {
             site_logo_url: get_value(setting_keys::SITE_LOGO_URL),
             site_favicon_url: get_value(setting_keys::SITE_FAVICON_URL),
 
-            allow_registration: get_bool(setting_keys::ALLOW_REGISTRATION, true),
-            email_verification_required: get_bool(setting_keys::EMAIL_VERIFICATION_REQUIRED, true),
-            default_user_quota: get_decimal(setting_keys::DEFAULT_USER_QUOTA, 10.0),
+            default_user_quota: get_decimal(setting_keys::DEFAULT_USER_QUOTA, 0.0),
 
             default_rpm_limit: get_int(setting_keys::DEFAULT_RPM_LIMIT, 60),
             default_tpm_limit: get_int(setting_keys::DEFAULT_TPM_LIMIT, 100000),
@@ -153,6 +149,13 @@ fn is_hidden_setting(key: &str) -> bool {
     key == setting_keys::DEFAULT_USER_ROLE
 }
 
+fn is_removed_setting(key: &str) -> bool {
+    matches!(
+        key,
+        "allow_registration" | "registration_mode" | "email_verification_required"
+    )
+}
+
 fn normalize_setting_update(key: &str, value: impl Into<String>) -> Result<String> {
     if is_hidden_setting(key) {
         return Err(ApiError::BadRequest(format!(
@@ -161,7 +164,28 @@ fn normalize_setting_update(key: &str, value: impl Into<String>) -> Result<Strin
         )));
     }
 
+    if is_removed_setting(key) {
+        return Err(ApiError::BadRequest(format!(
+            "Setting {} has been removed and can no longer be edited",
+            key
+        )));
+    }
+
     let value = value.into();
+
+    if key == setting_keys::DEFAULT_USER_QUOTA {
+        let quota = value.parse::<f64>().map_err(|_| {
+            ApiError::BadRequest("Setting default_user_quota must be a valid number".to_string())
+        })?;
+
+        if !quota.is_finite() {
+            return Err(ApiError::BadRequest(
+                "Setting default_user_quota must be a finite number".to_string(),
+            ));
+        }
+
+        return Ok(quota.to_string());
+    }
 
     Ok(value)
 }
@@ -173,6 +197,33 @@ fn normalize_settings_map(
         .into_iter()
         .map(|(key, value)| Ok((key.clone(), normalize_setting_update(&key, value)?)))
         .collect()
+}
+
+fn payload_to_settings_map(
+    payload: serde_json::Value,
+) -> Result<std::collections::HashMap<String, String>> {
+    if let serde_json::Value::Object(obj) = payload {
+        Ok(obj
+            .into_iter()
+            .filter_map(|(key, value)| {
+                if key == setting_keys::DEFAULT_USER_QUOTA && value.is_null() {
+                    return None;
+                }
+
+                let value_str = match value {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Null => return None,
+                    other => other.to_string(),
+                };
+
+                Some((key, value_str))
+            })
+            .collect())
+    } else {
+        Err(ApiError::BadRequest("Invalid request body".to_string()))
+    }
 }
 
 /// 获取系统设置（管理员）
@@ -199,7 +250,7 @@ pub async fn get_system_settings(
     // value 根据 value_type 转换为对应的 JSON 类型
     let map: std::collections::HashMap<String, serde_json::Value> = settings
         .into_iter()
-        .filter(|s| !is_hidden_setting(&s.key))
+        .filter(|s| !is_hidden_setting(&s.key) && !is_removed_setting(&s.key))
         .map(|s| {
             let val = match s.value_type.as_str() {
                 "bool" => match s.value.as_str() {
@@ -239,27 +290,7 @@ pub async fn update_system_settings(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    // 将 JSON 对象转换为 HashMap
-    let settings_map: std::collections::HashMap<String, String> =
-        if let serde_json::Value::Object(obj) = payload {
-            obj.into_iter()
-                .filter_map(|(k, v)| {
-                    // 将 JSON 值转换为字符串
-                    let value_str = match v {
-                        serde_json::Value::String(s) => s,
-                        serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => b.to_string(),
-                        serde_json::Value::Null => return None,
-                        other => other.to_string(),
-                    };
-                    Some((k, value_str))
-                })
-                .collect()
-        } else {
-            return Err(ApiError::BadRequest("Invalid request body".to_string()));
-        };
-
-    let settings_map = normalize_settings_map(settings_map)?;
+    let settings_map = normalize_settings_map(payload_to_settings_map(payload)?)?;
 
     // 批量更新设置
     let updated = keycompute_db::SystemSetting::batch_update(pool, &settings_map)
@@ -296,7 +327,7 @@ pub async fn get_system_setting_by_key(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    if is_hidden_setting(&key) {
+    if is_hidden_setting(&key) || is_removed_setting(&key) {
         return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
     }
 
@@ -326,7 +357,7 @@ pub async fn update_system_setting_by_key(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    if is_hidden_setting(&key) {
+    if is_hidden_setting(&key) || is_removed_setting(&key) {
         return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
     }
 
@@ -376,6 +407,12 @@ mod tests {
     }
 
     #[test]
+    fn test_removed_setting_marks_allow_registration() {
+        assert!(is_removed_setting("allow_registration"));
+        assert!(!is_removed_setting("site_name"));
+    }
+
+    #[test]
     fn test_normalize_setting_update_rejects_default_user_role() {
         let err = normalize_setting_update(setting_keys::DEFAULT_USER_ROLE, "user").unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be edited")));
@@ -387,5 +424,39 @@ mod tests {
             normalize_setting_update("site_name", "KeyCompute").unwrap(),
             "KeyCompute"
         );
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_removed_setting() {
+        let err = normalize_setting_update("allow_registration", "false").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("removed")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_accepts_negative_default_user_quota() {
+        assert_eq!(
+            normalize_setting_update(setting_keys::DEFAULT_USER_QUOTA, "-1").unwrap(),
+            "-1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_invalid_default_user_quota() {
+        let err =
+            normalize_setting_update(setting_keys::DEFAULT_USER_QUOTA, "not-a-number").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("default_user_quota")));
+    }
+
+    #[test]
+    fn test_payload_to_settings_map_ignores_null_default_user_quota() {
+        let payload = serde_json::json!({
+            "default_user_quota": null,
+            "site_name": "KeyCompute"
+        });
+
+        let map = payload_to_settings_map(payload).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("site_name"), Some(&"KeyCompute".to_string()));
+        assert!(!map.contains_key(setting_keys::DEFAULT_USER_QUOTA));
     }
 }

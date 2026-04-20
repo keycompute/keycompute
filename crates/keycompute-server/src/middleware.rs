@@ -9,14 +9,19 @@ use crate::{
 };
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header::SET_COOKIE},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use keycompute_auth::Permission;
 use keycompute_ratelimit::{RateLimitConfig, RateLimitKey};
+use sha2::{Digest, Sha256};
 use std::time::Instant;
 use tracing::{error, info, warn};
+use uuid::Uuid;
+
+const PUBLIC_AUTH_COOKIE_NAME: &str = "kc_reg_sid";
+const PUBLIC_AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24 * 30;
 
 /// 权限中间件的返回类型
 pub type PermissionMiddlewareFn =
@@ -191,6 +196,217 @@ pub async fn rate_limit_middleware(
             next.run(req).await
         }
     }
+}
+
+/// 公共认证限流中间件
+///
+/// 适用于无需登录的注册入口，按可信代理注入的 IP 和服务端签发 cookie 两个维度限流。
+pub async fn public_auth_rate_limit_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let headers = req.headers();
+    let config = RateLimitConfig::default();
+    let scope = "registration";
+
+    let client_ip = extract_client_ip_from_headers(headers);
+    if let Some(ref client_ip) = client_ip
+        && let Err(response) =
+            enforce_public_rate_limit(&state, scope, "ip", client_ip, &config).await
+    {
+        return response;
+    } else if client_ip.is_none()
+        && let Err(response) =
+            enforce_public_rate_limit(&state, scope, "ip-fallback", "anonymous", &config).await
+    {
+        return response;
+    }
+
+    let (cookie_identity, set_cookie_header) =
+        load_or_issue_public_auth_cookie(headers, state.public_auth_cookie_secret.as_str());
+    if let Err(response) =
+        enforce_public_rate_limit(&state, scope, "cookie", &cookie_identity, &config).await
+    {
+        return response;
+    }
+
+    let mut response = next.run(req).await;
+    if let Some(set_cookie_header) = set_cookie_header {
+        response.headers_mut().append(SET_COOKIE, set_cookie_header);
+    }
+
+    response
+}
+
+pub(crate) fn extract_client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
+    if let Some(real_ip) = headers.get("x-real-ip")
+        && let Ok(value) = real_ip.to_str()
+    {
+        let ip = value.trim();
+        if !ip.is_empty() {
+            return Some(ip.to_string());
+        }
+    }
+
+    None
+}
+
+fn load_or_issue_public_auth_cookie(
+    headers: &HeaderMap,
+    secret: &str,
+) -> (String, Option<HeaderValue>) {
+    if let Some(identity) = extract_public_auth_cookie_identity(headers, secret) {
+        return (identity, None);
+    }
+
+    let identity = Uuid::new_v4().to_string();
+    let signed_value = sign_public_auth_cookie_value(secret, &identity);
+    let set_cookie_header = build_public_auth_set_cookie(&signed_value, request_is_secure(headers));
+
+    (identity, set_cookie_header)
+}
+
+fn extract_public_auth_cookie_identity(headers: &HeaderMap, secret: &str) -> Option<String> {
+    let raw_cookie = extract_cookie_value(headers, PUBLIC_AUTH_COOKIE_NAME)?;
+    validate_public_auth_cookie_value(secret, &raw_cookie)
+}
+
+fn extract_cookie_value(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    for header_value in headers.get_all("cookie") {
+        let cookie_header = header_value.to_str().ok()?;
+        for part in cookie_header.split(';') {
+            let trimmed = part.trim();
+            let (name, cookie_value) = trimmed.split_once('=')?;
+            if name.trim() == cookie_name {
+                let cookie_value = cookie_value.trim();
+                if !cookie_value.is_empty() {
+                    return Some(cookie_value.to_string());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn sign_public_auth_cookie_value(secret: &str, identity: &str) -> String {
+    format!(
+        "{identity}.{}",
+        sign_public_auth_cookie_identity(secret, identity)
+    )
+}
+
+fn validate_public_auth_cookie_value(secret: &str, value: &str) -> Option<String> {
+    let (identity, signature) = value.split_once('.')?;
+    if identity.is_empty() || signature.is_empty() {
+        return None;
+    }
+
+    let expected_signature = sign_public_auth_cookie_identity(secret, identity);
+    if signature == expected_signature {
+        Some(identity.to_string())
+    } else {
+        None
+    }
+}
+
+fn sign_public_auth_cookie_identity(secret: &str, identity: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update("public-auth-cookie");
+    hasher.update(b":");
+    hasher.update(secret.as_bytes());
+    hasher.update(b":");
+    hasher.update(identity.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn build_public_auth_set_cookie(value: &str, secure: bool) -> Option<HeaderValue> {
+    let secure_attr = if secure { "; Secure" } else { "" };
+    let cookie = format!(
+        "{PUBLIC_AUTH_COOKIE_NAME}={value}; Path=/; Max-Age={PUBLIC_AUTH_COOKIE_MAX_AGE_SECS}; HttpOnly; SameSite=Lax{secure_attr}"
+    );
+    HeaderValue::from_str(&cookie).ok()
+}
+
+fn request_is_secure(headers: &HeaderMap) -> bool {
+    if let Some(proto) = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+    {
+        return proto.eq_ignore_ascii_case("https");
+    }
+
+    false
+}
+
+async fn enforce_public_rate_limit(
+    state: &AppState,
+    scope: &str,
+    dimension: &str,
+    identity: &str,
+    config: &RateLimitConfig,
+) -> std::result::Result<(), Response> {
+    let rate_key = build_public_rate_limit_key(scope, dimension, identity);
+
+    match state
+        .rate_limiter
+        .check_and_record_with_config(&rate_key, config)
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(keycompute_types::KeyComputeError::RateLimitExceeded(ref msg)) => {
+            info!(
+                scope = %scope,
+                dimension = %dimension,
+                identity = %identity,
+                rpm_limit = config.rpm_limit,
+                "Public auth rate limit exceeded: {}",
+                msg
+            );
+            Err(rate_limit_exceeded_response())
+        }
+        Err(e) => {
+            error!(
+                scope = %scope,
+                dimension = %dimension,
+                error = %e,
+                "Public auth rate limit check error"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn build_public_rate_limit_key(scope: &str, dimension: &str, identity: &str) -> RateLimitKey {
+    let scope = format!("public-auth:{scope}:{dimension}");
+    RateLimitKey::new(
+        hash_to_uuid(&scope),
+        hash_to_uuid(identity),
+        hash_to_uuid(&format!("{scope}:{identity}")),
+    )
+}
+
+fn hash_to_uuid(input: &str) -> Uuid {
+    let digest = Sha256::digest(input.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn rate_limit_exceeded_response() -> Response {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        serde_json::json!({
+            "error": {
+                "message": "Rate limit exceeded. Please try again later.",
+                "type": "rate_limit_exceeded",
+                "code": "rate_limit_exceeded"
+            }
+        })
+        .to_string(),
+    )
+        .into_response()
 }
 
 /// 权限检查中间件
@@ -520,5 +736,27 @@ mod tests {
         assert!(result.is_some());
         let extracted = result.unwrap();
         assert!(extracted.is_admin());
+    }
+
+    #[test]
+    fn test_extract_client_ip_only_trusts_x_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("1.1.1.1"));
+        headers.insert("x-real-ip", HeaderValue::from_static("2.2.2.2"));
+
+        let extracted = extract_client_ip_from_headers(&headers);
+        assert_eq!(extracted.as_deref(), Some("2.2.2.2"));
+    }
+
+    #[test]
+    fn test_public_auth_cookie_signature_validation() {
+        let secret = "super-secret";
+        let cookie_value = sign_public_auth_cookie_value(secret, "identity-123");
+
+        let valid = validate_public_auth_cookie_value(secret, &cookie_value);
+        assert_eq!(valid.as_deref(), Some("identity-123"));
+
+        let tampered = cookie_value.replacen("identity-123", "identity-456", 1);
+        assert!(validate_public_auth_cookie_value(secret, &tampered).is_none());
     }
 }

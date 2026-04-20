@@ -4,8 +4,9 @@ use client_api::error::Result;
 use client_api::{
     AuthApi,
     api::auth::{
-        AuthResponse, ForgotPasswordRequest, LoginRequest, MessageResponse, RefreshTokenRequest,
-        RegisterRequest, ResetPasswordRequest,
+        AuthResponse, CompleteRegistrationRequest, CompleteRegistrationResponse,
+        ForgotPasswordRequest, LoginRequest, MessageResponse, RefreshTokenRequest,
+        RequestRegistrationCodeRequest, RequestRegistrationCodeResponse, ResetPasswordRequest,
     },
 };
 
@@ -20,14 +21,32 @@ pub async fn login(email: &str, password: &str) -> Result<AuthResponse> {
     Ok(resp)
 }
 
-pub async fn register(email: &str, password: &str, name: Option<&str>) -> Result<AuthResponse> {
+pub async fn request_registration_code(
+    email: &str,
+    referral_code: Option<&str>,
+) -> Result<RequestRegistrationCodeResponse> {
     let client = get_client();
     let api = AuthApi::new(&client);
-    let mut req = RegisterRequest::new(email, password);
+    let mut req = RequestRegistrationCodeRequest::new(email);
+    if let Some(code) = referral_code {
+        req = req.with_referral_code(code);
+    }
+    api.request_registration_code(&req).await
+}
+
+pub async fn complete_registration(
+    email: &str,
+    code: &str,
+    password: &str,
+    name: Option<&str>,
+) -> Result<CompleteRegistrationResponse> {
+    let client = get_client();
+    let api = AuthApi::new(&client);
+    let mut req = CompleteRegistrationRequest::new(email, code, password);
     if let Some(n) = name {
         req = req.with_name(n);
     }
-    api.register(&req).await
+    api.complete_registration(&req).await
 }
 
 pub async fn refresh_token(refresh_token: &str) -> Result<AuthResponse> {
@@ -55,10 +74,4 @@ pub async fn verify_reset_token(token: &str) -> Result<MessageResponse> {
     let client = get_client();
     let api = AuthApi::new(&client);
     api.verify_reset_token(token).await
-}
-
-pub async fn verify_email(token: &str) -> Result<MessageResponse> {
-    let client = get_client();
-    let api = AuthApi::new(&client);
-    api.verify_email(token).await
 }

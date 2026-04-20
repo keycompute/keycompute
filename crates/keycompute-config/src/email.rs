@@ -4,7 +4,6 @@
 //! - SMTP 服务器连接参数
 //! - 发件人信息
 //! - TLS 配置
-//! - 验证链接基础 URL
 
 use serde::Deserialize;
 
@@ -27,8 +26,6 @@ pub struct EmailConfig {
     /// 是否使用 TLS（默认 true）
     #[serde(default = "default_use_tls")]
     pub use_tls: bool,
-    /// 验证链接基础 URL（如 https://api.example.com）
-    pub verification_base_url: String,
     /// 邮件发送超时（秒，默认 30）
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -56,7 +53,6 @@ impl Default for EmailConfig {
             from_address: "noreply@localhost".to_string(),
             from_name: Some("KeyCompute".to_string()),
             use_tls: true,
-            verification_base_url: "http://localhost:3000".to_string(),
             timeout_secs: 30,
         }
     }
@@ -77,19 +73,6 @@ impl EmailConfig {
             Some(name) => format!("{} <{}>", name, self.from_address),
             None => self.from_address.clone(),
         }
-    }
-
-    /// 生成邮箱验证链接
-    pub fn verification_url(&self, token: &str) -> String {
-        format!("{}/auth/verify-email/{}", self.verification_base_url, token)
-    }
-
-    /// 生成密码重置链接
-    pub fn password_reset_url(&self, token: &str) -> String {
-        format!(
-            "{}/auth/reset-password?token={}",
-            self.verification_base_url, token
-        )
     }
 }
 
@@ -123,30 +106,6 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.from_header(), "noreply@example.com");
-    }
-
-    #[test]
-    fn test_verification_url() {
-        let config = EmailConfig {
-            verification_base_url: "https://api.example.com".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            config.verification_url("abc123"),
-            "https://api.example.com/auth/verify-email/abc123"
-        );
-    }
-
-    #[test]
-    fn test_password_reset_url() {
-        let config = EmailConfig {
-            verification_base_url: "https://api.example.com".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            config.password_reset_url("reset456"),
-            "https://api.example.com/auth/reset-password?token=reset456"
-        );
     }
 
     #[test]

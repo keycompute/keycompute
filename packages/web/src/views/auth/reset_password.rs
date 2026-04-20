@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
+use crate::services::api_client::user_error_message;
 use crate::services::auth_service;
 
 /// 重置密码页面
@@ -47,7 +48,11 @@ pub fn ResetPassword(token: String) -> Element {
                         success.set(true);
                     }
                     Err(e) => {
-                        error_msg.set(Some(format!("{}：{e}", i18n.t("reset_password.failed"))));
+                        error_msg.set(Some(format!(
+                            "{}：{}",
+                            i18n.t("reset_password.failed"),
+                            user_error_message(&e)
+                        )));
                     }
                 }
                 submitting.set(false);

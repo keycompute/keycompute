@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::api_client::get_client;
+use crate::services::api_client::user_error_message;
 use crate::services::auth_service;
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::{UserInfo, UserStore};
@@ -59,7 +60,8 @@ pub fn Login() -> Element {
                     nav.push(Route::Dashboard {});
                 }
                 Err(e) => {
-                    error_msg.set(Some(format!("{t_login_failed}：{e}")));
+                    let err_text = user_error_message(&e);
+                    error_msg.set(Some(format!("{t_login_failed}：{err_text}")));
                     loading.set(false);
                 }
             }

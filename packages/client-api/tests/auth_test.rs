@@ -3,8 +3,8 @@
 //! 使用 Wiremock 模拟后端服务，无需启动真实服务器
 
 use client_api::api::auth::{
-    AuthApi, ForgotPasswordRequest, LoginRequest, RefreshTokenRequest, RegisterRequest,
-    ResendVerificationRequest, ResetPasswordRequest,
+    AuthApi, CompleteRegistrationRequest, ForgotPasswordRequest, LoginRequest, RefreshTokenRequest,
+    RequestRegistrationCodeRequest, ResetPasswordRequest,
 };
 use client_api::error::ClientError;
 use wiremock::matchers::{body_json, method, path};
@@ -65,56 +65,69 @@ async fn test_login_invalid_credentials() {
 }
 
 #[tokio::test]
-async fn test_register_success() {
+async fn test_request_registration_code_success() {
     let (client, mock_server) = create_test_client().await;
     let auth_api = AuthApi::new(&client);
 
     let expected_body = serde_json::json!({
         "email": "new@example.com",
-        "password": "SecurePass123!",
-        "name": "New User"
+        "referral_code": "6aac8ab5-aeec-48b8-a4cc-0a446d952862"
     });
 
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/register"))
         .and(body_json(&expected_body))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "user_id": "user_new_001",
-            "tenant_id": "tenant_001",
             "email": "new@example.com",
-            "role": "user",
-            "access_token": fixtures::TEST_ACCESS_TOKEN,
-            "token_type": "Bearer",
-            "expires_in": 3600
+            "message": "验证码已发送，请在 10 分钟内完成验证",
+            "expires_in_seconds": 600
         })))
         .mount(&mock_server)
         .await;
 
-    let req = RegisterRequest::new("new@example.com", "SecurePass123!").with_name("New User");
-    let result = auth_api.register(&req).await;
+    let req = RequestRegistrationCodeRequest::new("new@example.com")
+        .with_referral_code("6aac8ab5-aeec-48b8-a4cc-0a446d952862");
+    let result = auth_api.request_registration_code(&req).await;
 
     assert!(result.is_ok());
     let resp = result.unwrap();
     assert_eq!(resp.email, "new@example.com");
+    assert_eq!(resp.message, "验证码已发送，请在 10 分钟内完成验证");
+    assert_eq!(resp.expires_in_seconds, 600);
 }
 
 #[tokio::test]
-async fn test_verify_email_success() {
+async fn test_complete_registration_success() {
     let (client, mock_server) = create_test_client().await;
     let auth_api = AuthApi::new(&client);
 
-    Mock::given(method("GET"))
-        .and(path("/api/v1/auth/verify-email/valid_token_123"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "message": "Email verified successfully"
+    let expected_body = serde_json::json!({
+        "email": "new@example.com",
+        "code": "123456",
+        "password": "SecurePass123!",
+        "name": "New User"
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/register/complete"))
+        .and(body_json(&expected_body))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "user_id": "user_new_001",
+            "tenant_id": "tenant_001",
+            "email": "new@example.com",
+            "message": "注册成功，您现在可以登录了"
         })))
         .mount(&mock_server)
         .await;
 
-    let result = auth_api.verify_email("valid_token_123").await;
+    let req = CompleteRegistrationRequest::new("new@example.com", "123456", "SecurePass123!")
+        .with_name("New User");
+    let result = auth_api.complete_registration(&req).await;
 
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().message, "Email verified successfully");
+    let resp = result.unwrap();
+    assert_eq!(resp.email, "new@example.com");
+    assert_eq!(resp.message, "注册成功，您现在可以登录了");
 }
 
 #[tokio::test]
@@ -180,25 +193,6 @@ async fn test_refresh_token_success() {
     assert!(result.is_ok());
     let resp = result.unwrap();
     assert_eq!(resp.access_token, "new_access_token_999");
-}
-
-#[tokio::test]
-async fn test_resend_verification_success() {
-    let (client, mock_server) = create_test_client().await;
-    let auth_api = AuthApi::new(&client);
-
-    Mock::given(method("POST"))
-        .and(path("/api/v1/auth/resend-verification"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "message": "Verification email resent"
-        })))
-        .mount(&mock_server)
-        .await;
-
-    let req = ResendVerificationRequest::new(fixtures::TEST_EMAIL);
-    let result = auth_api.resend_verification(&req).await;
-
-    assert!(result.is_ok());
 }
 
 #[tokio::test]

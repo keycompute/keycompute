@@ -40,11 +40,10 @@ pub fn Settings() -> Element {
     };
 
     let platform_name = get_val("site_name");
-    let register_mode = get_val("registration_mode");
     let currency = get_val("default_currency");
     let min_recharge = get_val("min_recharge_amount");
+    let default_user_quota = get_val("default_user_quota");
     let jwt_expire = get_val("jwt_expire_hours");
-    let email_verify = get_val("email_verification_required");
 
     rsx! {
         div { class: "page-container settings-console-page",
@@ -108,20 +107,16 @@ pub fn Settings() -> Element {
                                     save_ok,
                                     save_error
                                 }
-                                SettingItemSelect {
-                                    label: i18n.t("settings.registration_mode_label").to_string(),
-                                    description: i18n.t("settings.registration_mode_desc").to_string(),
-                                    setting_key: "registration_mode",
-                                    value: register_mode.clone(),
+                                SettingItemNumber {
+                                    label: i18n.t("settings.default_user_quota_label").to_string(),
+                                    description: i18n.t("settings.default_user_quota_desc").to_string(),
+                                    setting_key: "default_user_quota",
+                                    value: default_user_quota.clone(),
                                     editable: is_admin,
                                     auth_store,
                                     save_ok,
                                     save_error,
-                                    options: vec![
-                                        ("open".to_string(), i18n.t("settings.registration_open").to_string()),
-                                        ("invite".to_string(), i18n.t("settings.registration_invite").to_string()),
-                                        ("close".to_string(), i18n.t("settings.registration_close").to_string()),
-                                    ]
+                                    allow_negative: true
                                 }
                                 SettingItemSelect {
                                     label: i18n.t("settings.default_currency_label").to_string(),
@@ -145,7 +140,8 @@ pub fn Settings() -> Element {
                                     editable: is_admin,
                                     auth_store,
                                     save_ok,
-                                    save_error
+                                    save_error,
+                                    allow_negative: false
                                 }
                             }
                         }
@@ -168,17 +164,8 @@ pub fn Settings() -> Element {
                                     editable: is_admin,
                                     auth_store,
                                     save_ok,
-                                    save_error
-                                }
-                                SettingItemToggle {
-                                    label: i18n.t("settings.email_verify_label").to_string(),
-                                    description: i18n.t("settings.email_verify_desc").to_string(),
-                                    setting_key: "email_verification_required",
-                                    value: email_verify.clone(),
-                                    editable: is_admin,
-                                    auth_store,
-                                    save_ok,
-                                    save_error
+                                    save_error,
+                                    allow_negative: false
                                 }
                             }
                         }
@@ -275,6 +262,7 @@ fn SettingItemNumber(
     auth_store: AuthStore,
     mut save_ok: Signal<bool>,
     mut save_error: Signal<String>,
+    allow_negative: bool,
 ) -> Element {
     let i18n = use_i18n();
     let mut edit_val = use_signal(|| value.clone());
@@ -290,7 +278,7 @@ fn SettingItemNumber(
     let on_save = move |_| {
         let val_str = edit_val();
         if let Ok(num) = val_str.parse::<f64>() {
-            if num < 0.0 {
+            if !allow_negative && num < 0.0 {
                 *error_msg.write() = i18n.t("settings.non_negative").to_string();
                 return;
             }
@@ -334,7 +322,7 @@ fn SettingItemNumber(
                             input {
                                 class: "input-field setting-control",
                                 r#type: "number",
-                                min: "0",
+                                min: if allow_negative { None } else { Some("0") },
                                 value: "{edit_val}",
                                 oninput: move |e| {
                                     *edit_val.write() = e.value();

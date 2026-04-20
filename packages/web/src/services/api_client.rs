@@ -126,6 +126,7 @@ pub fn localize_error(err: &client_api::error::ClientError) -> String {
         ClientError::Forbidden(_) => "权限不足，无法执行此操作".to_string(),
         ClientError::NotFound(_) => "资源不存在或已被删除".to_string(),
         ClientError::RateLimited(_) => "请求过于频繁，请稍候再试".to_string(),
+        ClientError::Verification(_) => "验证码校验失败，请检查后重试".to_string(),
         ClientError::Network(_) => "网络连接失败，请检查网络设置".to_string(),
         ClientError::ServerError(_) => "服务器内部错误，请稍候重试".to_string(),
         ClientError::ServiceUnavailable(_) => "服务暂时不可用，请稍候再试".to_string(),
@@ -144,5 +145,20 @@ pub fn localize_error(err: &client_api::error::ClientError) -> String {
             }
         }
         ClientError::Other(msg) => msg.clone(),
+    }
+}
+
+/// 优先使用后端返回的业务消息；如消息过于底层，再回退到本地友好文案。
+pub fn user_error_message(err: &client_api::error::ClientError) -> String {
+    let message = err.message();
+    if message.trim().is_empty() {
+        return localize_error(err);
+    }
+
+    match err {
+        ClientError::Network(_)
+        | ClientError::Serialization(_)
+        | ClientError::InvalidResponse(_) => localize_error(err),
+        _ => message,
     }
 }

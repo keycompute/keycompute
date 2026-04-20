@@ -74,7 +74,7 @@ KeyCompute 是一个**高性能**、**易扩展**、**开箱即用**的 AI Token
 ### 用户与权限
 
 - **多用户支持**：用户注册、登录、权限管理
-- **邮箱验证**：注册邮箱验证、密码重置
+- **邮箱验证码**：注册验证码、密码重置
 - **API Key 管理**：创建、删除、查看 API Key
 - **分组限流**：用户级别请求限流
 
@@ -167,7 +167,7 @@ export KC__EMAIL__SMTP_PORT="587"
 export KC__EMAIL__SMTP_USERNAME="noreply@example.com"
 export KC__EMAIL__SMTP_PASSWORD="your-smtp-password"
 export KC__EMAIL__FROM_ADDRESS="noreply@example.com"
-export KC__EMAIL__VERIFICATION_BASE_URL="https://api.example.com"
+export APP_BASE_URL="https://app.example.com"
 export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
 export KC__DEFAULT_ADMIN_PASSWORD="12345"
 
@@ -233,7 +233,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | SMTP 密码 | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | 发件邮箱地址 | ⚪ |
 | `KC__EMAIL__FROM_NAME` | 发件人显示名称 | ⚪ |
-| `KC__EMAIL__VERIFICATION_BASE_URL` | 邮箱验证与密码重置链接基础 URL | ⚪ |
+| `APP_BASE_URL` | 用于密码重置和邀请链接的公开前端地址；未设置时回退到可信转发请求头推导 | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | 默认管理员邮箱 | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | 默认管理员密码 | ⚪ |
 

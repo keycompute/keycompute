@@ -4,6 +4,7 @@
 //! 1. 环境变量优先（前缀 KC__，双下划线分隔层级）
 //! 2. 配置文件回退（项目根目录 config.toml）
 //! 3. 默认值兜底
+//! 4. 顶层 `APP_BASE_URL` 环境变量可覆盖公开链接基础地址
 
 use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
@@ -31,6 +32,8 @@ pub use server::ServerConfig;
 /// 全局应用配置
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct AppConfig {
+    /// 对外公开的前端应用基础 URL（可选）
+    pub app_base_url: Option<String>,
     /// 服务器配置
     pub server: ServerConfig,
     /// 数据库配置
@@ -63,17 +66,40 @@ pub enum ConfigLoadError {
 }
 
 impl AppConfig {
+    fn apply_global_env_overrides(mut app_config: AppConfig) -> AppConfig {
+        if let Ok(url) = std::env::var("APP_BASE_URL") {
+            app_config.app_base_url = Self::normalize_app_base_url(Some(url));
+        } else {
+            app_config.app_base_url = Self::normalize_app_base_url(app_config.app_base_url);
+        }
+
+        app_config
+    }
+
+    fn normalize_app_base_url(value: Option<String>) -> Option<String> {
+        value.and_then(|url| {
+            let normalized = url.trim().trim_end_matches('/').to_string();
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        })
+    }
+
     /// 加载配置（环境变量优先，配置文件回退）
     ///
     /// 加载顺序：
     /// 1. 设置默认值
     /// 2. 从项目根目录 config.toml 加载（如果存在）
     /// 3. 从环境变量 KC__* 加载（覆盖配置文件）
+    /// 4. 从顶层 APP_BASE_URL 加载公开链接基础地址（覆盖配置文件）
     ///
     /// # 环境变量格式
     /// - 使用 `KC__` 前缀
     /// - 使用双下划线 `__` 分隔层级
     /// - 示例：`KC__SERVER__PORT=8080` 对应 `server.port`
+    /// - 顶层 `APP_BASE_URL` 用于公开前端地址
     pub fn load() -> Result<Self, ConfigLoadError> {
         // 1. 设置默认值
         let mut builder = Self::create_default_builder()?;
@@ -98,7 +124,7 @@ impl AppConfig {
         );
 
         let config = builder.build()?;
-        let app_config: AppConfig = config.try_deserialize()?;
+        let app_config: AppConfig = Self::apply_global_env_overrides(config.try_deserialize()?);
 
         tracing::info!("配置加载成功");
         Ok(app_config)
@@ -117,7 +143,7 @@ impl AppConfig {
         );
 
         let config = builder.build()?;
-        let app_config: AppConfig = config.try_deserialize()?;
+        let app_config: AppConfig = Self::apply_global_env_overrides(config.try_deserialize()?);
 
         Ok(app_config)
     }
@@ -139,7 +165,7 @@ impl AppConfig {
         builder = builder.add_source(File::from(path).required(true));
 
         let config = builder.build()?;
-        let app_config: AppConfig = config.try_deserialize()?;
+        let app_config: AppConfig = Self::apply_global_env_overrides(config.try_deserialize()?);
 
         Ok(app_config)
     }
@@ -330,8 +356,8 @@ impl AppConfig {
             tracing::warn!("⚠️  Email 发送超时设置为 0，将使用无超时模式");
         }
 
-        if self.email.verification_base_url.is_empty() {
-            tracing::warn!("⚠️  验证链接基础 URL 为空，邮件验证功能将不可用");
+        if self.app_base_url.is_none() {
+            tracing::info!("💡 提示: 未配置 APP_BASE_URL，公开链接将回退到可信请求头推导");
         }
 
         // 加密配置提醒
@@ -433,24 +459,25 @@ mod tests {
         // 使用 unsafe 因为 set_var/remove_var 在 Rust 2024 中是 unsafe
         unsafe {
             std::env::set_var("KC__SERVER__PORT", "8080");
+            std::env::set_var("APP_BASE_URL", "http://localhost");
             std::env::set_var("KC__EMAIL__SMTP_HOST", "localhost");
             std::env::set_var("KC__EMAIL__SMTP_USERNAME", "test");
             std::env::set_var("KC__EMAIL__SMTP_PASSWORD", "test");
             std::env::set_var("KC__EMAIL__FROM_ADDRESS", "test@localhost");
-            std::env::set_var("KC__EMAIL__VERIFICATION_BASE_URL", "http://localhost");
         }
 
         let config = AppConfig::from_env().expect("应该从环境变量加载配置");
         assert_eq!(config.server.port, 8080);
+        assert_eq!(config.app_base_url.as_deref(), Some("http://localhost"));
 
         // 清理
         unsafe {
             std::env::remove_var("KC__SERVER__PORT");
+            std::env::remove_var("APP_BASE_URL");
             std::env::remove_var("KC__EMAIL__SMTP_HOST");
             std::env::remove_var("KC__EMAIL__SMTP_USERNAME");
             std::env::remove_var("KC__EMAIL__SMTP_PASSWORD");
             std::env::remove_var("KC__EMAIL__FROM_ADDRESS");
-            std::env::remove_var("KC__EMAIL__VERIFICATION_BASE_URL");
         }
     }
 
@@ -460,11 +487,11 @@ mod tests {
         // 设置 crypto 和 email 环境变量
         unsafe {
             std::env::set_var("KC__CRYPTO__SECRET_KEY", "dGVzdC1rZXktZnJvbS1lbnY=");
+            std::env::set_var("APP_BASE_URL", "http://localhost");
             std::env::set_var("KC__EMAIL__SMTP_HOST", "localhost");
             std::env::set_var("KC__EMAIL__SMTP_USERNAME", "test");
             std::env::set_var("KC__EMAIL__SMTP_PASSWORD", "test");
             std::env::set_var("KC__EMAIL__FROM_ADDRESS", "test@localhost");
-            std::env::set_var("KC__EMAIL__VERIFICATION_BASE_URL", "http://localhost");
         }
 
         let config = AppConfig::from_env().expect("应该从环境变量加载配置");
@@ -478,11 +505,11 @@ mod tests {
         // 清理
         unsafe {
             std::env::remove_var("KC__CRYPTO__SECRET_KEY");
+            std::env::remove_var("APP_BASE_URL");
             std::env::remove_var("KC__EMAIL__SMTP_HOST");
             std::env::remove_var("KC__EMAIL__SMTP_USERNAME");
             std::env::remove_var("KC__EMAIL__SMTP_PASSWORD");
             std::env::remove_var("KC__EMAIL__FROM_ADDRESS");
-            std::env::remove_var("KC__EMAIL__VERIFICATION_BASE_URL");
         }
     }
 

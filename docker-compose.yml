@@ -124,7 +124,7 @@ services:
       KC__EMAIL__SMTP_PASSWORD: ${KC__EMAIL__SMTP_PASSWORD}
       KC__EMAIL__FROM_ADDRESS: ${KC__EMAIL__FROM_ADDRESS}
       KC__EMAIL__FROM_NAME: ${KC__EMAIL__FROM_NAME:-KeyCompute}
-      KC__EMAIL__VERIFICATION_BASE_URL: ${KC__EMAIL__VERIFICATION_BASE_URL:-https://example.com}
+      APP_BASE_URL: ${APP_BASE_URL:-http://127.0.0.1}
 
       # 服务器配置
       KC__SERVER__BIND_ADDR: "0.0.0.0"

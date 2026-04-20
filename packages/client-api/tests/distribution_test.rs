@@ -137,7 +137,7 @@ async fn test_get_my_referral_code_success() {
         .and(path("/api/v1/me/referral/code"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "referral_code": "ABC123XYZ",
-            "invite_link": "https://keycompute.com/register?ref=ABC123XYZ"
+            "invite_link": "https://keycompute.com/auth/register?ref=ABC123XYZ"
         })))
         .mount(&mock_server)
         .await;
@@ -151,7 +151,7 @@ async fn test_get_my_referral_code_success() {
     assert_eq!(resp.referral_code, "ABC123XYZ");
     assert_eq!(
         resp.referral_link,
-        "https://keycompute.com/register?ref=ABC123XYZ"
+        "https://keycompute.com/auth/register?ref=ABC123XYZ"
     );
 }
 

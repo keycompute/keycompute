@@ -74,7 +74,7 @@ Accede a todos los modelos principales mediante el formato estándar de **OpenAI
 ### Usuarios y permisos
 
 - **Soporte multiusuario**: registro, inicio de sesión y gestión de permisos
-- **Verificación por correo**: verificación al registrarse y restablecimiento de contraseña
+- **Códigos por correo**: códigos de registro y restablecimiento de contraseña
 - **Gestión de API keys**: crear, eliminar y ver API keys
 - **Límite por grupos**: limitación de solicitudes a nivel de usuario
 
@@ -167,7 +167,7 @@ export KC__EMAIL__SMTP_PORT="587"
 export KC__EMAIL__SMTP_USERNAME="noreply@example.com"
 export KC__EMAIL__SMTP_PASSWORD="your-smtp-password"
 export KC__EMAIL__FROM_ADDRESS="noreply@example.com"
-export KC__EMAIL__VERIFICATION_BASE_URL="https://api.example.com"
+export APP_BASE_URL="https://app.example.com"
 export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
 export KC__DEFAULT_ADMIN_PASSWORD="12345"
 
@@ -233,7 +233,7 @@ Variables de entorno principales:
 | `KC__EMAIL__SMTP_PASSWORD` | Contraseña SMTP | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | Dirección de correo del remitente | ⚪ |
 | `KC__EMAIL__FROM_NAME` | Nombre visible del remitente | ⚪ |
-| `KC__EMAIL__VERIFICATION_BASE_URL` | URL base para enlaces de verificación y restablecimiento | ⚪ |
+| `APP_BASE_URL` | URL pública base del frontend para enlaces de restablecimiento e invitación; si falta, se usa como fallback la inferencia desde headers reenviados de confianza | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | Correo del administrador por defecto | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | Contraseña del administrador por defecto | ⚪ |
 

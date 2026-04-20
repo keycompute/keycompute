@@ -76,6 +76,27 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.send_reset_link", "Send Reset Link");
     m.insert("auth.logging_in", "Signing in...");
     m.insert("auth.registering", "Signing up...");
+    m.insert("auth.request_code", "Get Code");
+    m.insert("auth.requesting_code", "Sending code...");
+    m.insert("auth.request_code_failed", "Failed to get code");
+    m.insert("auth.resend_code", "Resend Code");
+    m.insert("auth.complete_registration", "Complete Registration");
+    m.insert("auth.verification_code", "Email Code");
+    m.insert(
+        "auth.verification_code_placeholder",
+        "Enter the 6-digit code",
+    );
+    m.insert("auth.code_required", "Please enter the email code");
+    m.insert("auth.code_sent_to", "Code sent to:");
+    m.insert(
+        "auth.code_sent_hint",
+        "The code is valid for 10 minutes. Your account will be created only after verification succeeds.",
+    );
+    m.insert("auth.change_email", "Change Email");
+    m.insert(
+        "auth.registration_success",
+        "Registration is complete. You can now sign in with your email and password.",
+    );
     m.insert(
         "auth.password_min8",
         "Password must be at least 8 characters",
@@ -269,21 +290,6 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("reset_password.success", "Password reset successfully!");
     m.insert("reset_password.go_login", "Go to Sign In");
     m.insert("reset_password.submit", "Confirm Reset");
-    m.insert("verify_email.title", "Email Verification");
-    m.insert(
-        "verify_email.verifying",
-        "Verifying your email, please wait...",
-    );
-    m.insert(
-        "verify_email.success",
-        "Email verified successfully. You can sign in now.",
-    );
-    m.insert("verify_email.go_login", "Go to Sign In");
-    m.insert("verify_email.failed", "Verification failed");
-    m.insert(
-        "verify_email.expired_hint",
-        "The link may have expired. Please register again or contact support.",
-    );
 
     // ── Account Settings ────────────────────────
     m.insert(
@@ -427,17 +433,17 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.load_failed", "Failed to load settings");
     m.insert("settings.saved", "Settings saved");
     m.insert("settings.basic_title", "Basic Configuration");
-    m.insert("settings.basic_desc", "Define the platform name, registration policy, and recharge baseline settings. The form stays intentionally narrow on wide screens.");
+    m.insert("settings.basic_desc", "Define the platform name, default new-user credit, and recharge baseline settings. The form stays intentionally narrow on wide screens.");
     m.insert("settings.site_name_label", "Platform Name");
     m.insert(
         "settings.site_name_desc",
         "Shown in the sign-in page, admin navigation, and email templates.",
     );
-    m.insert("settings.registration_mode_label", "Registration Mode");
-    m.insert("settings.registration_mode_desc", "Controls whether new users can register freely, require invitations, or cannot register at all.");
-    m.insert("settings.registration_open", "Open Registration");
-    m.insert("settings.registration_invite", "Invite Only");
-    m.insert("settings.registration_close", "Closed");
+    m.insert(
+        "settings.default_user_quota_label",
+        "Default New User Credit",
+    );
+    m.insert("settings.default_user_quota_desc", "Controls the runtime signup credit for new users. Credit is only granted when the value is greater than 0; 0 or negative values disable the gift.");
     m.insert("settings.default_currency_label", "Default Currency");
     m.insert(
         "settings.default_currency_desc",
@@ -449,14 +455,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Prevents extremely small recharge orders from entering the payment flow.",
     );
     m.insert("settings.security_title", "Security Configuration");
-    m.insert("settings.security_desc", "Control token lifetime and account verification strictness to avoid overly loose defaults.");
+    m.insert("settings.security_desc", "Control token lifetime and related security parameters. New user registration always requires email code verification.");
     m.insert("settings.jwt_expire_label", "JWT Token Expiry (Hours)");
     m.insert("settings.jwt_expire_desc", "Default lifetime for access tokens after sign-in. Longer expiry improves convenience but increases exposure risk.");
-    m.insert("settings.email_verify_label", "Email Verification");
-    m.insert(
-        "settings.email_verify_desc",
-        "When enabled, new accounts must verify their email before continuing to use the platform.",
-    );
     m.insert("settings.save_failed", "Failed to save");
     m.insert("settings.non_negative", "Value cannot be negative");
     m.insert("settings.invalid_number", "Please enter a valid number");

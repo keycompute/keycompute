@@ -74,7 +74,7 @@ Access all major models through the standard **OpenAI API format** out of the bo
 ### Users & permissions
 
 - **Multi-user support**: user registration, login, and permission management
-- **Email verification**: signup email verification and password reset
+- **Email codes**: signup email codes and password reset
 - **API key management**: create, delete, and view API keys
 - **Group-based rate limiting**: user-level request throttling
 
@@ -167,7 +167,7 @@ export KC__EMAIL__SMTP_PORT="587"
 export KC__EMAIL__SMTP_USERNAME="noreply@example.com"
 export KC__EMAIL__SMTP_PASSWORD="your-smtp-password"
 export KC__EMAIL__FROM_ADDRESS="noreply@example.com"
-export KC__EMAIL__VERIFICATION_BASE_URL="https://api.example.com"
+export APP_BASE_URL="https://app.example.com"
 export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
 export KC__DEFAULT_ADMIN_PASSWORD="12345"
 
@@ -233,7 +233,7 @@ Primary environment variables:
 | `KC__EMAIL__SMTP_PASSWORD` | SMTP password | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | Sender email address | ⚪ |
 | `KC__EMAIL__FROM_NAME` | Sender display name | ⚪ |
-| `KC__EMAIL__VERIFICATION_BASE_URL` | Base URL for email verification and password reset links | ⚪ |
+| `APP_BASE_URL` | Public frontend base URL for password reset and invite links; falls back to trusted forwarded headers when unset | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | Default administrator email | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | Default administrator password | ⚪ |
 

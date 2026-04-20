@@ -13,6 +13,7 @@ pub mod tables {
     pub const DISTRIBUTION_RECORDS: &str = "distribution_records";
     pub const TENANT_DISTRIBUTION_RULES: &str = "tenant_distribution_rules";
     pub const PAYMENT_ORDERS: &str = "payment_orders";
+    pub const PENDING_REGISTRATIONS: &str = "pending_registrations";
     pub const USER_BALANCES: &str = "user_balances";
     pub const BALANCE_TRANSACTIONS: &str = "balance_transactions";
     pub const SYSTEM_SETTINGS: &str = "system_settings";
@@ -160,6 +161,21 @@ pub mod payment_orders {
     pub const PAY_URL: &str = "pay_url";
     pub const NOTIFY_DATA: &str = "notify_data";
     pub const REMARKS: &str = "remarks";
+    pub const CREATED_AT: &str = "created_at";
+    pub const UPDATED_AT: &str = "updated_at";
+}
+
+/// pending_registrations 表列名
+pub mod pending_registrations {
+    pub const ID: &str = "id";
+    pub const EMAIL: &str = "email";
+    pub const REFERRAL_CODE: &str = "referral_code";
+    pub const VERIFICATION_CODE_HASH: &str = "verification_code_hash";
+    pub const EXPIRES_AT: &str = "expires_at";
+    pub const VERIFY_ATTEMPTS: &str = "verify_attempts";
+    pub const RESEND_COUNT: &str = "resend_count";
+    pub const LAST_SENT_AT: &str = "last_sent_at";
+    pub const REQUESTED_FROM_IP: &str = "requested_from_ip";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
 }

@@ -31,6 +31,8 @@ pub struct RequestPasswordResetRequest {
     pub email: String,
     /// 客户端 IP（可选）
     pub client_ip: Option<String>,
+    /// 对外公开的前端应用基础 URL
+    pub public_base_url: String,
 }
 
 /// 密码重置服务
@@ -145,7 +147,7 @@ impl PasswordResetService {
         // 5. 发送密码重置邮件
         if let Some(email_service) = &self.email_service
             && let Err(e) = email_service
-                .send_password_reset_email(&email, &token)
+                .send_password_reset_email(&email, &token, &req.public_base_url)
                 .await
         {
             tracing::error!(

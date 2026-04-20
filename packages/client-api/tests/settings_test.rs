@@ -172,8 +172,6 @@ async fn test_get_public_settings_success() {
             "site_logo_url": null,
             "site_favicon_url": null,
             "api_base_url": null,
-            "allow_registration": true,
-            "email_verification_required": false,
             "maintenance_mode": false,
             "maintenance_message": null,
             "alipay_enabled": false,
@@ -193,7 +191,6 @@ async fn test_get_public_settings_success() {
     assert!(result.is_ok());
     let settings = result.unwrap();
     assert_eq!(settings.site_name, "KeyCompute");
-    assert!(settings.allow_registration);
 }
 
 #[tokio::test]
@@ -206,8 +203,6 @@ async fn test_get_public_settings_empty() {
         .and(path("/api/v1/settings/public"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "site_name": "",
-            "allow_registration": false,
-            "email_verification_required": false,
             "maintenance_mode": false,
             "alipay_enabled": false,
             "wechatpay_enabled": false,

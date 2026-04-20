@@ -74,7 +74,7 @@ KeyCompute هي منصة خدمات حوسبة رموز ذكاء اصطناعي 
 ### المستخدمون والصلاحيات
 
 - **دعم متعدد المستخدمين**: التسجيل وتسجيل الدخول وإدارة الصلاحيات
-- **التحقق عبر البريد الإلكتروني**: التحقق عند التسجيل وإعادة تعيين كلمة المرور
+- **رموز البريد الإلكتروني**: رموز التسجيل وإعادة تعيين كلمة المرور
 - **إدارة مفاتيح API**: إنشاء وحذف وعرض مفاتيح API
 - **تحديد المعدل حسب المجموعات**: تقييد الطلبات على مستوى المستخدم
 
@@ -167,7 +167,7 @@ export KC__EMAIL__SMTP_PORT="587"
 export KC__EMAIL__SMTP_USERNAME="noreply@example.com"
 export KC__EMAIL__SMTP_PASSWORD="your-smtp-password"
 export KC__EMAIL__FROM_ADDRESS="noreply@example.com"
-export KC__EMAIL__VERIFICATION_BASE_URL="https://api.example.com"
+export APP_BASE_URL="https://app.example.com"
 export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
 export KC__DEFAULT_ADMIN_PASSWORD="12345"
 
@@ -233,7 +233,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | كلمة مرور SMTP | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | عنوان بريد المرسل | ⚪ |
 | `KC__EMAIL__FROM_NAME` | الاسم الظاهر للمرسل | ⚪ |
-| `KC__EMAIL__VERIFICATION_BASE_URL` | الرابط الأساسي للتحقق عبر البريد وإعادة التعيين | ⚪ |
+| `APP_BASE_URL` | العنوان العام لواجهة التطبيق لروابط إعادة التعيين والدعوات؛ وعند عدم ضبطه يتم الرجوع إلى الاستنتاج من ترويسات التحويل الموثوقة | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | بريد المدير الافتراضي | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | كلمة مرور المدير الافتراضية | ⚪ |
 

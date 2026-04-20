@@ -13,6 +13,8 @@ use integration_tests::mocks::email::{MockEmailService, MockEmailType};
 use keycompute_auth::password::{EmailValidator, PasswordHasher, PasswordValidator};
 use uuid::Uuid;
 
+const TEST_PUBLIC_APP_BASE_URL: &str = "https://app.example.com";
+
 /// 测试密码重置令牌生命周期
 #[test]
 fn test_password_reset_token_lifecycle() {
@@ -109,7 +111,7 @@ async fn test_password_reset_request_flow() {
 
     // 3. 发送密码重置邮件
     let result = email_service
-        .send_password_reset_email(&user.email, reset_token)
+        .send_password_reset_email(&user.email, reset_token, TEST_PUBLIC_APP_BASE_URL)
         .await;
     chain.add_step(
         "integration-tests",
@@ -177,7 +179,7 @@ async fn test_password_reset_full_flow() {
 
     // 3. 发送重置邮件
     let email_result = email_service
-        .send_password_reset_email(&user.email, reset_token)
+        .send_password_reset_email(&user.email, reset_token, TEST_PUBLIC_APP_BASE_URL)
         .await;
     chain.add_step(
         "integration-tests",
@@ -341,7 +343,7 @@ async fn test_reset_email_failure_handling() {
 
     // 2. 尝试发送重置邮件
     let result = email_service
-        .send_password_reset_email("test@example.com", "token")
+        .send_password_reset_email("test@example.com", "token", TEST_PUBLIC_APP_BASE_URL)
         .await;
     chain.add_step(
         "integration-tests",
@@ -361,7 +363,7 @@ async fn test_reset_email_failure_handling() {
     // 4. 恢复服务
     email_service.set_should_fail(false);
     let result = email_service
-        .send_password_reset_email("test@example.com", "token")
+        .send_password_reset_email("test@example.com", "token", TEST_PUBLIC_APP_BASE_URL)
         .await;
     chain.add_step(
         "integration-tests",
@@ -390,7 +392,7 @@ async fn test_multiple_reset_requests() {
     for token in &tokens {
         let reset = MockPasswordReset::new(user.id, *token);
         let result = email_service
-            .send_password_reset_email(&user.email, token)
+            .send_password_reset_email(&user.email, token, TEST_PUBLIC_APP_BASE_URL)
             .await;
         chain.add_step(
             "integration-tests",
@@ -566,7 +568,7 @@ async fn test_password_reset_email_integration() {
 
     // 3. 发送邮件
     let result = email_service
-        .send_password_reset_email(&user.email, reset_token)
+        .send_password_reset_email(&user.email, reset_token, TEST_PUBLIC_APP_BASE_URL)
         .await;
     chain.add_step(
         "integration-tests",

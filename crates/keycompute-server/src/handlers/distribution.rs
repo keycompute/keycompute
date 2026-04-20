@@ -10,6 +10,7 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::resolve_public_base_url,
     state::AppState,
 };
 use axum::{
@@ -190,6 +191,17 @@ pub struct InviteLinkResponse {
     pub expires_at: Option<String>,
 }
 
+fn build_invite_link(base_url: &str, referral_code: &str, source: Option<&str>) -> String {
+    if let Some(source) = source {
+        format!(
+            "{}/auth/register?ref={}&source={}",
+            base_url, referral_code, source
+        )
+    } else {
+        format!("{}/auth/register?ref={}", base_url, referral_code)
+    }
+}
+
 /// 获取我的推荐码和邀请链接
 ///
 /// GET /api/v1/me/referral/code
@@ -212,12 +224,13 @@ pub async fn get_my_referral_code(
         .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
 
     // 构建邀请链接
-    // 优先从 Host 头获取，其次从环境变量获取，最后使用默认值
-    let base_url = get_base_url(&headers);
-    let invite_link = format!("{}/auth/register?ref={}", base_url, auth.user_id);
+    // 优先使用全局 APP_BASE_URL，缺失时回退到可信请求头推导
+    let base_url = resolve_public_base_url(&headers, state.app_base_url.as_deref());
+    let referral_code = auth.user_id.to_string();
+    let invite_link = build_invite_link(&base_url, &referral_code, None);
 
     Ok(Json(ReferralCodeResponse {
-        referral_code: auth.user_id.to_string(),
+        referral_code,
         invite_link,
         level1_count: referral_stats.level1_count,
         level2_count: referral_stats.level2_count,
@@ -242,21 +255,13 @@ pub async fn generate_invite_link(
     check_distribution_enabled(pool).await?;
 
     // 构建基础邀请链接
-    let base_url = get_base_url(&headers);
-
-    // 如果有来源标识，添加到链接中
-    let invite_link = if let Some(source) = &req.source {
-        format!(
-            "{}/auth/register?ref={}&source={}",
-            base_url, auth.user_id, source
-        )
-    } else {
-        format!("{}/auth/register?ref={}", base_url, auth.user_id)
-    };
+    let base_url = resolve_public_base_url(&headers, state.app_base_url.as_deref());
+    let referral_code = auth.user_id.to_string();
+    let invite_link = build_invite_link(&base_url, &referral_code, req.source.as_deref());
 
     Ok(Json(InviteLinkResponse {
         invite_link,
-        referral_code: auth.user_id.to_string(),
+        referral_code,
         short_link: None, // 可以集成短链接服务
         expires_at: None, // 可以添加过期时间
     }))
@@ -289,37 +294,6 @@ fn string_to_bigdecimal(value: &str) -> Result<BigDecimal> {
     value
         .parse()
         .map_err(|e| ApiError::BadRequest(format!("Invalid decimal: {}", e)))
-}
-
-/// 获取基础 URL
-/// 优先从反向代理转发的 Host 获取，其次从 Host 头获取，再次从环境变量
-/// APP_BASE_URL 获取，最后使用默认值。
-fn get_base_url(headers: &axum::http::HeaderMap) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|h| h.to_str().ok())
-        .map(|value| value.split(',').next().unwrap_or(value).trim())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("http");
-
-    let forwarded_host = headers
-        .get("x-forwarded-host")
-        .and_then(|h| h.to_str().ok())
-        .or_else(|| headers.get("host").and_then(|h| h.to_str().ok()))
-        .map(|value| value.split(',').next().unwrap_or(value).trim())
-        .filter(|value| !value.is_empty());
-
-    if let Some(host) = forwarded_host {
-        return format!("{}://{}", scheme, host);
-    }
-
-    // 其次从环境变量获取
-    if let Ok(url) = std::env::var("APP_BASE_URL") {
-        return url.trim_end_matches('/').to_string();
-    }
-
-    // 最后使用默认值
-    "https://127.0.0.1:8080".to_string()
 }
 
 /// 检查分销系统是否启用
@@ -787,25 +761,26 @@ mod tests {
     }
 
     #[test]
-    fn test_get_base_url_uses_host_without_hardcoded_port() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert("host", "ug2ltzf5j4-80.cnb.run".parse().unwrap());
-        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+    fn test_build_invite_link_uses_short_ref_param() {
+        let link = build_invite_link(
+            "https://app.example.com",
+            "6aac8ab5-aeec-48b8-a4cc-0a446d952862",
+            None,
+        );
 
-        let base_url = get_base_url(&headers);
-
-        assert_eq!(base_url, "http://ug2ltzf5j4-80.cnb.run");
+        assert_eq!(
+            link,
+            "https://app.example.com/auth/register?ref=6aac8ab5-aeec-48b8-a4cc-0a446d952862"
+        );
     }
 
     #[test]
-    fn test_get_base_url_prefers_forwarded_host() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert("host", "keycompute-server:3000".parse().unwrap());
-        headers.insert("x-forwarded-host", "app.example.com".parse().unwrap());
-        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+    fn test_build_invite_link_preserves_source_param() {
+        let link = build_invite_link("https://app.example.com", "abc123", Some("campaign"));
 
-        let base_url = get_base_url(&headers);
-
-        assert_eq!(base_url, "https://app.example.com");
+        assert_eq!(
+            link,
+            "https://app.example.com/auth/register?ref=abc123&source=campaign"
+        );
     }
 }

@@ -22,23 +22,29 @@ impl AuthApi {
         }
     }
 
-    /// 用户注册
-    pub async fn register(&self, req: &RegisterRequest) -> Result<AuthResponse> {
+    /// 请求注册验证码
+    pub async fn request_registration_code(
+        &self,
+        req: &RequestRegistrationCodeRequest,
+    ) -> Result<RequestRegistrationCodeResponse> {
         self.client
             .post_json("/api/v1/auth/register", req, None)
+            .await
+    }
+
+    /// 完成注册
+    pub async fn complete_registration(
+        &self,
+        req: &CompleteRegistrationRequest,
+    ) -> Result<CompleteRegistrationResponse> {
+        self.client
+            .post_json("/api/v1/auth/register/complete", req, None)
             .await
     }
 
     /// 用户登录
     pub async fn login(&self, req: &LoginRequest) -> Result<AuthResponse> {
         self.client.post_json("/api/v1/auth/login", req, None).await
-    }
-
-    /// 验证邮箱
-    pub async fn verify_email(&self, token: &str) -> Result<MessageResponse> {
-        self.client
-            .get_json(&format!("/api/v1/auth/verify-email/{}", token), None)
-            .await
     }
 
     /// 忘记密码
@@ -68,30 +74,57 @@ impl AuthApi {
             .post_json("/api/v1/auth/refresh-token", req, None)
             .await
     }
+}
 
-    /// 重发验证邮件
-    pub async fn resend_verification(
-        &self,
-        req: &ResendVerificationRequest,
-    ) -> Result<MessageResponse> {
-        self.client
-            .post_json("/api/v1/auth/resend-verification", req, None)
-            .await
+/// 请求注册验证码
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestRegistrationCodeRequest {
+    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub referral_code: Option<String>,
+}
+
+impl RequestRegistrationCodeRequest {
+    pub fn new(email: impl Into<String>) -> Self {
+        Self {
+            email: email.into(),
+            referral_code: None,
+        }
+    }
+
+    pub fn with_referral_code(mut self, referral_code: impl Into<String>) -> Self {
+        self.referral_code = Some(referral_code.into());
+        self
     }
 }
 
-/// 注册请求
-#[derive(Debug, Clone, Serialize)]
-pub struct RegisterRequest {
+/// 请求注册验证码响应
+#[derive(Debug, Clone, Deserialize)]
+pub struct RequestRegistrationCodeResponse {
     pub email: String,
+    pub message: String,
+    pub expires_in_seconds: i64,
+}
+
+/// 完成注册请求
+#[derive(Debug, Clone, Serialize)]
+pub struct CompleteRegistrationRequest {
+    pub email: String,
+    pub code: String,
     pub password: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
-impl RegisterRequest {
-    pub fn new(email: impl Into<String>, password: impl Into<String>) -> Self {
+impl CompleteRegistrationRequest {
+    pub fn new(
+        email: impl Into<String>,
+        code: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
         Self {
             email: email.into(),
+            code: code.into(),
             password: password.into(),
             name: None,
         }
@@ -101,6 +134,15 @@ impl RegisterRequest {
         self.name = Some(name.into());
         self
     }
+}
+
+/// 完成注册响应
+#[derive(Debug, Clone, Deserialize)]
+pub struct CompleteRegistrationResponse {
+    pub user_id: String,
+    pub tenant_id: String,
+    pub email: String,
+    pub message: String,
 }
 
 /// 登录请求
@@ -171,20 +213,6 @@ impl RefreshTokenRequest {
     pub fn new(refresh_token: impl Into<String>) -> Self {
         Self {
             refresh_token: refresh_token.into(),
-        }
-    }
-}
-
-/// 重发验证邮件请求
-#[derive(Debug, Clone, Serialize)]
-pub struct ResendVerificationRequest {
-    pub email: String,
-}
-
-impl ResendVerificationRequest {
-    pub fn new(email: impl Into<String>) -> Self {
-        Self {
-            email: email.into(),
         }
     }
 }

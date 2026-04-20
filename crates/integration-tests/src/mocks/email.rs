@@ -2,9 +2,11 @@
 //!
 //! 用于测试邮件发送功能，无需真实 SMTP 服务器
 
-use keycompute_emailserver::{EmailConfig, EmailError};
+use keycompute_emailserver::EmailError;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+
+const DEFAULT_PUBLIC_APP_BASE_URL: &str = "http://localhost:3000";
 
 /// 模拟邮件记录
 #[derive(Debug, Clone)]
@@ -47,8 +49,6 @@ pub struct MockEmailService {
     records: Arc<Mutex<Vec<MockEmailRecord>>>,
     /// 是否模拟发送失败
     should_fail: Arc<Mutex<bool>>,
-    /// 配置
-    config: EmailConfig,
 }
 
 impl MockEmailService {
@@ -57,22 +57,19 @@ impl MockEmailService {
         Self {
             records: Arc::new(Mutex::new(Vec::new())),
             should_fail: Arc::new(Mutex::new(false)),
-            config: EmailConfig::default(),
-        }
-    }
-
-    /// 从配置创建
-    pub fn with_config(config: EmailConfig) -> Self {
-        Self {
-            records: Arc::new(Mutex::new(Vec::new())),
-            should_fail: Arc::new(Mutex::new(false)),
-            config,
         }
     }
 
     /// 设置是否模拟发送失败
     pub fn set_should_fail(&self, fail: bool) {
         *self.should_fail.lock().unwrap() = fail;
+    }
+
+    fn legacy_verification_url(&self, token: &str) -> String {
+        format!(
+            "{}/auth/verify-email/{}",
+            DEFAULT_PUBLIC_APP_BASE_URL, token
+        )
     }
 
     /// 发送验证邮件
@@ -85,10 +82,10 @@ impl MockEmailService {
             id: Uuid::new_v4(),
             to: to.to_string(),
             subject: "请验证您的邮箱地址".to_string(),
-            text_body: format!("验证链接: {}", self.config.verification_url(token)),
+            text_body: format!("验证链接: {}", self.legacy_verification_url(token)),
             html_body: Some(format!(
                 "<a href=\"{}\">验证邮箱</a>",
-                self.config.verification_url(token)
+                self.legacy_verification_url(token)
             )),
             email_type: MockEmailType::Verification,
             token: Some(token.to_string()),
@@ -100,20 +97,28 @@ impl MockEmailService {
     }
 
     /// 发送密码重置邮件
-    pub async fn send_password_reset_email(&self, to: &str, token: &str) -> Result<(), EmailError> {
+    pub async fn send_password_reset_email(
+        &self,
+        to: &str,
+        token: &str,
+        app_base_url: &str,
+    ) -> Result<(), EmailError> {
         if *self.should_fail.lock().unwrap() {
             return Err(EmailError::SendError("Mock send failed".to_string()));
         }
+
+        let reset_url = format!(
+            "{}/auth/reset-password/{}",
+            app_base_url.trim().trim_end_matches('/'),
+            token
+        );
 
         let record = MockEmailRecord {
             id: Uuid::new_v4(),
             to: to.to_string(),
             subject: "重置您的密码".to_string(),
-            text_body: format!("重置链接: {}", self.config.password_reset_url(token)),
-            html_body: Some(format!(
-                "<a href=\"{}\">重置密码</a>",
-                self.config.password_reset_url(token)
-            )),
+            text_body: format!("重置链接: {}", reset_url),
+            html_body: Some(format!("<a href=\"{}\">重置密码</a>", reset_url)),
             email_type: MockEmailType::PasswordReset,
             token: Some(token.to_string()),
             sent_at: chrono::Utc::now(),
@@ -254,7 +259,7 @@ mod tests {
 
         // 发送密码重置邮件
         service
-            .send_password_reset_email("test@example.com", "reset456")
+            .send_password_reset_email("test@example.com", "reset456", DEFAULT_PUBLIC_APP_BASE_URL)
             .await
             .unwrap();
 

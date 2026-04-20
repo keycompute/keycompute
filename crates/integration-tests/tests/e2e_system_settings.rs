@@ -70,7 +70,7 @@ async fn test_update_system_settings_requires_admin() {
         .body(Body::from(
             json!({
                 "site_name": "Test Site",
-                "allow_registration": false
+                "default_user_quota": 0
             })
             .to_string(),
         ))

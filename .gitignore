@@ -36,3 +36,4 @@ CLAUDE.md
 .env
 .env.local
 .env.production
+config.toml

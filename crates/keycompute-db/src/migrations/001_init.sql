@@ -195,6 +195,33 @@ CREATE TABLE tenant_distribution_rules (
 
 CREATE INDEX idx_tenant_distribution_rules_tenant ON tenant_distribution_rules(tenant_id);
 CREATE INDEX idx_tenant_distribution_rules_active ON tenant_distribution_rules(is_active) WHERE is_active = TRUE;
+-- pending_registrations: 待完成注册表
+-- 用于邮箱验证码注册流程，在验证码验证成功前暂存注册占位状态
+
+CREATE TABLE pending_registrations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) NOT NULL UNIQUE,
+    -- 首次触达时锁定的推荐码（可选）
+    referral_code UUID REFERENCES users(id) ON DELETE SET NULL,
+    -- Argon2 哈希后的 6 位验证码
+    verification_code_hash VARCHAR(255) NOT NULL,
+    -- 验证码过期时间（默认 10 分钟）
+    expires_at TIMESTAMPTZ NOT NULL,
+    -- 已尝试验证次数
+    verify_attempts INTEGER NOT NULL DEFAULT 0,
+    -- 验证码发送次数
+    resend_count INTEGER NOT NULL DEFAULT 1,
+    -- 最近一次发送时间
+    last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- 发起请求的客户端 IP（可选）
+    requested_from_ip TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_pending_registrations_email ON pending_registrations(email);
+CREATE INDEX idx_pending_registrations_expires ON pending_registrations(expires_at);
+CREATE INDEX idx_pending_registrations_referral_code ON pending_registrations(referral_code);
 -- user_credentials: 用户密码凭证表
 -- 存储用户密码哈希和登录安全相关信息
 
@@ -225,30 +252,6 @@ CREATE INDEX idx_user_credentials_locked ON user_credentials(locked_until)
     WHERE locked_until IS NOT NULL;
 CREATE INDEX idx_user_credentials_verified ON user_credentials(email_verified) 
     WHERE email_verified = FALSE;
--- email_verifications: 邮箱验证令牌表
--- 管理用户邮箱验证流程
-
-CREATE TABLE email_verifications (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    email VARCHAR(255) NOT NULL,
-    -- 验证令牌 (随机字符串)
-    token VARCHAR(255) NOT NULL UNIQUE,
-    -- 令牌过期时间
-    expires_at TIMESTAMPTZ NOT NULL,
-    -- 是否已使用
-    used BOOLEAN NOT NULL DEFAULT FALSE,
-    used_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- 每个用户的每个邮箱只能有一个有效验证记录
-    UNIQUE(user_id, email)
-);
-
--- 索引
-CREATE INDEX idx_email_verifications_token ON email_verifications(token);
-CREATE INDEX idx_email_verifications_expires ON email_verifications(expires_at) 
-    WHERE used = FALSE;
-CREATE INDEX idx_email_verifications_user ON email_verifications(user_id);
 -- password_resets: 密码重置令牌表
 -- 管理用户密码重置流程
 
@@ -515,8 +518,6 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
     ('site_favicon_url', '', 'string', '站点 Favicon URL'),
     
     -- 注册设置
-    ('allow_registration', 'true', 'bool', '是否允许新用户注册'),
-    ('email_verification_required', 'true', 'bool', '注册是否需要邮箱验证'),
     ('default_user_quota', '10.00', 'decimal', '新用户默认配额（元）'),
     ('default_user_role', 'user', 'string', '新用户默认角色'),
     

@@ -2,6 +2,8 @@
 //
 //! 处理各种 HTTP 请求
 
+use axum::http::HeaderMap;
+
 // 管理功能（拆分为多个模块）
 pub mod admin_account;
 pub mod admin_pricing;
@@ -21,9 +23,8 @@ pub mod user;
 
 // 认证相关
 pub use auth::{
-    forgot_password_handler, login_handler, refresh_token_handler, register_handler,
-    resend_verification_handler, reset_password_handler, verify_email_handler,
-    verify_reset_token_handler,
+    complete_registration_handler, forgot_password_handler, login_handler, refresh_token_handler,
+    register_handler, reset_password_handler, verify_reset_token_handler,
 };
 
 // OpenAI 兼容 API (统一入口)
@@ -86,3 +87,85 @@ pub use payment::{
     admin_list_payment_orders, alipay_notify, create_payment_order, get_my_balance,
     get_payment_order, list_my_payment_orders, sync_payment_order,
 };
+
+const DEFAULT_PUBLIC_APP_BASE_URL: &str = "https://127.0.0.1:8080";
+
+fn normalize_public_base_url(base_url: &str) -> Option<String> {
+    let normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+pub(crate) fn resolve_public_base_url(
+    headers: &HeaderMap,
+    configured_base_url: Option<&str>,
+) -> String {
+    if let Some(base_url) = configured_base_url.and_then(normalize_public_base_url) {
+        return base_url;
+    }
+
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or(value).trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http");
+
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|h| h.to_str().ok())
+        .or_else(|| headers.get("host").and_then(|h| h.to_str().ok()))
+        .map(|value| value.split(',').next().unwrap_or(value).trim())
+        .filter(|value| !value.is_empty());
+
+    if let Some(host) = forwarded_host {
+        return format!("{}://{}", scheme, host);
+    }
+
+    DEFAULT_PUBLIC_APP_BASE_URL.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_public_base_url_prefers_configured_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-host",
+            "app-from-header.example.com".parse().unwrap(),
+        );
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+
+        let base_url = resolve_public_base_url(&headers, Some("https://configured.example.com/"));
+
+        assert_eq!(base_url, "https://configured.example.com");
+    }
+
+    #[test]
+    fn test_resolve_public_base_url_uses_host_without_hardcoded_port() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "ug2ltzf5j4-80.cnb.run".parse().unwrap());
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+
+        let base_url = resolve_public_base_url(&headers, None);
+
+        assert_eq!(base_url, "http://ug2ltzf5j4-80.cnb.run");
+    }
+
+    #[test]
+    fn test_resolve_public_base_url_prefers_forwarded_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "keycompute-server:3000".parse().unwrap());
+        headers.insert("x-forwarded-host", "app.example.com".parse().unwrap());
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+
+        let base_url = resolve_public_base_url(&headers, None);
+
+        assert_eq!(base_url, "https://app.example.com");
+    }
+}

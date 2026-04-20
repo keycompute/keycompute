@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
+use crate::services::api_client::user_error_message;
 use crate::services::auth_service;
 
 #[component]
@@ -34,7 +35,7 @@ pub fn ForgotPassword() -> Element {
                     loading.set(false);
                 }
                 Err(e) => {
-                    error_msg.set(Some(format!("{t_send_failed}：{e}")));
+                    error_msg.set(Some(format!("{t_send_failed}：{}", user_error_message(&e))));
                     loading.set(false);
                 }
             }

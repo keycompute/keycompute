@@ -1,7 +1,7 @@
 //! 邮件服务模块
 //!
 //! 提供 SMTP 邮件发送功能：
-//! - 邮箱验证邮件
+//! - 注册验证码邮件
 //! - 密码重置邮件
 //! - 通用邮件发送
 //!
@@ -62,6 +62,14 @@ impl From<EmailError> for KeyComputeError {
 pub struct EmailService {
     config: Arc<RwLock<EmailConfig>>,
     transport: Arc<RwLock<Option<AsyncSmtpTransport<Tokio1Executor>>>>,
+}
+
+fn build_password_reset_url(app_base_url: &str, token: &str) -> String {
+    format!(
+        "{}/auth/reset-password/{}",
+        app_base_url.trim().trim_end_matches('/'),
+        token
+    )
 }
 
 impl EmailService {
@@ -141,55 +149,47 @@ impl EmailService {
         self.config.read().await.clone()
     }
 
-    /// 发送邮箱验证邮件
-    pub async fn send_verification_email(&self, to: &str, token: &str) -> Result<(), EmailError> {
-        // 快速获取需要的配置字段，然后释放锁
-        let verification_url = {
-            let config = self.config.read().await;
-            config.verification_url(token)
-        };
-
-        let subject = "请验证您的邮箱地址";
+    /// 发送注册验证码邮件
+    pub async fn send_registration_code_email(
+        &self,
+        to: &str,
+        code: &str,
+        expires_minutes: i64,
+    ) -> Result<(), EmailError> {
+        let subject = "您的注册验证码";
         let text_body = format!(
             r#"您好！
 
-感谢您注册 KeyCompute。
+您正在注册 KeyCompute。
 
-请点击以下链接验证您的邮箱地址：
-{}
+您的邮箱验证码是：{}
 
-此链接将在 24 小时后过期。
-
-如果您没有注册 KeyCompute 账户，请忽略此邮件。
+验证码将在 {} 分钟后失效。如非本人操作，请忽略此邮件。
 
 祝好，
 KeyCompute 团队
 "#,
-            verification_url
+            code, expires_minutes
         );
 
         let html_body = format!(
             r#"<html>
 <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
 <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2 style="color: #2c5282;">请验证您的邮箱地址</h2>
+<h2 style="color: #2c5282;">您的注册验证码</h2>
 <p>您好！</p>
-<p>感谢您注册 KeyCompute。</p>
-<p>请点击以下按钮验证您的邮箱地址：</p>
-<p>
-<a href="{}" style="display: inline-block; padding: 12px 24px; background-color: #4299e1; color: white; text-decoration: none; border-radius: 4px;">
-验证邮箱
-</a>
-</p>
-<p>或复制以下链接到浏览器：<br><code style="word-break: break-all;">{}</code></p>
-<p style="color: #718096; font-size: 14px;">此链接将在 24 小时后过期。</p>
-<p style="color: #718096; font-size: 14px;">如果您没有注册 KeyCompute 账户，请忽略此邮件。</p>
+<p>您正在注册 KeyCompute。</p>
+<p>请输入以下验证码完成注册：</p>
+<div style="margin: 24px 0; padding: 16px; background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+<span style="font-size: 28px; letter-spacing: 8px; font-weight: bold; color: #2d3748;">{}</span>
+</div>
+<p style="color: #718096; font-size: 14px;">验证码将在 {} 分钟后失效。如非本人操作，请忽略此邮件。</p>
 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
 <p style="color: #718096; font-size: 12px;">KeyCompute 团队</p>
 </div>
 </body>
 </html>"#,
-            verification_url, verification_url
+            code, expires_minutes
         );
 
         self.send_html_email(to, subject, &text_body, &html_body)
@@ -197,12 +197,13 @@ KeyCompute 团队
     }
 
     /// 发送密码重置邮件
-    pub async fn send_password_reset_email(&self, to: &str, token: &str) -> Result<(), EmailError> {
-        // 快速获取需要的配置字段，然后释放锁
-        let reset_url = {
-            let config = self.config.read().await;
-            config.password_reset_url(token)
-        };
+    pub async fn send_password_reset_email(
+        &self,
+        to: &str,
+        token: &str,
+        app_base_url: &str,
+    ) -> Result<(), EmailError> {
+        let reset_url = build_password_reset_url(app_base_url, token);
 
         let subject = "重置您的密码";
         let text_body = format!(
@@ -438,7 +439,6 @@ mod tests {
             from_address: "noreply@example.com".to_string(),
             from_name: Some("KeyCompute".to_string()),
             use_tls: true,
-            verification_base_url: "https://api.example.com".to_string(),
             timeout_secs: 30,
         }
     }
@@ -498,5 +498,15 @@ mod tests {
         let cfg = service.config().await;
 
         assert_eq!(cfg.from_name, Some("Test Sender".to_string()));
+    }
+
+    #[test]
+    fn test_build_password_reset_url_trims_trailing_slash() {
+        let reset_url = build_password_reset_url("https://app.example.com/", "reset456");
+
+        assert_eq!(
+            reset_url,
+            "https://app.example.com/auth/reset-password/reset456"
+        );
     }
 }

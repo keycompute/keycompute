@@ -10,9 +10,10 @@ pub mod user;
 
 // Password 模块重新导出
 pub use password::{
-    EmailConfig, EmailService, EmailValidator, LoginRequest, LoginResponse, LoginService,
-    PasswordHasher, PasswordResetService, PasswordValidator, RegisterRequest, RegisterResponse,
-    RegistrationService, RequestPasswordResetRequest, ResetPasswordRequest,
+    CompleteRegistrationRequest, CompleteRegistrationResponse, EmailConfig, EmailService,
+    EmailValidator, LoginRequest, LoginResponse, LoginService, PasswordHasher,
+    PasswordResetService, PasswordValidator, RegistrationService, RequestPasswordResetRequest,
+    RequestRegistrationCodeRequest, RequestRegistrationCodeResponse, ResetPasswordRequest,
 };
 
 pub use api_key::{ProduceAiKeyAuth, ProduceAiKeyValidator};

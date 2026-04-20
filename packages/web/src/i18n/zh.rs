@@ -70,6 +70,24 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.send_reset_link", "发送重置链接");
     m.insert("auth.logging_in", "登录中...");
     m.insert("auth.registering", "注册中...");
+    m.insert("auth.request_code", "获取验证码");
+    m.insert("auth.requesting_code", "验证码发送中...");
+    m.insert("auth.request_code_failed", "获取验证码失败");
+    m.insert("auth.resend_code", "重新发送验证码");
+    m.insert("auth.complete_registration", "完成注册");
+    m.insert("auth.verification_code", "邮箱验证码");
+    m.insert("auth.verification_code_placeholder", "请输入 6 位验证码");
+    m.insert("auth.code_required", "请输入邮箱验证码");
+    m.insert("auth.code_sent_to", "验证码已发送至：");
+    m.insert(
+        "auth.code_sent_hint",
+        "验证码 10 分钟内有效，验证成功后才会正式创建账号。",
+    );
+    m.insert("auth.change_email", "更换邮箱");
+    m.insert(
+        "auth.registration_success",
+        "注册已完成，请使用刚刚设置的邮箱和密码登录。",
+    );
     m.insert("auth.password_min8", "密码至少8位");
 
     // ── 页面标题 ─────────────────────────────────
@@ -233,15 +251,6 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("reset_password.success", "密码已重置成功！");
     m.insert("reset_password.go_login", "前往登录");
     m.insert("reset_password.submit", "确认重置");
-    m.insert("verify_email.title", "邮箱验证");
-    m.insert("verify_email.verifying", "正在验证邮箱，请稍候...");
-    m.insert("verify_email.success", "邮箱验证成功！您现在可以登录了。");
-    m.insert("verify_email.go_login", "前往登录");
-    m.insert("verify_email.failed", "验证失败");
-    m.insert(
-        "verify_email.expired_hint",
-        "链接可能已过期，请重新注册或联系支持。",
-    );
 
     // ── Account Settings ────────────────────────
     m.insert("account_settings.fill_all_passwords", "请填写所有密码字段");
@@ -369,21 +378,18 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.basic_title", "基础配置");
     m.insert(
         "settings.basic_desc",
-        "定义平台名称、注册策略和充值基础参数。界面刻意保持窄栏，避免输入区在宽屏下失控铺开。",
+        "定义平台名称、新用户赠送额度和充值基础参数。界面刻意保持窄栏，避免输入区在宽屏下失控铺开。",
     );
     m.insert("settings.site_name_label", "平台名称");
     m.insert(
         "settings.site_name_desc",
         "显示在登录页、后台导航和邮件模板中的平台名称。",
     );
-    m.insert("settings.registration_mode_label", "注册模式");
+    m.insert("settings.default_user_quota_label", "新用户默认赠送额度");
     m.insert(
-        "settings.registration_mode_desc",
-        "控制新用户的注册入口是否开放、需要邀请，或完全关闭。",
+        "settings.default_user_quota_desc",
+        "运行时按此值决定新用户注册赠送额度；只有大于 0 才会赠送，0 或负数表示不赠送。",
     );
-    m.insert("settings.registration_open", "开放注册");
-    m.insert("settings.registration_invite", "邀请注册");
-    m.insert("settings.registration_close", "关闭注册");
     m.insert("settings.default_currency_label", "默认货币");
     m.insert(
         "settings.default_currency_desc",
@@ -397,17 +403,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.security_title", "安全配置");
     m.insert(
         "settings.security_desc",
-        "控制令牌有效期与账户验证强度，避免默认策略过宽。",
+        "控制令牌有效期等安全参数。新用户注册始终强制邮箱验证码验证。",
     );
     m.insert("settings.jwt_expire_label", "JWT Token 有效期（小时）");
     m.insert(
         "settings.jwt_expire_desc",
         "登录后访问令牌的默认有效期。时间越长，体验更顺滑，但凭证暴露窗口也更大。",
-    );
-    m.insert("settings.email_verify_label", "邮箱验证");
-    m.insert(
-        "settings.email_verify_desc",
-        "启用后，新账户需先完成邮箱验证才能继续使用平台。",
     );
     m.insert("settings.save_failed", "保存失败");
     m.insert("settings.non_negative", "值不能为负数");

@@ -92,8 +92,6 @@ pub struct PublicSettings {
     pub site_favicon_url: Option<String>,
     /// API 基础 URL（用于生成 API 用法示例）
     pub api_base_url: Option<String>,
-    pub allow_registration: bool,
-    pub email_verification_required: bool,
     pub maintenance_mode: bool,
     pub maintenance_message: Option<String>,
     pub alipay_enabled: bool,
