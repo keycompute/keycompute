@@ -4,7 +4,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    handlers::resolve_public_base_url,
+    handlers::configured_public_base_url,
     middleware::extract_client_ip_from_headers,
     state::AppState,
 };
@@ -227,16 +227,20 @@ pub async fn forgot_password_handler(
 
     let service = PasswordResetService::new(Arc::clone(pool))
         .with_email_service((*state.email_service).clone());
+    let public_base_url =
+        configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
+            ApiError::Config("APP_BASE_URL is required to send password reset emails".to_string())
+        })?;
 
     // 无论邮箱是否存在都返回成功（防止邮箱枚举攻击）
     service
         .request_reset(&RequestPasswordResetRequest {
             email: req.email,
             client_ip: extract_client_ip_from_headers(&headers),
-            public_base_url: resolve_public_base_url(&headers, state.app_base_url.as_deref()),
+            public_base_url,
         })
         .await
-        .map_err(|e| ApiError::Internal(format!("Password reset request failed: {}", e)))?;
+        .map_err(ApiError::from)?;
 
     Ok((
         StatusCode::OK,

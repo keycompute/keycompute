@@ -8,7 +8,9 @@
 
 use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
+use std::net::IpAddr;
 use std::path::Path;
+use url::Url;
 
 pub mod auth;
 pub mod crypto;
@@ -85,6 +87,44 @@ impl AppConfig {
                 Some(normalized)
             }
         })
+    }
+
+    fn is_local_development_host(url: &Url) -> bool {
+        match url.host_str() {
+            Some("localhost") => true,
+            Some(host) => host
+                .parse::<IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false),
+            None => false,
+        }
+    }
+
+    fn validate_public_app_base_url(base_url: &str) -> Result<(), String> {
+        let parsed = Url::parse(base_url)
+            .map_err(|e| format!("APP_BASE_URL 必须是合法的绝对 URL: {}", e))?;
+
+        if parsed.host_str().is_none() {
+            return Err("APP_BASE_URL 必须包含主机名".to_string());
+        }
+
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err("APP_BASE_URL 不能包含用户名或密码".to_string());
+        }
+
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err("APP_BASE_URL 不能包含查询参数或片段".to_string());
+        }
+
+        match parsed.scheme() {
+            "https" => Ok(()),
+            "http" if Self::is_local_development_host(&parsed) => Ok(()),
+            "http" => Err("APP_BASE_URL 在非本地环境必须使用 https".to_string()),
+            scheme => Err(format!(
+                "APP_BASE_URL 仅支持 http/https 协议，当前为 {}",
+                scheme
+            )),
+        }
     }
 
     /// 加载配置（环境变量优先，配置文件回退）
@@ -325,39 +365,63 @@ impl AppConfig {
             return Err(ConfigLoadError::ValidationError(e));
         }
 
+        let email_is_configured = self.email.is_configured();
+        let email_is_partially_configured = self.email.is_partially_configured();
+
         // Email 配置检查
-        if self.email.smtp_port == 0 {
+        if email_is_configured || email_is_partially_configured {
+            if self.email.smtp_port == 0 {
+                return Err(ConfigLoadError::ValidationError(
+                    "SMTP 端口不能为 0".to_string(),
+                ));
+            }
+
+            if self.email.smtp_host.trim().is_empty() {
+                return Err(ConfigLoadError::ValidationError(
+                    "SMTP 主机地址不能为空".to_string(),
+                ));
+            }
+
+            if self.email.smtp_username.trim().is_empty() {
+                return Err(ConfigLoadError::ValidationError(
+                    "SMTP 用户名不能为空".to_string(),
+                ));
+            }
+
+            if self.email.smtp_password.trim().is_empty() {
+                return Err(ConfigLoadError::ValidationError(
+                    "SMTP 密码不能为空".to_string(),
+                ));
+            }
+
+            if self.email.from_address.trim().is_empty() {
+                return Err(ConfigLoadError::ValidationError(
+                    "Email 发件人地址不能为空".to_string(),
+                ));
+            }
+
+            // 简单的邮箱格式验证
+            if !self.email.from_address.contains('@') {
+                tracing::warn!(
+                    "⚠️  Email 发件人地址 '{}' 格式可能不正确，缺少 @ 符号",
+                    self.email.from_address
+                );
+            }
+
+            if self.email.timeout_secs == 0 {
+                tracing::warn!("⚠️  Email 发送超时设置为 0，将禁用 SMTP 超时");
+            }
+        }
+
+        if let Some(base_url) = self.app_base_url.as_deref() {
+            Self::validate_public_app_base_url(base_url)
+                .map_err(ConfigLoadError::ValidationError)?;
+        } else if email_is_configured {
             return Err(ConfigLoadError::ValidationError(
-                "SMTP 端口不能为 0".to_string(),
+                "启用 Email 服务时必须配置 APP_BASE_URL".to_string(),
             ));
-        }
-
-        if self.email.smtp_host.is_empty() {
-            return Err(ConfigLoadError::ValidationError(
-                "SMTP 主机地址不能为空".to_string(),
-            ));
-        }
-
-        if self.email.from_address.is_empty() {
-            return Err(ConfigLoadError::ValidationError(
-                "Email 发件人地址不能为空".to_string(),
-            ));
-        }
-
-        // 简单的邮箱格式验证
-        if !self.email.from_address.contains('@') {
-            tracing::warn!(
-                "⚠️  Email 发件人地址 '{}' 格式可能不正确，缺少 @ 符号",
-                self.email.from_address
-            );
-        }
-
-        if self.email.timeout_secs == 0 {
-            tracing::warn!("⚠️  Email 发送超时设置为 0，将使用无超时模式");
-        }
-
-        if self.app_base_url.is_none() {
-            tracing::info!("💡 提示: 未配置 APP_BASE_URL，公开链接将回退到可信请求头推导");
+        } else {
+            tracing::info!("💡 提示: 未配置 APP_BASE_URL，需要公开链接的功能将返回配置错误");
         }
 
         // 加密配置提醒
@@ -622,6 +686,67 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_app_base_url_missing_when_email_enabled() {
+        let mut config = AppConfig::default();
+        config.auth.jwt_secret = "a-very-secure-jwt-secret-key-for-testing".to_string();
+        config.email.smtp_host = "localhost".to_string();
+        config.email.smtp_username = "mailer".to_string();
+        config.email.smtp_password = "secret".to_string();
+        config.email.from_address = "noreply@example.com".to_string();
+
+        let result = config.validate();
+        assert!(result.is_err());
+        match result {
+            Err(ConfigLoadError::ValidationError(msg)) => {
+                assert!(msg.contains("APP_BASE_URL"));
+            }
+            _ => panic!("期望 ValidationError"),
+        }
+    }
+
+    #[test]
+    fn test_validate_app_base_url_requires_supported_scheme() {
+        let mut config = AppConfig::default();
+        config.auth.jwt_secret = "a-very-secure-jwt-secret-key-for-testing".to_string();
+        config.app_base_url = Some("ftp://example.com".to_string());
+
+        let result = config.validate();
+        assert!(result.is_err());
+        match result {
+            Err(ConfigLoadError::ValidationError(msg)) => {
+                assert!(msg.contains("http/https"));
+            }
+            _ => panic!("期望 ValidationError"),
+        }
+    }
+
+    #[test]
+    fn test_validate_app_base_url_requires_https_for_non_local_hosts() {
+        let mut config = AppConfig::default();
+        config.auth.jwt_secret = "a-very-secure-jwt-secret-key-for-testing".to_string();
+        config.app_base_url = Some("http://example.com".to_string());
+
+        let result = config.validate();
+        assert!(result.is_err());
+        match result {
+            Err(ConfigLoadError::ValidationError(msg)) => {
+                assert!(msg.contains("https"));
+            }
+            _ => panic!("期望 ValidationError"),
+        }
+    }
+
+    #[test]
+    fn test_validate_app_base_url_accepts_local_http() {
+        let mut config = AppConfig::default();
+        config.auth.jwt_secret = "a-very-secure-jwt-secret-key-for-testing".to_string();
+        config.app_base_url = Some("http://localhost:3000/base/".to_string());
+
+        let result = config.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn test_validate_gateway_retry_backoff_invalid() {
         // 重试初始退避时间大于最大退避时间应该报错
         let mut config = AppConfig::default();
@@ -767,6 +892,9 @@ mod tests {
     fn test_validate_email_from_address_empty() {
         // Email 发件人地址为空应该报错
         let mut config = AppConfig::default();
+        config.email.smtp_host = "smtp.example.com".to_string();
+        config.email.smtp_username = "mailer".to_string();
+        config.email.smtp_password = "secret".to_string();
         config.email.from_address = "".to_string();
         let result = config.validate();
         assert!(result.is_err());
@@ -783,7 +911,11 @@ mod tests {
         // Email 发件人地址缺少 @ 符号应该警告但不报错
         let mut config = AppConfig::default();
         config.auth.jwt_secret = "a-very-secure-jwt-secret-key-for-testing".to_string();
+        config.email.smtp_host = "smtp.example.com".to_string();
+        config.email.smtp_username = "mailer".to_string();
+        config.email.smtp_password = "secret".to_string();
         config.email.from_address = "invalid-email".to_string();
+        config.app_base_url = Some("https://app.example.com".to_string());
         let result = config.validate();
         // 应该通过验证，但会有警告日志
         assert!(result.is_ok());
@@ -814,6 +946,24 @@ mod tests {
         match result {
             Err(ConfigLoadError::ValidationError(msg)) => {
                 assert!(msg.contains("SMTP 主机"));
+            }
+            _ => panic!("期望 ValidationError"),
+        }
+    }
+
+    #[test]
+    fn test_validate_email_whitespace_username_rejected() {
+        let mut config = AppConfig::default();
+        config.email.smtp_host = "smtp.example.com".to_string();
+        config.email.smtp_username = "   ".to_string();
+        config.email.smtp_password = "secret".to_string();
+        config.email.from_address = "noreply@example.com".to_string();
+
+        let result = config.validate();
+        assert!(result.is_err());
+        match result {
+            Err(ConfigLoadError::ValidationError(msg)) => {
+                assert!(msg.contains("SMTP 用户名"));
             }
             _ => panic!("期望 ValidationError"),
         }

@@ -233,7 +233,7 @@ Primary environment variables:
 | `KC__EMAIL__SMTP_PASSWORD` | SMTP password | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | Sender email address | ⚪ |
 | `KC__EMAIL__FROM_NAME` | Sender display name | ⚪ |
-| `APP_BASE_URL` | Public frontend base URL for password reset and invite links; falls back to trusted forwarded headers when unset | ⚪ |
+| `APP_BASE_URL` | Public frontend base URL for password reset and invite links; must be explicitly configured when email or invite links are enabled | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | Default administrator email | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | Default administrator password | ⚪ |
 

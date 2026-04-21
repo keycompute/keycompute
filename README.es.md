@@ -233,7 +233,7 @@ Variables de entorno principales:
 | `KC__EMAIL__SMTP_PASSWORD` | Contraseña SMTP | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | Dirección de correo del remitente | ⚪ |
 | `KC__EMAIL__FROM_NAME` | Nombre visible del remitente | ⚪ |
-| `APP_BASE_URL` | URL pública base del frontend para enlaces de restablecimiento e invitación; si falta, se usa como fallback la inferencia desde headers reenviados de confianza | ⚪ |
+| `APP_BASE_URL` | URL pública base del frontend para enlaces de restablecimiento e invitación; debe configurarse explícitamente cuando se habiliten el correo o los enlaces de invitación | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | Correo del administrador por defecto | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | Contraseña del administrador por defecto | ⚪ |
 

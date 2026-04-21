@@ -125,12 +125,16 @@ impl PasswordResetService {
             }
         };
 
+        let email_service = self.email_service.as_ref().ok_or_else(|| {
+            KeyComputeError::ServiceUnavailable("密码重置邮件服务暂不可用".to_string())
+        })?;
+
         // 3. 生成重置令牌
         let token = self.generate_reset_token();
         let expires_at = Utc::now() + Duration::hours(self.token_expiry_hours);
 
         // 4. 保存令牌
-        PasswordReset::create(
+        let reset = PasswordReset::create(
             &self.pool,
             &CreatePasswordResetRequest {
                 user_id: user.id,
@@ -145,10 +149,9 @@ impl PasswordResetService {
         })?;
 
         // 5. 发送密码重置邮件
-        if let Some(email_service) = &self.email_service
-            && let Err(e) = email_service
-                .send_password_reset_email(&email, &token, &req.public_base_url)
-                .await
+        if let Err(e) = email_service
+            .send_password_reset_email(&email, &token, &req.public_base_url)
+            .await
         {
             tracing::error!(
                 user_id = %user.id,
@@ -156,7 +159,15 @@ impl PasswordResetService {
                 error = %e,
                 "Failed to send password reset email"
             );
-            return Err(KeyComputeError::AuthError(
+
+            reset.delete(&self.pool).await.map_err(|delete_err| {
+                KeyComputeError::DatabaseError(format!(
+                    "Failed to cleanup password reset after email send failure: {}",
+                    delete_err
+                ))
+            })?;
+
+            return Err(KeyComputeError::ServiceUnavailable(
                 "发送重置邮件失败，请稍后重试".to_string(),
             ));
         }

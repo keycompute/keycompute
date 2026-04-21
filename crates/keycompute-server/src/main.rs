@@ -13,7 +13,7 @@ use keycompute_config::AppConfig;
 use keycompute_db::{
     CreateDistributionRuleRequest, CreateTenantRequest, CreateUserCredentialRequest,
     CreateUserRequest, Database, DatabaseConfig as DbConfig, SystemSetting, Tenant,
-    TenantDistributionRule, User,
+    TenantDistributionRule, User, models::system_setting::setting_keys,
 };
 use keycompute_observability::{init_dev_observability, init_observability};
 use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run};
@@ -110,6 +110,11 @@ async fn main() -> anyhow::Result<()> {
     match SystemSetting::init_default_settings(&pool).await {
         Ok(_) => info!("系统默认设置初始化完成"),
         Err(e) => warn!("系统默认设置初始化失败（非致命错误）: {}", e),
+    }
+
+    if let Err(e) = validate_distribution_public_base_url(&pool, &config).await {
+        error!("运行时配置验证失败: {}", e);
+        std::process::exit(1);
     }
 
     // ==================== 阶段 6: 初始化应用状态 ====================
@@ -320,6 +325,22 @@ async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn validate_distribution_public_base_url(
+    pool: &sqlx::PgPool,
+    config: &AppConfig,
+) -> anyhow::Result<()> {
+    let distribution_enabled = SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
+        .await?
+        .map(|setting| setting.parse_bool())
+        .unwrap_or(false);
+
+    if distribution_enabled && config.app_base_url.is_none() {
+        anyhow::bail!("APP_BASE_URL must be configured when distribution is enabled");
+    }
+
+    Ok(())
+}
+
 /// 初始化默认分销规则
 ///
 /// 基于 system_settings 中的配置创建一级和二级分销规则
@@ -395,35 +416,6 @@ async fn initialize_default_distribution_rules(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::non_empty_or_default;
-
-    #[test]
-    fn test_non_empty_or_default_uses_non_empty_value() {
-        let resolved = non_empty_or_default(
-            Some("admin@example.com".to_string()),
-            "fallback@example.com",
-        );
-
-        assert_eq!(resolved, "admin@example.com");
-    }
-
-    #[test]
-    fn test_non_empty_or_default_falls_back_for_empty_value() {
-        let resolved = non_empty_or_default(Some(String::new()), "fallback");
-
-        assert_eq!(resolved, "fallback");
-    }
-
-    #[test]
-    fn test_non_empty_or_default_falls_back_for_missing_value() {
-        let resolved = non_empty_or_default(None, "fallback");
-
-        assert_eq!(resolved, "fallback");
-    }
-}
-
 /// 初始化管理员余额
 ///
 /// 为默认系统管理员充值 100 元初始余额
@@ -475,4 +467,33 @@ async fn initialize_admin_balance(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::non_empty_or_default;
+
+    #[test]
+    fn test_non_empty_or_default_uses_non_empty_value() {
+        let resolved = non_empty_or_default(
+            Some("admin@example.com".to_string()),
+            "fallback@example.com",
+        );
+
+        assert_eq!(resolved, "admin@example.com");
+    }
+
+    #[test]
+    fn test_non_empty_or_default_falls_back_for_empty_value() {
+        let resolved = non_empty_or_default(Some(String::new()), "fallback");
+
+        assert_eq!(resolved, "fallback");
+    }
+
+    #[test]
+    fn test_non_empty_or_default_falls_back_for_missing_value() {
+        let resolved = non_empty_or_default(None, "fallback");
+
+        assert_eq!(resolved, "fallback");
+    }
 }

@@ -233,7 +233,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | SMTP 密碼 | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | 寄件者電子郵件地址 | ⚪ |
 | `KC__EMAIL__FROM_NAME` | 寄件者顯示名稱 | ⚪ |
-| `APP_BASE_URL` | 用於密碼重設與邀請連結的公開前端位址；未設定時回退到可信轉發標頭推導 | ⚪ |
+| `APP_BASE_URL` | 用於密碼重設與邀請連結的公開前端位址；啟用郵件或邀請連結時必須明確設定 | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | 預設管理員電子郵件 | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | 預設管理員密碼 | ⚪ |
 

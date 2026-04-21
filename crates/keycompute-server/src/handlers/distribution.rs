@@ -10,14 +10,16 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
-    handlers::resolve_public_base_url,
+    handlers::configured_public_base_url,
     state::AppState,
 };
 use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use keycompute_db::models::system_setting::setting_keys;
 use serde::{Deserialize, Serialize};
+use url::Url;
 use uuid::Uuid;
 
 // 使用 sqlx::types::BigDecimal 替代 bigdecimal crate
@@ -191,15 +193,26 @@ pub struct InviteLinkResponse {
     pub expires_at: Option<String>,
 }
 
-fn build_invite_link(base_url: &str, referral_code: &str, source: Option<&str>) -> String {
-    if let Some(source) = source {
-        format!(
-            "{}/auth/register?ref={}&source={}",
-            base_url, referral_code, source
-        )
+fn build_invite_link(base_url: &str, referral_code: &str, source: Option<&str>) -> Result<String> {
+    let mut parsed = Url::parse(base_url)
+        .map_err(|e| ApiError::Config(format!("Invalid APP_BASE_URL: {}", e)))?;
+    let current_path = parsed.path().trim_end_matches('/');
+    let next_path = if current_path.is_empty() || current_path == "/" {
+        "/auth/register".to_string()
     } else {
-        format!("{}/auth/register?ref={}", base_url, referral_code)
+        format!("{}/auth/register", current_path)
+    };
+    parsed.set_path(&next_path);
+
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.append_pair("ref", referral_code);
+        if let Some(source) = source.map(str::trim).filter(|value| !value.is_empty()) {
+            query.append_pair("source", source);
+        }
     }
+
+    Ok(parsed.into())
 }
 
 /// 获取我的推荐码和邀请链接
@@ -208,7 +221,6 @@ fn build_invite_link(base_url: &str, referral_code: &str, source: Option<&str>) 
 pub async fn get_my_referral_code(
     auth: AuthExtractor,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
 ) -> Result<Json<ReferralCodeResponse>> {
     let pool = state
         .pool
@@ -223,11 +235,11 @@ pub async fn get_my_referral_code(
         .await
         .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
 
-    // 构建邀请链接
-    // 优先使用全局 APP_BASE_URL，缺失时回退到可信请求头推导
-    let base_url = resolve_public_base_url(&headers, state.app_base_url.as_deref());
+    let base_url = configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
+        ApiError::Config("APP_BASE_URL is required to generate public invite links".to_string())
+    })?;
     let referral_code = auth.user_id.to_string();
-    let invite_link = build_invite_link(&base_url, &referral_code, None);
+    let invite_link = build_invite_link(&base_url, &referral_code, None)?;
 
     Ok(Json(ReferralCodeResponse {
         referral_code,
@@ -243,7 +255,6 @@ pub async fn get_my_referral_code(
 pub async fn generate_invite_link(
     auth: AuthExtractor,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<GenerateInviteLinkRequest>,
 ) -> Result<Json<InviteLinkResponse>> {
     let pool = state
@@ -254,10 +265,11 @@ pub async fn generate_invite_link(
     // 检查分销系统是否启用
     check_distribution_enabled(pool).await?;
 
-    // 构建基础邀请链接
-    let base_url = resolve_public_base_url(&headers, state.app_base_url.as_deref());
+    let base_url = configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
+        ApiError::Config("APP_BASE_URL is required to generate public invite links".to_string())
+    })?;
     let referral_code = auth.user_id.to_string();
-    let invite_link = build_invite_link(&base_url, &referral_code, req.source.as_deref());
+    let invite_link = build_invite_link(&base_url, &referral_code, req.source.as_deref())?;
 
     Ok(Json(InviteLinkResponse {
         invite_link,
@@ -297,10 +309,21 @@ fn string_to_bigdecimal(value: &str) -> Result<BigDecimal> {
 }
 
 /// 检查分销系统是否启用
-async fn check_distribution_enabled(_pool: &sqlx::PgPool) -> Result<()> {
-    // 分销系统默认启用，不再检查系统设置
-    // 如需禁用，可通过租户级别的 distribution_enabled 控制
-    Ok(())
+async fn check_distribution_enabled(pool: &sqlx::PgPool) -> Result<()> {
+    let enabled =
+        keycompute_db::SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(format!("Failed to query distribution setting: {}", e))
+            })?
+            .map(|setting| setting.parse_bool())
+            .unwrap_or(false);
+
+    if enabled {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("Distribution is disabled".to_string()))
+    }
 }
 
 // ==================== API Handlers ====================
@@ -766,7 +789,8 @@ mod tests {
             "https://app.example.com",
             "6aac8ab5-aeec-48b8-a4cc-0a446d952862",
             None,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             link,
@@ -776,11 +800,27 @@ mod tests {
 
     #[test]
     fn test_build_invite_link_preserves_source_param() {
-        let link = build_invite_link("https://app.example.com", "abc123", Some("campaign"));
+        let link =
+            build_invite_link("https://app.example.com", "abc123", Some("campaign")).unwrap();
 
         assert_eq!(
             link,
             "https://app.example.com/auth/register?ref=abc123&source=campaign"
+        );
+    }
+
+    #[test]
+    fn test_build_invite_link_preserves_base_path_and_encodes_source() {
+        let link = build_invite_link(
+            "https://app.example.com/console/",
+            "abc123",
+            Some("email campaign&fall"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            link,
+            "https://app.example.com/console/auth/register?ref=abc123&source=email+campaign%26fall"
         );
     }
 }

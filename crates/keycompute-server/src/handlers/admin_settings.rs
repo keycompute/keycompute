@@ -5,6 +5,7 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::configured_public_base_url,
     state::AppState,
 };
 use axum::{
@@ -199,6 +200,30 @@ fn normalize_settings_map(
         .collect()
 }
 
+fn is_truthy_setting(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes"
+    )
+}
+
+fn ensure_distribution_has_public_base_url(
+    app_base_url: Option<&str>,
+    settings: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    if settings
+        .get(setting_keys::DISTRIBUTION_ENABLED)
+        .is_some_and(|value| is_truthy_setting(value))
+        && configured_public_base_url(app_base_url).is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "APP_BASE_URL must be configured before enabling distribution".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn payload_to_settings_map(
     payload: serde_json::Value,
 ) -> Result<std::collections::HashMap<String, String>> {
@@ -291,6 +316,7 @@ pub async fn update_system_settings(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let settings_map = normalize_settings_map(payload_to_settings_map(payload)?)?;
+    ensure_distribution_has_public_base_url(state.app_base_url.as_deref(), &settings_map)?;
 
     // 批量更新设置
     let updated = keycompute_db::SystemSetting::batch_update(pool, &settings_map)
@@ -362,6 +388,9 @@ pub async fn update_system_setting_by_key(
     }
 
     let normalized_value = normalize_setting_update(&key, payload.value)?;
+    let mut settings_map = std::collections::HashMap::new();
+    settings_map.insert(key.clone(), normalized_value.clone());
+    ensure_distribution_has_public_base_url(state.app_base_url.as_deref(), &settings_map)?;
 
     let setting = keycompute_db::SystemSetting::update_value(pool, &key, &normalized_value)
         .await
@@ -458,5 +487,31 @@ mod tests {
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("site_name"), Some(&"KeyCompute".to_string()));
         assert!(!map.contains_key(setting_keys::DEFAULT_USER_QUOTA));
+    }
+
+    #[test]
+    fn test_enable_distribution_requires_public_base_url() {
+        let mut settings = std::collections::HashMap::new();
+        settings.insert(
+            setting_keys::DISTRIBUTION_ENABLED.to_string(),
+            "true".to_string(),
+        );
+
+        let err = ensure_distribution_has_public_base_url(None, &settings).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("APP_BASE_URL")));
+    }
+
+    #[test]
+    fn test_enable_distribution_accepts_public_base_url() {
+        let mut settings = std::collections::HashMap::new();
+        settings.insert(
+            setting_keys::DISTRIBUTION_ENABLED.to_string(),
+            "true".to_string(),
+        );
+
+        assert!(
+            ensure_distribution_has_public_base_url(Some("https://app.example.com"), &settings)
+                .is_ok()
+        );
     }
 }

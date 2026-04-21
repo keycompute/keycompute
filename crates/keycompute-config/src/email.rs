@@ -8,7 +8,7 @@
 use serde::Deserialize;
 
 /// 邮件服务配置
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct EmailConfig {
     /// SMTP 服务器地址
     pub smtp_host: String,
@@ -61,10 +61,19 @@ impl Default for EmailConfig {
 impl EmailConfig {
     /// 检查配置是否有效（非默认值）
     pub fn is_configured(&self) -> bool {
-        !self.smtp_host.is_empty()
-            && self.smtp_host != "localhost"
-            && !self.smtp_username.is_empty()
-            && !self.smtp_password.is_empty()
+        self.smtp_port != 0
+            && !self.smtp_host.trim().is_empty()
+            && !self.smtp_username.trim().is_empty()
+            && !self.smtp_password.trim().is_empty()
+            && !self.from_address.trim().is_empty()
+    }
+
+    /// 检查是否处于“部分配置”状态
+    ///
+    /// 默认配置表示未启用邮件能力；只有在偏离默认值但仍缺少必填项时，
+    /// 才视为需要在启动阶段报错的部分配置。
+    pub fn is_partially_configured(&self) -> bool {
+        self != &Self::default() && !self.is_configured()
     }
 
     /// 获取完整的发件人地址（带名称）
@@ -112,6 +121,7 @@ mod tests {
     fn test_is_configured() {
         let default_config = EmailConfig::default();
         assert!(!default_config.is_configured());
+        assert!(!default_config.is_partially_configured());
 
         let configured = EmailConfig {
             smtp_host: "smtp.example.com".to_string(),
@@ -120,5 +130,18 @@ mod tests {
             ..Default::default()
         };
         assert!(configured.is_configured());
+        assert!(!configured.is_partially_configured());
+    }
+
+    #[test]
+    fn test_is_partially_configured() {
+        let partial = EmailConfig {
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_username: "   ".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!partial.is_configured());
+        assert!(partial.is_partially_configured());
     }
 }
