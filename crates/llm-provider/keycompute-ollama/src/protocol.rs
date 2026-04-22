@@ -132,6 +132,66 @@ pub struct OllamaError {
     pub error: String,
 }
 
+/// OpenAI 兼容格式响应 (用于 /v1/chat/completions 端点)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIChatResponse {
+    /// 响应 ID
+    pub id: String,
+    /// 对象类型
+    pub object: String,
+    /// 创建时间戳 (Unix)
+    pub created: u64,
+    /// 模型名称
+    pub model: String,
+    /// 选择列表
+    pub choices: Vec<OpenAIChoice>,
+    /// 用量统计
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<OpenAIUsage>,
+}
+
+/// OpenAI 选择
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIChoice {
+    /// 索引
+    pub index: u32,
+    /// 消息内容
+    pub message: OpenAIMessage,
+    /// 完成原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+}
+
+/// OpenAI 消息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIMessage {
+    /// 角色
+    pub role: String,
+    /// 内容
+    pub content: String,
+}
+
+/// OpenAI 用量统计
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAIUsage {
+    /// 提示词 token 数
+    pub prompt_tokens: u32,
+    /// 完成 token 数
+    pub completion_tokens: u32,
+    /// 总 token 数
+    pub total_tokens: u32,
+}
+
+impl OpenAIChatResponse {
+    /// 提取文本内容
+    pub fn extract_text(&self) -> &str {
+        self.choices
+            .first()
+            .map(|c| c.message.content.as_str())
+            .unwrap_or("")
+    }
+}
+
 impl OllamaRequest {
     /// 创建新的请求
     pub fn new(model: impl Into<String>) -> Self {
@@ -320,5 +380,71 @@ mod tests {
         assert!(json.contains("\"temperature\":0.7"));
         assert!(json.contains("\"top_p\":0.9"));
         assert!(json.contains("\"num_predict\":100"));
+    }
+
+    #[test]
+    fn test_openai_chat_response_parsing() {
+        // OpenAI 兼容格式响应
+        let json = r#"{
+            "id": "chatcmpl-123",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "llama2",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello there!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
+
+        let response: OpenAIChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.id, "chatcmpl-123");
+        assert_eq!(response.model, "llama2");
+        assert_eq!(response.created, 1234567890);
+        assert_eq!(response.extract_text(), "Hello there!");
+        assert_eq!(response.choices.len(), 1);
+        assert_eq!(response.choices[0].finish_reason, Some("stop".to_string()));
+        assert!(response.usage.is_some());
+        assert_eq!(response.usage.unwrap().total_tokens, 15);
+    }
+
+    #[test]
+    fn test_openai_chat_response_extract_text() {
+        let json = r#"{
+            "id": "chatcmpl-456",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "qwen2.5",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Test response"}
+            }]
+        }"#;
+
+        let response: OpenAIChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.extract_text(), "Test response");
+    }
+
+    #[test]
+    fn test_openai_chat_response_multiple_choices() {
+        // 取第一个 choice
+        let json = r#"{
+            "id": "chatcmpl-789",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "llama2",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "First"}},
+                {"index": 1, "message": {"role": "assistant", "content": "Second"}}
+            ]
+        }"#;
+
+        let response: OpenAIChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.extract_text(), "First");
     }
 }

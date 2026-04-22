@@ -18,7 +18,9 @@ use keycompute_provider_trait::{
 use keycompute_types::{KeyComputeError, Result};
 use serde_json;
 
-use crate::protocol::{OllamaMessage, OllamaOptions, OllamaRequest, OllamaResponse};
+use crate::protocol::{
+    OllamaMessage, OllamaOptions, OllamaRequest, OllamaResponse, OpenAIChatResponse,
+};
 use crate::stream::parse_ollama_stream;
 
 /// Ollama 默认 API 端点
@@ -276,12 +278,31 @@ impl OllamaProvider {
 
         let headers = self.build_headers(request.upstream_api_key.expose());
         let response_text = transport.post_json(&endpoint, headers, body_json).await?;
-        let ollama_response: OllamaResponse =
-            serde_json::from_str(&response_text).map_err(|e| {
-                KeyComputeError::ProviderError(format!("Failed to parse Ollama response: {}", e))
-            })?;
 
-        Ok(ollama_response.extract_text().to_string())
+        // 根据 endpoint 类型选择正确的响应解析器
+        let text = if endpoint.contains("/v1/chat/completions") {
+            // OpenAI 兼容格式
+            let openai_response: OpenAIChatResponse = serde_json::from_str(&response_text)
+                .map_err(|e| {
+                    KeyComputeError::ProviderError(format!(
+                        "Failed to parse OpenAI response: {}",
+                        e
+                    ))
+                })?;
+            openai_response.extract_text().to_string()
+        } else {
+            // 原生 Ollama 格式
+            let ollama_response: OllamaResponse =
+                serde_json::from_str(&response_text).map_err(|e| {
+                    KeyComputeError::ProviderError(format!(
+                        "Failed to parse Ollama response: {}",
+                        e
+                    ))
+                })?;
+            ollama_response.extract_text().to_string()
+        };
+
+        Ok(text)
     }
 
     async fn stream_chat_internal(
