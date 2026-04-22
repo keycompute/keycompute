@@ -176,12 +176,14 @@ pub struct AuthResponse {
 /// 忘记密码请求
 #[derive(Debug, Clone, Serialize)]
 pub struct ForgotPasswordRequest {
+    pub name: String,
     pub email: String,
 }
 
 impl ForgotPasswordRequest {
-    pub fn new(email: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<String>, email: impl Into<String>) -> Self {
         Self {
+            name: name.into(),
             email: email.into(),
         }
     }

@@ -39,8 +39,16 @@ impl PasswordReset {
         let reset = sqlx::query_as::<_, PasswordReset>(
             r#"
             INSERT INTO password_resets (user_id, token, expires_at, requested_from_ip)
-            VALUES ($1, $2, $3, $4)
-            RETURNING *
+            VALUES ($1, $2, $3, $4::INET)
+            RETURNING
+                id,
+                user_id,
+                token,
+                expires_at,
+                used,
+                used_at,
+                requested_from_ip::TEXT AS requested_from_ip,
+                created_at
             "#,
         )
         .bind(req.user_id)
@@ -58,11 +66,24 @@ impl PasswordReset {
         pool: &sqlx::PgPool,
         id: Uuid,
     ) -> Result<Option<PasswordReset>, DbError> {
-        let reset =
-            sqlx::query_as::<_, PasswordReset>("SELECT * FROM password_resets WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
-                .await?;
+        let reset = sqlx::query_as::<_, PasswordReset>(
+            r#"
+                SELECT
+                    id,
+                    user_id,
+                    token,
+                    expires_at,
+                    used,
+                    used_at,
+                    requested_from_ip::TEXT AS requested_from_ip,
+                    created_at
+                FROM password_resets
+                WHERE id = $1
+                "#,
+        )
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
 
         Ok(reset)
     }
@@ -72,11 +93,24 @@ impl PasswordReset {
         pool: &sqlx::PgPool,
         token: &str,
     ) -> Result<Option<PasswordReset>, DbError> {
-        let reset =
-            sqlx::query_as::<_, PasswordReset>("SELECT * FROM password_resets WHERE token = $1")
-                .bind(token)
-                .fetch_optional(pool)
-                .await?;
+        let reset = sqlx::query_as::<_, PasswordReset>(
+            r#"
+                SELECT
+                    id,
+                    user_id,
+                    token,
+                    expires_at,
+                    used,
+                    used_at,
+                    requested_from_ip::TEXT AS requested_from_ip,
+                    created_at
+                FROM password_resets
+                WHERE token = $1
+                "#,
+        )
+        .bind(token)
+        .fetch_optional(pool)
+        .await?;
 
         Ok(reset)
     }
@@ -88,7 +122,16 @@ impl PasswordReset {
     ) -> Result<Option<PasswordReset>, DbError> {
         let reset = sqlx::query_as::<_, PasswordReset>(
             r#"
-            SELECT * FROM password_resets 
+            SELECT
+                id,
+                user_id,
+                token,
+                expires_at,
+                used,
+                used_at,
+                requested_from_ip::TEXT AS requested_from_ip,
+                created_at
+            FROM password_resets
             WHERE user_id = $1 
             AND used = FALSE 
             AND expires_at > NOW()
@@ -111,7 +154,15 @@ impl PasswordReset {
             SET used = TRUE,
                 used_at = NOW()
             WHERE id = $1
-            RETURNING *
+            RETURNING
+                id,
+                user_id,
+                token,
+                expires_at,
+                used,
+                used_at,
+                requested_from_ip::TEXT AS requested_from_ip,
+                created_at
             "#,
         )
         .bind(self.id)

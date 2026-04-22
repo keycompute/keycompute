@@ -56,10 +56,10 @@ pub async fn refresh_token(refresh_token: &str) -> Result<AuthResponse> {
         .await
 }
 
-pub async fn forgot_password(email: &str) -> Result<MessageResponse> {
+pub async fn forgot_password(name: &str, email: &str) -> Result<MessageResponse> {
     let client = get_client();
     let api = AuthApi::new(&client);
-    api.forgot_password(&ForgotPasswordRequest::new(email))
+    api.forgot_password(&ForgotPasswordRequest::new(name, email))
         .await
 }
 

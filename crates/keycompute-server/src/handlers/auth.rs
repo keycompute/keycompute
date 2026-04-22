@@ -21,6 +21,8 @@ use keycompute_auth::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+const FORGOT_PASSWORD_IDENTITY_ERROR: &str = "邮箱地址或用户名错误，无法发送重置密码链接";
+
 // ============================================================================
 // 请求/响应类型
 // ============================================================================
@@ -51,6 +53,7 @@ pub struct LoginRequestJson {
 /// 忘记密码请求
 #[derive(Debug, Deserialize)]
 pub struct ForgotPasswordRequestJson {
+    pub name: String,
     pub email: String,
 }
 
@@ -232,9 +235,9 @@ pub async fn forgot_password_handler(
             ApiError::Config("APP_BASE_URL is required to send password reset emails".to_string())
         })?;
 
-    // 无论邮箱是否存在都返回成功（防止邮箱枚举攻击）
-    service
+    let reset_result = service
         .request_reset(&RequestPasswordResetRequest {
+            name: req.name,
             email: req.email,
             client_ip: extract_client_ip_from_headers(&headers),
             public_base_url,
@@ -242,10 +245,16 @@ pub async fn forgot_password_handler(
         .await
         .map_err(ApiError::from)?;
 
+    if reset_result.is_none() {
+        return Err(ApiError::BadRequest(
+            FORGOT_PASSWORD_IDENTITY_ERROR.to_string(),
+        ));
+    }
+
     Ok((
         StatusCode::OK,
         Json(MessageResponse {
-            message: "If the email exists, a reset link has been sent.".to_string(),
+            message: "If the account information matches, a reset link has been sent.".to_string(),
         }),
     ))
 }
@@ -396,6 +405,25 @@ mod tests {
         };
 
         assert_eq!(json.email, "test@example.com");
+    }
+
+    #[test]
+    fn test_forgot_password_request_json() {
+        let json = ForgotPasswordRequestJson {
+            name: "Test User".to_string(),
+            email: "test@example.com".to_string(),
+        };
+
+        assert_eq!(json.name, "Test User");
+        assert_eq!(json.email, "test@example.com");
+    }
+
+    #[test]
+    fn test_forgot_password_identity_error_message() {
+        assert_eq!(
+            FORGOT_PASSWORD_IDENTITY_ERROR,
+            "邮箱地址或用户名错误，无法发送重置密码链接"
+        );
     }
 
     #[test]

@@ -135,15 +135,21 @@ async fn test_forgot_password_success() {
     let (client, mock_server) = create_test_client().await;
     let auth_api = AuthApi::new(&client);
 
+    let expected_body = serde_json::json!({
+        "name": "Test User",
+        "email": fixtures::TEST_EMAIL
+    });
+
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/forgot-password"))
+        .and(body_json(&expected_body))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "message": "Password reset email sent"
         })))
         .mount(&mock_server)
         .await;
 
-    let req = ForgotPasswordRequest::new(fixtures::TEST_EMAIL);
+    let req = ForgotPasswordRequest::new("Test User", fixtures::TEST_EMAIL);
     let result = auth_api.forgot_password(&req).await;
 
     assert!(result.is_ok());

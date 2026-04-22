@@ -41,6 +41,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.forgot_password", "忘记密码");
     m.insert("auth.reset_password", "重置密码");
     m.insert("auth.email", "邮箱");
+    m.insert("auth.username", "用户名");
     m.insert("auth.password", "密码");
     m.insert("auth.confirm_password", "确认密码");
     m.insert("auth.name", "姓名");
@@ -51,22 +52,32 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.back_to_login", "返回登录");
     m.insert("auth.login_subtitle", "登录您的账户以继续");
     m.insert("auth.register_subtitle", "创建您的账户");
-    m.insert("auth.reset_subtitle", "输入您的邮箱，我们将发送重置链接");
-    m.insert("auth.reset_sent", "重置链接已发送到您的邮箱，请查收");
+    m.insert(
+        "auth.reset_subtitle",
+        "输入用户名和邮箱，校验通过后我们将发送重置链接",
+    );
+    m.insert(
+        "auth.reset_sent",
+        "如果用户名与邮箱匹配，重置链接已发送到对应邮箱，请注意查收",
+    );
     m.insert("auth.register_now", "立即注册");
     m.insert("auth.login_now", "立即登录");
     m.insert("auth.email_placeholder", "请输入邮箱");
     m.insert("auth.password_placeholder", "请输入密码");
+    m.insert("auth.username_placeholder", "请输入用户名");
     m.insert("auth.name_placeholder", "请输入姓名");
     m.insert("auth.confirm_password_placeholder", "再次输入密码");
     m.insert("auth.reset_email_placeholder", "请输入注册邮箱");
+    m.insert("auth.reset_username_placeholder", "请输入注册用户名");
     m.insert("auth.fill_all", "请填写邮箱和密码");
     m.insert("auth.fill_required", "请填写所有必填项");
     m.insert("auth.enter_email", "请输入邮箱地址");
+    m.insert("auth.enter_username", "请输入用户名");
     m.insert("auth.login_failed", "登录失败");
     m.insert("auth.register_failed", "注册失败");
     m.insert("auth.send_failed", "发送失败");
     m.insert("auth.sending", "发送中...");
+    m.insert("auth.cooldown_retry", "请稍后重试");
     m.insert("auth.send_reset_link", "发送重置链接");
     m.insert("auth.logging_in", "登录中...");
     m.insert("auth.registering", "注册中...");

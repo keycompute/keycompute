@@ -41,6 +41,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.forgot_password", "Forgot Password");
     m.insert("auth.reset_password", "Reset Password");
     m.insert("auth.email", "Email");
+    m.insert("auth.username", "Username");
     m.insert("auth.password", "Password");
     m.insert("auth.confirm_password", "Confirm Password");
     m.insert("auth.name", "Name");
@@ -53,26 +54,36 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.register_subtitle", "Create your account");
     m.insert(
         "auth.reset_subtitle",
-        "Enter your email and we'll send you a reset link",
+        "Enter your username and email, and we'll send a reset link after verification",
     );
-    m.insert("auth.reset_sent", "Reset link has been sent to your email");
+    m.insert(
+        "auth.reset_sent",
+        "If the username and email match, a reset link has been sent to the corresponding email",
+    );
     m.insert("auth.register_now", "Sign up");
     m.insert("auth.login_now", "Sign in");
     m.insert("auth.email_placeholder", "Enter your email");
     m.insert("auth.password_placeholder", "Enter your password");
+    m.insert("auth.username_placeholder", "Enter your username");
     m.insert("auth.name_placeholder", "Enter your name");
     m.insert("auth.confirm_password_placeholder", "Re-enter password");
     m.insert(
         "auth.reset_email_placeholder",
         "Enter your registered email",
     );
+    m.insert(
+        "auth.reset_username_placeholder",
+        "Enter your registered username",
+    );
     m.insert("auth.fill_all", "Please fill in email and password");
     m.insert("auth.fill_required", "Please fill in all required fields");
     m.insert("auth.enter_email", "Please enter your email address");
+    m.insert("auth.enter_username", "Please enter your username");
     m.insert("auth.login_failed", "Login failed");
     m.insert("auth.register_failed", "Registration failed");
     m.insert("auth.send_failed", "Failed to send");
     m.insert("auth.sending", "Sending...");
+    m.insert("auth.cooldown_retry", "Try again later");
     m.insert("auth.send_reset_link", "Send Reset Link");
     m.insert("auth.logging_in", "Signing in...");
     m.insert("auth.registering", "Signing up...");

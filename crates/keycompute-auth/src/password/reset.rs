@@ -27,6 +27,8 @@ pub struct ResetPasswordRequest {
 /// 请求密码重置请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct RequestPasswordResetRequest {
+    /// 用户名
+    pub name: String,
     /// 邮箱
     pub email: String,
     /// 客户端 IP（可选）
@@ -89,7 +91,7 @@ impl PasswordResetService {
     ///
     /// # 流程
     /// 1. 验证邮箱格式
-    /// 2. 查找用户（即使用户不存在也返回成功，防止邮箱枚举）
+    /// 2. 查找用户并校验用户名（即使用户不存在或用户名不匹配也返回成功，防止枚举）
     /// 3. 生成重置令牌
     /// 4. 保存令牌
     /// 5. 返回令牌（实际场景中应发送邮件）
@@ -97,6 +99,13 @@ impl PasswordResetService {
     /// # 安全考虑
     /// 即使用户不存在也返回成功，防止邮箱枚举攻击
     pub async fn request_reset(&self, req: &RequestPasswordResetRequest) -> Result<Option<String>> {
+        let requested_name = req.name.trim();
+        if requested_name.is_empty() {
+            return Err(KeyComputeError::ValidationError(
+                "用户名不能为空".to_string(),
+            ));
+        }
+
         // 1. 规范化并验证邮箱
         let email = self.email_validator.normalize(&req.email);
 
@@ -125,6 +134,15 @@ impl PasswordResetService {
             }
         };
 
+        if !password_reset_identity_matches(&user, requested_name) {
+            tracing::info!(
+                user_id = %user.id,
+                email = %email,
+                "Password reset requested with mismatched user name"
+            );
+            return Ok(None);
+        }
+
         let email_service = self.email_service.as_ref().ok_or_else(|| {
             KeyComputeError::ServiceUnavailable("密码重置邮件服务暂不可用".to_string())
         })?;
@@ -132,6 +150,7 @@ impl PasswordResetService {
         // 3. 生成重置令牌
         let token = self.generate_reset_token();
         let expires_at = Utc::now() + Duration::hours(self.token_expiry_hours);
+        let requested_from_ip = parse_client_ip(req.client_ip.as_deref());
 
         // 4. 保存令牌
         let reset = PasswordReset::create(
@@ -140,7 +159,7 @@ impl PasswordResetService {
                 user_id: user.id,
                 token: token.clone(),
                 expires_at,
-                requested_from_ip: req.client_ip.clone(),
+                requested_from_ip,
             },
         )
         .await
@@ -324,9 +343,45 @@ impl PasswordResetService {
     }
 }
 
+fn normalize_reset_name(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+fn password_reset_identity_matches(user: &User, requested_name: &str) -> bool {
+    let requested_name = normalize_reset_name(requested_name);
+    if requested_name.is_empty() {
+        return false;
+    }
+
+    user.name
+        .as_deref()
+        .map(normalize_reset_name)
+        .is_some_and(|stored_name| stored_name == requested_name)
+}
+
+fn parse_client_ip(client_ip: Option<&str>) -> Option<String> {
+    let client_ip = client_ip?.trim();
+    if client_ip.is_empty() {
+        return None;
+    }
+
+    match client_ip.parse() {
+        Ok::<std::net::IpAddr, _>(ip) => Some(ip.to_string()),
+        Err(_) => {
+            tracing::debug!(
+                client_ip,
+                "Ignoring invalid client IP in password reset request"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use uuid::Uuid;
 
     #[test]
     fn test_generate_reset_token() {
@@ -359,5 +414,61 @@ mod tests {
 
         assert_eq!(req.token, "abc123token456");
         assert_eq!(req.new_password, "NewSecurePass123!");
+    }
+
+    #[test]
+    fn test_request_password_reset_request_fields() {
+        let req = RequestPasswordResetRequest {
+            name: "Test User".to_string(),
+            email: "test@example.com".to_string(),
+            client_ip: Some("127.0.0.1".to_string()),
+            public_base_url: "https://app.example.com".to_string(),
+        };
+
+        assert_eq!(req.name, "Test User");
+        assert_eq!(req.email, "test@example.com");
+        assert_eq!(req.client_ip.as_deref(), Some("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_parse_client_ip() {
+        assert_eq!(
+            parse_client_ip(Some("127.0.0.1")),
+            Some("127.0.0.1".to_string())
+        );
+        assert_eq!(parse_client_ip(Some("not-an-ip")), None);
+        assert_eq!(parse_client_ip(Some("   ")), None);
+        assert_eq!(parse_client_ip(None), None);
+    }
+
+    #[test]
+    fn test_password_reset_identity_matches_trimmed_and_case_insensitive() {
+        let user = User {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            email: "test@example.com".to_string(),
+            name: Some("Test User".to_string()),
+            role: "user".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(password_reset_identity_matches(&user, "  test user  "));
+    }
+
+    #[test]
+    fn test_password_reset_identity_rejects_missing_or_mismatched_name() {
+        let user = User {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            email: "test@example.com".to_string(),
+            name: None,
+            role: "user".to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        assert!(!password_reset_identity_matches(&user, "Test User"));
+        assert!(!password_reset_identity_matches(&user, "   "));
     }
 }
