@@ -3548,6 +3548,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "keycompute-openai",
  "keycompute-provider-trait",
  "keycompute-types",
  "serde",

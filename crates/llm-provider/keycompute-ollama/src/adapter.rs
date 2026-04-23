@@ -22,6 +22,7 @@ use crate::protocol::{
     OllamaMessage, OllamaOptions, OllamaRequest, OllamaResponse, OpenAIChatResponse,
 };
 use crate::stream::parse_ollama_stream;
+use keycompute_openai::stream::parse_openai_stream;
 
 /// Ollama 默认 API 端点
 pub const OLLAMA_DEFAULT_ENDPOINT: &str = "https://ollama.com/api/chat";
@@ -318,7 +319,15 @@ impl OllamaProvider {
 
         let headers = self.build_headers(request.upstream_api_key.expose());
         let byte_stream: ByteStream = transport.post_stream(&endpoint, headers, body_json).await?;
-        Ok(parse_ollama_stream(byte_stream))
+
+        // 根据 endpoint 类型选择正确的流解析器
+        if endpoint.contains("/v1/chat/completions") {
+            // OpenAI 兼容格式（SSE），复用 openai provider 的流解析
+            Ok(parse_openai_stream(byte_stream))
+        } else {
+            // 原生 Ollama 格式（NDJSON）
+            Ok(parse_ollama_stream(byte_stream))
+        }
     }
 }
 

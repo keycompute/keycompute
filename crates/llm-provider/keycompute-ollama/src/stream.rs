@@ -2,12 +2,14 @@
 //!
 //! 将 Ollama 的 JSON 行流解析为标准化的 StreamEvent
 //!
-//! Ollama 流式格式：每行一个完整 JSON 对象
+//! Ollama 原生格式（/api/chat 端点）流式格式：每行一个完整 JSON 对象
 //! ```json
 //! {"model":"llama2","created_at":"...","message":{"role":"assistant","content":"Hello"},"done":false}
 //! {"model":"llama2","created_at":"...","message":{"role":"assistant","content":" there"},"done":false}
 //! {"model":"llama2","created_at":"...","done":true,"eval_count":5}
 //! ```
+//!
+//! 注：Ollama 的 /v1/chat/completions 端点使用 SSE 格式，复用 keycompute-openai 的流解析。
 
 use futures::{Stream, StreamExt};
 use keycompute_provider_trait::ByteStream;
