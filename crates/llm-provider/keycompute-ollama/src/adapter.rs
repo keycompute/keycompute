@@ -18,10 +18,9 @@ use keycompute_provider_trait::{
 use keycompute_types::{KeyComputeError, Result};
 use serde_json;
 
-use crate::protocol::{
-    OllamaMessage, OllamaOptions, OllamaRequest, OllamaResponse, OpenAIChatResponse,
-};
+use crate::protocol::{OllamaMessage, OllamaOptions, OllamaRequest, OllamaResponse};
 use crate::stream::parse_ollama_stream;
+use keycompute_openai::protocol::OpenAIResponse;
 use keycompute_openai::stream::parse_openai_stream;
 
 /// Ollama 默认 API 端点
@@ -283,8 +282,8 @@ impl OllamaProvider {
         // 根据 endpoint 类型选择正确的响应解析器
         let text = if endpoint.contains("/v1/chat/completions") {
             // OpenAI 兼容格式
-            let openai_response: OpenAIChatResponse = serde_json::from_str(&response_text)
-                .map_err(|e| {
+            let openai_response: OpenAIResponse =
+                serde_json::from_str(&response_text).map_err(|e| {
                     KeyComputeError::ProviderError(format!(
                         "Failed to parse OpenAI response: {}",
                         e
