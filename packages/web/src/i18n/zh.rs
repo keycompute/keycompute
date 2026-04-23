@@ -269,10 +269,6 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("account_settings.password_too_short", "新密码至少需要 8 位");
     m.insert("account_settings.password_changed", "密码修改成功");
     m.insert("account_settings.change_failed", "修改失败");
-    m.insert(
-        "account_settings.page_desc",
-        "维护登录安全信息与密码策略入口。布局参考系统诊断与系统设置页，保持纵向、紧凑、易扫描。",
-    );
     m.insert("account_settings.change_password", "修改密码");
     m.insert(
         "account_settings.section_desc",
@@ -357,6 +353,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution.title", "分销管理");
     m.insert("distribution.subtitle", "查看您的分销收益和推荐记录");
     m.insert("distribution.fetch_failed", "获取失败");
+    m.insert("distribution.disabled_title", "分销功能未启用");
+    m.insert(
+        "distribution.disabled_desc",
+        "当前系统尚未开启分销功能，因此暂时无法查看推荐收益、邀请码和推荐用户信息。",
+    );
     m.insert("distribution.total_earnings", "总收益");
     m.insert("distribution.available_balance", "可用余额");
     m.insert("distribution.pending", "待结算");

@@ -36,6 +36,11 @@ pub fn ForgotPassword() -> Element {
     // 提前提取 &'static str，避免闭包成为 FnOnce
     let t_enter_name = i18n.t("auth.enter_username");
     let t_enter_email = i18n.t("auth.enter_email");
+    let t_login_page_tagline_1 = i18n.t("login.tagline_1");
+    let t_login_page_tagline_highlight = i18n.t("login.tagline_highlight");
+    let t_login_page_tagline_2 = i18n.t("login.tagline_2");
+    let t_login_page_tagline_3 = i18n.t("login.tagline_3");
+    let t_login_page_desc = i18n.t("login.description");
 
     let on_submit = move |evt: Event<FormData>| {
         evt.prevent_default();
@@ -75,70 +80,135 @@ pub fn ForgotPassword() -> Element {
 
     rsx! {
         div {
-            class: "auth-page",
+            class: "kc-login-page",
+            div { class: "kc-login-bg-grid" }
+            div { class: "kc-login-bg-glow kc-login-glow-one" }
+            div { class: "kc-login-bg-glow kc-login-glow-two" }
             div {
-                class: "auth-card",
+                class: "kc-login-container",
                 div {
-                    class: "auth-header",
-                    h1 { class: "auth-title", {i18n.t("auth.reset_password")} }
-                    p { class: "auth-subtitle", {i18n.t("auth.reset_subtitle")} }
-                }
-
-                if sent() {
+                    class: "kc-login-brand-panel",
                     div {
-                        class: "alert alert-success",
-                        {i18n.t("auth.reset_sent")}
-                    }
-                } else {
-                    if let Some(err) = error_msg() {
-                        div { class: "alert alert-error", "{err}" }
-                    }
-                    form {
-                        onsubmit: on_submit,
+                        class: "kc-login-brand-content",
                         div {
-                            class: "form-group",
-                            label { class: "form-label", {i18n.t("auth.username")} }
-                            input {
-                                class: "form-input",
-                                r#type: "text",
-                                placeholder: i18n.t("auth.reset_username_placeholder"),
-                                value: "{name}",
-                                oninput: move |e| name.set(e.value()),
-                            }
+                            class: "kc-login-logo",
+                            div { class: "kc-login-logo-icon" }
+                            div { class: "kc-login-logo-text", "KeyCompute" }
+                        }
+                        h1 {
+                            class: "kc-login-tagline",
+                            "{t_login_page_tagline_1} "
+                            span { "{t_login_page_tagline_highlight}" }
+                            " {t_login_page_tagline_2}"
+                            br {}
+                            "{t_login_page_tagline_3}"
+                        }
+                        p {
+                            class: "kc-login-description",
+                            "{t_login_page_desc}"
                         }
                         div {
-                            class: "form-group",
-                            label { class: "form-label", {i18n.t("auth.email")} }
-                            input {
-                                class: "form-input",
-                                r#type: "email",
-                                placeholder: i18n.t("auth.reset_email_placeholder"),
-                                value: "{email}",
-                                oninput: move |e| email.set(e.value()),
+                            class: "kc-login-features",
+                            for label in [
+                                i18n.t("login.feature_routing"),
+                                i18n.t("login.feature_billing"),
+                                i18n.t("login.feature_ha"),
+                                i18n.t("login.feature_api"),
+                            ] {
+                                div {
+                                    class: "kc-login-feature-badge",
+                                    div { class: "kc-login-feature-dot" }
+                                    "{label}"
+                                }
                             }
                         }
-                        button {
-                            class: "btn btn-primary btn-full",
-                            r#type: "submit",
-                            disabled: loading() || cooldown_seconds() > 0,
-                            if loading() {
-                                {i18n.t("auth.sending")}
-                            } else if cooldown_seconds() > 0 {
-                                {format!("{} ({}s)", i18n.t("auth.cooldown_retry"), cooldown_seconds())}
-                            } else {
-                                {i18n.t("auth.send_reset_link")}
-                            }
-                        }
+                    }
+                    div {
+                        class: "kc-login-tech-circles",
+                        div { class: "kc-login-circle kc-login-circle-one" }
+                        div { class: "kc-login-circle kc-login-circle-two" }
+                        div { class: "kc-login-circle kc-login-circle-three" }
                     }
                 }
 
                 div {
-                    class: "auth-footer",
-                    button {
-                        class: "link",
-                        r#type: "button",
-                        onclick: move |_| { nav.push(Route::Login {}); },
-                        {i18n.t("auth.back_to_login")}
+                    class: "kc-login-panel",
+                    div {
+                        class: "kc-login-card kc-auth-card",
+                        div {
+                            class: "kc-login-header",
+                            h1 { class: "kc-login-title", {i18n.t("auth.reset_password")} }
+                            p { class: "kc-login-subtitle", {i18n.t("auth.reset_subtitle")} }
+                        }
+
+                        if sent() {
+                            div {
+                                class: "kc-auth-success-block",
+                                div {
+                                    class: "kc-login-status kc-login-status-success",
+                                    {i18n.t("auth.reset_sent")}
+                                }
+                                p {
+                                    class: "kc-auth-support-text",
+                                    {i18n.t("auth.reset_subtitle")}
+                                }
+                            }
+                        } else {
+                            if let Some(err) = error_msg() {
+                                div { class: "kc-login-status kc-login-status-error", "{err}" }
+                            }
+                            form {
+                                onsubmit: on_submit,
+                                div {
+                                    class: "kc-login-form-group",
+                                    label { class: "kc-login-form-label", {i18n.t("auth.username")} }
+                                    input {
+                                        class: "kc-login-form-input",
+                                        r#type: "text",
+                                        placeholder: i18n.t("auth.reset_username_placeholder"),
+                                        value: "{name}",
+                                        oninput: move |e| name.set(e.value()),
+                                    }
+                                    div { class: "kc-login-input-glow" }
+                                }
+                                div {
+                                    class: "kc-login-form-group",
+                                    label { class: "kc-login-form-label", {i18n.t("auth.email")} }
+                                    input {
+                                        class: "kc-login-form-input",
+                                        r#type: "email",
+                                        placeholder: i18n.t("auth.reset_email_placeholder"),
+                                        value: "{email}",
+                                        oninput: move |e| email.set(e.value()),
+                                    }
+                                    div { class: "kc-login-input-glow" }
+                                }
+                                button {
+                                    class: "kc-login-button",
+                                    r#type: "submit",
+                                    disabled: loading() || cooldown_seconds() > 0,
+                                    span {
+                                        if loading() {
+                                            {i18n.t("auth.sending")}
+                                        } else if cooldown_seconds() > 0 {
+                                            {format!("{} ({}s)", i18n.t("auth.cooldown_retry"), cooldown_seconds())}
+                                        } else {
+                                            {i18n.t("auth.send_reset_link")}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        div {
+                            class: "kc-login-signup",
+                            button {
+                                class: "kc-login-signup-link",
+                                r#type: "button",
+                                onclick: move |_| { nav.push(Route::Login {}); },
+                                {i18n.t("auth.back_to_login")}
+                            }
+                        }
                     }
                 }
             }

@@ -70,7 +70,6 @@ pub fn UserSettings() -> Element {
                 class: "page-header",
                 div {
                     h1 { class: "page-title", {i18n.t("page.account_settings")} }
-                    p { class: "page-description", {i18n.t("account_settings.page_desc")} }
                 }
             }
 

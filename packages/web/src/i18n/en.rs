@@ -320,10 +320,6 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Password changed successfully",
     );
     m.insert("account_settings.change_failed", "Change failed");
-    m.insert(
-        "account_settings.page_desc",
-        "Maintain sign-in security information and password policy entry points. The layout follows the diagnostics/settings pages with a compact vertical structure.",
-    );
     m.insert("account_settings.change_password", "Change Password");
     m.insert(
         "account_settings.section_desc",
@@ -417,6 +413,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Review your distribution earnings and referral records",
     );
     m.insert("distribution.fetch_failed", "Fetch failed");
+    m.insert("distribution.disabled_title", "Distribution is disabled");
+    m.insert(
+        "distribution.disabled_desc",
+        "Distribution has not been enabled for this system yet, so earnings, referral code, and referral user data are currently unavailable.",
+    );
     m.insert("distribution.total_earnings", "Total Earnings");
     m.insert("distribution.available_balance", "Available Balance");
     m.insert("distribution.pending", "Pending Settlement");

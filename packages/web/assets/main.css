@@ -291,6 +291,12 @@ input, textarea, select {
   border: 1px solid rgba(255, 68, 102, 0.3);
 }
 
+.kc-login-status-success {
+  color: var(--kc-login-success);
+  background: rgba(0, 255, 136, 0.1);
+  border: 1px solid rgba(0, 255, 136, 0.25);
+}
+
 .kc-login-form-group {
   position: relative;
   margin-bottom: 1.5rem;
@@ -510,6 +516,63 @@ input, textarea, select {
 
 .kc-login-signup-link {
   margin-left: 0.25rem;
+}
+
+.kc-auth-card {
+  max-width: 420px;
+}
+
+.kc-auth-step-panel {
+  padding: 1rem 1rem 0.25rem;
+  margin: 0 0 1.5rem;
+  background: rgba(10, 22, 40, 0.7);
+  border: 1px solid var(--kc-login-border);
+  border-radius: 14px;
+}
+
+.kc-auth-support-text {
+  margin: 0 0 0.85rem;
+  color: var(--kc-login-text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.kc-auth-action-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  margin: -0.25rem 0 1.5rem;
+  text-align: center;
+}
+
+.kc-auth-secondary-button {
+  width: 100%;
+  padding: 0.95rem 1rem;
+  color: var(--kc-login-text-primary);
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 600;
+  background: rgba(21, 42, 66, 0.72);
+  border: 1px solid var(--kc-login-border);
+  border-radius: 12px;
+  transition: border-color 0.3s ease, background 0.3s ease, transform 0.3s ease;
+}
+
+.kc-auth-secondary-button:hover:not(:disabled) {
+  background: var(--kc-login-surface-hover);
+  border-color: var(--kc-login-border-active);
+  transform: translateY(-1px);
+}
+
+.kc-auth-secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.kc-auth-success-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 
 .kc-login-tech-circles {
@@ -805,7 +868,10 @@ input, textarea, select {
   display: block;
   padding: 12px 14px;
   margin-top: 12px;
-  overflow-x: auto;
+  overflow: hidden;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
   color: var(--color-primary);
   font-family: "Space Grotesk", ui-monospace, SFMono-Regular, Menlo, monospace;
   background: rgba(5, 10, 20, 0.6);
@@ -941,7 +1007,10 @@ input, textarea, select {
 .kc-api-example {
   padding: 14px;
   margin: 0;
-  overflow-x: auto;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
   color: var(--text-primary);
   font-size: 13px;
   line-height: 1.6;
@@ -1160,6 +1229,10 @@ input, textarea, select {
 }
 
 .key-display {
+  overflow: hidden;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
   color: var(--text-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   background: rgba(0, 0, 0, 0.22);
@@ -1216,6 +1289,10 @@ input, textarea, select {
 }
 
 .kc-api-example {
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
   color: var(--text-primary);
   background: rgba(0, 0, 0, 0.22);
   border: 1px solid var(--border-color);
