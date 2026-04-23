@@ -103,6 +103,23 @@ pub struct Usage {
     pub total_tokens: i32,
 }
 
+impl OpenAIResponse {
+    /// 提取文本内容
+    pub fn extract_text(&self) -> &str {
+        self.choices
+            .first()
+            .and_then(|c| c.message.content.as_deref())
+            .unwrap_or("")
+    }
+}
+
+impl OpenAIMessage {
+    /// 获取消息内容
+    pub fn content(&self) -> &str {
+        self.content.as_deref().unwrap_or("")
+    }
+}
+
 /// OpenAI 流式响应
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIStreamResponse {

@@ -7,6 +7,7 @@ edition = "2024"
 async-trait = "0.1"
 bytes = "1.5"
 futures = "0.3"
+keycompute-openai = { path = "../keycompute-openai" }
 keycompute-provider-trait = { path = "../keycompute-provider-trait" }
 keycompute-types = { path = "../../keycompute-types" }
 serde = { version = "1.0", features = ["derive"] }
