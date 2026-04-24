@@ -140,7 +140,7 @@ max_total_ratio = 0.30
 #
 # 环境变量：
 # KC__DEFAULT_ADMIN_EMAIL=admin@keycompute.local
-# KC__DEFAULT_ADMIN_PASSWORD=<strong-password-here>
+# KC__DEFAULT_ADMIN_PASSWORD=change-me-admin-password
 #
 # 对应的 docker-compose.yml 中的设置：
 # KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
