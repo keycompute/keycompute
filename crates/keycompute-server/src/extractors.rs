@@ -56,24 +56,40 @@ impl AuthExtractor {
         self
     }
 
-    /// 从 Authorization 头和 AuthService 解析
+    /// 从 Authorization 或 x-api-key 头和 AuthService 解析
+    ///
+    /// 支持两种认证方式：
+    /// 1. Authorization: Bearer <token>  (OpenAI 风格)
+    /// 2. x-api-key: <token>             (Anthropic 风格)
     pub async fn from_header_with_auth(
         headers: &HeaderMap,
         auth_service: &keycompute_auth::AuthService,
     ) -> Result<Self> {
-        let auth_header = headers
-            .get("Authorization")
-            .and_then(|h| h.to_str().ok())
-            .ok_or_else(|| ApiError::Auth("Missing Authorization header".to_string()))?;
+        // 优先尝试 x-api-key (Anthropic 风格)
+        let token = if let Some(api_key) = headers.get("x-api-key") {
+            api_key
+                .to_str()
+                .map_err(|_| ApiError::Auth("Invalid x-api-key format".to_string()))?
+                .to_string()
+        } else if let Some(auth_header) = headers.get("Authorization") {
+            // 回退到 Authorization: Bearer (OpenAI 风格)
+            let auth_str = auth_header
+                .to_str()
+                .map_err(|_| ApiError::Auth("Invalid Authorization format".to_string()))?;
 
-        // 解析 Bearer token
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| ApiError::Auth("Invalid Authorization format".to_string()))?;
+            auth_str
+                .strip_prefix("Bearer ")
+                .ok_or_else(|| ApiError::Auth("Invalid Authorization format, expected 'Bearer <token>'".to_string()))?
+                .to_string()
+        } else {
+            return Err(ApiError::Auth(
+                "Missing authentication header. Provide either 'Authorization: Bearer <token>' or 'x-api-key: <token>'".to_string()
+            ));
+        };
 
         // 使用 AuthService 验证 Token（自动检测 JWT 或 API Key）
         let auth_context = auth_service
-            .verify_token(token)
+            .verify_token(&token)
             .await
             .map_err(|e| ApiError::Auth(format!("Authentication failed: {}", e)))?;
 
