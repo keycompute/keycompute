@@ -3546,6 +3546,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "keycompute-doubao"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "keycompute-openai",
+ "keycompute-provider-trait",
+ "keycompute-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "keycompute-emailserver"
 version = "0.1.0"
 dependencies = [
@@ -3723,6 +3740,7 @@ dependencies = [
  "keycompute-db",
  "keycompute-deepseek",
  "keycompute-distribution",
+ "keycompute-doubao",
  "keycompute-emailserver",
  "keycompute-gemini",
  "keycompute-observability",

@@ -51,6 +51,11 @@ pub const AVAILABLE_PROVIDERS: &[ProviderDefinition] = &[
         description: "Google Gemini Models",
         create_adapter: || Arc::new(keycompute_gemini::GeminiProvider::new()),
     },
+    ProviderDefinition {
+        name: "doubao",
+        description: "Doubao Models (Volcano Engine)",
+        create_adapter: || Arc::new(keycompute_doubao::DoubaoProvider::new()),
+    },
 ];
 
 /// 获取所有 Provider 名称列表
