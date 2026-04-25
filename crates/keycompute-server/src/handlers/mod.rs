@@ -8,6 +8,7 @@ pub mod admin_pricing;
 pub mod admin_settings;
 pub mod admin_user;
 
+pub mod anthropic;
 pub mod auth;
 pub mod billing;
 pub mod distribution;
@@ -30,6 +31,9 @@ pub use openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ListModelsResponse, Model,
     chat_completions, list_models, retrieve_model,
 };
+
+// Anthropic 兼容 API
+pub use anthropic::create_message;
 
 // Distribution 分销管理
 pub use distribution::{

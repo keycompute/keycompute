@@ -1,0 +1,37 @@
+[package]
+name = "keycompute-cache"
+version = "0.1.0"
+edition = "2024"
+description = "KeyCompute 缓存抽象层"
+
+[dependencies]
+# Redis - 使用与 runtime 相同的版本
+deadpool-redis = { version = "0.18", features = ["rt_tokio_1"] }
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# 异步运行时
+tokio = { version = "1", features = ["sync", "time", "rt"] }
+
+# 缓存库
+moka = { version = "0.12", features = ["sync", "future"] }
+
+# 序列化
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# 日志
+tracing = "0.1"
+
+# 错误处理
+thiserror = "1.0"
+anyhow = "1.0"
+
+# 工具
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# 异步工具
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

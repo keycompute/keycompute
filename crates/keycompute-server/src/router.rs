@@ -17,6 +17,8 @@ use crate::{
         // OpenAI 兼容 API
         chat_completions,
         check_provider_health,
+        // Anthropic 兼容 API
+        create_message,
         complete_registration_handler,
         create_account,
         create_api_key,
@@ -144,6 +146,15 @@ pub fn create_router(state: AppState) -> Router {
         // Models
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model}", get(retrieve_model))
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+
+    // ==================== 3.5 Anthropic 兼容 API（需要限流） ====================
+    // 这些端点使用 API Key 认证（x-api-key 或 Authorization），路径保持与 Anthropic 一致
+    // 参考: https://docs.anthropic.com/claude/reference/messages_post
+    // 底层可以路由到任意 provider (DeepSeek, Doubao, OpenAI, Claude 等)
+    let anthropic_routes = Router::new()
+        // Messages API
+        .route("/v1/messages", post(create_message))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
     // ==================== 4. 用户自服务 API（需要认证 + 限流） ====================
@@ -312,6 +323,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .merge(auth_routes)
         .merge(openai_routes)
+        .merge(anthropic_routes) // Anthropic 兼容 API
         .merge(user_routes)
         .merge(admin_routes)
         .merge(billing_routes)

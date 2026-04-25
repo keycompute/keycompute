@@ -32,6 +32,8 @@ CLAUDE.md
 .qoder
 .codex
 
+.code-review-graph/
+
 # 环境变量文件（含敏感密钥，禁止提交）
 .env
 .env.local
