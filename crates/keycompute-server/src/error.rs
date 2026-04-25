@@ -23,6 +23,10 @@ pub enum ApiError {
     Provider(String),
     /// 配置错误
     Config(String),
+    /// 验证流程错误
+    Verification(String),
+    /// 服务暂时不可用
+    ServiceUnavailable(String),
     /// 内部错误
     Internal(String),
     /// 请求参数错误
@@ -41,6 +45,8 @@ impl fmt::Display for ApiError {
             ApiError::Routing(msg) => write!(f, "Routing error: {}", msg),
             ApiError::Provider(msg) => write!(f, "Provider error: {}", msg),
             ApiError::Config(msg) => write!(f, "Config error: {}", msg),
+            ApiError::Verification(msg) => write!(f, "Verification error: {}", msg),
+            ApiError::ServiceUnavailable(msg) => write!(f, "Service unavailable: {}", msg),
             ApiError::Internal(msg) => write!(f, "Internal error: {}", msg),
             ApiError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
             ApiError::NotFound(msg) => write!(f, "Not found: {}", msg),
@@ -59,6 +65,8 @@ impl IntoResponse for ApiError {
             ApiError::Routing(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             ApiError::Provider(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             ApiError::Config(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            ApiError::Verification(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg.clone()),
+            ApiError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg.clone()),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
@@ -84,6 +92,8 @@ fn error_type(error: &ApiError) -> &'static str {
         ApiError::Routing(_) => "routing_error",
         ApiError::Provider(_) => "provider_error",
         ApiError::Config(_) => "config_error",
+        ApiError::Verification(_) => "verification_error",
+        ApiError::ServiceUnavailable(_) => "service_unavailable_error",
         ApiError::Internal(_) => "internal_error",
         ApiError::BadRequest(_) => "bad_request_error",
         ApiError::NotFound(_) => "not_found_error",
@@ -102,6 +112,7 @@ impl From<keycompute_types::KeyComputeError> for ApiError {
             // 认证与授权
             KeyComputeError::AuthError(msg) => ApiError::Auth(msg),
             KeyComputeError::PermissionDenied(msg) => ApiError::Forbidden(msg),
+            KeyComputeError::VerificationError(msg) => ApiError::Verification(msg),
 
             // 限流
             KeyComputeError::RateLimitExceeded(msg) => ApiError::RateLimit(msg),
@@ -120,6 +131,7 @@ impl From<keycompute_types::KeyComputeError> for ApiError {
 
             // 配置
             KeyComputeError::ConfigError(msg) => ApiError::Config(msg),
+            KeyComputeError::ServiceUnavailable(msg) => ApiError::ServiceUnavailable(msg),
 
             // 验证与请求
             KeyComputeError::ValidationError(msg) => ApiError::BadRequest(msg),

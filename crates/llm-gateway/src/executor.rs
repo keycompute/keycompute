@@ -100,6 +100,45 @@ impl GatewayExecutor {
     ) -> Result<mpsc::Receiver<StreamEvent>> {
         let (tx, rx) = mpsc::channel(100);
 
+        // 在后台任务中实际执行上游请求，避免在返回 rx 之前就被有界 channel 背压阻塞。
+        // 这对流式场景尤其重要：handler 需要先拿到 rx，才能开始消费事件并向客户端推送。
+        let runner = Self {
+            config: self.config.clone(),
+            providers: self.providers.clone(),
+            http_proxy: self.http_proxy.clone(),
+        };
+
+        tokio::spawn(async move {
+            if let Err(error) = runner
+                .run_plan(
+                    Arc::clone(&ctx),
+                    plan,
+                    tx.clone(),
+                    account_states,
+                    provider_health,
+                )
+                .await
+            {
+                tracing::error!(
+                    request_id = %ctx.request_id,
+                    error = %error,
+                    "Execution task failed"
+                );
+                let _ = tx.send(StreamEvent::error(error.to_string())).await;
+            }
+        });
+
+        Ok(rx)
+    }
+
+    async fn run_plan(
+        &self,
+        ctx: Arc<RequestContext>,
+        plan: ExecutionPlan,
+        tx: mpsc::Sender<StreamEvent>,
+        account_states: Arc<AccountStateStore>,
+        provider_health: Option<Arc<ProviderHealthStore>>,
+    ) -> Result<()> {
         // 构建 target 链：primary + fallback
         let mut targets = vec![plan.primary];
         targets.extend(plan.fallback_chain);
@@ -132,7 +171,7 @@ impl GatewayExecutor {
                         is_fallback = !is_primary,
                         "Request executed successfully"
                     );
-                    return Ok(rx);
+                    return Ok(());
                 }
                 Err(e) => {
                     // 注意：不再自动标记错误，错误计数只能通过管理员手动测试 API 触发
@@ -354,8 +393,50 @@ impl GatewayExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use keycompute_types::{Message, PricingSnapshot};
     use rust_decimal::Decimal;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    #[derive(Debug)]
+    struct ManyChunksProvider {
+        chunks: usize,
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for ManyChunksProvider {
+        fn name(&self) -> &'static str {
+            "many-chunks"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            vec!["gpt-4o"]
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<keycompute_provider_trait::StreamBox> {
+            let mut events: Vec<Result<StreamEvent>> = (0..self.chunks)
+                .map(|_| {
+                    Ok(StreamEvent::Delta {
+                        content: "x".to_string(),
+                        finish_reason: None,
+                    })
+                })
+                .collect();
+
+            events.push(Ok(StreamEvent::Usage {
+                input_tokens: 1,
+                output_tokens: self.chunks as u32,
+            }));
+            events.push(Ok(StreamEvent::Done));
+
+            Ok(Box::pin(futures::stream::iter(events)))
+        }
+    }
 
     #[allow(dead_code)]
     fn create_test_context() -> RequestContext {
@@ -413,5 +494,45 @@ mod tests {
     #[test]
     fn test_estimate_tokens_empty() {
         assert_eq!(GatewayExecutor::estimate_tokens(""), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_returns_receiver_before_consuming_large_stream() {
+        let config = GatewayConfig::default();
+        let mut providers = HashMap::new();
+        providers.insert(
+            "many-chunks".to_string(),
+            Arc::new(ManyChunksProvider { chunks: 150 }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(config, providers);
+
+        let ctx = Arc::new(create_test_context());
+        let plan = ExecutionPlan {
+            primary: ExecutionTarget {
+                provider: "many-chunks".to_string(),
+                account_id: Uuid::new_v4(),
+                endpoint: "http://mock".to_string(),
+                upstream_api_key: "mock-key".into(),
+            },
+            fallback_chain: vec![],
+        };
+
+        let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
+
+        let mut rx = tokio::time::timeout(
+            Duration::from_millis(50),
+            executor.execute(ctx, plan, account_states, Some(provider_health)),
+        )
+        .await
+        .expect("execute should return receiver immediately")
+        .expect("execute should succeed");
+
+        let first_event = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("stream should produce events")
+            .expect("channel should stay open");
+
+        assert!(matches!(first_event, StreamEvent::Delta { .. }));
     }
 }

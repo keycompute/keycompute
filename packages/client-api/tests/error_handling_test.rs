@@ -17,7 +17,7 @@ async fn test_401_unauthorized() {
     let auth_api = AuthApi::new(&client);
 
     Mock::given(method("POST"))
-        .and(path("/auth/login"))
+        .and(path("/api/v1/auth/login"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "Invalid credentials"
         })))
@@ -87,7 +87,7 @@ async fn test_429_rate_limited() {
     let auth_api = AuthApi::new(&client);
 
     Mock::given(method("POST"))
-        .and(path("/auth/login"))
+        .and(path("/api/v1/auth/login"))
         .respond_with(
             ResponseTemplate::new(429)
                 .insert_header("Retry-After", "60")
@@ -106,6 +106,34 @@ async fn test_429_rate_limited() {
             assert!(msg.contains("429") || msg.contains("Too many requests"));
         }
         other => panic!("Expected RateLimited error, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn test_422_verification_error() {
+    let (client, mock_server) = create_test_client().await;
+    let auth_api = AuthApi::new(&client);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/login"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+            "error": {
+                "message": "验证码错误",
+                "type": "verification_error",
+                "code": 422
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let req = LoginRequest::new("test@example.com", "password");
+    let result = auth_api.login(&req).await;
+
+    match result.unwrap_err() {
+        ClientError::Verification(msg) => {
+            assert!(msg.contains("验证码错误"));
+        }
+        other => panic!("Expected Verification error, got {:?}", other),
     }
 }
 
@@ -214,7 +242,7 @@ async fn test_error_helper_methods() {
     let auth_api = AuthApi::new(&client);
 
     Mock::given(method("POST"))
-        .and(path("/auth/login"))
+        .and(path("/api/v1/auth/login"))
         .respond_with(ResponseTemplate::new(401))
         .mount(&mock_server)
         .await;
@@ -224,5 +252,6 @@ async fn test_error_helper_methods() {
 
     assert!(err.is_auth_error());
     assert!(!err.is_rate_limited());
+    assert!(!err.is_verification_error());
     assert!(!err.is_network_error());
 }

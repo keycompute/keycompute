@@ -1,9 +1,11 @@
 //! 认证处理器
 //!
-//! 处理用户注册、登录、邮箱验证、密码重置等认证相关的 HTTP 请求
+//! 处理用户注册、登录和密码重置等认证相关的 HTTP 请求
 
 use crate::{
     error::{ApiError, Result},
+    handlers::configured_public_base_url,
+    middleware::extract_client_ip_from_headers,
     state::AppState,
 };
 use axum::{
@@ -13,62 +15,13 @@ use axum::{
     response::IntoResponse,
 };
 use keycompute_auth::{
-    LoginRequest, PasswordResetService, RegisterRequest, RegistrationService,
-    RequestPasswordResetRequest, ResetPasswordRequest,
+    CompleteRegistrationRequest, LoginRequest, PasswordResetService, RegistrationService,
+    RequestPasswordResetRequest, RequestRegistrationCodeRequest, ResetPasswordRequest,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use uuid::Uuid;
 
-// ============================================================================
-// 辅助函数
-// ============================================================================
-
-/// 从请求头中提取客户端 IP 地址
-///
-/// 优先级：X-Forwarded-For > X-Real-IP
-///
-/// # 参数
-/// - `headers`: HTTP 请求头
-///
-/// # 返回
-/// - 提取到的 IP 地址字符串，如果无法提取则返回 None
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    // 1. 尝试从 X-Forwarded-For 获取（反向代理场景）
-    // X-Forwarded-For 格式：client, proxy1, proxy2
-    // 我们需要第一个（最左边的）IP
-    if let Some(forwarded) = headers.get("x-forwarded-for")
-        && let Ok(value) = forwarded.to_str()
-        && let Some(client_ip) = value.split(',').next()
-    {
-        let ip = client_ip.trim();
-        if !ip.is_empty() {
-            return Some(ip.to_string());
-        }
-    }
-
-    // 2. 尝试从 X-Real-IP 获取（Nginx 常用）
-    if let Some(real_ip) = headers.get("x-real-ip")
-        && let Ok(value) = real_ip.to_str()
-    {
-        let ip = value.trim();
-        if !ip.is_empty() {
-            return Some(ip.to_string());
-        }
-    }
-
-    // 3. 尝试从 CF-Connecting-IP 获取（Cloudflare 专用）
-    if let Some(cf_ip) = headers.get("cf-connecting-ip")
-        && let Ok(value) = cf_ip.to_str()
-    {
-        let ip = value.trim();
-        if !ip.is_empty() {
-            return Some(ip.to_string());
-        }
-    }
-
-    None
-}
+const FORGOT_PASSWORD_IDENTITY_ERROR: &str = "邮箱地址或用户名错误，无法发送重置密码链接";
 
 // ============================================================================
 // 请求/响应类型
@@ -78,11 +31,16 @@ fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequestJson {
     pub email: String,
+    pub referral_code: Option<String>,
+}
+
+/// 完成注册请求
+#[derive(Debug, Deserialize)]
+pub struct CompleteRegistrationRequestJson {
+    pub email: String,
+    pub code: String,
     pub password: String,
     pub name: Option<String>,
-    pub tenant_slug: Option<String>,
-    /// 推荐码（推荐人的用户 ID）
-    pub referral_code: Option<String>,
 }
 
 /// 登录请求
@@ -95,6 +53,7 @@ pub struct LoginRequestJson {
 /// 忘记密码请求
 #[derive(Debug, Deserialize)]
 pub struct ForgotPasswordRequestJson {
+    pub name: String,
     pub email: String,
 }
 
@@ -127,7 +86,42 @@ pub struct VerifyTokenResponse {
 /// POST /auth/register
 pub async fn register_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequestJson>,
+) -> Result<impl IntoResponse> {
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+
+    let register_req = RequestRegistrationCodeRequest {
+        email: req.email,
+        referral_code: req.referral_code,
+    };
+
+    let service = RegistrationService::new(Arc::clone(pool))
+        .with_email_service((*state.email_service).clone());
+    let response = service
+        .request_registration_code(&register_req, extract_client_ip_from_headers(&headers))
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "email": response.email,
+            "message": response.message,
+            "expires_in_seconds": response.expires_in_seconds
+        })),
+    ))
+}
+
+/// 完成注册
+///
+/// POST /auth/register/complete
+pub async fn complete_registration_handler(
+    State(state): State<AppState>,
+    Json(req): Json<CompleteRegistrationRequestJson>,
 ) -> Result<impl IntoResponse> {
     use keycompute_db::models::system_setting::setting_keys;
 
@@ -135,92 +129,35 @@ pub async fn register_handler(
         .pool
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-
-    // 检查是否允许注册
-    let allow_registration =
-        keycompute_db::SystemSetting::get_bool(pool, setting_keys::ALLOW_REGISTRATION, true).await;
-
-    if !allow_registration {
-        return Err(ApiError::Forbidden(
-            "New user registration is currently disabled".to_string(),
+    let default_quota_setting =
+        keycompute_db::SystemSetting::find_by_key(pool, setting_keys::DEFAULT_USER_QUOTA)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to query default user quota: {}", e)))?
+            .ok_or_else(|| {
+                ApiError::Config("Missing system setting: default_user_quota".to_string())
+            })?;
+    let default_quota = default_quota_setting.parse_decimal().map_err(|e| {
+        ApiError::Config(format!("Invalid system setting default_user_quota: {}", e))
+    })?;
+    if !default_quota.is_finite() {
+        return Err(ApiError::Config(
+            "Invalid system setting default_user_quota: value must be finite".to_string(),
         ));
     }
 
-    // 获取默认用户配额
-    let default_quota =
-        keycompute_db::SystemSetting::get_decimal(pool, setting_keys::DEFAULT_USER_QUOTA, 10.0)
-            .await;
-
-    let register_req = RegisterRequest {
+    let complete_req = CompleteRegistrationRequest {
         email: req.email,
+        code: req.code,
         password: req.password,
         name: req.name,
-        tenant_slug: req.tenant_slug,
     };
 
     let service = RegistrationService::new(Arc::clone(pool))
         .with_email_service((*state.email_service).clone());
     let response = service
-        .register(&register_req)
+        .complete_registration(&complete_req, default_quota)
         .await
-        .map_err(|e| ApiError::Auth(format!("Registration failed: {}", e)))?;
-
-    // 为新用户设置初始余额（默认配额）
-    if default_quota > 0.0 {
-        if let Err(e) =
-            initialize_user_balance(pool, response.user_id, response.tenant_id, default_quota).await
-        {
-            tracing::warn!(
-                user_id = %response.user_id,
-                quota = default_quota,
-                error = %e,
-                "Failed to initialize user balance"
-            );
-        } else {
-            tracing::info!(
-                user_id = %response.user_id,
-                quota = default_quota,
-                "User balance initialized with default quota"
-            );
-        }
-    }
-
-    // 处理推荐关系
-    if let Some(ref referral_code) = req.referral_code
-        && let Ok(level1_referrer_id) = Uuid::parse_str(referral_code)
-    {
-        // 查找一级推荐人的推荐人（二级推荐人）
-        let level2_referrer_id =
-            keycompute_db::UserReferral::find_by_user(pool, level1_referrer_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|r| r.level1_referrer_id);
-
-        // 创建推荐关系
-        let referral_req = keycompute_db::CreateUserReferralRequest {
-            user_id: response.user_id,
-            level1_referrer_id: Some(level1_referrer_id),
-            level2_referrer_id,
-            source: Some("referral_code".to_string()),
-        };
-
-        if let Err(e) = keycompute_db::UserReferral::create(pool, &referral_req).await {
-            tracing::warn!(
-                user_id = %response.user_id,
-                referrer_id = %level1_referrer_id,
-                error = %e,
-                "Failed to create referral relationship"
-            );
-        } else {
-            tracing::info!(
-                user_id = %response.user_id,
-                level1_referrer = %level1_referrer_id,
-                level2_referrer = ?level2_referrer_id,
-                "Referral relationship created"
-            );
-        }
-    }
+        .map_err(ApiError::from)?;
 
     Ok((
         StatusCode::CREATED,
@@ -255,7 +192,7 @@ pub async fn login_handler(
     let login_req = LoginRequest {
         email: req.email,
         password: req.password,
-        client_ip: extract_client_ip(&headers),
+        client_ip: extract_client_ip_from_headers(&headers),
     };
 
     let service = keycompute_auth::LoginService::new(Arc::clone(pool), jwt_validator);
@@ -278,34 +215,6 @@ pub async fn login_handler(
     ))
 }
 
-/// 邮箱验证
-///
-/// GET /auth/verify-email/{token}
-pub async fn verify_email_handler(
-    State(state): State<AppState>,
-    Path(token): Path<String>,
-) -> Result<impl IntoResponse> {
-    let pool = state
-        .pool
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-
-    let service = RegistrationService::new(Arc::clone(pool))
-        .with_email_service((*state.email_service).clone());
-    let user_id = service
-        .verify_email(&token)
-        .await
-        .map_err(|e| ApiError::Auth(format!("Email verification failed: {}", e)))?;
-
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "message": "Email verified successfully",
-            "user_id": user_id.to_string()
-        })),
-    ))
-}
-
 /// 忘记密码
 ///
 /// POST /auth/forgot-password
@@ -321,20 +230,31 @@ pub async fn forgot_password_handler(
 
     let service = PasswordResetService::new(Arc::clone(pool))
         .with_email_service((*state.email_service).clone());
+    let public_base_url =
+        configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
+            ApiError::Config("APP_BASE_URL is required to send password reset emails".to_string())
+        })?;
 
-    // 无论邮箱是否存在都返回成功（防止邮箱枚举攻击）
-    service
+    let reset_result = service
         .request_reset(&RequestPasswordResetRequest {
+            name: req.name,
             email: req.email,
-            client_ip: extract_client_ip(&headers),
+            client_ip: extract_client_ip_from_headers(&headers),
+            public_base_url,
         })
         .await
-        .map_err(|e| ApiError::Internal(format!("Password reset request failed: {}", e)))?;
+        .map_err(ApiError::from)?;
+
+    if reset_result.is_none() {
+        return Err(ApiError::BadRequest(
+            FORGOT_PASSWORD_IDENTITY_ERROR.to_string(),
+        ));
+    }
 
     Ok((
         StatusCode::OK,
         Json(MessageResponse {
-            message: "If the email exists, a reset link has been sent.".to_string(),
+            message: "If the account information matches, a reset link has been sent.".to_string(),
         }),
     ))
 }
@@ -447,88 +367,6 @@ pub struct RefreshTokenRequestJson {
     pub token: String,
 }
 
-/// 重新发送验证邮件
-///
-/// POST /auth/resend-verification
-pub async fn resend_verification_handler(
-    State(state): State<AppState>,
-    Json(req): Json<ForgotPasswordRequestJson>,
-) -> Result<impl IntoResponse> {
-    let pool = state
-        .pool
-        .as_ref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-
-    let service = RegistrationService::new(Arc::clone(pool))
-        .with_email_service((*state.email_service).clone());
-    service
-        .resend_verification(&req.email)
-        .await
-        .map_err(|e| match e {
-            keycompute_types::KeyComputeError::AuthError(msg) => ApiError::Auth(msg),
-            _ => ApiError::Internal(format!("Resend verification failed: {}", e)),
-        })?;
-
-    Ok((
-        StatusCode::OK,
-        Json(MessageResponse {
-            message:
-                "If the email exists and is not verified, a new verification email has been sent."
-                    .to_string(),
-        }),
-    ))
-}
-
-// ==================== 辅助函数 ====================
-
-/// 初始化用户余额
-///
-/// 为新用户设置初始余额（默认配额）
-async fn initialize_user_balance(
-    pool: &sqlx::PgPool,
-    user_id: Uuid,
-    tenant_id: Uuid,
-    initial_balance: f64,
-) -> std::result::Result<(), sqlx::Error> {
-    use rust_decimal::Decimal;
-
-    let amount = Decimal::from_f64_retain(initial_balance).unwrap_or(Decimal::ZERO);
-
-    // 创建或更新余额记录
-    sqlx::query(
-        r#"
-        INSERT INTO user_balances (tenant_id, user_id, available_balance, total_recharged)
-        VALUES ($1, $2, $3, $3)
-        ON CONFLICT (user_id) DO UPDATE SET
-            available_balance = user_balances.available_balance + $3,
-            total_recharged = user_balances.total_recharged + $3,
-            updated_at = NOW()
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(user_id)
-    .bind(amount)
-    .execute(pool)
-    .await?;
-
-    // 记录交易
-    sqlx::query(
-        r#"
-        INSERT INTO balance_transactions (
-            tenant_id, user_id, transaction_type, amount, balance_before, balance_after, description
-        )
-        VALUES ($1, $2, 'recharge', $3, 0, $3, 'Initial quota from system')
-        "#,
-    )
-    .bind(tenant_id)
-    .bind(user_id)
-    .bind(amount)
-    .execute(pool)
-    .await?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,10 +375,23 @@ mod tests {
     fn test_register_request_json() {
         let json = RegisterRequestJson {
             email: "test@example.com".to_string(),
+            referral_code: Some("6aac8ab5-aeec-48b8-a4cc-0a446d952862".to_string()),
+        };
+
+        assert_eq!(json.email, "test@example.com");
+        assert_eq!(
+            json.referral_code.as_deref(),
+            Some("6aac8ab5-aeec-48b8-a4cc-0a446d952862")
+        );
+    }
+
+    #[test]
+    fn test_complete_registration_request_json() {
+        let json = CompleteRegistrationRequestJson {
+            email: "test@example.com".to_string(),
+            code: "123456".to_string(),
             password: "SecurePass123!".to_string(),
             name: Some("Test User".to_string()),
-            tenant_slug: None,
-            referral_code: None,
         };
 
         assert_eq!(json.email, "test@example.com");
@@ -554,6 +405,25 @@ mod tests {
         };
 
         assert_eq!(json.email, "test@example.com");
+    }
+
+    #[test]
+    fn test_forgot_password_request_json() {
+        let json = ForgotPasswordRequestJson {
+            name: "Test User".to_string(),
+            email: "test@example.com".to_string(),
+        };
+
+        assert_eq!(json.name, "Test User");
+        assert_eq!(json.email, "test@example.com");
+    }
+
+    #[test]
+    fn test_forgot_password_identity_error_message() {
+        assert_eq!(
+            FORGOT_PASSWORD_IDENTITY_ERROR,
+            "邮箱地址或用户名错误，无法发送重置密码链接"
+        );
     }
 
     #[test]

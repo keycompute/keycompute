@@ -437,10 +437,8 @@ async fn test_stream_error_injection() {
     while let Some(event) = stream.next().await {
         if let Ok(e) = event {
             match &e {
-                StreamEvent::Delta { .. } => {
-                    if !error_found {
-                        chunks_before_error += 1;
-                    }
+                StreamEvent::Delta { .. } if !error_found => {
+                    chunks_before_error += 1;
                 }
                 StreamEvent::Error { message } => {
                     error_found = true;

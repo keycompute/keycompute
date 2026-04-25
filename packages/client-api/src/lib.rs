@@ -49,3 +49,4 @@ pub use api::user::UserApi;
 pub use client::{ApiClient, OpenAiClient};
 pub use config::ClientConfig;
 pub use error::{ClientError, Result};
+pub use keycompute_types::{AssignableUserRole, UserRole};

@@ -7,6 +7,8 @@ use crate::error::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+pub use super::common::MessageResponse;
+
 /// 设置 API 客户端
 #[derive(Debug, Clone)]
 pub struct SettingsApi {
@@ -33,14 +35,18 @@ impl SettingsApi {
         &self,
         settings: &HashMap<String, serde_json::Value>,
         token: &str,
-    ) -> Result<HashMap<String, SettingValue>> {
+    ) -> Result<MessageResponse> {
         self.client
             .put_json("/api/v1/settings", settings, Some(token))
             .await
     }
 
     /// 获取指定设置（Admin）
-    pub async fn get_system_setting_by_key(&self, key: &str, token: &str) -> Result<SettingValue> {
+    pub async fn get_system_setting_by_key(
+        &self,
+        key: &str,
+        token: &str,
+    ) -> Result<SystemSettingRecord> {
         self.client
             .get_json(&format!("/api/v1/settings/{}", key), Some(token))
             .await
@@ -54,7 +60,7 @@ impl SettingsApi {
         key: &str,
         value: &serde_json::Value,
         token: &str,
-    ) -> Result<SettingValue> {
+    ) -> Result<SystemSettingRecord> {
         // 将值包装在 { "value": ... } 结构中
         let payload = serde_json::json!({
             "value": value.as_str().unwrap_or(&value.to_string())
@@ -79,6 +85,7 @@ impl SettingsApi {
 
 /// 公开系统设置
 #[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct PublicSettings {
     pub site_name: String,
     pub site_description: Option<String>,
@@ -86,10 +93,9 @@ pub struct PublicSettings {
     pub site_favicon_url: Option<String>,
     /// API 基础 URL（用于生成 API 用法示例）
     pub api_base_url: Option<String>,
-    pub allow_registration: bool,
-    pub email_verification_required: bool,
     pub maintenance_mode: bool,
     pub maintenance_message: Option<String>,
+    pub distribution_enabled: bool,
     pub alipay_enabled: bool,
     pub wechatpay_enabled: bool,
     pub system_notice: Option<String>,
@@ -98,6 +104,38 @@ pub struct PublicSettings {
     pub about_content: Option<String>,
     pub terms_of_service_url: Option<String>,
     pub privacy_policy_url: Option<String>,
+}
+
+impl Default for PublicSettings {
+    fn default() -> Self {
+        Self {
+            site_name: "KeyCompute".to_string(),
+            site_description: Some("AI Gateway Platform".to_string()),
+            site_logo_url: None,
+            site_favicon_url: None,
+            api_base_url: None,
+            maintenance_mode: false,
+            maintenance_message: None,
+            distribution_enabled: true,
+            alipay_enabled: false,
+            wechatpay_enabled: false,
+            system_notice: None,
+            system_notice_enabled: false,
+            footer_content: None,
+            about_content: None,
+            terms_of_service_url: None,
+            privacy_policy_url: None,
+        }
+    }
+}
+
+/// 单个系统设置记录
+#[derive(Debug, Clone, Deserialize)]
+pub struct SystemSettingRecord {
+    pub key: String,
+    pub value: String,
+    pub value_type: String,
+    pub description: Option<String>,
 }
 
 /// 设置值

@@ -27,33 +27,43 @@ impl DebugApi {
     /// - `model`: 模型名称，用于模拟路由决策
     /// - `token`: 认证令牌
     pub async fn debug_routing(&self, model: &str, token: &str) -> Result<RoutingDebugInfo> {
-        let path = format!("/debug/routing?model={}", urlencoding::encode(model));
+        let path = format!("/api/v1/debug/routing?model={}", urlencoding::encode(model));
         self.client.get_json(&path, Some(token)).await
     }
 
     /// 获取 Provider 健康状态
     pub async fn get_provider_health(&self, token: &str) -> Result<ProviderHealthResponse> {
-        self.client.get_json("/debug/providers", Some(token)).await
+        self.client
+            .get_json("/api/v1/debug/providers", Some(token))
+            .await
     }
 
     /// 获取网关状态
     pub async fn get_gateway_status(&self, token: &str) -> Result<GatewayStatus> {
         self.client
-            .get_json("/debug/gateway/status", Some(token))
+            .get_json("/api/v1/debug/gateway/status", Some(token))
             .await
     }
 
     /// 获取网关统计
     pub async fn get_gateway_stats(&self, token: &str) -> Result<GatewayStats> {
         self.client
-            .get_json("/debug/gateway/stats", Some(token))
+            .get_json("/api/v1/debug/gateway/stats", Some(token))
             .await
     }
 
     /// 检查 Provider 健康
-    pub async fn check_provider_health(&self, token: &str) -> Result<HealthCheckResponse> {
+    pub async fn check_provider_health(
+        &self,
+        provider: &str,
+        token: &str,
+    ) -> Result<ProviderHealthCheckResponse> {
         self.client
-            .post_json("/debug/gateway/health", &serde_json::json!({}), Some(token))
+            .post_json(
+                "/api/v1/debug/gateway/health",
+                &serde_json::json!({ "provider": provider }),
+                Some(token),
+            )
             .await
     }
 
@@ -63,7 +73,7 @@ impl DebugApi {
     pub async fn reset_health(&self, token: &str) -> Result<ResetHealthResponse> {
         self.client
             .post_json(
-                "/debug/providers/reset",
+                "/api/v1/debug/providers/reset",
                 &serde_json::json!({}),
                 Some(token),
             )
@@ -119,24 +129,30 @@ pub struct ProviderStatusInfo {
 /// Provider 健康响应
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderHealthResponse {
-    pub providers: HashMap<String, ProviderHealth>,
-}
-
-/// Provider 健康状态
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderHealth {
-    pub status: String,
-    pub last_check: Option<String>,
-    pub latency_ms: Option<i64>,
-    pub error: Option<String>,
+    pub healthy_providers: Vec<String>,
+    pub account_count: usize,
 }
 
 /// 网关状态
 #[derive(Debug, Clone, Deserialize)]
 pub struct GatewayStatus {
-    pub status: String,
-    pub uptime_seconds: i64,
-    pub version: String,
+    pub available: bool,
+    pub providers: Vec<GatewayProvider>,
+    pub config: GatewayConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayProvider {
+    pub name: String,
+    pub supported_models: Vec<String>,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayConfig {
+    pub max_retries: u32,
+    pub timeout_secs: u64,
+    pub enable_fallback: bool,
 }
 
 /// 网关统计
@@ -145,16 +161,27 @@ pub struct GatewayStats {
     pub total_requests: i64,
     pub successful_requests: i64,
     pub failed_requests: i64,
-    pub average_latency_ms: f64,
-    pub active_connections: i32,
+    pub fallback_count: i64,
+    pub avg_latency_ms: u64,
+    pub provider_stats: HashMap<String, ProviderStats>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderStats {
+    pub requests: u64,
+    pub successes: u64,
+    pub failures: u64,
+    pub avg_latency_ms: u64,
 }
 
 /// 健康检查响应
 #[derive(Debug, Clone, Deserialize)]
-pub struct HealthCheckResponse {
-    pub checked_providers: Vec<String>,
-    pub healthy_providers: Vec<String>,
-    pub unhealthy_providers: Vec<String>,
+pub struct ProviderHealthCheckResponse {
+    pub provider: String,
+    pub healthy: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+    pub models: Vec<String>,
 }
 
 /// 重置健康状态响应

@@ -33,6 +33,15 @@ pub fn Header(
     sidebar_mobile_open: Signal<bool>,
     theme: Signal<String>,
     lang: Signal<String>,
+    #[props(default)] toggle_sidebar_title: String,
+    #[props(default)] open_menu_title: String,
+    #[props(default)] switch_to_light_theme_title: String,
+    #[props(default)] switch_to_dark_theme_title: String,
+    #[props(default)] switch_to_zh_title: String,
+    #[props(default)] switch_to_en_title: String,
+    #[props(default)] profile_label: String,
+    #[props(default)] account_settings_label: String,
+    #[props(default)] logout_label: String,
     #[props(default)] on_user_menu: EventHandler<UserMenuAction>,
 ) -> Element {
     // 头像首字母
@@ -45,17 +54,17 @@ pub fn Header(
     // 主题图标：light 显示月亮（切换到 dark），dark 显示太阳（切换到 light）
     let is_dark = theme() == "dark";
     let theme_title = if is_dark {
-        "切换到亮色主题"
+        switch_to_light_theme_title
     } else {
-        "切换到暗色主题"
+        switch_to_dark_theme_title
     };
 
     let lang_val = lang();
     let lang_label = if lang_val == "zh" { "EN" } else { "中" };
     let lang_title = if lang_val == "zh" {
-        "Switch to English"
+        switch_to_en_title
     } else {
-        "切换到中文"
+        switch_to_zh_title
     };
 
     let title = page_title.clone();
@@ -70,7 +79,7 @@ pub fn Header(
                 // PC 端折叠/展开按钮
                 button {
                     class: "header-toggle-btn hide-mobile",
-                    title: "切换侧边栏",
+                    title: "{toggle_sidebar_title}",
                     onclick: move |_| {
                         let cur = sidebar_collapsed();
                         *sidebar_collapsed.write() = !cur;
@@ -80,7 +89,7 @@ pub fn Header(
                 // 移动端汉堡菜单
                 button {
                     class: "header-toggle-btn hide-desktop hide-tablet",
-                    title: "打开菜单",
+                    title: "{open_menu_title}",
                     onclick: move |_| {
                         let cur = sidebar_mobile_open();
                         *sidebar_mobile_open.write() = !cur;
@@ -119,9 +128,8 @@ pub fn Header(
 
                 // 语言切换
                 button {
-                    class: "header-icon-btn",
+                    class: "header-icon-btn header-lang-btn",
                     title: "{lang_title}",
-                    style: "font-size: 12px; font-weight: 600; width: 36px;",
                     onclick: move |_| {
                         let cur = lang();
                         let next = if cur == "zh" { "en" } else { "zh" };
@@ -132,7 +140,7 @@ pub fn Header(
                         }
                     },
                     IconGlobe { size: 18 }
-                    span { style: "font-size: 11px; margin-left: 2px;", "{lang_label}" }
+                    span { "{lang_label}" }
                 }
 
                 // 通知功能待实现，暂隐藏铃铛按钮
@@ -185,7 +193,7 @@ pub fn Header(
                                     on_user_menu.call(UserMenuAction::Profile);
                                 },
                                 IconUser { size: 16 }
-                                span { "个人资料" }
+                                span { "{profile_label}" }
                             }
 
                             // 设置
@@ -199,7 +207,7 @@ pub fn Header(
                                     on_user_menu.call(UserMenuAction::Settings);
                                 },
                                 IconSettings { size: 16 }
-                                span { "账户设置" }
+                                span { "{account_settings_label}" }
                             }
 
                             // 分隔线
@@ -218,7 +226,7 @@ pub fn Header(
                                     on_user_menu.call(UserMenuAction::Logout);
                                 },
                                 IconLogOut { size: 16 }
-                                span { "退出登录" }
+                                span { "{logout_label}" }
                             }
                         }
                     }

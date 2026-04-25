@@ -8,7 +8,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, Query, State},
 };
 use keycompute_types::RequestContext;
@@ -84,7 +84,7 @@ pub struct PricingInfo {
 /// 即使路由失败也会返回 200，包含详细的诊断信息
 pub async fn debug_routing(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    Extension(auth): Extension<AuthExtractor>,
     Query(query): Query<RoutingDebugQuery>,
 ) -> Result<Json<RoutingDebugResponse>> {
     use keycompute_db::models::Account;
@@ -245,7 +245,6 @@ pub struct ProviderHealthResponse {
 /// 获取 Provider 健康状态
 pub async fn get_provider_health(
     State(state): State<AppState>,
-    _auth: AuthExtractor,
 ) -> Result<Json<ProviderHealthResponse>> {
     let providers = state.routing.healthy_providers().to_vec();
     let account_count = state.account_states.all_states().len();
@@ -268,10 +267,7 @@ pub struct ResetHealthResponse {
 /// 重置 Provider 健康状态和冷却状态
 ///
 /// 用于调试，清除所有 Provider 和账号的健康状态和冷却状态
-pub async fn reset_health(
-    State(state): State<AppState>,
-    _auth: AuthExtractor,
-) -> Result<Json<ResetHealthResponse>> {
+pub async fn reset_health(State(state): State<AppState>) -> Result<Json<ResetHealthResponse>> {
     // 重置所有 Provider 的健康状态
     let providers = state.routing.configured_providers();
     for provider in providers {
@@ -313,12 +309,11 @@ pub struct SetAccountCooldownResponse {
 
 /// 设置指定账号的冷却状态
 ///
-/// POST /debug/accounts/{account_id}/cooldown
+/// POST /api/v1/debug/accounts/{account_id}/cooldown
 ///
 /// 手动触发指定账号进入冷却状态，用于临时禁用某个账号
 pub async fn set_account_cooldown(
     State(state): State<AppState>,
-    _auth: AuthExtractor,
     Path(account_id): Path<Uuid>,
     Json(req): Json<SetAccountCooldownRequest>,
 ) -> Result<Json<SetAccountCooldownResponse>> {

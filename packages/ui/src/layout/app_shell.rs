@@ -37,6 +37,19 @@ pub fn AppShell(
     #[props(default)] page_title: String,
     #[props(default)] user_name: String,
     #[props(default)] current_path: String,
+    #[props(default)] toggle_sidebar_title: String,
+    #[props(default)] open_menu_title: String,
+    #[props(default)] switch_to_light_theme_title: String,
+    #[props(default)] switch_to_dark_theme_title: String,
+    #[props(default)] switch_to_zh_title: String,
+    #[props(default)] switch_to_en_title: String,
+    #[props(default)] profile_label: String,
+    #[props(default)] account_settings_label: String,
+    #[props(default)] logout_label: String,
+    #[props(default)] expand_sidebar_title: String,
+    #[props(default)] collapse_sidebar_title: String,
+    #[props(default)] expand_label: String,
+    #[props(default)] collapse_label: String,
     #[props(default)] on_user_menu: EventHandler<UserMenuAction>,
     children: Element,
 ) -> Element {
@@ -46,15 +59,15 @@ pub fn AppShell(
     let theme = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
-            read_local_storage("theme").unwrap_or_else(|| "light".to_string())
+            read_local_storage("theme").unwrap_or_else(|| "dark".to_string())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            "light".to_string()
+            "dark".to_string()
         }
     });
 
-    let lang = use_signal(|| {
+    let fallback_lang = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
             read_local_storage("lang").unwrap_or_else(|| "zh".to_string())
@@ -64,6 +77,7 @@ pub fn AppShell(
             "zh".to_string()
         }
     });
+    let lang = try_use_context::<Signal<String>>().unwrap_or(fallback_lang);
 
     use_context_provider(|| UiState {
         sidebar_collapsed,
@@ -124,6 +138,10 @@ pub fn AppShell(
                 collapsed: sidebar_collapsed,
                 mobile_open: sidebar_mobile_open,
                 current_path: current_path.clone(),
+                expand_sidebar_title: expand_sidebar_title.clone(),
+                collapse_sidebar_title: collapse_sidebar_title.clone(),
+                expand_label: expand_label.clone(),
+                collapse_label: collapse_label.clone(),
             }
 
             div { class: "{main_class}",
@@ -134,6 +152,15 @@ pub fn AppShell(
                     sidebar_mobile_open,
                     theme,
                     lang,
+                    toggle_sidebar_title: toggle_sidebar_title.clone(),
+                    open_menu_title: open_menu_title.clone(),
+                    switch_to_light_theme_title: switch_to_light_theme_title.clone(),
+                    switch_to_dark_theme_title: switch_to_dark_theme_title.clone(),
+                    switch_to_zh_title: switch_to_zh_title.clone(),
+                    switch_to_en_title: switch_to_en_title.clone(),
+                    profile_label: profile_label.clone(),
+                    account_settings_label: account_settings_label.clone(),
+                    logout_label: logout_label.clone(),
                     on_user_menu,
                 }
 

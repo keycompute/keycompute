@@ -4,8 +4,8 @@ use client_api::error::Result;
 use client_api::{
     AdminApi,
     api::admin::{
-        CreatePricingRequest, MessageResponse, PricingInfo, SetDefaultPricingRequest,
-        UpdatePricingRequest,
+        CreatePricingRequest, CreatePricingResponse, MessageResponse, PricingInfo,
+        SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
     },
 };
 
@@ -16,12 +16,16 @@ pub async fn list(token: &str) -> Result<Vec<PricingInfo>> {
     AdminApi::new(&client).list_pricing(token).await
 }
 
-pub async fn create(req: CreatePricingRequest, token: &str) -> Result<PricingInfo> {
+pub async fn create(req: CreatePricingRequest, token: &str) -> Result<CreatePricingResponse> {
     let client = get_client();
     AdminApi::new(&client).create_pricing(&req, token).await
 }
 
-pub async fn update(id: &str, req: UpdatePricingRequest, token: &str) -> Result<PricingInfo> {
+pub async fn update(
+    id: &str,
+    req: UpdatePricingRequest,
+    token: &str,
+) -> Result<UpdatePricingResponse> {
     let client = get_client();
     AdminApi::new(&client).update_pricing(id, &req, token).await
 }

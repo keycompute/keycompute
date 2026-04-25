@@ -1,5 +1,6 @@
 //! 管理功能模块集成测试
 
+use client_api::AssignableUserRole;
 use client_api::api::admin::{
     AdminApi, CalculateCostRequest, CreateAccountRequest, CreatePricingRequest,
     UpdateBalanceRequest, UpdateUserRequest,
@@ -105,28 +106,27 @@ async fn test_update_user_success() {
     Mock::given(method("PUT"))
         .and(path("/api/v1/users/user_001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "user_001",
+            "success": true,
+            "message": "User updated successfully",
+            "user_id": "user_001",
             "email": "updated@example.com",
             "name": "Updated Name",
-            "role": "admin",
-            "tenant_id": "tenant_001",
-            "tenant_name": "Test Tenant",
-            "balance": 75.5,
-            "created_at": "2024-01-01T00:00:00Z",
-            "updated_at": "2024-01-20T00:00:00Z"
+            "role": "admin"
         })))
         .mount(&mock_server)
         .await;
 
     let req = UpdateUserRequest::new()
         .with_name("Updated Name")
-        .with_role("admin");
+        .with_role(AssignableUserRole::Admin);
     let result = admin_api
         .update_user("user_001", &req, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(result.is_ok());
     let user = result.unwrap();
+    assert!(user.success);
+    assert_eq!(user.user_id, "user_001");
     assert_eq!(user.name, Some("Updated Name".to_string()));
 }
 
@@ -303,20 +303,24 @@ async fn test_list_pricing_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             {
                 "id": "pricing_001",
-                "model": "gpt-4",
-                "input_price": 0.03,
-                "output_price": 0.06,
+                "model_name": "gpt-4",
+                "provider": "openai",
+                "input_price_per_1k": "0.03",
+                "output_price_per_1k": "0.06",
                 "currency": "USD",
                 "is_default": true,
+                "is_effective": true,
                 "created_at": "2024-01-01T00:00:00Z"
             },
             {
                 "id": "pricing_002",
-                "model": "gpt-3.5-turbo",
-                "input_price": 0.0015,
-                "output_price": 0.002,
+                "model_name": "gpt-3.5-turbo",
+                "provider": "openai",
+                "input_price_per_1k": "0.0015",
+                "output_price_per_1k": "0.002",
                 "currency": "USD",
                 "is_default": true,
+                "is_effective": true,
                 "created_at": "2024-01-01T00:00:00Z"
             }
         ])))
@@ -328,7 +332,7 @@ async fn test_list_pricing_success() {
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
     let pricing = result.unwrap();
     assert_eq!(pricing.len(), 2);
-    assert_eq!(pricing[0].model, "gpt-4");
+    assert_eq!(pricing[0].model_name, "gpt-4");
 }
 
 #[tokio::test]
@@ -339,24 +343,26 @@ async fn test_create_pricing_success() {
     Mock::given(method("POST"))
         .and(path("/api/v1/pricing"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "pricing_new_001",
-            "model": "claude-3-opus",
-            "input_price": 0.015,
-            "output_price": 0.075,
-            "currency": "USD",
+            "success": true,
+            "message": "Pricing created",
+            "pricing_id": "pricing_new_001",
+            "model_name": "claude-3-opus",
+            "provider": "anthropic",
+            "input_price_per_1k": "0.015",
+            "output_price_per_1k": "0.075",
             "is_default": false,
-            "created_at": "2024-01-20T00:00:00Z"
+            "created_by": "admin_001"
         })))
         .mount(&mock_server)
         .await;
 
-    let req = CreatePricingRequest::new("claude-3-opus", 0.015, 0.075, "USD");
+    let req = CreatePricingRequest::new("claude-3-opus", "anthropic", "0.015", "0.075", "USD");
     let result = admin_api
         .create_pricing(&req, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
-    assert_eq!(result.unwrap().model, "claude-3-opus");
+    assert_eq!(result.unwrap().model_name, "claude-3-opus");
 }
 
 #[tokio::test]

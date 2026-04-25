@@ -14,31 +14,28 @@ async fn test_create_payment_order_success() {
     let payment_api = PaymentApi::new(&client);
 
     let expected_body = serde_json::json!({
-        "amount": 10.0,
-        "currency": "USD",
-        "payment_method": "alipay",
-        "description": null
+        "amount": "10",
+        "subject": "账户充值",
+        "body": null,
+        "payment_type": "page"
     });
 
     Mock::given(method("POST"))
         .and(path("/api/v1/payments/orders"))
         .and(body_json(&expected_body))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "order_001",
+            "order_id": "order_001",
             "out_trade_no": "PAY202401200001",
-            "amount": 10.0,
-            "currency": "USD",
-            "status": "pending",
-            "description": null,
-            "payment_method": "alipay",
+            "payment_type": "page",
             "pay_url": "https://alipay.com/pay?order=xxx",
-            "paid_at": null,
-            "created_at": "2024-01-20T10:00:00Z"
+            "qr_code": null,
+            "qr_code_image_url": null,
+            "expired_at": "2024-01-20T11:00:00Z"
         })))
         .mount(&mock_server)
         .await;
 
-    let req = CreatePaymentOrderRequest::new(10.0, "USD", "alipay");
+    let req = CreatePaymentOrderRequest::new(10.0, "账户充值", "page");
     let result = payment_api
         .create_payment_order(&req, fixtures::TEST_ACCESS_TOKEN)
         .await;
@@ -46,8 +43,7 @@ async fn test_create_payment_order_success() {
     assert!(result.is_ok());
     let order = result.unwrap();
     assert_eq!(order.out_trade_no, "PAY202401200001");
-    assert_eq!(order.amount, 10.0);
-    assert_eq!(order.status, "pending");
+    assert_eq!(order.payment_type, "page");
 }
 
 #[tokio::test]
@@ -56,39 +52,35 @@ async fn test_create_payment_order_with_description() {
     let payment_api = PaymentApi::new(&client);
 
     let expected_body = serde_json::json!({
-        "amount": 50.0,
-        "currency": "USD",
-        "payment_method": "wechat",
-        "description": "Account recharge"
+        "amount": "50",
+        "subject": "账户充值",
+        "body": "Account recharge",
+        "payment_type": "qr"
     });
 
     Mock::given(method("POST"))
         .and(path("/api/v1/payments/orders"))
         .and(body_json(&expected_body))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "order_002",
+            "order_id": "order_002",
             "out_trade_no": "PAY202401200002",
-            "amount": 50.0,
-            "currency": "USD",
-            "status": "pending",
-            "description": "Account recharge",
-            "payment_method": "wechat",
-            "pay_url": "https://wechat.com/pay?order=yyy",
-            "paid_at": null,
-            "created_at": "2024-01-20T11:00:00Z"
+            "payment_type": "qr",
+            "pay_url": null,
+            "qr_code": "qr-content",
+            "qr_code_image_url": "https://example.com/qr.png",
+            "expired_at": "2024-01-20T11:00:00Z"
         })))
         .mount(&mock_server)
         .await;
 
-    let req =
-        CreatePaymentOrderRequest::new(50.0, "USD", "wechat").with_description("Account recharge");
+    let req = CreatePaymentOrderRequest::new(50.0, "账户充值", "qr").with_body("Account recharge");
     let result = payment_api
         .create_payment_order(&req, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(result.is_ok());
     let order = result.unwrap();
-    assert_eq!(order.description, Some("Account recharge".to_string()));
+    assert_eq!(order.qr_code, Some("qr-content".to_string()));
 }
 
 #[tokio::test]
@@ -104,7 +96,7 @@ async fn test_create_payment_order_invalid_amount() {
         .mount(&mock_server)
         .await;
 
-    let req = CreatePaymentOrderRequest::new(-5.0, "USD", "alipay");
+    let req = CreatePaymentOrderRequest::new(-5.0, "账户充值", "page");
     let result = payment_api
         .create_payment_order(&req, fixtures::TEST_ACCESS_TOKEN)
         .await;
@@ -190,12 +182,13 @@ async fn test_get_payment_order_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "order_001",
             "out_trade_no": "PAY202401200001",
-            "amount": 10.0,
-            "currency": "USD",
+            "amount": "10",
             "status": "paid",
-            "description": null,
+            "subject": "账户充值",
+            "body": null,
             "payment_method": "alipay",
             "pay_url": null,
+            "expired_at": "2024-01-20T11:00:00Z",
             "paid_at": "2024-01-20T10:05:00Z",
             "created_at": "2024-01-20T10:00:00Z"
         })))
@@ -240,16 +233,10 @@ async fn test_sync_payment_order_success() {
     Mock::given(method("POST"))
         .and(path("/api/v1/payments/sync/PAY202401200001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "id": "order_001",
+            "order_id": "order_001",
             "out_trade_no": "PAY202401200001",
-            "amount": 10.0,
-            "currency": "USD",
             "status": "paid",
-            "description": null,
-            "payment_method": "alipay",
-            "pay_url": null,
-            "paid_at": "2024-01-20T10:05:00Z",
-            "created_at": "2024-01-20T10:00:00Z"
+            "changed": true
         })))
         .mount(&mock_server)
         .await;
@@ -260,7 +247,9 @@ async fn test_sync_payment_order_success() {
 
     assert!(result.is_ok());
     let order = result.unwrap();
+    assert_eq!(order.order_id, "order_001");
     assert_eq!(order.status, "paid");
+    assert!(order.changed);
 }
 
 #[tokio::test]

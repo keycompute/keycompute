@@ -17,6 +17,7 @@ use crate::{
         // OpenAI 兼容 API
         chat_completions,
         check_provider_health,
+        complete_registration_handler,
         create_account,
         create_api_key,
         create_distribution_rule,
@@ -73,7 +74,6 @@ use crate::{
         refresh_account,
         refresh_token_handler,
         register_handler,
-        resend_verification_handler,
         reset_health,
         reset_password_handler,
         retrieve_model,
@@ -89,12 +89,12 @@ use crate::{
         update_system_settings,
         update_user,
         update_user_balance,
-        verify_email_handler,
         verify_reset_token_handler,
     },
     middleware::{
-        admin_auth_middleware, cors_layer, maintenance_mode_middleware, rate_limit_middleware,
-        request_logger, trace_id_middleware,
+        admin_auth_middleware, cors_layer, maintenance_mode_middleware,
+        public_auth_rate_limit_middleware, rate_limit_middleware, request_logger,
+        trace_id_middleware,
     },
     state::AppState,
 };
@@ -107,24 +107,35 @@ use tower_http::trace::TraceLayer;
 
 /// 创建路由器
 pub fn create_router(state: AppState) -> Router {
-    // ==================== 1. 认证路由（不需要限流） ====================
-    let auth_routes = Router::new()
-        .route("/auth/register", post(register_handler))
-        .route("/auth/login", post(login_handler))
-        .route("/auth/verify-email/{token}", get(verify_email_handler))
-        .route("/auth/forgot-password", post(forgot_password_handler))
-        .route("/auth/reset-password", post(reset_password_handler))
+    // ==================== 1. 公共注册路由（按 IP/设备限流） ====================
+    let registration_routes = Router::new()
+        .route("/api/v1/auth/register", post(register_handler))
         .route(
-            "/auth/verify-reset-token/{token}",
-            get(verify_reset_token_handler),
+            "/api/v1/auth/register/complete",
+            post(complete_registration_handler),
         )
-        .route("/auth/refresh-token", post(refresh_token_handler))
-        .route(
-            "/auth/resend-verification",
-            post(resend_verification_handler),
-        );
+        .layer(from_fn_with_state(
+            state.clone(),
+            public_auth_rate_limit_middleware,
+        ));
 
-    // ==================== 2. OpenAI 兼容 API（需要限流） ====================
+    // ==================== 2. 其他认证路由（不需要限流） ====================
+    let auth_routes = registration_routes.merge(
+        Router::new()
+            .route("/api/v1/auth/login", post(login_handler))
+            .route(
+                "/api/v1/auth/forgot-password",
+                post(forgot_password_handler),
+            )
+            .route("/api/v1/auth/reset-password", post(reset_password_handler))
+            .route(
+                "/api/v1/auth/verify-reset-token/{token}",
+                get(verify_reset_token_handler),
+            )
+            .route("/api/v1/auth/refresh-token", post(refresh_token_handler)),
+    );
+
+    // ==================== 3. OpenAI 兼容 API（需要限流） ====================
     // 这些端点使用 API Key 认证，路径保持与 OpenAI 一致
     // 参考: https://platform.openai.com/docs/api-reference
     let openai_routes = Router::new()
@@ -135,7 +146,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/v1/models/{model}", get(retrieve_model))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
-    // ==================== 3. 用户自服务 API（需要认证 + 限流） ====================
+    // ==================== 4. 用户自服务 API（需要认证 + 限流） ====================
     // 用户管理自己的资源，Admin 也可以访问（根据业务逻辑返回不同范围的数据）
     let user_routes = Router::new()
         // 当前用户信息
@@ -248,19 +259,20 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/billing/stats", get(get_billing_stats))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
-    // ==================== 6. 调试接口（仅开发/Admin 使用） ====================
+    // ==================== 6. 调试接口（仅 Admin 使用） ====================
     let debug_routes = Router::new()
-        .route("/debug/routing", get(debug_routing))
-        .route("/debug/providers", get(get_provider_health))
-        .route("/debug/providers/reset", post(reset_health))
+        .route("/api/v1/debug/routing", get(debug_routing))
+        .route("/api/v1/debug/providers", get(get_provider_health))
+        .route("/api/v1/debug/providers/reset", post(reset_health))
         .route(
-            "/debug/accounts/{account_id}/cooldown",
+            "/api/v1/debug/accounts/{account_id}/cooldown",
             post(set_account_cooldown),
         )
-        .route("/debug/gateway/status", get(get_gateway_status))
-        .route("/debug/gateway/stats", get(get_execution_stats))
-        .route("/debug/gateway/health", post(check_provider_health))
-        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+        .route("/api/v1/debug/gateway/status", get(get_gateway_status))
+        .route("/api/v1/debug/gateway/stats", get(get_execution_stats))
+        .route("/api/v1/debug/gateway/health", post(check_provider_health))
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(state.clone(), admin_auth_middleware));
 
     // ==================== 7. 支付 API ====================
     // 用户支付路由（需要认证 + 限流）

@@ -26,11 +26,14 @@ packages/mobile/dist/
 .vscode/
 .idea/
 *.iml
+.codex
+.claude
 
 # ── 文档与说明文件 ──
 *.md
 !README.md
 LICENSE
+**/__pycache__/
 
 # ── 测试文件（生产镜像不需要，但 Cargo workspace 解析需要目录存在，只排除源码）──
 # 注意：不能排除整个 crates/integration-tests/ 目录

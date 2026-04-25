@@ -8,7 +8,6 @@ CREATE TABLE tenants (
     -- 租户配置
     default_rpm_limit INTEGER NOT NULL DEFAULT 60,
     default_tpm_limit INTEGER NOT NULL DEFAULT 100000,
-    distribution_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -22,13 +21,52 @@ CREATE TABLE users (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email VARCHAR(255) NOT NULL UNIQUE,
     name VARCHAR(255),
-    role VARCHAR(50) NOT NULL DEFAULT 'user',
+    role VARCHAR(50) NOT NULL DEFAULT 'user'
+        CONSTRAINT chk_users_role_allowed CHECK (role IN ('system', 'admin', 'user')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_users_tenant_id ON users(tenant_id);
 CREATE INDEX idx_users_email ON users(email);
+CREATE UNIQUE INDEX uq_users_single_system_role ON users (role) WHERE role = 'system';
+
+CREATE OR REPLACE FUNCTION prevent_system_role_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.role = 'system' AND NEW.role <> 'system' THEN
+        RAISE EXCEPTION 'system user role cannot be changed';
+    END IF;
+
+    IF OLD.role <> 'system' AND NEW.role = 'system' THEN
+        RAISE EXCEPTION 'system role cannot be assigned by update';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_prevent_system_role_change
+BEFORE UPDATE OF role ON users
+FOR EACH ROW
+EXECUTE FUNCTION prevent_system_role_change();
+
+CREATE OR REPLACE FUNCTION prevent_system_user_delete()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.role = 'system' THEN
+        RAISE EXCEPTION 'system user cannot be deleted';
+    END IF;
+
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_prevent_system_user_delete
+BEFORE DELETE ON users
+FOR EACH ROW
+EXECUTE FUNCTION prevent_system_user_delete();
+
 -- produce_ai_keys: Produce AI Key 表（用户访问系统的 API Key）
 CREATE TABLE produce_ai_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -156,6 +194,33 @@ CREATE TABLE tenant_distribution_rules (
 
 CREATE INDEX idx_tenant_distribution_rules_tenant ON tenant_distribution_rules(tenant_id);
 CREATE INDEX idx_tenant_distribution_rules_active ON tenant_distribution_rules(is_active) WHERE is_active = TRUE;
+-- pending_registrations: 待完成注册表
+-- 用于邮箱验证码注册流程，在验证码验证成功前暂存注册占位状态
+
+CREATE TABLE pending_registrations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email VARCHAR(255) NOT NULL UNIQUE,
+    -- 首次触达时锁定的推荐码（可选）
+    referral_code UUID REFERENCES users(id) ON DELETE SET NULL,
+    -- Argon2 哈希后的 6 位验证码
+    verification_code_hash VARCHAR(255) NOT NULL,
+    -- 验证码过期时间（默认 10 分钟）
+    expires_at TIMESTAMPTZ NOT NULL,
+    -- 已尝试验证次数
+    verify_attempts INTEGER NOT NULL DEFAULT 0,
+    -- 验证码发送次数
+    resend_count INTEGER NOT NULL DEFAULT 1,
+    -- 最近一次发送时间
+    last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- 发起请求的客户端 IP（可选）
+    requested_from_ip TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_pending_registrations_email ON pending_registrations(email);
+CREATE INDEX idx_pending_registrations_expires ON pending_registrations(expires_at);
+CREATE INDEX idx_pending_registrations_referral_code ON pending_registrations(referral_code);
 -- user_credentials: 用户密码凭证表
 -- 存储用户密码哈希和登录安全相关信息
 
@@ -186,30 +251,6 @@ CREATE INDEX idx_user_credentials_locked ON user_credentials(locked_until)
     WHERE locked_until IS NOT NULL;
 CREATE INDEX idx_user_credentials_verified ON user_credentials(email_verified) 
     WHERE email_verified = FALSE;
--- email_verifications: 邮箱验证令牌表
--- 管理用户邮箱验证流程
-
-CREATE TABLE email_verifications (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    email VARCHAR(255) NOT NULL,
-    -- 验证令牌 (随机字符串)
-    token VARCHAR(255) NOT NULL UNIQUE,
-    -- 令牌过期时间
-    expires_at TIMESTAMPTZ NOT NULL,
-    -- 是否已使用
-    used BOOLEAN NOT NULL DEFAULT FALSE,
-    used_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- 每个用户的每个邮箱只能有一个有效验证记录
-    UNIQUE(user_id, email)
-);
-
--- 索引
-CREATE INDEX idx_email_verifications_token ON email_verifications(token);
-CREATE INDEX idx_email_verifications_expires ON email_verifications(expires_at) 
-    WHERE used = FALSE;
-CREATE INDEX idx_email_verifications_user ON email_verifications(user_id);
 -- password_resets: 密码重置令牌表
 -- 管理用户密码重置流程
 
@@ -451,7 +492,9 @@ CREATE TABLE IF NOT EXISTS system_settings (
     -- 设置键名（唯一）
     key VARCHAR(100) UNIQUE NOT NULL,
     -- 设置值（以字符串形式存储）
-    value TEXT NOT NULL,
+    value TEXT NOT NULL
+        CONSTRAINT chk_system_settings_default_user_role
+        CHECK (key <> 'default_user_role' OR value = 'user'),
     -- 值类型：string, bool, int, decimal, json
     value_type VARCHAR(20) NOT NULL DEFAULT 'string',
     -- 设置描述
@@ -474,8 +517,6 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
     ('site_favicon_url', '', 'string', '站点 Favicon URL'),
     
     -- 注册设置
-    ('allow_registration', 'true', 'bool', '是否允许新用户注册'),
-    ('email_verification_required', 'true', 'bool', '注册是否需要邮箱验证'),
     ('default_user_quota', '10.00', 'decimal', '新用户默认配额（元）'),
     ('default_user_role', 'user', 'string', '新用户默认角色'),
     
@@ -488,9 +529,9 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
     ('maintenance_message', '', 'string', '维护模式提示信息'),
     
     -- 分销设置
-    ('distribution_enabled', 'false', 'bool', '是否启用分销系统'),
+    ('distribution_enabled', 'true', 'bool', '是否启用分销系统'),
     ('distribution_level1_default_ratio', '0.03', 'decimal', '一级分销默认分成比例'),
-    ('distribution_level2_default_ratio', '0.01', 'decimal', '二级分销默认分成比例'),
+    ('distribution_level2_default_ratio', '0.02', 'decimal', '二级分销默认分成比例'),
     ('distribution_min_withdraw', '10.00', 'decimal', '最低提现金额'),
     
     -- 支付设置

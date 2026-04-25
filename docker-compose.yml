@@ -6,6 +6,8 @@
 #   redis             — Redis 缓存（限流、会话存储）
 #   keycompute-server — Axum 后端 API 服务
 #   keycompute-web    — Nginx + Dioxus WASM 前端
+#   ollama            — Ollama 本地模型服务
+#   ollama-model-init — 启动后自动拉取并预热指定模型
 #
 # 网络拓扑：
 #   keycompute-internal — 内部网络（后端 ↔ 数据库/Redis，外部不可访问）
@@ -117,12 +119,12 @@ services:
 
       # 邮件服务配置
       KC__EMAIL__SMTP_HOST: ${KC__EMAIL__SMTP_HOST}
-      KC__EMAIL__SMTP_PORT: ${KC__EMAIL__SMTP_PORT:-587}
+      KC__EMAIL__SMTP_PORT: ${KC__EMAIL__SMTP_PORT:-465}
       KC__EMAIL__SMTP_USERNAME: ${KC__EMAIL__SMTP_USERNAME}
       KC__EMAIL__SMTP_PASSWORD: ${KC__EMAIL__SMTP_PASSWORD}
       KC__EMAIL__FROM_ADDRESS: ${KC__EMAIL__FROM_ADDRESS}
       KC__EMAIL__FROM_NAME: ${KC__EMAIL__FROM_NAME:-KeyCompute}
-      KC__EMAIL__VERIFICATION_BASE_URL: ${KC__EMAIL__VERIFICATION_BASE_URL:-https://example.com}
+      APP_BASE_URL: ${APP_BASE_URL:-http://127.0.0.1}
 
       # 服务器配置
       KC__SERVER__BIND_ADDR: "0.0.0.0"
@@ -181,6 +183,51 @@ services:
           memory: 128m
           cpus: "0.5"
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # Ollama — 本地模型服务
+  # ─────────────────────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: keycompute-ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      # 控制模型在内存中的保活时间；如需常驻可在 .env 中设为 -1
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - keycompute-public
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # ollama-model-init — 自动拉取并预热指定模型
+  # ─────────────────────────────────────────────────────────────────────────
+  ollama-model-init:
+    image: ollama/ollama:latest
+    container_name: keycompute-ollama-model-init
+    restart: on-failure
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:270m}
+      OLLAMA_WARMUP_PROMPT: ${OLLAMA_WARMUP_PROMPT:-ready}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - ollama pull "$$OLLAMA_MODEL" && ollama run "$$OLLAMA_MODEL" "$$OLLAMA_WARMUP_PROMPT" >/dev/null
+    networks:
+      - keycompute-public
+
 # =============================================================================
 # 持久化卷
 # =============================================================================
@@ -188,6 +235,8 @@ volumes:
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  ollama_data:
     driver: local
 
 # =============================================================================
@@ -199,6 +248,6 @@ networks:
     driver: bridge
     internal: true
 
-  # 公共网络：Web/Server 对外暴露，Nginx 通过此网络代理后端
+  # 公共网络：Web/Server/Ollama 对外暴露，Nginx 通过此网络代理后端
   keycompute-public:
     driver: bridge

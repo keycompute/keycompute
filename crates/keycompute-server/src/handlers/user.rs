@@ -317,7 +317,7 @@ pub async fn create_api_key(
     })))
 }
 
-/// 删除 API Key（实际上是撤销）
+/// 删除 API Key
 ///
 /// DELETE /api/v1/keys/{id}
 pub async fn delete_api_key(
@@ -343,7 +343,22 @@ pub async fn delete_api_key(
         ));
     }
 
-    // 撤销 API Key
+    // 行为约定：
+    // - 活跃 Key：先撤销（保留审计痕迹）
+    // - 已撤销 Key：允许物理删除（便于用户清理列表）
+    if key.revoked {
+        key.delete(pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to delete API key: {}", e)))?;
+
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "message": "API Key deleted",
+            "key_id": key.id,
+            "deleted": true,
+        })));
+    }
+
     let revoked = key
         .revoke(pool)
         .await
@@ -354,6 +369,7 @@ pub async fn delete_api_key(
         "message": "API Key revoked",
         "key_id": revoked.id,
         "revoked_at": revoked.revoked_at.map(|t| t.to_rfc3339()),
+        "deleted": false,
     })))
 }
 

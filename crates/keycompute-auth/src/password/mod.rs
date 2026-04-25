@@ -18,7 +18,10 @@ mod validator;
 // 重新导出公共接口
 pub use hash::PasswordHasher;
 pub use login::{LoginRequest, LoginResponse, LoginService};
-pub use register::{RegisterRequest, RegisterResponse, RegistrationService};
+pub use register::{
+    CompleteRegistrationRequest, CompleteRegistrationResponse, RegistrationService,
+    RequestRegistrationCodeRequest, RequestRegistrationCodeResponse,
+};
 pub use reset::{PasswordResetService, RequestPasswordResetRequest, ResetPasswordRequest};
 pub use validator::{EmailValidator, PasswordValidator};
 

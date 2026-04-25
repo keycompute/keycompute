@@ -5,12 +5,14 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::configured_public_base_url,
     state::AppState,
 };
 use axum::{
     Json,
     extract::{Path, State},
 };
+use keycompute_db::models::system_setting::setting_keys;
 use serde::{Deserialize, Serialize};
 
 // ==================== 系统设置 ====================
@@ -25,10 +27,7 @@ pub struct AdminSystemSettings {
     pub site_favicon_url: Option<String>,
 
     // 注册设置
-    pub allow_registration: bool,
-    pub email_verification_required: bool,
     pub default_user_quota: f64,
-    pub default_user_role: String,
 
     // 限流设置
     pub default_rpm_limit: i32,
@@ -109,11 +108,7 @@ impl AdminSystemSettings {
             site_logo_url: get_value(setting_keys::SITE_LOGO_URL),
             site_favicon_url: get_value(setting_keys::SITE_FAVICON_URL),
 
-            allow_registration: get_bool(setting_keys::ALLOW_REGISTRATION, true),
-            email_verification_required: get_bool(setting_keys::EMAIL_VERIFICATION_REQUIRED, true),
-            default_user_quota: get_decimal(setting_keys::DEFAULT_USER_QUOTA, 10.0),
-            default_user_role: get_value(setting_keys::DEFAULT_USER_ROLE)
-                .unwrap_or_else(|| "user".to_string()),
+            default_user_quota: get_decimal(setting_keys::DEFAULT_USER_QUOTA, 0.0),
 
             default_rpm_limit: get_int(setting_keys::DEFAULT_RPM_LIMIT, 60),
             default_tpm_limit: get_int(setting_keys::DEFAULT_TPM_LIMIT, 100000),
@@ -121,14 +116,14 @@ impl AdminSystemSettings {
             maintenance_mode: get_bool(setting_keys::MAINTENANCE_MODE, false),
             maintenance_message: get_value(setting_keys::MAINTENANCE_MESSAGE),
 
-            distribution_enabled: get_bool(setting_keys::DISTRIBUTION_ENABLED, false),
+            distribution_enabled: get_bool(setting_keys::DISTRIBUTION_ENABLED, true),
             distribution_level1_default_ratio: get_decimal(
                 setting_keys::DISTRIBUTION_LEVEL1_DEFAULT_RATIO,
                 0.03,
             ),
             distribution_level2_default_ratio: get_decimal(
                 setting_keys::DISTRIBUTION_LEVEL2_DEFAULT_RATIO,
-                0.01,
+                0.02,
             ),
             distribution_min_withdraw: get_decimal(setting_keys::DISTRIBUTION_MIN_WITHDRAW, 10.0),
 
@@ -148,6 +143,136 @@ impl AdminSystemSettings {
             terms_of_service_url: get_value(setting_keys::TERMS_OF_SERVICE_URL),
             privacy_policy_url: get_value(setting_keys::PRIVACY_POLICY_URL),
         }
+    }
+}
+
+fn is_hidden_setting(key: &str) -> bool {
+    key == setting_keys::DEFAULT_USER_ROLE
+}
+
+fn is_removed_setting(key: &str) -> bool {
+    matches!(
+        key,
+        "allow_registration" | "registration_mode" | "email_verification_required"
+    )
+}
+
+fn normalize_setting_update(key: &str, value: impl Into<String>) -> Result<String> {
+    if is_hidden_setting(key) {
+        return Err(ApiError::BadRequest(format!(
+            "Setting {} is fixed and cannot be edited",
+            key
+        )));
+    }
+
+    if is_removed_setting(key) {
+        return Err(ApiError::BadRequest(format!(
+            "Setting {} has been removed and can no longer be edited",
+            key
+        )));
+    }
+
+    let value = value.into();
+
+    if key == setting_keys::DEFAULT_USER_QUOTA {
+        let quota = value.parse::<f64>().map_err(|_| {
+            ApiError::BadRequest("Setting default_user_quota must be a valid number".to_string())
+        })?;
+
+        if !quota.is_finite() {
+            return Err(ApiError::BadRequest(
+                "Setting default_user_quota must be a finite number".to_string(),
+            ));
+        }
+
+        return Ok(quota.to_string());
+    }
+
+    Ok(value)
+}
+
+fn normalize_settings_map(
+    settings: std::collections::HashMap<String, String>,
+) -> Result<std::collections::HashMap<String, String>> {
+    settings
+        .into_iter()
+        .map(|(key, value)| Ok((key.clone(), normalize_setting_update(&key, value)?)))
+        .collect()
+}
+
+fn is_truthy_setting(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "yes"
+    )
+}
+
+fn ensure_distribution_has_public_base_url(
+    app_base_url: Option<&str>,
+    settings: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    if settings
+        .get(setting_keys::DISTRIBUTION_ENABLED)
+        .is_some_and(|value| is_truthy_setting(value))
+        && configured_public_base_url(app_base_url).is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "APP_BASE_URL must be configured before enabling distribution".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn requires_system_role_for_setting(key: &str) -> bool {
+    key == setting_keys::DISTRIBUTION_ENABLED
+}
+
+fn ensure_setting_update_allowed(auth: &AuthExtractor, key: &str) -> Result<()> {
+    if requires_system_role_for_setting(key) && auth.role != "system" {
+        return Err(ApiError::Forbidden(
+            "Only system can update distribution_enabled".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_settings_update_allowed(
+    auth: &AuthExtractor,
+    settings: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    for key in settings.keys() {
+        ensure_setting_update_allowed(auth, key)?;
+    }
+
+    Ok(())
+}
+
+fn payload_to_settings_map(
+    payload: serde_json::Value,
+) -> Result<std::collections::HashMap<String, String>> {
+    if let serde_json::Value::Object(obj) = payload {
+        Ok(obj
+            .into_iter()
+            .filter_map(|(key, value)| {
+                if key == setting_keys::DEFAULT_USER_QUOTA && value.is_null() {
+                    return None;
+                }
+
+                let value_str = match value {
+                    serde_json::Value::String(s) => s,
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Null => return None,
+                    other => other.to_string(),
+                };
+
+                Some((key, value_str))
+            })
+            .collect())
+    } else {
+        Err(ApiError::BadRequest("Invalid request body".to_string()))
     }
 }
 
@@ -175,6 +300,7 @@ pub async fn get_system_settings(
     // value 根据 value_type 转换为对应的 JSON 类型
     let map: std::collections::HashMap<String, serde_json::Value> = settings
         .into_iter()
+        .filter(|s| !is_hidden_setting(&s.key) && !is_removed_setting(&s.key))
         .map(|s| {
             let val = match s.value_type.as_str() {
                 "bool" => match s.value.as_str() {
@@ -214,25 +340,9 @@ pub async fn update_system_settings(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    // 将 JSON 对象转换为 HashMap
-    let settings_map: std::collections::HashMap<String, String> =
-        if let serde_json::Value::Object(obj) = payload {
-            obj.into_iter()
-                .filter_map(|(k, v)| {
-                    // 将 JSON 值转换为字符串
-                    let value_str = match v {
-                        serde_json::Value::String(s) => s,
-                        serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => b.to_string(),
-                        serde_json::Value::Null => return None,
-                        other => other.to_string(),
-                    };
-                    Some((k, value_str))
-                })
-                .collect()
-        } else {
-            return Err(ApiError::BadRequest("Invalid request body".to_string()));
-        };
+    let settings_map = normalize_settings_map(payload_to_settings_map(payload)?)?;
+    ensure_settings_update_allowed(&auth, &settings_map)?;
+    ensure_distribution_has_public_base_url(state.app_base_url.as_deref(), &settings_map)?;
 
     // 批量更新设置
     let updated = keycompute_db::SystemSetting::batch_update(pool, &settings_map)
@@ -269,6 +379,10 @@ pub async fn get_system_setting_by_key(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
+    if is_hidden_setting(&key) || is_removed_setting(&key) {
+        return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
+    }
+
     let setting = keycompute_db::SystemSetting::find_by_key(pool, &key)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query setting: {}", e)))?
@@ -295,7 +409,18 @@ pub async fn update_system_setting_by_key(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let setting = keycompute_db::SystemSetting::update_value(pool, &key, &payload.value)
+    if is_hidden_setting(&key) || is_removed_setting(&key) {
+        return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
+    }
+
+    ensure_setting_update_allowed(&auth, &key)?;
+
+    let normalized_value = normalize_setting_update(&key, payload.value)?;
+    let mut settings_map = std::collections::HashMap::new();
+    settings_map.insert(key.clone(), normalized_value.clone());
+    ensure_distribution_has_public_base_url(state.app_base_url.as_deref(), &settings_map)?;
+
+    let setting = keycompute_db::SystemSetting::update_value(pool, &key, &normalized_value)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to update setting: {}", e)))?;
 
@@ -326,4 +451,112 @@ pub async fn get_public_settings(
     };
 
     Ok(Json(settings))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn test_hidden_setting_marks_default_user_role() {
+        assert!(is_hidden_setting(setting_keys::DEFAULT_USER_ROLE));
+        assert!(!is_hidden_setting("site_name"));
+    }
+
+    #[test]
+    fn test_removed_setting_marks_allow_registration() {
+        assert!(is_removed_setting("allow_registration"));
+        assert!(!is_removed_setting("site_name"));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_default_user_role() {
+        let err = normalize_setting_update(setting_keys::DEFAULT_USER_ROLE, "user").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be edited")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_accepts_normal_setting() {
+        assert_eq!(
+            normalize_setting_update("site_name", "KeyCompute").unwrap(),
+            "KeyCompute"
+        );
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_removed_setting() {
+        let err = normalize_setting_update("allow_registration", "false").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("removed")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_accepts_negative_default_user_quota() {
+        assert_eq!(
+            normalize_setting_update(setting_keys::DEFAULT_USER_QUOTA, "-1").unwrap(),
+            "-1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_invalid_default_user_quota() {
+        let err =
+            normalize_setting_update(setting_keys::DEFAULT_USER_QUOTA, "not-a-number").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("default_user_quota")));
+    }
+
+    #[test]
+    fn test_payload_to_settings_map_ignores_null_default_user_quota() {
+        let payload = serde_json::json!({
+            "default_user_quota": null,
+            "site_name": "KeyCompute"
+        });
+
+        let map = payload_to_settings_map(payload).unwrap();
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("site_name"), Some(&"KeyCompute".to_string()));
+        assert!(!map.contains_key(setting_keys::DEFAULT_USER_QUOTA));
+    }
+
+    #[test]
+    fn test_enable_distribution_requires_public_base_url() {
+        let mut settings = std::collections::HashMap::new();
+        settings.insert(
+            setting_keys::DISTRIBUTION_ENABLED.to_string(),
+            "true".to_string(),
+        );
+
+        let err = ensure_distribution_has_public_base_url(None, &settings).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("APP_BASE_URL")));
+    }
+
+    #[test]
+    fn test_enable_distribution_accepts_public_base_url() {
+        let mut settings = std::collections::HashMap::new();
+        settings.insert(
+            setting_keys::DISTRIBUTION_ENABLED.to_string(),
+            "true".to_string(),
+        );
+
+        assert!(
+            ensure_distribution_has_public_base_url(Some("https://app.example.com"), &settings)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_distribution_toggle_requires_system_role() {
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
+
+        let err =
+            ensure_setting_update_allowed(&auth, setting_keys::DISTRIBUTION_ENABLED).unwrap_err();
+        assert!(matches!(err, ApiError::Forbidden(msg) if msg.contains("Only system")));
+    }
+
+    #[test]
+    fn test_distribution_toggle_allows_system_role() {
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system");
+
+        assert!(ensure_setting_update_allowed(&auth, setting_keys::DISTRIBUTION_ENABLED).is_ok());
+    }
 }

@@ -12,39 +12,42 @@
   --color-primary: #3b82f6;
   --color-primary-hover: #2563eb;
   --color-primary-active: #1d4ed8;
-  --color-primary-light: #eff6ff;
+  --color-primary-light: rgba(59, 130, 246, 0.12);
 
   --color-success: #10b981;
-  --color-success-light: #ecfdf5;
+  --color-success-light: rgba(16, 185, 129, 0.14);
   --color-warning: #f59e0b;
-  --color-warning-light: #fffbeb;
+  --color-warning-light: rgba(245, 158, 11, 0.14);
   --color-error: #ef4444;
-  --color-error-light: #fef2f2;
+  --color-error-light: rgba(239, 68, 68, 0.14);
   --color-info: #3b82f6;
-  --color-info-light: #eff6ff;
+  --color-info-light: rgba(59, 130, 246, 0.14);
+  --color-accent-secondary: #8b5cf6;
+  --color-accent-glow: rgba(59, 130, 246, 0.22);
 
   /* ── 中性色 ───────────────────────────────── */
-  --bg-primary: #ffffff;
-  --bg-secondary: #f8fafc;
-  --bg-tertiary: #f1f5f9;
-  --bg-overlay: rgba(0, 0, 0, 0.5);
+  --bg-primary: #f6f7fb;
+  --bg-secondary: #ffffff;
+  --bg-tertiary: #eef1f7;
+  --bg-overlay: rgba(15, 17, 23, 0.42);
+  --bg-card: #ffffff;
 
-  --border-color: #e2e8f0;
-  --border-color-light: #f1f5f9;
+  --border-color: #d9deea;
+  --border-color-light: #edf0f6;
 
-  --text-primary: #0f172a;
-  --text-secondary: #475569;
-  --text-tertiary: #94a3b8;
-  --text-disabled: #cbd5e1;
+  --text-primary: #151924;
+  --text-secondary: #5c6478;
+  --text-tertiary: #8a91a3;
+  --text-disabled: #b5bdcc;
   --text-inverse: #ffffff;
 
   /* ── 侧边栏 ───────────────────────────────── */
-  --sidebar-bg: #1e293b;
-  --sidebar-text: #cbd5e1;
-  --sidebar-text-active: #ffffff;
+  --sidebar-bg: #ffffff;
+  --sidebar-text: #5c6478;
+  --sidebar-text-active: #151924;
   --sidebar-item-active-bg: rgba(59, 130, 246, 0.15);
-  --sidebar-item-hover-bg: rgba(255, 255, 255, 0.06);
-  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --sidebar-item-hover-bg: rgba(59, 130, 246, 0.1);
+  --sidebar-border: #d9deea;
 
   /* ── 间距系统 ─────────────────────────────── */
   --space-xs: 4px;
@@ -55,7 +58,8 @@
   --space-2xl: 48px;
 
   /* ── 字体 ─────────────────────────────────── */
-  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: var(--font-family);
   --font-size-xs: 12px;
   --font-size-sm: 14px;
   --font-size-base: 15px;
@@ -79,10 +83,10 @@
   --radius-full: 9999px;
 
   /* ── 阴影 ─────────────────────────────────── */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -1px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.04);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.16);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.18), 0 2px 4px -1px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 12px 24px rgba(0, 0, 0, 0.2);
+  --shadow-xl: 0 20px 36px rgba(0, 0, 0, 0.28);
 
   /* ── 过渡 ─────────────────────────────────── */
   --transition-fast: 150ms ease;

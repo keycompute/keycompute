@@ -2,24 +2,29 @@
 
 [data-theme="dark"] {
   /* ── 背景色 ─────────────────────────────────── */
-  --bg-primary: #0f172a;
-  --bg-secondary: #1e293b;
-  --bg-tertiary: #334155;
-  --bg-overlay: rgba(0, 0, 0, 0.7);
+  --bg-primary: #0f1117;
+  --bg-secondary: #1a1d27;
+  --bg-tertiary: #242734;
+  --bg-overlay: rgba(0, 0, 0, 0.68);
+  --bg-card: #242734;
 
   /* ── 边框 ───────────────────────────────────── */
-  --border-color: #334155;
-  --border-color-light: #1e293b;
+  --border-color: #2e3240;
+  --border-color-light: rgba(255, 255, 255, 0.06);
 
   /* ── 文字 ───────────────────────────────────── */
-  --text-primary: #f8fafc;
-  --text-secondary: #94a3b8;
-  --text-tertiary: #64748b;
-  --text-disabled: #475569;
+  --text-primary: #f0f2f5;
+  --text-secondary: #a0a5b8;
+  --text-tertiary: #6b7084;
+  --text-disabled: #4e5364;
 
   /* ── 侧边栏（暗色主题下更深） ─────────────────── */
-  --sidebar-bg: #020617;
-  --sidebar-border: rgba(255, 255, 255, 0.06);
+  --sidebar-bg: #1a1d27;
+  --sidebar-text: #a0a5b8;
+  --sidebar-text-active: #f0f2f5;
+  --sidebar-item-active-bg: rgba(59, 130, 246, 0.15);
+  --sidebar-item-hover-bg: rgba(59, 130, 246, 0.1);
+  --sidebar-border: #2e3240;
 
   /* ── 阴影（暗色下更强） ──────────────────────── */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);

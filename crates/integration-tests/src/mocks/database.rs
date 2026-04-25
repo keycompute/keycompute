@@ -53,7 +53,6 @@ pub struct MockTenant {
     pub status: String,
     pub default_rpm_limit: i32,
     pub default_tpm_limit: i32,
-    pub distribution_enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -69,7 +68,6 @@ impl MockTenant {
             status: "active".to_string(),
             default_rpm_limit: 60,
             default_tpm_limit: 100000,
-            distribution_enabled: false,
             created_at: now,
             updated_at: now,
         }
@@ -88,11 +86,6 @@ impl MockTenant {
     pub fn with_limits(mut self, rpm: i32, tpm: i32) -> Self {
         self.default_rpm_limit = rpm;
         self.default_tpm_limit = tpm;
-        self
-    }
-
-    pub fn with_distribution(mut self, enabled: bool) -> Self {
-        self.distribution_enabled = enabled;
         self
     }
 
@@ -638,15 +631,12 @@ mod tests {
 
     #[test]
     fn test_mock_tenant() {
-        let tenant = MockTenant::new("Test Corp", "test-corp")
-            .with_limits(100, 50000)
-            .with_distribution(true);
+        let tenant = MockTenant::new("Test Corp", "test-corp").with_limits(100, 50000);
 
         assert_eq!(tenant.name, "Test Corp");
         assert_eq!(tenant.slug, "test-corp");
         assert_eq!(tenant.default_rpm_limit, 100);
         assert_eq!(tenant.default_tpm_limit, 50000);
-        assert!(tenant.distribution_enabled);
         assert!(tenant.is_active());
     }
 

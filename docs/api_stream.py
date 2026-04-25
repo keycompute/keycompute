@@ -3,18 +3,16 @@
 简单的对话 Demo，使用 OpenAI 兼容格式的 API（流式响应）
 """
 
-import json
-import requests
+import readline   # Unix/macOS 自带; Windows 需安装 pyreadline3
+from openai import OpenAI
 
 # 配置
 
-# API_URL = "https://api.deepseek.com/v1/chat/completions"
-# API_KEY = "sk-70f08cda30ee4e56bd0d27223dec522f"
-# API_MODEL = "deepseek-chat"
+API_URL="http://192.168.100.100:3000/v1"
+API_KEY="sk-xxxxxxxxxx"
+API_MODEL="deepseek-chat"
 
-API_URL = "http://192.168.100.100:3000/v1/chat/completions"
-API_KEY = "sk-e53734645ff1414fa308a394c474f0004559314290bb4eca"
-API_MODEL = "kimi-k2.5"
+client = OpenAI(base_url=API_URL, api_key=API_KEY)
 
 
 def chat():
@@ -22,7 +20,12 @@ def chat():
     print("对话已开始，输入 'quit' 退出\n")
 
     while True:
-        user_input = input("你: ").strip()
+        try:
+            user_input = input("你: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n对话已结束")
+            break
+
         if user_input.lower() == "quit":
             break
         if not user_input:
@@ -31,47 +34,23 @@ def chat():
         messages.append({"role": "user", "content": user_input})
 
         try:
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            }
-            data = {
-                "model": API_MODEL,
-                "messages": messages,
-                "stream": True,
-            }
-
             print("助手: ", end="", flush=True)
             reply_parts = []
+            stream = client.chat.completions.create(
+                model=API_MODEL,
+                messages=messages,
+                stream=True,
+            )
 
-            # 使用 requests 发送流式请求
-            with requests.post(API_URL, headers=headers, json=data, stream=True) as response:
-                response.raise_for_status()
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
 
-                # 逐行读取流式响应
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-
-                    line = line.decode("utf-8")
-
-                    # SSE 格式以 "data: " 开头
-                    if line.startswith("data: "):
-                        json_str = line[6:]  # 去掉 "data: " 前缀
-
-                        # 流结束标记
-                        if json_str.strip() == "[DONE]":
-                            break
-
-                        try:
-                            chunk = json.loads(json_str)
-                            delta = chunk["choices"][0].get("delta", {})
-                            content = delta.get("content", "")
-                            if content:
-                                print(content, end="", flush=True)
-                                reply_parts.append(content)
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            continue
+                delta = chunk.choices[0].delta
+                content = delta.content or ""
+                if content:
+                    print(content, end="", flush=True)
+                    reply_parts.append(content)
 
             print()  # 换行
             print()
@@ -81,6 +60,9 @@ def chat():
             if reply:
                 messages.append({"role": "assistant", "content": reply})
 
+        except KeyboardInterrupt:
+            print("\n对话已结束")
+            break
         except Exception as e:
             print(f"\n错误: {e}\n")
             # 移除失败的消息，允许重试
@@ -88,4 +70,7 @@ def chat():
 
 
 if __name__ == "__main__":
-    chat()
+    try:
+        chat()
+    except KeyboardInterrupt:
+        print("\n对话已结束")

@@ -3,7 +3,8 @@
 use client_api::error::Result;
 use client_api::{
     SettingsApi,
-    api::settings::{PublicSettings, SettingValue},
+    api::common::MessageResponse,
+    api::settings::{PublicSettings, SettingValue, SystemSettingRecord},
 };
 use std::collections::HashMap;
 
@@ -17,7 +18,7 @@ pub async fn get_all(token: &str) -> Result<HashMap<String, SettingValue>> {
 pub async fn update_all(
     settings: HashMap<String, serde_json::Value>,
     token: &str,
-) -> Result<HashMap<String, SettingValue>> {
+) -> Result<MessageResponse> {
     let client = get_client();
     SettingsApi::new(&client)
         .update_system_settings(&settings, token)
@@ -29,7 +30,7 @@ pub async fn update_by_key(
     key: &str,
     value: &serde_json::Value,
     token: &str,
-) -> Result<SettingValue> {
+) -> Result<SystemSettingRecord> {
     let client = get_client();
     SettingsApi::new(&client)
         .update_system_setting_by_key(key, value, token)

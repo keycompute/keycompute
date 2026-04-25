@@ -67,9 +67,6 @@ pub mod setting_keys {
     pub const API_BASE_URL: &str = "api_base_url";
 
     // 注册设置
-    pub const ALLOW_REGISTRATION: &str = "allow_registration";
-    pub const REGISTRATION_MODE: &str = "registration_mode";
-    pub const EMAIL_VERIFICATION_REQUIRED: &str = "email_verification_required";
     pub const DEFAULT_USER_QUOTA: &str = "default_user_quota";
     pub const DEFAULT_USER_ROLE: &str = "default_user_role";
 
@@ -152,10 +149,9 @@ pub struct PublicSettings {
     pub site_favicon_url: Option<String>,
     /// API 基础 URL（用于生成 API 用法示例）
     pub api_base_url: Option<String>,
-    pub allow_registration: bool,
-    pub email_verification_required: bool,
     pub maintenance_mode: bool,
     pub maintenance_message: Option<String>,
+    pub distribution_enabled: bool,
     pub alipay_enabled: bool,
     pub wechatpay_enabled: bool,
     pub system_notice: Option<String>,
@@ -174,10 +170,9 @@ impl Default for PublicSettings {
             site_logo_url: None,
             site_favicon_url: None,
             api_base_url: None,
-            allow_registration: true,
-            email_verification_required: true,
             maintenance_mode: false,
             maintenance_message: None,
+            distribution_enabled: true,
             alipay_enabled: false,
             wechatpay_enabled: false,
             system_notice: None,
@@ -324,10 +319,7 @@ impl SystemSetting {
             (setting_keys::SITE_NAME, "KeyCompute", "string"),
             (setting_keys::SITE_DESCRIPTION, "AI 模型聚合平台", "string"),
             // 注册设置
-            (setting_keys::ALLOW_REGISTRATION, "true", "bool"),
-            (setting_keys::REGISTRATION_MODE, "open", "string"),
-            (setting_keys::EMAIL_VERIFICATION_REQUIRED, "true", "bool"),
-            (setting_keys::DEFAULT_USER_QUOTA, "100", "int"),
+            (setting_keys::DEFAULT_USER_QUOTA, "10.00", "decimal"),
             (setting_keys::DEFAULT_USER_ROLE, "user", "string"),
             // 限流设置
             (setting_keys::DEFAULT_RPM_LIMIT, "60", "int"),
@@ -443,13 +435,9 @@ impl SystemSetting {
             site_logo_url: get_value(setting_keys::SITE_LOGO_URL),
             site_favicon_url: get_value(setting_keys::SITE_FAVICON_URL),
             api_base_url: get_value(setting_keys::API_BASE_URL),
-            allow_registration: get_bool_value(setting_keys::ALLOW_REGISTRATION, true),
-            email_verification_required: get_bool_value(
-                setting_keys::EMAIL_VERIFICATION_REQUIRED,
-                true,
-            ),
             maintenance_mode: get_bool_value(setting_keys::MAINTENANCE_MODE, false),
             maintenance_message: get_value(setting_keys::MAINTENANCE_MESSAGE),
+            distribution_enabled: get_bool_value(setting_keys::DISTRIBUTION_ENABLED, true),
             alipay_enabled: get_bool_value(setting_keys::ALIPAY_ENABLED, false),
             wechatpay_enabled: get_bool_value(setting_keys::WECHATPAY_ENABLED, false),
             system_notice: get_value(setting_keys::SYSTEM_NOTICE),

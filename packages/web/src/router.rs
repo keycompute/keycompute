@@ -4,7 +4,7 @@ use crate::app::{AdminLayout, AppLayout};
 use crate::views::{
     Billing, NotFound, Usage,
     api_keys::ApiKeyList,
-    auth::{ForgotPassword, Login, Register, ResetPassword, VerifyEmail},
+    auth::{ForgotPassword, Login, Register, ResetPassword},
     dashboard::Dashboard,
     distribution::DistributionOverview,
     payments::{PaymentsOverview, Recharge},
@@ -26,8 +26,6 @@ pub enum Route {
     ForgotPassword {},
     #[route("/auth/reset-password/:token")]
     ResetPassword { token: String },
-    #[route("/auth/verify-email/:token")]
-    VerifyEmail { token: String },
 
     // 主应用（带 AppShell 布局）
     #[layout(AppLayout)]

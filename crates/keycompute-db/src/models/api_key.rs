@@ -181,6 +181,21 @@ impl ProduceAiKey {
         Ok(key)
     }
 
+    /// 物理删除 Produce AI Key
+    pub async fn delete(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            DELETE FROM produce_ai_keys
+            WHERE id = $1
+            "#,
+        )
+        .bind(self.id)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// 更新最后使用时间
     pub async fn update_last_used(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
         sqlx::query(

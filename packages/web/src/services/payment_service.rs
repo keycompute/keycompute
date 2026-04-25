@@ -4,8 +4,8 @@ use client_api::error::Result;
 use client_api::{
     PaymentApi,
     api::payment::{
-        CreatePaymentOrderRequest, PaymentOrderResponse, PaymentOrderSummary, PaymentQueryParams,
-        UserBalanceResponse,
+        CreatePaymentOrderRequest, CreatePaymentOrderResponse, PaymentOrderResponse,
+        PaymentOrderSummary, PaymentQueryParams, SyncPaymentOrderResponse, UserBalanceResponse,
     },
 };
 
@@ -34,14 +34,14 @@ pub async fn get_order(id: &str, token: &str) -> Result<PaymentOrderResponse> {
 pub async fn create_order(
     req: CreatePaymentOrderRequest,
     token: &str,
-) -> Result<PaymentOrderResponse> {
+) -> Result<CreatePaymentOrderResponse> {
     let client = get_client();
     PaymentApi::new(&client)
         .create_payment_order(&req, token)
         .await
 }
 
-pub async fn sync_order(out_trade_no: &str, token: &str) -> Result<PaymentOrderResponse> {
+pub async fn sync_order(out_trade_no: &str, token: &str) -> Result<SyncPaymentOrderResponse> {
     let client = get_client();
     PaymentApi::new(&client)
         .sync_payment_order(out_trade_no, token)

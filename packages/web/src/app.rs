@@ -1,11 +1,11 @@
 use dioxus::prelude::*;
 
-use crate::i18n::Lang;
+use crate::i18n::{I18n, Lang};
 use crate::router::Route;
-use crate::services::api_client::get_client;
-use crate::services::user_service;
+use crate::services::{api_client::get_client, settings_service, user_service};
 use crate::stores::{
     auth_store::AuthStore,
+    public_settings_store::{PublicSettingsState, PublicSettingsStore},
     ui_store::{ToastMsg, UiStore},
     user_store::{UserInfo, UserStore},
 };
@@ -20,13 +20,39 @@ pub fn App() -> Element {
     let auth_initial = AuthStore::load_from_storage();
     let auth_state = use_signal(|| auth_initial);
     let user_info = use_signal(|| None::<UserInfo>);
+    let public_settings_state = use_signal(PublicSettingsState::default);
     let toast_signal = use_signal(|| None::<ToastMsg>);
-    let lang_signal = use_signal(Lang::default);
+    let lang_signal = use_signal(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            read_local_storage("lang").unwrap_or_else(|| "zh".to_string())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            "zh".to_string()
+        }
+    });
 
     let auth_store = use_context_provider(|| AuthStore::new(auth_state));
     let mut user_store = use_context_provider(|| UserStore::new(user_info));
+    let public_settings_store =
+        use_context_provider(|| PublicSettingsStore::new(public_settings_state));
     let _ui_store = use_context_provider(|| UiStore::new(toast_signal));
     let _lang = use_context_provider(|| lang_signal);
+
+    use_effect(move || {
+        if public_settings_store.loaded() {
+            return;
+        }
+
+        spawn(async move {
+            let mut store = public_settings_store;
+            match settings_service::get_public().await {
+                Ok(settings) => store.set(settings),
+                Err(_) => store.mark_loaded(),
+            }
+        });
+    });
 
     // App 启动时或登录状态变化时，若已有 token，自动拉取用户信息
     use_effect(move || {
@@ -54,13 +80,25 @@ pub fn App() -> Element {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+fn read_local_storage(key: &str) -> Option<String> {
+    web_sys::window()?
+        .local_storage()
+        .ok()??
+        .get_item(key)
+        .ok()?
+}
+
 /// 带 AppShell 侧边栏布局的页面外壳
 /// 内含路由守卫：未登录时立即重定向到登录页，避免闪屏
 #[component]
 pub fn AppLayout() -> Element {
     let user_store = use_context::<UserStore>();
+    let public_settings_store = use_context::<PublicSettingsStore>();
     let mut auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();
+    let lang_signal = use_context::<Signal<String>>();
+    let i18n = I18n::new(Lang::from_str(&lang_signal()));
     let nav = use_navigator();
     let mut user_store_write = use_context::<UserStore>();
 
@@ -87,11 +125,11 @@ pub fn AppLayout() -> Element {
                         class: "spinner",
                         style: "width:32px;height:32px",
                         role: "status",
-                        "aria-label": "跳转中",
+                        "aria-label": "{i18n.t(\"common.redirecting\")}",
                     }
                     span {
                         style: "color:var(--text-secondary,#64748b);font-size:14px",
-                        "正在跳转到登录页…"
+                        {i18n.t("common.redirect_to_login")}
                     }
                 }
             }
@@ -122,31 +160,51 @@ pub fn AppLayout() -> Element {
     let r_admin_tenants = Route::Tenants {}.to_string();
     let r_admin_system = Route::System {}.to_string();
     let r_admin_system_settings = Route::Settings {}.to_string();
+    let show_distribution_nav = public_settings_store.loaded()
+        && !matches!(public_settings_store.distribution_enabled(), Some(false));
+
+    let mut billing_nav_items = vec![NavItem::new(
+        i18n.t("nav.payments"),
+        r_payments,
+        NavIcon::Wallet,
+    )];
+    if show_distribution_nav {
+        billing_nav_items.push(NavItem::new(
+            i18n.t("nav.distribution"),
+            r_distribution,
+            NavIcon::Share,
+        ));
+    }
 
     let mut nav_sections = vec![
         NavSection {
             title: None,
             items: vec![
-                NavItem::new("控制台", r_dashboard, NavIcon::Home),
-                NavItem::new("API Key", r_api_keys, NavIcon::Key),
+                NavItem::new(i18n.t("page.home"), r_dashboard, NavIcon::Home),
+                NavItem::new(i18n.t("nav.api_keys"), r_api_keys, NavIcon::Key),
             ],
         },
         NavSection {
-            title: Some("用量".to_string()),
-            items: vec![NavItem::new("用量统计", r_usage, NavIcon::BarChart)],
+            title: Some(i18n.t("nav.group.usage").to_string()),
+            items: vec![NavItem::new(
+                i18n.t("nav.usage"),
+                r_usage,
+                NavIcon::BarChart,
+            )],
         },
         NavSection {
-            title: Some("账务".to_string()),
-            items: vec![
-                NavItem::new("支付与账单", r_payments, NavIcon::Wallet),
-                NavItem::new("分发管理", r_distribution, NavIcon::Share),
-            ],
+            title: Some(i18n.t("nav.group.billing").to_string()),
+            items: billing_nav_items,
         },
         NavSection {
-            title: Some("账户".to_string()),
+            title: Some(i18n.t("nav.group.account").to_string()),
             items: vec![
-                NavItem::new("个人资料", r_profile, NavIcon::User),
-                NavItem::new("账户设置", r_settings, NavIcon::Settings),
+                NavItem::new(i18n.t("nav.user.profile"), r_profile, NavIcon::User),
+                NavItem::new(
+                    i18n.t("nav.account_settings"),
+                    r_settings,
+                    NavIcon::Settings,
+                ),
             ],
         },
     ];
@@ -154,16 +212,31 @@ pub fn AppLayout() -> Element {
     // Admin 专属导航分组（仅 admin 角色可见）
     if is_admin {
         nav_sections.push(NavSection {
-            title: Some("管理".to_string()),
+            title: Some(i18n.t("nav.group.admin").to_string()),
             items: vec![
-                NavItem::new("用户管理", r_admin_users, NavIcon::User).admin(),
-                NavItem::new("渠道账号", r_admin_accounts, NavIcon::Key).admin(),
-                NavItem::new("计费定价", r_admin_pricing, NavIcon::Wallet).admin(),
-                NavItem::new("支付订单", r_admin_payment_orders, NavIcon::Wallet).admin(),
-                NavItem::new("分销记录", r_admin_distribution, NavIcon::Share).admin(),
-                NavItem::new("租户管理", r_admin_tenants, NavIcon::Home).admin(),
-                NavItem::new("系统诊断", r_admin_system, NavIcon::Settings).admin(),
-                NavItem::new("系统设置", r_admin_system_settings, NavIcon::Settings).admin(),
+                NavItem::new(i18n.t("nav.users"), r_admin_users, NavIcon::User).admin(),
+                NavItem::new(i18n.t("nav.accounts"), r_admin_accounts, NavIcon::Key).admin(),
+                NavItem::new(i18n.t("nav.pricing"), r_admin_pricing, NavIcon::Wallet).admin(),
+                NavItem::new(
+                    i18n.t("nav.payment_orders"),
+                    r_admin_payment_orders,
+                    NavIcon::Wallet,
+                )
+                .admin(),
+                NavItem::new(
+                    i18n.t("nav.distribution_records"),
+                    r_admin_distribution,
+                    NavIcon::Share,
+                )
+                .admin(),
+                NavItem::new(i18n.t("nav.tenants"), r_admin_tenants, NavIcon::Home).admin(),
+                NavItem::new(i18n.t("nav.system"), r_admin_system, NavIcon::Settings).admin(),
+                NavItem::new(
+                    i18n.t("nav.settings"),
+                    r_admin_system_settings,
+                    NavIcon::Settings,
+                )
+                .admin(),
             ],
         });
     }
@@ -175,6 +248,19 @@ pub fn AppLayout() -> Element {
             nav_sections,
             user_name,
             current_path,
+            toggle_sidebar_title: i18n.t("layout.toggle_sidebar"),
+            open_menu_title: i18n.t("layout.open_menu"),
+            switch_to_light_theme_title: i18n.t("layout.switch_to_light"),
+            switch_to_dark_theme_title: i18n.t("layout.switch_to_dark"),
+            switch_to_zh_title: i18n.t("layout.switch_to_zh"),
+            switch_to_en_title: i18n.t("layout.switch_to_en"),
+            profile_label: i18n.t("nav.user.profile"),
+            account_settings_label: i18n.t("nav.account_settings"),
+            logout_label: i18n.t("auth.logout"),
+            expand_sidebar_title: i18n.t("layout.expand_sidebar"),
+            collapse_sidebar_title: i18n.t("layout.collapse_sidebar"),
+            expand_label: i18n.t("common.expand"),
+            collapse_label: i18n.t("common.collapse"),
             on_user_menu: move |action: UserMenuAction| match action {
                 UserMenuAction::Profile => { nav.push(Route::UserProfile {}); }
                 UserMenuAction::Settings => { nav.push(Route::UserSettings {}); }
@@ -201,6 +287,8 @@ pub fn AppLayout() -> Element {
 pub fn AdminLayout() -> Element {
     let user_store = use_context::<UserStore>();
     let mut ui_store = use_context::<UiStore>();
+    let lang_signal = use_context::<Signal<String>>();
+    let i18n = I18n::new(Lang::from_str(&lang_signal()));
     let nav = use_navigator();
 
     let is_admin = user_store.is_admin();
@@ -209,7 +297,7 @@ pub fn AdminLayout() -> Element {
 
     use_effect(move || {
         if info_loaded && !user_store.is_admin() {
-            ui_store.show_error("权限不足：该页面仅管理员可访问");
+            ui_store.show_error(i18n.t("common.admin_only_page"));
             nav.replace(Route::Dashboard {});
         }
     });

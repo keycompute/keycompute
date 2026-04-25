@@ -137,7 +137,7 @@ async fn test_get_my_referral_code_success() {
         .and(path("/api/v1/me/referral/code"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "referral_code": "ABC123XYZ",
-            "invite_link": "https://keycompute.com/register?ref=ABC123XYZ"
+            "invite_link": "https://keycompute.com/auth/register?ref=ABC123XYZ"
         })))
         .mount(&mock_server)
         .await;
@@ -151,7 +151,7 @@ async fn test_get_my_referral_code_success() {
     assert_eq!(resp.referral_code, "ABC123XYZ");
     assert_eq!(
         resp.referral_link,
-        "https://keycompute.com/register?ref=ABC123XYZ"
+        "https://keycompute.com/auth/register?ref=ABC123XYZ"
     );
 }
 
@@ -192,8 +192,8 @@ async fn test_list_distribution_records_success() {
                 "id": "dist_001",
                 "referrer_id": "user_001",
                 "referred_id": "user_002",
-                "amount": 100.0,
-                "commission": 10.0,
+                "amount": "100.00",
+                "commission": "10.00",
                 "status": "confirmed",
                 "created_at": "2024-01-15T10:00:00Z"
             },
@@ -217,7 +217,8 @@ async fn test_list_distribution_records_success() {
     assert!(result.is_ok());
     let records = result.unwrap();
     assert_eq!(records.len(), 2);
-    assert_eq!(records[0].commission, 10.0);
+    assert_eq!(records[0].commission, "10.00");
+    assert_eq!(records[1].amount, "50.0");
     assert_eq!(records[0].status, "confirmed");
 }
 

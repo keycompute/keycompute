@@ -11,6 +11,8 @@ use integration_tests::common::VerificationChain;
 use integration_tests::mocks::email::{MockEmailService, MockEmailType};
 use keycompute_emailserver::EmailConfig;
 
+const TEST_PUBLIC_APP_BASE_URL: &str = "https://app.example.com";
+
 /// 测试 MockEmailService 基础功能
 #[tokio::test]
 async fn test_mock_email_service_basic() {
@@ -68,7 +70,7 @@ async fn test_mock_email_service_types() {
         .await
         .unwrap();
     service
-        .send_password_reset_email("user2@example.com", "token2")
+        .send_password_reset_email("user2@example.com", "token2", TEST_PUBLIC_APP_BASE_URL)
         .await
         .unwrap();
     service
@@ -205,7 +207,7 @@ async fn test_mock_email_service_failure() {
 
     // 3. 密码重置邮件发送失败
     let result = service
-        .send_password_reset_email("test@example.com", "token")
+        .send_password_reset_email("test@example.com", "token", TEST_PUBLIC_APP_BASE_URL)
         .await;
     chain.add_step(
         "integration-tests",
@@ -277,13 +279,12 @@ fn test_email_service_config() {
     // 1. 创建配置
     let config = EmailConfig {
         smtp_host: "smtp.example.com".to_string(),
-        smtp_port: 587,
+        smtp_port: 465,
         smtp_username: "test@example.com".to_string(),
         smtp_password: "password123".to_string(),
         from_address: "noreply@example.com".to_string(),
         from_name: Some("KeyCompute".to_string()),
         use_tls: true,
-        verification_base_url: "https://app.example.com/verify".to_string(),
         timeout_secs: 30,
     };
 
@@ -299,7 +300,7 @@ fn test_email_service_config() {
         "keycompute-emailserver",
         "EmailConfig::smtp_port",
         format!("SMTP端口: {}", config.smtp_port),
-        config.smtp_port == 587,
+        config.smtp_port == 465,
     );
     chain.add_step(
         "keycompute-emailserver",
@@ -308,21 +309,12 @@ fn test_email_service_config() {
         config.use_tls,
     );
 
-    // 3. 验证 URL 构建
-    let verify_url = config.verification_url("test_token");
+    // 3. 验证配置字段
     chain.add_step(
         "keycompute-emailserver",
-        "EmailConfig::verification_url",
-        format!("验证URL: {}", verify_url),
-        verify_url.contains("test_token"),
-    );
-
-    let reset_url = config.password_reset_url("reset_token");
-    chain.add_step(
-        "keycompute-emailserver",
-        "EmailConfig::password_reset_url",
-        format!("重置URL: {}", reset_url),
-        reset_url.contains("reset_token"),
+        "EmailConfig::from_address",
+        format!("发件地址: {}", config.from_address),
+        config.from_address == "noreply@example.com",
     );
 
     chain.print_report();
@@ -345,7 +337,7 @@ async fn test_mock_email_service_recipient_filter() {
         .await
         .unwrap();
     service
-        .send_password_reset_email("alice@example.com", "token3")
+        .send_password_reset_email("alice@example.com", "token3", TEST_PUBLIC_APP_BASE_URL)
         .await
         .unwrap();
 

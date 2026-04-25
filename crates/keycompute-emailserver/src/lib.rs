@@ -1,7 +1,7 @@
 //! 邮件服务模块
 //!
 //! 提供 SMTP 邮件发送功能：
-//! - 邮箱验证邮件
+//! - 注册验证码邮件
 //! - 密码重置邮件
 //! - 通用邮件发送
 //!
@@ -27,9 +27,11 @@ use lettre::{
     message::{Mailbox, header::ContentType},
     transport::smtp::authentication::Credentials,
 };
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
+use url::Url;
 
 /// 邮件发送错误
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +39,10 @@ pub enum EmailError {
     /// 配置错误
     #[error("邮件服务未配置")]
     NotConfigured,
+
+    /// 邮件配置无效
+    #[error("邮件配置无效: {0}")]
+    InvalidConfig(String),
 
     /// 邮箱地址格式错误
     #[error("无效的邮箱地址: {0}")]
@@ -53,15 +59,145 @@ pub enum EmailError {
 
 impl From<EmailError> for KeyComputeError {
     fn from(err: EmailError) -> Self {
-        KeyComputeError::Internal(err.to_string())
+        match err {
+            EmailError::NotConfigured | EmailError::SendError(_) => {
+                KeyComputeError::ServiceUnavailable(err.to_string())
+            }
+            EmailError::InvalidAddress(_) => KeyComputeError::ValidationError(err.to_string()),
+            EmailError::BuildError(_) | EmailError::InvalidConfig(_) => {
+                KeyComputeError::ConfigError(err.to_string())
+            }
+        }
     }
+}
+
+#[derive(Clone)]
+enum TransportState {
+    Disabled,
+    InvalidConfig(String),
+    Ready(AsyncSmtpTransport<Tokio1Executor>),
+}
+
+impl TransportState {
+    fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SmtpSecurityMode {
+    StartTls,
+    ImplicitTls,
+    Plain,
+}
+
+#[derive(Clone)]
+struct EmailRuntime {
+    config: EmailConfig,
+    transport: TransportState,
 }
 
 /// 邮件服务
 #[derive(Clone)]
 pub struct EmailService {
-    config: Arc<RwLock<EmailConfig>>,
-    transport: Arc<RwLock<Option<AsyncSmtpTransport<Tokio1Executor>>>>,
+    runtime: Arc<RwLock<EmailRuntime>>,
+}
+
+fn is_local_development_host(url: &Url) -> bool {
+    match url.host_str() {
+        Some("localhost") => true,
+        Some(host) => host
+            .parse::<IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+fn validate_public_app_base_url(app_base_url: &str) -> Result<Url, EmailError> {
+    let parsed = Url::parse(app_base_url).map_err(|e| {
+        EmailError::InvalidConfig(format!("APP_BASE_URL 必须是合法的绝对 URL: {}", e))
+    })?;
+
+    if parsed.host_str().is_none() {
+        return Err(EmailError::InvalidConfig(
+            "APP_BASE_URL 必须包含主机名".to_string(),
+        ));
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(EmailError::InvalidConfig(
+            "APP_BASE_URL 不能包含用户名或密码".to_string(),
+        ));
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(EmailError::InvalidConfig(
+            "APP_BASE_URL 不能包含查询参数或片段".to_string(),
+        ));
+    }
+
+    match parsed.scheme() {
+        "https" => Ok(parsed),
+        "http" if is_local_development_host(&parsed) => Ok(parsed),
+        "http" => Err(EmailError::InvalidConfig(
+            "APP_BASE_URL 在非本地环境必须使用 https".to_string(),
+        )),
+        scheme => Err(EmailError::InvalidConfig(format!(
+            "APP_BASE_URL 仅支持 http/https 协议，当前为 {}",
+            scheme
+        ))),
+    }
+}
+
+fn smtp_timeout(timeout_secs: u64) -> Option<Duration> {
+    if timeout_secs == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(timeout_secs))
+    }
+}
+
+fn smtp_security_mode(config: &EmailConfig) -> SmtpSecurityMode {
+    if config.use_tls {
+        if config.smtp_port == 465 {
+            SmtpSecurityMode::ImplicitTls
+        } else {
+            SmtpSecurityMode::StartTls
+        }
+    } else {
+        SmtpSecurityMode::Plain
+    }
+}
+
+fn build_password_reset_url(app_base_url: &str, token: &str) -> Result<String, EmailError> {
+    let mut parsed = validate_public_app_base_url(app_base_url)?;
+    let current_path = parsed.path().trim_end_matches('/');
+    let next_path = if current_path.is_empty() || current_path == "/" {
+        format!("/auth/reset-password/{}", token)
+    } else {
+        format!("{}/auth/reset-password/{}", current_path, token)
+    };
+    parsed.set_path(&next_path);
+    Ok(parsed.into())
+}
+
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn build_welcome_greeting(name: Option<&str>) -> (String, String) {
+    match name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => (
+            format!("您好，{}！", name),
+            format!("您好，{}！", escape_html(name)),
+        ),
+        None => ("您好！".to_string(), "您好！".to_string()),
+    }
 }
 
 impl EmailService {
@@ -69,8 +205,7 @@ impl EmailService {
     pub fn new(config: EmailConfig) -> Self {
         let transport = Self::build_transport(&config);
         Self {
-            config: Arc::new(RwLock::new(config)),
-            transport: Arc::new(RwLock::new(transport)),
+            runtime: Arc::new(RwLock::new(EmailRuntime { config, transport })),
         }
     }
 
@@ -83,113 +218,126 @@ impl EmailService {
     }
 
     /// 构建 SMTP 传输
-    fn build_transport(config: &EmailConfig) -> Option<AsyncSmtpTransport<Tokio1Executor>> {
+    fn build_transport(config: &EmailConfig) -> TransportState {
         if !config.is_configured() {
             tracing::warn!("邮件服务未配置，邮件发送将被禁用");
-            return None;
+            return TransportState::Disabled;
         }
 
         let creds = Credentials::new(config.smtp_username.clone(), config.smtp_password.clone());
 
         // lettre 0.11 的 pool 配置在启用 pool feature 后自动生效
         // 使用默认连接池配置（最大 10 个连接）
-        let transport = if config.use_tls {
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
-                .ok()?
-                .credentials(creds)
-                .port(config.smtp_port)
-                .timeout(Some(Duration::from_secs(config.timeout_secs)))
-                .build()
-        } else {
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
-                .credentials(creds)
-                .port(config.smtp_port)
-                .timeout(Some(Duration::from_secs(config.timeout_secs)))
-                .build()
+        let timeout = smtp_timeout(config.timeout_secs);
+        let transport = match smtp_security_mode(config) {
+            SmtpSecurityMode::StartTls => {
+                match AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host) {
+                    Ok(builder) => builder
+                        .credentials(creds)
+                        .port(config.smtp_port)
+                        .timeout(timeout)
+                        .build(),
+                    Err(e) => {
+                        let msg = format!(
+                            "无法为 SMTP 主机 '{}' 构建 STARTTLS 连接: {}",
+                            config.smtp_host, e
+                        );
+                        tracing::error!(error = %msg, "邮件服务配置错误");
+                        return TransportState::InvalidConfig(msg);
+                    }
+                }
+            }
+            SmtpSecurityMode::ImplicitTls => {
+                match AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host) {
+                    Ok(builder) => builder
+                        .credentials(creds)
+                        .port(config.smtp_port)
+                        .timeout(timeout)
+                        .build(),
+                    Err(e) => {
+                        let msg = format!(
+                            "无法为 SMTP 主机 '{}' 构建 SMTPS 连接: {}",
+                            config.smtp_host, e
+                        );
+                        tracing::error!(error = %msg, "邮件服务配置错误");
+                        return TransportState::InvalidConfig(msg);
+                    }
+                }
+            }
+            SmtpSecurityMode::Plain => {
+                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
+                    .credentials(creds)
+                    .port(config.smtp_port)
+                    .timeout(timeout)
+                    .build()
+            }
         };
 
-        Some(transport)
+        TransportState::Ready(transport)
     }
 
     /// 检查服务是否已配置
     pub async fn is_configured(&self) -> bool {
-        self.transport.read().await.is_some()
+        self.runtime.read().await.transport.is_ready()
     }
 
     /// 更新配置（支持热更新）
     ///
-    /// 更新配置后会重新构建 SMTP 传输层。
-    /// 先更新 transport，再更新 config，确保任何时刻至少有一个有效配置。
+    /// 更新配置后会原子性地替换 SMTP 运行时状态。
     pub async fn update_config(&self, config: EmailConfig) {
-        let new_transport = Self::build_transport(&config);
-
-        // 先更新 transport（使用新配置构建的 transport）
-        let mut transport = self.transport.write().await;
-        *transport = new_transport;
-        drop(transport);
-
-        // 再更新 config
-        let mut cfg = self.config.write().await;
-        *cfg = config;
-        drop(cfg);
+        let transport = Self::build_transport(&config);
+        let mut runtime = self.runtime.write().await;
+        *runtime = EmailRuntime { config, transport };
 
         tracing::info!("邮件服务配置已更新");
     }
 
     /// 获取当前配置的克隆
     pub async fn config(&self) -> EmailConfig {
-        self.config.read().await.clone()
+        self.runtime.read().await.config.clone()
     }
 
-    /// 发送邮箱验证邮件
-    pub async fn send_verification_email(&self, to: &str, token: &str) -> Result<(), EmailError> {
-        // 快速获取需要的配置字段，然后释放锁
-        let verification_url = {
-            let config = self.config.read().await;
-            config.verification_url(token)
-        };
-
-        let subject = "请验证您的邮箱地址";
+    /// 发送注册验证码邮件
+    pub async fn send_registration_code_email(
+        &self,
+        to: &str,
+        code: &str,
+        expires_minutes: i64,
+    ) -> Result<(), EmailError> {
+        let subject = "您的注册验证码";
         let text_body = format!(
             r#"您好！
 
-感谢您注册 KeyCompute。
+您正在注册 KeyCompute。
 
-请点击以下链接验证您的邮箱地址：
-{}
+您的邮箱验证码是：{}
 
-此链接将在 24 小时后过期。
-
-如果您没有注册 KeyCompute 账户，请忽略此邮件。
+验证码将在 {} 分钟后失效。如非本人操作，请忽略此邮件。
 
 祝好，
 KeyCompute 团队
 "#,
-            verification_url
+            code, expires_minutes
         );
 
         let html_body = format!(
             r#"<html>
 <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
 <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-<h2 style="color: #2c5282;">请验证您的邮箱地址</h2>
+<h2 style="color: #2c5282;">您的注册验证码</h2>
 <p>您好！</p>
-<p>感谢您注册 KeyCompute。</p>
-<p>请点击以下按钮验证您的邮箱地址：</p>
-<p>
-<a href="{}" style="display: inline-block; padding: 12px 24px; background-color: #4299e1; color: white; text-decoration: none; border-radius: 4px;">
-验证邮箱
-</a>
-</p>
-<p>或复制以下链接到浏览器：<br><code style="word-break: break-all;">{}</code></p>
-<p style="color: #718096; font-size: 14px;">此链接将在 24 小时后过期。</p>
-<p style="color: #718096; font-size: 14px;">如果您没有注册 KeyCompute 账户，请忽略此邮件。</p>
+<p>您正在注册 KeyCompute。</p>
+<p>请输入以下验证码完成注册：</p>
+<div style="margin: 24px 0; padding: 16px; background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; text-align: center;">
+<span style="font-size: 28px; letter-spacing: 8px; font-weight: bold; color: #2d3748;">{}</span>
+</div>
+<p style="color: #718096; font-size: 14px;">验证码将在 {} 分钟后失效。如非本人操作，请忽略此邮件。</p>
 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
 <p style="color: #718096; font-size: 12px;">KeyCompute 团队</p>
 </div>
 </body>
 </html>"#,
-            verification_url, verification_url
+            code, expires_minutes
         );
 
         self.send_html_email(to, subject, &text_body, &html_body)
@@ -197,12 +345,13 @@ KeyCompute 团队
     }
 
     /// 发送密码重置邮件
-    pub async fn send_password_reset_email(&self, to: &str, token: &str) -> Result<(), EmailError> {
-        // 快速获取需要的配置字段，然后释放锁
-        let reset_url = {
-            let config = self.config.read().await;
-            config.password_reset_url(token)
-        };
+    pub async fn send_password_reset_email(
+        &self,
+        to: &str,
+        token: &str,
+        app_base_url: &str,
+    ) -> Result<(), EmailError> {
+        let reset_url = build_password_reset_url(app_base_url, token)?;
 
         let subject = "重置您的密码";
         let text_body = format!(
@@ -253,28 +402,11 @@ KeyCompute 团队
 
     /// 发送欢迎邮件（邮箱验证成功后）
     pub async fn send_welcome_email(&self, to: &str, name: Option<&str>) -> Result<(), EmailError> {
-        // 先准备所有数据，不持有锁
-        let greeting = name
-            .map(|n| format!("{}！", n))
-            .unwrap_or_else(|| "！".to_string());
+        let (text_greeting, html_greeting) = build_welcome_greeting(name);
 
         let subject = "欢迎加入 KeyCompute";
         let text_body = format!(
-            r#"您好{}！
-
-恭喜您成功验证了邮箱地址。
-
-现在您可以开始使用 KeyCompute 的全部功能：
-• 创建和管理 API Key
-• 配置 LLM Provider
-• 监控使用量和费用
-
-如果您有任何问题，请随时联系我们的支持团队。
-
-祝好，
-KeyCompute 团队
-"#,
-            greeting
+            "{text_greeting}\n\n恭喜您成功验证了邮箱地址。\n\n现在您可以开始使用 KeyCompute 的全部功能：\n• 创建和管理 API Key\n• 配置 LLM Provider\n• 监控使用量和费用\n\n如果您有任何问题，请随时联系我们的支持团队。\n\n祝好，\nKeyCompute 团队\n"
         );
 
         let html_body = format!(
@@ -282,7 +414,7 @@ KeyCompute 团队
 <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
 <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
 <h2 style="color: #2c5282;">欢迎加入 KeyCompute</h2>
-<p>您好{}！</p>
+<p>{}</p>
 <p>恭喜您成功验证了邮箱地址。</p>
 <p>现在您可以开始使用 KeyCompute 的全部功能：</p>
 <ul>
@@ -296,7 +428,7 @@ KeyCompute 团队
 </div>
 </body>
 </html>"#,
-            greeting
+            html_greeting
         );
 
         self.send_html_email(to, subject, &text_body, &html_body)
@@ -310,9 +442,8 @@ KeyCompute 团队
         subject: &str,
         body: &str,
     ) -> Result<(), EmailError> {
-        // 先获取配置
-        let config = self.config.read().await;
-        let from_mailbox = Self::build_from_mailbox(&config)?;
+        let runtime = self.runtime.read().await.clone();
+        let from_mailbox = Self::build_from_mailbox(&runtime.config)?;
 
         let to_mailbox: Mailbox = to
             .parse()
@@ -326,16 +457,18 @@ KeyCompute 团队
             .body(body.to_string())
             .map_err(|e| EmailError::BuildError(e.to_string()))?;
 
-        drop(config);
-
-        // 获取 transport 并发送
-        let transport_guard = self.transport.read().await;
-        let transport = transport_guard.as_ref().ok_or(EmailError::NotConfigured)?;
-
-        transport
-            .send(email)
-            .await
-            .map_err(|e| EmailError::SendError(e.to_string()))?;
+        match &runtime.transport {
+            TransportState::Ready(transport) => {
+                transport
+                    .send(email)
+                    .await
+                    .map_err(|e| EmailError::SendError(e.to_string()))?;
+            }
+            TransportState::Disabled => return Err(EmailError::NotConfigured),
+            TransportState::InvalidConfig(msg) => {
+                return Err(EmailError::InvalidConfig(msg.clone()));
+            }
+        }
 
         tracing::info!(
             to = %to,
@@ -366,9 +499,8 @@ KeyCompute 团队
         text_body: &str,
         html_body: &str,
     ) -> Result<(), EmailError> {
-        // 先获取配置和检查 transport
-        let config = self.config.read().await;
-        let from_mailbox = Self::build_from_mailbox(&config)?;
+        let runtime = self.runtime.read().await.clone();
+        let from_mailbox = Self::build_from_mailbox(&runtime.config)?;
 
         let to_mailbox: Mailbox = to
             .parse()
@@ -394,16 +526,18 @@ KeyCompute 团队
             )
             .map_err(|e| EmailError::BuildError(e.to_string()))?;
 
-        drop(config);
-
-        // 获取 transport 并发送
-        let transport_guard = self.transport.read().await;
-        let transport = transport_guard.as_ref().ok_or(EmailError::NotConfigured)?;
-
-        transport
-            .send(email)
-            .await
-            .map_err(|e| EmailError::SendError(e.to_string()))?;
+        match &runtime.transport {
+            TransportState::Ready(transport) => {
+                transport
+                    .send(email)
+                    .await
+                    .map_err(|e| EmailError::SendError(e.to_string()))?;
+            }
+            TransportState::Disabled => return Err(EmailError::NotConfigured),
+            TransportState::InvalidConfig(msg) => {
+                return Err(EmailError::InvalidConfig(msg.clone()));
+            }
+        }
 
         tracing::info!(
             to = %to,
@@ -432,13 +566,12 @@ mod tests {
     fn test_config() -> EmailConfig {
         EmailConfig {
             smtp_host: "smtp.example.com".to_string(),
-            smtp_port: 587,
+            smtp_port: 465,
             smtp_username: "test@example.com".to_string(),
             smtp_password: "testpass".to_string(),
             from_address: "noreply@example.com".to_string(),
             from_name: Some("KeyCompute".to_string()),
             use_tls: true,
-            verification_base_url: "https://api.example.com".to_string(),
             timeout_secs: 30,
         }
     }
@@ -446,6 +579,16 @@ mod tests {
     #[tokio::test]
     async fn test_email_service_creation() {
         let service = EmailService::new(test_config());
+        assert!(service.is_configured().await);
+    }
+
+    #[tokio::test]
+    async fn test_localhost_email_service_creation() {
+        let mut config = test_config();
+        config.smtp_host = "localhost".to_string();
+        config.use_tls = false;
+
+        let service = EmailService::new(config);
         assert!(service.is_configured().await);
     }
 
@@ -498,5 +641,102 @@ mod tests {
         let cfg = service.config().await;
 
         assert_eq!(cfg.from_name, Some("Test Sender".to_string()));
+    }
+
+    #[test]
+    fn test_build_password_reset_url_trims_trailing_slash() {
+        let reset_url =
+            build_password_reset_url("https://app.example.com/", "reset456").expect("valid URL");
+
+        assert_eq!(
+            reset_url,
+            "https://app.example.com/auth/reset-password/reset456"
+        );
+    }
+
+    #[test]
+    fn test_build_password_reset_url_preserves_base_path() {
+        let reset_url = build_password_reset_url("https://app.example.com/console", "reset456")
+            .expect("valid URL");
+
+        assert_eq!(
+            reset_url,
+            "https://app.example.com/console/auth/reset-password/reset456"
+        );
+    }
+
+    #[test]
+    fn test_build_password_reset_url_rejects_remote_http() {
+        let err = build_password_reset_url("http://example.com", "reset456")
+            .expect_err("remote http should be rejected");
+
+        assert!(matches!(err, EmailError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_smtp_timeout_zero_disables_timeout() {
+        assert_eq!(smtp_timeout(0), None);
+        assert_eq!(smtp_timeout(30), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn test_smtp_security_mode_prefers_starttls_for_standard_submission() {
+        let mut config = test_config();
+        config.smtp_port = 587;
+        config.use_tls = true;
+
+        assert_eq!(smtp_security_mode(&config), SmtpSecurityMode::StartTls);
+    }
+
+    #[test]
+    fn test_smtp_security_mode_uses_implicit_tls_for_port_465() {
+        let mut config = test_config();
+        config.smtp_port = 465;
+        config.use_tls = true;
+
+        assert_eq!(smtp_security_mode(&config), SmtpSecurityMode::ImplicitTls);
+    }
+
+    #[test]
+    fn test_smtp_security_mode_plain_when_tls_disabled() {
+        let mut config = test_config();
+        config.use_tls = false;
+
+        assert_eq!(smtp_security_mode(&config), SmtpSecurityMode::Plain);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_public_base_url_reports_configuration_error() {
+        let service = EmailService::new(test_config());
+        let err = service
+            .send_password_reset_email("test@example.com", "token", "http://example.com")
+            .await
+            .expect_err("invalid public base URL should fail");
+
+        assert!(matches!(err, EmailError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn test_build_welcome_greeting_without_name() {
+        let (text_greeting, html_greeting) = build_welcome_greeting(None);
+
+        assert_eq!(text_greeting, "您好！");
+        assert_eq!(html_greeting, "您好！");
+    }
+
+    #[test]
+    fn test_build_welcome_greeting_trims_blank_name() {
+        let (text_greeting, html_greeting) = build_welcome_greeting(Some("   "));
+
+        assert_eq!(text_greeting, "您好！");
+        assert_eq!(html_greeting, "您好！");
+    }
+
+    #[test]
+    fn test_build_welcome_greeting_escapes_html_name() {
+        let (text_greeting, html_greeting) = build_welcome_greeting(Some(" <b>Alice & Bob</b> "));
+
+        assert_eq!(text_greeting, "您好，<b>Alice & Bob</b>！");
+        assert_eq!(html_greeting, "您好，&lt;b&gt;Alice &amp; Bob&lt;/b&gt;！");
     }
 }

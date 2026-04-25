@@ -2,6 +2,12 @@
 # 复制此文件为 config.toml 并根据需要修改
 # 环境变量优先级高于配置文件，格式：KC__SECTION__KEY=value
 
+# ==================== 应用公开地址配置（全局） ====================
+# 用于密码重置邮件、邀请注册链接等中的公开链接
+# 除此之外，该值也可通过环境变量 APP_BASE_URL 覆盖（优先级最高）
+# 启用邮件服务或需要生成公开邀请链接时必须显式配置
+# app_base_url = "https://app.example.com"
+
 # ==================== 服务器配置 ====================
 [server]
 # 服务器绑定地址
@@ -70,20 +76,6 @@ backoff_multiplier = 2.0
 # Gateway HTTP 代理配置（可选）
 # 用于多代理出口、按 Provider 路由到不同代理
 # [gateway.proxy]
-# Provider 级代理映射
-# [gateway.proxy.providers]
-# openai = "http://proxy-openai:8080"
-# claude = "http://proxy-claude:8080"
-# deepseek = "http://proxy-cn:8080"
-
-# 账号级代理映射（可选，最高优先级）
-# [gateway.proxy.accounts]
-# "openai:550e8400-e29b-41d4-a716-446655440000" = "http://premium-proxy:8080"
-
-# 通配符规则（可选）
-# [gateway.proxy.patterns]
-# "*-cn" = "http://cn-proxy:8080"
-# "openai-*" = "http://openai-proxy:8080"
 
 # ==================== 加密配置（可选）====================
 # 用于上游 Provider API Key 的加密存储
@@ -99,14 +91,14 @@ backoff_multiplier = 2.0
 # secret_key = "your-base64-encoded-32-byte-key"
 
 # ==================== 邮件服务配置 ====================
-# 用于发送邮箱验证、密码重置等邮件
-# 邮箱认证功能必需配置！
+# 用于发送注册验证码、密码重置和欢迎邮件
+# 启用邮件能力时请完整配置
 #
 [email]
 # SMTP 服务器地址
 smtp_host = "smtp.example.com"
-# SMTP 端口（默认 587）
-smtp_port = 587
+# SMTP 端口（默认 465）
+smtp_port = 465
 # SMTP 用户名
 smtp_username = "noreply@example.com"
 # SMTP 密码
@@ -117,28 +109,39 @@ from_address = "noreply@example.com"
 from_name = "KeyCompute"
 # 是否使用 TLS（默认 true）
 use_tls = true
-# 验证链接基础 URL（用于生成邮箱验证和密码重置链接）
-verification_base_url = "https://api.example.com"
 # 邮件发送超时（秒，默认 30）
 timeout_secs = 30
-#
-# 环境变量方式：
-# KC__EMAIL__SMTP_HOST=smtp.example.com
-# KC__EMAIL__SMTP_PORT=587
-# KC__EMAIL__SMTP_USERNAME=noreply@example.com
-# KC__EMAIL__SMTP_PASSWORD=your-smtp-password
-# KC__EMAIL__FROM_ADDRESS=noreply@example.com
-# KC__EMAIL__VERIFICATION_BASE_URL=https://api.example.com
 
-# ==================== 默认管理员配置 ====================
-# 首次启动时自动创建的系统管理员账号
-# 生产环境部署后请立即修改默认密码！
-[admin]
-# 默认管理员邮箱
-default_email = "admin@keycompute.local"
-# 默认管理员密码
-default_password = "12345"
+# ==================== 分销配置（可选） ====================
+# 提供二级分销的默认比例配置
+# 注意：这里只配置默认分销比例，不配置分销开关。
+# 分销功能是否开启由 system 角色在后台系统设置中统一管理。
+# 一级分销比例范围：0 - 1.0（推荐 0.03 即 3%）
+# 二级分销比例范围：0 - 1.0（推荐 0.02 即 2%）
+# 注：max_total_ratio 为一级和二级分销的最大总和限制
+#
+[distribution]
+# 一级分销默认比例（如 0.03 表示 3%）
+default_level1_ratio = 0.03
+# 二级分销默认比例（如 0.02 表示 2%）
+default_level2_ratio = 0.02
+# 最大总分销比例限制（如 0.30 表示最多 30%）
+max_total_ratio = 0.30
 #
 # 环境变量方式：
+# KC__DISTRIBUTION__DEFAULT_LEVEL1_RATIO=0.03
+# KC__DISTRIBUTION__DEFAULT_LEVEL2_RATIO=0.02
+# KC__DISTRIBUTION__MAX_TOTAL_RATIO=0.30
+
+# ==================== 默认系统管理员（环境变量配置） ====================
+# 首次启动时自动创建的系统管理员账号
+# 注意：这些值不在 config.toml 中配置，而是通过环境变量设置
+# 生产环境部署后请立即修改默认密码！
+#
+# 环境变量：
 # KC__DEFAULT_ADMIN_EMAIL=admin@keycompute.local
-# KC__DEFAULT_ADMIN_PASSWORD=12345
+# KC__DEFAULT_ADMIN_PASSWORD=change-me-admin-password
+#
+# 对应的 docker-compose.yml 中的设置：
+# KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
+# KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-12345}

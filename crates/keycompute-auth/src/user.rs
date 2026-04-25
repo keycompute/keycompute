@@ -58,7 +58,7 @@ impl UserInfo {
 
     /// 检查是否是管理员
     pub fn is_admin(&self) -> bool {
-        self.role == "admin" || self.role == "tenant_admin"
+        self.role == "admin" || self.role == "system"
     }
 
     /// 检查是否是系统管理员
@@ -89,8 +89,6 @@ pub struct TenantConfig {
     pub default_rpm_limit: u32,
     /// 默认 TPM 限制
     pub default_tpm_limit: u32,
-    /// 是否启用分销
-    pub distribution_enabled: bool,
 }
 
 impl TenantInfo {
@@ -115,7 +113,6 @@ impl TenantInfo {
             config: TenantConfig {
                 default_rpm_limit: tenant.default_rpm_limit as u32,
                 default_tpm_limit: tenant.default_tpm_limit as u32,
-                distribution_enabled: tenant.distribution_enabled,
             },
         }
     }
@@ -339,11 +336,10 @@ mod tests {
         let config = TenantConfig {
             default_rpm_limit: 100,
             default_tpm_limit: 10000,
-            distribution_enabled: true,
         };
         let tenant = TenantInfo::new(Uuid::new_v4(), "Test", "test").with_config(config);
         assert_eq!(tenant.config.default_rpm_limit, 100);
-        assert!(tenant.config.distribution_enabled);
+        assert_eq!(tenant.config.default_tpm_limit, 10000);
     }
 
     #[tokio::test]

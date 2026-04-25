@@ -1,5 +1,6 @@
 //! 用户管理相关类型
 
+use keycompute_types::{AssignableUserRole, UserRole};
 use serde::{Deserialize, Serialize};
 
 use crate::api::common::encode_query_value;
@@ -10,7 +11,7 @@ pub struct UserQueryParams {
     /// 租户 ID 过滤
     pub tenant_id: Option<String>,
     /// 角色过滤
-    pub role: Option<String>,
+    pub role: Option<UserRole>,
     /// 搜索关键词（邮箱或名称）
     pub search: Option<String>,
     /// 页码（从 1 开始）
@@ -31,8 +32,8 @@ impl UserQueryParams {
         self
     }
 
-    pub fn with_role(mut self, role: impl Into<String>) -> Self {
-        self.role = Some(role.into());
+    pub fn with_role(mut self, role: UserRole) -> Self {
+        self.role = Some(role);
         self
     }
 
@@ -57,7 +58,7 @@ impl UserQueryParams {
             params.push(format!("tenant_id={}", encode_query_value(tenant_id)));
         }
         if let Some(ref role) = self.role {
-            params.push(format!("role={}", encode_query_value(role)));
+            params.push(format!("role={}", encode_query_value(role.as_str())));
         }
         if let Some(ref search) = self.search {
             params.push(format!("search={}", encode_query_value(search)));
@@ -103,7 +104,7 @@ pub struct UserListResponse {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdateUserRequest {
     pub name: Option<String>,
-    pub role: Option<String>,
+    pub role: Option<AssignableUserRole>,
 }
 
 impl UpdateUserRequest {
@@ -116,10 +117,20 @@ impl UpdateUserRequest {
         self
     }
 
-    pub fn with_role(mut self, role: impl Into<String>) -> Self {
-        self.role = Some(role.into());
+    pub fn with_role(mut self, role: AssignableUserRole) -> Self {
+        self.role = Some(role);
         self
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateUserResponse {
+    pub success: bool,
+    pub message: String,
+    pub user_id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub role: String,
 }
 
 /// 更新余额请求

@@ -171,15 +171,6 @@ fn build_jwt_permissions(role: &str) -> Vec<Permission> {
             Permission::ManageProviders,
             Permission::SystemAdmin,
         ],
-        // 租户管理员：管理本租户内的资源和用户
-        "tenant_admin" => vec![
-            Permission::UseApi,
-            Permission::ViewUsage,
-            Permission::ManageApiKeys,
-            Permission::ManageUsers,
-            Permission::ManageTenant,
-            Permission::ViewBilling,
-        ],
         // 普通用户：仅能查看用量
         "user" => vec![Permission::UseApi, Permission::ViewUsage],
         // 未知角色：最小权限
@@ -197,18 +188,6 @@ pub mod roles {
     /// 普通用户权限
     pub fn user() -> Vec<Permission> {
         vec![Permission::UseApi, Permission::ViewUsage]
-    }
-
-    /// 租户管理员权限
-    pub fn tenant_admin() -> Vec<Permission> {
-        vec![
-            Permission::UseApi,
-            Permission::ViewUsage,
-            Permission::ManageApiKeys,
-            Permission::ManageUsers,
-            Permission::ManageTenant,
-            Permission::ViewBilling,
-        ]
     }
 
     /// 系统管理员权限
@@ -286,7 +265,7 @@ mod tests {
         assert!(user_perms.contains(&Permission::UseApi));
         assert!(!user_perms.contains(&Permission::ManageUsers));
 
-        let admin_perms = build_permissions(AuthType::Jwt, "tenant_admin");
+        let admin_perms = build_permissions(AuthType::Jwt, "admin");
         assert!(admin_perms.contains(&Permission::ManageApiKeys));
     }
 
@@ -326,20 +305,6 @@ mod tests {
         let perms = build_permissions(AuthType::Jwt, "system");
         assert!(perms.contains(&Permission::SystemAdmin));
         assert!(perms.contains(&Permission::ManageProviders));
-    }
-
-    #[test]
-    fn test_build_permissions_jwt_tenant_admin() {
-        // JWT 认证 - tenant_admin 没有系统级权限
-        let perms = build_permissions(AuthType::Jwt, "tenant_admin");
-        assert!(perms.contains(&Permission::UseApi));
-        assert!(perms.contains(&Permission::ViewUsage));
-        assert!(perms.contains(&Permission::ManageUsers));
-        assert!(perms.contains(&Permission::ManageTenant));
-        assert!(!perms.contains(&Permission::SystemAdmin));
-        assert!(!perms.contains(&Permission::ManageBilling));
-        assert!(!perms.contains(&Permission::ManagePricing));
-        assert!(!perms.contains(&Permission::ManageProviders));
     }
 
     #[test]

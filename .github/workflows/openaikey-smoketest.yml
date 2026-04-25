@@ -1,0 +1,109 @@
+name: openai-key-smoke-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: OpenAI model to test
+        required: true
+        default: gpt-5.4
+      prompt:
+        description: Short prompt for the smoke test
+        required: true
+        default: "Reply with exactly: OPENAI_SMOKE_TEST_OK"
+
+permissions:
+  contents: read
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ inputs.model }}
+      OPENAI_PROMPT: ${{ inputs.prompt }}
+
+    steps:
+      - name: Verify secret is configured
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY is not configured for this repository."
+            exit 1
+          fi
+
+      - name: Call OpenAI Responses API
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import urllib.error
+          import urllib.request
+
+          api_key = os.environ["OPENAI_API_KEY"]
+          model = os.environ["OPENAI_MODEL"]
+          prompt = os.environ["OPENAI_PROMPT"]
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+
+          payload = json.dumps(
+              {
+                  "model": model,
+                  "input": prompt,
+                  "max_output_tokens": 32,
+              }
+          ).encode("utf-8")
+
+          req = urllib.request.Request(
+              "https://api.openai.com/v1/responses",
+              data=payload,
+              headers={
+                  "Authorization": f"Bearer {api_key}",
+                  "Content-Type": "application/json",
+              },
+              method="POST",
+          )
+
+          try:
+              with urllib.request.urlopen(req, timeout=60) as resp:
+                  body = resp.read().decode("utf-8")
+                  data = json.loads(body)
+          except urllib.error.HTTPError as exc:
+              body = exc.read().decode("utf-8", errors="replace")
+              try:
+                  data = json.loads(body)
+              except json.JSONDecodeError:
+                  data = {"raw_error": body}
+
+              error = data.get("error") if isinstance(data, dict) else None
+              if not isinstance(error, dict):
+                  error = {}
+
+              message = error.get("message") or body or "Unknown HTTP error"
+              error_type = error.get("type") or "unknown"
+              error_code = error.get("code") or "unknown"
+
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("## OpenAI Smoke Test Failed\n\n")
+                  fh.write(f"- HTTP status: `{exc.code}`\n")
+                  fh.write(f"- Model: `{model}`\n")
+                  fh.write(f"- Error type: `{error_type}`\n")
+                  fh.write(f"- Error code: `{error_code}`\n")
+                  fh.write(f"- Message: `{message}`\n")
+
+              print(
+                  f"OpenAI smoke test failed: status={exc.code} "
+                  f"type={error_type} code={error_code} message={message}",
+                  file=sys.stderr,
+              )
+              raise
+
+          output_text = data.get("output_text", "") if isinstance(data, dict) else ""
+          with open(summary_path, "a", encoding="utf-8") as fh:
+              fh.write("## OpenAI Smoke Test Passed\n\n")
+              fh.write(f"- Model: `{model}`\n")
+              fh.write(f"- Prompt: `{prompt}`\n")
+              fh.write(f"- Output: `{output_text.strip() or '[empty output]'}`\n")
+
+          print(f"OpenAI smoke test passed for model {model}")
+          print(output_text.strip())
+          PY

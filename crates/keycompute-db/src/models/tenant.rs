@@ -16,8 +16,6 @@ pub struct Tenant {
     pub default_rpm_limit: i32,
     /// 默认 TPM 限制
     pub default_tpm_limit: i32,
-    /// 是否启用分销
-    pub distribution_enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -34,9 +32,6 @@ pub struct CreateTenantRequest {
     /// 默认 TPM 限制
     #[serde(default)]
     pub default_tpm_limit: Option<i32>,
-    /// 是否启用分销
-    #[serde(default)]
-    pub distribution_enabled: Option<bool>,
 }
 
 /// 更新租户请求
@@ -47,7 +42,6 @@ pub struct UpdateTenantRequest {
     pub status: Option<String>,
     pub default_rpm_limit: Option<i32>,
     pub default_tpm_limit: Option<i32>,
-    pub distribution_enabled: Option<bool>,
 }
 
 impl Tenant {
@@ -55,8 +49,8 @@ impl Tenant {
     pub async fn create(pool: &sqlx::PgPool, req: &CreateTenantRequest) -> Result<Tenant, DbError> {
         let tenant = sqlx::query_as::<_, Tenant>(
             r#"
-            INSERT INTO tenants (name, slug, description, default_rpm_limit, default_tpm_limit, distribution_enabled)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO tenants (name, slug, description, default_rpm_limit, default_tpm_limit)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *
             "#,
         )
@@ -65,7 +59,6 @@ impl Tenant {
         .bind(&req.description)
         .bind(req.default_rpm_limit.unwrap_or(60))
         .bind(req.default_tpm_limit.unwrap_or(100000))
-        .bind(req.distribution_enabled.unwrap_or(false))
         .fetch_one(pool)
         .await?;
 
@@ -126,9 +119,8 @@ impl Tenant {
                 status = COALESCE($3, status),
                 default_rpm_limit = COALESCE($4, default_rpm_limit),
                 default_tpm_limit = COALESCE($5, default_tpm_limit),
-                distribution_enabled = COALESCE($6, distribution_enabled),
                 updated_at = NOW()
-            WHERE id = $7
+            WHERE id = $6
             RETURNING *
             "#,
         )
@@ -137,7 +129,6 @@ impl Tenant {
         .bind(&req.status)
         .bind(req.default_rpm_limit)
         .bind(req.default_tpm_limit)
-        .bind(req.distribution_enabled)
         .bind(self.id)
         .fetch_one(pool)
         .await?;

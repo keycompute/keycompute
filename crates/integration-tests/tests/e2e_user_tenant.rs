@@ -230,19 +230,19 @@ fn test_user_info_functionality() {
         admin.is_admin(),
     );
 
-    // 3. 创建租户管理员
-    let tenant_admin = UserInfo::new(
+    // 3. 创建系统管理员
+    let system_admin = UserInfo::new(
         Uuid::new_v4(),
         tenant_id,
-        "ta@test.com",
-        "TA",
-        "tenant_admin",
+        "system@test.com",
+        "System Admin",
+        "system",
     );
     chain.add_step(
         "keycompute-auth",
-        "UserInfo::tenant_admin",
-        format!("Tenant admin check: {}", tenant_admin.is_admin()),
-        tenant_admin.is_admin(),
+        "UserInfo::system_admin",
+        format!("System admin check: {}", system_admin.is_admin()),
+        system_admin.is_admin(),
     );
 
     chain.print_report();
@@ -269,7 +269,6 @@ fn test_tenant_info_with_config() {
     let config = TenantConfig {
         default_rpm_limit: 100,
         default_tpm_limit: 50000,
-        distribution_enabled: true,
     };
     let tenant_with_config = tenant.with_config(config);
 
@@ -277,12 +276,12 @@ fn test_tenant_info_with_config() {
         "keycompute-auth",
         "TenantInfo::with_config",
         format!(
-            "RPM: {}, TPM: {}, Distribution: {}",
+            "RPM: {}, TPM: {}",
             tenant_with_config.config.default_rpm_limit,
             tenant_with_config.config.default_tpm_limit,
-            tenant_with_config.config.distribution_enabled
         ),
-        tenant_with_config.config.default_rpm_limit == 100,
+        tenant_with_config.config.default_rpm_limit == 100
+            && tenant_with_config.config.default_tpm_limit == 50000,
     );
 
     chain.print_report();
@@ -550,15 +549,15 @@ fn test_permission_system() {
         admin_has_manage,
     );
 
-    // 4. 预定义角色（使用新的 build_permissions 函数）
+    // 4. 角色权限（使用新的 build_permissions 函数）
     let user_role = build_permissions(AuthType::Jwt, "user");
-    let admin_role = build_permissions(AuthType::Jwt, "tenant_admin");
+    let admin_role = build_permissions(AuthType::Jwt, "admin");
 
     chain.add_step(
         "keycompute-auth",
-        "roles::predefined",
+        "roles::jwt",
         format!(
-            "User role: {} perms, TenantAdmin: {} perms",
+            "User role: {} perms, Admin: {} perms",
             user_role.len(),
             admin_role.len()
         ),

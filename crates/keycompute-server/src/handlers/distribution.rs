@@ -10,13 +10,16 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::configured_public_base_url,
     state::AppState,
 };
 use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use keycompute_db::models::system_setting::setting_keys;
 use serde::{Deserialize, Serialize};
+use url::Url;
 use uuid::Uuid;
 
 // 使用 sqlx::types::BigDecimal 替代 bigdecimal crate
@@ -50,20 +53,14 @@ fn default_limit() -> Option<i64> {
 pub struct DistributionRecordResponse {
     /// 记录 ID
     pub id: String,
-    /// 关联的 usage_log ID
-    pub usage_log_id: String,
-    /// 租户 ID
-    pub tenant_id: String,
-    /// 受益人 ID
-    pub beneficiary_id: String,
-    /// 受益人名称
-    pub beneficiary_name: String,
-    /// 分成金额
-    pub share_amount: String,
-    /// 分成比例
-    pub share_ratio: String,
-    /// 分销层级: level1, level2
-    pub level: String,
+    /// 推荐人（受益人）ID
+    pub referrer_id: String,
+    /// 被推荐用户 ID
+    pub referred_id: String,
+    /// 被推荐用户消费金额
+    pub amount: String,
+    /// 分销佣金
+    pub commission: String,
     /// 状态: pending, settled, cancelled
     pub status: String,
     /// 创建时间
@@ -190,13 +187,34 @@ pub struct InviteLinkResponse {
     pub expires_at: Option<String>,
 }
 
+fn build_invite_link(base_url: &str, referral_code: &str, source: Option<&str>) -> Result<String> {
+    let mut parsed = Url::parse(base_url)
+        .map_err(|e| ApiError::Config(format!("Invalid APP_BASE_URL: {}", e)))?;
+    let current_path = parsed.path().trim_end_matches('/');
+    let next_path = if current_path.is_empty() || current_path == "/" {
+        "/auth/register".to_string()
+    } else {
+        format!("{}/auth/register", current_path)
+    };
+    parsed.set_path(&next_path);
+
+    {
+        let mut query = parsed.query_pairs_mut();
+        query.append_pair("ref", referral_code);
+        if let Some(source) = source.map(str::trim).filter(|value| !value.is_empty()) {
+            query.append_pair("source", source);
+        }
+    }
+
+    Ok(parsed.into())
+}
+
 /// 获取我的推荐码和邀请链接
 ///
 /// GET /api/v1/me/referral/code
 pub async fn get_my_referral_code(
     auth: AuthExtractor,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
 ) -> Result<Json<ReferralCodeResponse>> {
     let pool = state
         .pool
@@ -211,13 +229,14 @@ pub async fn get_my_referral_code(
         .await
         .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
 
-    // 构建邀请链接
-    // 优先从 Host 头获取，其次从环境变量获取，最后使用默认值
-    let base_url = get_base_url(&headers);
-    let invite_link = format!("{}/auth/register?ref={}", base_url, auth.user_id);
+    let base_url = configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
+        ApiError::Config("APP_BASE_URL is required to generate public invite links".to_string())
+    })?;
+    let referral_code = auth.user_id.to_string();
+    let invite_link = build_invite_link(&base_url, &referral_code, None)?;
 
     Ok(Json(ReferralCodeResponse {
-        referral_code: auth.user_id.to_string(),
+        referral_code,
         invite_link,
         level1_count: referral_stats.level1_count,
         level2_count: referral_stats.level2_count,
@@ -230,7 +249,6 @@ pub async fn get_my_referral_code(
 pub async fn generate_invite_link(
     auth: AuthExtractor,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<GenerateInviteLinkRequest>,
 ) -> Result<Json<InviteLinkResponse>> {
     let pool = state
@@ -241,22 +259,15 @@ pub async fn generate_invite_link(
     // 检查分销系统是否启用
     check_distribution_enabled(pool).await?;
 
-    // 构建基础邀请链接
-    let base_url = get_base_url(&headers);
-
-    // 如果有来源标识，添加到链接中
-    let invite_link = if let Some(source) = &req.source {
-        format!(
-            "{}/auth/register?ref={}&source={}",
-            base_url, auth.user_id, source
-        )
-    } else {
-        format!("{}/auth/register?ref={}", base_url, auth.user_id)
-    };
+    let base_url = configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
+        ApiError::Config("APP_BASE_URL is required to generate public invite links".to_string())
+    })?;
+    let referral_code = auth.user_id.to_string();
+    let invite_link = build_invite_link(&base_url, &referral_code, req.source.as_deref())?;
 
     Ok(Json(InviteLinkResponse {
         invite_link,
-        referral_code: auth.user_id.to_string(),
+        referral_code,
         short_link: None, // 可以集成短链接服务
         expires_at: None, // 可以添加过期时间
     }))
@@ -265,16 +276,18 @@ pub async fn generate_invite_link(
 /// 推荐人信息
 #[derive(Debug, Serialize)]
 pub struct ReferralInfo {
-    /// 用户 ID
-    pub user_id: String,
-    /// 用户名/邮箱
-    pub user_name: String,
-    /// 层级
-    pub level: String,
+    /// 被推荐用户 ID
+    pub id: String,
+    /// 被推荐用户邮箱
+    pub email: String,
+    /// 被推荐用户昵称
+    pub name: Option<String>,
     /// 注册时间
-    pub registered_at: String,
-    /// 产生的收益
-    pub total_earnings: String,
+    pub created_at: String,
+    /// 被推荐用户累计消费
+    pub total_consumption: String,
+    /// 当前用户从该推荐用户获得的收益
+    pub earnings: String,
 }
 
 // ==================== 辅助函数 ====================
@@ -291,38 +304,88 @@ fn string_to_bigdecimal(value: &str) -> Result<BigDecimal> {
         .map_err(|e| ApiError::BadRequest(format!("Invalid decimal: {}", e)))
 }
 
-/// 获取基础 URL
-/// 优先从 Host 头获取，其次从环境变量 APP_BASE_URL 获取，最后使用默认值
-fn get_base_url(headers: &axum::http::HeaderMap) -> String {
-    // 尝试从 Host 头获取
-    if let Some(host) = headers.get("host").and_then(|h| h.to_str().ok()) {
-        // 根据请求协议判断 http 或 https
-        // 如果有 X-Forwarded-Proto 头，使用它；否则默认 http（开发环境）
-        let scheme = headers
-            .get("x-forwarded-proto")
-            .and_then(|h| h.to_str().ok())
-            .unwrap_or("http");
-        return format!(
-            "{}://{}:8080",
-            scheme,
-            host.split(':').next().unwrap_or(host)
-        );
-    }
+/// 检查分销系统是否启用
+async fn check_distribution_enabled(pool: &sqlx::PgPool) -> Result<()> {
+    let enabled =
+        keycompute_db::SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
+            .await
+            .map_err(|e| {
+                ApiError::Internal(format!("Failed to query distribution setting: {}", e))
+            })?
+            .map(|setting| setting.parse_bool())
+            // 与默认初始化保持一致：缺失设置时按启用处理，避免升级环境漏种默认值时误判为禁用。
+            .unwrap_or(true);
 
-    // 其次从环境变量获取
-    if let Ok(url) = std::env::var("APP_BASE_URL") {
-        return url;
+    if enabled {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden("Distribution is disabled".to_string()))
     }
-
-    // 最后使用默认值
-    "https://127.0.0.1:8080".to_string()
 }
 
-/// 检查分销系统是否启用
-async fn check_distribution_enabled(_pool: &sqlx::PgPool) -> Result<()> {
-    // 分销系统默认启用，不再检查系统设置
-    // 如需禁用，可通过租户级别的 distribution_enabled 控制
-    Ok(())
+async fn build_distribution_record_response(
+    pool: &sqlx::PgPool,
+    record: keycompute_db::DistributionRecord,
+) -> Result<DistributionRecordResponse> {
+    let usage_log = keycompute_db::UsageLog::find_by_id(pool, record.usage_log_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
+
+    let (referred_id, amount) = usage_log
+        .map(|usage_log| {
+            (
+                usage_log.user_id.to_string(),
+                bigdecimal_to_string(&usage_log.user_amount),
+            )
+        })
+        .unwrap_or_else(|| (record.usage_log_id.to_string(), "0".to_string()));
+
+    Ok(DistributionRecordResponse {
+        id: record.id.to_string(),
+        referrer_id: record.beneficiary_id.to_string(),
+        referred_id,
+        amount,
+        commission: bigdecimal_to_string(&record.share_amount),
+        status: record.status,
+        created_at: record.created_at.to_rfc3339(),
+    })
+}
+
+async fn build_referral_info(
+    pool: &sqlx::PgPool,
+    beneficiary_id: Uuid,
+    referral: keycompute_db::UserReferral,
+) -> Result<ReferralInfo> {
+    let user = keycompute_db::User::find_by_id(pool, referral.user_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
+
+    let usage_stats = keycompute_db::UsageLog::get_user_stats(pool, referral.user_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
+
+    let earnings = keycompute_db::DistributionRecord::get_earnings_for_referral(
+        pool,
+        beneficiary_id,
+        referral.user_id,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
+
+    let email = user
+        .as_ref()
+        .map(|user| user.email.clone())
+        .unwrap_or_else(|| referral.user_id.to_string());
+    let name = user.and_then(|user| user.name);
+
+    Ok(ReferralInfo {
+        id: referral.user_id.to_string(),
+        email,
+        name,
+        created_at: referral.created_at.to_rfc3339(),
+        total_consumption: bigdecimal_to_string(&usage_stats.total_cost),
+        earnings: bigdecimal_to_string(&earnings),
+    })
 }
 
 // ==================== API Handlers ====================
@@ -368,11 +431,9 @@ pub async fn list_distribution_records(
             .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
     };
 
-    // 转换为响应格式
-    let responses: Vec<DistributionRecordResponse> = records
+    let filtered_records = records
         .into_iter()
         .filter(|r| {
-            // 应用状态筛选
             if let Some(ref status) = query.status {
                 r.status == *status
             } else {
@@ -380,26 +441,18 @@ pub async fn list_distribution_records(
             }
         })
         .filter(|r| {
-            // 应用层级筛选
             if let Some(ref level) = query.level {
                 r.level == *level
             } else {
                 true
             }
         })
-        .map(|r| DistributionRecordResponse {
-            id: r.id.to_string(),
-            usage_log_id: r.usage_log_id.to_string(),
-            tenant_id: r.tenant_id.to_string(),
-            beneficiary_id: r.beneficiary_id.to_string(),
-            beneficiary_name: r.beneficiary_id.to_string(), // 使用 ID 作为名称，前端可进一步查询
-            share_amount: bigdecimal_to_string(&r.share_amount),
-            share_ratio: bigdecimal_to_string(&r.share_ratio),
-            level: r.level.clone(),
-            status: r.status,
-            created_at: r.created_at.to_rfc3339(),
-        })
-        .collect();
+        .collect::<Vec<_>>();
+
+    let mut responses = Vec::with_capacity(filtered_records.len());
+    for record in filtered_records {
+        responses.push(build_distribution_record_response(pool, record).await?);
+    }
 
     Ok(Json(responses))
 }
@@ -704,42 +757,12 @@ pub async fn get_my_referrals(
     // 合并并转换为响应格式，查询真实收益
     let mut referrals: Vec<ReferralInfo> = Vec::new();
 
-    for r in level1_referrals {
-        // 查询该推荐用户产生的分销收益
-        let earnings = keycompute_db::DistributionRecord::get_earnings_for_referral(
-            pool,
-            auth.user_id,
-            r.user_id,
-        )
-        .await
-        .unwrap_or(BigDecimal::from(0));
-
-        referrals.push(ReferralInfo {
-            user_id: r.user_id.to_string(),
-            user_name: r.user_id.to_string(), // 使用 ID 作为名称
-            level: "level1".to_string(),
-            registered_at: r.created_at.to_rfc3339(),
-            total_earnings: bigdecimal_to_string(&earnings),
-        });
+    for referral in level1_referrals {
+        referrals.push(build_referral_info(pool, auth.user_id, referral).await?);
     }
 
-    for r in level2_referrals {
-        // 查询该推荐用户产生的分销收益
-        let earnings = keycompute_db::DistributionRecord::get_earnings_for_referral(
-            pool,
-            auth.user_id,
-            r.user_id,
-        )
-        .await
-        .unwrap_or(BigDecimal::from(0));
-
-        referrals.push(ReferralInfo {
-            user_id: r.user_id.to_string(),
-            user_name: r.user_id.to_string(),
-            level: "level2".to_string(),
-            registered_at: r.created_at.to_rfc3339(),
-            total_earnings: bigdecimal_to_string(&earnings),
-        });
+    for referral in level2_referrals {
+        referrals.push(build_referral_info(pool, auth.user_id, referral).await?);
     }
 
     Ok(Json(referrals))
@@ -780,5 +803,46 @@ mod tests {
         let json = serde_json::to_string(&stats).unwrap();
         assert!(json.contains("100.00"));
         assert!(json.contains("CNY"));
+    }
+
+    #[test]
+    fn test_build_invite_link_uses_short_ref_param() {
+        let link = build_invite_link(
+            "https://app.example.com",
+            "6aac8ab5-aeec-48b8-a4cc-0a446d952862",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            link,
+            "https://app.example.com/auth/register?ref=6aac8ab5-aeec-48b8-a4cc-0a446d952862"
+        );
+    }
+
+    #[test]
+    fn test_build_invite_link_preserves_source_param() {
+        let link =
+            build_invite_link("https://app.example.com", "abc123", Some("campaign")).unwrap();
+
+        assert_eq!(
+            link,
+            "https://app.example.com/auth/register?ref=abc123&source=campaign"
+        );
+    }
+
+    #[test]
+    fn test_build_invite_link_preserves_base_path_and_encodes_source() {
+        let link = build_invite_link(
+            "https://app.example.com/console/",
+            "abc123",
+            Some("email campaign&fall"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            link,
+            "https://app.example.com/console/auth/register?ref=abc123&source=email+campaign%26fall"
+        );
     }
 }

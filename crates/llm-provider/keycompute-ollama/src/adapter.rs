@@ -20,6 +20,8 @@ use serde_json;
 
 use crate::protocol::{OllamaMessage, OllamaOptions, OllamaRequest, OllamaResponse};
 use crate::stream::parse_ollama_stream;
+use keycompute_openai::protocol::OpenAIResponse;
+use keycompute_openai::stream::parse_openai_stream;
 
 /// Ollama 默认 API 端点
 pub const OLLAMA_DEFAULT_ENDPOINT: &str = "https://ollama.com/api/chat";
@@ -276,12 +278,31 @@ impl OllamaProvider {
 
         let headers = self.build_headers(request.upstream_api_key.expose());
         let response_text = transport.post_json(&endpoint, headers, body_json).await?;
-        let ollama_response: OllamaResponse =
-            serde_json::from_str(&response_text).map_err(|e| {
-                KeyComputeError::ProviderError(format!("Failed to parse Ollama response: {}", e))
-            })?;
 
-        Ok(ollama_response.extract_text().to_string())
+        // 根据 endpoint 类型选择正确的响应解析器
+        let text = if endpoint.contains("/v1/chat/completions") {
+            // OpenAI 兼容格式
+            let openai_response: OpenAIResponse =
+                serde_json::from_str(&response_text).map_err(|e| {
+                    KeyComputeError::ProviderError(format!(
+                        "Failed to parse OpenAI response: {}",
+                        e
+                    ))
+                })?;
+            openai_response.extract_text().to_string()
+        } else {
+            // 原生 Ollama 格式
+            let ollama_response: OllamaResponse =
+                serde_json::from_str(&response_text).map_err(|e| {
+                    KeyComputeError::ProviderError(format!(
+                        "Failed to parse Ollama response: {}",
+                        e
+                    ))
+                })?;
+            ollama_response.extract_text().to_string()
+        };
+
+        Ok(text)
     }
 
     async fn stream_chat_internal(
@@ -297,7 +318,15 @@ impl OllamaProvider {
 
         let headers = self.build_headers(request.upstream_api_key.expose());
         let byte_stream: ByteStream = transport.post_stream(&endpoint, headers, body_json).await?;
-        Ok(parse_ollama_stream(byte_stream))
+
+        // 根据 endpoint 类型选择正确的流解析器
+        if endpoint.contains("/v1/chat/completions") {
+            // OpenAI 兼容格式（SSE），复用 openai provider 的流解析
+            Ok(parse_openai_stream(byte_stream))
+        } else {
+            // 原生 Ollama 格式（NDJSON）
+            Ok(parse_ollama_stream(byte_stream))
+        }
     }
 }
 

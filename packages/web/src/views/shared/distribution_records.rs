@@ -3,7 +3,11 @@ use ui::{Badge, BadgeVariant, Pagination, Table, TableHead};
 
 const PAGE_SIZE: usize = 20;
 
-use crate::services::{api_client::with_auto_refresh, distribution_service};
+use crate::hooks::use_i18n::use_i18n;
+use crate::services::{
+    api_client::{user_error_message, with_auto_refresh},
+    distribution_service,
+};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
 use crate::utils::time::format_time;
@@ -14,6 +18,7 @@ use crate::utils::time::format_time;
 /// - Admin：查看全平台分销记录，展示分销规则（只读，当前由后端硬编码）
 #[component]
 pub fn DistributionRecords() -> Element {
+    let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
     let is_admin = user_store
@@ -88,33 +93,35 @@ pub fn DistributionRecords() -> Element {
     };
 
     let mut page = use_signal(|| 1u32);
+    let page_desc = if is_admin {
+        i18n.t("distribution_records.admin_desc")
+    } else {
+        i18n.t("distribution_records.user_desc")
+    };
 
     rsx! {
         div { class: "page-header",
-            h1 { class: "page-title", "分销记录" }
-            p { class: "page-description",
-                if is_admin { "查看全平台分销收益记录，及当前生效的分销规则" }
-                else { "查看您通过邀请获得的分销收益明细" }
-            }
+            h1 { class: "page-title", {i18n.t("page.distribution_records")} }
+            p { class: "page-description", "{page_desc}" }
         }
 
         // 收益统计卡片
         div { class: "stats-grid",
             div { class: "stat-card card",
                 div { class: "card-body",
-                    p { class: "stat-label", "总收益" }
+                    p { class: "stat-label", {i18n.t("distribution.total_earnings")} }
                     p { class: "stat-value", "{total_earnings}" }
                 }
             }
             div { class: "stat-card card",
                 div { class: "card-body",
-                    p { class: "stat-label", "可用余额" }
+                    p { class: "stat-label", {i18n.t("distribution.available_balance")} }
                     p { class: "stat-value", "{available}" }
                 }
             }
             div { class: "stat-card card",
                 div { class: "card-body",
-                    p { class: "stat-label", "待结算" }
+                    p { class: "stat-label", {i18n.t("distribution.pending")} }
                     p { class: "stat-value", "{pending}" }
                 }
             }
@@ -123,30 +130,30 @@ pub fn DistributionRecords() -> Element {
         // 分销规则只读展示（Admin 可见）
         if is_admin {
             div { class: "section",
-                h2 { class: "section-title", "分销规则（只读）" }
+                h2 { class: "section-title", {i18n.t("distribution_records.rules_title")} }
                 div { class: "alert alert-info", style: "margin-bottom: 12px",
                     span { class: "alert-icon", "ℹ" }
                     div { class: "alert-content",
                         p { class: "alert-body",
-                            "分销规则由平台运营方统一配置，如需调整请联系系统管理员。"
+                            {i18n.t("distribution_records.rules_hint")}
                         }
                     }
                 }
                 match rules() {
-                    None => rsx! { p { class: "text-secondary", "加载中..." } },
-                    Some(Err(_)) => rsx! { p { class: "text-secondary", "加载失败" } },
+                    None => rsx! { p { class: "text-secondary", {i18n.t("table.loading")} } },
+                    Some(Err(ref e)) => rsx! { p { class: "text-secondary", {user_error_message(e)} } },
                     Some(Ok(ref list)) if list.is_empty() => rsx! {
-                        p { class: "text-secondary", "当前无分销规则" }
+                        p { class: "text-secondary", {i18n.t("distribution_records.no_rules")} }
                     },
                     Some(Ok(ref list)) => rsx! {
                         Table {
                             col_count: 4,
                             thead {
                                 tr {
-                                    TableHead { "规则名称" }
-                                    TableHead { "分销比例" }
-                                    TableHead { "状态" }
-                                    TableHead { "创建时间" }
+                                    TableHead { {i18n.t("distribution_records.rule_name")} }
+                                    TableHead { {i18n.t("distribution_records.commission_rate")} }
+                                    TableHead { {i18n.t("table.status")} }
+                                    TableHead { {i18n.t("table.created_at")} }
                                 }
                             }
                             tbody {
@@ -156,9 +163,9 @@ pub fn DistributionRecords() -> Element {
                                         td { { format!("{:.1}%", r.commission_rate * 100.0) } }
                                         td {
                                             if r.is_active {
-                                                Badge { variant: BadgeVariant::Success, "已启用" }
+                                                Badge { variant: BadgeVariant::Success, {i18n.t("common.enabled")} }
                                             } else {
-                                                Badge { variant: BadgeVariant::Neutral, "已禁用" }
+                                                Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
                                             }
                                         }
                                         td { { format_time(&r.created_at) } }
@@ -175,26 +182,28 @@ pub fn DistributionRecords() -> Element {
         if is_admin {
             {
                 let (is_empty, empty_text) = match admin_records() {
-                    None => (true, "加载中..."),
-                    Some(Err(_)) => (true, "加载失败"),
-                    Some(Ok(ref l)) if l.is_empty() => (true, "暂无分销记录"),
-                    _ => (false, ""),
+                    None => (true, i18n.t("table.loading").to_string()),
+                    Some(Err(ref e)) => (true, user_error_message(e)),
+                    Some(Ok(ref l)) if l.is_empty() => {
+                        (true, i18n.t("distribution_records.empty_admin").to_string())
+                    }
+                    _ => (false, String::new()),
                 };
                 let admin_start = (page() as usize - 1) * PAGE_SIZE;
                 rsx! {
                     Table {
                         empty: is_empty,
-                        empty_text: empty_text.to_string(),
+                        empty_text,
                         col_count: 7u32,
                         thead {
                             tr {
-                                TableHead { "记录编号" }
-                                TableHead { "来源用户 ID" }
-                                TableHead { "消费金额" }
-                                TableHead { "分销金额" }
-                                TableHead { "状态" }
-                                TableHead { "创建时间" }
-                                TableHead { "推荐人 ID" }
+                                TableHead { {i18n.t("distribution_records.record_id")} }
+                                TableHead { {i18n.t("distribution_records.source_user_id")} }
+                                TableHead { {i18n.t("distribution_records.amount_spent")} }
+                                TableHead { {i18n.t("distribution_records.commission_amount")} }
+                                TableHead { {i18n.t("table.status")} }
+                                TableHead { {i18n.t("table.created_at")} }
+                                TableHead { {i18n.t("distribution_records.referrer_id")} }
                             }
                         }
                         tbody {
@@ -210,8 +219,8 @@ pub fn DistributionRecords() -> Element {
                                                 { format!("{}…", &rec.referred_id[..rec.referred_id.len().min(8)]) }
                                             }
                                         }
-                                        td { "¥{rec.amount:.2}" }
-                                        td { "¥{rec.commission:.2}" }
+                                        td { "¥{rec.amount}" }
+                                        td { "¥{rec.commission}" }
                                         td {
                                             Badge {
                                                 variant: dist_status_variant(&rec.status),
@@ -236,23 +245,25 @@ pub fn DistributionRecords() -> Element {
         } else {
             {
                 let (is_empty, empty_text) = match referrals() {
-                    None => (true, "加载中..."),
-                    Some(Err(_)) => (true, "加载失败"),
-                    Some(Ok(ref l)) if l.is_empty() => (true, "暂无推荐记录"),
-                    _ => (false, ""),
+                    None => (true, i18n.t("table.loading").to_string()),
+                    Some(Err(ref e)) => (true, user_error_message(e)),
+                    Some(Ok(ref l)) if l.is_empty() => {
+                        (true, i18n.t("distribution_records.empty_user").to_string())
+                    }
+                    _ => (false, String::new()),
                 };
                 let ref_start = (page() as usize - 1) * PAGE_SIZE;
                 rsx! {
                     Table {
                         empty: is_empty,
-                        empty_text: empty_text.to_string(),
+                        empty_text,
                         col_count: 4u32,
                         thead {
                             tr {
-                                TableHead { "被推荐用户" }
-                                TableHead { "加入时间" }
-                                TableHead { "消费总额" }
-                                TableHead { "我的收益" }
+                                TableHead { {i18n.t("distribution_records.referred_user")} }
+                                TableHead { {i18n.t("distribution.joined_at")} }
+                                TableHead { {i18n.t("distribution.total_spent")} }
+                                TableHead { {i18n.t("distribution.my_earnings")} }
                             }
                         }
                         tbody {
@@ -268,8 +279,8 @@ pub fn DistributionRecords() -> Element {
                                             }
                                         }
                                         td { { format_time(&r.joined_at) } }
-                                        td { "¥{r.total_spent:.2}" }
-                                        td { "¥{r.earnings_from_referral:.2}" }
+                                        td { "¥{r.total_spent}" }
+                                        td { "¥{r.earnings_from_referral}" }
                                     }
                                 }
                             }
@@ -288,7 +299,7 @@ pub fn DistributionRecords() -> Element {
             let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
             rsx! {
                 div { class: "pagination",
-                    span { class: "pagination-info", "共 {total} 条" }
+                    span { class: "pagination-info", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
                     Pagination {
                         current: page(),
                         total_pages,

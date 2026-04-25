@@ -10,9 +10,10 @@ pub mod user;
 
 // Password 模块重新导出
 pub use password::{
-    EmailConfig, EmailService, EmailValidator, LoginRequest, LoginResponse, LoginService,
-    PasswordHasher, PasswordResetService, PasswordValidator, RegisterRequest, RegisterResponse,
-    RegistrationService, RequestPasswordResetRequest, ResetPasswordRequest,
+    CompleteRegistrationRequest, CompleteRegistrationResponse, EmailConfig, EmailService,
+    EmailValidator, LoginRequest, LoginResponse, LoginService, PasswordHasher,
+    PasswordResetService, PasswordValidator, RegistrationService, RequestPasswordResetRequest,
+    RequestRegistrationCodeRequest, RequestRegistrationCodeResponse, ResetPasswordRequest,
 };
 
 pub use api_key::{ProduceAiKeyAuth, ProduceAiKeyValidator};
@@ -95,11 +96,6 @@ impl AuthContext {
     /// 是否是管理员
     pub fn is_admin(&self) -> bool {
         self.role == "admin" || self.role == "system"
-    }
-
-    /// 是否是租户管理员
-    pub fn is_tenant_admin(&self) -> bool {
-        self.role == "tenant_admin" || self.role == "admin"
     }
 
     /// 获取用户信息（如果已加载）
@@ -320,19 +316,6 @@ mod tests {
         assert!(ctx.has_permission(&Permission::UseApi));
         assert!(ctx.has_permission(&Permission::ViewUsage));
         assert!(!ctx.has_permission(&Permission::ManageUsers));
-    }
-
-    #[test]
-    fn test_auth_context_tenant_admin() {
-        let ctx = AuthContext::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            "tenant_admin",
-        );
-
-        assert!(ctx.is_tenant_admin());
-        assert!(!ctx.is_admin());
     }
 
     #[tokio::test]

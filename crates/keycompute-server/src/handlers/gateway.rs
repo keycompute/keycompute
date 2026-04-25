@@ -210,11 +210,7 @@ pub async fn get_execution_stats(State(state): State<AppState>) -> Result<Json<E
         );
     }
 
-    let avg_latency_ms = if latency_count > 0 {
-        total_latency / latency_count
-    } else {
-        0
-    };
+    let avg_latency_ms = total_latency.checked_div(latency_count).unwrap_or(0);
 
     Ok(Json(ExecutionStats {
         total_requests,

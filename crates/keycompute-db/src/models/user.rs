@@ -1,5 +1,6 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use keycompute_types::{AssignableUserRole, UserRole};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -22,14 +23,14 @@ pub struct CreateUserRequest {
     pub tenant_id: Uuid,
     pub email: String,
     pub name: Option<String>,
-    pub role: Option<String>,
+    pub role: Option<UserRole>,
 }
 
 /// 更新用户请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateUserRequest {
     pub name: Option<String>,
-    pub role: Option<String>,
+    pub role: Option<AssignableUserRole>,
 }
 
 impl User {
@@ -45,7 +46,7 @@ impl User {
         .bind(req.tenant_id)
         .bind(&req.email)
         .bind(&req.name)
-        .bind(&req.role)
+        .bind(req.role.as_ref().map(|role| role.as_str()))
         .fetch_one(pool)
         .await?;
 
@@ -134,7 +135,7 @@ impl User {
             "#,
         )
         .bind(&req.name)
-        .bind(&req.role)
+        .bind(req.role.as_ref().map(|role| role.as_str()))
         .bind(self.id)
         .fetch_one(pool)
         .await?;

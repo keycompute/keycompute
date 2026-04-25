@@ -35,6 +35,10 @@ pub enum ClientError {
     #[error("Rate limited: {0}")]
     RateLimited(String),
 
+    /// 验证流程错误 (422)
+    #[error("Verification failed: {0}")]
+    Verification(String),
+
     /// 服务维护中 (503)
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
@@ -62,12 +66,13 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 impl ClientError {
     /// 根据 HTTP 状态码创建对应的错误
     pub fn from_status(status: u16, message: impl Into<String>) -> Self {
-        let msg = message.into();
+        let msg = extract_error_message(message.into());
         match status {
             401 => ClientError::Unauthorized(msg),
             403 => ClientError::Forbidden(msg),
             404 => ClientError::NotFound(msg),
             429 => ClientError::RateLimited(msg),
+            422 => ClientError::Verification(msg),
             503 => ClientError::ServiceUnavailable(msg),
             500..=599 => ClientError::ServerError(msg),
             _ => ClientError::Http(format!("HTTP {}: {}", status, msg)),
@@ -84,9 +89,35 @@ impl ClientError {
         matches!(self, ClientError::RateLimited(_))
     }
 
+    /// 判断是否为验证码/验证流程错误
+    pub fn is_verification_error(&self) -> bool {
+        matches!(self, ClientError::Verification(_))
+    }
+
     /// 判断是否为网络错误
     pub fn is_network_error(&self) -> bool {
         matches!(self, ClientError::Network(_) | ClientError::Http(_))
+    }
+
+    /// 获取适合直接展示给用户的错误消息文本。
+    ///
+    /// 该方法会移除枚举 `Display` 中的英文包装层，优先保留后端返回的业务消息。
+    pub fn message(&self) -> String {
+        match self {
+            ClientError::Http(msg) => strip_http_prefix(msg),
+            ClientError::Serialization(msg)
+            | ClientError::Network(msg)
+            | ClientError::Unauthorized(msg)
+            | ClientError::Forbidden(msg)
+            | ClientError::NotFound(msg)
+            | ClientError::RateLimited(msg)
+            | ClientError::Verification(msg)
+            | ClientError::ServiceUnavailable(msg)
+            | ClientError::ServerError(msg)
+            | ClientError::InvalidResponse(msg)
+            | ClientError::Config(msg)
+            | ClientError::Other(msg) => msg.clone(),
+        }
     }
 }
 
@@ -117,5 +148,30 @@ impl From<serde_json::Error> for ClientError {
 impl From<std::io::Error> for ClientError {
     fn from(err: std::io::Error) -> Self {
         ClientError::Network(err.to_string())
+    }
+}
+
+fn extract_error_message(raw: String) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return raw;
+    };
+
+    value
+        .get("error")
+        .and_then(|error| match error {
+            serde_json::Value::String(msg) => Some(msg.as_str()),
+            serde_json::Value::Object(map) => map.get("message").and_then(|msg| msg.as_str()),
+            _ => None,
+        })
+        .or_else(|| value.get("message").and_then(|msg| msg.as_str()))
+        .map(ToString::to_string)
+        .unwrap_or(raw)
+}
+
+fn strip_http_prefix(msg: &str) -> String {
+    if let Some((_, rest)) = msg.split_once(": ") {
+        rest.to_string()
+    } else {
+        msg.to_string()
     }
 }

@@ -19,6 +19,10 @@ pub enum KeyComputeError {
     #[error("permission denied: {0}")]
     PermissionDenied(String),
 
+    /// 验证码/验证流程错误
+    #[error("verification failed: {0}")]
+    VerificationError(String),
+
     // ============ 限流 ============
     /// 限流触发
     #[error("rate limit exceeded: {0}")]
@@ -47,6 +51,10 @@ pub enum KeyComputeError {
     /// 配置错误
     #[error("configuration error: {0}")]
     ConfigError(String),
+
+    /// 服务暂时不可用（依赖服务故障、临时降级等）
+    #[error("service unavailable: {0}")]
+    ServiceUnavailable(String),
 
     // ============ 请求处理 ============
     /// 内部错误（不应暴露给用户的系统错误）
@@ -121,6 +129,7 @@ impl KeyComputeError {
                 | KeyComputeError::ProviderTimeout(_, _)
                 | KeyComputeError::NetworkError(_)
                 | KeyComputeError::Timeout(_)
+                | KeyComputeError::ServiceUnavailable(_)
                 | KeyComputeError::DatabaseError(_)
         )
     }
@@ -131,6 +140,7 @@ impl KeyComputeError {
             KeyComputeError::AuthError(_) | KeyComputeError::PermissionDenied(_) => {
                 ErrorCategory::Auth
             }
+            KeyComputeError::VerificationError(_) => ErrorCategory::Verification,
             KeyComputeError::RateLimitExceeded(_) => ErrorCategory::RateLimit,
             KeyComputeError::RoutingFailed(_) => ErrorCategory::Routing,
             KeyComputeError::ProviderError(_) | KeyComputeError::ProviderTimeout(_, _) => {
@@ -138,6 +148,7 @@ impl KeyComputeError {
             }
             KeyComputeError::DatabaseError(_) => ErrorCategory::Database,
             KeyComputeError::ConfigError(_) => ErrorCategory::Config,
+            KeyComputeError::ServiceUnavailable(_) => ErrorCategory::ServiceUnavailable,
             KeyComputeError::ValidationError(_) | KeyComputeError::InvalidRequest(_) => {
                 ErrorCategory::Validation
             }
@@ -156,11 +167,13 @@ impl KeyComputeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
     Auth,
+    Verification,
     RateLimit,
     Routing,
     Provider,
     Database,
     Config,
+    ServiceUnavailable,
     Validation,
     NotFound,
     Network,
@@ -171,11 +184,13 @@ impl std::fmt::Display for ErrorCategory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ErrorCategory::Auth => write!(f, "authentication_error"),
+            ErrorCategory::Verification => write!(f, "verification_error"),
             ErrorCategory::RateLimit => write!(f, "rate_limit_error"),
             ErrorCategory::Routing => write!(f, "routing_error"),
             ErrorCategory::Provider => write!(f, "provider_error"),
             ErrorCategory::Database => write!(f, "database_error"),
             ErrorCategory::Config => write!(f, "config_error"),
+            ErrorCategory::ServiceUnavailable => write!(f, "service_unavailable_error"),
             ErrorCategory::Validation => write!(f, "validation_error"),
             ErrorCategory::NotFound => write!(f, "not_found_error"),
             ErrorCategory::Network => write!(f, "network_error"),
@@ -203,9 +218,11 @@ mod tests {
         assert!(KeyComputeError::ProviderError("timeout".into()).is_retryable());
         assert!(KeyComputeError::NetworkError("connection reset".into()).is_retryable());
         assert!(KeyComputeError::DatabaseError("deadlock".into()).is_retryable());
+        assert!(KeyComputeError::ServiceUnavailable("smtp unavailable".into()).is_retryable());
 
         // 不可重试
         assert!(!KeyComputeError::AuthError("invalid".into()).is_retryable());
+        assert!(!KeyComputeError::VerificationError("bad code".into()).is_retryable());
         assert!(!KeyComputeError::ValidationError("bad input".into()).is_retryable());
         assert!(!KeyComputeError::NotFound("missing".into()).is_retryable());
     }
@@ -217,6 +234,10 @@ mod tests {
             ErrorCategory::Auth
         );
         assert_eq!(
+            KeyComputeError::VerificationError("test".into()).category(),
+            ErrorCategory::Verification
+        );
+        assert_eq!(
             KeyComputeError::RateLimitExceeded("test".into()).category(),
             ErrorCategory::RateLimit
         );
@@ -224,12 +245,24 @@ mod tests {
             KeyComputeError::ProviderError("test".into()).category(),
             ErrorCategory::Provider
         );
+        assert_eq!(
+            KeyComputeError::ServiceUnavailable("test".into()).category(),
+            ErrorCategory::ServiceUnavailable
+        );
     }
 
     #[test]
     fn test_category_display() {
         assert_eq!(ErrorCategory::Auth.to_string(), "authentication_error");
+        assert_eq!(
+            ErrorCategory::Verification.to_string(),
+            "verification_error"
+        );
         assert_eq!(ErrorCategory::RateLimit.to_string(), "rate_limit_error");
+        assert_eq!(
+            ErrorCategory::ServiceUnavailable.to_string(),
+            "service_unavailable_error"
+        );
     }
 
     #[test]

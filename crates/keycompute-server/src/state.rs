@@ -48,6 +48,8 @@ impl Default for JwtConfig {
 /// 应用状态配置
 #[derive(Debug, Clone, Default)]
 pub struct AppStateConfig {
+    /// 对外公开的前端应用基础 URL（可选）
+    pub app_base_url: Option<String>,
     /// 限流后端配置
     pub rate_limit: RateLimitBackendConfig,
     /// JWT 配置
@@ -62,6 +64,7 @@ impl AppStateConfig {
     /// 从 keycompute_config::AppConfig 创建
     pub fn from_config(config: &keycompute_config::AppConfig) -> Self {
         Self {
+            app_base_url: Some(config.resolved_app_base_url()),
             rate_limit: if let Some(redis) = &config.redis {
                 RateLimitBackendConfig::Redis {
                     url: redis.url.clone(),
@@ -117,6 +120,8 @@ pub fn init_global_crypto(config: &keycompute_config::AppConfig) -> crate::error
 /// 应用状态
 #[derive(Clone)]
 pub struct AppState {
+    /// 对外公开的前端应用基础 URL（可选）
+    pub app_base_url: Option<String>,
     /// 数据库连接池（可选）
     pub pool: Option<Arc<PgPool>>,
     /// 认证服务
@@ -139,6 +144,8 @@ pub struct AppState {
     pub billing: Arc<BillingService>,
     /// 邮件服务
     pub email_service: Arc<EmailService>,
+    /// 公共注册 cookie 签名密钥
+    pub public_auth_cookie_secret: Arc<String>,
     /// 支付服务（可选）
     pub payment: Option<Arc<keycompute_alipay::PaymentService>>,
     /// Gateway 配置
@@ -148,6 +155,7 @@ pub struct AppState {
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
+            .field("app_base_url", &self.app_base_url)
             .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
             .field("auth", &"<AuthService>")
             .field("rate_limiter", &"<RateLimitService>")
@@ -159,6 +167,7 @@ impl std::fmt::Debug for AppState {
             .field("http_proxy", &"<HttpProxy>")
             .field("billing", &"<BillingService>")
             .field("email_service", &"<EmailService>")
+            .field("public_auth_cookie_secret", &"<secret>")
             .field(
                 "payment",
                 &self.payment.as_ref().map(|_| "<PaymentService>"),
@@ -222,8 +231,11 @@ impl AppState {
 
         // 创建邮件服务
         let email_service = Arc::new(EmailService::new(config.email));
+        let public_auth_cookie_secret =
+            Arc::new(format!("{}:public-auth-cookie", config.jwt.secret));
 
         Self {
+            app_base_url: config.app_base_url,
             pool: None,
             auth: Arc::new(auth_service),
             rate_limiter: Arc::new(rate_limiter),
@@ -235,6 +247,7 @@ impl AppState {
             http_proxy,
             billing,
             email_service,
+            public_auth_cookie_secret,
             payment: None, // 支付服务需要数据库连接
             gateway_config: config.gateway,
         }
@@ -369,6 +382,8 @@ impl AppState {
 
         // 创建邮件服务
         let email_service = Arc::new(EmailService::new(config.email));
+        let public_auth_cookie_secret =
+            Arc::new(format!("{}:public-auth-cookie", config.jwt.secret));
 
         // 尝试初始化支付服务
         let payment = match keycompute_alipay::AlipayConfig::from_env() {
@@ -391,6 +406,7 @@ impl AppState {
         };
 
         Self {
+            app_base_url: config.app_base_url,
             pool: Some(pool),
             auth: Arc::new(auth_service),
             rate_limiter: Arc::new(rate_limiter),
@@ -402,6 +418,7 @@ impl AppState {
             http_proxy,
             billing,
             email_service,
+            public_auth_cookie_secret,
             payment,
             gateway_config: config.gateway,
         }
@@ -463,8 +480,11 @@ impl AppState {
 
         // 创建邮件服务
         let email_service = Arc::new(EmailService::new(config.email));
+        let public_auth_cookie_secret =
+            Arc::new(format!("{}:public-auth-cookie", config.jwt.secret));
 
         Self {
+            app_base_url: config.app_base_url,
             pool: None,
             auth: Arc::new(auth_service),
             rate_limiter: Arc::new(rate_limiter),
@@ -476,6 +496,7 @@ impl AppState {
             http_proxy,
             billing,
             email_service,
+            public_auth_cookie_secret,
             payment: None, // 测试环境不需要支付服务
             gateway_config: config.gateway,
         }

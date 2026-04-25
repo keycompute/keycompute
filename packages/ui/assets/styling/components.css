@@ -23,7 +23,7 @@
 }
 
 .btn:focus-visible {
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.3);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
 }
 
 .btn:active {
@@ -31,14 +31,19 @@
 }
 
 .btn-primary {
-  background-color: var(--color-primary);
+  position: relative;
+  overflow: hidden;
+  background: var(--color-primary);
   color: var(--text-inverse);
   border-color: var(--color-primary);
+  box-shadow: none;
 }
 
 .btn-primary:hover {
-  background-color: var(--color-primary-hover);
+  background: var(--color-primary-hover);
   border-color: var(--color-primary-hover);
+  box-shadow: none;
+  transform: translateY(-1px);
 }
 
 .btn-primary:active {
@@ -115,7 +120,7 @@
   font-size: var(--font-size-sm);
   font-family: var(--font-family);
   color: var(--text-primary);
-  background-color: var(--bg-primary);
+  background-color: var(--bg-secondary);
   transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
   outline: none;
   appearance: none;
@@ -123,7 +128,7 @@
 
 .input-field:focus {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
 }
 
 .input-field.error {
@@ -146,7 +151,7 @@
 
 /* ── Card ───────────────────────────────────── */
 .card {
-  background-color: var(--bg-primary);
+  background-color: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-sm);
@@ -192,17 +197,17 @@
 
 .badge-success {
   background-color: var(--color-success-light);
-  color: #059669;
+  color: var(--color-success);
 }
 
 .badge-warning {
   background-color: var(--color-warning-light);
-  color: #d97706;
+  color: var(--color-warning);
 }
 
 .badge-error {
   background-color: var(--color-error-light);
-  color: #dc2626;
+  color: var(--color-error);
 }
 
 .badge-info {
@@ -232,7 +237,7 @@
   padding: var(--space-sm) var(--space-md);
   font-weight: var(--font-weight-semibold);
   color: var(--text-secondary);
-  background-color: var(--bg-secondary);
+  background-color: rgba(255, 255, 255, 0.02);
   border-bottom: 1px solid var(--border-color);
   white-space: nowrap;
   font-size: var(--font-size-xs);
@@ -248,7 +253,7 @@
 }
 
 .table tbody tr:hover td {
-  background-color: var(--bg-secondary);
+  background-color: rgba(255, 255, 255, 0.02);
 }
 
 .table tbody tr:last-child td {
@@ -353,7 +358,8 @@
 }
 
 .modal {
-  background-color: var(--bg-primary);
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-xl);
   width: 100%;
@@ -419,7 +425,7 @@
 .alert-success {
   background-color: var(--color-success-light);
   border-color: rgba(16, 185, 129, 0.3);
-  color: #059669;
+  color: var(--color-success);
 }
 
 .alert-warning {
@@ -431,7 +437,7 @@
 .alert-error {
   background-color: var(--color-error-light);
   border-color: rgba(239, 68, 68, 0.3);
-  color: #dc2626;
+  color: var(--color-error);
 }
 
 .alert-icon {
@@ -731,4 +737,3 @@
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
-

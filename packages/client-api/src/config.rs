@@ -68,13 +68,23 @@ impl ClientConfig {
     /// 构建完整 URL
     /// 空字符串 base_url 表示使用相对路径（适用于 Nginx 反向代理场景）
     pub fn build_url(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+
         if self.base_url.is_empty() {
-            // 使用相对路径，让浏览器自动使用当前域名
-            let path = path.trim_start_matches('/');
+            #[cfg(target_arch = "wasm32")]
+            {
+                // reqwest on wasm expects an absolute URL, so derive same-origin requests
+                // from the current browser location when no explicit API base is configured.
+                if let Some(window) = web_sys::window()
+                    && let Ok(origin) = window.location().origin()
+                {
+                    return format!("{}/{}", origin.trim_end_matches('/'), path);
+                }
+            }
+
             format!("/{}", path)
         } else {
             let base = self.base_url.trim_end_matches('/');
-            let path = path.trim_start_matches('/');
             format!("{}/{}", base, path)
         }
     }

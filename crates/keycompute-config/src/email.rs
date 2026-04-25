@@ -4,16 +4,15 @@
 //! - SMTP 服务器连接参数
 //! - 发件人信息
 //! - TLS 配置
-//! - 验证链接基础 URL
 
 use serde::Deserialize;
 
 /// 邮件服务配置
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, PartialEq)]
 pub struct EmailConfig {
     /// SMTP 服务器地址
     pub smtp_host: String,
-    /// SMTP 端口（默认 587）
+    /// SMTP 端口（默认 465）
     #[serde(default = "default_smtp_port")]
     pub smtp_port: u16,
     /// SMTP 用户名
@@ -27,15 +26,13 @@ pub struct EmailConfig {
     /// 是否使用 TLS（默认 true）
     #[serde(default = "default_use_tls")]
     pub use_tls: bool,
-    /// 验证链接基础 URL（如 https://api.example.com）
-    pub verification_base_url: String,
     /// 邮件发送超时（秒，默认 30）
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 }
 
 fn default_smtp_port() -> u16 {
-    587
+    465
 }
 
 fn default_use_tls() -> bool {
@@ -50,13 +47,12 @@ impl Default for EmailConfig {
     fn default() -> Self {
         Self {
             smtp_host: "localhost".to_string(),
-            smtp_port: 587,
+            smtp_port: 465,
             smtp_username: String::new(),
             smtp_password: String::new(),
             from_address: "noreply@localhost".to_string(),
             from_name: Some("KeyCompute".to_string()),
             use_tls: true,
-            verification_base_url: "http://localhost:3000".to_string(),
             timeout_secs: 30,
         }
     }
@@ -65,10 +61,19 @@ impl Default for EmailConfig {
 impl EmailConfig {
     /// 检查配置是否有效（非默认值）
     pub fn is_configured(&self) -> bool {
-        !self.smtp_host.is_empty()
-            && self.smtp_host != "localhost"
-            && !self.smtp_username.is_empty()
-            && !self.smtp_password.is_empty()
+        self.smtp_port != 0
+            && !self.smtp_host.trim().is_empty()
+            && !self.smtp_username.trim().is_empty()
+            && !self.smtp_password.trim().is_empty()
+            && !self.from_address.trim().is_empty()
+    }
+
+    /// 检查是否处于“部分配置”状态
+    ///
+    /// 默认配置表示未启用邮件能力；只有在偏离默认值但仍缺少必填项时，
+    /// 才视为需要在启动阶段报错的部分配置。
+    pub fn is_partially_configured(&self) -> bool {
+        self != &Self::default() && !self.is_configured()
     }
 
     /// 获取完整的发件人地址（带名称）
@@ -77,19 +82,6 @@ impl EmailConfig {
             Some(name) => format!("{} <{}>", name, self.from_address),
             None => self.from_address.clone(),
         }
-    }
-
-    /// 生成邮箱验证链接
-    pub fn verification_url(&self, token: &str) -> String {
-        format!("{}/auth/verify-email/{}", self.verification_base_url, token)
-    }
-
-    /// 生成密码重置链接
-    pub fn password_reset_url(&self, token: &str) -> String {
-        format!(
-            "{}/auth/reset-password?token={}",
-            self.verification_base_url, token
-        )
     }
 }
 
@@ -100,7 +92,7 @@ mod tests {
     #[test]
     fn test_default_email_config() {
         let config = EmailConfig::default();
-        assert_eq!(config.smtp_port, 587);
+        assert_eq!(config.smtp_port, 465);
         assert!(config.use_tls);
         assert_eq!(config.timeout_secs, 30);
     }
@@ -126,33 +118,10 @@ mod tests {
     }
 
     #[test]
-    fn test_verification_url() {
-        let config = EmailConfig {
-            verification_base_url: "https://api.example.com".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            config.verification_url("abc123"),
-            "https://api.example.com/auth/verify-email/abc123"
-        );
-    }
-
-    #[test]
-    fn test_password_reset_url() {
-        let config = EmailConfig {
-            verification_base_url: "https://api.example.com".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            config.password_reset_url("reset456"),
-            "https://api.example.com/auth/reset-password?token=reset456"
-        );
-    }
-
-    #[test]
     fn test_is_configured() {
         let default_config = EmailConfig::default();
         assert!(!default_config.is_configured());
+        assert!(!default_config.is_partially_configured());
 
         let configured = EmailConfig {
             smtp_host: "smtp.example.com".to_string(),
@@ -161,5 +130,18 @@ mod tests {
             ..Default::default()
         };
         assert!(configured.is_configured());
+        assert!(!configured.is_partially_configured());
+    }
+
+    #[test]
+    fn test_is_partially_configured() {
+        let partial = EmailConfig {
+            smtp_host: "smtp.example.com".to_string(),
+            smtp_username: "   ".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!partial.is_configured());
+        assert!(partial.is_partially_configured());
     }
 }

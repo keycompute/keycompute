@@ -20,12 +20,12 @@ pub use account::{
 };
 pub use payment::PaymentOrderInfo;
 pub use pricing::{
-    CalculateCostRequest, CostCalculationResponse, CreatePricingRequest, PricingInfo,
-    SetDefaultPricingRequest, UpdatePricingRequest,
+    CalculateCostRequest, CostCalculationResponse, CreatePricingRequest, CreatePricingResponse,
+    PricingInfo, SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
 };
 pub use user::{
-    ApiKeyInfo, UpdateBalanceRequest, UpdateBalanceResponse, UpdateUserRequest, UserDetail,
-    UserListResponse, UserQueryParams,
+    ApiKeyInfo, UpdateBalanceRequest, UpdateBalanceResponse, UpdateUserRequest, UpdateUserResponse,
+    UserDetail, UserListResponse, UserQueryParams,
 };
 
 // Re-export admin payment's PaymentQueryParams distinctly
@@ -74,7 +74,7 @@ impl AdminApi {
         id: &str,
         req: &UpdateUserRequest,
         token: &str,
-    ) -> Result<UserDetail> {
+    ) -> Result<UpdateUserResponse> {
         self.client
             .put_json(&format!("/api/v1/users/{}", id), req, Some(token))
             .await
@@ -186,7 +186,7 @@ impl AdminApi {
         &self,
         req: &CreatePricingRequest,
         token: &str,
-    ) -> Result<PricingInfo> {
+    ) -> Result<CreatePricingResponse> {
         self.client
             .post_json("/api/v1/pricing", req, Some(token))
             .await
@@ -198,7 +198,7 @@ impl AdminApi {
         id: &str,
         req: &UpdatePricingRequest,
         token: &str,
-    ) -> Result<PricingInfo> {
+    ) -> Result<UpdatePricingResponse> {
         self.client
             .put_json(&format!("/api/v1/pricing/{}", id), req, Some(token))
             .await

@@ -342,9 +342,9 @@ mod tests {
         assert!(admin_perms.contains(&Permission::SystemAdmin));
         assert!(admin_perms.contains(&Permission::ManageUsers));
 
-        let tenant_admin_perms = build_permissions(AuthType::Jwt, "tenant_admin");
-        assert!(tenant_admin_perms.contains(&Permission::ManageApiKeys));
-        assert!(!tenant_admin_perms.contains(&Permission::SystemAdmin));
+        let system_perms = build_permissions(AuthType::Jwt, "system");
+        assert!(system_perms.contains(&Permission::ManageApiKeys));
+        assert!(system_perms.contains(&Permission::SystemAdmin));
 
         let user_perms = build_permissions(AuthType::Jwt, "user");
         assert!(user_perms.contains(&Permission::UseApi));

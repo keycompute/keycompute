@@ -4,7 +4,7 @@
 
 use crate::client::ApiClient;
 use crate::error::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub use super::common::{MessageResponse, encode_query_value};
 
@@ -138,14 +138,26 @@ pub struct DistributionEarnings {
 /// 推荐人信息
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReferralInfo {
+    #[serde(alias = "user_id")]
     pub id: String,
+    #[serde(default)]
     pub email: String,
+    #[serde(default, alias = "user_name")]
     pub name: Option<String>,
-    #[serde(rename = "created_at")]
+    #[serde(rename = "created_at", alias = "registered_at")]
     pub joined_at: String,
-    #[serde(rename = "total_consumption")]
+    #[serde(
+        rename = "total_consumption",
+        default = "default_zero_string",
+        deserialize_with = "deserialize_string_from_number_or_string"
+    )]
     pub total_spent: String,
-    #[serde(rename = "earnings")]
+    #[serde(
+        rename = "earnings",
+        alias = "total_earnings",
+        default = "default_zero_string",
+        deserialize_with = "deserialize_string_from_number_or_string"
+    )]
     pub earnings_from_referral: String,
 }
 
@@ -220,10 +232,18 @@ impl DistributionQueryParams {
 #[derive(Debug, Clone, Deserialize)]
 pub struct DistributionRecord {
     pub id: String,
+    #[serde(alias = "beneficiary_id")]
     pub referrer_id: String,
+    #[serde(alias = "usage_log_id")]
     pub referred_id: String,
-    pub amount: f64,
-    pub commission: f64,
+    #[serde(default, deserialize_with = "deserialize_string_from_number_or_string")]
+    pub amount: String,
+    #[serde(
+        default,
+        alias = "share_amount",
+        deserialize_with = "deserialize_string_from_number_or_string"
+    )]
+    pub commission: String,
     pub status: String,
     pub created_at: String,
 }
@@ -256,6 +276,27 @@ pub struct CreateDistributionRuleRequest {
     pub commission_rate: f64,
     pub min_purchase_amount: Option<f64>,
     pub max_commission_amount: Option<f64>,
+}
+
+fn default_zero_string() -> String {
+    "0".to_string()
+}
+
+fn deserialize_string_from_number_or_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Null => Ok(default_zero_string()),
+        serde_json::Value::Number(number) => Ok(number.to_string()),
+        serde_json::Value::String(string) => Ok(string),
+        other => Err(serde::de::Error::custom(format!(
+            "expected number or string, got {other}"
+        ))),
+    }
 }
 
 impl CreateDistributionRuleRequest {

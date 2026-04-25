@@ -459,7 +459,7 @@ impl RoutingEngine {
 
         // 按优先级排序
         let mut sorted_accounts: Vec<_> = accounts.into_iter().collect();
-        sorted_accounts.sort_by(|a, b| b.priority.cmp(&a.priority));
+        sorted_accounts.sort_by_key(|account| std::cmp::Reverse(account.priority));
 
         for account in sorted_accounts {
             // 检查账号是否在冷却中

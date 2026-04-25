@@ -14,6 +14,7 @@ use axum::{
 use keycompute_db::models::api_key::ProduceAiKey;
 use keycompute_db::models::tenant::Tenant;
 use keycompute_db::models::user::User;
+use keycompute_types::{AssignableUserRole, UserRole};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
@@ -58,6 +59,61 @@ fn default_page() -> i64 {
 
 fn default_page_size() -> i64 {
     20
+}
+
+fn validate_role_change_request(
+    auth: &AuthExtractor,
+    target_user_id: Uuid,
+    target_user: &User,
+    requested_role: &Option<AssignableUserRole>,
+) -> Result<()> {
+    if requested_role.is_none() {
+        return Ok(());
+    }
+
+    if auth.role != UserRole::System.as_str() {
+        return Err(ApiError::Forbidden(
+            "Only system can change user roles".to_string(),
+        ));
+    }
+
+    if auth.user_id == target_user_id {
+        return Err(ApiError::BadRequest(
+            "System cannot modify its own role".to_string(),
+        ));
+    }
+
+    if target_user.role == UserRole::System.as_str() {
+        return Err(ApiError::BadRequest(
+            "System role cannot be modified".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_user_delete_request(
+    auth: &AuthExtractor,
+    target_user_id: Uuid,
+    target_user: &User,
+) -> Result<()> {
+    if target_user_id == auth.user_id {
+        return Err(ApiError::BadRequest("Cannot delete yourself".to_string()));
+    }
+
+    if target_user.role == UserRole::System.as_str() {
+        return Err(ApiError::BadRequest(
+            "System user cannot be deleted".to_string(),
+        ));
+    }
+
+    if target_user.role == UserRole::Admin.as_str() && auth.role != UserRole::System.as_str() {
+        return Err(ApiError::Forbidden(
+            "Only system can delete admin users".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// 用户列表响应（带分页信息）
@@ -253,7 +309,7 @@ pub async fn get_user_by_id(
 #[derive(Debug, Deserialize)]
 pub struct UpdateUserRequest {
     pub name: Option<String>,
-    pub role: Option<String>,
+    pub role: Option<AssignableUserRole>,
 }
 
 /// 更新用户信息
@@ -278,6 +334,8 @@ pub async fn update_user(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
+
+    validate_role_change_request(&auth, user_id, &user, &req.role)?;
 
     let update_req = keycompute_db::models::user::UpdateUserRequest {
         name: req.name,
@@ -311,11 +369,6 @@ pub async fn delete_user(
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
-    // 防止删除自己
-    if user_id == auth.user_id {
-        return Err(ApiError::BadRequest("Cannot delete yourself".to_string()));
-    }
-
     let pool = state
         .pool
         .as_ref()
@@ -325,6 +378,8 @@ pub async fn delete_user(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
+
+    validate_user_delete_request(&auth, user_id, &user)?;
 
     user.delete(pool)
         .await
@@ -524,5 +579,94 @@ mod tests {
 
         let json = serde_json::to_string(&user).unwrap();
         assert!(json.contains("admin@example.com"));
+    }
+
+    fn make_test_user(id: Uuid, role: &str) -> User {
+        use chrono::Utc;
+
+        User {
+            id,
+            tenant_id: Uuid::new_v4(),
+            email: "target@example.com".to_string(),
+            name: Some("Target".to_string()),
+            role: role.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_validate_role_change_request_requires_system() {
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
+        let target = make_test_user(Uuid::new_v4(), "user");
+        let err = validate_role_change_request(
+            &auth,
+            target.id,
+            &target,
+            &Some(AssignableUserRole::Admin),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ApiError::Forbidden(msg) if msg.contains("Only system")));
+    }
+
+    #[test]
+    fn test_validate_role_change_request_rejects_self_role_change() {
+        let user_id = Uuid::new_v4();
+        let auth = AuthExtractor::new(user_id, Uuid::new_v4(), Uuid::new_v4(), "system");
+        let target = make_test_user(user_id, "system");
+        let err = validate_role_change_request(
+            &auth,
+            target.id,
+            &target,
+            &Some(AssignableUserRole::Admin),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("own role")));
+    }
+
+    #[test]
+    fn test_validate_role_change_request_rejects_modifying_system_role() {
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system");
+        let target = make_test_user(Uuid::new_v4(), "system");
+        let err = validate_role_change_request(
+            &auth,
+            target.id,
+            &target,
+            &Some(AssignableUserRole::Admin),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be modified")));
+    }
+
+    #[test]
+    fn test_validate_user_delete_request_rejects_self_delete() {
+        let user_id = Uuid::new_v4();
+        let auth = AuthExtractor::new(user_id, Uuid::new_v4(), Uuid::new_v4(), "admin");
+        let target = make_test_user(user_id, "admin");
+        let err = validate_user_delete_request(&auth, target.id, &target).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("yourself")));
+    }
+
+    #[test]
+    fn test_validate_user_delete_request_rejects_system_user() {
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
+        let target = make_test_user(Uuid::new_v4(), "system");
+        let err = validate_user_delete_request(&auth, target.id, &target).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be deleted")));
+    }
+
+    #[test]
+    fn test_validate_user_delete_request_requires_system_for_admin_target() {
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
+        let target = make_test_user(Uuid::new_v4(), "admin");
+        let err = validate_user_delete_request(&auth, target.id, &target).unwrap_err();
+        assert!(matches!(err, ApiError::Forbidden(msg) if msg.contains("Only system")));
+    }
+
+    #[test]
+    fn test_validate_user_delete_request_allows_system_to_delete_admin_target() {
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system");
+        let target = make_test_user(Uuid::new_v4(), "admin");
+        assert!(validate_user_delete_request(&auth, target.id, &target).is_ok());
     }
 }

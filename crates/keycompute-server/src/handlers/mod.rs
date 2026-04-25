@@ -21,9 +21,8 @@ pub mod user;
 
 // 认证相关
 pub use auth::{
-    forgot_password_handler, login_handler, refresh_token_handler, register_handler,
-    resend_verification_handler, reset_password_handler, verify_email_handler,
-    verify_reset_token_handler,
+    complete_registration_handler, forgot_password_handler, login_handler, refresh_token_handler,
+    register_handler, reset_password_handler, verify_reset_token_handler,
 };
 
 // OpenAI 兼容 API (统一入口)
@@ -86,3 +85,42 @@ pub use payment::{
     admin_list_payment_orders, alipay_notify, create_payment_order, get_my_balance,
     get_payment_order, list_my_payment_orders, sync_payment_order,
 };
+
+fn normalize_public_base_url(base_url: &str) -> Option<String> {
+    let normalized = base_url.trim().trim_end_matches('/').to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+pub(crate) fn configured_public_base_url(configured_base_url: Option<&str>) -> Option<String> {
+    configured_base_url.and_then(normalize_public_base_url)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_configured_public_base_url_prefers_configured_value() {
+        let base_url = configured_public_base_url(Some("https://configured.example.com/"));
+
+        assert_eq!(base_url.as_deref(), Some("https://configured.example.com"));
+    }
+
+    #[test]
+    fn test_configured_public_base_url_returns_none_when_missing() {
+        let base_url = configured_public_base_url(None);
+
+        assert!(base_url.is_none());
+    }
+
+    #[test]
+    fn test_configured_public_base_url_ignores_blank_values() {
+        let base_url = configured_public_base_url(Some("   "));
+
+        assert!(base_url.is_none());
+    }
+}

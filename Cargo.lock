@@ -682,6 +682,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "gloo-timers",
+ "keycompute-types",
  "reqwest",
  "serde",
  "serde_json",
@@ -690,6 +691,7 @@ dependencies = [
  "tokio-test",
  "urlencoding",
  "uuid",
+ "web-sys",
  "wiremock",
 ]
 
@@ -3417,6 +3419,7 @@ dependencies = [
  "password-hash",
  "rand 0.8.5",
  "regex",
+ "rust_decimal",
  "serde",
  "sha2",
  "sqlx",
@@ -3487,6 +3490,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3552,6 +3556,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3591,6 +3596,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "keycompute-openai",
  "keycompute-provider-trait",
  "keycompute-types",
  "serde",
@@ -3708,6 +3714,7 @@ dependencies = [
  "bigdecimal",
  "chrono",
  "futures",
+ "hex",
  "keycompute-alipay",
  "keycompute-auth",
  "keycompute-billing",
@@ -3742,6 +3749,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -7547,6 +7555,7 @@ dependencies = [
 name = "web"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "client-api",
  "dioxus",
  "gloo-timers",

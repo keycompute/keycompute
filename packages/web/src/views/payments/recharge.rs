@@ -24,13 +24,6 @@ impl PayMethod {
         }
     }
 
-    fn value(&self) -> &'static str {
-        match self {
-            PayMethod::Alipay => "alipay",
-            PayMethod::WechatPay => "wechatpay",
-        }
-    }
-
     fn icon(&self) -> &'static str {
         match self {
             PayMethod::Alipay => "💳",
@@ -48,7 +41,9 @@ enum OrderState {
     Pending {
         out_trade_no: String,
         pay_url: Option<String>,
-        method: String,
+        payment_type: String,
+        qr_code: Option<String>,
+        qr_code_image_url: Option<String>,
     },
     /// 支付完成
     Paid { out_trade_no: String },
@@ -165,19 +160,25 @@ pub fn Recharge() -> Element {
                 return;
             }
         };
-        let method_val = pay_method().value().to_string();
+        let payment_type = match pay_method() {
+            PayMethod::Alipay => "page",
+            PayMethod::WechatPay => "qr",
+        };
         loading.set(true);
         order_state.set(OrderState::Idle);
         spawn(async move {
             let token = auth_store.token().unwrap_or_default();
-            let req = CreatePaymentOrderRequest::new(amount_val, "CNY", method_val);
+            let req = CreatePaymentOrderRequest::new(amount_val, "账户充值", payment_type)
+                .with_body(format!("KeyCompute 账户充值 {} 元", amount_val));
             match payment_service::create_order(req, &token).await {
                 Ok(order) => {
                     loading.set(false);
                     order_state.set(OrderState::Pending {
                         out_trade_no: order.out_trade_no.clone(),
                         pay_url: order.pay_url.clone(),
-                        method: order.payment_method.clone(),
+                        payment_type: order.payment_type.clone(),
+                        qr_code: order.qr_code.clone(),
+                        qr_code_image_url: order.qr_code_image_url.clone(),
                     });
                     amount.set(String::new());
                     // 递增 gen，使旧轮询 loop 自动退出，再将 active 设为 true 开启新轮询
@@ -307,7 +308,7 @@ pub fn Recharge() -> Element {
                 },
 
                 // 订单已创建，等待支付
-                OrderState::Pending { ref out_trade_no, ref pay_url, ref method } => rsx! {
+                OrderState::Pending { ref out_trade_no, ref pay_url, ref payment_type, ref qr_code, ref qr_code_image_url } => rsx! {
                     div { class: "card",
                         div { class: "card-header",
                             h3 { class: "card-title", "请完成支付" }
@@ -325,8 +326,8 @@ pub fn Recharge() -> Element {
                             if let Some(url) = pay_url {
                                 div { class: "pay-qr-area",
                                     p { class: "pay-qr-tip",
-                                        if method == "alipay" { "💳 请用支付宝扫码支付" }
-                                        else if method == "wechatpay" { "📱 请用微信扫一扫支付" }
+                                        if payment_type == "page" { "💳 请打开支付宝支付页面完成付款" }
+                                        else if payment_type == "wap" { "📱 请在手机端打开支付链接完成付款" }
                                         else { "请点击下方按钮完成支付" }
                                     }
                                     a {
@@ -340,6 +341,23 @@ pub fn Recharge() -> Element {
                                     p {
                                         style: "font-size:12px;color:var(--text-secondary);margin-top:8px;text-align:center",
                                         "支付完成后点击【已完成支付】按钮刷新状态"
+                                    }
+                                }
+                            }
+
+                            if let Some(image_url) = qr_code_image_url {
+                                div { class: "pay-qr-area",
+                                    p { class: "pay-qr-tip", "请使用支付宝或其他扫码工具完成支付" }
+                                    img {
+                                        src: "{image_url}",
+                                        alt: "支付二维码",
+                                        style: "width:220px;height:220px;display:block;margin:0 auto;border-radius:16px;border:1px solid var(--border-color);background:white;padding:12px"
+                                    }
+                                    if let Some(code) = qr_code {
+                                        p {
+                                            style: "font-size:12px;color:var(--text-secondary);margin-top:8px;text-align:center;word-break:break-all",
+                                            "二维码内容：{code}"
+                                        }
                                     }
                                 }
                             }

@@ -10,7 +10,16 @@ use crate::stores::auth_store::AuthStore;
 /// ApiClient 内部持有 Arc，Clone 只是增加引用计数，开销极低
 static CLIENT: LazyLock<ApiClient> = LazyLock::new(|| {
     let base_url = option_env!("API_BASE_URL")
-        .unwrap_or("http://localhost:8080")
+        .unwrap_or({
+            #[cfg(debug_assertions)]
+            {
+                "http://localhost:3001"
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                ""
+            }
+        })
         .to_string();
     let config = ClientConfig::new(base_url);
     ApiClient::new(config).expect("Failed to create API client")
@@ -19,6 +28,36 @@ static CLIENT: LazyLock<ApiClient> = LazyLock::new(|| {
 /// 获取全局 API 客户端实例（廉价克隆，仅增加 Arc 引用计数）
 pub fn get_client() -> ApiClient {
     CLIENT.clone()
+}
+
+/// 获取对外展示用的 OpenAI 兼容 API 基址
+///
+/// - 如果配置了绝对 `API_BASE_URL`，优先使用配置值并归一化到 `/v1`
+/// - 如果当前是同域反代部署（`API_BASE_URL=""`），在浏览器中读取当前站点 origin
+pub fn public_openai_api_base_url() -> String {
+    let client = get_client();
+    let configured = client.config().base_url.trim_end_matches('/');
+
+    if configured.is_empty() {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(window) = web_sys::window()
+                && let Ok(origin) = window.location().origin()
+            {
+                return format!("{}/v1", origin.trim_end_matches('/'));
+            }
+        }
+
+        return "http://localhost:8080/v1".to_string();
+    }
+
+    let root = configured
+        .trim_end_matches("/auth")
+        .trim_end_matches("/api/v1")
+        .trim_end_matches("/v1")
+        .trim_end_matches('/');
+
+    format!("{}/v1", root)
 }
 
 /// Token 自动刷新封装器
@@ -87,6 +126,7 @@ pub fn localize_error(err: &client_api::error::ClientError) -> String {
         ClientError::Forbidden(_) => "权限不足，无法执行此操作".to_string(),
         ClientError::NotFound(_) => "资源不存在或已被删除".to_string(),
         ClientError::RateLimited(_) => "请求过于频繁，请稍候再试".to_string(),
+        ClientError::Verification(_) => "验证码校验失败，请检查后重试".to_string(),
         ClientError::Network(_) => "网络连接失败，请检查网络设置".to_string(),
         ClientError::ServerError(_) => "服务器内部错误，请稍候重试".to_string(),
         ClientError::ServiceUnavailable(_) => "服务暂时不可用，请稍候再试".to_string(),
@@ -105,5 +145,20 @@ pub fn localize_error(err: &client_api::error::ClientError) -> String {
             }
         }
         ClientError::Other(msg) => msg.clone(),
+    }
+}
+
+/// 优先使用后端返回的业务消息；如消息过于底层，再回退到本地友好文案。
+pub fn user_error_message(err: &client_api::error::ClientError) -> String {
+    let message = err.message();
+    if message.trim().is_empty() {
+        return localize_error(err);
+    }
+
+    match err {
+        ClientError::Network(_)
+        | ClientError::Serialization(_)
+        | ClientError::InvalidResponse(_) => localize_error(err),
+        _ => message,
     }
 }

@@ -5,9 +5,9 @@
 pub mod account;
 pub mod api_key;
 pub mod distribution_record;
-pub mod email_verification;
 pub mod password_reset;
 pub mod payment_order;
+pub mod pending_registration;
 pub mod pricing_model;
 pub mod system_setting;
 pub mod tenant;
@@ -24,11 +24,11 @@ pub use api_key::{CreateProduceAiKeyRequest, ProduceAiKey, ProduceAiKeyResponse}
 pub use distribution_record::{
     CreateDistributionRecordRequest, DistributionLevelStats, DistributionRecord, DistributionStats,
 };
-pub use email_verification::{CreateEmailVerificationRequest, EmailVerification};
 pub use password_reset::{CreatePasswordResetRequest, PasswordReset};
 pub use payment_order::{
     CreatePaymentOrderRequest, PaymentMethod, PaymentOrder, PaymentOrderStats, PaymentOrderStatus,
 };
+pub use pending_registration::{PendingRegistration, UpsertPendingRegistrationRequest};
 pub use pricing_model::{CreatePricingRequest, PricingModel, UpdatePricingRequest};
 pub use system_setting::{
     BatchUpdateSettingsRequest, PublicSettings, SettingValueType, SystemSetting,
