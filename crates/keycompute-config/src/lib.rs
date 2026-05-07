@@ -54,6 +54,8 @@ pub struct AppConfig {
     pub email: EmailConfig,
     /// 分销配置
     pub distribution: DistributionConfig,
+    /// 节点网关配置（可选）
+    pub node_gateway: Option<NodeGatewayConfig>,
 }
 
 impl Default for AppConfig {
@@ -68,6 +70,7 @@ impl Default for AppConfig {
             crypto: None,
             email: EmailConfig::default(),
             distribution: DistributionConfig::default(),
+            node_gateway: None,
         }
     }
 }

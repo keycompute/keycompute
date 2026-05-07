@@ -9,6 +9,7 @@ use keycompute_provider_trait::ProviderAdapter;
 use keycompute_routing::{AccountStateStore, ProviderHealthStore, RoutingEngine};
 use keycompute_runtime::set_global_crypto;
 use llm_gateway::{GatewayBuilder, GatewayExecutor, HttpProxy, ProxyConfig as HttpProxyConfig};
+use node_gateway::NodeGatewayService;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,6 +59,8 @@ pub struct AppStateConfig {
     pub gateway: keycompute_config::GatewayConfig,
     /// 邮件服务配置
     pub email: EmailConfig,
+    /// 节点网关配置（可选）
+    pub node_gateway: Option<keycompute_config::NodeGatewayConfig>,
 }
 
 impl AppStateConfig {
@@ -79,6 +82,7 @@ impl AppStateConfig {
             },
             gateway: config.gateway.clone(),
             email: config.email.clone(),
+            node_gateway: config.node_gateway.clone(),
         }
     }
 }
@@ -148,6 +152,8 @@ pub struct AppState {
     pub public_auth_cookie_secret: Arc<String>,
     /// 支付服务（可选）
     pub payment: Option<Arc<keycompute_alipay::PaymentService>>,
+    /// 节点网关服务（可选）
+    pub node_gateway: Option<Arc<NodeGatewayService>>,
     /// Gateway 配置
     pub gateway_config: keycompute_config::GatewayConfig,
 }
@@ -171,6 +177,10 @@ impl std::fmt::Debug for AppState {
             .field(
                 "payment",
                 &self.payment.as_ref().map(|_| "<PaymentService>"),
+            )
+            .field(
+                "node_gateway",
+                &self.node_gateway.as_ref().map(|_| "<NodeGatewayService>"),
             )
             .field("gateway_config", &self.gateway_config)
             .finish()
@@ -249,6 +259,7 @@ impl AppState {
             email_service,
             public_auth_cookie_secret,
             payment: None, // 支付服务需要数据库连接
+            node_gateway: None, // 节点网关需要数据库连接和 Redis
             gateway_config: config.gateway,
         }
     }
@@ -328,6 +339,33 @@ impl AppState {
         }
     }
 
+    /// 创建 Node Gateway 服务
+    fn create_node_gateway(
+        pool: &PgPool,
+        redis_url: &str,
+        node_config: Option<keycompute_config::NodeGatewayConfig>,
+    ) -> Result<NodeGatewayService, anyhow::Error> {
+        use keycompute_runtime::redis_store::RedisRuntimeStore;
+        use node_gateway::{NodeGatewayAppConfig, NodeGatewayRedis, NodeGatewayStore};
+
+        // 创建 Redis 运行时存储
+        let redis_store = Arc::new(RedisRuntimeStore::new(redis_url)?);
+
+        // 创建节点网关配置
+        let config = if let Some(node_config) = node_config {
+            NodeGatewayAppConfig::from_config(&node_config)
+        } else {
+            NodeGatewayAppConfig::default()
+        };
+
+        // 创建 Store 和 Redis 实例
+        let store = NodeGatewayStore::new(pool.clone(), config.clone());
+        let redis = NodeGatewayRedis::new(redis_store);
+
+        // 创建 NodeGatewayService
+        Ok(NodeGatewayService::new(store, redis, config))
+    }
+
     /// 创建带数据库连接的应用状态（使用默认配置）
     pub fn with_pool(pool: Arc<PgPool>) -> Self {
         Self::with_pool_and_config(pool, AppStateConfig::default())
@@ -380,6 +418,24 @@ impl AppState {
         // 根据配置创建限流服务
         let rate_limiter = Self::create_rate_limiter(&config.rate_limit);
 
+        // 尝试初始化节点网关服务（需要 Redis）
+        let node_gateway = if let RateLimitBackendConfig::Redis { url } = &config.rate_limit {
+            let node_config = config.node_gateway.clone();
+            match Self::create_node_gateway(&pool, url, node_config) {
+                Ok(service) => {
+                    tracing::info!("Node gateway service initialized successfully");
+                    Some(Arc::new(service))
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize node gateway service: {}", e);
+                    None
+                }
+            }
+        } else {
+            tracing::info!("Node gateway requires Redis backend, skipping initialization");
+            None
+        };
+
         // 创建邮件服务
         let email_service = Arc::new(EmailService::new(config.email));
         let public_auth_cookie_secret =
@@ -420,6 +476,7 @@ impl AppState {
             email_service,
             public_auth_cookie_secret,
             payment,
+            node_gateway,
             gateway_config: config.gateway,
         }
     }
@@ -498,6 +555,7 @@ impl AppState {
             email_service,
             public_auth_cookie_secret,
             payment: None, // 测试环境不需要支付服务
+            node_gateway: None, // 测试环境不需要节点网关
             gateway_config: config.gateway,
         }
     }

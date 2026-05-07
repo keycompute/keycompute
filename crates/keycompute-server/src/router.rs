@@ -71,6 +71,11 @@ use crate::{
         list_pricing,
         list_tenants,
         login_handler,
+        // 节点网关
+        node_complete,
+        node_heartbeat,
+        node_poll,
+        node_register,
         refresh_account,
         refresh_token_handler,
         register_handler,
@@ -308,6 +313,13 @@ pub fn create_router(state: AppState) -> Router {
     // ==================== 8. 健康检查（公开） ====================
     let health_routes = Router::new().route("/health", get(health_check));
 
+    // ==================== 9. 节点网关 API（使用 session token 认证） ====================
+    let node_routes = Router::new()
+        .route("/node/v1/register", post(node_register))
+        .route("/node/v1/heartbeat", post(node_heartbeat))
+        .route("/node/v1/tasks/poll", post(node_poll))
+        .route("/node/v1/tasks/{task_id}/complete", post(node_complete));
+
     // ==================== 合并所有路由 ====================
     Router::new()
         .merge(auth_routes)
@@ -320,6 +332,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(payment_notify_routes)
         .merge(admin_payment_routes)
         .merge(health_routes)
+        .merge(node_routes)
         .merge(public_settings_routes) // 公开设置路由
         // 维护模式中间件（最外层，在其他中间件之前）
         .layer(from_fn_with_state(

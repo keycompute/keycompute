@@ -3688,6 +3688,7 @@ dependencies = [
  "keycompute-types",
  "keycompute-vllm",
  "llm-gateway",
+ "node-gateway",
  "percent-encoding",
  "reqwest",
  "rust_decimal",

@@ -671,7 +671,7 @@ impl NodeGatewayStore {
         &self,
         tx: &mut Transaction<'_, Postgres>,
         task: &NodeTask,
-        node: &Node,
+        _node: &Node,
         node_id: Uuid,
         session_id: Uuid,
         lease_id: Uuid,

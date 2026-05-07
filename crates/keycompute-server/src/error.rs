@@ -35,6 +35,15 @@ pub enum ApiError {
     NotFound(String),
     /// 权限拒绝
     Forbidden(String),
+    /// 节点身份不匹配
+    NodeIdentityMismatch {
+        expected_node_id: uuid::Uuid,
+        expected_session_id: uuid::Uuid,
+        actual_node_id: uuid::Uuid,
+        actual_session_id: uuid::Uuid,
+    },
+    /// 节点任务提交冲突（409）
+    NodeTaskConflict(String),
 }
 
 impl fmt::Display for ApiError {
@@ -51,6 +60,8 @@ impl fmt::Display for ApiError {
             ApiError::BadRequest(msg) => write!(f, "Bad request: {}", msg),
             ApiError::NotFound(msg) => write!(f, "Not found: {}", msg),
             ApiError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
+            ApiError::NodeIdentityMismatch { .. } => write!(f, "Node identity mismatch"),
+            ApiError::NodeTaskConflict(msg) => write!(f, "Node task conflict: {}", msg),
         }
     }
 }
@@ -71,6 +82,12 @@ impl IntoResponse for ApiError {
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             ApiError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            ApiError::NodeIdentityMismatch { .. } => (
+                StatusCode::UNAUTHORIZED,
+                "Node identity mismatch: node_id or session_id does not match authenticated session"
+                    .to_string(),
+            ),
+            ApiError::NodeTaskConflict(msg) => (StatusCode::CONFLICT, msg.clone()),
         };
 
         let body = Json(json!({
@@ -98,11 +115,47 @@ fn error_type(error: &ApiError) -> &'static str {
         ApiError::BadRequest(_) => "bad_request_error",
         ApiError::NotFound(_) => "not_found_error",
         ApiError::Forbidden(_) => "forbidden_error",
+        ApiError::NodeIdentityMismatch { .. } => "node_identity_mismatch_error",
+        ApiError::NodeTaskConflict(_) => "node_task_conflict_error",
     }
 }
 
 /// API 结果类型
 pub type Result<T> = std::result::Result<T, ApiError>;
+
+/// 从 anyhow 错误转换
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        ApiError::Internal(err.to_string())
+    }
+}
+
+/// 从数据库错误转换
+impl From<keycompute_db::DbError> for ApiError {
+    fn from(err: keycompute_db::DbError) -> Self {
+        match err {
+            keycompute_db::DbError::NotFound { entity, id } => {
+                ApiError::NotFound(format!("{} not found: {}", entity, id))
+            }
+            keycompute_db::DbError::DatabaseError(_) => ApiError::Internal(err.to_string()),
+            keycompute_db::DbError::Other(msg) => {
+                // 节点任务提交相关的冲突错误应该返回 409
+                match msg.as_str() {
+                    "duplicate_submission_session_mismatch"
+                    | "duplicate_submission_conflict"
+                    | "grace_period_expired"
+                    | "invalid_task_state"
+                    | "lease_mismatch"
+                    | "task_expired_during_complete" => {
+                        ApiError::NodeTaskConflict(msg)
+                    }
+                    _ => ApiError::Internal(msg),
+                }
+            }
+            _ => ApiError::Internal(err.to_string()),
+        }
+    }
+}
 
 /// 从 keycompute-types 错误转换
 impl From<keycompute_types::KeyComputeError> for ApiError {

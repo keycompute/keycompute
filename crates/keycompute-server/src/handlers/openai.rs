@@ -353,102 +353,187 @@ pub async fn chat_completions(
         .await
         .map_err(|e| ApiError::Internal(format!("Routing failed: {}", e)))?;
 
-    let (primary_provider, primary_account_id) = match &plan.primary {
-        ExecutionTarget::ProviderAccount { provider, account_id, .. } => {
-            (provider.clone(), *account_id)
-        }
+    // 5. 根据 ExecutionTarget 分流执行路径
+    match &plan.primary {
         ExecutionTarget::Node { model } => {
-            return Err(ApiError::BadRequest(
-                format!("Node execution not supported in this endpoint: node:{}", model),
-            ));
+            // Node 执行路径：仅支持非流式
+            if request.stream {
+                return Err(ApiError::BadRequest(
+                    "streaming not supported on node execution path".to_string(),
+                ));
+            }
+            
+            // 调用 node-gateway 执行
+            let node_gateway = state
+                .node_gateway
+                .as_ref()
+                .ok_or_else(|| ApiError::Internal("node gateway not configured".to_string()))?;
+            
+            // 构建 NodeTaskPayload
+            let payload = keycompute_types::node::NodeTaskPayload {
+                request_id: ctx.request_id,
+                chat: keycompute_types::ChatCompletionRequest {
+                    model: request.model.clone(),
+                    messages: ctx.messages.clone(),
+                    stream: Some(false),
+                    max_tokens: request.max_tokens,
+                    temperature: request.temperature,
+                    top_p: request.top_p,
+                    n: request.n,
+                    stop: None, // StopSequence 不支持 Clone，暂时使用 None
+                },
+            };
+            
+            let response = node_gateway
+                .enqueue_and_wait(auth.user_id, model.clone(), payload)
+                .await
+                .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
+            
+            // 将 ChatCompletionResponse 转换为 OpenAI 格式
+            let openai_response = ChatCompletionResponse {
+                id: format!(
+                    "chatcmpl-{}-kc",
+                    uuid::Uuid::new_v4()
+                        .to_string()
+                        .replace("-", "")
+                        .to_lowercase()
+                ),
+                object: "chat.completion".to_string(),
+                created: chrono::Utc::now().timestamp(),
+                model: model.clone(),
+                choices: vec![ChatCompletionChoice {
+                    index: 0,
+                    message: ChatCompletionMessage {
+                        role: "assistant".to_string(),
+                        content: response
+                            .choices
+                            .first()
+                            .map(|c| c.message.content.clone()),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                    finish_reason: response
+                        .choices
+                        .first()
+                        .and_then(|c| c.finish_reason.clone()),
+                    logprobs: None,
+                }],
+                usage: CompletionUsage {
+                    prompt_tokens: response.usage.prompt_tokens as u32,
+                    completion_tokens: response.usage.completion_tokens as u32,
+                    total_tokens: response.usage.total_tokens as u32,
+                    prompt_tokens_details: None,
+                    completion_tokens_details: None,
+                },
+                system_fingerprint: None,
+            };
+            
+            // 触发计费
+            let billing = Arc::clone(&state.billing);
+            let _ = billing
+                .finalize_and_trigger_distribution(
+                    &ctx,
+                    "node",
+                    uuid::Uuid::nil(),
+                    model.as_str(),
+                    uuid::Uuid::nil(),
+                )
+                .await;
+            
+            return Ok(Json(openai_response).into_response());
         }
-    };
-
-    // 5.1 根据实际 provider 更新定价（如果需要）
-    {
-        let ctx_mut = Arc::make_mut(&mut ctx);
-        state
-            .pricing
-            .update_context_pricing(ctx_mut, &primary_provider)
-            .await;
-    }
-
-    tracing::info!(
-        request_id = %request_id.0,
-        model = %request.model,
-        stream = %request.stream,
-        primary_provider = %primary_provider,
-        "Chat completion request"
-    );
-
-    // 6. 执行（带超时保护）
-    tracing::info!(
-        request_id = %request_id.0,
-        timeout_secs = state.gateway_config.timeout_secs,
-        "Starting gateway execute"
-    );
-
-    let timeout_duration = std::time::Duration::from_secs(state.gateway_config.timeout_secs);
-    let rx = match tokio::time::timeout(
-        timeout_duration,
-        state.gateway.execute(
-            Arc::clone(&ctx),
-            plan,
-            Arc::clone(&state.account_states),
-            Some(Arc::clone(&state.provider_health)),
-        ),
-    )
-    .await
-    {
-        Ok(result) => result.map_err(|e| ApiError::Internal(format!("Execution failed: {}", e)))?,
-        Err(_) => {
-            tracing::error!(
+        ExecutionTarget::ProviderAccount { provider, account_id, .. } => {
+            // Provider 执行路径：继续后续逻辑
+            let (primary_provider, primary_account_id) = (provider.clone(), *account_id);
+            
+            // 5.1 根据实际 provider 更新定价（如果需要）
+            {
+                let ctx_mut = Arc::make_mut(&mut ctx);
+                state
+                    .pricing
+                    .update_context_pricing(ctx_mut, &primary_provider)
+                    .await;
+            }
+            
+            tracing::info!(
+                request_id = %request_id.0,
+                model = %request.model,
+                stream = %request.stream,
+                primary_provider = %primary_provider,
+                "Chat completion request"
+            );
+            
+            // 6. 执行（带超时保护）
+            tracing::info!(
                 request_id = %request_id.0,
                 timeout_secs = state.gateway_config.timeout_secs,
-                "Gateway execute timeout"
+                "Starting gateway execute"
             );
-            return Err(ApiError::Internal(format!(
-                "Gateway execute timeout after {}s",
-                state.gateway_config.timeout_secs
-            )));
+            
+            let timeout_duration = std::time::Duration::from_secs(state.gateway_config.timeout_secs);
+            let rx = match tokio::time::timeout(
+                timeout_duration,
+                state.gateway.execute(
+                    Arc::clone(&ctx),
+                    plan,
+                    Arc::clone(&state.account_states),
+                    Some(Arc::clone(&state.provider_health)),
+                ),
+            )
+            .await
+            {
+                Ok(result) => result.map_err(|e| ApiError::Internal(format!("Execution failed: {}", e)))?,
+                Err(_) => {
+                    tracing::error!(
+                        request_id = %request_id.0,
+                        timeout_secs = state.gateway_config.timeout_secs,
+                        "Gateway execute timeout"
+                    );
+                    return Err(ApiError::Internal(format!(
+                        "Gateway execute timeout after {}s",
+                        state.gateway_config.timeout_secs
+                    )));
+                }
+            };
+            
+            tracing::info!(
+                request_id = %request_id.0,
+                "Gateway execute returned, creating response"
+            );
+            
+            // 7. 根据 stream 参数返回不同类型的响应
+            let billing = Arc::clone(&state.billing);
+            let is_stream = request.stream;
+            let model = request.model;
+            let stream_options = request.stream_options;
+            
+            if is_stream {
+                // 流式响应
+                let stream = create_openai_stream(
+                    rx,
+                    ctx,
+                    model,
+                    primary_provider,
+                    primary_account_id,
+                    billing,
+                    stream_options,
+                );
+                return Ok(Sse::new(stream).into_response());
+            } else {
+                // 非流式响应：收集所有内容后返回完整 JSON
+                let response = create_openai_response(
+                    rx,
+                    ctx,
+                    model,
+                    primary_provider,
+                    primary_account_id,
+                    billing,
+                )
+                .await?;
+                return Ok(Json(response).into_response());
+            }
         }
-    };
-
-    tracing::info!(
-        request_id = %request_id.0,
-        "Gateway execute returned, creating response"
-    );
-
-    // 6. 根据 stream 参数返回不同类型的响应
-    let billing = Arc::clone(&state.billing);
-    let is_stream = request.stream;
-    let model = request.model;
-    let stream_options = request.stream_options;
-
-    if is_stream {
-        // 流式响应
-        let stream = create_openai_stream(
-            rx,
-            ctx,
-            model,
-            primary_provider,
-            primary_account_id,
-            billing,
-            stream_options,
-        );
-        Ok(Sse::new(stream).into_response())
-    } else {
-        // 非流式响应：收集所有内容后返回完整 JSON
-        let response = create_openai_response(
-            rx,
-            ctx,
-            model,
-            primary_provider,
-            primary_account_id,
-            billing,
-        )
-        .await?;
-        Ok(Json(response).into_response())
     }
 }
 

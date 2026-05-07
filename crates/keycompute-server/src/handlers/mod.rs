@@ -13,6 +13,7 @@ pub mod billing;
 pub mod distribution;
 pub mod gateway;
 pub mod health;
+pub mod node;
 pub mod openai;
 pub mod payment;
 pub mod pricing;
@@ -79,6 +80,9 @@ pub use routing::{debug_routing, get_provider_health, reset_health, set_account_
 
 // 健康检查
 pub use health::health_check;
+
+// 节点网关
+pub use node::{node_complete, node_heartbeat, node_poll, node_register};
 
 // 支付相关
 pub use payment::{

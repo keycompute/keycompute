@@ -12,6 +12,7 @@ use axum::{
 };
 use keycompute_auth::{AuthContext, Permission};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -228,4 +229,68 @@ mod tests {
         let id = RequestId::new();
         assert_ne!(id.0, Uuid::nil());
     }
+}
+
+/// 节点会话认证提取器
+///
+/// 从 Authorization header 中提取 session token 并验证
+/// 认证成功后返回 node_id 和 session_id
+pub struct NodeSessionAuth {
+    /// 节点 ID
+    pub node_id: Uuid,
+    /// 会话 ID
+    pub session_id: Uuid,
+}
+
+impl FromRequestParts<AppState> for NodeSessionAuth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        // 1. 从 Authorization header 提取 token
+        let auth_header = parts
+            .headers
+            .get("Authorization")
+            .ok_or_else(|| ApiError::Auth("Missing authorization header".to_string()))?;
+
+        let token = auth_header
+            .to_str()
+            .map_err(|_| ApiError::Auth("Invalid authorization header".to_string()))?
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| ApiError::Auth("Invalid bearer token".to_string()))?;
+
+        // 2. 计算 token hash (SHA-256)
+        let token_hash = compute_sha256_hash(token);
+
+        // 3. 从 state 获取 pool
+        let pool = state
+            .pool
+            .as_ref()
+            .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
+
+        // 4. 查询 node_sessions, 匹配 session_token_hash
+        let session = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "SELECT node_id, id FROM node_sessions WHERE session_token_hash = $1 AND revoked_at IS NULL",
+        )
+        .bind(token_hash)
+        .fetch_optional(pool.as_ref())
+        .await
+        .map_err(|e| ApiError::Internal(format!("Database query failed: {}", e)))?
+        .ok_or_else(|| ApiError::Auth("Invalid session token".to_string()))?;
+
+        Ok(NodeSessionAuth {
+            node_id: session.0,
+            session_id: session.1,
+        })
+    }
+}
+
+/// 计算 SHA-256 hash
+fn compute_sha256_hash(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    format!("{:x}", result)
 }
