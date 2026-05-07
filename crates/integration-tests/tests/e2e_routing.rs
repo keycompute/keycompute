@@ -4,10 +4,26 @@
 
 use integration_tests::common::VerificationChain;
 use keycompute_routing::{AccountStateStore, ProviderHealthStore, RoutingEngine};
-use keycompute_types::{PricingSnapshot, RequestContext};
+use keycompute_types::{ExecutionTarget, PricingSnapshot, RequestContext};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use uuid::Uuid;
+
+/// 从 ExecutionTarget 提取 provider 名称
+fn get_provider_name(target: &ExecutionTarget) -> String {
+    match target {
+        ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
+        ExecutionTarget::Node { model } => format!("node:{}", model),
+    }
+}
+
+/// 从 ExecutionTarget 提取 endpoint
+fn get_endpoint(target: &ExecutionTarget) -> Option<String> {
+    match target {
+        ExecutionTarget::ProviderAccount { endpoint, .. } => Some(endpoint.clone()),
+        ExecutionTarget::Node { .. } => None,
+    }
+}
 
 /// 创建测试用的路由引擎
 fn create_test_engine() -> RoutingEngine {
@@ -74,11 +90,12 @@ async fn test_routing_dual_layer_flow() {
 
     // 4. 验证执行计划
     if let Ok(plan) = plan {
+        let primary_provider = get_provider_name(&plan.primary);
         chain.add_step(
             "keycompute-routing",
             "ExecutionPlan::primary",
-            format!("Primary provider: {}", plan.primary.provider),
-            !plan.primary.provider.is_empty(),
+            format!("Primary provider: {}", primary_provider),
+            !primary_provider.is_empty(),
         );
         chain.add_step(
             "keycompute-routing",
@@ -86,12 +103,14 @@ async fn test_routing_dual_layer_flow() {
             format!("Fallback chain length: {}", plan.fallback_chain.len()),
             true, // fallback 可能为空
         );
-        chain.add_step(
-            "keycompute-routing",
-            "ExecutionTarget::endpoint",
-            format!("Endpoint: {}", plan.primary.endpoint),
-            plan.primary.endpoint.starts_with("https://"),
-        );
+        if let Some(endpoint) = get_endpoint(&plan.primary) {
+            chain.add_step(
+                "keycompute-routing",
+                "ExecutionTarget::endpoint",
+                format!("Endpoint: {}", endpoint),
+                endpoint.starts_with("https://"),
+            );
+        }
     }
 
     chain.print_report();
@@ -342,11 +361,12 @@ async fn test_routing_unhealthy_provider_filtering() {
     let plan = engine.route(&ctx).await;
 
     if let Ok(plan) = plan {
+        let primary_provider = get_provider_name(&plan.primary);
         chain.add_step(
             "keycompute-routing",
             "RoutingEngine::skip_unhealthy",
-            format!("Primary provider (not claude): {}", plan.primary.provider),
-            plan.primary.provider != "claude",
+            format!("Primary provider (not claude): {}", primary_provider),
+            primary_provider != "claude",
         );
     }
 

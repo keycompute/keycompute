@@ -18,7 +18,7 @@ use axum::{
 };
 use futures::stream::Stream;
 use keycompute_db::models::account::Account;
-use keycompute_types::{Message, MessageRole, RequestContext};
+use keycompute_types::{ExecutionTarget, Message, MessageRole, RequestContext};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -353,8 +353,16 @@ pub async fn chat_completions(
         .await
         .map_err(|e| ApiError::Internal(format!("Routing failed: {}", e)))?;
 
-    let primary_provider = plan.primary.provider.clone();
-    let primary_account_id = plan.primary.account_id;
+    let (primary_provider, primary_account_id) = match &plan.primary {
+        ExecutionTarget::ProviderAccount { provider, account_id, .. } => {
+            (provider.clone(), *account_id)
+        }
+        ExecutionTarget::Node { model } => {
+            return Err(ApiError::BadRequest(
+                format!("Node execution not supported in this endpoint: node:{}", model),
+            ));
+        }
+    };
 
     // 5.1 根据实际 provider 更新定价（如果需要）
     {

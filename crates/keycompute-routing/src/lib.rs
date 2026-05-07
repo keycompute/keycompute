@@ -132,10 +132,14 @@ impl RoutingEngine {
                 .select_account_for_model(&provider, ctx.tenant_id, &ctx.model)
                 .await?
             {
+                let endpoint = match &target {
+                    ExecutionTarget::ProviderAccount { endpoint, .. } => endpoint,
+                    ExecutionTarget::Node { .. } => "node",
+                };
                 tracing::info!(
                     request_id = %ctx.request_id,
                     provider = %provider,
-                    endpoint = %target.endpoint,
+                    endpoint = %endpoint,
                     "route: account selected"
                 );
                 targets.push(target);
@@ -156,9 +160,13 @@ impl RoutingEngine {
             return Err(KeyComputeError::RoutingFailed(ctx.model.clone()));
         }
 
+        let primary_provider = match &targets[0] {
+            ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
+            ExecutionTarget::Node { model } => format!("node:{}", model),
+        };
         tracing::info!(
             request_id = %ctx.request_id,
-            primary_provider = %targets[0].provider,
+            primary_provider = %primary_provider,
             targets_count = targets.len(),
             "route: completed"
         );
@@ -478,12 +486,12 @@ impl RoutingEngine {
             let upstream_api_key =
                 Self::decrypt_upstream_api_key(&account.upstream_api_key_encrypted)?;
 
-            let target = ExecutionTarget {
-                provider: provider.to_string(),
-                account_id: account.id,
-                endpoint: account.endpoint,
-                upstream_api_key: upstream_api_key.into(),
-            };
+            let target = ExecutionTarget::new_provider(
+                provider.to_string(),
+                account.id,
+                account.endpoint,
+                upstream_api_key,
+            );
 
             tracing::info!(
                 provider = %provider,
@@ -544,12 +552,12 @@ impl RoutingEngine {
         }
 
         // 构建执行目标
-        let target = ExecutionTarget {
-            provider: provider.to_string(),
+        let target = ExecutionTarget::new_provider(
+            provider.to_string(),
             account_id,
-            endpoint: format!("https://api.{}.com/v1/chat/completions", provider),
-            upstream_api_key: "mock-api-key".into(),
-        };
+            format!("https://api.{}.com/v1/chat/completions", provider),
+            "mock-api-key",
+        );
 
         Ok(Some(target))
     }
@@ -660,7 +668,15 @@ mod tests {
         assert!(plan.is_ok());
 
         let plan = plan.unwrap();
-        assert!(!plan.primary.provider.is_empty());
+        // 验证 primary target 是 ProviderAccount 变体
+        match &plan.primary {
+            ExecutionTarget::ProviderAccount { provider, .. } => {
+                assert!(!provider.is_empty());
+            }
+            ExecutionTarget::Node { .. } => {
+                panic!("Expected ProviderAccount variant in test");
+            }
+        }
     }
 
     #[test]

@@ -11,9 +11,23 @@ use axum::{
     Extension, Json,
     extract::{Path, Query, State},
 };
-use keycompute_types::RequestContext;
+use keycompute_types::{ExecutionTarget, RequestContext};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// 从 ExecutionTarget 提取路由目标信息
+fn extract_target_info(target: &ExecutionTarget) -> Option<RoutingTargetInfo> {
+    match target {
+        ExecutionTarget::ProviderAccount { provider, account_id, endpoint, .. } => {
+            Some(RoutingTargetInfo {
+                provider: provider.clone(),
+                account_id: *account_id,
+                endpoint: endpoint.clone(),
+            })
+        }
+        ExecutionTarget::Node { .. } => None, // Node 路径不支持此接口
+    }
+}
 
 /// 路由调试请求
 #[derive(Debug, Deserialize)]
@@ -155,33 +169,38 @@ pub async fn debug_routing(
     // 5. 执行路由（只读）
     match state.routing.route(&ctx).await {
         Ok(plan) => {
+            // 提取 primary target 信息
+            let primary_info = match extract_target_info(&plan.primary) {
+                Some(info) => info,
+                None => {
+                    return Err(ApiError::Internal(
+                        "Node execution not supported in routing debug".into(),
+                    ));
+                }
+            };
+
             // 路由成功，根据实际 provider 更新定价
             state
                 .pricing
-                .update_context_pricing(&mut ctx, &plan.primary.provider)
+                .update_context_pricing(&mut ctx, &primary_info.provider)
                 .await;
 
             // 使用更新后的定价信息
             let pricing = &ctx.pricing_snapshot;
 
+            // 提取 fallback chain 信息
+            let fallback_chain: Vec<RoutingTargetInfo> = plan
+                .fallback_chain
+                .iter()
+                .filter_map(|t| extract_target_info(t))
+                .collect();
+
             // 路由成功
             let response = RoutingDebugResponse {
                 request_id: ctx.request_id,
                 routed: true,
-                primary: Some(RoutingTargetInfo {
-                    provider: plan.primary.provider.clone(),
-                    account_id: plan.primary.account_id,
-                    endpoint: plan.primary.endpoint.clone(),
-                }),
-                fallback_chain: plan
-                    .fallback_chain
-                    .iter()
-                    .map(|t| RoutingTargetInfo {
-                        provider: t.provider.clone(),
-                        account_id: t.account_id,
-                        endpoint: t.endpoint.clone(),
-                    })
-                    .collect(),
+                primary: Some(primary_info),
+                fallback_chain,
                 pricing: PricingInfo {
                     model_name: pricing.model_name.clone(),
                     currency: pricing.currency.clone(),
@@ -192,10 +211,11 @@ pub async fn debug_routing(
                 message: None,
             };
 
+            let primary_provider = response.primary.as_ref().map(|p| p.provider.clone()).unwrap_or_default();
             tracing::info!(
                 request_id = %ctx.request_id,
-                primary_provider = %plan.primary.provider,
-                fallback_count = plan.fallback_chain.len(),
+                primary_provider = %primary_provider,
+                fallback_count = response.fallback_chain.len(),
                 "Routing debug completed"
             );
 

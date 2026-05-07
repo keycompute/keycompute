@@ -15,7 +15,7 @@ use integration_tests::mocks::provider::MockProviderFactory;
 use keycompute_provider_trait::{ProviderAdapter, UpstreamRequest};
 use keycompute_ratelimit::{RateLimitKey, RateLimitService};
 use keycompute_routing::{AccountStateStore, ProviderHealthStore, RoutingEngine};
-use keycompute_types::{PricingSnapshot, RequestContext};
+use keycompute_types::{ExecutionTarget, PricingSnapshot, RequestContext};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -771,14 +771,15 @@ async fn test_full_chain_concurrent_pressure() {
 
             // Step 1: Routing
             if let Ok(plan) = engine.route(&ctx).await {
-                // Step 2: Check account cooldown
-                if !engine.is_account_cooling(&plan.primary.account_id) {
-                    // Step 3: Provider request
-                    let request = UpstreamRequest::new(
-                        &plan.primary.endpoint,
-                        plan.primary.upstream_api_key.clone(),
-                        &ctx.model,
-                    );
+                // Step 2: Check account cooldown (only for ProviderAccount)
+                if let ExecutionTarget::ProviderAccount { account_id, endpoint, upstream_api_key, .. } = &plan.primary {
+                    if !engine.is_account_cooling(account_id) {
+                        // Step 3: Provider request
+                        let request = UpstreamRequest::new(
+                            endpoint,
+                            upstream_api_key.clone(),
+                            &ctx.model,
+                        );
 
                     if let Ok(mut stream) = provider.stream_chat(&*transport, request).await {
                         // Step 4: Consume stream
@@ -801,6 +802,7 @@ async fn test_full_chain_concurrent_pressure() {
                 } else {
                     stats.lock().unwrap().cooldown_skips += 1;
                 }
+                } // Close the if let ExecutionTarget::ProviderAccount
             }
 
             if success {

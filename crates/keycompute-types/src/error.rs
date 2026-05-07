@@ -33,6 +33,14 @@ pub enum KeyComputeError {
     #[error("routing failed: no available provider for model {0}")]
     RoutingFailed(String),
 
+    /// 无可用 Node 节点
+    #[error("no ready node available for model: {0}")]
+    NoReadyNode(String),
+
+    /// Node 路径不支持流式输出
+    #[error("streaming not supported on node execution path")]
+    StreamingNotSupportedOnNode,
+
     // ============ Provider ============
     /// 上游 Provider 错误
     #[error("upstream provider error: {0}")]
@@ -142,7 +150,9 @@ impl KeyComputeError {
             }
             KeyComputeError::VerificationError(_) => ErrorCategory::Verification,
             KeyComputeError::RateLimitExceeded(_) => ErrorCategory::RateLimit,
-            KeyComputeError::RoutingFailed(_) => ErrorCategory::Routing,
+            KeyComputeError::RoutingFailed(_) 
+            | KeyComputeError::NoReadyNode(_)
+            | KeyComputeError::StreamingNotSupportedOnNode => ErrorCategory::Routing,
             KeyComputeError::ProviderError(_) | KeyComputeError::ProviderTimeout(_, _) => {
                 ErrorCategory::Provider
             }

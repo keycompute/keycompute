@@ -5,6 +5,7 @@
 use integration_tests::common::VerificationChain;
 use integration_tests::mocks::provider::MockProviderFactory;
 use keycompute_provider_trait::ProviderAdapter;
+use keycompute_types::ExecutionTarget;
 use llm_gateway::retry::RetryState;
 use llm_gateway::{FailoverManager, GatewayBuilder, GatewayConfig, RetryPolicy};
 use std::sync::Arc;
@@ -133,27 +134,32 @@ fn test_gateway_failover() {
 
     // 2. 创建测试 targets
     let targets = vec![
-        ExecutionTarget {
-            provider: "openai".to_string(),
-            account_id: Uuid::new_v4(),
-            endpoint: "https://api.openai.com".to_string(),
-            upstream_api_key: "key1".into(),
-        },
-        ExecutionTarget {
-            provider: "claude".to_string(),
-            account_id: Uuid::new_v4(),
-            endpoint: "https://api.anthropic.com".to_string(),
-            upstream_api_key: "key2".into(),
-        },
+        ExecutionTarget::new_provider(
+            "openai",
+            Uuid::new_v4(),
+            "https://api.openai.com",
+            "key1",
+        ),
+        ExecutionTarget::new_provider(
+            "claude",
+            Uuid::new_v4(),
+            "https://api.anthropic.com",
+            "key2",
+        ),
     ];
 
     // 3. 选择下一个 target
     let next = manager.select_next(&targets, 0);
+    let next_provider = match &next {
+        Some(ExecutionTarget::ProviderAccount { provider, .. }) => Some(provider.clone()),
+        Some(ExecutionTarget::Node { model }) => Some(format!("node:{}", model)),
+        None => None,
+    };
     chain.add_step(
         "llm-gateway",
         "FailoverManager::select_next",
-        format!("Next provider: {:?}", next.map(|t| t.provider.clone())),
-        next.map(|t| t.provider.clone()) == Some("claude".to_string()),
+        format!("Next provider: {:?}", next_provider),
+        next_provider == Some("claude".to_string()),
     );
 
     // 4. 从最后一个选择
@@ -161,7 +167,7 @@ fn test_gateway_failover() {
     chain.add_step(
         "llm-gateway",
         "FailoverManager::select_next_last",
-        format!("Next after last: {:?}", none.map(|t| t.provider.clone())),
+        format!("Next after last: {:?}", none),
         none.is_none(),
     );
 

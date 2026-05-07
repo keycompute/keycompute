@@ -16,7 +16,9 @@ use crate::{GatewayConfig, HttpProxy, streaming::StreamPipeline};
 use futures::StreamExt;
 use keycompute_provider_trait::{HttpTransport, ProviderAdapter, StreamEvent, UpstreamRequest};
 use keycompute_routing::{AccountStateStore, ProviderHealthStore};
-use keycompute_types::{ExecutionPlan, ExecutionTarget, KeyComputeError, RequestContext, Result};
+use keycompute_types::{
+    ExecutionPlan, ExecutionTarget, KeyComputeError, RequestContext, Result, SensitiveString,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -152,21 +154,29 @@ impl GatewayExecutor {
             match self.try_execute(&ctx, &target, tx.clone()).await {
                 Ok(()) => {
                     // 成功：标记账号状态
-                    account_states.mark_success(target.account_id);
+                    if let ExecutionTarget::ProviderAccount { account_id, .. } = &target {
+                        account_states.mark_success(*account_id);
+                    }
 
                     // 成功：更新 Provider 健康状态
                     let latency_ms = target_start.elapsed().as_millis() as u64;
-                    if let Some(ref health_store) = provider_health {
-                        health_store.record_success(&target.provider, latency_ms);
-                        // 如果不是 primary，说明使用了 fallback
-                        if !is_primary {
-                            health_store.record_fallback();
+                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target {
+                        if let Some(ref health_store) = provider_health {
+                            health_store.record_success(provider, latency_ms);
+                            // 如果不是 primary，说明使用了 fallback
+                            if !is_primary {
+                                health_store.record_fallback();
+                            }
                         }
                     }
 
+                    let provider_name = match &target {
+                        ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
+                        ExecutionTarget::Node { model } => format!("node:{}", model),
+                    };
                     tracing::info!(
                         request_id = %ctx.request_id,
-                        provider = %target.provider,
+                        provider = %provider_name,
                         latency_ms = latency_ms,
                         is_fallback = !is_primary,
                         "Request executed successfully"
@@ -176,13 +186,19 @@ impl GatewayExecutor {
                 Err(e) => {
                     // 注意：不再自动标记错误，错误计数只能通过管理员手动测试 API 触发
                     // 保留 Provider 健康状态更新用于路由评分
-                    if let Some(ref health_store) = provider_health {
-                        health_store.record_failure(&target.provider);
+                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target {
+                        if let Some(ref health_store) = provider_health {
+                            health_store.record_failure(provider);
+                        }
                     }
 
+                    let provider_name = match &target {
+                        ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
+                        ExecutionTarget::Node { model } => format!("node:{}", model),
+                    };
                     tracing::warn!(
                         request_id = %ctx.request_id,
-                        provider = %target.provider,
+                        provider = %provider_name,
                         error = %e,
                         "Request failed, trying fallback"
                     );
@@ -204,16 +220,28 @@ impl GatewayExecutor {
         target: &ExecutionTarget,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<()> {
+        // 只处理 ProviderAccount 变体
+        let (provider, endpoint, upstream_api_key) = match target {
+            ExecutionTarget::ProviderAccount { provider, endpoint, upstream_api_key, .. } => {
+                (provider, endpoint, upstream_api_key)
+            }
+            ExecutionTarget::Node { .. } => {
+                return Err(KeyComputeError::Internal(
+                    "Node execution not supported in stream executor".into(),
+                ));
+            }
+        };
+
         tracing::info!(
             request_id = %ctx.request_id,
-            provider = %target.provider,
-            endpoint = %target.endpoint,
+            provider = %provider,
+            endpoint = %endpoint,
             "try_execute: starting"
         );
 
         // 获取 Provider
-        let provider = self.providers.get(&target.provider).ok_or_else(|| {
-            KeyComputeError::Internal(format!("Provider {} not found", target.provider))
+        let provider_impl = self.providers.get(provider.as_str()).ok_or_else(|| {
+            KeyComputeError::Internal(format!("Provider {} not found", provider))
         })?;
 
         // 获取 HTTP 传输层（优先使用 HttpProxy 中的客户端）
@@ -225,20 +253,20 @@ impl GatewayExecutor {
         };
 
         // 构建上游请求
-        let request = self.build_upstream_request(ctx, target);
+        let request = self.build_upstream_request(ctx, provider, endpoint, upstream_api_key);
 
         tracing::info!(
             request_id = %ctx.request_id,
-            provider = %target.provider,
+            provider = %provider,
             "try_execute: calling provider.stream_chat"
         );
 
         // 执行流式请求（传入 transport）
-        let mut stream = provider.stream_chat(transport.as_ref(), request).await?;
+        let mut stream = provider_impl.stream_chat(transport.as_ref(), request).await?;
 
         tracing::info!(
             request_id = %ctx.request_id,
-            provider = %target.provider,
+            provider = %provider,
             "try_execute: stream started, processing events"
         );
 
@@ -312,7 +340,7 @@ impl GatewayExecutor {
 
         tracing::debug!(
             request_id = %ctx.request_id,
-            provider = %target.provider,
+            provider = %provider,
             "try_execute: completed successfully"
         );
 
@@ -323,7 +351,9 @@ impl GatewayExecutor {
     fn build_upstream_request(
         &self,
         ctx: &RequestContext,
-        target: &ExecutionTarget,
+        _provider: &str,
+        endpoint: &str,
+        upstream_api_key: &SensitiveString,
     ) -> UpstreamRequest {
         let messages: Vec<keycompute_provider_trait::UpstreamMessage> = ctx
             .messages
@@ -335,8 +365,8 @@ impl GatewayExecutor {
             .collect();
 
         UpstreamRequest {
-            endpoint: target.endpoint.clone(),
-            upstream_api_key: target.upstream_api_key.clone(),
+            endpoint: endpoint.to_string(),
+            upstream_api_key: upstream_api_key.clone(),
             model: ctx.model.clone(),
             messages,
             stream: ctx.stream,
@@ -508,12 +538,12 @@ mod tests {
 
         let ctx = Arc::new(create_test_context());
         let plan = ExecutionPlan {
-            primary: ExecutionTarget {
-                provider: "many-chunks".to_string(),
-                account_id: Uuid::new_v4(),
-                endpoint: "http://mock".to_string(),
-                upstream_api_key: "mock-key".into(),
-            },
+            primary: ExecutionTarget::new_provider(
+                "many-chunks",
+                Uuid::new_v4(),
+                "http://mock",
+                "mock-key",
+            ),
             fallback_chain: vec![],
         };
 

@@ -96,28 +96,58 @@ impl ExecutionPlan {
     }
 }
 
-/// 执行目标：指定具体的 provider 和账号
+/// 执行目标：指定具体的 provider 和账号或 Node 执行路径
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionTarget {
-    pub provider: String,
-    pub account_id: Uuid,
-    pub endpoint: String,
-    pub upstream_api_key: SensitiveString, // 已解密的上游 Provider API Key（敏感信息自动隐藏）
+pub enum ExecutionTarget {
+    /// Provider 账户执行路径
+    ProviderAccount {
+        /// Provider 名称
+        provider: String,
+        /// 账号 ID
+        account_id: Uuid,
+        /// 端点 URL
+        endpoint: String,
+        /// 上游 API Key（敏感信息自动隐藏）
+        upstream_api_key: SensitiveString,
+    },
+    /// Node 执行路径（去掉 `node:` 前缀后的实际模型名）
+    Node {
+        /// 模型名称（不包含 node: 前缀）
+        model: String,
+    },
 }
 
 impl ExecutionTarget {
-    pub fn new(
+    /// 创建 ProviderAccount 执行目标
+    pub fn new_provider(
         provider: impl Into<String>,
         account_id: Uuid,
         endpoint: impl Into<String>,
         upstream_api_key: impl Into<SensitiveString>,
     ) -> Self {
-        Self {
+        Self::ProviderAccount {
             provider: provider.into(),
             account_id,
             endpoint: endpoint.into(),
             upstream_api_key: upstream_api_key.into(),
         }
+    }
+
+    /// 创建 Node 执行目标
+    pub fn new_node(model: impl Into<String>) -> Self {
+        Self::Node {
+            model: model.into(),
+        }
+    }
+
+    /// 判断是否为 Node 执行路径
+    pub fn is_node(&self) -> bool {
+        matches!(self, Self::Node { .. })
+    }
+
+    /// 判断是否为 Provider 执行路径
+    pub fn is_provider(&self) -> bool {
+        matches!(self, Self::ProviderAccount { .. })
     }
 }
 
@@ -220,26 +250,30 @@ mod tests {
 
     #[test]
     fn test_execution_plan_new() {
-        let target = ExecutionTarget::new(
+        let target = ExecutionTarget::new_provider(
             "openai",
             Uuid::new_v4(),
             "https://api.openai.com",
             "sk-test-key",
         );
         let plan = ExecutionPlan::new(target);
-        assert_eq!(plan.primary.provider, "openai");
+        if let ExecutionTarget::ProviderAccount { provider, .. } = &plan.primary {
+            assert_eq!(provider, "openai");
+        } else {
+            panic!("Expected ProviderAccount variant");
+        }
         assert!(plan.fallback_chain.is_empty());
     }
 
     #[test]
     fn test_execution_plan_with_fallback() {
-        let primary = ExecutionTarget::new(
+        let primary = ExecutionTarget::new_provider(
             "openai",
             Uuid::new_v4(),
             "https://api.openai.com",
             "sk-primary-key",
         );
-        let fallback = ExecutionTarget::new(
+        let fallback = ExecutionTarget::new_provider(
             "claude",
             Uuid::new_v4(),
             "https://api.anthropic.com",
@@ -247,24 +281,28 @@ mod tests {
         );
         let plan = ExecutionPlan::new(primary).with_fallback(fallback);
         assert_eq!(plan.fallback_chain.len(), 1);
-        assert_eq!(plan.fallback_chain[0].provider, "claude");
+        if let ExecutionTarget::ProviderAccount { provider, .. } = &plan.fallback_chain[0] {
+            assert_eq!(provider, "claude");
+        } else {
+            panic!("Expected ProviderAccount variant");
+        }
     }
 
     #[test]
     fn test_execution_plan_all_targets() {
-        let primary = ExecutionTarget::new(
+        let primary = ExecutionTarget::new_provider(
             "openai",
             Uuid::new_v4(),
             "https://api.openai.com",
             "sk-primary-key",
         );
-        let fallback1 = ExecutionTarget::new(
+        let fallback1 = ExecutionTarget::new_provider(
             "claude",
             Uuid::new_v4(),
             "https://api.anthropic.com",
             "sk-fallback1-key",
         );
-        let fallback2 = ExecutionTarget::new(
+        let fallback2 = ExecutionTarget::new_provider(
             "gemini",
             Uuid::new_v4(),
             "https://api.gemini.com",
@@ -276,14 +314,21 @@ mod tests {
 
         let targets: Vec<_> = plan.all_targets().collect();
         assert_eq!(targets.len(), 3);
-        assert_eq!(targets[0].provider, "openai");
-        assert_eq!(targets[1].provider, "claude");
-        assert_eq!(targets[2].provider, "gemini");
+        
+        if let ExecutionTarget::ProviderAccount { provider, .. } = targets[0] {
+            assert_eq!(provider, "openai");
+        }
+        if let ExecutionTarget::ProviderAccount { provider, .. } = targets[1] {
+            assert_eq!(provider, "claude");
+        }
+        if let ExecutionTarget::ProviderAccount { provider, .. } = targets[2] {
+            assert_eq!(provider, "gemini");
+        }
     }
 
     #[test]
     fn test_execution_target_api_key_hidden_in_debug() {
-        let target = ExecutionTarget::new(
+        let target = ExecutionTarget::new_provider(
             "openai",
             Uuid::new_v4(),
             "https://api.openai.com",
@@ -296,7 +341,7 @@ mod tests {
 
     #[test]
     fn test_execution_target_api_key_hidden_in_serialize() {
-        let target = ExecutionTarget::new(
+        let target = ExecutionTarget::new_provider(
             "openai",
             Uuid::new_v4(),
             "https://api.openai.com",
@@ -309,13 +354,30 @@ mod tests {
 
     #[test]
     fn test_execution_target_api_key_expose() {
-        let target = ExecutionTarget::new(
+        let target = ExecutionTarget::new_provider(
             "openai",
             Uuid::new_v4(),
             "https://api.openai.com",
             "sk-secret-key",
         );
         // expose() 方法可以获取原始值（用于实际请求）
-        assert_eq!(target.upstream_api_key.expose(), "sk-secret-key");
+        if let ExecutionTarget::ProviderAccount { upstream_api_key, .. } = &target {
+            assert_eq!(upstream_api_key.expose(), "sk-secret-key");
+        } else {
+            panic!("Expected ProviderAccount variant");
+        }
+    }
+
+    #[test]
+    fn test_execution_target_node_variant() {
+        let target = ExecutionTarget::new_node("deepseek-chat");
+        assert!(target.is_node());
+        assert!(!target.is_provider());
+        
+        if let ExecutionTarget::Node { model } = &target {
+            assert_eq!(model, "deepseek-chat");
+        } else {
+            panic!("Expected Node variant");
+        }
     }
 }

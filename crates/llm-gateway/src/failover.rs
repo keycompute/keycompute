@@ -42,9 +42,21 @@ impl FailoverManager {
 
     /// 记录失败
     pub fn record_failure(&self, target: &ExecutionTarget, error: &KeyComputeError) {
+        let (account_id, provider) = match target {
+            ExecutionTarget::ProviderAccount { account_id, provider, .. } => (account_id, provider),
+            ExecutionTarget::Node { model } => {
+                tracing::warn!(
+                    model = %model,
+                    error = %error,
+                    "Node fallback target failed"
+                );
+                return;
+            }
+        };
+        
         tracing::warn!(
-            account_id = %target.account_id,
-            provider = %target.provider,
+            account_id = %account_id,
+            provider = %provider,
             error = %error,
             "Fallback target failed"
         );
@@ -102,18 +114,18 @@ mod tests {
 
     fn create_test_targets() -> Vec<ExecutionTarget> {
         vec![
-            ExecutionTarget {
-                provider: "openai".to_string(),
-                account_id: Uuid::new_v4(),
-                endpoint: "https://api.openai.com".to_string(),
-                upstream_api_key: "key1".into(),
-            },
-            ExecutionTarget {
-                provider: "claude".to_string(),
-                account_id: Uuid::new_v4(),
-                endpoint: "https://api.anthropic.com".to_string(),
-                upstream_api_key: "key2".into(),
-            },
+            ExecutionTarget::new_provider(
+                "openai",
+                Uuid::new_v4(),
+                "https://api.openai.com",
+                "key1",
+            ),
+            ExecutionTarget::new_provider(
+                "claude",
+                Uuid::new_v4(),
+                "https://api.anthropic.com",
+                "key2",
+            ),
         ]
     }
 
@@ -130,7 +142,13 @@ mod tests {
 
         let next = manager.select_next(&targets, 0);
         assert!(next.is_some());
-        assert_eq!(next.unwrap().provider, "claude");
+        
+        // 验证返回的是 claude provider
+        if let ExecutionTarget::ProviderAccount { provider, .. } = next.unwrap() {
+            assert_eq!(provider, "claude");
+        } else {
+            panic!("Expected ProviderAccount variant");
+        }
 
         let none = manager.select_next(&targets, 1);
         assert!(none.is_none());
