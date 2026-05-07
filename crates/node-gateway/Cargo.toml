@@ -7,6 +7,7 @@ edition = "2024"
 keycompute-types = { path = "../keycompute-types" }
 keycompute-db = { path = "../keycompute-db" }
 keycompute-config = { path = "../keycompute-config" }
+keycompute-routing = { path = "../keycompute-routing" }
 keycompute-runtime = { path = "../keycompute-runtime", features = ["redis"] }
 
 anyhow = "1"

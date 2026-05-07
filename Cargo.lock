@@ -4281,6 +4281,7 @@ dependencies = [
  "deadpool-redis",
  "keycompute-config",
  "keycompute-db",
+ "keycompute-routing",
  "keycompute-runtime",
  "keycompute-types",
  "serde",

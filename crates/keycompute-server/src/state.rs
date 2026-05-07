@@ -9,7 +9,7 @@ use keycompute_provider_trait::ProviderAdapter;
 use keycompute_routing::{AccountStateStore, ProviderHealthStore, RoutingEngine};
 use keycompute_runtime::set_global_crypto;
 use llm_gateway::{GatewayBuilder, GatewayExecutor, HttpProxy, ProxyConfig as HttpProxyConfig};
-use node_gateway::NodeGatewayService;
+use node_gateway::{NodeGatewayService, PostgresNodeIndex};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -391,12 +391,16 @@ impl AppState {
         // 获取 Provider 名称列表（与 Gateway 使用一致的列表）
         let provider_names = crate::providers::get_provider_names();
 
-        // 创建带数据库连接的路由引擎
-        let routing_engine = Arc::new(RoutingEngine::with_pool(
+        // 创建 Node 能力索引
+        let node_index = Arc::new(PostgresNodeIndex::new(Arc::clone(&pool)));
+
+        // 创建带数据库连接和 Node 能力索引的路由引擎
+        let routing_engine = Arc::new(RoutingEngine::with_node_index(
             Arc::clone(&account_states),
             Arc::clone(&provider_health),
             Arc::clone(&pool),
             provider_names,
+            node_index,
         ));
 
         // 创建 Internal HTTP Proxy（统一上游连接管理，支持配置）

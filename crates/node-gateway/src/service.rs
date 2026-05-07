@@ -150,22 +150,42 @@ impl NodeGatewayService {
         self.store.heartbeat(node_id, session_id, accepted_models).await
     }
 
-    /// 领取任务（长轮询）
+    /// 领取任务(长轮询)
     pub async fn poll_task(
         &self,
         node_id: Uuid,
         session_id: Uuid,
+        accepted_models: Vec<String>,
     ) -> Result<NodePollResponse, anyhow::Error> {
-        // 1. 获取 session 和节点信息
-        let (_, session) = self
-            .store
-            .authenticate_session(&format!("dummy-token")) // 实际应从认证中间件获取
-            .await?;
+        // 1. 检查节点状态
+        let node = keycompute_db::models::node::Node::find_by_id(self.store.pool(), node_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
+    
+        // 如果节点状态不是 online,直接返回空 task (不参与 poll)
+        if node.status != "online" {
+            return Ok(NodePollResponse {
+                protocol_version: "node.v1".to_string(),
+                task: None,
+                retry_after_ms: Some(5000),
+            });
+        }
 
-        // 2. 从 session 获取 accepted_models
-        let accepted_models: Vec<String> =
-            serde_json::from_value(session.accepted_models_json.clone()).unwrap_or_default();
+        // 2. 检查 session 是否过期或撤销 (ready predicate)
+        let session = keycompute_db::models::node_session::NodeSession::find_by_id(self.store.pool(), session_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
+        let now = chrono::Utc::now();
+        if session.is_revoked() || session.expires_at < now {
+            // session 已撤销或过期,不允许 poll
+            return Ok(NodePollResponse {
+                protocol_version: "node.v1".to_string(),
+                task: None,
+                retry_after_ms: Some(5000),
+            });
+        }
+    
         // 3. 对每个 accepted_model 尝试 poll
         for model in accepted_models {
             match self
@@ -174,7 +194,7 @@ impl NodeGatewayService {
                 .await
             {
                 Ok(Some(task_id)) => {
-                    // 4. 原子 claim 任务
+                    // 3. 原子 claim 任务
                     match self
                         .store
                         .claim_task(task_id, node_id, session_id)
@@ -188,13 +208,13 @@ impl NodeGatewayService {
                             });
                         }
                         None => {
-                            // claim 失败，任务已过期或被其他节点领取
+                            // claim 失败,任务已过期或被其他节点领取
                             continue;
                         }
                     }
                 }
                 Ok(None) => {
-                    // 超时，尝试下一个模型
+                    // 超时,尝试下一个模型
                     continue;
                 }
                 Err(e) => {
@@ -203,7 +223,7 @@ impl NodeGatewayService {
                 }
             }
         }
-
+    
         // 没有任务
         Ok(NodePollResponse {
             protocol_version: "node.v1".to_string(),
@@ -226,29 +246,68 @@ impl NodeGatewayService {
             .complete_task(task_id, lease_id, node_id, session_id, result)
             .await?;
 
-        // 推送结果通知到 Redis（best-effort）
-        let status = match response.action {
-            NodeTaskCompleteAction::Succeeded => "succeeded",
+        // 推送结果通知到 Redis(best-effort)
+        match response.action {
+            NodeTaskCompleteAction::Succeeded => {
+                if let Err(e) = self
+                    .redis
+                    .push_result_notification(task_id, "succeeded")
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to push succeeded notification for task {}: {}",
+                        task_id,
+                        e
+                    );
+                }
+            }
             NodeTaskCompleteAction::Requeued => {
                 // requeued 需要重新推送到模型队列
-                // 注意：这里需要获取 task 的 model，暂时跳过
-                "requeued"
-            }
-            NodeTaskCompleteAction::Failed => "failed",
-            NodeTaskCompleteAction::Expired => "expired",
-        };
-
-        if status != "requeued" {
-            if let Err(e) = self
-                .redis
-                .push_result_notification(task_id, status)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to push result notification for task {}: {}",
+                // 注意:这里需要获取 task 的 model,从任务中查询
+                if let Ok(task) = keycompute_db::models::node_task::NodeTask::find_by_id(
+                    self.store.pool(),
                     task_id,
-                    e
-                );
+                ).await {
+                    if let Some(t) = task {
+                        if let Err(e) = self
+                            .redis
+                            .push_to_model_queue(&t.model, task_id)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to repush requeued task {} to queue: {}",
+                                task_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            NodeTaskCompleteAction::Failed => {
+                if let Err(e) = self
+                    .redis
+                    .push_result_notification(task_id, "failed")
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to push failed notification for task {}: {}",
+                        task_id,
+                        e
+                    );
+                }
+            }
+            NodeTaskCompleteAction::Expired => {
+                if let Err(e) = self
+                    .redis
+                    .push_result_notification(task_id, "expired")
+                    .await
+                {
+                    tracing::warn!(
+                        "Failed to push expired notification for task {}: {}",
+                        task_id,
+                        e
+                    );
+                }
             }
         }
 

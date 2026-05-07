@@ -9,8 +9,10 @@
 //! - `service`: 业务逻辑层
 //! - `redis`: Redis 队列管理
 //! - `sweeper`: 后台维护任务
+//! - `node_index`: Node 能力索引实现
 
 pub mod config;
+pub mod node_index;
 pub mod redis;
 pub mod service;
 pub mod store;
@@ -18,6 +20,7 @@ pub mod sweeper;
 
 // 重新导出关键类型
 pub use config::NodeGatewayAppConfig;
+pub use node_index::PostgresNodeIndex;
 pub use redis::NodeGatewayRedis;
 pub use service::NodeGatewayService;
 pub use store::NodeGatewayStore;

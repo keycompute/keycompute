@@ -64,6 +64,11 @@ impl NodeGatewayStore {
         req: &NodeRegisterRequest,
         owner_user_id: Uuid,
     ) -> Result<NodeRegisterResponse, DbError> {
+        // 0. 校验 registration_token
+        if req.registration_token != self.config.registration_token {
+            return Err(DbError::Other("Invalid registration token".to_string()));
+        }
+
         let now = Utc::now();
 
         // 1. 查找或创建节点
@@ -95,7 +100,9 @@ impl NodeGatewayStore {
             }
         };
 
-        // 2. 创建新会话
+        // 2. 在同一事务中:创建 session + 更新节点状态 + 更新心跳
+        let mut tx = self.pool.begin().await?;
+
         let session_token = Uuid::new_v4().to_string();
         let session_token_hash = hash_token(&session_token);
         let expires_at = now + self.config.session_ttl();
@@ -115,15 +122,49 @@ impl NodeGatewayStore {
             accepted_models_json: serde_json::to_value(&accepted_models).map_err(|e| DbError::Other(e.to_string()))?,
         };
 
-        let session = NodeSession::create(&self.pool, &create_session_req).await?;
+        // 2.1 创建 session (在事务中)
+        let session = sqlx::query_as::<_, NodeSession>(
+            r#"
+            INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json)
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+            "#
+        )
+        .bind(create_session_req.node_id)
+        .bind(&create_session_req.session_token_hash)
+        .bind(create_session_req.expires_at)
+        .bind(&create_session_req.accepted_models_json)
+        .fetch_one(&mut *tx)
+        .await?;
 
-        // 3. 更新节点状态为 online（如果原来是 offline）
+        // 2.2 更新节点状态为 online (如果原来是 offline,在事务中)
         if node.status == NODE_STATUS_OFFLINE {
-            Node::update_status(&self.pool, node.id, NODE_STATUS_ONLINE).await?;
+            sqlx::query(
+                r#"
+                UPDATE nodes
+                SET status = 'online', updated_at = NOW()
+                WHERE id = $1
+                "#
+            )
+            .bind(node.id)
+            .execute(&mut *tx)
+            .await?;
         }
 
-        // 4. 更新节点心跳时间
-        Node::update_heartbeat(&self.pool, node.id).await?;
+        // 2.3 更新节点心跳时间 (在事务中)
+        sqlx::query(
+            r#"
+            UPDATE nodes
+            SET last_heartbeat_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            "#
+        )
+        .bind(node.id)
+        .execute(&mut *tx)
+        .await?;
+
+        // 提交事务
+        tx.commit().await?;
 
         Ok(NodeRegisterResponse {
             protocol_version: "node.v1".to_string(),
@@ -161,49 +202,68 @@ impl NodeGatewayStore {
         }
     }
 
-    /// 处理心跳
+    /// 处理心跳(在同一事务中完成所有操作)
     pub async fn heartbeat(
         &self,
         node_id: Uuid,
         session_id: Uuid,
         accepted_models: Vec<String>,
     ) -> Result<NodeHeartbeatResponse, DbError> {
+        let mut tx = self.pool.begin().await?;
         let now = Utc::now();
         let expires_at = now + self.config.session_ttl();
-
-        // 1. 获取节点和会话
-        let node = Node::find_by_id(&self.pool, node_id)
-            .await?
-            .ok_or_else(|| DbError::not_found("Node", &node_id.to_string()))?;
-
-        let session = NodeSession::find_by_id(&self.pool, session_id)
-            .await?
-            .ok_or_else(|| DbError::not_found("Session", &session_id.to_string()))?;
-
+    
+        // 1. 获取节点和会话(FOR UPDATE)
+        let node = sqlx::query_as::<_, Node>(
+            "SELECT * FROM nodes WHERE id = $1 FOR UPDATE"
+        )
+        .bind(node_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_e| DbError::not_found("Node", &node_id.to_string()))?;
+        
+        let session = sqlx::query_as::<_, NodeSession>(
+            "SELECT * FROM node_sessions WHERE id = $1 FOR UPDATE"
+        )
+        .bind(session_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_e| DbError::not_found("Session", &session_id.to_string()))?;
+    
         // 2. 校验请求体与认证结果一致
         if session.node_id != node_id {
             return Err(DbError::Other(
                 "Session node_id mismatch".to_string(),
             ));
         }
-
+    
         // 3. 根据节点状态分支处理
         if node.is_excluded() {
-            // excluded 节点：只更新会话可见性，不改变节点状态
-            NodeSession::update_seen_and_expiry(&self.pool, session_id, expires_at).await?;
+            // excluded 节点:只更新会话可见性,不改变节点状态
+            sqlx::query(
+                r#"
+                UPDATE node_sessions
+                SET last_seen_at = NOW(), expires_at = $1
+                WHERE id = $2
+                "#,
+            )
+            .bind(expires_at)
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?;
         } else {
-            // 非 excluded 节点：校验并持久化 accepted_models
+            // 非 excluded 节点:校验并持久化 accepted_models
             let capabilities: NodeCapabilities =
                 serde_json::from_value(node.capabilities_json.clone()).map_err(|e| {
                     DbError::Other(format!("Invalid capabilities_json: {}", e))
                 })?;
-
+    
             let registered_models: Vec<String> = capabilities
                 .models
                 .iter()
                 .map(|m| m.model.clone())
                 .collect();
-
+    
             // 校验 accepted_models 是 registered_models 的子集
             for model in &accepted_models {
                 if !registered_models.contains(model) {
@@ -213,30 +273,63 @@ impl NodeGatewayStore {
                     )));
                 }
             }
-
-            // 更新会话的 accepted_models 和可见性
-            NodeSession::update_accepted_models(
-                &self.pool,
-                session_id,
-                &serde_json::to_value(&accepted_models).map_err(|e| DbError::Other(e.to_string()))?,
+    
+            // 在同一事务中:
+            // 1) 更新会话的 accepted_models 和可见性
+            sqlx::query(
+                r#"
+                UPDATE node_sessions
+                SET accepted_models_json = $1, last_seen_at = NOW(), expires_at = $2
+                WHERE id = $3
+                "#,
             )
+            .bind(&serde_json::to_value(&accepted_models).map_err(|e| DbError::Other(e.to_string()))?)
+            .bind(expires_at)
+            .bind(session_id)
+            .execute(&mut *tx)
             .await?;
-
-            // 更新节点状态为 online（如果原来是 offline）
+    
+            // 2) 更新节点状态为 online(如果原来是 offline)
             if node.status != NODE_STATUS_ONLINE {
-                Node::update_status(&self.pool, node_id, NODE_STATUS_ONLINE).await?;
+                sqlx::query(
+                    r#"
+                    UPDATE nodes
+                    SET status = 'online', updated_at = NOW()
+                    WHERE id = $1
+                    "#,
+                )
+                .bind(node_id)
+                .execute(&mut *tx)
+                .await?;
             }
-
-            // 更新节点心跳时间
-            Node::update_heartbeat(&self.pool, node_id).await?;
+    
+            // 3) 更新节点心跳时间
+            sqlx::query(
+                r#"
+                UPDATE nodes
+                SET last_heartbeat_at = NOW(), updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(node_id)
+            .execute(&mut *tx)
+            .await?;
         }
-
+    
+        // 提交事务
+        tx.commit().await?;
+    
+        // 查询最新节点状态用于返回
+        let updated_node = Node::find_by_id(&self.pool, node_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("Node", &node_id.to_string()))?;
+    
         Ok(NodeHeartbeatResponse {
             protocol_version: "node.v1".to_string(),
             accepted: true,
-            node_status: node.status.clone(),
-            server_failure_count: node.consecutive_failure_count as u32,
-            failure_threshold: node.failure_threshold as u32,
+            node_status: updated_node.status,
+            server_failure_count: updated_node.consecutive_failure_count as u32,
+            failure_threshold: updated_node.failure_threshold as u32,
         })
     }
 
@@ -325,8 +418,14 @@ impl NodeGatewayStore {
         .fetch_optional(&mut *tx)
         .await?;
 
-        // 3. 如果已有 submission，处理幂等逻辑
+        // 3. 如果已有 submission,处理幂等逻辑
         if let Some(submission) = existing_submission {
+            // 先检查 session 是否被撤销(AGENTS.md: 已撤销 session 一律拒绝,包括查询已有 submission)
+            let session = NodeSession::find_by_id(&self.pool, authenticated_session_id).await?;
+            if session.map(|s| s.is_revoked()).unwrap_or(true) {
+                return Err(DbError::Other("Session has been revoked".to_string()));
+            }
+        
             // 校验 session 身份
             if submission.node_id != authenticated_node_id
                 || submission.session_id != authenticated_session_id
@@ -353,18 +452,18 @@ impl NodeGatewayStore {
                 )?;
 
                 if submission.request_hash == current_request_hash {
-                    // request_hash 相同，直接返回已保存的 ACK
+                    // request_hash 相同,直接返回已保存的 ACK
                     let action = parse_action(&submission.action)?;
-                    
-                    // 查询节点状态
+                                    
+                    // 查询节点状态(从事务中查询,保证读到最新数据)
                     let node = sqlx::query_as::<_, Node>(
                         "SELECT * FROM nodes WHERE id = $1"
                     )
                     .bind(authenticated_node_id)
-                    .fetch_optional(&self.pool)
+                    .fetch_optional(&mut *tx)
                     .await?
                     .ok_or_else(|| DbError::not_found("Node", &authenticated_node_id.to_string()))?;
-
+                
                     return Ok(NodeTaskCompleteResponse {
                         action,
                         task_status: submission.action.clone(),
@@ -379,17 +478,17 @@ impl NodeGatewayStore {
                     ));
                 }
             } else {
-                // 已归档，仍然返回已保存的 ACK (幂等)
+                // 已归档,仍然返回已保存的 ACK (幂等)
                 let action = parse_action(&submission.action)?;
-                
+                            
                 let node = sqlx::query_as::<_, Node>(
                     "SELECT * FROM nodes WHERE id = $1"
                 )
                 .bind(authenticated_node_id)
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *tx)
                 .await?
                 .ok_or_else(|| DbError::not_found("Node", &authenticated_node_id.to_string()))?;
-
+            
                 return Ok(NodeTaskCompleteResponse {
                     action,
                     task_status: submission.action.clone(),
@@ -592,8 +691,29 @@ impl NodeGatewayStore {
         .bind(node_id)
         .bind(session_id)
         .bind(lease_id)
-        .fetch_one(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await?;
+
+        // 并发安全检查: 如果 UPDATE 返回 0 行,说明任务可能已被 sweeper 标记为 expired
+        let updated_task = match updated_task {
+            Some(t) => t,
+            None => {
+                // 查询任务当前状态,判断是否已过期
+                let current_task = sqlx::query_as::<_, NodeTask>(
+                    "SELECT * FROM node_tasks WHERE id = $1"
+                )
+                .bind(task.id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .ok_or_else(|| DbError::not_found("Task", &task.id.to_string()))?;
+
+                if current_task.status == TASK_STATUS_EXPIRED || current_task.deadline_at < Utc::now() {
+                    return Err(DbError::Other("task_expired_during_complete".to_string()));
+                } else {
+                    return Err(DbError::Other("concurrent_task_update_failed".to_string()));
+                }
+            }
+        };
 
         // 2. 清零节点连续失败计数（仅非 excluded 节点）
         if !node.is_excluded() {
@@ -648,12 +768,12 @@ impl NodeGatewayStore {
 
         // 不在这里 commit,由调用方 commit
 
-        // 查询最新节点状态
+        // 查询最新节点状态(从事务中查询)
         let updated_node = sqlx::query_as::<_, Node>(
             "SELECT * FROM nodes WHERE id = $1"
         )
         .bind(node_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| DbError::not_found("Node", &node_id.to_string()))?;
 
@@ -725,8 +845,29 @@ impl NodeGatewayStore {
         .bind(node_id)
         .bind(session_id)
         .bind(lease_id)
-        .fetch_one(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await?;
+
+        // 并发安全检查: 如果 UPDATE 返回 0 行,说明任务可能已被 sweeper 标记为 expired
+        let updated_task = match updated_task {
+            Some(t) => t,
+            None => {
+                // 查询任务当前状态,判断是否已过期
+                let current_task = sqlx::query_as::<_, NodeTask>(
+                    "SELECT * FROM node_tasks WHERE id = $1"
+                )
+                .bind(task.id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .ok_or_else(|| DbError::not_found("Task", &task.id.to_string()))?;
+
+                if current_task.status == TASK_STATUS_EXPIRED || current_task.deadline_at < Utc::now() {
+                    return Err(DbError::Other("task_expired_during_complete".to_string()));
+                } else {
+                    return Err(DbError::Other("concurrent_task_update_failed".to_string()));
+                }
+            }
+        };
 
         // 2. 增加节点连续失败计数并检查排除
         sqlx::query(
@@ -793,12 +934,12 @@ impl NodeGatewayStore {
 
         // 不在这里 commit,由调用方 commit
 
-        // 查询最新节点状态
+        // 查询最新节点状态(从事务中查询)
         let updated_node = sqlx::query_as::<_, Node>(
             "SELECT * FROM nodes WHERE id = $1"
         )
         .bind(node_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| DbError::not_found("Node", &node_id.to_string()))?;
 

@@ -77,7 +77,7 @@ pub async fn node_heartbeat(
 /// 节点任务轮询 Handler
 /// POST /node/v1/tasks/poll
 ///
-/// 需要 session token 认证，长轮询领取任务
+/// 需要 session token 认证,长轮询领取任务
 pub async fn node_poll(
     State(state): State<AppState>,
     auth: NodeSessionAuth,
@@ -95,8 +95,23 @@ pub async fn node_poll(
     
     let node_gateway = get_node_gateway(&state)?;
     
+    // 从数据库读取 session 的 accepted_models
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
+    
+    let session = keycompute_db::models::node_session::NodeSession::find_by_id(pool, auth.session_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query session: {}", e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("Session {} not found", auth.session_id)))?;
+    
+    let accepted_models: Vec<String> =
+        serde_json::from_value(session.accepted_models_json)
+            .unwrap_or_default();
+    
     let response = node_gateway
-        .poll_task(auth.node_id, auth.session_id)
+        .poll_task(auth.node_id, auth.session_id, accepted_models)
         .await
         .map_err(|e| ApiError::from(e))?;
     

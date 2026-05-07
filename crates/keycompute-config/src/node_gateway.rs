@@ -7,29 +7,32 @@ use serde::Deserialize;
 /// Node Gateway 配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct NodeGatewayConfig {
-    /// 会话 TTL（秒），默认 300
+    /// 注册 token (全局 token,用于验证节点注册请求)
+    pub registration_token: Option<String>,
+    /// 会话 TTL(秒),默认 300
     pub session_ttl_secs: Option<u64>,
-    /// 心跳间隔（秒），默认 30
+    /// 心跳间隔(秒),默认 30
     pub heartbeat_interval_secs: Option<u64>,
-    /// 轮询超时（秒），默认 30
+    /// 轮询超时(秒),默认 30
     pub poll_timeout_secs: Option<u64>,
-    /// 任务 deadline 超时（秒），默认 120
+    /// 任务 deadline 超时(秒),默认 120
     pub task_deadline_secs: Option<u64>,
-    /// 完成宽限期（秒），默认 60
+    /// 完成宽限期(秒),默认 60
     pub complete_grace_secs: Option<u64>,
-    /// 节点失败阈值，默认 3
+    /// 节点失败阈值,默认 3
     pub node_failure_threshold: Option<u32>,
-    /// 任务失败阈值，默认 3
+    /// 任务失败阈值,默认 3
     pub task_failure_threshold: Option<u32>,
-    /// Sweeper 心跳 TTL（秒），默认 600
+    /// Sweeper 心跳 TTL(秒),默认 600
     pub sweeper_heartbeat_ttl_secs: Option<u64>,
-    /// Sweeper 补推间隔（秒），默认 10
+    /// Sweeper 补推间隔(秒),默认 10
     pub sweeper_repush_interval_secs: Option<u64>,
 }
 
 impl Default for NodeGatewayConfig {
     fn default() -> Self {
         Self {
+            registration_token: None,
             session_ttl_secs: Some(300),
             heartbeat_interval_secs: Some(30),
             poll_timeout_secs: Some(30),
