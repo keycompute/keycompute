@@ -51,15 +51,10 @@ impl NodeTestEnv {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to run database migrations: {}", e))?;
 
-        // 清理测试数据
-        sqlx::query("DELETE FROM node_task_submissions")
+        // 清理测试数据（使用 TRUNCATE CASCADE 确保彻底清理）
+        sqlx::query("TRUNCATE node_task_submissions, node_tasks, node_sessions, nodes CASCADE")
             .execute(&pool)
             .await?;
-        sqlx::query("DELETE FROM node_tasks").execute(&pool).await?;
-        sqlx::query("DELETE FROM node_sessions")
-            .execute(&pool)
-            .await?;
-        sqlx::query("DELETE FROM nodes").execute(&pool).await?;
 
         let config = NodeGatewayAppConfig::default();
         let store = NodeGatewayStore::new(pool.clone(), config.clone());
