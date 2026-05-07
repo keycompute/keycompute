@@ -90,7 +90,7 @@ jobs:
         run: cargo test --package client-api --tests --verbose
 
       - name: Run crates integration tests
-        run: cargo test --package integration-tests --tests --verbose
+        run: cargo test --package integration-tests --tests --verbose -- --test-threads=1
         env:
           DATABASE_URL: postgres://postgres:password@localhost:5432/keycompute
           KC__DATABASE__URL: postgres://postgres:password@localhost:5432/keycompute
