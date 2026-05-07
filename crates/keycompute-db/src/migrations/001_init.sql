@@ -574,3 +574,86 @@ CREATE TRIGGER trigger_update_system_settings_updated_at
     BEFORE UPDATE ON system_settings
     FOR EACH ROW
     EXECUTE FUNCTION update_system_settings_updated_at();
+
+-- ============================================================================
+-- Node Gateway 节点相关表 (MVP)
+-- ============================================================================
+
+-- nodes: 节点注册信息表
+CREATE TABLE nodes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id UUID NOT NULL,
+    client_instance_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    capabilities_json JSONB NOT NULL,
+    consecutive_failure_count INTEGER NOT NULL DEFAULT 0,
+    failure_threshold INTEGER NOT NULL DEFAULT 3,
+    last_heartbeat_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (owner_user_id, client_instance_id)
+);
+
+CREATE INDEX idx_nodes_status ON nodes(status);
+CREATE INDEX idx_nodes_last_heartbeat_at ON nodes(last_heartbeat_at);
+
+-- node_sessions: 节点会话管理表
+CREATE TABLE node_sessions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    session_token_hash TEXT NOT NULL UNIQUE,
+    accepted_models_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_node_sessions_node_id_expires_at ON node_sessions(node_id, expires_at);
+CREATE INDEX idx_node_sessions_accepted_models ON node_sessions USING GIN (accepted_models_json);
+
+-- node_tasks: 节点任务生命周期表
+CREATE TABLE node_tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id UUID NOT NULL UNIQUE,
+    user_id UUID NOT NULL,
+    model TEXT NOT NULL,
+    payload_json JSONB NOT NULL,
+    status TEXT NOT NULL,
+    assigned_node_id UUID REFERENCES nodes(id),
+    assigned_session_id UUID REFERENCES node_sessions(id),
+    lease_id UUID,
+    failure_count INTEGER NOT NULL DEFAULT 0,
+    failure_threshold INTEGER NOT NULL DEFAULT 3,
+    result_json JSONB,
+    error_json JSONB,
+    queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    claimed_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    deadline_at TIMESTAMPTZ NOT NULL,
+    complete_grace_until TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_node_tasks_status_model_deadline ON node_tasks(status, model, deadline_at);
+CREATE INDEX idx_node_tasks_assigned_node_status ON node_tasks(assigned_node_id, status);
+CREATE INDEX idx_node_tasks_assigned_session_lease ON node_tasks(assigned_session_id, lease_id);
+
+-- node_task_submissions: 节点任务提交结果表 (幂等控制)
+CREATE TABLE node_task_submissions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    task_id UUID NOT NULL REFERENCES node_tasks(id) ON DELETE CASCADE,
+    lease_id UUID NOT NULL,
+    node_id UUID NOT NULL REFERENCES nodes(id),
+    session_id UUID NOT NULL REFERENCES node_sessions(id),
+    result_kind TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    action TEXT NOT NULL,
+    response_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (task_id, lease_id)
+);
+
+CREATE INDEX idx_node_task_submissions_task_lease ON node_task_submissions(task_id, lease_id);
