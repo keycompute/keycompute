@@ -18,6 +18,26 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Node 能力索引 trait
+///
+/// 用于路由引擎检查是否存在 ready 节点
+/// 实现方可以是 PostgresNodeIndex 或 mock 实现
+/// 
+/// **ready predicate** (与 poll 领取资格使用同一套服务端可验证数据):
+/// - `nodes.status = 'online'` (隐含 `consecutive_failure_count < failure_threshold`)
+/// - `node_sessions.expires_at > NOW()` (session 未过期)
+/// - `node_sessions.revoked_at IS NULL` (session 未撤销)
+/// - `nodes.capabilities_json->>'runtime' = 'ollama'` (runtime 类型匹配)
+/// - `node_sessions.accepted_models_json` 包含目标模型名 (已在 heartbeat 时校验为注册能力的子集)
+/// - 不读取 Redis，不使用客户端自报的负载或本地失败计数
+#[async_trait::async_trait]
+pub trait NodeCapabilityIndex: Send + Sync {
+    /// 检查是否存在 ready 节点可以处理指定模型
+    /// 
+    /// 该方法为异步，因为实际实现需要执行数据库查询 (I/O 操作)。
+    async fn has_ready_node(&self, model: &str) -> bool;
+}
+
 /// 路由权重常量（硬编码，不可通过配置修改）
 const COST_WEIGHT: f64 = 0.3;
 const LATENCY_WEIGHT: f64 = 0.25;
@@ -31,6 +51,7 @@ const HIGH_LATENCY_THRESHOLD_MS: u64 = 1000;
 /// 双层路由：Layer1 模型路由，Layer2 账号路由
 /// 集成 ProviderHealthStore 进行健康评分路由
 /// 集成 AccountStateStore 进行账号冷却状态检查
+/// 集成 NodeCapabilityIndex 进行 Node 路由支持
 #[derive(Clone)]
 pub struct RoutingEngine {
     /// 账号状态存储（只读）
@@ -41,6 +62,8 @@ pub struct RoutingEngine {
     pool: Option<Arc<PgPool>>,
     /// 可用 Provider 列表
     providers: Vec<String>,
+    /// Node 能力索引（可选）
+    node_index: Option<Arc<dyn NodeCapabilityIndex>>,
 }
 
 impl std::fmt::Debug for RoutingEngine {
@@ -50,6 +73,7 @@ impl std::fmt::Debug for RoutingEngine {
             .field("provider_health", &"ProviderHealthStore")
             .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
             .field("providers", &self.providers)
+            .field("node_index", &self.node_index.as_ref().map(|_| "NodeCapabilityIndex"))
             .finish()
     }
 }
@@ -71,6 +95,7 @@ impl RoutingEngine {
             provider_health,
             pool: None,
             providers,
+            node_index: None,
         }
     }
 
@@ -92,6 +117,31 @@ impl RoutingEngine {
             provider_health,
             pool: Some(pool),
             providers,
+            node_index: None,
+        }
+    }
+
+    /// 创建带 Node 能力索引的路由引擎
+    ///
+    /// # 参数
+    /// - `account_states`: 账号状态存储
+    /// - `provider_health`: Provider 健康状态存储
+    /// - `pool`: 数据库连接池
+    /// - `providers`: Provider 名称列表（从外部传入，确保与 Gateway 一致）
+    /// - `node_index`: Node 能力索引，用于检查是否存在 ready 节点
+    pub fn with_node_index(
+        account_states: Arc<AccountStateStore>,
+        provider_health: Arc<ProviderHealthStore>,
+        pool: Arc<PgPool>,
+        providers: Vec<String>,
+        node_index: Arc<dyn NodeCapabilityIndex>,
+    ) -> Self {
+        Self {
+            account_states,
+            provider_health,
+            pool: Some(pool),
+            providers,
+            node_index: Some(node_index),
         }
     }
 
@@ -99,6 +149,14 @@ impl RoutingEngine {
     ///
     /// 根据 RequestContext 路由到最优的 Provider 和账号
     /// 使用租户专属账号池进行路由
+    /// 
+    /// **Node 路由支持**:
+    /// - 检测 `model.starts_with("node:")` 前缀
+    /// - 如果 `stream=true` 且前缀为 `node:`,返回 `streaming_not_supported_on_node`
+    /// - 去掉前缀得到 actual_model,调用 `node_index.has_ready_node(actual_model)`
+    /// - 存在 ready 节点: 返回 `ExecutionTarget::Node { model: actual_model }`
+    /// - 不存在: 返回 `NoReadyNode` 错误,不 fallback
+    /// - 无前缀: 走现有 Provider 路由逻辑
     pub async fn route(&self, ctx: &RequestContext) -> Result<ExecutionPlan> {
         tracing::info!(
             request_id = %ctx.request_id,
@@ -106,6 +164,53 @@ impl RoutingEngine {
             tenant_id = %ctx.tenant_id,
             "route: starting"
         );
+
+        // 检测 Node 路由前缀
+        if let Some(actual_model) = ctx.model.strip_prefix("node:") {
+            tracing::info!(
+                request_id = %ctx.request_id,
+                model = %ctx.model,
+                actual_model = %actual_model,
+                "route: node prefix detected"
+            );
+
+            // 检查 stream=true 是否被用于 Node 路径
+            if ctx.stream {
+                tracing::warn!(
+                    request_id = %ctx.request_id,
+                    "route: streaming not supported on node"
+                );
+                return Err(KeyComputeError::StreamingNotSupportedOnNode);
+            }
+
+            // 检查是否配置了 node_index
+            let node_index = self.node_index.as_ref().ok_or_else(|| {
+                tracing::error!("route: node_index not configured");
+                KeyComputeError::Internal("Node routing not configured".to_string())
+            })?;
+
+            // 检查是否存在 ready 节点
+            if node_index.has_ready_node(actual_model).await {
+                tracing::info!(
+                    request_id = %ctx.request_id,
+                    model = %actual_model,
+                    "route: ready node found, routing to node path"
+                );
+                return Ok(ExecutionPlan {
+                    primary: ExecutionTarget::Node {
+                        model: actual_model.to_string(),
+                    },
+                    fallback_chain: Vec::new(),
+                });
+            } else {
+                tracing::warn!(
+                    request_id = %ctx.request_id,
+                    model = %actual_model,
+                    "route: no ready node available"
+                );
+                return Err(KeyComputeError::NoReadyNode(actual_model.to_string()));
+            }
+        }
 
         // Layer1: 模型路由 - 选择 provider 排序
         let ranked_providers = self
@@ -622,6 +727,18 @@ mod tests {
     use keycompute_types::PricingSnapshot;
     use rust_decimal::Decimal;
 
+    /// Mock Node 能力索引,用于测试
+    struct MockNodeIndex {
+        ready_models: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl NodeCapabilityIndex for MockNodeIndex {
+        async fn has_ready_node(&self, model: &str) -> bool {
+            self.ready_models.contains(&model.to_string())
+        }
+    }
+
     fn create_test_context() -> RequestContext {
         RequestContext::new(
             Uuid::new_v4(),
@@ -836,5 +953,180 @@ mod tests {
         let result = RoutingEngine::decrypt_upstream_api_key(encrypted.as_str());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), plaintext);
+    }
+
+    #[tokio::test]
+    async fn test_node_routing_with_ready_node() {
+        // 创建带有 ready node 的引擎
+        let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
+        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let providers = vec!["openai".to_string()];
+        let node_index = Arc::new(MockNodeIndex {
+            ready_models: vec!["deepseek-chat".to_string()],
+        });
+
+        let engine = RoutingEngine::with_node_index(
+            account_states,
+            provider_health,
+            pool,
+            providers,
+            node_index,
+        );
+
+        // 创建请求上下文,使用 node: 前缀
+        let mut ctx = create_test_context();
+        ctx.model = "node:deepseek-chat".to_string();
+        ctx.stream = false;
+
+        // 应该路由到 Node
+        let plan = engine.route(&ctx).await;
+        assert!(plan.is_ok());
+
+        let plan = plan.unwrap();
+        match &plan.primary {
+            ExecutionTarget::Node { model } => {
+                assert_eq!(model, "deepseek-chat");
+            }
+            ExecutionTarget::ProviderAccount { .. } => {
+                panic!("Expected Node variant");
+            }
+        }
+
+        // 应该没有 fallback
+        assert!(plan.fallback_chain.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_node_routing_without_ready_node() {
+        // 创建没有 ready node 的引擎
+        let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
+        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let providers = vec!["openai".to_string()];
+        let node_index = Arc::new(MockNodeIndex {
+            ready_models: vec![], // 没有 ready 模型
+        });
+
+        let engine = RoutingEngine::with_node_index(
+            account_states,
+            provider_health,
+            pool,
+            providers,
+            node_index,
+        );
+
+        // 创建请求上下文,使用 node: 前缀
+        let mut ctx = create_test_context();
+        ctx.model = "node:deepseek-chat".to_string();
+        ctx.stream = false;
+
+        // 应该返回 NoReadyNode 错误
+        let plan = engine.route(&ctx).await;
+        assert!(plan.is_err());
+
+        match plan.unwrap_err() {
+            KeyComputeError::NoReadyNode(model) => {
+                assert_eq!(model, "deepseek-chat");
+            }
+            _ => panic!("Expected NoReadyNode error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_node_routing_streaming_not_supported() {
+        // 创建带有 ready node 的引擎
+        let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
+        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let providers = vec!["openai".to_string()];
+        let node_index = Arc::new(MockNodeIndex {
+            ready_models: vec!["deepseek-chat".to_string()],
+        });
+
+        let engine = RoutingEngine::with_node_index(
+            account_states,
+            provider_health,
+            pool,
+            providers,
+            node_index,
+        );
+
+        // 创建请求上下文,使用 node: 前缀但 stream=true
+        let mut ctx = create_test_context();
+        ctx.model = "node:deepseek-chat".to_string();
+        ctx.stream = true; // 流式请求
+
+        // 应该返回 StreamingNotSupportedOnNode 错误
+        let plan = engine.route(&ctx).await;
+        assert!(plan.is_err());
+
+        match plan.unwrap_err() {
+            KeyComputeError::StreamingNotSupportedOnNode => {}
+            _ => panic!("Expected StreamingNotSupportedOnNode error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_node_routing_without_node_index() {
+        // 创建没有 node_index 的引擎
+        let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
+        let providers = vec!["openai".to_string()];
+
+        let engine = RoutingEngine::new(account_states, provider_health, providers);
+
+        // 创建请求上下文,使用 node: 前缀
+        let mut ctx = create_test_context();
+        ctx.model = "node:deepseek-chat".to_string();
+        ctx.stream = false;
+
+        // 应该返回 Internal 错误(node_index not configured)
+        let plan = engine.route(&ctx).await;
+        assert!(plan.is_err());
+
+        match plan.unwrap_err() {
+            KeyComputeError::Internal(msg) => {
+                assert!(msg.contains("Node routing not configured"));
+            }
+            _ => panic!("Expected Internal error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_provider_routing_without_node_prefix() {
+        // 创建带有 node_index 的引擎
+        let account_states = Arc::new(AccountStateStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::new());
+        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let providers = vec!["openai".to_string()];
+        let node_index = Arc::new(MockNodeIndex {
+            ready_models: vec!["deepseek-chat".to_string()],
+        });
+
+        let engine = RoutingEngine::with_node_index(
+            account_states,
+            provider_health,
+            pool,
+            providers,
+            node_index,
+        );
+
+        // 创建请求上下文,不使用 node: 前缀
+        let ctx = create_test_context(); // 默认 model = "gpt-4o"
+
+        // 应该走 Provider 路由
+        let plan = engine.route(&ctx).await;
+        assert!(plan.is_ok());
+
+        let plan = plan.unwrap();
+        match &plan.primary {
+            ExecutionTarget::ProviderAccount { provider, .. } => {
+                assert!(!provider.is_empty());
+            }
+            ExecutionTarget::Node { .. } => {
+                panic!("Expected ProviderAccount variant for non-node prefix");
+            }
+        }
     }
 }
