@@ -65,6 +65,13 @@ Access all major models through the standard **OpenAI API format** out of the bo
 - **Automatic retry on failure**: switch channels automatically when a request fails
 - **Health checks**: monitor provider availability in real time
 
+### Consumer-grade PC Nodes
+
+- **Bring your own compute**: personal PCs can join as compute nodes via pull-based polling behind NAT
+- **Local model execution**: run Ollama-hosted models on personal hardware
+- **Model prefix routing**: use `node:<model>` to explicitly route requests to the node pool
+- **Automatic failover**: failed nodes are excluded from scheduling, and tasks are automatically requeued
+
 ### Billing & payments
 
 - **Real-time billing**: request-level price snapshots with precise post-settlement

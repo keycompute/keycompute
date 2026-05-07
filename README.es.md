@@ -65,6 +65,13 @@ Accede a todos los modelos principales mediante el formato estándar de **OpenAI
 - **Reintento automático ante fallos**: cambia de canal automáticamente cuando una solicitud falla
 - **Comprobaciones de salud**: monitoriza la disponibilidad del provider en tiempo real
 
+### Nodos de PC de consumo
+
+- **Trae tu propio cómputo**: las PCs personales pueden unirse como nodos de cómputo mediante sondeo pull-based tras NAT
+- **Ejecución de modelos locales**: ejecuta modelos alojados en Ollama en hardware personal
+- **Enrutamiento por prefijo de modelo**: usa `node:<modelo>` para enrutar solicitudes explícitamente al pool de nodos
+- **Conmutación por error automática**: los nodos fallidos se excluyen de la planificación, las tareas se reencolan automáticamente
+
 ### Facturación y pagos
 
 - **Facturación en tiempo real**: instantáneas de precios por solicitud con liquidación precisa posterior

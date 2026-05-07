@@ -22,6 +22,7 @@ target
 
 **/__pycache__/
 test.py
+node-token/
 
 config.toml
 
