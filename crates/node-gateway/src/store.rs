@@ -67,14 +67,22 @@ impl NodeGatewayStore {
 
         let now = Utc::now();
 
-        // 1. 查找或创建节点
-        let node = match Node::find_by_owner_and_client(
-            &self.pool,
-            owner_user_id,
-            &req.client_instance_id,
+        // 1. 开始事务
+        let mut tx = self.pool.begin().await?;
+
+        // 2. 查找或创建节点(在事务中)
+        let existing_node = sqlx::query_as::<_, Node>(
+            r#"
+            SELECT * FROM nodes
+            WHERE owner_user_id = $1 AND client_instance_id = $2
+            "#,
         )
-        .await?
-        {
+        .bind(owner_user_id)
+        .bind(&req.client_instance_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let node = match existing_node {
             Some(existing_node) => {
                 // 如果节点被排除，拒绝注册
                 if existing_node.is_excluded() {
@@ -85,20 +93,28 @@ impl NodeGatewayStore {
                 existing_node
             }
             None => {
-                // 创建新节点
-                let create_req = CreateNodeRequest {
-                    owner_user_id,
-                    client_instance_id: req.client_instance_id.clone(),
-                    display_name: req.display_name.clone(),
-                    capabilities_json: serde_json::to_value(&req.capabilities)
-                        .map_err(|e| DbError::Other(e.to_string()))?,
-                };
-                Node::create(&self.pool, &create_req).await?
+                // 创建新节点(在事务中)
+                let capabilities_json = serde_json::to_value(&req.capabilities)
+                    .map_err(|e| DbError::Other(e.to_string()))?;
+
+                sqlx::query_as::<_, Node>(
+                    r#"
+                    INSERT INTO nodes (owner_user_id, client_instance_id, display_name, status, capabilities_json)
+                    VALUES ($1, $2, $3, $4, $5)
+                    RETURNING *
+                    "#
+                )
+                .bind(owner_user_id)
+                .bind(&req.client_instance_id)
+                .bind(&req.display_name)
+                .bind(NODE_STATUS_OFFLINE)
+                .bind(&capabilities_json)
+                .fetch_one(&mut *tx)
+                .await?
             }
         };
 
-        // 2. 在同一事务中:创建 session + 更新节点状态 + 更新心跳
-        let mut tx = self.pool.begin().await?;
+        // 3. 在同一事务中:创建 session + 更新节点状态 + 更新心跳
 
         let session_token = Uuid::new_v4().to_string();
         let session_token_hash = hash_token(&session_token);

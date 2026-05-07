@@ -568,10 +568,11 @@ async fn test_complete_task_success() -> anyhow::Result<()> {
         .await?;
 
     // 2. 手动创建 leased 任务 (模拟已领取)
+    let lease_id = Uuid::new_v4();
     let task = sqlx::query_as::<_, NodeTask>(
         r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, deadline_at, complete_grace_until)
-        VALUES ($1, $2, $3, $4, 'leased', NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds')
+        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
         RETURNING *
         "#
     )
@@ -579,23 +580,10 @@ async fn test_complete_task_success() -> anyhow::Result<()> {
     .bind(Uuid::new_v4())
     .bind("deepseek-chat")
     .bind(serde_json::json!({}))
-    .fetch_one(&env.pool)
-    .await?;
-
-    // 3. 手动更新 assignment 信息
-    let lease_id = Uuid::new_v4();
-    sqlx::query(
-        r#"
-        UPDATE node_tasks
-        SET assigned_node_id = $1, assigned_session_id = $2, lease_id = $3
-        WHERE id = $4
-        "#,
-    )
     .bind(register_resp.node_id)
     .bind(register_resp.session_id)
     .bind(lease_id)
-    .bind(task.id)
-    .execute(&env.pool)
+    .fetch_one(&env.pool)
     .await?;
 
     chain.add_step(
@@ -683,8 +671,8 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
     let lease_id = Uuid::new_v4();
     let task = sqlx::query_as::<_, NodeTask>(
         r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds')
+        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
         RETURNING *
         "#
     )
@@ -856,8 +844,8 @@ async fn test_node_excluded_after_failures() -> anyhow::Result<()> {
         let lease_id = Uuid::new_v4();
         let task = sqlx::query_as::<_, NodeTask>(
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds')
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#
         )
@@ -973,8 +961,8 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
     let lease_id = Uuid::new_v4();
     let task = sqlx::query_as::<_, NodeTask>(
         r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds')
+        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
         RETURNING *
         "#
     )
