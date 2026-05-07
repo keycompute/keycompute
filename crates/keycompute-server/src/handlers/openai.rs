@@ -362,13 +362,13 @@ pub async fn chat_completions(
                     "streaming not supported on node execution path".to_string(),
                 ));
             }
-            
+
             // 调用 node-gateway 执行
             let node_gateway = state
                 .node_gateway
                 .as_ref()
                 .ok_or_else(|| ApiError::Internal("node gateway not configured".to_string()))?;
-            
+
             // 构建 NodeTaskPayload
             let payload = keycompute_types::node::NodeTaskPayload {
                 request_id: ctx.request_id,
@@ -383,12 +383,12 @@ pub async fn chat_completions(
                     stop: None, // StopSequence 不支持 Clone，暂时使用 None
                 },
             };
-            
+
             let response = node_gateway
                 .enqueue_and_wait(auth.user_id, model.clone(), payload)
                 .await
                 .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
-            
+
             // 将 ChatCompletionResponse 转换为 OpenAI 格式
             let openai_response = ChatCompletionResponse {
                 id: format!(
@@ -405,10 +405,7 @@ pub async fn chat_completions(
                     index: 0,
                     message: ChatCompletionMessage {
                         role: "assistant".to_string(),
-                        content: response
-                            .choices
-                            .first()
-                            .map(|c| c.message.content.clone()),
+                        content: response.choices.first().map(|c| c.message.content.clone()),
                         tool_calls: None,
                         tool_call_id: None,
                         name: None,
@@ -428,7 +425,7 @@ pub async fn chat_completions(
                 },
                 system_fingerprint: None,
             };
-            
+
             // 触发计费
             let billing = Arc::clone(&state.billing);
             let _ = billing
@@ -440,13 +437,17 @@ pub async fn chat_completions(
                     uuid::Uuid::nil(),
                 )
                 .await;
-            
-            return Ok(Json(openai_response).into_response());
+
+            Ok(Json(openai_response).into_response())
         }
-        ExecutionTarget::ProviderAccount { provider, account_id, .. } => {
+        ExecutionTarget::ProviderAccount {
+            provider,
+            account_id,
+            ..
+        } => {
             // Provider 执行路径：继续后续逻辑
             let (primary_provider, primary_account_id) = (provider.clone(), *account_id);
-            
+
             // 5.1 根据实际 provider 更新定价（如果需要）
             {
                 let ctx_mut = Arc::make_mut(&mut ctx);
@@ -455,7 +456,7 @@ pub async fn chat_completions(
                     .update_context_pricing(ctx_mut, &primary_provider)
                     .await;
             }
-            
+
             tracing::info!(
                 request_id = %request_id.0,
                 model = %request.model,
@@ -463,15 +464,16 @@ pub async fn chat_completions(
                 primary_provider = %primary_provider,
                 "Chat completion request"
             );
-            
+
             // 6. 执行（带超时保护）
             tracing::info!(
                 request_id = %request_id.0,
                 timeout_secs = state.gateway_config.timeout_secs,
                 "Starting gateway execute"
             );
-            
-            let timeout_duration = std::time::Duration::from_secs(state.gateway_config.timeout_secs);
+
+            let timeout_duration =
+                std::time::Duration::from_secs(state.gateway_config.timeout_secs);
             let rx = match tokio::time::timeout(
                 timeout_duration,
                 state.gateway.execute(
@@ -483,7 +485,9 @@ pub async fn chat_completions(
             )
             .await
             {
-                Ok(result) => result.map_err(|e| ApiError::Internal(format!("Execution failed: {}", e)))?,
+                Ok(result) => {
+                    result.map_err(|e| ApiError::Internal(format!("Execution failed: {}", e)))?
+                }
                 Err(_) => {
                     tracing::error!(
                         request_id = %request_id.0,
@@ -496,18 +500,18 @@ pub async fn chat_completions(
                     )));
                 }
             };
-            
+
             tracing::info!(
                 request_id = %request_id.0,
                 "Gateway execute returned, creating response"
             );
-            
+
             // 7. 根据 stream 参数返回不同类型的响应
             let billing = Arc::clone(&state.billing);
             let is_stream = request.stream;
             let model = request.model;
             let stream_options = request.stream_options;
-            
+
             if is_stream {
                 // 流式响应
                 let stream = create_openai_stream(
@@ -519,7 +523,7 @@ pub async fn chat_completions(
                     billing,
                     stream_options,
                 );
-                return Ok(Sse::new(stream).into_response());
+                Ok(Sse::new(stream).into_response())
             } else {
                 // 非流式响应：收集所有内容后返回完整 JSON
                 let response = create_openai_response(
@@ -531,7 +535,7 @@ pub async fn chat_completions(
                     billing,
                 )
                 .await?;
-                return Ok(Json(response).into_response());
+                Ok(Json(response).into_response())
             }
         }
     }

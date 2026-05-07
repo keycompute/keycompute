@@ -150,7 +150,7 @@ impl KeyComputeError {
             }
             KeyComputeError::VerificationError(_) => ErrorCategory::Verification,
             KeyComputeError::RateLimitExceeded(_) => ErrorCategory::RateLimit,
-            KeyComputeError::RoutingFailed(_) 
+            KeyComputeError::RoutingFailed(_)
             | KeyComputeError::NoReadyNode(_)
             | KeyComputeError::StreamingNotSupportedOnNode => ErrorCategory::Routing,
             KeyComputeError::ProviderError(_) | KeyComputeError::ProviderTimeout(_, _) => {

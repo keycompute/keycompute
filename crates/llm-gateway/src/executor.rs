@@ -160,13 +160,13 @@ impl GatewayExecutor {
 
                     // 成功：更新 Provider 健康状态
                     let latency_ms = target_start.elapsed().as_millis() as u64;
-                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target {
-                        if let Some(ref health_store) = provider_health {
-                            health_store.record_success(provider, latency_ms);
-                            // 如果不是 primary，说明使用了 fallback
-                            if !is_primary {
-                                health_store.record_fallback();
-                            }
+                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target
+                        && let Some(ref health_store) = provider_health
+                    {
+                        health_store.record_success(provider, latency_ms);
+                        // 如果不是 primary，说明使用了 fallback
+                        if !is_primary {
+                            health_store.record_fallback();
                         }
                     }
 
@@ -186,10 +186,10 @@ impl GatewayExecutor {
                 Err(e) => {
                     // 注意：不再自动标记错误，错误计数只能通过管理员手动测试 API 触发
                     // 保留 Provider 健康状态更新用于路由评分
-                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target {
-                        if let Some(ref health_store) = provider_health {
-                            health_store.record_failure(provider);
-                        }
+                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target
+                        && let Some(ref health_store) = provider_health
+                    {
+                        health_store.record_failure(provider);
                     }
 
                     let provider_name = match &target {
@@ -222,9 +222,12 @@ impl GatewayExecutor {
     ) -> Result<()> {
         // 只处理 ProviderAccount 变体
         let (provider, endpoint, upstream_api_key) = match target {
-            ExecutionTarget::ProviderAccount { provider, endpoint, upstream_api_key, .. } => {
-                (provider, endpoint, upstream_api_key)
-            }
+            ExecutionTarget::ProviderAccount {
+                provider,
+                endpoint,
+                upstream_api_key,
+                ..
+            } => (provider, endpoint, upstream_api_key),
             ExecutionTarget::Node { .. } => {
                 return Err(KeyComputeError::Internal(
                     "Node execution not supported in stream executor".into(),
@@ -240,9 +243,10 @@ impl GatewayExecutor {
         );
 
         // 获取 Provider
-        let provider_impl = self.providers.get(provider.as_str()).ok_or_else(|| {
-            KeyComputeError::Internal(format!("Provider {} not found", provider))
-        })?;
+        let provider_impl = self
+            .providers
+            .get(provider.as_str())
+            .ok_or_else(|| KeyComputeError::Internal(format!("Provider {} not found", provider)))?;
 
         // 获取 HTTP 传输层（优先使用 HttpProxy 中的客户端）
         let transport: Arc<dyn HttpTransport> = if let Some(ref proxy) = self.http_proxy {
@@ -262,7 +266,9 @@ impl GatewayExecutor {
         );
 
         // 执行流式请求（传入 transport）
-        let mut stream = provider_impl.stream_chat(transport.as_ref(), request).await?;
+        let mut stream = provider_impl
+            .stream_chat(transport.as_ref(), request)
+            .await?;
 
         tracing::info!(
             request_id = %ctx.request_id,

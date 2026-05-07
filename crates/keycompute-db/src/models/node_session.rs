@@ -73,12 +73,10 @@ impl NodeSession {
 
     /// 根据 ID 查询会话
     pub async fn find_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<NodeSession>, DbError> {
-        let session = sqlx::query_as::<_, NodeSession>(
-            "SELECT * FROM node_sessions WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+        let session = sqlx::query_as::<_, NodeSession>("SELECT * FROM node_sessions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
 
         Ok(session)
     }

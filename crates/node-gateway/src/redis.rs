@@ -9,6 +9,7 @@ use tracing;
 use uuid::Uuid;
 
 /// Node Gateway Redis 管理器
+#[derive(Clone)]
 pub struct NodeGatewayRedis {
     redis: Arc<RedisRuntimeStore>,
 }
@@ -20,7 +21,11 @@ impl NodeGatewayRedis {
     }
 
     /// 推送任务到模型队列
-    pub async fn push_to_model_queue(&self, model: &str, task_id: Uuid) -> Result<(), anyhow::Error> {
+    pub async fn push_to_model_queue(
+        &self,
+        model: &str,
+        task_id: Uuid,
+    ) -> Result<(), anyhow::Error> {
         let queue_key = format!("queue:node:model:{}", model);
         let mut conn = self.redis.pool().get().await?;
         let _: () = conn.lpush(&queue_key, &[task_id.to_string()]).await?;
@@ -35,11 +40,10 @@ impl NodeGatewayRedis {
         timeout_secs: u64,
     ) -> Result<Option<Uuid>, anyhow::Error> {
         let queue_key = format!("queue:node:model:{}", model);
-        
+
         let mut conn = self.redis.pool().get().await?;
-        let result: Option<(String, String)> = conn
-            .brpop(&[queue_key], timeout_secs as f64)
-            .await?;
+        let result: Option<(String, String)> =
+            conn.brpop(&[queue_key], timeout_secs as f64).await?;
 
         match result {
             Some((_, task_id_str)) => {
@@ -74,11 +78,10 @@ impl NodeGatewayRedis {
         timeout_secs: u64,
     ) -> Result<Option<String>, anyhow::Error> {
         let result_key = format!("task:result:{}", task_id);
-        
+
         let mut conn = self.redis.pool().get().await?;
-        let result: Option<(String, String)> = conn
-            .brpop(&[result_key], timeout_secs as f64)
-            .await?;
+        let result: Option<(String, String)> =
+            conn.brpop(&[result_key], timeout_secs as f64).await?;
 
         match result {
             Some((_, status)) => Ok(Some(status)),
@@ -87,7 +90,11 @@ impl NodeGatewayRedis {
     }
 
     /// 补推 queued 任务到模型队列
-    pub async fn repush_queued_task(&self, model: &str, task_id: Uuid) -> Result<(), anyhow::Error> {
+    pub async fn repush_queued_task(
+        &self,
+        model: &str,
+        task_id: Uuid,
+    ) -> Result<(), anyhow::Error> {
         self.push_to_model_queue(model, task_id).await
     }
 }

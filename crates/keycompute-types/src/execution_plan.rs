@@ -314,7 +314,7 @@ mod tests {
 
         let targets: Vec<_> = plan.all_targets().collect();
         assert_eq!(targets.len(), 3);
-        
+
         if let ExecutionTarget::ProviderAccount { provider, .. } = targets[0] {
             assert_eq!(provider, "openai");
         }
@@ -361,7 +361,10 @@ mod tests {
             "sk-secret-key",
         );
         // expose() 方法可以获取原始值（用于实际请求）
-        if let ExecutionTarget::ProviderAccount { upstream_api_key, .. } = &target {
+        if let ExecutionTarget::ProviderAccount {
+            upstream_api_key, ..
+        } = &target
+        {
             assert_eq!(upstream_api_key.expose(), "sk-secret-key");
         } else {
             panic!("Expected ProviderAccount variant");
@@ -373,7 +376,7 @@ mod tests {
         let target = ExecutionTarget::new_node("deepseek-chat");
         assert!(target.is_node());
         assert!(!target.is_provider());
-        
+
         if let ExecutionTarget::Node { model } = &target {
             assert_eq!(model, "deepseek-chat");
         } else {

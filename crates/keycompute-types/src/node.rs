@@ -222,7 +222,7 @@ pub struct NodeTaskCompleteResponse {
 }
 
 /// 节点任务完成动作
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeTaskCompleteAction {
     /// 任务成功完成

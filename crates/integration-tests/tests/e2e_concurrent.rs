@@ -772,36 +772,39 @@ async fn test_full_chain_concurrent_pressure() {
             // Step 1: Routing
             if let Ok(plan) = engine.route(&ctx).await {
                 // Step 2: Check account cooldown (only for ProviderAccount)
-                if let ExecutionTarget::ProviderAccount { account_id, endpoint, upstream_api_key, .. } = &plan.primary {
+                if let ExecutionTarget::ProviderAccount {
+                    account_id,
+                    endpoint,
+                    upstream_api_key,
+                    ..
+                } = &plan.primary
+                {
                     if !engine.is_account_cooling(account_id) {
                         // Step 3: Provider request
-                        let request = UpstreamRequest::new(
-                            endpoint,
-                            upstream_api_key.clone(),
-                            &ctx.model,
-                        );
+                        let request =
+                            UpstreamRequest::new(endpoint, upstream_api_key.clone(), &ctx.model);
 
-                    if let Ok(mut stream) = provider.stream_chat(&*transport, request).await {
-                        // Step 4: Consume stream
-                        let mut event_count = 0u64;
-                        while let Some(event) = stream.next().await {
-                            if event.is_ok() {
-                                event_count += 1;
+                        if let Ok(mut stream) = provider.stream_chat(&*transport, request).await {
+                            // Step 4: Consume stream
+                            let mut event_count = 0u64;
+                            while let Some(event) = stream.next().await {
+                                if event.is_ok() {
+                                    event_count += 1;
+                                }
                             }
-                        }
-                        success = event_count > 0;
+                            success = event_count > 0;
 
-                        // Step 5: Record success
-                        if success {
-                            stats.lock().unwrap().provider_successes += 1;
+                            // Step 5: Record success
+                            if success {
+                                stats.lock().unwrap().provider_successes += 1;
+                            }
+                        } else {
+                            // Provider failed
+                            stats.lock().unwrap().provider_failures += 1;
                         }
                     } else {
-                        // Provider failed
-                        stats.lock().unwrap().provider_failures += 1;
+                        stats.lock().unwrap().cooldown_skips += 1;
                     }
-                } else {
-                    stats.lock().unwrap().cooldown_skips += 1;
-                }
                 } // Close the if let ExecutionTarget::ProviderAccount
             }
 

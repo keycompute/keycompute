@@ -4,8 +4,8 @@
 
 use crate::config::NodeGatewayAppConfig;
 use crate::redis::NodeGatewayRedis;
-use keycompute_db::models::node_task::*;
 use keycompute_db::DbError;
+use keycompute_db::models::node_task::*;
 use sqlx::PgPool;
 use tracing;
 
@@ -18,11 +18,7 @@ pub struct NodeGatewaySweeper {
 
 impl NodeGatewaySweeper {
     /// 创建新的 Sweeper
-    pub fn new(
-        pool: PgPool,
-        redis: NodeGatewayRedis,
-        config: NodeGatewayAppConfig,
-    ) -> Self {
+    pub fn new(pool: PgPool, redis: NodeGatewayRedis, config: NodeGatewayAppConfig) -> Self {
         Self {
             pool,
             redis,
@@ -78,10 +74,7 @@ impl NodeGatewaySweeper {
         .await?;
 
         if result.rows_affected() > 0 {
-            tracing::info!(
-                "Marked {} nodes as offline",
-                result.rows_affected()
-            );
+            tracing::info!("Marked {} nodes as offline", result.rows_affected());
         }
 
         Ok(())
@@ -92,10 +85,7 @@ impl NodeGatewaySweeper {
         let expired_tasks = NodeTask::expire_overdue_tasks(&self.pool).await?;
 
         if !expired_tasks.is_empty() {
-            tracing::info!(
-                "Marked {} tasks as expired",
-                expired_tasks.len()
-            );
+            tracing::info!("Marked {} tasks as expired", expired_tasks.len());
         }
 
         Ok(expired_tasks)
@@ -119,24 +109,13 @@ impl NodeGatewaySweeper {
         .await?;
 
         for task in &tasks_to_repush {
-            if let Err(e) = self
-                .redis
-                .repush_queued_task(&task.model, task.id)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to repush task {} to queue: {}",
-                    task.id,
-                    e
-                );
+            if let Err(e) = self.redis.repush_queued_task(&task.model, task.id).await {
+                tracing::warn!("Failed to repush task {} to queue: {}", task.id, e);
             }
         }
 
         if !tasks_to_repush.is_empty() {
-            tracing::info!(
-                "Repushed {} queued tasks to Redis",
-                tasks_to_repush.len()
-            );
+            tracing::info!("Repushed {} queued tasks to Redis", tasks_to_repush.len());
         }
 
         Ok(())

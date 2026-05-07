@@ -92,12 +92,10 @@ impl NodeTask {
         pool: &sqlx::PgPool,
         request_id: Uuid,
     ) -> Result<Option<NodeTask>, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>(
-            "SELECT * FROM node_tasks WHERE request_id = $1",
-        )
-        .bind(request_id)
-        .fetch_optional(pool)
-        .await?;
+        let task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE request_id = $1")
+            .bind(request_id)
+            .fetch_optional(pool)
+            .await?;
 
         Ok(task)
     }

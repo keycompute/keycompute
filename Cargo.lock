@@ -3151,6 +3151,7 @@ dependencies = [
  "keycompute-server",
  "keycompute-types",
  "llm-gateway",
+ "node-gateway",
  "once_cell",
  "reqwest",
  "rust_decimal",

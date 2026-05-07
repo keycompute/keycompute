@@ -5,17 +5,18 @@
 use crate::config::NodeGatewayAppConfig;
 use crate::redis::NodeGatewayRedis;
 use crate::store::NodeGatewayStore;
-use keycompute_db::models::node_task::*;
 use keycompute_db::DbError;
-use keycompute_types::node::*;
+use keycompute_db::models::node_task::*;
 use keycompute_types::ChatCompletionResponse;
+use keycompute_types::node::*;
 use std::time::Duration;
 use tracing;
 use uuid::Uuid;
 
 /// Node Gateway Service
+#[derive(Clone)]
 pub struct NodeGatewayService {
-    store: NodeGatewayStore,
+    pub store: NodeGatewayStore,
     redis: NodeGatewayRedis,
     config: NodeGatewayAppConfig,
 }
@@ -50,16 +51,8 @@ impl NodeGatewayService {
             .await?;
 
         // 2. 推送到 Redis 队列
-        if let Err(e) = self
-            .redis
-            .push_to_model_queue(&model, task.id)
-            .await
-        {
-            tracing::warn!(
-                "Failed to push task {} to Redis queue: {}",
-                task.id,
-                e
-            );
+        if let Err(e) = self.redis.push_to_model_queue(&model, task.id).await {
+            tracing::warn!("Failed to push task {} to Redis queue: {}", task.id, e);
             // Redis 失败不影响，sweeper 会补推
         }
 
@@ -68,20 +61,16 @@ impl NodeGatewayService {
         let result = tokio::time::timeout(wait_timeout, async {
             loop {
                 // 3.1 尝试从 Redis 获取结果通知
-                if let Ok(Some(status)) = self
-                    .redis
-                    .wait_for_result(task.id, 1)
-                    .await
-                {
+                if let Ok(Some(status)) = self.redis.wait_for_result(task.id, 1).await {
                     // 3.2 从 Postgres 查询任务结果
                     return self.query_task_result(task.id, &status).await;
                 }
 
                 // 3.3 直接查询 Postgres（兜底）
-                if let Ok(Some(task)) = NodeTask::find_by_id(self.store.pool(), task.id).await {
-                    if task.is_terminal() {
-                        return self.query_task_result(task.id, &task.status).await;
-                    }
+                if let Ok(Some(task)) = NodeTask::find_by_id(self.store.pool(), task.id).await
+                    && task.is_terminal()
+                {
+                    return self.query_task_result(task.id, &task.status).await;
                 }
 
                 // 短暂休眠后继续轮询
@@ -116,10 +105,10 @@ impl NodeGatewayService {
 
         match status {
             "succeeded" => {
-                let response: ChatCompletionResponse =
-                    serde_json::from_value(task.result_json.ok_or_else(|| {
-                        anyhow::anyhow!("Task succeeded but no result_json")
-                    })?)?;
+                let response: ChatCompletionResponse = serde_json::from_value(
+                    task.result_json
+                        .ok_or_else(|| anyhow::anyhow!("Task succeeded but no result_json"))?,
+                )?;
                 Ok(response)
             }
             "failed" => {
@@ -147,7 +136,9 @@ impl NodeGatewayService {
         session_id: Uuid,
         accepted_models: Vec<String>,
     ) -> Result<NodeHeartbeatResponse, DbError> {
-        self.store.heartbeat(node_id, session_id, accepted_models).await
+        self.store
+            .heartbeat(node_id, session_id, accepted_models)
+            .await
     }
 
     /// 领取任务(长轮询)
@@ -161,7 +152,7 @@ impl NodeGatewayService {
         let node = keycompute_db::models::node::Node::find_by_id(self.store.pool(), node_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
-    
+
         // 如果节点状态不是 online,直接返回空 task (不参与 poll)
         if node.status != "online" {
             return Ok(NodePollResponse {
@@ -172,9 +163,12 @@ impl NodeGatewayService {
         }
 
         // 2. 检查 session 是否过期或撤销 (ready predicate)
-        let session = keycompute_db::models::node_session::NodeSession::find_by_id(self.store.pool(), session_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
+        let session = keycompute_db::models::node_session::NodeSession::find_by_id(
+            self.store.pool(),
+            session_id,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
         let now = chrono::Utc::now();
         if session.is_revoked() || session.expires_at < now {
@@ -185,7 +179,7 @@ impl NodeGatewayService {
                 retry_after_ms: Some(5000),
             });
         }
-    
+
         // 3. 对每个 accepted_model 尝试 poll
         for model in accepted_models {
             match self
@@ -195,11 +189,7 @@ impl NodeGatewayService {
             {
                 Ok(Some(task_id)) => {
                     // 3. 原子 claim 任务
-                    match self
-                        .store
-                        .claim_task(task_id, node_id, session_id)
-                        .await?
-                    {
+                    match self.store.claim_task(task_id, node_id, session_id).await? {
                         Some((_, envelope)) => {
                             return Ok(NodePollResponse {
                                 protocol_version: "node.v1".to_string(),
@@ -223,7 +213,7 @@ impl NodeGatewayService {
                 }
             }
         }
-    
+
         // 没有任务
         Ok(NodePollResponse {
             protocol_version: "node.v1".to_string(),
@@ -264,31 +254,18 @@ impl NodeGatewayService {
             NodeTaskCompleteAction::Requeued => {
                 // requeued 需要重新推送到模型队列
                 // 注意:这里需要获取 task 的 model,从任务中查询
-                if let Ok(task) = keycompute_db::models::node_task::NodeTask::find_by_id(
+                if let Ok(Some(t)) = keycompute_db::models::node_task::NodeTask::find_by_id(
                     self.store.pool(),
                     task_id,
-                ).await {
-                    if let Some(t) = task {
-                        if let Err(e) = self
-                            .redis
-                            .push_to_model_queue(&t.model, task_id)
-                            .await
-                        {
-                            tracing::warn!(
-                                "Failed to repush requeued task {} to queue: {}",
-                                task_id,
-                                e
-                            );
-                        }
-                    }
+                )
+                .await
+                    && let Err(e) = self.redis.push_to_model_queue(&t.model, task_id).await
+                {
+                    tracing::warn!("Failed to repush requeued task {} to queue: {}", task_id, e);
                 }
             }
             NodeTaskCompleteAction::Failed => {
-                if let Err(e) = self
-                    .redis
-                    .push_result_notification(task_id, "failed")
-                    .await
-                {
+                if let Err(e) = self.redis.push_result_notification(task_id, "failed").await {
                     tracing::warn!(
                         "Failed to push failed notification for task {}: {}",
                         task_id,

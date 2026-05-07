@@ -43,7 +43,11 @@ impl FailoverManager {
     /// 记录失败
     pub fn record_failure(&self, target: &ExecutionTarget, error: &KeyComputeError) {
         let (account_id, provider) = match target {
-            ExecutionTarget::ProviderAccount { account_id, provider, .. } => (account_id, provider),
+            ExecutionTarget::ProviderAccount {
+                account_id,
+                provider,
+                ..
+            } => (account_id, provider),
             ExecutionTarget::Node { model } => {
                 tracing::warn!(
                     model = %model,
@@ -53,7 +57,7 @@ impl FailoverManager {
                 return;
             }
         };
-        
+
         tracing::warn!(
             account_id = %account_id,
             provider = %provider,
@@ -142,7 +146,7 @@ mod tests {
 
         let next = manager.select_next(&targets, 0);
         assert!(next.is_some());
-        
+
         // 验证返回的是 claude provider
         if let ExecutionTarget::ProviderAccount { provider, .. } = next.unwrap() {
             assert_eq!(provider, "claude");

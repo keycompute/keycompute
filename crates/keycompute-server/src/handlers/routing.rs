@@ -18,13 +18,16 @@ use uuid::Uuid;
 /// 从 ExecutionTarget 提取路由目标信息
 fn extract_target_info(target: &ExecutionTarget) -> Option<RoutingTargetInfo> {
     match target {
-        ExecutionTarget::ProviderAccount { provider, account_id, endpoint, .. } => {
-            Some(RoutingTargetInfo {
-                provider: provider.clone(),
-                account_id: *account_id,
-                endpoint: endpoint.clone(),
-            })
-        }
+        ExecutionTarget::ProviderAccount {
+            provider,
+            account_id,
+            endpoint,
+            ..
+        } => Some(RoutingTargetInfo {
+            provider: provider.clone(),
+            account_id: *account_id,
+            endpoint: endpoint.clone(),
+        }),
         ExecutionTarget::Node { .. } => None, // Node 路径不支持此接口
     }
 }
@@ -192,7 +195,7 @@ pub async fn debug_routing(
             let fallback_chain: Vec<RoutingTargetInfo> = plan
                 .fallback_chain
                 .iter()
-                .filter_map(|t| extract_target_info(t))
+                .filter_map(extract_target_info)
                 .collect();
 
             // 路由成功
@@ -211,7 +214,11 @@ pub async fn debug_routing(
                 message: None,
             };
 
-            let primary_provider = response.primary.as_ref().map(|p| p.provider.clone()).unwrap_or_default();
+            let primary_provider = response
+                .primary
+                .as_ref()
+                .map(|p| p.provider.clone())
+                .unwrap_or_default();
             tracing::info!(
                 request_id = %ctx.request_id,
                 primary_provider = %primary_provider,

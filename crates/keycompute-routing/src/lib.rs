@@ -22,7 +22,7 @@ use uuid::Uuid;
 ///
 /// 用于路由引擎检查是否存在 ready 节点
 /// 实现方可以是 PostgresNodeIndex 或 mock 实现
-/// 
+///
 /// **ready predicate** (与 poll 领取资格使用同一套服务端可验证数据):
 /// - `nodes.status = 'online'` (隐含 `consecutive_failure_count < failure_threshold`)
 /// - `node_sessions.expires_at > NOW()` (session 未过期)
@@ -33,7 +33,7 @@ use uuid::Uuid;
 #[async_trait::async_trait]
 pub trait NodeCapabilityIndex: Send + Sync {
     /// 检查是否存在 ready 节点可以处理指定模型
-    /// 
+    ///
     /// 该方法为异步，因为实际实现需要执行数据库查询 (I/O 操作)。
     async fn has_ready_node(&self, model: &str) -> bool;
 }
@@ -73,7 +73,10 @@ impl std::fmt::Debug for RoutingEngine {
             .field("provider_health", &"ProviderHealthStore")
             .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
             .field("providers", &self.providers)
-            .field("node_index", &self.node_index.as_ref().map(|_| "NodeCapabilityIndex"))
+            .field(
+                "node_index",
+                &self.node_index.as_ref().map(|_| "NodeCapabilityIndex"),
+            )
             .finish()
     }
 }
@@ -149,7 +152,7 @@ impl RoutingEngine {
     ///
     /// 根据 RequestContext 路由到最优的 Provider 和账号
     /// 使用租户专属账号池进行路由
-    /// 
+    ///
     /// **Node 路由支持**:
     /// - 检测 `model.starts_with("node:")` 前缀
     /// - 如果 `stream=true` 且前缀为 `node:`,返回 `streaming_not_supported_on_node`

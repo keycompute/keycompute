@@ -28,7 +28,9 @@ pub use api_key::{CreateProduceAiKeyRequest, ProduceAiKey, ProduceAiKeyResponse}
 pub use distribution_record::{
     CreateDistributionRecordRequest, DistributionLevelStats, DistributionRecord, DistributionStats,
 };
-pub use node::{CreateNodeRequest, Node, NODE_STATUS_EXCLUDED, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE};
+pub use node::{
+    CreateNodeRequest, NODE_STATUS_EXCLUDED, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE, Node,
+};
 pub use node_session::{CreateNodeSessionRequest, NodeSession};
 pub use node_task::{
     CreateNodeTaskRequest, NodeTask, TASK_STATUS_EXPIRED, TASK_STATUS_FAILED, TASK_STATUS_LEASED,

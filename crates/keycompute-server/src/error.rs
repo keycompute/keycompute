@@ -146,9 +146,7 @@ impl From<keycompute_db::DbError> for ApiError {
                     | "grace_period_expired"
                     | "invalid_task_state"
                     | "lease_mismatch"
-                    | "task_expired_during_complete" => {
-                        ApiError::NodeTaskConflict(msg)
-                    }
+                    | "task_expired_during_complete" => ApiError::NodeTaskConflict(msg),
                     _ => ApiError::Internal(msg),
                 }
             }

@@ -12,8 +12,8 @@ use axum::{
     extract::{Path, State},
 };
 use keycompute_types::node::{
-    NodeHeartbeatRequest, NodeHeartbeatResponse, NodeRegisterRequest, NodeRegisterResponse,
-    NodeTaskCompleteRequest, NodeTaskCompleteResponse, NodePollRequest, NodePollResponse,
+    NodeHeartbeatRequest, NodeHeartbeatResponse, NodePollRequest, NodePollResponse,
+    NodeRegisterRequest, NodeRegisterResponse, NodeTaskCompleteRequest, NodeTaskCompleteResponse,
 };
 use node_gateway::NodeGatewayService;
 use std::sync::Arc;
@@ -28,17 +28,17 @@ pub async fn node_register(
     Json(request): Json<NodeRegisterRequest>,
 ) -> Result<Json<NodeRegisterResponse>> {
     let node_gateway = get_node_gateway(&state)?;
-    
+
     // 注意：register_node 需要 owner_user_id
     // MVP 阶段使用 nil UUID，后续应从认证上下文或配置读取真实的 user_id
     // 根据 AGENTS.md：nodes.owner_user_id 表示节点注册归属和管理主体
     let owner_user_id = uuid::Uuid::nil(); // TODO: MVP 临时方案，需从配置读取
-    
+
     let response = node_gateway
         .register_node(&request, owner_user_id)
         .await
-        .map_err(|e| ApiError::from(e))?;
-    
+        .map_err(ApiError::from)?;
+
     Ok(Json(response))
 }
 
@@ -60,17 +60,17 @@ pub async fn node_heartbeat(
             actual_session_id: body.session_id,
         });
     }
-    
+
     let node_gateway = get_node_gateway(&state)?;
-    
+
     // 从 body 中提取 accepted_models
     let accepted_models = body.accepted_models.clone();
-    
+
     let response = node_gateway
         .heartbeat(auth.node_id, auth.session_id, accepted_models)
         .await
-        .map_err(|e| ApiError::from(e))?;
-    
+        .map_err(ApiError::from)?;
+
     Ok(Json(response))
 }
 
@@ -92,29 +92,29 @@ pub async fn node_poll(
             actual_session_id: body.session_id,
         });
     }
-    
+
     let node_gateway = get_node_gateway(&state)?;
-    
+
     // 从数据库读取 session 的 accepted_models
     let pool = state
         .pool
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
-    
-    let session = keycompute_db::models::node_session::NodeSession::find_by_id(pool, auth.session_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query session: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Session {} not found", auth.session_id)))?;
-    
+
+    let session =
+        keycompute_db::models::node_session::NodeSession::find_by_id(pool, auth.session_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to query session: {}", e)))?
+            .ok_or_else(|| ApiError::NotFound(format!("Session {} not found", auth.session_id)))?;
+
     let accepted_models: Vec<String> =
-        serde_json::from_value(session.accepted_models_json)
-            .unwrap_or_default();
-    
+        serde_json::from_value(session.accepted_models_json).unwrap_or_default();
+
     let response = node_gateway
         .poll_task(auth.node_id, auth.session_id, accepted_models)
         .await
-        .map_err(|e| ApiError::from(e))?;
-    
+        .map_err(ApiError::from)?;
+
     Ok(Json(response))
 }
 
@@ -137,21 +137,27 @@ pub async fn node_complete(
             actual_session_id: body.session_id,
         });
     }
-    
+
     // 验证路径中的 task_id 与请求体中的 task_id 一致
     if body.task_id != task_id {
         return Err(ApiError::BadRequest(
             "task_id in path does not match task_id in body".to_string(),
         ));
     }
-    
+
     let node_gateway = get_node_gateway(&state)?;
-    
+
     let response = node_gateway
-        .complete_task(body.task_id, body.lease_id, auth.node_id, auth.session_id, body.result)
+        .complete_task(
+            body.task_id,
+            body.lease_id,
+            auth.node_id,
+            auth.session_id,
+            body.result,
+        )
         .await
-        .map_err(|e| ApiError::from(e))?;
-    
+        .map_err(ApiError::from)?;
+
     Ok(Json(response))
 }
 

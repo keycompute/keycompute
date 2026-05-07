@@ -258,7 +258,7 @@ impl AppState {
             billing,
             email_service,
             public_auth_cookie_secret,
-            payment: None, // 支付服务需要数据库连接
+            payment: None,      // 支付服务需要数据库连接
             node_gateway: None, // 节点网关需要数据库连接和 Redis
             gateway_config: config.gateway,
         }
@@ -558,7 +558,7 @@ impl AppState {
             billing,
             email_service,
             public_auth_cookie_secret,
-            payment: None, // 测试环境不需要支付服务
+            payment: None,      // 测试环境不需要支付服务
             node_gateway: None, // 测试环境不需要节点网关
             gateway_config: config.gateway,
         }

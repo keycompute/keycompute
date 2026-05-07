@@ -5,7 +5,6 @@
 use integration_tests::common::VerificationChain;
 use integration_tests::mocks::provider::MockProviderFactory;
 use keycompute_provider_trait::ProviderAdapter;
-use keycompute_types::ExecutionTarget;
 use llm_gateway::retry::RetryState;
 use llm_gateway::{FailoverManager, GatewayBuilder, GatewayConfig, RetryPolicy};
 use std::sync::Arc;
@@ -134,12 +133,7 @@ fn test_gateway_failover() {
 
     // 2. 创建测试 targets
     let targets = vec![
-        ExecutionTarget::new_provider(
-            "openai",
-            Uuid::new_v4(),
-            "https://api.openai.com",
-            "key1",
-        ),
+        ExecutionTarget::new_provider("openai", Uuid::new_v4(), "https://api.openai.com", "key1"),
         ExecutionTarget::new_provider(
             "claude",
             Uuid::new_v4(),
