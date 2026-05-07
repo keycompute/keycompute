@@ -56,15 +56,11 @@ impl NodeTestEnv {
         sqlx::query("DELETE FROM node_task_submissions")
             .execute(&pool)
             .await?;
-        sqlx::query("DELETE FROM node_tasks")
-            .execute(&pool)
-            .await?;
+        sqlx::query("DELETE FROM node_tasks").execute(&pool).await?;
         sqlx::query("DELETE FROM node_sessions")
             .execute(&pool)
             .await?;
-        sqlx::query("DELETE FROM nodes")
-            .execute(&pool)
-            .await?;
+        sqlx::query("DELETE FROM nodes").execute(&pool).await?;
 
         let config = NodeGatewayAppConfig::default();
         let store = NodeGatewayStore::new(pool.clone(), config.clone());

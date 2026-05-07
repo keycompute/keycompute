@@ -102,7 +102,7 @@ jobs:
           if [ ! -f ~/.cargo/bin/cargo-tarpaulin ]; then
             cargo install cargo-tarpaulin --version 0.35.2
           fi
-          cargo tarpaulin --package integration-tests --out Xml --output-dir coverage
+          cargo tarpaulin --package integration-tests --out Xml --output-dir coverage --timeout 300 -- --test-threads=1
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
