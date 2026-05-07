@@ -5,6 +5,10 @@
 pub mod account;
 pub mod api_key;
 pub mod distribution_record;
+pub mod node;
+pub mod node_session;
+pub mod node_task;
+pub mod node_task_submission;
 pub mod password_reset;
 pub mod payment_order;
 pub mod pending_registration;
@@ -24,6 +28,13 @@ pub use api_key::{CreateProduceAiKeyRequest, ProduceAiKey, ProduceAiKeyResponse}
 pub use distribution_record::{
     CreateDistributionRecordRequest, DistributionLevelStats, DistributionRecord, DistributionStats,
 };
+pub use node::{CreateNodeRequest, Node, NODE_STATUS_EXCLUDED, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE};
+pub use node_session::{CreateNodeSessionRequest, NodeSession};
+pub use node_task::{
+    CreateNodeTaskRequest, NodeTask, TASK_STATUS_EXPIRED, TASK_STATUS_FAILED, TASK_STATUS_LEASED,
+    TASK_STATUS_QUEUED, TASK_STATUS_SUCCEEDED,
+};
+pub use node_task_submission::{CreateNodeTaskSubmissionRequest, NodeTaskSubmission};
 pub use password_reset::{CreatePasswordResetRequest, PasswordReset};
 pub use payment_order::{
     CreatePaymentOrderRequest, PaymentMethod, PaymentOrder, PaymentOrderStats, PaymentOrderStatus,
