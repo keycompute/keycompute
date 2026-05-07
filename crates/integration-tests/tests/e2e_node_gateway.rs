@@ -568,6 +568,15 @@ async fn test_complete_task_success() -> anyhow::Result<()> {
         .await?;
 
     // 2. 手动创建 leased 任务 (模拟已领取)
+    // 先验证 session 是否存在
+    let session_exists = keycompute_db::models::node_session::NodeSession::find_by_id(
+        &env.pool,
+        register_resp.session_id,
+    )
+    .await?
+    .is_some();
+    assert!(session_exists, "Session should exist after registration");
+
     let lease_id = Uuid::new_v4();
     let task = sqlx::query_as::<_, NodeTask>(
         r#"
