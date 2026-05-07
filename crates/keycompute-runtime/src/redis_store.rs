@@ -120,6 +120,11 @@ impl RedisRuntimeStore {
     pub fn pool_status(&self) -> deadpool_redis::Status {
         self.pool.status()
     }
+
+    /// 获取 Redis 连接池引用
+    pub fn pool(&self) -> &Pool {
+        &self.pool
+    }
 }
 
 impl RuntimeStore for RedisRuntimeStore {

@@ -18,6 +18,7 @@ pub mod database;
 pub mod distribution;
 pub mod email;
 pub mod gateway;
+pub mod node_gateway;
 pub mod redis;
 pub mod server;
 
@@ -28,6 +29,7 @@ pub use database::DatabaseConfig;
 pub use distribution::DistributionConfig;
 pub use email::EmailConfig;
 pub use gateway::{GatewayConfig, ProxyConfig};
+pub use node_gateway::NodeGatewayConfig;
 pub use redis::RedisConfig;
 pub use server::ServerConfig;
 
