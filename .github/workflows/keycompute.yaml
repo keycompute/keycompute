@@ -96,6 +96,7 @@ jobs:
           KC__DATABASE__URL: postgres://postgres:password@localhost:5432/keycompute
           KC__REDIS__URL: redis://localhost:6379
           KC__AUTH__JWT_SECRET: test-jwt-secret-for-ci
+          KC__NODE_GATEWAY__REGISTRATION_TOKEN: default-registration-token
 
       - name: Generate coverage report
         run: |
@@ -103,6 +104,12 @@ jobs:
             cargo install cargo-tarpaulin --version 0.35.2
           fi
           cargo tarpaulin --package integration-tests --out Xml --output-dir coverage --timeout 300 -- --test-threads=1
+        env:
+          DATABASE_URL: postgres://postgres:password@localhost:5432/keycompute
+          KC__DATABASE__URL: postgres://postgres:password@localhost:5432/keycompute
+          KC__REDIS__URL: redis://localhost:6379
+          KC__AUTH__JWT_SECRET: test-jwt-secret-for-ci
+          KC__NODE_GATEWAY__REGISTRATION_TOKEN: default-registration-token
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4

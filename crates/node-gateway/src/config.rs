@@ -51,7 +51,8 @@ impl NodeGatewayAppConfig {
     /// 从配置文件中加载
     pub fn from_config(config: &NodeGatewayConfig) -> Self {
         Self {
-            registration_token: config.registration_token
+            registration_token: config
+                .registration_token
                 .clone()
                 .unwrap_or_else(|| "change-me-in-production".to_string()),
             session_ttl_secs: config.session_ttl_secs.unwrap_or(300),

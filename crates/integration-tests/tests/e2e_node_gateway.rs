@@ -62,7 +62,14 @@ impl NodeTestEnv {
             .await?;
         sqlx::query("DELETE FROM nodes").execute(&pool).await?;
 
-        let config = NodeGatewayAppConfig::default();
+        // 从环境变量读取配置（支持 CI 环境）
+        let registration_token = std::env::var("KC__NODE_GATEWAY__REGISTRATION_TOKEN")
+            .unwrap_or_else(|_| "change-me-in-production".to_string());
+
+        let config = NodeGatewayAppConfig {
+            registration_token,
+            ..Default::default()
+        };
         let store = NodeGatewayStore::new(pool.clone(), config.clone());
 
         // Redis 连接（与 e2e_redis_runtime.rs 保持一致）
@@ -83,12 +90,12 @@ impl NodeTestEnv {
     }
 
     /// 创建注册请求
-    fn create_register_request(client_id: &str) -> NodeRegisterRequest {
+    fn create_register_request(&self, client_id: &str) -> NodeRegisterRequest {
         NodeRegisterRequest {
             protocol_version: "node.v1".to_string(),
             client_instance_id: client_id.to_string(),
             display_name: format!("Test Node {}", client_id),
-            registration_token: "default-registration-token".to_string(),
+            registration_token: self.config.registration_token.clone(),
             capabilities: NodeCapabilities {
                 runtime: "ollama".to_string(),
                 models: vec![
@@ -111,7 +118,7 @@ async fn test_node_registration() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 新节点注册
-    let register_req = NodeTestEnv::create_register_request("test-client-1");
+    let register_req = env.create_register_request("test-client-1");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -171,7 +178,7 @@ async fn test_node_reregistration() -> anyhow::Result<()> {
     let owner_id = Uuid::new_v4();
 
     // 1. 首次注册
-    let req1 = NodeTestEnv::create_register_request(client_id);
+    let req1 = env.create_register_request(client_id);
     let resp1 = env.service.register_node(&req1, owner_id).await?;
 
     chain.add_step(
@@ -182,7 +189,7 @@ async fn test_node_reregistration() -> anyhow::Result<()> {
     );
 
     // 2. 重复注册 (应该创建新 session)
-    let req2 = NodeTestEnv::create_register_request(client_id);
+    let req2 = env.create_register_request(client_id);
     let resp2 = env.service.register_node(&req2, owner_id).await?;
 
     chain.add_step(
@@ -216,7 +223,7 @@ async fn test_excluded_node_reject_registration() -> anyhow::Result<()> {
     let owner_id = Uuid::new_v4();
 
     // 1. 正常注册
-    let req = NodeTestEnv::create_register_request(client_id);
+    let req = env.create_register_request(client_id);
     let resp = env.service.register_node(&req, owner_id).await?;
 
     // 2. 手动将节点标记为 excluded
@@ -228,7 +235,7 @@ async fn test_excluded_node_reject_registration() -> anyhow::Result<()> {
     .await?;
 
     // 3. 尝试重新注册 (应该失败)
-    let req2 = NodeTestEnv::create_register_request(client_id);
+    let req2 = env.create_register_request(client_id);
     let result = env.service.register_node(&req2, owner_id).await;
 
     chain.add_step(
@@ -250,7 +257,7 @@ async fn test_heartbeat_normal_node() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-hb-normal");
+    let register_req = env.create_register_request("test-client-hb-normal");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -308,7 +315,7 @@ async fn test_heartbeat_excluded_node() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-hb-excluded");
+    let register_req = env.create_register_request("test-client-hb-excluded");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -377,7 +384,7 @@ async fn test_heartbeat_accepted_models_validation() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点 (注册了 deepseek-chat 和 llama3)
-    let register_req = NodeTestEnv::create_register_request("test-client-hb-validation");
+    let register_req = env.create_register_request("test-client-hb-validation");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -429,7 +436,7 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-task");
+    let register_req = env.create_register_request("test-client-task");
     let _register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -494,7 +501,7 @@ async fn test_poll_task_success() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-poll");
+    let register_req = env.create_register_request("test-client-poll");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -562,7 +569,7 @@ async fn test_complete_task_success() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-complete");
+    let register_req = env.create_register_request("test-client-complete");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -662,7 +669,7 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-idempotent");
+    let register_req = env.create_register_request("test-client-idempotent");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -778,7 +785,7 @@ async fn test_node_lifecycle_offline_to_online() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-lifecycle");
+    let register_req = env.create_register_request("test-client-lifecycle");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -832,7 +839,7 @@ async fn test_node_excluded_after_failures() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-excluded");
+    let register_req = env.create_register_request("test-client-excluded");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -909,7 +916,7 @@ async fn test_poll_rejected_for_excluded_node() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-poll-excluded");
+    let register_req = env.create_register_request("test-client-poll-excluded");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -952,7 +959,7 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册节点
-    let register_req = NodeTestEnv::create_register_request("test-client-concurrent");
+    let register_req = env.create_register_request("test-client-concurrent");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())
@@ -1065,7 +1072,7 @@ async fn test_full_node_chain() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 1. 注册
-    let register_req = NodeTestEnv::create_register_request("test-client-full-chain");
+    let register_req = env.create_register_request("test-client-full-chain");
     let register_resp = env
         .service
         .register_node(&register_req, Uuid::new_v4())

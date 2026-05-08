@@ -544,7 +544,8 @@ impl AppConfig {
         if let Some(ref node_gateway_config) = self.node_gateway {
             // 检查 registration_token 是否使用了占位符
             if let Some(ref token) = node_gateway_config.registration_token
-                && (token == "change-me-node-registration-token" || token == "change-me-in-production")
+                && (token == "change-me-node-registration-token"
+                    || token == "change-me-in-production")
             {
                 tracing::warn!(
                     "⚠️  安全警告: Node Gateway registration_token 使用默认占位符，生产环境必须修改！请设置 KC__NODE_GATEWAY__REGISTRATION_TOKEN 环境变量"
