@@ -133,6 +133,49 @@ max_total_ratio = 0.30
 # KC__DISTRIBUTION__DEFAULT_LEVEL2_RATIO=0.02
 # KC__DISTRIBUTION__MAX_TOTAL_RATIO=0.30
 
+# ==================== 节点网关配置（Node Gateway） ====================
+# 用于个人 PC 节点接入，支持 Ollama 本地模型执行
+# 节点通过 node-token 客户端连接，主动轮询任务并提交结果
+#
+[node_gateway]
+# 节点注册 token（生产环境必须修改！）
+# 用于验证节点注册请求，所有节点共享此 token
+# 生成命令：openssl rand -base64 32
+# 安全警告：一旦有节点注册后不可更改（会导致已注册节点失效）
+# openssl rand -base64 32
+registration_token = "change-me-in-production"
+# 会话 TTL（秒），节点会话有效期，默认 300（5 分钟）
+# 超过此时间未心跳的会话将被标记为过期
+session_ttl_secs = 300
+# 心跳间隔（秒），node-token 客户端发送心跳的间隔，默认 30
+heartbeat_interval_secs = 30
+# 轮询超时（秒），节点长轮询领取任务的最长等待时间，默认 30
+poll_timeout_secs = 30
+# 任务 deadline 超时（秒），任务必须在 deadline 内完成，默认 120（2 分钟）
+task_deadline_secs = 120
+# 完成宽限期（秒），任务过期后允许提交结果的时间，默认 60（1 分钟）
+complete_grace_secs = 60
+# 节点失败阈值，节点连续失败次数达到此值后被排除（excluded），默认 3
+node_failure_threshold = 3
+# 任务失败阈值，单个任务失败重试次数上限，默认 3
+task_failure_threshold = 3
+# Sweeper 心跳 TTL（秒），超过此时间未心跳的 online 节点标记为 offline，默认 600（10 分钟）
+sweeper_heartbeat_ttl_secs = 600
+# Sweeper 补推间隔（秒），创建超过此时间的 queued 任务补推到 Redis，默认 10
+sweeper_repush_interval_secs = 10
+#
+# 环境变量方式（推荐，优先级更高）：
+# KC__NODE_GATEWAY__REGISTRATION_TOKEN=your-secure-token
+# KC__NODE_GATEWAY__SESSION_TTL_SECS=300
+# KC__NODE_GATEWAY__HEARTBEAT_INTERVAL_SECS=30
+# KC__NODE_GATEWAY__POLL_TIMEOUT_SECS=30
+# KC__NODE_GATEWAY__TASK_DEADLINE_SECS=120
+# KC__NODE_GATEWAY__COMPLETE_GRACE_SECS=60
+# KC__NODE_GATEWAY__NODE_FAILURE_THRESHOLD=3
+# KC__NODE_GATEWAY__TASK_FAILURE_THRESHOLD=3
+# KC__NODE_GATEWAY__SWEEPER_HEARTBEAT_TTL_SECS=600
+# KC__NODE_GATEWAY__SWEEPER_REPUSH_INTERVAL_SECS=10
+
 # ==================== 默认系统管理员（环境变量配置） ====================
 # 首次启动时自动创建的系统管理员账号
 # 注意：这些值不在 config.toml 中配置，而是通过环境变量设置

@@ -540,6 +540,59 @@ impl AppConfig {
             ));
         }
 
+        // Node Gateway 配置检查
+        if let Some(ref node_gateway_config) = self.node_gateway {
+            // 检查 registration_token 是否使用了占位符
+            if let Some(ref token) = node_gateway_config.registration_token
+                && (token == "change-me-node-registration-token" || token == "change-me-in-production")
+            {
+                tracing::warn!(
+                    "⚠️  安全警告: Node Gateway registration_token 使用默认占位符，生产环境必须修改！请设置 KC__NODE_GATEWAY__REGISTRATION_TOKEN 环境变量"
+                );
+                // 生产环境强制报错
+                #[cfg(not(debug_assertions))]
+                return Err(ConfigLoadError::ValidationError(
+                    "生产环境禁止使用默认 Node Gateway registration_token，请设置 KC__NODE_GATEWAY__REGISTRATION_TOKEN 环境变量".to_string(),
+                ));
+            }
+
+            // 检查超时配置合理性
+            if let Some(session_ttl) = node_gateway_config.session_ttl_secs
+                && session_ttl == 0
+            {
+                tracing::warn!("⚠️  Node Gateway 会话 TTL 设置为 0，会话将立即过期");
+            }
+
+            if let Some(poll_timeout) = node_gateway_config.poll_timeout_secs
+                && poll_timeout == 0
+            {
+                tracing::warn!("⚠️  Node Gateway 轮询超时设置为 0，轮询将立即失败");
+            }
+
+            if let Some(task_deadline) = node_gateway_config.task_deadline_secs
+                && task_deadline == 0
+            {
+                tracing::warn!("⚠️  Node Gateway 任务 deadline 设置为 0，任务将立即过期");
+            }
+
+            // 检查失败阈值
+            if let Some(threshold) = node_gateway_config.node_failure_threshold
+                && threshold == 0
+            {
+                tracing::warn!("⚠️  Node Gateway 节点失败阈值设置为 0，节点将永远不会被排除");
+            }
+
+            if let Some(threshold) = node_gateway_config.task_failure_threshold
+                && threshold == 0
+            {
+                tracing::warn!("⚠️  Node Gateway 任务失败阈值设置为 0，任务失败后将不会重试");
+            }
+
+            tracing::info!("Node Gateway 配置已加载");
+        } else {
+            tracing::info!("💡 提示: 未配置 Node Gateway，个人 PC 节点接入功能将不可用");
+        }
+
         tracing::info!("配置验证通过");
         Ok(())
     }

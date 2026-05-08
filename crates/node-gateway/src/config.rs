@@ -33,7 +33,7 @@ pub struct NodeGatewayAppConfig {
 impl Default for NodeGatewayAppConfig {
     fn default() -> Self {
         Self {
-            registration_token: "default-registration-token".to_string(),
+            registration_token: "change-me-in-production".to_string(),
             session_ttl_secs: 300, // 5 分钟
             heartbeat_interval_secs: 30,
             poll_timeout_secs: 30,
@@ -51,10 +51,9 @@ impl NodeGatewayAppConfig {
     /// 从配置文件中加载
     pub fn from_config(config: &NodeGatewayConfig) -> Self {
         Self {
-            registration_token: config.registration_token.clone().unwrap_or_else(|| {
-                std::env::var("NODE_REGISTRATION_TOKEN")
-                    .unwrap_or_else(|_| "default-registration-token".to_string())
-            }),
+            registration_token: config.registration_token
+                .clone()
+                .unwrap_or_else(|| "change-me-in-production".to_string()),
             session_ttl_secs: config.session_ttl_secs.unwrap_or(300),
             heartbeat_interval_secs: config.heartbeat_interval_secs.unwrap_or(30),
             poll_timeout_secs: config.poll_timeout_secs.unwrap_or(30),
