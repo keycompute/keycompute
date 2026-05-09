@@ -155,11 +155,12 @@ impl RoutingEngine {
     ///
     /// **Node 路由支持**:
     /// - 检测 `model.starts_with("node:")` 前缀
-    /// - 如果 `stream=true` 且前缀为 `node:`,返回 `streaming_not_supported_on_node`
     /// - 去掉前缀得到 actual_model,调用 `node_index.has_ready_node(actual_model)`
     /// - 存在 ready 节点: 返回 `ExecutionTarget::Node { model: actual_model }`
     /// - 不存在: 返回 `NoReadyNode` 错误,不 fallback
     /// - 无前缀: 走现有 Provider 路由逻辑
+    ///
+    /// **注**: Node 路径支持 stream=true,服务端会模拟流式输出
     pub async fn route(&self, ctx: &RequestContext) -> Result<ExecutionPlan> {
         tracing::info!(
             request_id = %ctx.request_id,
@@ -176,15 +177,6 @@ impl RoutingEngine {
                 actual_model = %actual_model,
                 "route: node prefix detected"
             );
-
-            // 检查 stream=true 是否被用于 Node 路径
-            if ctx.stream {
-                tracing::warn!(
-                    request_id = %ctx.request_id,
-                    "route: streaming not supported on node"
-                );
-                return Err(KeyComputeError::StreamingNotSupportedOnNode);
-            }
 
             // 检查是否配置了 node_index
             let node_index = self.node_index.as_ref().ok_or_else(|| {
@@ -1058,15 +1050,17 @@ mod tests {
         // 创建请求上下文,使用 node: 前缀但 stream=true
         let mut ctx = create_test_context();
         ctx.model = "node:deepseek-chat".to_string();
-        ctx.stream = true; // 流式请求
+        ctx.stream = true; // 流式请求现在应该被允许
 
-        // 应该返回 StreamingNotSupportedOnNode 错误
+        // 应该成功路由到 Node,服务端会模拟流式输出
         let plan = engine.route(&ctx).await;
-        assert!(plan.is_err());
+        assert!(plan.is_ok());
 
-        match plan.unwrap_err() {
-            KeyComputeError::StreamingNotSupportedOnNode => {}
-            _ => panic!("Expected StreamingNotSupportedOnNode error"),
+        match plan.unwrap().primary {
+            ExecutionTarget::Node { model } => {
+                assert_eq!(model, "deepseek-chat");
+            }
+            _ => panic!("Expected Node target"),
         }
     }
 

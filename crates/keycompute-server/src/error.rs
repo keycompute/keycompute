@@ -171,9 +171,6 @@ impl From<keycompute_types::KeyComputeError> for ApiError {
             // 路由
             KeyComputeError::RoutingFailed(msg) => ApiError::Routing(msg),
             KeyComputeError::NoReadyNode(msg) => ApiError::Routing(msg),
-            KeyComputeError::StreamingNotSupportedOnNode => {
-                ApiError::BadRequest("streaming not supported on node".into())
-            }
 
             // Provider
             KeyComputeError::ProviderError(msg) => ApiError::Provider(msg),

@@ -192,7 +192,7 @@ pub struct NodeTaskCompleteRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum NodeTaskResult {
-    /// 任务成功
+    /// 任务成功(非流式完整响应)
     Succeeded {
         /// Chat 完成响应
         response: crate::ChatCompletionResponse,

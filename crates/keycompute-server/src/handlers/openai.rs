@@ -356,13 +356,6 @@ pub async fn chat_completions(
     // 5. 根据 ExecutionTarget 分流执行路径
     match &plan.primary {
         ExecutionTarget::Node { model } => {
-            // Node 执行路径：仅支持非流式
-            if request.stream {
-                return Err(ApiError::BadRequest(
-                    "streaming not supported on node execution path".to_string(),
-                ));
-            }
-
             // 更新 ctx 的 model 字段（使用去掉前缀的实际模型名）
             let ctx_mut = Arc::make_mut(&mut ctx);
             ctx_mut.model = model.clone();
@@ -370,11 +363,8 @@ pub async fn chat_completions(
             // 更新定价快照（使用实际模型名和 "node" provider 进行定价查找）
             // 注意：必须先调用 update_context_pricing，再设置 provider
             // 因为 update_context_pricing 会检查 provider 是否变化
-            state
-                .pricing
-                .update_context_pricing(ctx_mut, "node")
-                .await;
-            
+            state.pricing.update_context_pricing(ctx_mut, "node").await;
+
             // 设置 provider 字段（用于日志追踪和后续逻辑）
             ctx_mut.set_provider("node");
 
@@ -390,7 +380,7 @@ pub async fn chat_completions(
                 chat: keycompute_types::ChatCompletionRequest {
                     model: model.clone(), // 使用去掉 node: 前缀的实际模型名
                     messages: ctx.messages.clone(),
-                    stream: Some(false),
+                    stream: Some(request.stream), // 传递 stream 标志
                     max_tokens: request.max_tokens,
                     temperature: request.temperature,
                     top_p: request.top_p,
@@ -399,65 +389,88 @@ pub async fn chat_completions(
                 },
             };
 
-            let response = node_gateway
-                .enqueue_and_wait(auth.user_id, model.clone(), payload)
-                .await
-                .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
+            if request.stream {
+                // 流式路径：获取完整响应后模拟流式输出
+                let response = node_gateway
+                    .enqueue_and_wait(auth.user_id, model.clone(), payload)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
 
-            // 更新 token 计数到 ctx（用于计费）
-            ctx.set_input_tokens(response.usage.prompt_tokens);
-            ctx.add_output_tokens(response.usage.completion_tokens);
+                // 更新 token 计数到 ctx（用于计费）
+                ctx.set_input_tokens(response.usage.prompt_tokens);
+                ctx.add_output_tokens(response.usage.completion_tokens);
 
-            // 将 ChatCompletionResponse 转换为 OpenAI 格式
-            let openai_response = ChatCompletionResponse {
-                id: format!(
-                    "chatcmpl-{}-kc",
-                    uuid::Uuid::new_v4()
-                        .to_string()
-                        .replace("-", "")
-                        .to_lowercase()
-                ),
-                object: "chat.completion".to_string(),
-                created: chrono::Utc::now().timestamp(),
-                model: model.clone(),
-                choices: vec![ChatCompletionChoice {
-                    index: 0,
-                    message: ChatCompletionMessage {
-                        role: "assistant".to_string(),
-                        content: response.choices.first().map(|c| c.message.content.clone()),
-                        tool_calls: None,
-                        tool_call_id: None,
-                        name: None,
+                // 将完整响应转换为模拟流式输出
+                let stream = simulate_node_stream(
+                    response,
+                    ctx,
+                    model.clone(),
+                    Arc::clone(&state.billing),
+                    request.stream_options,
+                );
+                Ok(Sse::new(stream).into_response())
+            } else {
+                // 非流式路径：保持现有逻辑
+                let response = node_gateway
+                    .enqueue_and_wait(auth.user_id, model.clone(), payload)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
+
+                // 更新 token 计数到 ctx（用于计费）
+                ctx.set_input_tokens(response.usage.prompt_tokens);
+                ctx.add_output_tokens(response.usage.completion_tokens);
+
+                // 将 ChatCompletionResponse 转换为 OpenAI 格式
+                let openai_response = ChatCompletionResponse {
+                    id: format!(
+                        "chatcmpl-{}-kc",
+                        uuid::Uuid::new_v4()
+                            .to_string()
+                            .replace("-", "")
+                            .to_lowercase()
+                    ),
+                    object: "chat.completion".to_string(),
+                    created: chrono::Utc::now().timestamp(),
+                    model: model.clone(),
+                    choices: vec![ChatCompletionChoice {
+                        index: 0,
+                        message: ChatCompletionMessage {
+                            role: "assistant".to_string(),
+                            content: response.choices.first().map(|c| c.message.content.clone()),
+                            tool_calls: None,
+                            tool_call_id: None,
+                            name: None,
+                        },
+                        finish_reason: response
+                            .choices
+                            .first()
+                            .and_then(|c| c.finish_reason.clone()),
+                        logprobs: None,
+                    }],
+                    usage: CompletionUsage {
+                        prompt_tokens: response.usage.prompt_tokens as u32,
+                        completion_tokens: response.usage.completion_tokens as u32,
+                        total_tokens: response.usage.total_tokens as u32,
+                        prompt_tokens_details: None,
+                        completion_tokens_details: None,
                     },
-                    finish_reason: response
-                        .choices
-                        .first()
-                        .and_then(|c| c.finish_reason.clone()),
-                    logprobs: None,
-                }],
-                usage: CompletionUsage {
-                    prompt_tokens: response.usage.prompt_tokens as u32,
-                    completion_tokens: response.usage.completion_tokens as u32,
-                    total_tokens: response.usage.total_tokens as u32,
-                    prompt_tokens_details: None,
-                    completion_tokens_details: None,
-                },
-                system_fingerprint: None,
-            };
+                    system_fingerprint: None,
+                };
 
-            // 触发计费
-            let billing = Arc::clone(&state.billing);
-            let _ = billing
-                .finalize_and_trigger_distribution(
-                    &ctx,
-                    "node",
-                    uuid::Uuid::nil(),
-                    model.as_str(),
-                    auth.user_id,
-                )
-                .await;
+                // 触发计费
+                let billing = Arc::clone(&state.billing);
+                let _ = billing
+                    .finalize_and_trigger_distribution(
+                        &ctx,
+                        "node",
+                        uuid::Uuid::nil(),
+                        model.as_str(),
+                        auth.user_id,
+                    )
+                    .await;
 
-            Ok(Json(openai_response).into_response())
+                Ok(Json(openai_response).into_response())
+            }
         }
         ExecutionTarget::ProviderAccount {
             provider,
@@ -924,6 +937,97 @@ pub async fn retrieve_model(
 
     // 模型不存在
     Err(ApiError::NotFound(format!("Model not found: {}", model_id)))
+}
+
+/// 将节点的完整响应转换为模拟流式输出
+///
+/// 该函数接收节点返回的完整 ChatCompletionResponse，
+/// 将其内容拆分为多个 SSE chunk，模拟 token 级流式输出。
+fn simulate_node_stream(
+    response: keycompute_types::ChatCompletionResponse,
+    ctx: Arc<RequestContext>,
+    model: String,
+    billing: Arc<keycompute_billing::BillingService>,
+    stream_options: Option<StreamOptions>,
+) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+    async_stream::stream! {
+        let completion_id = format!("chatcmpl-{}-kc", uuid::Uuid::new_v4().to_string().replace("-", "").to_lowercase());
+        let created = chrono::Utc::now().timestamp();
+
+        // 获取响应内容
+        let content = response.choices.first().map(|c| c.message.content.clone()).unwrap_or_default();
+
+        // 将内容拆分为字符级别的 chunk（模拟 token 级输出）
+        // 注：这里是简单实现，按字符拆分，实际可以按 token 拆分
+        let chars: Vec<char> = content.chars().collect();
+        let chunk_size = std::cmp::max(1, chars.len() / 20); // 至少 1 个字符，最多 20 个 chunk
+
+        // 发送 content chunks
+        for chunk in chars.chunks(chunk_size) {
+            let chunk_content: String = chunk.iter().collect();
+            let data = serde_json::json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": chunk_content
+                    },
+                    "finish_reason": null
+                }]
+            });
+            yield Ok(Event::default().event("message").data(data.to_string()));
+
+            // 小延迟，模拟真实流式输出
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        }
+
+        // 发送最后一个带有 finish_reason 的 chunk
+        let finish_reason = response.choices.first().and_then(|c| c.finish_reason.clone()).unwrap_or("stop".to_string());
+        let data = serde_json::json!({
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": finish_reason
+            }]
+        });
+        yield Ok(Event::default().event("message").data(data.to_string()));
+
+        // 如果请求了 usage，发送 usage chunk
+        if stream_options.map(|o| o.include_usage).unwrap_or(false) {
+            let data = serde_json::json!({
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            });
+            yield Ok(Event::default().event("message").data(data.to_string()));
+        }
+
+        // 计费（与 Provider 路径一致）
+        let _ = billing
+            .finalize_and_trigger_distribution(
+                &ctx,
+                "node",
+                uuid::Uuid::nil(),
+                &model,
+                ctx.user_id,
+            )
+            .await;
+    }
 }
 
 #[cfg(test)]
