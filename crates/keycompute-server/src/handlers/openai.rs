@@ -363,6 +363,21 @@ pub async fn chat_completions(
                 ));
             }
 
+            // 更新 ctx 的 model 字段（使用去掉前缀的实际模型名）
+            let ctx_mut = Arc::make_mut(&mut ctx);
+            ctx_mut.model = model.clone();
+
+            // 更新定价快照（使用实际模型名和 "node" provider 进行定价查找）
+            // 注意：必须先调用 update_context_pricing，再设置 provider
+            // 因为 update_context_pricing 会检查 provider 是否变化
+            state
+                .pricing
+                .update_context_pricing(ctx_mut, "node")
+                .await;
+            
+            // 设置 provider 字段（用于日志追踪和后续逻辑）
+            ctx_mut.set_provider("node");
+
             // 调用 node-gateway 执行
             let node_gateway = state
                 .node_gateway
@@ -373,7 +388,7 @@ pub async fn chat_completions(
             let payload = keycompute_types::node::NodeTaskPayload {
                 request_id: ctx.request_id,
                 chat: keycompute_types::ChatCompletionRequest {
-                    model: request.model.clone(),
+                    model: model.clone(), // 使用去掉 node: 前缀的实际模型名
                     messages: ctx.messages.clone(),
                     stream: Some(false),
                     max_tokens: request.max_tokens,
@@ -388,6 +403,10 @@ pub async fn chat_completions(
                 .enqueue_and_wait(auth.user_id, model.clone(), payload)
                 .await
                 .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
+
+            // 更新 token 计数到 ctx（用于计费）
+            ctx.set_input_tokens(response.usage.prompt_tokens);
+            ctx.add_output_tokens(response.usage.completion_tokens);
 
             // 将 ChatCompletionResponse 转换为 OpenAI 格式
             let openai_response = ChatCompletionResponse {
@@ -434,7 +453,7 @@ pub async fn chat_completions(
                     "node",
                     uuid::Uuid::nil(),
                     model.as_str(),
-                    uuid::Uuid::nil(),
+                    auth.user_id,
                 )
                 .await;
 
