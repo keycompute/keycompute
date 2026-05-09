@@ -165,7 +165,7 @@ sweeper_heartbeat_ttl_secs = 600
 sweeper_repush_interval_secs = 10
 #
 # 环境变量方式（推荐，优先级更高）：
-# KC__NODE_GATEWAY__REGISTRATION_TOKEN=your-secure-token
+# KC__NODE_GATEWAY__REGISTRATION_TOKEN=change-me-in-production
 # KC__NODE_GATEWAY__SESSION_TTL_SECS=300
 # KC__NODE_GATEWAY__HEARTBEAT_INTERVAL_SECS=30
 # KC__NODE_GATEWAY__POLL_TIMEOUT_SECS=30
