@@ -4280,6 +4280,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "deadpool-redis",
+ "fastrand",
  "keycompute-config",
  "keycompute-db",
  "keycompute-routing",
