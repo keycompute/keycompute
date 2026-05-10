@@ -63,7 +63,7 @@ Use this setup when you want a faster edit / run loop.
 1. Copy the local config template:
 
 ```bash
-cp config.toml.example config.toml
+cp config.example.toml config.toml
 ```
 
 2. Start the local dependencies:

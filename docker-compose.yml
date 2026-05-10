@@ -132,7 +132,7 @@ services:
 
       # 默认系统管理员配置（首次启动时自动创建）
       KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
-      KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-12345}
+      KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}
 
       # 节点网关配置（Node Gateway）
       # 生产环境必须修改 REGISTRATION_TOKEN！

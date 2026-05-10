@@ -134,11 +134,17 @@ docker compose ps
 
 部署完成后访问 `http://localhost:8080` 即可使用！
 
-初始账号：`admin@keycompute.local`，密码：`12345`
+初始账号：`admin@keycompute.local`，密码：`change-me-admin-password`
 
 > 生产环境请立即修改默认管理员密码！
 
 ### 方式二：本地开发
+
+> ⚠️ **安全警告**：下方显示的默认值（`change-me-*`）仅用于演示。
+> **切勿在生产环境中使用！** 请使用以下命令生成强随机密码：
+> ```bash
+> openssl rand -base64 32
+> ```
 
 ```bash
 # 创建网络
@@ -150,7 +156,7 @@ docker run -d \
   --network keycompute-internal \
   -e POSTGRES_DB=keycompute \
   -e POSTGRES_USER=keycompute \
-  -e POSTGRES_PASSWORD="ObpipdGz00wLxK1u1OupDP4rWVu1NEUpB5QGIiIGbek=" \
+  -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-change-me-strong-password}" \
   -p 5432:5432 \
   -v keycompute_postgres_data:/var/lib/postgresql/data \
   --restart unless-stopped \
@@ -165,7 +171,7 @@ docker run -d \
   --restart unless-stopped \
   redis:7-alpine \
   redis-server \
-  --requirepass "1VoCAza2HoaOmCafAdM+oxj165CiYpgp2XmD9tTeLN0=" \
+  --requirepass "${REDIS_PASSWORD:-change-me-redis-password}" \
   --maxmemory 256mb \
   --maxmemory-policy allkeys-lru
 
@@ -173,10 +179,18 @@ docker run -d \
 curl -sSL http://dioxus.dev/install.sh | sh
 
 # 启动后端服务
-export KC__DATABASE__URL="postgres://keycompute:ObpipdGz00wLxK1u1OupDP4rWVu1NEUpB5QGIiIGbek=@localhost:5432/keycompute"
-export KC__REDIS__URL="redis://:1VoCAza2HoaOmCafAdM+oxj165CiYpgp2XmD9tTeLN0=@localhost:6379"
-export KC__AUTH__JWT_SECRET="ea2fe6dd660639d1401c0c4c9fbd71cfe627785ae2359f3b0179efa7c0e24245f966a586295ed598db795da5a942dff7"
-export KC__CRYPTO__SECRET_KEY="H8AS+HwrYBp/KSAWRLh9jcLnsV+SIvOtohDPRun+GXA="
+# 方式 A：使用 .env 文件（推荐）：
+#   cp .env.example .env
+#   # 编辑 .env 填入实际配置值
+#   set -a && source .env && set +a  # 加载所有变量到环境变量
+#   # 然后跳过下方的 export 命令，直接运行：cargo run -p keycompute-server --features redis
+#
+# 方式 B：手动导出环境变量：
+
+export KC__DATABASE__URL="postgres://keycompute:${POSTGRES_PASSWORD:-change-me-strong-password}@localhost:5432/keycompute"
+export KC__REDIS__URL="redis://:${REDIS_PASSWORD:-change-me-redis-password}@localhost:6379"
+export KC__AUTH__JWT_SECRET="${KC__AUTH__JWT_SECRET:-change-me-jwt-secret-key}"
+export KC__CRYPTO__SECRET_KEY="${KC__CRYPTO__SECRET_KEY:-change-me-base64-encoded-32-byte-key}"
 export KC__EMAIL__SMTP_HOST="smtp.example.com"
 export KC__EMAIL__SMTP_PORT="465"
 export KC__EMAIL__SMTP_USERNAME="noreply@example.com"
@@ -184,7 +198,7 @@ export KC__EMAIL__SMTP_PASSWORD="your-smtp-password"
 export KC__EMAIL__FROM_ADDRESS="noreply@example.com"
 export APP_BASE_URL="https://app.example.com"
 export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
-export KC__DEFAULT_ADMIN_PASSWORD="12345"
+export KC__DEFAULT_ADMIN_PASSWORD="${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}"
 
 cargo run -p keycompute-server --features redis
 

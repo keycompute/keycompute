@@ -134,11 +134,17 @@ docker compose ps
 
 After deployment, visit `http://localhost:8080` to get started.
 
-Default account: `admin@keycompute.local`, password: `12345`
+Default account: `admin@keycompute.local`, password: `change-me-admin-password`
 
 > Change the default administrator password immediately in production.
 
 ### Option 2: Local development
+
+> ⚠️ **Security Warning**: The default values shown below (`change-me-*`) are for demonstration only.
+> **Never use these in production!** Generate strong random passwords using:
+> ```bash
+> openssl rand -base64 32
+> ```
 
 ```bash
 # Create the network
@@ -150,7 +156,7 @@ docker run -d \
   --network keycompute-internal \
   -e POSTGRES_DB=keycompute \
   -e POSTGRES_USER=keycompute \
-  -e POSTGRES_PASSWORD="ObpipdGz00wLxK1u1OupDP4rWVu1NEUpB5QGIiIGbek=" \
+  -e POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-change-me-strong-password}" \
   -p 5432:5432 \
   -v keycompute_postgres_data:/var/lib/postgresql/data \
   --restart unless-stopped \
@@ -165,7 +171,7 @@ docker run -d \
   --restart unless-stopped \
   redis:7-alpine \
   redis-server \
-  --requirepass "1VoCAza2HoaOmCafAdM+oxj165CiYpgp2XmD9tTeLN0=" \
+  --requirepass "${REDIS_PASSWORD:-change-me-redis-password}" \
   --maxmemory 256mb \
   --maxmemory-policy allkeys-lru
 
@@ -173,10 +179,18 @@ docker run -d \
 curl -sSL http://dioxus.dev/install.sh | sh
 
 # Start the backend service
-export KC__DATABASE__URL="postgres://keycompute:ObpipdGz00wLxK1u1OupDP4rWVu1NEUpB5QGIiIGbek=@localhost:5432/keycompute"
-export KC__REDIS__URL="redis://:1VoCAza2HoaOmCafAdM+oxj165CiYpgp2XmD9tTeLN0=@localhost:6379"
-export KC__AUTH__JWT_SECRET="ea2fe6dd660639d1401c0c4c9fbd71cfe627785ae2359f3b0179efa7c0e24245f966a586295ed598db795da5a942dff7"
-export KC__CRYPTO__SECRET_KEY="H8AS+HwrYBp/KSAWRLh9jcLnsV+SIvOtohDPRun+GXA="
+# Option A: Use .env file (recommended):
+#   cp .env.example .env
+#   # Edit .env with your actual configuration values
+#   set -a && source .env && set +a  # Load all variables into environment
+#   # Then skip the export commands below and run: cargo run -p keycompute-server --features redis
+#
+# Option B: Manually export environment variables:
+
+export KC__DATABASE__URL="postgres://keycompute:${POSTGRES_PASSWORD:-change-me-strong-password}@localhost:5432/keycompute"
+export KC__REDIS__URL="redis://:${REDIS_PASSWORD:-change-me-redis-password}@localhost:6379"
+export KC__AUTH__JWT_SECRET="${KC__AUTH__JWT_SECRET:-change-me-jwt-secret-key}"
+export KC__CRYPTO__SECRET_KEY="${KC__CRYPTO__SECRET_KEY:-change-me-base64-encoded-32-byte-key}"
 export KC__EMAIL__SMTP_HOST="smtp.example.com"
 export KC__EMAIL__SMTP_PORT="465"
 export KC__EMAIL__SMTP_USERNAME="noreply@example.com"
@@ -184,7 +198,7 @@ export KC__EMAIL__SMTP_PASSWORD="your-smtp-password"
 export KC__EMAIL__FROM_ADDRESS="noreply@example.com"
 export APP_BASE_URL="https://app.example.com"
 export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
-export KC__DEFAULT_ADMIN_PASSWORD="12345"
+export KC__DEFAULT_ADMIN_PASSWORD="${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}"
 
 cargo run -p keycompute-server --features redis
 

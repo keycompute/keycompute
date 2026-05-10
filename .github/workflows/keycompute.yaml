@@ -76,7 +76,7 @@ jobs:
 
       - name: Setup configuration file
         run: |
-          cp config.toml.example config.toml
+          cp config.example.toml config.toml
           sed -i 's|url = "postgres://localhost/keycompute"|url = "postgres://postgres:password@localhost:5432/keycompute"|g' config.toml
           sed -i 's|url = "redis://127.0.0.1:6379"|url = "redis://localhost:6379"|g' config.toml
 
