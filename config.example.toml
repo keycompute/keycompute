@@ -34,8 +34,9 @@ max_lifetime_secs = 1800
 
 # ==================== Redis 配置（可选）====================
 [redis]
-# Redis 连接 URL
-url = "redis://127.0.0.1:6379"
+# Redis 连接 URL（注意：需要包含密码，格式：redis://:password@host:port）
+# 生产环境请使用环境变量 KC__REDIS__URL 覆盖此配置
+url = "redis://:change-me-redis-password@127.0.0.1:6379"
 # 键前缀（用于多租户隔离）
 # key_prefix = "kc:prod:"
 # 连接池大小
@@ -187,4 +188,4 @@ sweeper_repush_interval_secs = 10
 #
 # 对应的 docker-compose.yml 中的设置：
 # KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
-# KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-12345}
+# KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}

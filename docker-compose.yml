@@ -31,7 +31,7 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-keycompute}
       POSTGRES_USER: ${POSTGRES_USER:-keycompute}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-strong-password}
       # 性能调优（根据服务器内存酌情调整）
       POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
     volumes:
@@ -59,7 +59,7 @@ services:
     restart: unless-stopped
     command: >
       redis-server
-      --requirepass ${REDIS_PASSWORD}
+      --requirepass ${REDIS_PASSWORD:-change-me-redis-password}
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
       --save 60 1000
@@ -69,7 +69,7 @@ services:
     networks:
       - keycompute-internal
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change-me-redis-password}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -106,23 +106,24 @@ services:
       KC__DATABASE__MIN_CONNECTIONS: ${DB_MIN_CONNECTIONS:-2}
 
       # Redis 配置
-      KC__REDIS__URL: "redis://:${REDIS_PASSWORD}@redis:6379"
+      KC__REDIS__URL: "redis://${REDIS_PASSWORD:-change-me-redis-password}@redis:6379"
       KC__REDIS__POOL_SIZE: ${REDIS_POOL_SIZE:-10}
+      KC__REDIS__CONNECT_TIMEOUT_SECS: ${KC__REDIS__CONNECT_TIMEOUT_SECS:-5}
 
       # 认证配置（生产环境必须修改！）
-      KC__AUTH__JWT_SECRET: ${KC__AUTH__JWT_SECRET}
+      KC__AUTH__JWT_SECRET: ${KC__AUTH__JWT_SECRET:-change-me-jwt-secret-key}
       KC__AUTH__JWT_ISSUER: ${KC__AUTH__JWT_ISSUER:-keycompute}
       KC__AUTH__JWT_EXPIRY_SECS: ${KC__AUTH__JWT_EXPIRY_SECS:-3600}
 
       # 加密配置（API Key 加密存储，生产环境必须配置！）
-      KC__CRYPTO__SECRET_KEY: ${KC__CRYPTO__SECRET_KEY}
+      KC__CRYPTO__SECRET_KEY: ${KC__CRYPTO__SECRET_KEY:-change-me-base64-encoded-32-byte-key}
 
       # 邮件服务配置
-      KC__EMAIL__SMTP_HOST: ${KC__EMAIL__SMTP_HOST}
+      KC__EMAIL__SMTP_HOST: ${KC__EMAIL__SMTP_HOST:-smtp.example.com}
       KC__EMAIL__SMTP_PORT: ${KC__EMAIL__SMTP_PORT:-465}
-      KC__EMAIL__SMTP_USERNAME: ${KC__EMAIL__SMTP_USERNAME}
-      KC__EMAIL__SMTP_PASSWORD: ${KC__EMAIL__SMTP_PASSWORD}
-      KC__EMAIL__FROM_ADDRESS: ${KC__EMAIL__FROM_ADDRESS}
+      KC__EMAIL__SMTP_USERNAME: ${KC__EMAIL__SMTP_USERNAME:-noreply@example.com}
+      KC__EMAIL__SMTP_PASSWORD: ${KC__EMAIL__SMTP_PASSWORD:-change-me-smtp-password}
+      KC__EMAIL__FROM_ADDRESS: ${KC__EMAIL__FROM_ADDRESS:-noreply@example.com}
       KC__EMAIL__FROM_NAME: ${KC__EMAIL__FROM_NAME:-KeyCompute}
       APP_BASE_URL: ${APP_BASE_URL:-http://127.0.0.1}
 
@@ -136,7 +137,7 @@ services:
 
       # 节点网关配置（Node Gateway）
       # 生产环境必须修改 REGISTRATION_TOKEN！
-      KC__NODE_GATEWAY__REGISTRATION_TOKEN: ${KC__NODE_GATEWAY__REGISTRATION_TOKEN}
+      KC__NODE_GATEWAY__REGISTRATION_TOKEN: ${KC__NODE_GATEWAY__REGISTRATION_TOKEN:-change-me-node-registration-token}
       # 其他节点网关参数使用默认值，如需自定义可取消注释：
       # KC__NODE_GATEWAY__SESSION_TTL_SECS: ${KC__NODE_GATEWAY__SESSION_TTL_SECS:-300}
       # KC__NODE_GATEWAY__HEARTBEAT_INTERVAL_SECS: ${KC__NODE_GATEWAY__HEARTBEAT_INTERVAL_SECS:-30}
