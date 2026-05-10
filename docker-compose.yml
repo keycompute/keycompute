@@ -106,7 +106,7 @@ services:
       KC__DATABASE__MIN_CONNECTIONS: ${DB_MIN_CONNECTIONS:-2}
 
       # Redis 配置
-      KC__REDIS__URL: "redis://${REDIS_PASSWORD:-change-me-redis-password}@redis:6379"
+      KC__REDIS__URL: "redis://:${REDIS_PASSWORD:-change-me-redis-password}@redis:6379"
       KC__REDIS__POOL_SIZE: ${REDIS_POOL_SIZE:-10}
       KC__REDIS__CONNECT_TIMEOUT_SECS: ${KC__REDIS__CONNECT_TIMEOUT_SECS:-5}
 
