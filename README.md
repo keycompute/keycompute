@@ -252,6 +252,7 @@ Primary environment variables:
 | `KC__REDIS__URL` | Redis connection string | ⚪ |
 | `KC__AUTH__JWT_SECRET` | JWT signing secret | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | API key encryption secret | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN` | Node registration token; used to verify node registration requests, shared by all nodes | ✅ |
 | `KC__EMAIL__SMTP_HOST` | SMTP host | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | SMTP port | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | SMTP username | ⚪ |

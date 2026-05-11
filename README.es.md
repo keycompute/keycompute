@@ -252,6 +252,7 @@ Variables de entorno principales:
 | `KC__REDIS__URL` | Cadena de conexión de Redis | ⚪ |
 | `KC__AUTH__JWT_SECRET` | Secreto de firma JWT | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | Secreto de cifrado para API keys | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN` | Token de registro de nodo; utilizado para verificar solicitudes de registro, compartido por todos los nodos | ✅ |
 | `KC__EMAIL__SMTP_HOST` | Host SMTP | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | Puerto SMTP | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | Usuario SMTP | ⚪ |

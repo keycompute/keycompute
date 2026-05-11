@@ -252,6 +252,7 @@ keycompute/
 | `KC__REDIS__URL` | Redis 連線字串 | ⚪ |
 | `KC__AUTH__JWT_SECRET` | JWT 簽名金鑰 | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | API Key 加密金鑰 | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN` | 節點註冊令牌；用於驗證節點註冊請求，所有節點共享 | ✅ |
 | `KC__EMAIL__SMTP_HOST` | SMTP 伺服器位址 | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | SMTP 伺服器連接埠 | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | SMTP 使用者名稱 | ⚪ |

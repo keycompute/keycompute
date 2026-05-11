@@ -252,6 +252,7 @@ keycompute/
 | `KC__REDIS__URL` | سلسلة اتصال Redis | ⚪ |
 | `KC__AUTH__JWT_SECRET` | سر توقيع JWT | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | سر تشفير مفاتيح API | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN` | رمز تسجيل العقدة؛ يُستخدم للتحقق من طلبات تسجيل العقدة، مشترك بين جميع العقد | ✅ |
 | `KC__EMAIL__SMTP_HOST` | مضيف SMTP | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | منفذ SMTP | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | اسم مستخدم SMTP | ⚪ |
