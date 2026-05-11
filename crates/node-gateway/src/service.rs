@@ -183,26 +183,22 @@ impl NodeGatewayService {
         // 3. 对每个 accepted_model 尝试 poll（所有模型共享同一个 poll_timeout）
         // 设计意图：防止多个模型队列依次等待导致总超时时间过长
         let poll_deadline = tokio::time::Instant::now() + self.config.poll_timeout();
-        
+
         // 随机打乱模型顺序，避免固定顺序导致的队列饥饿问题
         let mut shuffled_models = accepted_models;
         fastrand::shuffle(&mut shuffled_models);
-        
+
         for model in shuffled_models {
             // 检查是否已超过 poll 总超时时间
             let remaining = poll_deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 break; // 超时，不再尝试更多模型
             }
-            
+
             // 当前模型的等待时间：取剩余时间和单个模型最小等待时间（2秒）的较大值
             let model_timeout = remaining.as_secs().max(2);
-            
-            match self
-                .redis
-                .pop_from_model_queue(&model, model_timeout)
-                .await
-            {
+
+            match self.redis.pop_from_model_queue(&model, model_timeout).await {
                 Ok(Some(task_id)) => {
                     // 3. 原子 claim 任务
                     match self.store.claim_task(task_id, node_id, session_id).await? {

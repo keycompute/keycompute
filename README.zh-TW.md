@@ -187,16 +187,12 @@ curl -sSL http://dioxus.dev/install.sh | sh
 #
 # 方式 B：手動匯出環境變數：
 
+# 載入 .env 檔案（包含資料庫密碼等敏感資訊）
+set -a && source .env && set +a
+
 export KC__DATABASE__URL="postgres://keycompute:${POSTGRES_PASSWORD:-change-me-strong-password}@localhost:5432/keycompute"
 export KC__REDIS__URL="redis://:${REDIS_PASSWORD:-change-me-redis-password}@localhost:6379"
 export KC__AUTH__JWT_SECRET="${KC__AUTH__JWT_SECRET:-change-me-jwt-secret-key}"
-export KC__CRYPTO__SECRET_KEY="${KC__CRYPTO__SECRET_KEY:-change-me-base64-encoded-32-byte-key}"
-export KC__EMAIL__SMTP_HOST="smtp.example.com"
-export KC__EMAIL__SMTP_PORT="465"
-export KC__EMAIL__SMTP_USERNAME="noreply@example.com"
-export KC__EMAIL__SMTP_PASSWORD="your-smtp-password"
-export KC__EMAIL__FROM_ADDRESS="noreply@example.com"
-export APP_BASE_URL="https://app.example.com"
 export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
 export KC__DEFAULT_ADMIN_PASSWORD="${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}"
 
