@@ -96,6 +96,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      ollama-model-init:
+        condition: service_completed_successfully
     environment:
       # 运行环境
       KC__ENV: production
