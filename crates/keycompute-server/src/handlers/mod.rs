@@ -4,6 +4,8 @@
 
 // 管理功能（拆分为多个模块）
 pub mod admin_account;
+pub mod admin_monitoring;
+pub mod admin_node_gateway;
 pub mod admin_pricing;
 pub mod admin_settings;
 pub mod admin_user;
@@ -57,6 +59,12 @@ pub use admin_account::{
     AccountInfo, CreateAccountRequest, UpdateAccountRequest, create_account, delete_account,
     get_default_endpoint, list_accounts, refresh_account, test_account, update_account,
 };
+
+// Node Gateway 管理
+pub use admin_node_gateway::get_node_gateway_overview;
+
+// 监控追踪
+pub use admin_monitoring::get_monitoring_overview;
 
 // 定价管理（admin_pricing）
 pub use admin_pricing::{

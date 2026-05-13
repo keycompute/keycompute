@@ -27,6 +27,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.distribution_records", "分销记录");
     m.insert("nav.tenants", "租户管理");
     m.insert("nav.system", "系统诊断");
+    m.insert("nav.node_gateway", "节点网关");
+    m.insert("nav.monitoring", "监控追踪");
     m.insert("nav.account_settings", "账户设置");
     m.insert("nav.settings", "系统设置");
     m.insert("nav.group.usage", "用量");
@@ -119,6 +121,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.system", "系统诊断");
     m.insert("page.account_settings", "账户设置");
     m.insert("page.settings", "系统设置");
+    m.insert("page.node_gateway", "节点网关");
+    m.insert("page.monitoring", "监控追踪");
     m.insert("page.not_found", "页面不存在");
 
     // ── 表单 ────────────────────────────────────
@@ -203,11 +207,41 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.created_title", "API Key 已创建");
     m.insert("api_keys.created_once", "仅显示一次，请立即保存。");
     m.insert("api_keys.example", "使用示例");
+    m.insert("api_keys.models_title", "1. 当前系统可用模型");
+    m.insert("api_keys.models_desc_prefix", "可在请求中通过 ");
+    m.insert("api_keys.models_desc_suffix", " 参数使用");
+    m.insert("api_keys.default_model", "默认");
+    m.insert("api_keys.more_models", "个更多模型");
+    m.insert(
+        "api_keys.quick_example",
+        "2. 快速使用示例（可直接复制使用）",
+    );
+    m.insert(
+        "api_keys.quick_example_desc",
+        "复制以下示例并替换成你的业务代码即可快速接入。",
+    );
+    m.insert("api_keys.example_env", "环境变量");
+    m.insert(
+        "api_keys.example_env_comment",
+        "将以下内容添加到你的 .env 文件或环境变量中",
+    );
+    m.insert("api_keys.example_python", "OpenAI SDK（Python）");
+    m.insert("api_keys.example_node", "OpenAI SDK（Node.js）");
+    m.insert("api_keys.example_curl", "cURL");
+    m.insert("api_keys.copy", "复制");
     m.insert("api_keys.copy_hint", "点击复制");
     m.insert("api_keys.copied", "已复制");
     m.insert(
         "api_keys.example_note",
         "将以上配置用于 OpenAI 兼容的 SDK 或工具中。",
+    );
+    m.insert(
+        "api_keys.example_note_prefix",
+        "提示：如需更换模型，只需修改 ",
+    );
+    m.insert(
+        "api_keys.example_note_suffix",
+        " 的值为左侧列表中的任一模型即可。",
     );
     m.insert("api_keys.close_saved", "我已记录，关闭");
     m.insert("api_keys.create_title", "创建 API Key");
@@ -591,6 +625,133 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("system.degraded", "降级");
     m.insert("system.abnormal", "异常");
     m.insert("system.unknown", "未知");
+
+    m.insert(
+        "node_gateway.subtitle",
+        "管理本地节点接入、任务队列和 node: 模型执行路径。",
+    );
+    m.insert("node_gateway.runtime_status", "运行状态");
+    m.insert(
+        "node_gateway.runtime_desc",
+        "Node Gateway 依赖 Redis 队列、Postgres 状态表和节点会话 token。",
+    );
+    m.insert("node_gateway.enabled", "已启用");
+    m.insert("node_gateway.disabled", "未启用");
+    m.insert("node_gateway.nodes_total", "节点总数");
+    m.insert("node_gateway.nodes_total_desc", "已注册节点实例");
+    m.insert("node_gateway.nodes_online", "在线节点");
+    m.insert("node_gateway.nodes_online_desc", "可参与 node: 路由");
+    m.insert("node_gateway.tasks_active", "活跃任务");
+    m.insert("node_gateway.tasks_active_desc", "queued + leased");
+    m.insert("node_gateway.tasks_done", "成功任务");
+    m.insert("node_gateway.tasks_done_desc", "已返回结果");
+    m.insert("node_gateway.protocol_title", "协议入口");
+    m.insert(
+        "node_gateway.protocol_register",
+        "节点首次注册，使用 registration token 换取 session token。",
+    );
+    m.insert(
+        "node_gateway.protocol_heartbeat",
+        "刷新 session 可见性并上报当前可接收模型。",
+    );
+    m.insert("node_gateway.protocol_poll", "长轮询领取匹配模型的任务。");
+    m.insert(
+        "node_gateway.protocol_complete",
+        "提交任务结果，支持幂等重试。",
+    );
+    m.insert("node_gateway.nodes_title", "节点列表");
+    m.insert("node_gateway.tasks_title", "最近任务");
+    m.insert("node_gateway.no_nodes", "暂无注册节点");
+    m.insert("node_gateway.no_tasks", "暂无节点任务");
+    m.insert("node_gateway.node", "节点");
+    m.insert("node_gateway.models", "可接收模型");
+    m.insert("node_gateway.failures", "失败计数");
+    m.insert("node_gateway.heartbeat", "最近心跳");
+    m.insert("node_gateway.no_models", "暂无模型");
+    m.insert("node_gateway.assigned_node", "领取节点");
+    m.insert("node_gateway.deadline", "截止时间");
+    m.insert("node_gateway.status_online", "在线");
+    m.insert("node_gateway.status_offline", "离线");
+    m.insert("node_gateway.status_excluded", "已排除");
+    m.insert("node_gateway.task_queued", "排队中");
+    m.insert("node_gateway.task_leased", "执行中");
+    m.insert("node_gateway.task_succeeded", "成功");
+    m.insert("node_gateway.task_failed", "失败");
+    m.insert("node_gateway.task_expired", "已过期");
+    m.insert(
+        "monitoring.subtitle",
+        "追踪 gateway 到 node 的请求生命周期、节点健康和用量落账状态。",
+    );
+    m.insert("monitoring.control_plane", "执行链路概览");
+    m.insert(
+        "monitoring.control_plane_desc",
+        "基于现有 node_tasks、nodes、node_sessions 和 usage_logs 聚合，只读展示运行态。",
+    );
+    m.insert("monitoring.read_only", "只读");
+    m.insert("monitoring.online_nodes", "在线节点");
+    m.insert("monitoring.online_nodes_desc", "当前可参与调度");
+    m.insert("monitoring.active_tasks", "活跃任务");
+    m.insert("monitoring.active_tasks_desc", "排队或执行中的节点任务");
+    m.insert("monitoring.succeeded_tasks", "成功任务");
+    m.insert("monitoring.succeeded_tasks_desc", "已由节点返回结果");
+    m.insert("monitoring.avg_latency", "平均耗时");
+    m.insert("monitoring.avg_latency_desc", "queued 到 finished");
+    m.insert("monitoring.flow_title", "Gateway + Node 流程");
+    m.insert("monitoring.flow_gateway", "Gateway 接入");
+    m.insert(
+        "monitoring.flow_gateway_desc",
+        "OpenAI 兼容入口识别 node: 模型并创建请求。",
+    );
+    m.insert("monitoring.flow_queue", "任务入队");
+    m.insert(
+        "monitoring.flow_queue_desc",
+        "请求写入 node_tasks，等待匹配模型的节点领取。",
+    );
+    m.insert("monitoring.flow_node", "节点执行");
+    m.insert(
+        "monitoring.flow_node_desc",
+        "节点通过 poll 领取 lease，执行后 complete 回传。",
+    );
+    m.insert("monitoring.flow_usage", "用量落账");
+    m.insert(
+        "monitoring.flow_usage_desc",
+        "成功响应关联 usage_logs，用于账单和审计。",
+    );
+    m.insert("monitoring.health_title", "节点健康");
+    m.insert("monitoring.no_nodes", "暂无节点健康数据");
+    m.insert("monitoring.active", "活跃");
+    m.insert("monitoring.succeeded", "成功");
+    m.insert("monitoring.failed", "失败");
+    m.insert("monitoring.traces_title", "最近追踪");
+    m.insert("monitoring.no_traces", "暂无 gateway/node 追踪记录");
+    m.insert("monitoring.records_title", "追踪明细");
+    m.insert("monitoring.request", "请求");
+    m.insert("monitoring.request_payload", "请求信息");
+    m.insert("monitoring.basic_info", "基本信息");
+    m.insert("monitoring.request_metrics", "请求指标");
+    m.insert("monitoring.node", "节点");
+    m.insert("monitoring.duration", "耗时");
+    m.insert("monitoring.tokens", "Tokens");
+    m.insert("monitoring.queued_at", "入队时间");
+    m.insert("monitoring.task", "任务");
+    m.insert("monitoring.lease", "租约");
+    m.insert("monitoring.stage_queued", "入队");
+    m.insert("monitoring.stage_claimed", "领取");
+    m.insert("monitoring.stage_finished", "完成");
+    m.insert("monitoring.stage_usage", "用量");
+    m.insert("monitoring.submissions", "提交");
+    m.insert("monitoring.amount", "金额");
+    m.insert("monitoring.total_usage_logs", "用量日志");
+    m.insert("monitoring.total_node_tasks", "节点任务");
+    m.insert("monitoring.failed_tasks", "异常任务");
+    m.insert("monitoring.map_receive_request", "接收请求");
+    m.insert("monitoring.map_return_client", "返回客户端");
+    m.insert("monitoring.map_router", "路由模块");
+    m.insert("monitoring.map_match_route", "匹配路由规则");
+    m.insert("monitoring.map_process_request", "处理请求");
+    m.insert("monitoring.map_submit_result", "提交结果");
+    m.insert("monitoring.map_model_service", "模型服务");
+    m.insert("monitoring.map_model_response", "模型响应");
     m.insert("users.subtitle", "查看和管理平台所有注册用户");
     m.insert("users.search_placeholder", "搜索邮箱或用户名...");
     m.insert("users.empty", "暂无用户数据");

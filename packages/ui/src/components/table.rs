@@ -50,7 +50,10 @@ pub fn Table(
                             td {
                                 colspan: "{col_count}",
                                 class: "table-empty",
-                                "{empty_text}"
+                                div { class: "table-empty-content",
+                                    span { class: "table-empty-mark", "-" }
+                                    span { class: "table-empty-text", "{empty_text}" }
+                                }
                             }
                         }
                     }

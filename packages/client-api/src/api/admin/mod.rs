@@ -3,6 +3,8 @@
 //! 拆分为子模块：user / account / pricing / payment
 
 mod account;
+mod monitoring;
+mod node_gateway;
 mod payment;
 mod pricing;
 mod user;
@@ -17,6 +19,13 @@ pub use super::common::MessageResponse;
 pub use account::{
     AccountInfo, AccountQueryParams, AccountTestResponse, CreateAccountRequest,
     UpdateAccountRequest,
+};
+pub use monitoring::{
+    MonitoringNodeHealth, MonitoringOverviewResponse, MonitoringSummary, MonitoringTraceEntry,
+};
+pub use node_gateway::{
+    NodeGatewayNodeInfo, NodeGatewayNodeStats, NodeGatewayOverviewResponse, NodeGatewayTaskInfo,
+    NodeGatewayTaskStats,
 };
 pub use payment::PaymentOrderInfo;
 pub use pricing::{
@@ -171,6 +180,20 @@ impl AdminApi {
                 &serde_json::json!({}),
                 Some(token),
             )
+            .await
+    }
+
+    // ==================== Node Gateway 管理 ====================
+
+    pub async fn node_gateway_overview(&self, token: &str) -> Result<NodeGatewayOverviewResponse> {
+        self.client
+            .get_json("/api/v1/admin/node-gateway/overview", Some(token))
+            .await
+    }
+
+    pub async fn monitoring_overview(&self, token: &str) -> Result<MonitoringOverviewResponse> {
+        self.client
+            .get_json("/api/v1/admin/monitoring/overview", Some(token))
             .await
     }
 

@@ -13,13 +13,14 @@ fn read_query_param_from_search(search: &str, name: &str) -> Option<String> {
         }
 
         let mut parts = pair.splitn(2, '=');
-        if let Some(key) = parts.next()
-            && key == name
-        {
-            let value = parts.next().unwrap_or("").trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
+        match parts.next() {
+            Some(key) if key == name => {
+                let value = parts.next().unwrap_or("").trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
             }
+            _ => {}
         }
     }
 

@@ -1,10 +1,23 @@
 use dioxus::prelude::*;
 use ui::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Pagination, Table, TableHead,
-    icons::IconPlus,
+    icons::{IconCopy, IconPlus},
 };
 
 const PAGE_SIZE: usize = 20;
+
+fn model_display_rank(model: &str) -> usize {
+    match model {
+        "gpt-4-turbo" => 0,
+        "gpt-4o-mini" => 1,
+        "qwen3-14b" => 2,
+        "deepseek-chat" => 3,
+        model if model.starts_with("claude-3-5-sonnet") => 4,
+        "gpt-4o" => 5,
+        "gpt-3.5-turbo" => 6,
+        _ => 100,
+    }
+}
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, api_key_service, model_service};
@@ -40,6 +53,7 @@ pub fn ApiKeyList() -> Element {
     let mut include_revoked = use_signal(|| false);
     // 复制状态
     let mut copied = use_signal(|| false);
+    let mut example_tab = use_signal(|| "env".to_string());
     let create_failed = i18n.t("api_keys.create_failed");
 
     // 获取模型列表（用于显示用法示例）
@@ -146,68 +160,220 @@ pub fn ApiKeyList() -> Element {
                     // 同域部署时从浏览器地址解析完整 origin，避免示例里只显示相对路径 /v1
                     let api_url = crate::services::api_client::public_openai_api_base_url();
 
-                    // 获取第一个模型作为示例
-                    let sample_model = models()
+                    let mut available_models = models()
                         .flatten()
-                        .and_then(|m| m.data.first().map(|model| model.id.clone()))
+                        .map(|m| {
+                            let mut data = m.data;
+                            data.sort_by(|a, b| {
+                                model_display_rank(&a.id)
+                                    .cmp(&model_display_rank(&b.id))
+                                    .then_with(|| a.id.cmp(&b.id))
+                            });
+                            data
+                        })
+                        .unwrap_or_default();
+
+                    if available_models.is_empty() {
+                        available_models = vec![client_api::api::openai::ModelInfo {
+                            id: "deepseek-chat".to_string(),
+                            object: "model".to_string(),
+                            created: 0,
+                            owned_by: "deepseek".to_string(),
+                        }];
+                    }
+
+                    let sample_model = available_models
+                        .first()
+                        .map(|model| model.id.clone())
                         .unwrap_or_else(|| "deepseek-chat".to_string());
 
-                    // 生成要复制的文本
-                    let example_text = format!(
-                        r#"API_URL="{}"
+                    let selected_tab = example_tab();
+                    let env_text = format!(
+                        r#"# {}
+API_URL="{}"
 API_KEY="{}"
 API_MODEL="{}""#,
+                        i18n.t("api_keys.example_env_comment"),
+                        api_url,
+                        key,
+                        sample_model
+                    );
+                    let python_text = format!(
+                        r#"from openai import OpenAI
+
+client = OpenAI(
+    base_url="{}",
+    api_key="{}",
+)
+
+response = client.chat.completions.create(
+    model="{}",
+    messages=[{{"role": "user", "content": "Hello"}}],
+)
+
+print(response.choices[0].message.content)"#,
                         api_url, key, sample_model
                     );
+                    let node_text = format!(
+                        r#"import OpenAI from "openai";
+
+const client = new OpenAI({{
+  baseURL: "{}",
+  apiKey: "{}",
+}});
+
+const response = await client.chat.completions.create({{
+  model: "{}",
+  messages: [{{ role: "user", content: "Hello" }}],
+}});
+
+console.log(response.choices[0].message.content);"#,
+                        api_url, key, sample_model
+                    );
+                    let curl_text = format!(
+                        r#"curl "{}/chat/completions" \
+    -H "Authorization: Bearer {}" \
+    -H "Content-Type: application/json" \
+  -d '{{
+    "model": "{}",
+    "messages": [
+      {{"role": "user", "content": "Hello"}}
+    ]
+  }}'"#,
+                        api_url, key, sample_model
+                    );
+
+                    let example_text = match selected_tab.as_str() {
+                        "python" => python_text,
+                        "node" => node_text,
+                        "curl" => curl_text,
+                        _ => env_text,
+                    };
                     let example_text_for_click = example_text.clone();
 
                     let copied_label = i18n.t("api_keys.copied");
                     let copy_hint = i18n.t("api_keys.copy_hint");
                     rsx! {
                         div {
-                            class: "alert alert-success kc-api-secret-alert",
-                            div { class: "kc-api-secret-topline",
-                                strong { {i18n.t("api_keys.created_title")} }
-                                span { {i18n.t("api_keys.created_once")} }
-                            }
-                            code { class: "key-display", "{key}" }
-                            p { class: "kc-api-secret-label", {i18n.t("api_keys.example")} }
-                            div { class: "kc-api-copy-block",
-                                pre {
-                                    class: if copied() { "kc-api-example copied" } else { "kc-api-example" },
-                                    title: if copied() { copied_label } else { copy_hint },
-                                    onclick: {
-                                        let text = example_text_for_click.clone();
-                                        move |_| {
-                                            copy_to_clipboard(&text);
-                                            copied.set(true);
-                                            // 2秒后重置状态
-                                            let mut copied_clone = copied.clone();
-                                            spawn(async move {
-                                                gloo_timers::future::TimeoutFuture::new(2000).await;
-                                                copied_clone.set(false);
-                                            });
-                                        }
-                                    },
-                                    "{example_text}"
+                            class: "kc-api-success-panel",
+                            div { class: "kc-api-success-head",
+                                div { class: "kc-api-success-icon", "✓" }
+                                div {
+                                    h2 { {i18n.t("api_keys.created_title")} }
+                                    p { {i18n.t("api_keys.created_once")} }
                                 }
-                                div { class: "kc-api-copy-hint",
-                                    if copied() {
-                                        {copied_label}
-                                    } else {
-                                        {copy_hint}
+                            }
+
+                            div { class: "kc-api-success-grid",
+                                section { class: "kc-api-model-panel",
+                                    h3 { {i18n.t("api_keys.models_title")} }
+                                    p {
+                                        {i18n.t("api_keys.models_desc_prefix")}
+                                        code { "API_MODEL" }
+                                        {i18n.t("api_keys.models_desc_suffix")}
+                                    }
+                                    div { class: "kc-api-model-list",
+                                        for (idx, model) in available_models.iter().take(6).enumerate() {
+                                            div { class: "kc-api-model-row",
+                                                span { class: "kc-api-model-name", "{model.id}" }
+                                                span {
+                                                    class: if idx == 0 { "kc-api-model-badge is-default" } else { "kc-api-model-badge" },
+                                                    if idx == 0 {
+                                                        {i18n.t("api_keys.default_model")}
+                                                    } else {
+                                                        "{model.owned_by}"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if available_models.len() > 6 {
+                                        p { class: "kc-api-model-more", "+{available_models.len() - 6} {i18n.t(\"api_keys.more_models\")}" }
+                                    }
+                                }
+
+                                section { class: "kc-api-example-panel",
+                                    h3 { {i18n.t("api_keys.quick_example")} }
+                                    p { {i18n.t("api_keys.quick_example_desc")} }
+
+                                    div { class: "kc-api-example-box",
+                                        div { class: "kc-api-example-tabs",
+                                            for (value, label) in [
+                                                ("env", i18n.t("api_keys.example_env")),
+                                                ("python", i18n.t("api_keys.example_python")),
+                                                ("node", i18n.t("api_keys.example_node")),
+                                                ("curl", i18n.t("api_keys.example_curl")),
+                                            ] {
+                                                button {
+                                                    class: if selected_tab == value { "kc-api-example-tab active" } else { "kc-api-example-tab" },
+                                                    r#type: "button",
+                                                    onclick: move |_| {
+                                                        example_tab.set(value.to_string());
+                                                        copied.set(false);
+                                                    },
+                                                    "{label}"
+                                                }
+                                            }
+                                        }
+                                        div { class: "kc-api-copy-block",
+                                            pre {
+                                                class: if copied() { "kc-api-example copied" } else { "kc-api-example" },
+                                                title: if copied() { copied_label } else { copy_hint },
+                                                onclick: {
+                                                    let text = example_text_for_click.clone();
+                                                    move |_| {
+                                                        copy_to_clipboard(&text);
+                                                        copied.set(true);
+                                                        let mut copied_clone = copied.clone();
+                                                        spawn(async move {
+                                                            gloo_timers::future::TimeoutFuture::new(2000).await;
+                                                            copied_clone.set(false);
+                                                        });
+                                                    }
+                                                },
+                                                "{example_text}"
+                                            }
+                                            button {
+                                                class: "kc-api-copy-button",
+                                                r#type: "button",
+                                                onclick: {
+                                                    let text = example_text.clone();
+                                                    move |_| {
+                                                        copy_to_clipboard(&text);
+                                                        copied.set(true);
+                                                        let mut copied_clone = copied.clone();
+                                                        spawn(async move {
+                                                            gloo_timers::future::TimeoutFuture::new(2000).await;
+                                                            copied_clone.set(false);
+                                                        });
+                                                    }
+                                                },
+                                                IconCopy { size: 15 }
+                                                if copied() {
+                                                    {copied_label}
+                                                } else {
+                                                    {i18n.t("api_keys.copy")}
+                                                }
+                                            }
+                                        }
+                                    }
+                                    p { class: "kc-api-secret-note",
+                                        {i18n.t("api_keys.example_note_prefix")}
+                                        code { "API_MODEL" }
+                                        {i18n.t("api_keys.example_note_suffix")}
                                     }
                                 }
                             }
-                            p { class: "kc-api-secret-note", {i18n.t("api_keys.example_note")} }
-                            Button {
-                                variant: ButtonVariant::Ghost,
-                                size: ButtonSize::Small,
-                                onclick: move |_| {
-                                    new_key_value.set(None);
-                                    copied.set(false);
-                                },
-                                {i18n.t("api_keys.close_saved")}
+                            div { class: "kc-api-success-actions",
+                                Button {
+                                    variant: ButtonVariant::Ghost,
+                                    size: ButtonSize::Small,
+                                    onclick: move |_| {
+                                        new_key_value.set(None);
+                                        copied.set(false);
+                                    },
+                                    {i18n.t("api_keys.close_saved")}
+                                }
                             }
                         }
                     }

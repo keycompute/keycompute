@@ -1,6 +1,8 @@
 pub mod accounts;
 pub mod distribution_records;
 pub mod loading;
+pub mod monitoring;
+pub mod node_gateway;
 pub mod payment_orders;
 pub mod pricing;
 pub mod settings;
@@ -11,6 +13,8 @@ pub mod users;
 
 pub use accounts::Accounts;
 pub use distribution_records::DistributionRecords;
+pub use monitoring::Monitoring;
+pub use node_gateway::NodeGateway;
 pub use payment_orders::PaymentOrders;
 pub use pricing::Pricing;
 pub use settings::Settings;

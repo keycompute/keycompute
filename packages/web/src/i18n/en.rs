@@ -27,6 +27,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.distribution_records", "Distribution Records");
     m.insert("nav.tenants", "Tenants");
     m.insert("nav.system", "System");
+    m.insert("nav.node_gateway", "Node Gateway");
+    m.insert("nav.monitoring", "Monitoring");
     m.insert("nav.account_settings", "Account Settings");
     m.insert("nav.settings", "Settings");
     m.insert("nav.group.usage", "Usage");
@@ -131,6 +133,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.system", "System Diagnostics");
     m.insert("page.account_settings", "Account Settings");
     m.insert("page.settings", "Settings");
+    m.insert("page.node_gateway", "Node Gateway");
+    m.insert("page.monitoring", "Monitoring");
     m.insert("page.not_found", "Page Not Found");
 
     // ── Form ────────────────────────────────────
@@ -227,11 +231,41 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.created_title", "API Key created");
     m.insert("api_keys.created_once", "Shown only once. Save it now.");
     m.insert("api_keys.example", "Usage example");
+    m.insert("api_keys.models_title", "1. Available models");
+    m.insert("api_keys.models_desc_prefix", "Use the ");
+    m.insert("api_keys.models_desc_suffix", " parameter in requests");
+    m.insert("api_keys.default_model", "Default");
+    m.insert("api_keys.more_models", "more models");
+    m.insert(
+        "api_keys.quick_example",
+        "2. Quick start example, ready to copy",
+    );
+    m.insert(
+        "api_keys.quick_example_desc",
+        "Copy an example below and replace it into your application code.",
+    );
+    m.insert("api_keys.example_env", "Environment");
+    m.insert(
+        "api_keys.example_env_comment",
+        "Add the following to your .env file or environment variables",
+    );
+    m.insert("api_keys.example_python", "OpenAI SDK (Python)");
+    m.insert("api_keys.example_node", "OpenAI SDK (Node.js)");
+    m.insert("api_keys.example_curl", "cURL");
+    m.insert("api_keys.copy", "Copy");
     m.insert("api_keys.copy_hint", "Click to copy");
     m.insert("api_keys.copied", "Copied");
     m.insert(
         "api_keys.example_note",
         "Use this configuration with OpenAI-compatible SDKs or tools.",
+    );
+    m.insert(
+        "api_keys.example_note_prefix",
+        "Tip: to switch models, change ",
+    );
+    m.insert(
+        "api_keys.example_note_suffix",
+        " to any model from the list on the left.",
     );
     m.insert("api_keys.close_saved", "Saved, close");
     m.insert("api_keys.create_title", "Create API Key");
@@ -709,6 +743,142 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("system.degraded", "Degraded");
     m.insert("system.abnormal", "Abnormal");
     m.insert("system.unknown", "Unknown");
+
+    m.insert(
+        "node_gateway.subtitle",
+        "Manage local node access, task queues, and the node: model execution path.",
+    );
+    m.insert("node_gateway.runtime_status", "Runtime Status");
+    m.insert(
+        "node_gateway.runtime_desc",
+        "Node Gateway relies on Redis queues, Postgres state tables, and node session tokens.",
+    );
+    m.insert("node_gateway.enabled", "Enabled");
+    m.insert("node_gateway.disabled", "Disabled");
+    m.insert("node_gateway.nodes_total", "Total Nodes");
+    m.insert("node_gateway.nodes_total_desc", "Registered node instances");
+    m.insert("node_gateway.nodes_online", "Online Nodes");
+    m.insert(
+        "node_gateway.nodes_online_desc",
+        "Eligible for node: routing",
+    );
+    m.insert("node_gateway.tasks_active", "Active Tasks");
+    m.insert("node_gateway.tasks_active_desc", "queued + leased");
+    m.insert("node_gateway.tasks_done", "Succeeded Tasks");
+    m.insert("node_gateway.tasks_done_desc", "Completed with responses");
+    m.insert("node_gateway.protocol_title", "Protocol Endpoints");
+    m.insert(
+        "node_gateway.protocol_register",
+        "Initial node registration; exchanges registration token for a session token.",
+    );
+    m.insert(
+        "node_gateway.protocol_heartbeat",
+        "Refreshes session visibility and reports currently accepted models.",
+    );
+    m.insert(
+        "node_gateway.protocol_poll",
+        "Long-polls for tasks matching accepted models.",
+    );
+    m.insert(
+        "node_gateway.protocol_complete",
+        "Submits task result with idempotent retry support.",
+    );
+    m.insert("node_gateway.nodes_title", "Nodes");
+    m.insert("node_gateway.tasks_title", "Recent Tasks");
+    m.insert("node_gateway.no_nodes", "No registered nodes");
+    m.insert("node_gateway.no_tasks", "No node tasks");
+    m.insert("node_gateway.node", "Node");
+    m.insert("node_gateway.models", "Accepted Models");
+    m.insert("node_gateway.failures", "Failures");
+    m.insert("node_gateway.heartbeat", "Last Heartbeat");
+    m.insert("node_gateway.no_models", "No models");
+    m.insert("node_gateway.assigned_node", "Assigned Node");
+    m.insert("node_gateway.deadline", "Deadline");
+    m.insert("node_gateway.status_online", "Online");
+    m.insert("node_gateway.status_offline", "Offline");
+    m.insert("node_gateway.status_excluded", "Excluded");
+    m.insert("node_gateway.task_queued", "Queued");
+    m.insert("node_gateway.task_leased", "Leased");
+    m.insert("node_gateway.task_succeeded", "Succeeded");
+    m.insert("node_gateway.task_failed", "Failed");
+    m.insert("node_gateway.task_expired", "Expired");
+    m.insert(
+        "monitoring.subtitle",
+        "Trace gateway-to-node request lifecycles, node health, and usage logging state.",
+    );
+    m.insert("monitoring.control_plane", "Execution Overview");
+    m.insert(
+        "monitoring.control_plane_desc",
+        "Read-only aggregation from node_tasks, nodes, node_sessions, and usage_logs.",
+    );
+    m.insert("monitoring.read_only", "Read-only");
+    m.insert("monitoring.online_nodes", "Online Nodes");
+    m.insert("monitoring.online_nodes_desc", "Available for scheduling");
+    m.insert("monitoring.active_tasks", "Active Tasks");
+    m.insert(
+        "monitoring.active_tasks_desc",
+        "Queued or leased node tasks",
+    );
+    m.insert("monitoring.succeeded_tasks", "Succeeded Tasks");
+    m.insert("monitoring.succeeded_tasks_desc", "Completed by nodes");
+    m.insert("monitoring.avg_latency", "Avg Duration");
+    m.insert("monitoring.avg_latency_desc", "queued to finished");
+    m.insert("monitoring.flow_title", "Gateway + Node Flow");
+    m.insert("monitoring.flow_gateway", "Gateway Intake");
+    m.insert(
+        "monitoring.flow_gateway_desc",
+        "OpenAI-compatible endpoint detects node: models and creates requests.",
+    );
+    m.insert("monitoring.flow_queue", "Task Queue");
+    m.insert(
+        "monitoring.flow_queue_desc",
+        "Requests are written to node_tasks and wait for matching nodes.",
+    );
+    m.insert("monitoring.flow_node", "Node Execution");
+    m.insert(
+        "monitoring.flow_node_desc",
+        "Nodes poll for leases, execute tasks, and complete them.",
+    );
+    m.insert("monitoring.flow_usage", "Usage Logging");
+    m.insert(
+        "monitoring.flow_usage_desc",
+        "Successful responses correlate with usage_logs for billing and audit.",
+    );
+    m.insert("monitoring.health_title", "Node Health");
+    m.insert("monitoring.no_nodes", "No node health data");
+    m.insert("monitoring.active", "Active");
+    m.insert("monitoring.succeeded", "Succeeded");
+    m.insert("monitoring.failed", "Failed");
+    m.insert("monitoring.traces_title", "Recent Traces");
+    m.insert("monitoring.no_traces", "No gateway/node traces yet");
+    m.insert("monitoring.records_title", "Trace Details");
+    m.insert("monitoring.request", "Request");
+    m.insert("monitoring.request_payload", "Request Payload");
+    m.insert("monitoring.basic_info", "Basic Info");
+    m.insert("monitoring.request_metrics", "Request Metrics");
+    m.insert("monitoring.node", "Node");
+    m.insert("monitoring.duration", "Duration");
+    m.insert("monitoring.tokens", "Tokens");
+    m.insert("monitoring.queued_at", "Queued At");
+    m.insert("monitoring.task", "Task");
+    m.insert("monitoring.lease", "Lease");
+    m.insert("monitoring.stage_queued", "Queued");
+    m.insert("monitoring.stage_claimed", "Claimed");
+    m.insert("monitoring.stage_finished", "Finished");
+    m.insert("monitoring.stage_usage", "Usage");
+    m.insert("monitoring.submissions", "Submissions");
+    m.insert("monitoring.amount", "Amount");
+    m.insert("monitoring.total_usage_logs", "Usage logs");
+    m.insert("monitoring.total_node_tasks", "Node tasks");
+    m.insert("monitoring.failed_tasks", "Failed tasks");
+    m.insert("monitoring.map_receive_request", "Receive Request");
+    m.insert("monitoring.map_return_client", "Return to Client");
+    m.insert("monitoring.map_router", "Routing Module");
+    m.insert("monitoring.map_match_route", "Match Route");
+    m.insert("monitoring.map_process_request", "Process Request");
+    m.insert("monitoring.map_submit_result", "Submit Result");
+    m.insert("monitoring.map_model_service", "Model Service");
+    m.insert("monitoring.map_model_response", "Model Response");
     m.insert(
         "users.subtitle",
         "View and manage all registered users on the platform",

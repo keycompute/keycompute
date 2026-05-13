@@ -75,8 +75,8 @@ impl ClientConfig {
             {
                 // reqwest on wasm expects an absolute URL, so derive same-origin requests
                 // from the current browser location when no explicit API base is configured.
-                if let Some(window) = web_sys::window()
-                    && let Ok(origin) = window.location().origin()
+                if let Some(origin) =
+                    web_sys::window().and_then(|window| window.location().origin().ok())
                 {
                     return format!("{}/{}", origin.trim_end_matches('/'), path);
                 }
