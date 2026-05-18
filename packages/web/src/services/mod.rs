@@ -7,6 +7,8 @@ pub mod debug_service;
 pub mod distribution_service;
 pub mod health_service;
 pub mod model_service;
+pub mod monitoring_service;
+pub mod node_gateway_service;
 pub mod payment_service;
 pub mod pricing_service;
 pub mod settings_service;

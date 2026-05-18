@@ -9,10 +9,10 @@
   --content-max-width: 1440px;
 
   /* ── 颜色系统 ─────────────────────────────── */
-  --color-primary: #3b82f6;
-  --color-primary-hover: #2563eb;
-  --color-primary-active: #1d4ed8;
-  --color-primary-light: rgba(59, 130, 246, 0.12);
+  --color-primary: #5e6ad2;
+  --color-primary-hover: #828fff;
+  --color-primary-active: #4f5fc7;
+  --color-primary-light: rgba(94, 106, 210, 0.14);
 
   --color-success: #10b981;
   --color-success-light: rgba(16, 185, 129, 0.14);
@@ -20,34 +20,34 @@
   --color-warning-light: rgba(245, 158, 11, 0.14);
   --color-error: #ef4444;
   --color-error-light: rgba(239, 68, 68, 0.14);
-  --color-info: #3b82f6;
-  --color-info-light: rgba(59, 130, 246, 0.14);
-  --color-accent-secondary: #8b5cf6;
-  --color-accent-glow: rgba(59, 130, 246, 0.22);
+  --color-info: #5e6ad2;
+  --color-info-light: rgba(94, 106, 210, 0.14);
+  --color-accent-secondary: #7a7fad;
+  --color-accent-glow: rgba(94, 106, 210, 0.28);
 
   /* ── 中性色 ───────────────────────────────── */
-  --bg-primary: #f6f7fb;
+  --bg-primary: #f5f6f8;
   --bg-secondary: #ffffff;
-  --bg-tertiary: #eef1f7;
+  --bg-tertiary: #eceef3;
   --bg-overlay: rgba(15, 17, 23, 0.42);
   --bg-card: #ffffff;
 
-  --border-color: #d9deea;
-  --border-color-light: #edf0f6;
+  --border-color: #d7dbe6;
+  --border-color-light: #eceef4;
 
-  --text-primary: #151924;
-  --text-secondary: #5c6478;
-  --text-tertiary: #8a91a3;
+  --text-primary: #151720;
+  --text-secondary: #5f6572;
+  --text-tertiary: #8a8f98;
   --text-disabled: #b5bdcc;
   --text-inverse: #ffffff;
 
   /* ── 侧边栏 ───────────────────────────────── */
   --sidebar-bg: #ffffff;
-  --sidebar-text: #5c6478;
-  --sidebar-text-active: #151924;
-  --sidebar-item-active-bg: rgba(59, 130, 246, 0.15);
-  --sidebar-item-hover-bg: rgba(59, 130, 246, 0.1);
-  --sidebar-border: #d9deea;
+  --sidebar-text: #5f6572;
+  --sidebar-text-active: #151720;
+  --sidebar-item-active-bg: rgba(94, 106, 210, 0.14);
+  --sidebar-item-hover-bg: rgba(94, 106, 210, 0.08);
+  --sidebar-border: #d7dbe6;
 
   /* ── 间距系统 ─────────────────────────────── */
   --space-xs: 4px;
@@ -58,8 +58,9 @@
   --space-2xl: 48px;
 
   /* ── 字体 ─────────────────────────────────── */
-  --font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-family: "Inter", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-display: var(--font-family);
+  --font-mono: "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", monospace;
   --font-size-xs: 12px;
   --font-size-sm: 14px;
   --font-size-base: 15px;
@@ -72,21 +73,21 @@
   --font-weight-semibold: 600;
   --font-weight-bold: 700;
   --line-height-tight: 1.25;
-  --line-height-base: 1.5;
+  --line-height-base: 1.45;
   --line-height-loose: 1.75;
 
   /* ── 圆角 ─────────────────────────────────── */
   --radius-sm: 4px;
   --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
   --radius-full: 9999px;
 
   /* ── 阴影 ─────────────────────────────────── */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.16);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.18), 0 2px 4px -1px rgba(0, 0, 0, 0.12);
-  --shadow-lg: 0 12px 24px rgba(0, 0, 0, 0.2);
-  --shadow-xl: 0 20px 36px rgba(0, 0, 0, 0.28);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 8px 20px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 16px 34px rgba(0, 0, 0, 0.14);
+  --shadow-xl: 0 24px 54px rgba(0, 0, 0, 0.18);
 
   /* ── 过渡 ─────────────────────────────────── */
   --transition-fast: 150ms ease;

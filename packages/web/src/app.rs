@@ -58,21 +58,27 @@ pub fn App() -> Element {
     use_effect(move || {
         // 依赖 auth_store 的认证状态，登录/登出时会重新执行
         let is_auth = auth_store.is_authenticated();
-        if is_auth && let Some(token) = auth_store.token() {
-            // 恢复 token 到 API 客户端
-            get_client().set_token(&token);
-            spawn(async move {
-                if let Ok(user) = user_service::get_current_user(&token).await {
-                    *user_store.info.write() = Some(UserInfo {
-                        id: user.id.to_string(),
-                        email: user.email,
-                        name: user.name,
-                        role: user.role,
-                        tenant_id: user.tenant_id.to_string(),
-                    });
-                }
-            });
+        if !is_auth {
+            return;
         }
+
+        let Some(token) = auth_store.token() else {
+            return;
+        };
+
+        // 恢复 token 到 API 客户端
+        get_client().set_token(&token);
+        spawn(async move {
+            if let Ok(user) = user_service::get_current_user(&token).await {
+                *user_store.info.write() = Some(UserInfo {
+                    id: user.id.to_string(),
+                    email: user.email,
+                    name: user.name,
+                    role: user.role,
+                    tenant_id: user.tenant_id.to_string(),
+                });
+            }
+        });
     });
 
     rsx! {
@@ -159,6 +165,8 @@ pub fn AppLayout() -> Element {
     let r_admin_distribution = Route::DistributionRecords {}.to_string();
     let r_admin_tenants = Route::Tenants {}.to_string();
     let r_admin_system = Route::System {}.to_string();
+    let r_admin_node_gateway = Route::NodeGateway {}.to_string();
+    let r_admin_monitoring = Route::Monitoring {}.to_string();
     let r_admin_system_settings = Route::Settings {}.to_string();
     let show_distribution_nav = public_settings_store.loaded()
         && !matches!(public_settings_store.distribution_enabled(), Some(false));
@@ -231,6 +239,18 @@ pub fn AppLayout() -> Element {
                 .admin(),
                 NavItem::new(i18n.t("nav.tenants"), r_admin_tenants, NavIcon::Home).admin(),
                 NavItem::new(i18n.t("nav.system"), r_admin_system, NavIcon::Settings).admin(),
+                NavItem::new(
+                    i18n.t("nav.node_gateway"),
+                    r_admin_node_gateway,
+                    NavIcon::Server,
+                )
+                .admin(),
+                NavItem::new(
+                    i18n.t("nav.monitoring"),
+                    r_admin_monitoring,
+                    NavIcon::Activity,
+                )
+                .admin(),
                 NavItem::new(
                     i18n.t("nav.settings"),
                     r_admin_system_settings,

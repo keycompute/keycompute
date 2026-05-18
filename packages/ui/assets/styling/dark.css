@@ -2,35 +2,35 @@
 
 [data-theme="dark"] {
   /* ── 背景色 ─────────────────────────────────── */
-  --bg-primary: #0f1117;
-  --bg-secondary: #1a1d27;
-  --bg-tertiary: #242734;
-  --bg-overlay: rgba(0, 0, 0, 0.68);
-  --bg-card: #242734;
+  --bg-primary: #010102;
+  --bg-secondary: #0f1011;
+  --bg-tertiary: #18191a;
+  --bg-overlay: rgba(0, 0, 0, 0.72);
+  --bg-card: #0f1011;
 
   /* ── 边框 ───────────────────────────────────── */
-  --border-color: #2e3240;
-  --border-color-light: rgba(255, 255, 255, 0.06);
+  --border-color: #23252a;
+  --border-color-light: rgba(255, 255, 255, 0.055);
 
   /* ── 文字 ───────────────────────────────────── */
-  --text-primary: #f0f2f5;
-  --text-secondary: #a0a5b8;
-  --text-tertiary: #6b7084;
-  --text-disabled: #4e5364;
+  --text-primary: #f7f8f8;
+  --text-secondary: #d0d6e0;
+  --text-tertiary: #8a8f98;
+  --text-disabled: #62666d;
 
   /* ── 侧边栏（暗色主题下更深） ─────────────────── */
-  --sidebar-bg: #1a1d27;
-  --sidebar-text: #a0a5b8;
-  --sidebar-text-active: #f0f2f5;
-  --sidebar-item-active-bg: rgba(59, 130, 246, 0.15);
-  --sidebar-item-hover-bg: rgba(59, 130, 246, 0.1);
-  --sidebar-border: #2e3240;
+  --sidebar-bg: #08090b;
+  --sidebar-text: #8a8f98;
+  --sidebar-text-active: #f7f8f8;
+  --sidebar-item-active-bg: rgba(94, 106, 210, 0.16);
+  --sidebar-item-hover-bg: rgba(255, 255, 255, 0.045);
+  --sidebar-border: #23252a;
 
   /* ── 阴影（暗色下更强） ──────────────────────── */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+  --shadow-sm: none;
+  --shadow-md: none;
+  --shadow-lg: 0 18px 42px rgba(0, 0, 0, 0.28);
+  --shadow-xl: 0 28px 70px rgba(0, 0, 0, 0.36);
 }
 
 /* ── 暗色主题过渡动画 ─────────────────────────── */

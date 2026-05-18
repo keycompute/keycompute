@@ -41,8 +41,8 @@ pub fn public_openai_api_base_url() -> String {
     if configured.is_empty() {
         #[cfg(target_arch = "wasm32")]
         {
-            if let Some(window) = web_sys::window()
-                && let Ok(origin) = window.location().origin()
+            if let Some(origin) =
+                web_sys::window().and_then(|window| window.location().origin().ok())
             {
                 return format!("{}/v1", origin.trim_end_matches('/'));
             }

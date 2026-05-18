@@ -14,8 +14,10 @@ html, body {
   line-height: var(--line-height-base);
   color: var(--text-primary);
   background-color: var(--bg-primary);
+  font-feature-settings: "cv02", "cv03", "cv04", "tnum";
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 /* ── AppShell ───────────────────────────────── */
@@ -24,8 +26,19 @@ html, body {
   height: 100vh;
   overflow: hidden;
   position: relative;
-  background: var(--bg-primary);
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    var(--bg-primary);
+  background-size: 48px 48px;
   color: var(--text-primary);
+  font-family: var(--font-family);
+}
+
+.app-shell *,
+.app-shell *::before,
+.app-shell *::after {
+  letter-spacing: 0;
 }
 
 .app-shell::before {
@@ -49,6 +62,14 @@ html, body {
   box-shadow: none;
 }
 
+.sidebar::after {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, transparent, rgba(94, 106, 210, 0.45), transparent);
+}
+
 .sidebar::before {
   display: none;
 }
@@ -58,12 +79,12 @@ html, body {
 }
 
 .sidebar-logo {
-  height: var(--header-height);
+  height: 58px;
   display: flex;
   align-items: center;
   position: relative;
   z-index: 1;
-  padding: 0 var(--space-md);
+  padding: 0 14px;
   border-bottom: 1px solid var(--sidebar-border);
   flex-shrink: 0;
   gap: 12px;
@@ -72,10 +93,11 @@ html, body {
 }
 
 .sidebar-logo-icon {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   flex-shrink: 0;
-  background: linear-gradient(135deg, var(--color-primary), var(--color-accent-secondary));
+  background: var(--color-primary);
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: var(--radius-md);
   display: flex;
   align-items: center;
@@ -96,11 +118,11 @@ html, body {
 
 .sidebar-logo-text {
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: 18px;
   font-weight: var(--font-weight-semibold);
   line-height: 1.1;
   color: var(--sidebar-text-active);
-  letter-spacing: -0.5px;
+  letter-spacing: 0;
   background: none;
   -webkit-text-fill-color: currentColor;
 }
@@ -109,7 +131,7 @@ html, body {
   color: var(--text-tertiary);
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.16em;
+  letter-spacing: 0;
   text-transform: uppercase;
   transition: opacity var(--transition-slow);
 }
@@ -123,7 +145,7 @@ html, body {
   position: relative;
   z-index: 1;
   flex: 1;
-  padding: 20px 12px;
+  padding: 16px 10px;
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -138,16 +160,16 @@ html, body {
 }
 
 .sidebar-section {
-  margin-bottom: 18px;
+  margin-bottom: 16px;
 }
 
 .sidebar-section-title {
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-semibold);
-  color: var(--text-tertiary);
+  color: var(--text-disabled);
   text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: 0 10px;
+  letter-spacing: 0;
+  padding: 0 9px;
   margin-bottom: 7px;
   white-space: nowrap;
   overflow: hidden;
@@ -168,7 +190,7 @@ html, body {
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 12px 13px 12px 18px;
+  padding: 9px 11px 9px 17px;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   color: var(--sidebar-text);
@@ -184,21 +206,21 @@ html, body {
     transform var(--transition-fast);
   white-space: nowrap;
   overflow: hidden;
-  min-height: 40px;
+  min-height: 36px;
   user-select: none;
 }
 
 .sidebar-item:hover {
-  background-color: rgba(59, 130, 246, 0.08);
-  border-color: transparent;
+  background-color: var(--sidebar-item-hover-bg);
+  border-color: rgba(255, 255, 255, 0.04);
   color: var(--sidebar-text-active);
   transform: none;
 }
 
 .sidebar-item.active {
-  background: rgba(59, 130, 246, 0.12);
-  border-color: transparent;
-  color: #60a5fa;
+  background: var(--sidebar-item-active-bg);
+  border-color: rgba(94, 106, 210, 0.22);
+  color: var(--color-primary-hover);
   box-shadow: none;
 }
 
@@ -207,7 +229,7 @@ html, body {
   top: 50%;
   left: 7px;
   width: 2px;
-  height: 18px;
+  height: 16px;
   content: "";
   background: var(--color-primary);
   border-radius: var(--radius-full);
@@ -215,7 +237,7 @@ html, body {
 }
 
 .sidebar-item.active .sidebar-item-icon {
-  color: #60a5fa;
+  color: var(--color-primary-hover);
 }
 
 .sidebar-item.active .sidebar-item-label {
@@ -279,12 +301,13 @@ html, body {
 .header {
   position: sticky;
   top: 0;
-  height: var(--header-height);
-  background-color: var(--bg-primary);
+  height: 58px;
+  background-color: color-mix(in srgb, var(--bg-primary) 88%, transparent);
+  backdrop-filter: blur(18px);
   border-bottom: 1px solid var(--border-color);
   display: flex;
   align-items: center;
-  padding: 0 var(--space-lg);
+  padding: 0 24px;
   z-index: var(--z-header);
   gap: var(--space-md);
   flex-shrink: 0;
@@ -304,14 +327,13 @@ html, body {
 }
 
 .header-toggle-btn {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-md);
-  border: none;
-  background: transparent;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
   cursor: pointer;
@@ -326,20 +348,19 @@ html, body {
 }
 
 .header-page-title {
-  font-size: var(--font-size-xl);
+  font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
   color: var(--text-primary);
 }
 
 .header-icon-btn {
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   display: flex;
   align-items: center;
   justify-content: center;
   border-radius: var(--radius-md);
-  border: none;
-  background: transparent;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
   cursor: pointer;
@@ -370,10 +391,10 @@ html, body {
 }
 
 .header-avatar {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
   border-radius: var(--radius-full);
-  background: linear-gradient(135deg, var(--color-primary), var(--color-accent-secondary));
+  background: var(--color-primary);
   color: white;
   display: flex;
   align-items: center;
@@ -393,9 +414,9 @@ html, body {
 /* ── Content Area ───────────────────────────── */
 .content-area {
   flex: 1;
-  padding: var(--space-lg);
+  padding: 28px;
   overflow-y: auto;
-  background-color: var(--bg-primary);
+  background-color: transparent;
 }
 
 .content-inner {
@@ -406,7 +427,7 @@ html, body {
 /* ── Footer ─────────────────────────────────── */
 .footer {
   height: 48px;
-  background-color: var(--bg-primary);
+  background-color: transparent;
   border-top: 1px solid var(--border-color);
   display: flex;
   align-items: center;

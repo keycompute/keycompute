@@ -42,12 +42,14 @@ use crate::{
         get_distribution_stats,
         get_execution_stats,
         get_gateway_status,
+        get_monitoring_overview,
         get_my_balance,
         get_my_distribution_earnings,
         get_my_referral_code,
         get_my_referrals,
         get_my_usage,
         get_my_usage_stats,
+        get_node_gateway_overview,
         get_payment_order,
         get_provider_health,
         // 公开设置
@@ -243,6 +245,18 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/pricing/batch-defaults", post(set_default_pricing))
         .route("/api/v1/pricing/calculate", post(calculate_cost));
 
+    // Node Gateway 管理（仅 Admin）
+    let admin_node_gateway_routes = Router::new().route(
+        "/api/v1/admin/node-gateway/overview",
+        get(get_node_gateway_overview),
+    );
+
+    // 监控追踪（仅 Admin）
+    let admin_monitoring_routes = Router::new().route(
+        "/api/v1/admin/monitoring/overview",
+        get(get_monitoring_overview),
+    );
+
     // 合并管理路由并添加认证和限流中间件
     // 注意：中间件执行顺序是反向的，所以先添加 rate_limit，再添加 admin_auth
     // 实际执行顺序：admin_auth_middleware -> rate_limit_middleware -> handler
@@ -252,6 +266,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(admin_settings_routes)
         .merge(admin_distribution_routes)
         .merge(admin_pricing_routes)
+        .merge(admin_node_gateway_routes)
+        .merge(admin_monitoring_routes)
         // 先添加限流层（后执行）
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         // 再添加 Admin 认证层（先执行），统一保护所有 Admin 路由

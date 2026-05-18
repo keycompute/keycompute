@@ -9,7 +9,8 @@ use crate::views::{
     distribution::DistributionOverview,
     payments::{PaymentsOverview, Recharge},
     shared::{
-        Accounts, DistributionRecords, PaymentOrders, Pricing, Settings, System, Tenants, Users,
+        Accounts, DistributionRecords, Monitoring, NodeGateway, PaymentOrders, Pricing, Settings,
+        System, Tenants, Users,
     },
     user::{UserProfile, UserSettings},
 };
@@ -64,6 +65,10 @@ pub enum Route {
             Tenants {},
             #[route("/admin/system")]
             System {},
+            #[route("/admin/node-gateway")]
+            NodeGateway {},
+            #[route("/admin/monitoring")]
+            Monitoring {},
             #[route("/admin/settings")]
             Settings {},
         #[end_layout]

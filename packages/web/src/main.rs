@@ -14,7 +14,10 @@ mod views;
 use app::App;
 
 const FAVICON: Asset = asset!("/assets/favicon.ico");
-const MAIN_CSS: Asset = asset!("/assets/main.css");
+const MAIN_CSS: Asset = asset!(
+    "/assets/main.css",
+    AssetOptions::css().with_static_head(true)
+);
 
 fn main() {
     dioxus::launch(Root);
@@ -22,9 +25,10 @@ fn main() {
 
 #[component]
 fn Root() -> Element {
+    let _ = MAIN_CSS;
+
     rsx! {
         document::Link { rel: "icon", href: FAVICON }
-        document::Link { rel: "stylesheet", href: MAIN_CSS }
         // ECharts 用于图表渲染
         document::Script {
             src: "https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js",
