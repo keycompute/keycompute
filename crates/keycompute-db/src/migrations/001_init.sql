@@ -651,9 +651,29 @@ CREATE TABLE node_task_submissions (
     result_kind TEXT NOT NULL,
     request_hash TEXT NOT NULL,
     action TEXT NOT NULL,
-    response_json JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (task_id, lease_id)
 );
 
 CREATE INDEX idx_node_task_submissions_task_lease ON node_task_submissions(task_id, lease_id);
+
+-- ============================================================================
+-- 管理端监控查询性能优化索引
+-- ============================================================================
+
+-- node_tasks 监控追踪查询优化索引
+-- 用于 admin_monitoring.rs 中的 traces 查询（ORDER BY created_at DESC LIMIT 50）
+CREATE INDEX idx_node_tasks_created_at_desc ON node_tasks(created_at DESC);
+
+-- node_tasks 完成时间统计优化索引（部分索引）
+-- 用于 admin_monitoring.rs 中的 avg_node_latency_ms 统计（WHERE finished_at IS NOT NULL）
+CREATE INDEX idx_node_tasks_finished_at ON node_tasks(finished_at) WHERE finished_at IS NOT NULL;
+
+-- node_task_submissions 监控查询优化索引
+-- 用于 admin_monitoring.rs 中的 LEFT JOIN LATERAL 子查询（WHERE task_id = nt.id ORDER BY created_at DESC）
+CREATE INDEX idx_node_task_submissions_task_id_created_at ON node_task_submissions(task_id, created_at DESC);
+
+-- node_sessions 监控查询优化索引
+-- 用于 admin_monitoring.rs 和 admin_node_gateway.rs 中的 LEFT JOIN LATERAL 子查询
+-- （WHERE node_id = n.id ORDER BY last_seen_at DESC LIMIT 1）
+CREATE INDEX idx_node_sessions_node_id_last_seen_at ON node_sessions(node_id, last_seen_at DESC);

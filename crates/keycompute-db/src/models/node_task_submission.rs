@@ -19,7 +19,6 @@ pub struct NodeTaskSubmission {
     pub result_kind: String,
     pub request_hash: String,
     pub action: String,
-    pub response_json: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }
 
@@ -33,7 +32,6 @@ pub struct CreateNodeTaskSubmissionRequest {
     pub result_kind: String,
     pub request_hash: String,
     pub action: String,
-    pub response_json: serde_json::Value,
 }
 
 impl NodeTaskSubmission {
@@ -44,8 +42,8 @@ impl NodeTaskSubmission {
     ) -> Result<NodeTaskSubmission, DbError> {
         let submission = sqlx::query_as::<_, NodeTaskSubmission>(
             r#"
-            INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action, response_json)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             "#,
         )
@@ -56,7 +54,6 @@ impl NodeTaskSubmission {
         .bind(&req.result_kind)
         .bind(&req.request_hash)
         .bind(&req.action)
-        .bind(&req.response_json)
         .fetch_one(pool)
         .await?;
 

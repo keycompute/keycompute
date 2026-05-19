@@ -549,13 +549,12 @@ impl NodeGatewayStore {
                     result_kind: "expired".to_string(),
                     request_hash,
                     action: "expired".to_string(),
-                    response_json: serde_json::json!({}),
                 };
 
                 sqlx::query_as::<_, NodeTaskSubmission>(
                     r#"
-                    INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action, response_json)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     RETURNING *
                     "#,
                 )
@@ -566,7 +565,6 @@ impl NodeGatewayStore {
                 .bind(&submission_req.result_kind)
                 .bind(&submission_req.request_hash)
                 .bind(&submission_req.action)
-                .bind(&submission_req.response_json)
                 .fetch_one(&mut *tx)
                 .await?;
 
@@ -737,13 +735,12 @@ impl NodeGatewayStore {
             result_kind: "succeeded".to_string(),
             request_hash,
             action: "succeeded".to_string(),
-            response_json,
         };
 
         sqlx::query_as::<_, NodeTaskSubmission>(
             r#"
-            INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action, response_json)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             "#,
         )
@@ -754,7 +751,6 @@ impl NodeGatewayStore {
         .bind(&submission_req.result_kind)
         .bind(&submission_req.request_hash)
         .bind(&submission_req.action)
-        .bind(&submission_req.response_json)
         .fetch_one(&mut **tx)
         .await?;
 
@@ -899,13 +895,12 @@ impl NodeGatewayStore {
             result_kind: "failed".to_string(),
             request_hash,
             action: action.to_string(),
-            response_json: error_json.clone(),
         };
 
         sqlx::query_as::<_, NodeTaskSubmission>(
             r#"
-            INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action, response_json)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             "#,
         )
@@ -916,7 +911,6 @@ impl NodeGatewayStore {
         .bind(&submission_req.result_kind)
         .bind(&submission_req.request_hash)
         .bind(&submission_req.action)
-        .bind(&submission_req.response_json)
         .fetch_one(&mut **tx)
         .await?;
 
