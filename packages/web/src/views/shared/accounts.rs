@@ -382,30 +382,29 @@ fn AdminAccountsView() -> Element {
     };
 
     rsx! {
-        div { class: "page-header",
-            h1 { class: "page-title", {i18n.t("page.accounts")} }
-            p { class: "page-description", {i18n.t("accounts.subtitle")} }
-        }
-
-        div { class: "toolbar",
-            div { class: "toolbar-left",
-                Button {
-                    variant: ButtonVariant::Ghost,
-                    size: ButtonSize::Small,
-                    loading: resetting(),
-                    onclick: on_reset_health,
-                    "{reset_health_label}"
-                }
-            }
-            div { class: "toolbar-right",
-                Button {
-                    variant: ButtonVariant::Primary,
-                    size: ButtonSize::Small,
+        div { class: "page-container",
+            div { class: "page-header",
+                h1 { class: "page-title", {i18n.t("page.accounts")} }
+                p { class: "page-description", {i18n.t("accounts.subtitle")} }
+                button {
+                    class: "btn btn-primary",
                     onclick: move |_| *show_create.write() = true,
                     {i18n.t("accounts.add_channel")}
                 }
             }
-        }
+
+            // 操作工具栏
+            div { class: "toolbar",
+                div { class: "toolbar-left",
+                    Button {
+                        variant: ButtonVariant::Ghost,
+                        size: ButtonSize::Small,
+                        loading: resetting(),
+                        onclick: on_reset_health,
+                        "{reset_health_label}"
+                    }
+                }
+            }
 
         {
             let (is_empty, empty_text) = match accounts() {
@@ -844,6 +843,7 @@ fn AdminAccountsView() -> Element {
                     }
                 }
             }
+        }
         }
     }
 }

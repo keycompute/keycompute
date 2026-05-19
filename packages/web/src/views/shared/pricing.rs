@@ -342,8 +342,7 @@ fn CreatePricingModal(
     let mut saving = use_signal(|| false);
     let mut form_err = use_signal(String::new);
 
-    let on_submit = move |evt: Event<FormData>| {
-        evt.prevent_default();
+    let on_submit = move |_| {
         let m = model();
         let p = provider();
         let ip_str = input_price();
@@ -388,96 +387,94 @@ fn CreatePricingModal(
     };
 
     rsx! {
-        div { class: "modal-overlay",
+        div { class: "modal-backdrop",
             onclick: move |_| on_close.call(()),
             div {
                 class: "modal",
                 onclick: move |e| e.stop_propagation(),
                 div { class: "modal-header",
-                    h3 { class: "modal-title", {i18n.t("pricing.create_title")} }
+                    h2 { class: "modal-title", {i18n.t("pricing.create_title")} }
                     button {
-                        class: "modal-close",
+                        class: "btn btn-ghost btn-sm",
                         r#type: "button",
                         onclick: move |_| on_close.call(()),
-                        "×"
+                        "✕"
                     }
                 }
                 div { class: "modal-body",
                     if !form_err().is_empty() {
                         div { class: "alert alert-error", "{form_err}" }
                     }
-                    form {
-                        onsubmit: on_submit,
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("pricing.model_name")} }
-                            input {
-                                class: "form-input",
-                                r#type: "text",
-                                placeholder: "{i18n.t(\"pricing.model_placeholder\")}",
-                                value: "{model}",
-                                oninput: move |e| model.set(e.value()),
-                            }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("pricing.model_name")} }
+                        input {
+                            class: "input-field",
+                            r#type: "text",
+                            placeholder: "{i18n.t(\"pricing.model_placeholder\")}",
+                            value: "{model}",
+                            oninput: move |e| model.set(e.value()),
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", "Provider" }
-                            select {
-                                class: "form-input",
-                                value: "{provider}",
-                                onchange: move |e| provider.set(e.value()),
-                                option { value: "openai", "OpenAI" }
-                                option { value: "anthropic", "Anthropic" }
-                                option { value: "gemini", "Gemini" }
-                                option { value: "deepseek", "DeepSeek" }
-                                option { value: "ollama", "Ollama" }
-                                option { value: "vllm", "vLLM" }
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", "Provider" }
+                        select {
+                            class: "input-field",
+                            value: "{provider}",
+                            onchange: move |e| provider.set(e.value()),
+                            option { value: "openai", "OpenAI" }
+                            option { value: "anthropic", "Anthropic" }
+                            option { value: "gemini", "Gemini" }
+                            option { value: "deepseek", "DeepSeek" }
+                            option { value: "ollama", "Ollama" }
+                            option { value: "vllm", "vLLM" }
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("pricing.input_price_label")} }
-                            input {
-                                class: "form-input",
-                                r#type: "number",
-                                placeholder: "{i18n.t(\"pricing.input_placeholder\")}",
-                                step: "0.000001",
-                                value: "{input_price}",
-                                oninput: move |e| input_price.set(e.value()),
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("pricing.input_price_label")} }
+                        input {
+                            class: "input-field",
+                            r#type: "number",
+                            placeholder: "{i18n.t(\"pricing.input_placeholder\")}",
+                            step: "0.000001",
+                            value: "{input_price}",
+                            oninput: move |e| input_price.set(e.value()),
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("pricing.output_price_label")} }
-                            input {
-                                class: "form-input",
-                                r#type: "number",
-                                placeholder: "{i18n.t(\"pricing.output_placeholder\")}",
-                                step: "0.000001",
-                                value: "{output_price}",
-                                oninput: move |e| output_price.set(e.value()),
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("pricing.output_price_label")} }
+                        input {
+                            class: "input-field",
+                            r#type: "number",
+                            placeholder: "{i18n.t(\"pricing.output_placeholder\")}",
+                            step: "0.000001",
+                            value: "{output_price}",
+                            oninput: move |e| output_price.set(e.value()),
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("common.currency")} }
-                            select {
-                                class: "form-input",
-                                value: "{currency}",
-                                onchange: move |e| currency.set(e.value()),
-                                option { value: "CNY", {i18n.t("pricing.currency_cny")} }
-                                option { value: "USD", {i18n.t("pricing.currency_usd")} }
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("common.currency")} }
+                        select {
+                            class: "input-field",
+                            value: "{currency}",
+                            onchange: move |e| currency.set(e.value()),
+                            option { value: "CNY", {i18n.t("pricing.currency_cny")} }
+                            option { value: "USD", {i18n.t("pricing.currency_usd")} }
                         }
-                        div { class: "modal-footer",
-                            button {
-                                class: "btn btn-secondary",
-                                r#type: "button",
-                                onclick: move |_| on_close.call(()),
-                                {i18n.t("form.cancel")}
-                            }
-                            button {
-                                class: "btn btn-primary",
-                                r#type: "submit",
-                                disabled: saving(),
-                                if saving() { {i18n.t("pricing.creating")} } else { {i18n.t("form.create")} }
-                            }
-                        }
+                    }
+                }
+                div { class: "modal-footer",
+                    button {
+                        class: "btn btn-ghost",
+                        r#type: "button",
+                        onclick: move |_| on_close.call(()),
+                        {i18n.t("form.cancel")}
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        r#type: "button",
+                        disabled: saving(),
+                        onclick: on_submit,
+                        if saving() { {i18n.t("pricing.creating")} } else { {i18n.t("form.create")} }
                     }
                 }
             }
@@ -503,8 +500,7 @@ fn EditPricingModal(
     let mut saving = use_signal(|| false);
     let mut form_err = use_signal(String::new);
 
-    let on_submit = move |evt: Event<FormData>| {
-        evt.prevent_default();
+    let on_submit = move |_| {
         let ip_str = input_price();
         let op_str = output_price();
 
@@ -551,87 +547,85 @@ fn EditPricingModal(
     };
 
     rsx! {
-        div { class: "modal-overlay",
+        div { class: "modal-backdrop",
             onclick: move |_| on_close.call(()),
             div {
                 class: "modal",
                 onclick: move |e| e.stop_propagation(),
                 div { class: "modal-header",
-                    h3 { class: "modal-title", {i18n.t("pricing.edit_title")} }
+                    h2 { class: "modal-title", {i18n.t("pricing.edit_title")} }
                     button {
-                        class: "modal-close",
+                        class: "btn btn-ghost btn-sm",
                         r#type: "button",
                         onclick: move |_| on_close.call(()),
-                        "×"
+                        "✕"
                     }
                 }
                 div { class: "modal-body",
                     if !form_err().is_empty() {
                         div { class: "alert alert-error", "{form_err}" }
                     }
-                    form {
-                        onsubmit: on_submit,
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("pricing.model_name")} }
-                            input {
-                                class: "form-input",
-                                r#type: "text",
-                                value: "{pricing_model}",
-                                disabled: true,
-                            }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("pricing.model_name")} }
+                        input {
+                            class: "input-field",
+                            r#type: "text",
+                            value: "{pricing_model}",
+                            disabled: true,
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", "Provider" }
-                            input {
-                                class: "form-input",
-                                r#type: "text",
-                                value: "{pricing_provider}",
-                                disabled: true,
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", "Provider" }
+                        input {
+                            class: "input-field",
+                            r#type: "text",
+                            value: "{pricing_provider}",
+                            disabled: true,
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("common.currency")} }
-                            input {
-                                class: "form-input",
-                                r#type: "text",
-                                value: "{pricing_currency}",
-                                disabled: true,
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("common.currency")} }
+                        input {
+                            class: "input-field",
+                            r#type: "text",
+                            value: "{pricing_currency}",
+                            disabled: true,
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("pricing.input_price_label")} }
-                            input {
-                                class: "form-input",
-                                r#type: "number",
-                                step: "0.000001",
-                                value: "{input_price}",
-                                oninput: move |e| input_price.set(e.value()),
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("pricing.input_price_label")} }
+                        input {
+                            class: "input-field",
+                            r#type: "number",
+                            step: "0.000001",
+                            value: "{input_price}",
+                            oninput: move |e| input_price.set(e.value()),
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("pricing.output_price_label")} }
-                            input {
-                                class: "form-input",
-                                r#type: "number",
-                                step: "0.000001",
-                                value: "{output_price}",
-                                oninput: move |e| output_price.set(e.value()),
-                            }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("pricing.output_price_label")} }
+                        input {
+                            class: "input-field",
+                            r#type: "number",
+                            step: "0.000001",
+                            value: "{output_price}",
+                            oninput: move |e| output_price.set(e.value()),
                         }
-                        div { class: "modal-footer",
-                            button {
-                                class: "btn btn-secondary",
-                                r#type: "button",
-                                onclick: move |_| on_close.call(()),
-                                {i18n.t("form.cancel")}
-                            }
-                            button {
-                                class: "btn btn-primary",
-                                r#type: "submit",
-                                disabled: saving(),
-                                if saving() { {i18n.t("form.saving")} } else { {i18n.t("form.save_changes")} }
-                            }
-                        }
+                    }
+                }
+                div { class: "modal-footer",
+                    button {
+                        class: "btn btn-ghost",
+                        r#type: "button",
+                        onclick: move |_| on_close.call(()),
+                        {i18n.t("form.cancel")}
+                    }
+                    button {
+                        class: "btn btn-primary",
+                        r#type: "button",
+                        disabled: saving(),
+                        onclick: on_submit,
+                        if saving() { {i18n.t("form.saving")} } else { {i18n.t("form.save_changes")} }
                     }
                 }
             }

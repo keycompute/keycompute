@@ -6,7 +6,15 @@ pub fn Footer() -> Element {
     rsx! {
         footer { class: "footer",
             span { class: "footer-text",
-                "© 2025 KeyCompute · Built with Dioxus 0.7"
+                "© 2026 "
+                a {
+                    class: "footer-link",
+                    href: "https://github.com/aiqubits/keycompute",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    "KeyCompute"
+                }
+                ". All Rights Reserved."
             }
         }
     }
