@@ -79,9 +79,25 @@ impl RequestContext {
         self.usage.add_output(tokens);
     }
 
+    /// 设置输出 token（用于覆盖估算值）
+    ///
+    /// 当 Provider 返回精确的 usage 信息时，使用此方法直接设置输出 token 数
+    /// 而非累积，确保与 Provider 的计费完全一致
+    pub fn set_output_tokens(&self, tokens: u32) {
+        self.usage.set_output(tokens);
+    }
+
     /// 设置输入 token（原子更新）
     pub fn set_input_tokens(&self, tokens: u32) {
         self.usage.set_input(tokens);
+    }
+
+    /// 检查 usage 是否已被 Provider 精确值覆盖
+    ///
+    /// 如果返回 true，说明收到过 StreamEvent::Usage 事件，使用的是 Provider 精确值
+    /// 如果返回 false，说明未收到 Usage 事件，使用的是 tiktoken 估算值
+    pub fn is_usage_finalized(&self) -> bool {
+        self.usage.is_input_finalized() && self.usage.is_output_finalized()
     }
 }
 

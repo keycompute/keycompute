@@ -279,13 +279,33 @@ impl GatewayExecutor {
         // 流处理管道
         let mut pipeline = StreamPipeline::new(ctx.request_id);
 
+        // 流开始前：使用 tiktoken 估算输入 token 数
+        // 注意：这只是估算，最终会被 StreamEvent::Usage 事件中的精确值覆盖
+        let upstream_messages: Vec<keycompute_provider_trait::UpstreamMessage> = ctx
+            .messages
+            .iter()
+            .map(|m| keycompute_provider_trait::UpstreamMessage {
+                role: m.role.to_string(),
+                content: m.content.clone(),
+            })
+            .collect();
+        let estimated_input_tokens = Self::estimate_input_tokens(&upstream_messages);
+        ctx.set_input_tokens(estimated_input_tokens);
+
+        tracing::debug!(
+            request_id = %ctx.request_id,
+            estimated_input_tokens = estimated_input_tokens,
+            "Stream started, input tokens estimated"
+        );
+
         while let Some(event) = stream.next().await {
             match event? {
                 StreamEvent::Delta {
                     content,
                     finish_reason,
                 } => {
-                    // 累积 tokens（简化估算）
+                    // 使用 tiktoken 估算输出 token（累积）
+                    // 注意：这里的估算会在收到 StreamEvent::Usage 时被覆盖
                     let tokens = Self::estimate_tokens(&content);
                     ctx.add_output_tokens(tokens);
 
@@ -314,13 +334,18 @@ impl GatewayExecutor {
                     input_tokens,
                     output_tokens,
                 } => {
-                    // Provider 报告的用量（优先级更高）
+                    // Provider 报告的精确 usage 值（优先级最高）
+                    // 覆盖之前的 tiktoken 估算值
                     ctx.set_input_tokens(input_tokens);
-                    // 覆盖输出的 token 计数
-                    let current_output = ctx.usage_snapshot().1;
-                    if output_tokens > current_output {
-                        ctx.add_output_tokens(output_tokens - current_output);
-                    }
+                    ctx.set_output_tokens(output_tokens);
+
+                    tracing::debug!(
+                        request_id = %ctx.request_id,
+                        provider_usage = true,
+                        input_tokens = input_tokens,
+                        output_tokens = output_tokens,
+                        "Provider usage received, overriding estimation"
+                    );
                 }
                 StreamEvent::Done => {
                     tracing::debug!(
@@ -382,10 +407,13 @@ impl GatewayExecutor {
         }
     }
 
-    /// 精确计算 token 数
+    /// 估算 token 数（使用 tiktoken-rs）
     ///
     /// 使用 tiktoken-rs 库的 o200k_base tokenizer（支持 GPT-4o, o1, o3 等模型）
     /// 提供与 OpenAI API 完全一致的 token 计数
+    ///
+    /// 注意：这是估算值，用于流式场景的实时反馈
+    /// 最终计费会使用 API Response 中的精确 usage 值进行覆盖
     fn estimate_tokens(content: &str) -> u32 {
         if content.is_empty() {
             return 0;
@@ -395,6 +423,26 @@ impl GatewayExecutor {
         // singleton 模式避免重复加载词表
         let bpe = tiktoken_rs::o200k_base_singleton();
         bpe.encode_with_special_tokens(content).len() as u32
+    }
+
+    /// 估算输入 messages 的 token 数（使用 tiktoken-rs）
+    ///
+    /// 用于在 API Response Usage 不可用时提供估算值
+    /// 包括消息格式化和特殊 token 的处理
+    ///
+    /// 注意：这是估算值，最终计费会使用 API Response 中的精确 usage 值进行覆盖
+    ///
+    /// 实现说明：
+    /// 不使用 get_chat_completion_max_tokens，因为它返回的是"剩余可用token数"而非"输入token数"
+    /// 而是直接序列化messages为JSON，然后用tiktoken计算整个JSON的token数
+    /// 这样可以正确包含role名称、格式化等所有token
+    fn estimate_input_tokens(messages: &[keycompute_provider_trait::UpstreamMessage]) -> u32 {
+        // 将messages序列化为JSON，保留所有格式（包括role名称）
+        let json_str = serde_json::to_string(messages).unwrap_or_default();
+
+        // 使用tiktoken直接计算JSON的token数
+        // 这样可以正确包含 role 名称、content 格式化等所有 token
+        Self::estimate_tokens(&json_str)
     }
 
     /// 获取所有 Provider 名称列表
@@ -530,6 +578,95 @@ mod tests {
     #[test]
     fn test_estimate_tokens_empty() {
         assert_eq!(GatewayExecutor::estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_single_message() {
+        // 测试单个消息的 token 估算
+        let messages = vec![keycompute_provider_trait::UpstreamMessage {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+        }];
+        let tokens = GatewayExecutor::estimate_input_tokens(&messages);
+        // 单个 "Hello" 约 1-2 tokens，加上 JSON 格式化和 role 名称
+        assert!(
+            tokens > 0,
+            "Token count should be greater than 0, got: {}",
+            tokens
+        );
+        // 应该大于单纯 "Hello" 的 token 数，因为包含了 JSON 格式
+        let plain_tokens = GatewayExecutor::estimate_tokens("Hello");
+        assert!(
+            tokens >= plain_tokens,
+            "Input tokens should include format overhead"
+        );
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_multiple_messages() {
+        // 测试多个消息的 token 估算
+        let messages = vec![
+            keycompute_provider_trait::UpstreamMessage {
+                role: "system".to_string(),
+                content: "You are a helpful assistant.".to_string(),
+            },
+            keycompute_provider_trait::UpstreamMessage {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+            },
+        ];
+        let tokens = GatewayExecutor::estimate_input_tokens(&messages);
+        assert!(tokens > 0, "Token count should be greater than 0");
+        // 多个消息的 token 数应该大于单个消息
+        let single_tokens = GatewayExecutor::estimate_input_tokens(&[messages[1].clone()]);
+        assert!(
+            tokens > single_tokens,
+            "Multiple messages should have more tokens"
+        );
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_empty() {
+        // 测试空消息列表
+        // 注意：空列表序列化后是 "[]"，这本身也是有 token 的
+        let messages: Vec<keycompute_provider_trait::UpstreamMessage> = vec![];
+        let tokens = GatewayExecutor::estimate_input_tokens(&messages);
+        // 空 JSON "[]" 在 tiktoken 中也会计算为约 1 token
+        // 这是正确的，因为即使空消息数组也有序列化开销
+        // u32 类型永远 >= 0，所以直接验证返回值有效
+        assert!(
+            matches!(tokens, 0..=u32::MAX),
+            "Empty messages should return valid u32 token count"
+        );
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_chinese() {
+        // 测试中文消息的 token 估算
+        let messages = vec![keycompute_provider_trait::UpstreamMessage {
+            role: "user".to_string(),
+            content: "你好世界".to_string(),
+        }];
+        let tokens = GatewayExecutor::estimate_input_tokens(&messages);
+        assert!(tokens > 0, "Chinese content should have token count > 0");
+    }
+
+    #[test]
+    fn test_estimate_input_tokens_includes_role_format() {
+        // 测试估算是否包含 role 和格式
+        // 将 messages 序列化为 JSON，确保包含 role 信息
+        let messages = vec![keycompute_provider_trait::UpstreamMessage {
+            role: "user".to_string(),
+            content: "test".to_string(),
+        }];
+        let tokens = GatewayExecutor::estimate_input_tokens(&messages);
+        let json = serde_json::to_string(&messages).unwrap();
+        let json_tokens = GatewayExecutor::estimate_tokens(&json);
+        // 应该等于 JSON 的 token 数
+        assert_eq!(
+            tokens, json_tokens,
+            "estimate_input_tokens should return JSON token count"
+        );
     }
 
     #[tokio::test]

@@ -71,10 +71,8 @@ fn get_or_init_instance(
             if let Ok(resize_fn) = js_sys::Reflect::get(inst, &"resize".into()) {
                 if let Some(f) = resize_fn.dyn_ref::<js_sys::Function>() {
                     let opts = js_sys::Object::new();
-                    let _ =
-                        js_sys::Reflect::set(&opts, &"width".into(), &(width as f64).into());
-                    let _ =
-                        js_sys::Reflect::set(&opts, &"height".into(), &(height as f64).into());
+                    let _ = js_sys::Reflect::set(&opts, &"width".into(), &(width as f64).into());
+                    let _ = js_sys::Reflect::set(&opts, &"height".into(), &(height as f64).into());
                     let _ = f.call1(inst, &opts);
                 }
             }

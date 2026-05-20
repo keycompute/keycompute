@@ -12,7 +12,6 @@
 //! - 管理员可通过前端界面动态配置，无需重启系统
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use keycompute_provider_trait::{
     ByteStream, HttpTransport, ProviderAdapter, StreamBox, StreamEvent, UpstreamRequest,
 };
@@ -75,7 +74,8 @@ impl OpenAIProvider {
         &self,
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<(u32, u32)>, Option<String>)> {
+        // 返回 (content, usage, finish_reason) 元组
         let body = self.build_request_body(&request);
         let body_json = serde_json::to_string(&body).map_err(|e| {
             KeyComputeError::ProviderError(format!("Failed to serialize request: {}", e))
@@ -98,15 +98,16 @@ impl OpenAIProvider {
                 KeyComputeError::ProviderError(format!("Failed to parse response: {}", e))
             })?;
 
-        // 提取内容
-        let content = openai_response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .unwrap_or_default();
+        // 使用 OpenAIResponse 的方法一次性提取所有字段
+        let content = openai_response.extract_text().to_string();
+        let finish_reason = openai_response.extract_finish_reason();
 
-        Ok(content)
+        // 提取 usage 信息（非流式响应通常包含完整的 usage 数据）
+        let usage = openai_response
+            .usage
+            .map(|u| (u.prompt_tokens as u32, u.completion_tokens as u32));
+
+        Ok((content, usage, finish_reason))
     }
 
     /// 执行流式请求
@@ -164,13 +165,27 @@ impl ProviderAdapter for OpenAIProvider {
             self.stream_chat_internal(transport, request).await
         } else {
             // 非流式请求，包装为单事件流
-            let content = self.chat_internal(transport, request).await?;
-            let event = StreamEvent::delta(content);
+            let (content, usage, finish_reason) = self.chat_internal(transport, request).await?;
 
-            let stream = futures::stream::once(async move { Ok(event) }).chain(
-                futures::stream::once(async move { Ok(StreamEvent::done()) }),
-            );
+            let event = StreamEvent::Delta {
+                content,
+                // 非流式响应有finish_reason，设为Some
+                finish_reason: Some(finish_reason.unwrap_or_else(|| "stop".to_string())),
+            };
 
+            let mut events: Vec<Result<StreamEvent>> = vec![Ok(event)];
+
+            // 如果有 usage 信息，添加 Usage 事件
+            if let Some((input_tokens, output_tokens)) = usage {
+                events.push(Ok(StreamEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                }));
+            }
+
+            events.push(Ok(StreamEvent::Done));
+
+            let stream = futures::stream::iter(events);
             Ok(Box::pin(stream))
         }
     }
@@ -180,7 +195,8 @@ impl ProviderAdapter for OpenAIProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> Result<String> {
-        self.chat_internal(transport, request).await
+        let (content, _usage, _finish_reason) = self.chat_internal(transport, request).await?;
+        Ok(content)
     }
 }
 

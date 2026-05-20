@@ -111,6 +111,11 @@ impl OpenAIResponse {
             .and_then(|c| c.message.content.as_deref())
             .unwrap_or("")
     }
+
+    /// 提取 finish_reason
+    pub fn extract_finish_reason(&self) -> Option<String> {
+        self.choices.first().and_then(|c| c.finish_reason.clone())
+    }
 }
 
 impl OpenAIMessage {

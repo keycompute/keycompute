@@ -97,8 +97,12 @@ impl BillingService {
         let user_amount = calculate_amount(input_tokens, output_tokens, &ctx.pricing_snapshot);
 
         // 确定用量来源
-        // 注意：这里简化处理，实际应该根据 Provider 是否报告了用量来决定
-        let usage_source = UsageSource::GatewayAccumulated;
+        // 根据是否收到 Provider 的 Usage 事件来决定
+        let usage_source = if ctx.is_usage_finalized() {
+            UsageSource::ProviderReported
+        } else {
+            UsageSource::GatewayAccumulated
+        };
 
         let log = NewUsageLog {
             request_id: ctx.request_id,
