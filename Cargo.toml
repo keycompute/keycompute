@@ -39,3 +39,11 @@ keycompute-alipay = { path = "crates/keycompute-payment/keycompute-alipay" }
 node-gateway = { path = "crates/node-gateway" }
 ui = { path = "packages/ui" }
 client-api = { path = "packages/client-api" }
+
+# ── WASM 体积优化 ──────────────────────────────────────
+[profile.release]
+opt-level = "z"       # 最小体积优化
+lto = true             # 跨 crate 链接时优化，消除死代码
+codegen-units = 1      # 最大优化机会（牺牲编译速度）
+strip = true           # 移除调试符号
+panic = "abort"        # 减少 panic 展开代码

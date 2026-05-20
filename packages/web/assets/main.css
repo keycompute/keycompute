@@ -4486,8 +4486,8 @@ select.form-input:focus {
 }
 
 @keyframes kc-star-twinkle {
-  0%, 100% { opacity: 0.3; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.2); }
+  0%, 100% { opacity: 0.2; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.5); }
 }
 
 .kc-home-shooting-stars {
@@ -4749,6 +4749,15 @@ select.form-input:focus {
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: -0.03em;
+}
+
+.kc-home-hero-slogan {
+  margin: 0 0 24px;
+  font-family: "Space Grotesk", sans-serif;
+  font-size: clamp(1.2rem, 3vw, 1.8rem);
+  font-weight: 500;
+  color: var(--kc-home-text-secondary);
+  letter-spacing: -0.02em;
 }
 
 .kc-home-hero-highlight {

@@ -1,6 +1,6 @@
 //! 柱状图组件
 //!
-//! 基于 `charming` crate（ECharts WASM 渲染）封装的 Dioxus 柱状图组件。
+//! 通过 JS 互调直接使用 ECharts 渲染柱状图，无需 charming 中间层。
 //!
 //! # 示例
 //! ```rust
@@ -16,13 +16,9 @@
 //! }
 //! ```
 
-use charming::{
-    Chart, WasmRenderer,
-    component::{Axis, Grid, Legend, Title},
-    element::AxisType,
-    series::Bar,
-};
 use dioxus::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use serde_json::json;
 
 /// 柱状图单条数据系列
 #[derive(Clone, PartialEq)]
@@ -55,9 +51,10 @@ pub struct BarChartProps {
 
 /// 柱状图组件
 ///
-/// 基于 charming `WasmRenderer` 渲染 Apache ECharts 柱状图。
+/// 通过 JS 互调直接调用 ECharts API 渲染柱状图。
 /// 组件挂载后通过 `use_effect` 触发渲染，数据变更时自动重渲染。
 #[component]
+#[allow(unused_variables)]
 pub fn BarChart(props: BarChartProps) -> Element {
     let id = props.id.clone();
     let width = props.width;
@@ -67,34 +64,35 @@ pub fn BarChart(props: BarChartProps) -> Element {
     let series_data = props.series.clone();
 
     use_effect(move || {
-        let mut chart = Chart::new().grid(Grid::new());
+        #[cfg(target_arch = "wasm32")]
+        {
+            let series_arr: Vec<serde_json::Value> = series_data
+                .iter()
+                .map(|s| {
+                    json!({
+                        "type": "bar",
+                        "name": s.name,
+                        "data": s.data
+                    })
+                })
+                .collect();
 
-        if !title_text.is_empty() {
-            chart = chart.title(Title::new().text(title_text.as_str()));
+            let mut option = json!({
+                "grid": { "containLabel": true },
+                "xAxis": { "type": "category", "data": x_data },
+                "yAxis": { "type": "value" },
+                "series": series_arr
+            });
+
+            if !title_text.is_empty() {
+                option["title"] = json!({ "text": title_text });
+            }
+            if series_data.len() > 1 {
+                option["legend"] = json!({ "bottom": 0 });
+            }
+
+            crate::charts::echarts_bindgen::render_chart(&id, width, height, &option);
         }
-
-        // 图例（多系列时显示）
-        if series_data.len() > 1 {
-            chart = chart.legend(Legend::new().top("bottom"));
-        }
-
-        // X 轴
-        let x_labels: Vec<&str> = x_data.iter().map(String::as_str).collect();
-        chart = chart.x_axis(Axis::new().type_(AxisType::Category).data(x_labels));
-
-        // Y 轴
-        chart = chart.y_axis(Axis::new().type_(AxisType::Value));
-
-        // 数据系列
-        for s in &series_data {
-            let values: Vec<charming::datatype::CompositeValue> =
-                s.data.iter().map(|&v| v.into()).collect();
-            let bar = Bar::new().name(s.name.as_str()).data(values);
-            chart = chart.series(bar);
-        }
-
-        let renderer = WasmRenderer::new(width, height);
-        let _ = renderer.render(&id, &chart);
     });
 
     rsx! {

@@ -3,7 +3,7 @@
 //! # 模块结构
 //! - `layout`     — 应用布局（AppShell、Sidebar、Header、Footer）
 //! - `components` — 通用原子组件（Button、Input、Badge、Card、Modal、Table、Loading、Alert）
-//! - `charts`     — 图表组件（LineChart、BarChart、PieChart，基于 charming + ECharts WASM）
+//! - `charts`     — 图表组件（LineChart、BarChart、PieChart，通过 JS 互调直接使用 ECharts）
 //! - `icons`      — 内联 SVG 图标组件
 
 pub mod charts;

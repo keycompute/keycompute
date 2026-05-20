@@ -348,7 +348,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     // ── Login ───────────────────────────────────
     m.insert("login.tagline_1", "Next-Gen");
     m.insert("login.tagline_highlight", "AI Token Compute Platform");
-    m.insert("login.tagline_2", "— Every Token Creates Value");
+    m.insert("login.tagline_2", "Every Token Creates Value");
     m.insert("login.tagline_3", "");
     m.insert(
         "login.description",

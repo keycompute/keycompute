@@ -1,4 +1,5 @@
 pub mod bar_chart;
+pub mod echarts_bindgen;
 pub mod line_chart;
 pub mod pie_chart;
 

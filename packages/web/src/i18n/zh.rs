@@ -309,7 +309,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     // ── Login ───────────────────────────────────
     m.insert("login.tagline_1", "新一代");
     m.insert("login.tagline_highlight", "AI Token 算力服务平台");
-    m.insert("login.tagline_2", "，让每一个 Token 都创造价值");
+    m.insert("login.tagline_2", "让每一个 Token 都创造价值");
     m.insert("login.tagline_3", "");
     m.insert(
         "login.description",

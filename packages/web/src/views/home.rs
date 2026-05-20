@@ -52,6 +52,7 @@ pub fn Home() -> Element {
     let t_register = i18n.t("home.register");
     let t_tagline_1 = i18n.t("login.tagline_1");
     let t_tagline_highlight = i18n.t("login.tagline_highlight");
+    let t_tagline_2 = i18n.t("login.tagline_2");
     let t_description = i18n.t("login.description");
     let t_features_title = i18n.t("home.features.title");
     let t_feature_routing = i18n.t("login.feature_routing");
@@ -87,13 +88,13 @@ pub fn Home() -> Element {
             if is_dark {
                 // 黑暗主题：星空背景
                 div { class: "kc-home-stars-container",
-                    // 生成多层星星
-                    {(0..100).map(|i| {
+                    // 生成星星（减少到50个，增大尺寸，增强缩放效果）
+                    {(0..50).map(|i| {
                         let style = format!(
                             "--star-left: {}%; --star-top: {}%; --star-size: {}; --star-delay: {}s; --star-duration: {}s;",
                             (i * 37 % 100),
                             (i * 53 % 100),
-                            if i % 3 == 0 { "2px" } else if i % 3 == 1 { "3px" } else { "1px" },
+                            if i % 5 == 0 { "4px" } else if i % 5 == 1 { "5px" } else if i % 5 == 2 { "3px" } else { "2px" },
                             (i % 10) as f64 * 0.5,
                             (2 + (i % 4)) as f64
                         );
@@ -289,6 +290,9 @@ pub fn Home() -> Element {
                             h1 {
                                 class: "kc-home-hero-title",
                                 span { class: "kc-home-hero-highlight", "{t_tagline_1} {t_tagline_highlight}" }
+                            }
+                            if !t_tagline_2.is_empty() {
+                                p { class: "kc-home-hero-slogan", "{t_tagline_2}" }
                             }
                             p {
                                 class: "kc-home-hero-description",

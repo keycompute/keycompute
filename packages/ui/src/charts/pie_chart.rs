@@ -1,6 +1,6 @@
 //! 饼图组件
 //!
-//! 基于 `charming` crate（ECharts WASM 渲染）封装的 Dioxus 饼图组件。
+//! 通过 JS 互调直接使用 ECharts 渲染饼图，无需 charming 中间层。
 //!
 //! # 示例
 //! ```rust
@@ -17,12 +17,9 @@
 //! }
 //! ```
 
-use charming::{
-    Chart, WasmRenderer,
-    component::{Legend, Title},
-    series::Pie,
-};
 use dioxus::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use serde_json::json;
 
 /// 饼图单项数据
 #[derive(Clone, PartialEq)]
@@ -53,9 +50,10 @@ pub struct PieChartProps {
 
 /// 饼图组件
 ///
-/// 基于 charming `WasmRenderer` 渲染 Apache ECharts 饼图。
+/// 通过 JS 互调直接调用 ECharts API 渲染饼图。
 /// 组件挂载后通过 `use_effect` 触发渲染，数据变更时自动重渲染。
 #[component]
+#[allow(unused_variables)]
 pub fn PieChart(props: PieChartProps) -> Element {
     let id = props.id.clone();
     let width = props.width;
@@ -63,64 +61,38 @@ pub fn PieChart(props: PieChartProps) -> Element {
     let title_text = props.title.clone();
     let pie_data = props.data.clone();
 
-    let _cleanup_id = props.id.clone();
+    let cleanup_id = props.id.clone();
     use_drop(move || {
         #[cfg(target_arch = "wasm32")]
         {
-            use wasm_bindgen::JsCast;
-            if let Some(window) = web_sys::window() {
-                if let Some(doc) = window.document() {
-                    if let Some(el) = doc.get_element_by_id(&_cleanup_id) {
-                        // 通过 ECharts 全局 API 销毁实例
-                        let _ = js_sys::Reflect::get(&window, &"echarts".into())
-                            .ok()
-                            .and_then(|echarts| {
-                                js_sys::Reflect::get(&echarts, &"getInstanceByDom".into())
-                                    .ok()
-                                    .and_then(|get_fn| {
-                                        get_fn
-                                            .dyn_ref::<js_sys::Function>()
-                                            .and_then(|f| f.call1(&echarts, &el).ok())
-                                    })
-                                    .and_then(|instance| {
-                                        js_sys::Reflect::get(&instance, &"dispose".into())
-                                            .ok()
-                                            .and_then(|dispose| {
-                                                dispose
-                                                    .dyn_ref::<js_sys::Function>()
-                                                    .and_then(|f| f.call0(&instance).ok())
-                                            })
-                                    })
-                            });
-                    }
-                }
-            }
+            crate::charts::echarts_bindgen::dispose_chart(&cleanup_id);
         }
     });
 
     use_effect(move || {
-        let id_clone = id.clone();
-        let mut chart = Chart::new().legend(Legend::new().top("bottom"));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let data_arr: Vec<serde_json::Value> = pie_data
+                .iter()
+                .map(|item| json!({ "name": item.name, "value": item.value }))
+                .collect();
 
-        if !title_text.is_empty() {
-            chart = chart.title(Title::new().text(title_text.as_str()));
+            let mut option = json!({
+                "legend": { "bottom": 0 },
+                "series": [{
+                    "type": "pie",
+                    "radius": ["40%", "70%"],
+                    "center": ["50%", "50%"],
+                    "data": data_arr
+                }]
+            });
+
+            if !title_text.is_empty() {
+                option["title"] = json!({ "text": title_text });
+            }
+
+            crate::charts::echarts_bindgen::render_chart(&id, width, height, &option);
         }
-
-        // 构造 ECharts 饼图数据格式 (value, name)
-        let data_pairs: Vec<(f64, &str)> = pie_data
-            .iter()
-            .map(|item| (item.value, item.name.as_str()))
-            .collect();
-
-        let pie = Pie::new()
-            .radius(vec!["40%", "70%"])
-            .center(vec!["50%", "50%"])
-            .data(data_pairs);
-
-        chart = chart.series(pie);
-
-        let renderer = WasmRenderer::new(width, height);
-        let _ = renderer.render(&id_clone, &chart);
     });
 
     rsx! {
