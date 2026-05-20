@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::app::{AdminLayout, AppLayout};
 use crate::views::{
-    Billing, NotFound, Usage,
+    Billing, Home, NotFound, Usage,
     api_keys::ApiKeyList,
     auth::{ForgotPassword, Login, Register, ResetPassword},
     dashboard::Dashboard,
@@ -18,6 +18,10 @@ use crate::views::{
 #[derive(Debug, Clone, Routable, PartialEq)]
 #[rustfmt::skip]
 pub enum Route {
+    // 首页（无 AppShell 布局，单独处理认证弹窗）
+    #[route("/")]
+    Home {},
+
     // 认证页面（无 AppShell 布局）
     #[route("/auth/login")]
     Login {},
@@ -30,7 +34,7 @@ pub enum Route {
 
     // 主应用（带 AppShell 布局）
     #[layout(AppLayout)]
-        #[route("/")]
+        #[route("/dashboard")]
         Dashboard {},
         #[route("/api-keys")]
         ApiKeyList {},

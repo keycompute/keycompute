@@ -40,7 +40,17 @@ impl AuthStore {
     }
 
     pub fn login(&mut self, access_token: String) {
-        Self::save_to_storage(&access_token);
+        // 未指定 persist 时，沿用当前已有的持久化模式
+        // （例如 token 刷新场景不应该改变原有的“记住我”选择）
+        let persist = currently_persistent();
+        self.login_with_persist(access_token, persist);
+    }
+
+    /// 登录并明确指定是否持久化保存 token
+    /// - persist=true  → 写入 localStorage（关闭浏览器后仍保留）
+    /// - persist=false → 写入 sessionStorage（关闭标签页/浏览器后失效）
+    pub fn login_with_persist(&mut self, access_token: String, persist: bool) {
+        Self::save_to_storage(&access_token, persist);
         *self.state.write() = AuthState::logged_in(access_token);
     }
 
@@ -65,8 +75,11 @@ impl AuthStore {
     pub fn load_from_storage() -> AuthState {
         #[cfg(target_arch = "wasm32")]
         {
-            let token = read_local_storage("access_token");
-            if let Some(access_token) = token {
+            // 优先从 localStorage 读取（“记住我”），其次 sessionStorage
+            if let Some(access_token) = read_local_storage("access_token") {
+                return AuthState::logged_in(access_token);
+            }
+            if let Some(access_token) = read_session_storage("access_token") {
                 return AuthState::logged_in(access_token);
             }
         }
@@ -79,13 +92,21 @@ impl AuthStore {
         AuthState::default()
     }
 
-    fn save_to_storage(access_token: &str) {
+    fn save_to_storage(access_token: &str, persist: bool) {
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = write_local_storage("access_token", access_token);
+            if persist {
+                let _ = write_local_storage("access_token", access_token);
+                // 避免两边同时有 token 导致语义不一致
+                let _ = remove_session_storage("access_token");
+            } else {
+                let _ = write_session_storage("access_token", access_token);
+                let _ = remove_local_storage("access_token");
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
+            let _ = persist; // 原生平台仅文件持久化，不区分 persist
             write_native_storage(access_token);
         }
     }
@@ -95,6 +116,10 @@ impl AuthStore {
         {
             if let Some(window) = web_sys::window() {
                 if let Ok(Some(storage)) = window.local_storage() {
+                    let _ = storage.remove_item("access_token");
+                    let _ = storage.remove_item("refresh_token");
+                }
+                if let Ok(Some(storage)) = window.session_storage() {
                     let _ = storage.remove_item("access_token");
                     let _ = storage.remove_item("refresh_token");
                 }
@@ -123,6 +148,55 @@ fn write_local_storage(key: &str, value: &str) -> Option<()> {
         .ok()??
         .set_item(key, value)
         .ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn remove_local_storage(key: &str) -> Option<()> {
+    web_sys::window()?
+        .local_storage()
+        .ok()??
+        .remove_item(key)
+        .ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn read_session_storage(key: &str) -> Option<String> {
+    web_sys::window()?
+        .session_storage()
+        .ok()??
+        .get_item(key)
+        .ok()?
+}
+
+#[cfg(target_arch = "wasm32")]
+fn write_session_storage(key: &str, value: &str) -> Option<()> {
+    web_sys::window()?
+        .session_storage()
+        .ok()??
+        .set_item(key, value)
+        .ok()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn remove_session_storage(key: &str) -> Option<()> {
+    web_sys::window()?
+        .session_storage()
+        .ok()??
+        .remove_item(key)
+        .ok()
+}
+
+/// 判断当前 token 是否位于持久化存储（localStorage）
+/// 用于 token 刷新场景沿用原本的“记住我”选择
+fn currently_persistent() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        return read_local_storage("access_token").is_some();
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        true
+    }
 }
 
 // ── 非 WASM 环境（桌面端）使用系统临时目录下的 JSON 文件持久化 Token ──

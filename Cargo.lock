@@ -7181,6 +7181,7 @@ version = "0.1.0"
 dependencies = [
  "charming",
  "dioxus",
+ "gloo-timers",
  "js-sys",
  "wasm-bindgen",
  "web-sys",

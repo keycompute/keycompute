@@ -364,7 +364,7 @@ html, body {
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
   cursor: pointer;
-  transition: background-color var(--transition-fast), color var(--transition-fast);
+  transition: all 0.2s ease;
   position: relative;
 }
 
@@ -374,20 +374,82 @@ html, body {
   border-color: var(--border-color);
 }
 
-.header-lang-btn {
-  width: auto;
-  min-width: 64px;
-  gap: 6px;
-  padding: 0 10px;
-  font-size: 12px;
-  font-weight: 600;
+/* GitHub 仓库链接（与首页 .kc-home-github-link 同款，按 34px 比例缩放） */
+.header-github-link {
+  width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  text-decoration: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
 }
 
-.header-lang-btn span {
-  min-width: 18px;
-  font-size: 12px;
+.header-github-link:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--color-primary);
+  border-color: var(--border-color);
+  transform: translateY(-1px);
+}
+
+.header-github-link:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.header-github-link svg {
+  display: block;
+}
+
+/* 主题切换按钮（与首页 .kc-home-theme-toggle 同款 hover 旋转动效） */
+.header-theme-btn:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--color-primary);
+  border-color: var(--border-color);
+  transform: rotate(15deg);
+}
+
+/* 主题切换全局动画类（与首页保持一致：图标 360° 旋转 + 缩放） */
+.kc-theme-switching .header-theme-btn {
+  animation: kc-theme-icon-rotate 0.5s ease-in-out;
+}
+
+@keyframes kc-theme-icon-rotate {
+  0% { transform: rotate(0deg) scale(1); }
+  50% { transform: rotate(180deg) scale(1.2); }
+  100% { transform: rotate(360deg) scale(1); }
+}
+
+/* 语言切换按钮（与首页 .kc-home-lang-toggle 同款：纯文本 EN / 中） */
+.header-lang-btn {
+  width: auto;
+  min-width: 34px;
+  height: 34px;
+  padding: 0 9px;
+  gap: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.header-lang-btn:hover {
+  background-color: var(--bg-tertiary);
+  color: var(--color-primary);
+  border-color: var(--border-color);
+  transform: translateY(-1px);
+}
+
+.header-lang-btn-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   line-height: 1;
-  text-align: center;
 }
 
 .header-avatar {

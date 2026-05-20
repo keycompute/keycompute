@@ -32,6 +32,16 @@ pub fn App() -> Element {
             "zh".to_string()
         }
     });
+    let theme_signal = use_signal(|| {
+        #[cfg(target_arch = "wasm32")]
+        {
+            read_local_storage("theme").unwrap_or_else(|| "dark".to_string())
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            "dark".to_string()
+        }
+    });
 
     let auth_store = use_context_provider(|| AuthStore::new(auth_state));
     let mut user_store = use_context_provider(|| UserStore::new(user_info));
@@ -39,6 +49,20 @@ pub fn App() -> Element {
         use_context_provider(|| PublicSettingsStore::new(public_settings_state));
     let _ui_store = use_context_provider(|| UiStore::new(toast_signal));
     let _lang = use_context_provider(|| lang_signal);
+    let _theme = use_context_provider(|| theme_signal);
+
+    // 应用启动时同步主题到 HTML data-theme 属性
+    use_effect(move || {
+        let theme = theme_signal();
+        #[cfg(target_arch = "wasm32")]
+        {
+            apply_theme_to_html(&theme);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = theme;
+        }
+    });
 
     use_effect(move || {
         if public_settings_store.loaded() {
@@ -93,6 +117,17 @@ fn read_local_storage(key: &str) -> Option<String> {
         .ok()??
         .get_item(key)
         .ok()?
+}
+
+#[cfg(target_arch = "wasm32")]
+fn apply_theme_to_html(theme: &str) {
+    if let Some(window) = web_sys::window() {
+        if let Some(document) = window.document() {
+            if let Some(root) = document.document_element() {
+                let _ = root.set_attribute("data-theme", theme);
+            }
+        }
+    }
 }
 
 /// 带 AppShell 侧边栏布局的页面外壳
@@ -290,7 +325,7 @@ pub fn AppLayout() -> Element {
                     get_client().clear_token();
                     // 清空用户信息，避免登出后旧数据残留
                     *user_store_write.info.write() = None;
-                    nav.replace(Route::Login {});
+                    nav.replace(Route::Home {});
                 }
             },
             Toast { toast: ui_store.toast }

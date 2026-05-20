@@ -272,20 +272,56 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("error.not_found_desc", "您访问的页面不存在或已被移除");
     m.insert("error.back_home", "返回首页");
 
+    // ── Home ────────────────────────────────────
+    m.insert("home.welcome", "欢迎使用 KeyCompute");
+    m.insert("home.login", "登录");
+    m.insert("home.register", "注册");
+    m.insert("home.toggle_theme", "切换主题");
+    m.insert("home.features.title", "核心优势");
+    m.insert("home.features.routing.title", "智能路由");
+    m.insert(
+        "home.features.routing.desc",
+        "多模型智能调度，自动选择最优路径",
+    );
+    m.insert("home.features.billing.title", "实时计费");
+    m.insert("home.features.billing.desc", "精准计量，秒级结算，透明消费");
+    m.insert("home.features.cluster.title", "分布式集群");
+    m.insert(
+        "home.features.cluster.desc",
+        "多区域部署，弹性扩展，高可用保障",
+    );
+    m.insert("home.features.node_rental.title", "节点租赁");
+    m.insert(
+        "home.features.node_rental.desc",
+        "个人 PC 接入算力市场，闲置资源变现",
+    );
+    m.insert("home.features.distribution.title", "传播裂变");
+    m.insert(
+        "home.features.distribution.desc",
+        "二级分销佣金，推荐奖励，增长飞轮",
+    );
+    m.insert("home.features.custom.title", "需求定制");
+    m.insert(
+        "home.features.custom.desc",
+        "按需定制，灵活适配企业方业务场景",
+    );
+
     // ── Login ───────────────────────────────────
-    m.insert("login.tagline_1", "为");
-    m.insert("login.tagline_highlight", "AI 应用");
-    m.insert("login.tagline_2", "提供");
-    m.insert("login.tagline_3", "高性能算力中转");
+    m.insert("login.tagline_1", "新一代");
+    m.insert("login.tagline_highlight", "AI Token 算力服务平台");
+    m.insert("login.tagline_2", "，让每一个 Token 都创造价值");
+    m.insert("login.tagline_3", "");
     m.insert(
         "login.description",
-        "统一大模型接入、智能路由调度、实时计费结算与全链路可观测性。开箱即用的企业级 AI Token 管理平台。",
+        "统一大模型接入、智能路由调度、实时计费结算与全链路可观测性。开箱即用的企业级 AI Token 算力服务平台。",
     );
     m.insert("login.feature_routing", "智能路由");
     m.insert("login.feature_billing", "实时计费");
-    m.insert("login.feature_ha", "高可用性");
-    m.insert("login.feature_api", "API 管理");
-    m.insert("login.title", "登录您的账户");
+    m.insert("login.feature_ha", "节点租赁");
+    m.insert("login.feature_api", "分布式集群");
+    m.insert("login.feature_metering", "精准计量计费");
+    m.insert("login.feature_custom", "需求定制化");
+    m.insert("login.title", "登录");
     m.insert("login.subtitle", "管理您的 AI Token 与算力资源");
     m.insert("login.email_label", "邮箱地址");
     m.insert("login.hide_password", "隐藏密码");

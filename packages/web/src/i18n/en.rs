@@ -308,19 +308,58 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("error.back_home", "Back to Dashboard");
 
+    // ── Home ────────────────────────────────────
+    m.insert("home.welcome", "Welcome to KeyCompute");
+    m.insert("home.login", "Sign In");
+    m.insert("home.register", "Sign Up");
+    m.insert("home.toggle_theme", "Toggle Theme");
+    m.insert("home.features.title", "Core Features");
+    m.insert("home.features.routing.title", "Smart Routing");
+    m.insert(
+        "home.features.routing.desc",
+        "Intelligent model scheduling with optimal path selection",
+    );
+    m.insert("home.features.billing.title", "Real-time Billing");
+    m.insert(
+        "home.features.billing.desc",
+        "Precise metering, instant settlement, transparent consumption",
+    );
+    m.insert("home.features.cluster.title", "Distributed Cluster");
+    m.insert(
+        "home.features.cluster.desc",
+        "Multi-region deployment, elastic scaling, high availability",
+    );
+    m.insert("home.features.node_rental.title", "Node Leasing");
+    m.insert(
+        "home.features.node_rental.desc",
+        "Connect personal PCs to the compute market and monetize idle hardware",
+    );
+    m.insert("home.features.distribution.title", "Viral Growth");
+    m.insert(
+        "home.features.distribution.desc",
+        "Two-tier referral commissions and incentives that fuel growth",
+    );
+    m.insert("home.features.custom.title", "Custom Solutions");
+    m.insert(
+        "home.features.custom.desc",
+        "On-demand configuration, flexible business adaptation",
+    );
+
     // ── Login ───────────────────────────────────
-    m.insert("login.tagline_1", "Give");
-    m.insert("login.tagline_highlight", "AI Apps");
-    m.insert("login.tagline_2", "a");
-    m.insert("login.tagline_3", "high-performance compute gateway");
+    m.insert("login.tagline_1", "Next-Gen");
+    m.insert("login.tagline_highlight", "AI Token Compute Platform");
+    m.insert("login.tagline_2", "— Every Token Creates Value");
+    m.insert("login.tagline_3", "");
     m.insert(
         "login.description",
-        "Unified LLM access, intelligent routing, real-time billing, and end-to-end observability. An enterprise-ready AI token management platform out of the box.",
+        "Unified LLM access, intelligent routing, real-time billing, and end-to-end observability. An enterprise-ready AI token compute platform out of the box.",
     );
     m.insert("login.feature_routing", "Smart Routing");
     m.insert("login.feature_billing", "Real-time Billing");
-    m.insert("login.feature_ha", "High Availability");
-    m.insert("login.feature_api", "API Management");
+    m.insert("login.feature_ha", "Node Leasing");
+    m.insert("login.feature_api", "Distributed Cluster");
+    m.insert("login.feature_metering", "Precise Metering");
+    m.insert("login.feature_custom", "Custom Solutions");
     m.insert("login.title", "Sign in to your account");
     m.insert(
         "login.subtitle",
