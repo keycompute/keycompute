@@ -4881,6 +4881,89 @@ select.form-input:focus {
   line-height: 1.6;
 }
 
+/* ── Tip / Donation Section ───────────────────── */
+.kc-home-tip-section {
+  position: relative;
+  z-index: 1;
+  padding: 48px 0 32px;
+  text-align: center;
+}
+
+.kc-home-tip-title {
+  margin: 0 0 8px;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--kc-home-text-primary);
+  font-family: "Space Grotesk", sans-serif;
+}
+
+.kc-home-tip-subtitle {
+  margin: 0 0 32px;
+  font-size: 0.95rem;
+  color: var(--kc-home-text-secondary);
+  line-height: 1.6;
+}
+
+.kc-home-tip-cards {
+  display: flex;
+  justify-content: center;
+  gap: 32px;
+  flex-wrap: wrap;
+}
+
+.kc-home-tip-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 20px;
+  background: var(--kc-home-surface);
+  border: 1px solid var(--kc-home-border);
+  border-radius: 16px;
+  transition: transform 0.3s ease, box-shadow 0.3s ease, border-color 0.3s ease, background 0.3s ease;
+  cursor: default;
+}
+
+.kc-home-tip-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 40px var(--kc-home-accent-glow);
+  border-color: var(--kc-home-accent);
+  background: var(--kc-home-surface-hover);
+}
+
+.kc-home-tip-qr {
+  width: 160px;
+  height: 160px;
+  border-radius: 12px;
+  object-fit: cover;
+  display: block;
+}
+
+.kc-home-tip-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--kc-home-text-muted);
+  letter-spacing: 0.02em;
+  transition: color 0.3s ease;
+}
+
+.kc-home-tip-card:hover .kc-home-tip-label {
+  color: var(--kc-home-accent);
+}
+
+@media (max-width: 520px) {
+  .kc-home-tip-cards {
+    gap: 20px;
+  }
+  .kc-home-tip-qr {
+    width: 130px;
+    height: 130px;
+  }
+  .kc-home-tip-card {
+    padding: 16px;
+  }
+}
+
 .kc-home-footer {
   position: relative;
   z-index: 1;

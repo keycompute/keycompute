@@ -455,6 +455,50 @@ pub fn Home() -> Element {
                 }
             }
 
+            // 赞赏码区域
+            section {
+                class: "kc-home-tip-section",
+                div {
+                    class: "container",
+                    h2 { class: "kc-home-tip-title",
+                        span { "☕ " }
+                        if is_zh { "赞赏支持" } else { "Support Us" }
+                    }
+                    p { class: "kc-home-tip-subtitle",
+                        if is_zh {
+                            "如果您喜欢 KeyCompute，欢迎请我们喝杯咖啡 ☕"
+                        } else {
+                            "If you like KeyCompute, feel free to buy us a coffee ☕"
+                        }
+                    }
+                    div {
+                        class: "kc-home-tip-cards",
+                        div {
+                            class: "kc-home-tip-card",
+                            img {
+                                class: "kc-home-tip-qr",
+                                src: asset!("/assets/wechat_tip.jpg"),
+                                alt: if is_zh { "微信赞赏码" } else { "WeChat Tip QR" },
+                            }
+                            span { class: "kc-home-tip-label",
+                                if is_zh { "微信赞赏" } else { "WeChat Pay" }
+                            }
+                        }
+                        div {
+                            class: "kc-home-tip-card",
+                            img {
+                                class: "kc-home-tip-qr",
+                                src: asset!("/assets/alipay_tip.png"),
+                                alt: if is_zh { "支付宝赞赏码" } else { "Alipay Tip QR" },
+                            }
+                            span { class: "kc-home-tip-label",
+                                if is_zh { "支付宝赞赏" } else { "Alipay" }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Footer
             footer { class: "footer",
                 span { class: "footer-text",

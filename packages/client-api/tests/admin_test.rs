@@ -195,31 +195,35 @@ async fn test_list_accounts_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             {
                 "id": "account_001",
+                "tenant_id": "tenant_001",
                 "name": "OpenAI Account",
                 "provider": "openai",
                 "api_key_preview": "sk-xxx...",
-                "base_url": null,
+                "api_base": null,
                 "models": ["gpt-4", "gpt-3.5-turbo"],
                 "rpm_limit": 60,
                 "current_rpm": 10,
                 "is_active": true,
                 "is_healthy": true,
                 "priority": 1,
+                "visibility": "tenant",
                 "created_at": "2024-01-01T00:00:00Z",
                 "last_used_at": null
             },
             {
                 "id": "account_002",
+                "tenant_id": "tenant_001",
                 "name": "Anthropic Account",
                 "provider": "anthropic",
                 "api_key_preview": "sk-ant-xxx...",
-                "base_url": null,
+                "api_base": null,
                 "models": ["claude-3-opus"],
                 "rpm_limit": 30,
                 "current_rpm": 5,
                 "is_active": true,
                 "is_healthy": true,
                 "priority": 2,
+                "visibility": "tenant",
                 "created_at": "2024-01-10T00:00:00Z",
                 "last_used_at": null
             }
@@ -246,16 +250,18 @@ async fn test_create_account_success() {
         .and(path("/api/v1/accounts"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "account_new_001",
+            "tenant_id": "tenant_001",
             "name": "New Gemini Account",
             "provider": "gemini",
             "api_key_preview": "AIza...",
-            "base_url": null,
+            "api_base": null,
             "models": ["gemini-pro"],
             "rpm_limit": 60,
             "current_rpm": 0,
             "is_active": true,
             "is_healthy": true,
             "priority": 1,
+            "visibility": "tenant",
             "created_at": "2024-01-20T00:00:00Z",
             "last_used_at": null
         })))
@@ -303,24 +309,30 @@ async fn test_list_pricing_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             {
                 "id": "pricing_001",
+                "tenant_id": null,
                 "model_name": "gpt-4",
-                "provider": "openai",
+                "billing_dimension": "openai",
                 "input_price_per_1k": "0.03",
                 "output_price_per_1k": "0.06",
                 "currency": "USD",
                 "is_default": true,
                 "is_effective": true,
+                "effective_from": "2024-01-01T00:00:00Z",
+                "effective_until": null,
                 "created_at": "2024-01-01T00:00:00Z"
             },
             {
                 "id": "pricing_002",
+                "tenant_id": null,
                 "model_name": "gpt-3.5-turbo",
-                "provider": "openai",
+                "billing_dimension": "openai",
                 "input_price_per_1k": "0.0015",
                 "output_price_per_1k": "0.002",
                 "currency": "USD",
                 "is_default": true,
                 "is_effective": true,
+                "effective_from": "2024-01-01T00:00:00Z",
+                "effective_until": null,
                 "created_at": "2024-01-01T00:00:00Z"
             }
         ])))
@@ -347,11 +359,10 @@ async fn test_create_pricing_success() {
             "message": "Pricing created",
             "pricing_id": "pricing_new_001",
             "model_name": "claude-3-opus",
-            "provider": "anthropic",
+            "billing_dimension": "anthropic",
             "input_price_per_1k": "0.015",
             "output_price_per_1k": "0.075",
-            "is_default": false,
-            "created_by": "admin_001"
+            "is_default": false
         })))
         .mount(&mock_server)
         .await;
