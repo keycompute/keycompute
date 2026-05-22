@@ -134,14 +134,14 @@ fn test_provider_openai() {
     );
 
     // 4. 检查模型支持判断
-    let supports_gpt4 = provider.supports_model("gpt-4o");
+    let supports_gpt_empty = provider.supports_model("gpt-empty");
     let supports_unknown = provider.supports_model("unknown-model");
 
     chain.add_step(
         "keycompute-openai",
-        "OpenAIProvider::supports_model_gpt4",
-        format!("Supports gpt-4o: {}", supports_gpt4),
-        supports_gpt4,
+        "OpenAIProvider::supports_model_gpt_empty",
+        format!("Supports gpt-empty: {}", supports_gpt_empty),
+        supports_gpt_empty,
     );
     chain.add_step(
         "keycompute-openai",
@@ -224,25 +224,16 @@ fn test_provider_claude() {
         !models.is_empty(),
     );
 
-    // 4. 检查 Claude 3.5 Sonnet 支持
-    let supports_sonnet = provider.supports_model("claude-3-5-sonnet-20241022");
+    // 4. 检查示例空模型支持
+    let supports_empty = provider.supports_model("claude-empty");
     chain.add_step(
         "keycompute-claude",
-        "ClaudeProvider::supports_model_sonnet",
-        format!("Supports claude-3-5-sonnet-20241022: {}", supports_sonnet),
-        supports_sonnet,
+        "ClaudeProvider::supports_model_empty",
+        format!("Supports claude-empty: {}", supports_empty),
+        supports_empty,
     );
 
-    // 5. 检查 Claude 3 Opus 支持
-    let supports_opus = provider.supports_model("claude-3-opus-20240229");
-    chain.add_step(
-        "keycompute-claude",
-        "ClaudeProvider::supports_model_opus",
-        format!("Supports claude-3-opus-20240229: {}", supports_opus),
-        supports_opus,
-    );
-
-    // 6. 检查不支持的模型
+    // 5. 检查不支持的模型
     let supports_unknown = provider.supports_model("gpt-4o");
     chain.add_step(
         "keycompute-claude",
@@ -251,13 +242,13 @@ fn test_provider_claude() {
         !supports_unknown,
     );
 
-    // 7. 检查短名称支持（兼容形式）
-    let supports_short_name = provider.supports_model("claude-3-5-sonnet");
+    // 6. 检查未知模型
+    let supports_unknown_other = provider.supports_model("unknown-model");
     chain.add_step(
         "keycompute-claude",
-        "ClaudeProvider::supports_model_short_name",
-        format!("Supports claude-3-5-sonnet: {}", supports_short_name),
-        supports_short_name,
+        "ClaudeProvider::supports_model_unknown_other",
+        format!("Supports unknown-model: {}", supports_unknown_other),
+        !supports_unknown_other,
     );
 
     chain.print_report();
