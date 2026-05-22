@@ -4,7 +4,9 @@ use ui::{Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Pagination, Tab
 const PAGE_SIZE: usize = 20;
 
 use crate::hooks::use_i18n::use_i18n;
-use crate::services::{account_service, api_client::with_auto_refresh, debug_service};
+use crate::services::{
+    account_service, api_client::with_auto_refresh, debug_service, tenant_service,
+};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
 use crate::stores::user_store::UserStore;
@@ -234,6 +236,9 @@ fn AdminAccountsView() -> Element {
     let mut edit_api_key = use_signal(String::new);
     let mut edit_api_base = use_signal(String::new);
     let mut edit_is_active = use_signal(|| true);
+    let mut edit_visibility = use_signal(|| "tenant".to_string());
+    let mut edit_tenant_id = use_signal(String::new);
+    let mut show_tenant_dropdown = use_signal(|| false);
     let mut show_edit = use_signal(|| false);
     let mut edit_saving = use_signal(|| false);
     let mut edit_error = use_signal(String::new);
@@ -249,6 +254,12 @@ fn AdminAccountsView() -> Element {
             account_service::list(None, &token).await
         })
         .await
+    });
+
+    // 租户列表（编辑弹窗下拉选项）
+    let tenants = use_resource(move || async move {
+        let token = auth_store.token().unwrap_or_default();
+        tenant_service::list(None, &token).await
     });
 
     // 全局重置健康状态处理函数
@@ -328,6 +339,8 @@ fn AdminAccountsView() -> Element {
         let key_val = edit_api_key();
         let base_val = edit_api_base();
         let active = edit_is_active();
+        let visibility = edit_visibility();
+        let tenant_id = edit_tenant_id();
         if name_val.trim().is_empty() {
             *edit_error.write() = i18n.t("accounts.name_required").to_string();
             return;
@@ -339,7 +352,11 @@ fn AdminAccountsView() -> Element {
             use client_api::api::admin::UpdateAccountRequest;
             let mut req = UpdateAccountRequest::new()
                 .with_name(name_val)
-                .with_is_active(active);
+                .with_is_active(active)
+                .with_visibility(visibility);
+            if !tenant_id.trim().is_empty() {
+                req = req.with_tenant_id(tenant_id);
+            }
             if !key_val.trim().is_empty() {
                 req = req.with_api_key(key_val);
             }
@@ -433,13 +450,14 @@ fn AdminAccountsView() -> Element {
                         class: "accounts-table".to_string(),
                         empty: is_empty,
                         empty_text: empty_text.to_string(),
-                        col_count: 6,
+                        col_count: 7,
                         thead {
                             tr {
                                 TableHead { {i18n.t("accounts.channel")} }
                                 TableHead { {i18n.t("accounts.provider_model")} }
                                 TableHead { {i18n.t("accounts.runtime_status")} }
                                 TableHead { {i18n.t("accounts.rate_quota")} }
+                                TableHead { {i18n.t("accounts.tenant_id")} }
                                 TableHead { {i18n.t("common.time")} }
                                 TableHead { {i18n.t("table.actions")} }
                             }
@@ -522,6 +540,13 @@ fn AdminAccountsView() -> Element {
                                             }
                                         }
                                         td {
+                                            div { class: "account-tenant-cell",
+                                                span { class: "account-tenant-id",
+                                                    "{acc.tenant_id.chars().take(8).collect::<String>()}"
+                                                }
+                                            }
+                                        }
+                                        td {
                                             div { class: "account-time-cell",
                                                 div { class: "account-time-block",
                                                     span { class: "account-time-label", {i18n.t("common.created_at_label")} }
@@ -550,12 +575,16 @@ fn AdminAccountsView() -> Element {
                                                         let id = acc.id.clone();
                                                         let name = acc.name.clone();
                                                         let active = acc.is_active;
+                                                        let visibility = acc.visibility.clone();
+                                                        let tenant_id = acc.tenant_id.clone();
                                                         move |_| {
                                                             edit_id.set(id.clone());
                                                             edit_name.set(name.clone());
                                                             edit_api_key.set(String::new());
                                                             edit_api_base.set(String::new());
                                                             edit_is_active.set(active);
+                                                            edit_visibility.set(visibility.clone());
+                                                            edit_tenant_id.set(tenant_id.clone());
                                                             *edit_error.write() = String::new();
                                                             show_edit.set(true);
                                                         }
@@ -760,6 +789,57 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "form-group",
+                            label { class: "form-label", {i18n.t("accounts.tenant_id_label")} }
+                            {
+                                let tenant_list = tenants().and_then(|r| r.ok()).unwrap_or_default();
+                                let tenant_id = edit_tenant_id();
+                                let selected_label = if tenant_id.is_empty() {
+                                    i18n.t("accounts.tenant_id_keep").to_string()
+                                } else {
+                                    tenant_list.iter()
+                                        .find(|t| t.id == tenant_id)
+                                        .map(|t| format!("{} ({})", t.name, &t.id[..t.id.len().min(8)]))
+                                        .unwrap_or_else(|| tenant_id.clone())
+                                };
+                                rsx! {
+                                    div { class: "custom-select",
+                                        div {
+                                            class: "custom-select-trigger",
+                                            onclick: move |_| show_tenant_dropdown.set(!show_tenant_dropdown()),
+                                            span { "{selected_label}" }
+                                            span { class: "custom-select-arrow", "▼" }
+                                        }
+                                        if show_tenant_dropdown() {
+                                            div { class: "custom-select-dropdown",
+                                                div {
+                                                    class: "custom-select-option",
+                                                    onclick: move |_| {
+                                                        edit_tenant_id.set(String::new());
+                                                        show_tenant_dropdown.set(false);
+                                                    },
+                                                    {i18n.t("accounts.tenant_id_keep")}
+                                                }
+                                                for t in &tenant_list {
+                                                    div {
+                                                        class: "custom-select-option",
+                                                        onclick: {
+                                                            let id = t.id.clone();
+                                                            move |_| {
+                                                                edit_tenant_id.set(id.clone());
+                                                                show_tenant_dropdown.set(false);
+                                                            }
+                                                        },
+                                                        "{t.name} ({t.id.chars().take(8).collect::<String>()}...)"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            small { class: "form-hint", {i18n.t("accounts.tenant_id_hint")} }
+                        }
+                        div { class: "form-group",
                             label { class: "form-label",
                                 input {
                                     r#type: "checkbox",
@@ -769,6 +849,24 @@ fn AdminAccountsView() -> Element {
                                 }
                                 {i18n.t("accounts.enable_channel")}
                             }
+                        }
+                        div { class: "form-group",
+                            label { class: "form-label",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: edit_visibility() == "global",
+                                    onchange: move |e| {
+                                        if e.checked() {
+                                            edit_visibility.set("global".to_string());
+                                        } else {
+                                            edit_visibility.set("tenant".to_string());
+                                        }
+                                    },
+                                    style: "margin-right:6px",
+                                }
+                                {i18n.t("accounts.global_visibility")}
+                            }
+                            small { class: "form-hint", {i18n.t("accounts.global_visibility_hint")} }
                         }
                     }
                     div { class: "modal-footer",

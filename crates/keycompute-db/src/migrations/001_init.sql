@@ -101,6 +101,7 @@ CREATE TABLE accounts (
     priority INTEGER NOT NULL DEFAULT 0,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     models_supported TEXT[] NOT NULL DEFAULT '{}',
+    visibility VARCHAR(20) NOT NULL DEFAULT 'tenant',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -108,6 +109,7 @@ CREATE TABLE accounts (
 CREATE INDEX idx_accounts_tenant_id ON accounts(tenant_id);
 CREATE INDEX idx_accounts_provider ON accounts(provider);
 CREATE INDEX idx_accounts_enabled ON accounts(enabled) WHERE enabled = TRUE;
+CREATE INDEX idx_accounts_visibility ON accounts(visibility) WHERE visibility = 'global';
 -- pricing_models: 模型定价表
 CREATE TABLE pricing_models (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

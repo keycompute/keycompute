@@ -231,16 +231,14 @@ mod tests {
     fn test_claude_supported_models() {
         let provider = ClaudeProvider::new();
         let models = provider.supported_models();
-        assert!(models.contains(&"claude-3-5-sonnet-20241022"));
-        assert!(models.contains(&"claude-3-opus-20240229"));
-        assert!(models.contains(&"claude-3-haiku-20240307"));
+        // CLAUDE_MODELS 已替换为示例空模型，仅保留 claude-empty 占位
+        assert!(models.contains(&"claude-empty"));
     }
 
     #[test]
     fn test_claude_supports_model() {
         let provider = ClaudeProvider::new();
-        assert!(provider.supports_model("claude-3-5-sonnet-20241022"));
-        assert!(provider.supports_model("claude-3-5-sonnet")); // 短名称
+        assert!(provider.supports_model("claude-empty"));
         assert!(!provider.supports_model("gpt-4o"));
     }
 

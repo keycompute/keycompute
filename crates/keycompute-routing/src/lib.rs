@@ -467,7 +467,7 @@ impl RoutingEngine {
         self.select_best_account(provider, accounts).await
     }
 
-    /// 从数据库加载租户专属账号
+    /// 从数据库加载租户可见的账号（含本租户 + 全局可见）
     ///
     /// # 参数
     /// - `pool`: 数据库连接池
@@ -475,7 +475,7 @@ impl RoutingEngine {
     /// - `tenant_id`: 租户 ID
     ///
     /// # 返回
-    /// 返回该租户专属的、支持指定 provider 的启用账号列表
+    /// 返回该租户专属的 + 全局可见的、支持指定 provider 的启用账号列表
     async fn load_accounts_from_database(
         &self,
         pool: &PgPool,
@@ -499,13 +499,13 @@ impl RoutingEngine {
             provider = %provider,
             tenant_id = %tenant_id,
             count = provider_accounts.len(),
-            "Loaded tenant-specific accounts from database"
+            "Loaded visible accounts from database"
         );
 
         Ok(provider_accounts)
     }
 
-    /// 从数据库加载支持指定模型的租户专属账号
+    /// 从数据库加载支持指定模型的可见账号（含本租户 + 全局可见）
     ///
     /// # 参数
     /// - `pool`: 数据库连接池
@@ -514,7 +514,7 @@ impl RoutingEngine {
     /// - `model`: 请求的模型名称
     ///
     /// # 返回
-    /// 返回该租户专属的、支持指定模型和 provider 的启用账号列表
+    /// 返回该租户可见的、支持指定模型和 provider 的启用账号列表
     async fn load_accounts_for_model(
         &self,
         pool: &PgPool,
@@ -540,7 +540,7 @@ impl RoutingEngine {
             tenant_id = %tenant_id,
             model = %model,
             count = provider_accounts.len(),
-            "Loaded tenant-specific accounts for model from database"
+            "Loaded visible accounts for model from database"
         );
 
         Ok(provider_accounts)

@@ -60,6 +60,8 @@ impl AccountQueryParams {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AccountInfo {
     pub id: String,
+    /// 所属租户 ID
+    pub tenant_id: String,
     pub name: String,
     pub provider: String,
     pub api_key_preview: String,
@@ -71,6 +73,8 @@ pub struct AccountInfo {
     pub is_active: bool,
     pub is_healthy: bool,
     pub priority: i32,
+    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
+    pub visibility: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
 }
@@ -114,15 +118,23 @@ impl CreateAccountRequest {
 /// 更新账号请求
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdateAccountRequest {
+    pub tenant_id: Option<String>,
     pub name: Option<String>,
     pub api_key: Option<String>,
     pub api_base: Option<String>,
     pub is_active: Option<bool>,
+    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
+    pub visibility: Option<String>,
 }
 
 impl UpdateAccountRequest {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
@@ -137,6 +149,11 @@ impl UpdateAccountRequest {
 
     pub fn with_is_active(mut self, is_active: bool) -> Self {
         self.is_active = Some(is_active);
+        self
+    }
+
+    pub fn with_visibility(mut self, visibility: impl Into<String>) -> Self {
+        self.visibility = Some(visibility.into());
         self
     }
 }

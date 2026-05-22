@@ -71,6 +71,7 @@ pub mod accounts {
     pub const PRIORITY: &str = "priority";
     pub const ENABLED: &str = "enabled";
     pub const MODELS_SUPPORTED: &str = "models_supported";
+    pub const VISIBILITY: &str = "visibility";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
 }

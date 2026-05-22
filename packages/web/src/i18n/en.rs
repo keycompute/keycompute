@@ -1072,6 +1072,18 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Custom Base URL (leave blank to keep current)",
     );
     m.insert("accounts.enable_channel", "Enable channel");
+    m.insert("accounts.global_visibility", "Global Visibility");
+    m.insert(
+        "accounts.global_visibility_hint",
+        "When enabled, API keys from all tenants can route to this channel account",
+    );
+    m.insert("accounts.tenant_id", "Tenant ID");
+    m.insert("accounts.tenant_id_label", "Tenant ID");
+    m.insert(
+        "accounts.tenant_id_hint",
+        "Change the owner tenant of this channel account",
+    );
+    m.insert("accounts.tenant_id_keep", "-- Keep current tenant --");
     m.insert("accounts.delete_confirm_title", "Confirm Deletion");
     m.insert("accounts.delete_confirm_prefix", "Delete channel \"");
     m.insert(

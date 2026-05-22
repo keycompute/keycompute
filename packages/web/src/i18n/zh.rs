@@ -903,6 +903,18 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "自定义 Base URL（留空则不修改）",
     );
     m.insert("accounts.enable_channel", "启用渠道");
+    m.insert("accounts.global_visibility", "全局可见");
+    m.insert(
+        "accounts.global_visibility_hint",
+        "开启后，所有租户的 API Key 均可路由到此渠道账号",
+    );
+    m.insert("accounts.tenant_id", "租户ID");
+    m.insert("accounts.tenant_id_label", "所属租户 ID");
+    m.insert(
+        "accounts.tenant_id_hint",
+        "更改后此渠道账号将归属到新的租户",
+    );
+    m.insert("accounts.tenant_id_keep", "-- 保持当前租户 --");
     m.insert("accounts.delete_confirm_title", "确认删除");
     m.insert("accounts.delete_confirm_prefix", "确定要删除渠道「");
     m.insert("accounts.delete_confirm_suffix", "」吗？该操作不可恢复。");

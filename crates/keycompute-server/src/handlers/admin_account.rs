@@ -24,6 +24,8 @@ use uuid::Uuid;
 #[derive(Debug, Serialize)]
 pub struct AccountInfo {
     pub id: Uuid,
+    /// 所属租户 ID
+    pub tenant_id: Uuid,
     pub name: String,
     pub provider: String, // openai, anthropic, etc.
     pub api_key_preview: String,
@@ -35,11 +37,13 @@ pub struct AccountInfo {
     pub is_active: bool,
     pub is_healthy: bool,
     pub priority: i32,
+    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
+    pub visibility: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
 }
 
-/// 列出所有账号
+/// 列出所有账号（Admin 全局视图，不限租户）
 ///
 /// GET /api/v1/accounts
 pub async fn list_accounts(
@@ -55,7 +59,8 @@ pub async fn list_accounts(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let db_accounts = Account::find_by_tenant(pool, auth.tenant_id)
+    // Admin 管理面加载所有租户的账号
+    let db_accounts = Account::find_all(pool)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
 
@@ -70,6 +75,7 @@ pub async fn list_accounts(
 
             AccountInfo {
                 id: acc.id,
+                tenant_id: acc.tenant_id,
                 name: acc.name,
                 provider: acc.provider,
                 api_key_preview: acc.upstream_api_key_preview,
@@ -84,6 +90,7 @@ pub async fn list_accounts(
                 is_active: acc.enabled,
                 is_healthy,
                 priority: acc.priority,
+                visibility: acc.visibility,
                 created_at: acc.created_at.to_rfc3339(),
                 last_used_at: acc.updated_at.to_rfc3339().into(),
             }
@@ -104,6 +111,13 @@ pub struct CreateAccountRequest {
     pub models: Vec<String>,
     pub rpm_limit: Option<i32>,
     pub priority: Option<i32>,
+    /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
+    #[serde(default = "default_visibility")]
+    pub visibility: String,
+}
+
+fn default_visibility() -> String {
+    "tenant".to_string()
 }
 
 /// 创建账号
@@ -151,6 +165,7 @@ pub async fn create_account(
         tpm_limit: None,
         priority: req.priority,
         models_supported: req.models.clone(),
+        visibility: Some(req.visibility.clone()),
     };
 
     let account = Account::create(pool, &db_req)
@@ -160,6 +175,7 @@ pub async fn create_account(
     // 返回完整的账号信息，与前端 AccountInfo 类型匹配
     Ok(Json(serde_json::json!({
         "id": account.id.to_string(),
+        "tenant_id": account.tenant_id.to_string(),
         "name": account.name,
         "provider": account.provider,
         "api_key_preview": account.upstream_api_key_preview,
@@ -174,6 +190,7 @@ pub async fn create_account(
         "is_active": account.enabled,
         "is_healthy": true,
         "priority": account.priority,
+        "visibility": account.visibility,
         "created_at": account.created_at.to_rfc3339(),
         "last_used_at": serde_json::Value::Null,
     })))
@@ -182,6 +199,7 @@ pub async fn create_account(
 /// 更新账号请求
 #[derive(Debug, Deserialize)]
 pub struct UpdateAccountRequest {
+    pub tenant_id: Option<Uuid>,
     pub name: Option<String>,
     pub api_key: Option<String>,
     /// 自定义 Base URL（Provider 端点地址）
@@ -190,6 +208,8 @@ pub struct UpdateAccountRequest {
     pub rpm_limit: Option<i32>,
     pub is_active: Option<bool>,
     pub priority: Option<i32>,
+    /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
+    pub visibility: Option<String>,
 }
 
 /// 更新账号
@@ -238,6 +258,7 @@ pub async fn update_account(
     };
 
     let db_req = DbUpdateAccountRequest {
+        tenant_id: req.tenant_id,
         name: req.name.clone(),
         endpoint: req.api_base.clone(),
         upstream_api_key_encrypted: encrypted_key,
@@ -247,6 +268,7 @@ pub async fn update_account(
         priority: req.priority,
         enabled: req.is_active,
         models_supported: req.models.clone(),
+        visibility: req.visibility.clone(),
     };
 
     let updated = existing
@@ -257,6 +279,7 @@ pub async fn update_account(
     // 返回更新后的账号信息
     Ok(Json(serde_json::json!({
         "id": updated.id.to_string(),
+        "tenant_id": updated.tenant_id.to_string(),
         "name": updated.name,
         "provider": updated.provider,
         "api_key_preview": updated.upstream_api_key_preview,
@@ -267,6 +290,7 @@ pub async fn update_account(
         "is_active": updated.enabled,
         "is_healthy": true,
         "priority": updated.priority,
+        "visibility": updated.visibility,
         "created_at": updated.created_at.to_rfc3339(),
         "last_used_at": serde_json::Value::Null,
     })))
@@ -506,6 +530,7 @@ pub async fn refresh_account(
 
     // 更新数据库
     let db_req = DbUpdateAccountRequest {
+        tenant_id: None,
         name: None,
         endpoint: None,
         upstream_api_key_encrypted: None,
@@ -515,6 +540,7 @@ pub async fn refresh_account(
         priority: None,
         enabled: None,
         models_supported: Some(new_models.clone()),
+        visibility: None,
     };
 
     let updated = account

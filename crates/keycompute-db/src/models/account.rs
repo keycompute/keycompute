@@ -19,6 +19,8 @@ pub struct Account {
     pub priority: i32,
     pub enabled: bool,
     pub models_supported: Vec<String>,
+    /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
+    pub visibility: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -36,11 +38,13 @@ pub struct CreateAccountRequest {
     pub tpm_limit: Option<i32>,
     pub priority: Option<i32>,
     pub models_supported: Vec<String>,
+    pub visibility: Option<String>,
 }
 
 /// 更新账号请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateAccountRequest {
+    pub tenant_id: Option<Uuid>,
     pub name: Option<String>,
     pub endpoint: Option<String>,
     pub upstream_api_key_encrypted: Option<String>,
@@ -50,6 +54,7 @@ pub struct UpdateAccountRequest {
     pub priority: Option<i32>,
     pub enabled: Option<bool>,
     pub models_supported: Option<Vec<String>>,
+    pub visibility: Option<String>,
 }
 
 impl Account {
@@ -63,9 +68,9 @@ impl Account {
             INSERT INTO accounts (
                 tenant_id, provider, name, endpoint,
                 upstream_api_key_encrypted, upstream_api_key_preview,
-                rpm_limit, tpm_limit, priority, models_supported
+                rpm_limit, tpm_limit, priority, models_supported, visibility
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
             "#,
         )
@@ -79,6 +84,7 @@ impl Account {
         .bind(req.tpm_limit.unwrap_or(100000))
         .bind(req.priority.unwrap_or(0))
         .bind(&req.models_supported)
+        .bind(req.visibility.as_deref().unwrap_or("tenant"))
         .fetch_one(pool)
         .await?;
 
@@ -95,7 +101,7 @@ impl Account {
         Ok(account)
     }
 
-    /// 查找租户的所有账号
+    /// 查找租户的所有账号（仅本租户，管理面使用）
     pub async fn find_by_tenant(
         pool: &sqlx::PgPool,
         tenant_id: Uuid,
@@ -110,13 +116,24 @@ impl Account {
         Ok(accounts)
     }
 
-    /// 查找租户启用的账号
+    /// 查找所有账号（不限租户，Admin 管理面使用）
+    pub async fn find_all(pool: &sqlx::PgPool) -> Result<Vec<Account>, DbError> {
+        let accounts = sqlx::query_as::<_, Account>(
+            "SELECT * FROM accounts ORDER BY priority DESC, created_at ASC",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        Ok(accounts)
+    }
+
+    /// 查找租户启用的账号（含本租户 + 全局可见）
     pub async fn find_enabled_by_tenant(
         pool: &sqlx::PgPool,
         tenant_id: Uuid,
     ) -> Result<Vec<Account>, DbError> {
         let accounts = sqlx::query_as::<_, Account>(
-            "SELECT * FROM accounts WHERE tenant_id = $1 AND enabled = TRUE ORDER BY priority DESC",
+            "SELECT * FROM accounts WHERE (tenant_id = $1 OR visibility = 'global') AND enabled = TRUE ORDER BY priority DESC",
         )
         .bind(tenant_id)
         .fetch_all(pool)
@@ -136,7 +153,7 @@ impl Account {
         Ok(accounts)
     }
 
-    /// 查找支持指定模型的账号
+    /// 查找支持指定模型的账号（含本租户 + 全局可见）
     pub async fn find_by_model(
         pool: &sqlx::PgPool,
         tenant_id: Uuid,
@@ -145,7 +162,7 @@ impl Account {
         let accounts = sqlx::query_as::<_, Account>(
             r#"
             SELECT * FROM accounts
-            WHERE tenant_id = $1
+            WHERE (tenant_id = $1 OR visibility = 'global')
               AND enabled = TRUE
               AND $2 = ANY(models_supported)
             ORDER BY priority DESC
@@ -177,8 +194,10 @@ impl Account {
                 priority = COALESCE($7, priority),
                 enabled = COALESCE($8, enabled),
                 models_supported = COALESCE($9, models_supported),
+                visibility = COALESCE($10, visibility),
+                tenant_id = COALESCE($11, tenant_id),
                 updated_at = NOW()
-            WHERE id = $10
+            WHERE id = $12
             RETURNING *
             "#,
         )
@@ -191,6 +210,8 @@ impl Account {
         .bind(req.priority)
         .bind(req.enabled)
         .bind(&req.models_supported)
+        .bind(&req.visibility)
+        .bind(req.tenant_id)
         .bind(self.id)
         .fetch_one(pool)
         .await?;
