@@ -246,16 +246,14 @@ mod tests {
     fn test_gemini_supported_models() {
         let provider = GeminiProvider::new();
         let models = provider.supported_models();
-        assert!(models.contains(&"gemini-1.5-flash"));
-        assert!(models.contains(&"gemini-1.5-pro"));
-        assert!(models.contains(&"gemini-pro"));
+        assert!(models.contains(&"gemini-empty"));
+        assert_eq!(models.len(), 1);
     }
 
     #[test]
     fn test_gemini_supports_model() {
         let provider = GeminiProvider::new();
-        assert!(provider.supports_model("gemini-1.5-flash"));
-        assert!(provider.supports_model("gemini-pro"));
+        assert!(provider.supports_model("gemini-empty"));
         assert!(!provider.supports_model("gpt-4o"));
     }
 

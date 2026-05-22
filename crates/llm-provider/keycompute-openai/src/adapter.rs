@@ -209,15 +209,14 @@ mod tests {
     fn test_openai_supported_models() {
         let provider = OpenAIProvider::new();
         let models = provider.supported_models();
-        assert!(models.contains(&"gpt-4o"));
-        assert!(models.contains(&"gpt-3.5-turbo"));
+        assert!(models.contains(&"gpt-empty"));
+        assert_eq!(models.len(), 1);
     }
 
     #[test]
     fn test_openai_supports_model() {
         let provider = OpenAIProvider::new();
-        assert!(provider.supports_model("gpt-4o"));
-        assert!(provider.supports_model("gpt-4o-mini"));
+        assert!(provider.supports_model("gpt-empty"));
         assert!(!provider.supports_model("unknown-model"));
     }
 

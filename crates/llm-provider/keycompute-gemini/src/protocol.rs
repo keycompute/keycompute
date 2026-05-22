@@ -295,8 +295,7 @@ mod tests {
 
     #[test]
     fn test_gemini_models_list() {
-        assert!(GEMINI_MODELS.contains(&"gemini-1.5-flash"));
-        assert!(GEMINI_MODELS.contains(&"gemini-1.5-pro"));
-        assert!(GEMINI_MODELS.contains(&"gemini-pro"));
+        assert!(GEMINI_MODELS.contains(&"gemini-empty"));
+        assert_eq!(GEMINI_MODELS.len(), 1);
     }
 }

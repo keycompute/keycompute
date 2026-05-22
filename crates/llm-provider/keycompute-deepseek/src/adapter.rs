@@ -233,16 +233,14 @@ mod tests {
     fn test_deepseek_supported_models() {
         let provider = DeepSeekProvider::new();
         let models = provider.supported_models();
-        assert!(models.contains(&"deepseek-chat"));
-        assert!(models.contains(&"deepseek-coder"));
-        assert!(models.contains(&"deepseek-reasoner"));
+        assert!(models.contains(&"deepseek-empty"));
+        assert_eq!(models.len(), 1);
     }
 
     #[test]
     fn test_deepseek_supports_model() {
         let provider = DeepSeekProvider::new();
-        assert!(provider.supports_model("deepseek-chat"));
-        assert!(provider.supports_model("deepseek-coder"));
+        assert!(provider.supports_model("deepseek-empty"));
         assert!(!provider.supports_model("gpt-4o"));
     }
 
