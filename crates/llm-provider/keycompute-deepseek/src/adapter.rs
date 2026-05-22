@@ -32,12 +32,7 @@ pub const DEEPSEEK_DEFAULT_ENDPOINT: &str = "https://api.deepseek.com/v1/chat/co
 
 /// DeepSeek 支持的模型列表
 pub const DEEPSEEK_MODELS: &[&str] = &[
-    "deepseek-chat",
-    "deepseek-coder",
-    "deepseek-reasoner",
-    // 兼容旧版本模型名称
-    "deepseek-chat-pro",
-    "deepseek-coder-pro",
+    "deepseek-empty", // DeepSeek 示例空模型名称
 ];
 
 /// DeepSeek Provider 适配器

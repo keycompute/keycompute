@@ -36,20 +36,7 @@ pub const CLAUDE_API_VERSION: &str = "2023-06-01";
 
 /// Claude 支持的模型列表
 pub const CLAUDE_MODELS: &[&str] = &[
-    // Claude 3.5 系列
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-sonnet-20240620",
-    "claude-3-5-haiku-20241022",
-    // Claude 3 系列
-    "claude-3-opus-20240229",
-    "claude-3-sonnet-20240229",
-    "claude-3-haiku-20240307",
-    // 旧版本兼容
-    "claude-3-5-sonnet",
-    "claude-3-5-haiku",
-    "claude-3-opus",
-    "claude-3-sonnet",
-    "claude-3-haiku",
+    "claude-empty", // Claude 示例空模型名称
 ];
 
 /// Claude Provider 适配器

@@ -523,6 +523,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("pricing.items_suffix", "条");
     m.insert("pricing.model_provider", "模型 / Provider");
+    m.insert("pricing.tenant_id", "租户 ID");
+    m.insert("pricing.global", "全局默认");
     m.insert("pricing.input_price", "输入价格");
     m.insert("pricing.output_price", "输出价格");
     m.insert("pricing.billing_status", "计费状态");
@@ -550,6 +552,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.edit_title", "编辑定价");
     m.insert("pricing.model_name", "模型名称");
     m.insert("pricing.model_placeholder", "如 gpt-4o");
+    m.insert("pricing.provider_type", "计费维度");
+    m.insert("pricing.provider_type_placeholder", "选择计费维度");
     m.insert("pricing.input_price_label", "输入单价（每1K tokens）");
     m.insert("pricing.output_price_label", "输出单价（每1K tokens）");
     m.insert("pricing.input_placeholder", "如 0.000005");

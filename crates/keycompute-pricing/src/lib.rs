@@ -14,6 +14,38 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Node 模型定价 provider 标识
+/// 用于区分 Node 路径模型（node:前缀）的定价查询
+pub const NODE_PRICING_PROVIDER: &str = "node";
+
+/// ProviderAccount 定价 provider 标识
+/// 用于所有非 Node 路径模型的定价查询
+pub const DEFAULT_PRICING_PROVIDER: &str = "provideraccount";
+
+/// 根据模型名确定定价 provider
+///
+/// # 参数
+/// - `model_name`: 模型名称
+///
+/// # 返回
+/// - `"node"`: Node 模型（node:前缀）
+/// - `"provideraccount"`: 其他模型
+///
+/// # 示例
+/// ```rust
+/// use keycompute_pricing::resolve_pricing_provider;
+///
+/// assert_eq!(resolve_pricing_provider("node:ollama-llama3"), "node");
+/// assert_eq!(resolve_pricing_provider("gpt-4o"), "provideraccount");
+/// ```
+pub fn resolve_pricing_provider(model_name: &str) -> &'static str {
+    if model_name.starts_with("node:") {
+        NODE_PRICING_PROVIDER
+    } else {
+        DEFAULT_PRICING_PROVIDER
+    }
+}
+
 /// 标记价格来源，用于优化缓存策略
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PricingSource {
@@ -30,9 +62,6 @@ enum PricingSource {
 struct SnapshotWithSource {
     snapshot: PricingSnapshot,
     source: PricingSource,
-    /// 实际匹配到的 provider（用于缓存键）
-    /// 当回退匹配时，可能与请求的 provider 不同
-    matched_provider: String,
 }
 
 /// 默认缓存 TTL（5 分钟）
@@ -143,8 +172,11 @@ impl PricingService {
     }
 
     /// 生成缓存 key
-    fn cache_key(tenant_id: &Uuid, model_name: &str, provider: &str) -> String {
-        format!("{}:{}:{}", tenant_id, model_name, provider)
+    ///
+    /// 缓存键包含计费维度，因为同一个模型在不同计费维度下可能有不同定价
+    /// 例如: gpt-4o 在 node 和 provideraccount 下可能有不同价格
+    fn cache_key(tenant_id: &Uuid, model_name: &str, provider_type: &str) -> String {
+        format!("{}:{}:{}", tenant_id, model_name, provider_type)
     }
 
     /// 创建价格快照（固化到 RequestContext）
@@ -154,12 +186,12 @@ impl PricingService {
     /// # 参数
     /// - `model_name`: 模型名称
     /// - `tenant_id`: 租户 ID
-    /// - `provider`: Provider 名称（可选，默认 "openai"）
+    /// - `provider`: 计费维度（"node" 或 "provideraccount"）
     ///
     /// # 缓存策略
     /// 采用多级缓存 Key 查找策略：
-    /// 1. `tenant_id:model:provider` - 租户特定定价
-    /// 2. `nil:model:provider` - 系统默认定价（按 provider）
+    /// 1. `tenant_id:model:billing_dimension` - 租户特定定价
+    /// 2. `nil:model:billing_dimension` - 系统默认定价（按计费维度）
     /// 3. 兜底到硬编码默认价格
     pub async fn create_snapshot(
         &self,
@@ -167,7 +199,7 @@ impl PricingService {
         tenant_id: &Uuid,
         provider: Option<&str>,
     ) -> Result<PricingSnapshot> {
-        let provider = provider.unwrap_or("openai");
+        let provider = provider.unwrap_or(DEFAULT_PRICING_PROVIDER);
         let nil_tenant = Uuid::nil();
 
         // 构建多级缓存 key（优先级从高到低）
@@ -204,45 +236,32 @@ impl PricingService {
             SnapshotWithSource {
                 snapshot: self.get_default_pricing(model_name),
                 source: PricingSource::HardcodedDefault,
-                matched_provider: provider.to_string(),
             }
         };
 
-        // 智能缓存策略：根据来源决定缓存方式
+        // 缓存策略：根据来源决定缓存方式
         {
             let mut cache = self.cache.write().await;
             let snapshot = snapshot_with_source.snapshot.clone();
 
-            // 使用实际匹配到的 provider 构建缓存键
-            let matched_cache_key = Self::cache_key(
-                &nil_tenant,
-                model_name,
-                &snapshot_with_source.matched_provider,
-            );
-
-            // 请求的 provider 的缓存键（可能与 matched_provider 不同）
-            let requested_cache_key = cache_keys[1].clone();
-
             match snapshot_with_source.source {
                 PricingSource::TenantSpecific => {
-                    // 租户特定定价：缓存到租户 key 和默认 key
+                    // 租户特定定价：缓存到租户 key
                     let primary_key = cache_keys[0].clone();
                     cache.put(primary_key, CacheEntry::new(snapshot.clone()));
                     // 同时缓存到默认 key，避免重复查询
-                    cache.put(matched_cache_key, CacheEntry::new(snapshot));
+                    let default_key = cache_keys[1].clone();
+                    cache.put(default_key, CacheEntry::new(snapshot));
                 }
                 PricingSource::DatabaseDefault => {
-                    // 数据库默认定价：缓存到匹配到的 provider key
-                    cache.put(matched_cache_key, CacheEntry::new(snapshot.clone()));
-                    // 如果回退匹配（matched_provider != 请求的 provider），
-                    // 还需要缓存到请求的 provider key，避免后续相同请求重复查询
-                    if snapshot_with_source.matched_provider != provider {
-                        cache.put(requested_cache_key, CacheEntry::new(snapshot));
-                    }
+                    // 数据库默认定价：缓存到 nil tenant key
+                    let default_key = cache_keys[1].clone();
+                    cache.put(default_key, CacheEntry::new(snapshot));
                 }
                 PricingSource::HardcodedDefault => {
-                    // 硬编码默认定价：缓存到请求的 provider key
-                    cache.put(requested_cache_key, CacheEntry::new(snapshot));
+                    // 硬编码默认定价：缓存到 nil tenant key
+                    let default_key = cache_keys[1].clone();
+                    cache.put(default_key, CacheEntry::new(snapshot));
                 }
             }
         }
@@ -263,9 +282,14 @@ impl PricingService {
     /// 当路由确定的 provider 与初始 provider 不同时，
     /// 重新获取定价并更新 RequestContext
     ///
+    /// # 设计说明
+    /// - 定价查找始终使用计费维度（"node" / "provideraccount"），而非真实 provider
+    /// - ctx.provider 字段仍记录真实 provider（用于 UsageLog 和日志追踪）
+    /// - 这样确保租户级定价（provider="provideraccount"）在路由后仍然生效
+    ///
     /// # 参数
     /// - `ctx`: 可变引用的 RequestContext
-    /// - `actual_provider`: 路由确定的实际 provider
+    /// - `actual_provider`: 路由确定的实际 provider（如 "openai", "deepseek"）
     ///
     /// # 返回
     /// - `true`: 定价已更新
@@ -275,19 +299,22 @@ impl PricingService {
         ctx: &mut keycompute_types::RequestContext,
         actual_provider: &str,
     ) -> bool {
-        let current_provider = ctx.provider.as_deref().unwrap_or("openai");
+        // 根据模型确定计费维度（而非使用真实 provider）
+        let pricing_provider = resolve_pricing_provider(&ctx.model);
 
-        // 如果 provider 相同，只需设置 provider 字段（如果尚未设置）
-        if current_provider == actual_provider {
+        let current_provider = ctx.provider.as_deref().unwrap_or(pricing_provider);
+
+        // 如果计费维度相同，只需设置 provider 字段（如果尚未设置）
+        if current_provider == pricing_provider {
             if ctx.provider.is_none() {
                 ctx.set_provider(actual_provider);
             }
             return false;
         }
 
-        // 获取新 provider 的定价
+        // 获取新计费维度的定价
         match self
-            .create_snapshot(&ctx.model, &ctx.tenant_id, Some(actual_provider))
+            .create_snapshot(&ctx.model, &ctx.tenant_id, Some(pricing_provider))
             .await
         {
             Ok(new_pricing) => {
@@ -296,6 +323,7 @@ impl PricingService {
                     model = %ctx.model,
                     old_provider = %current_provider,
                     new_provider = %actual_provider,
+                    pricing_provider = %pricing_provider,
                     "Updated pricing for different provider"
                 );
                 ctx.set_provider(actual_provider);
@@ -316,6 +344,8 @@ impl PricingService {
     }
 
     /// 从数据库加载价格（带来源标记）
+    ///
+    /// 定价仅按计费维度（"node" / "provideraccount"）区分，不按真实 provider 区分
     async fn load_from_database_with_source(
         &self,
         pool: &PgPool,
@@ -323,7 +353,7 @@ impl PricingService {
         tenant_id: &Uuid,
         provider: &str,
     ) -> Result<SnapshotWithSource> {
-        // 尝试按租户+模型名+provider查找
+        // 尝试按租户+模型名+计费维度查找
         let pricing = PricingModel::find_by_model(pool, *tenant_id, model_name, provider)
             .await
             .map_err(|e| {
@@ -339,18 +369,17 @@ impl PricingService {
                     output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
                 },
                 source: PricingSource::TenantSpecific,
-                matched_provider: provider.to_string(),
             });
         }
 
-        // 尝试查找默认定价（优先匹配 model_name + provider）
+        // 尝试查找默认定价（按计费维度匹配）
         let defaults = PricingModel::find_defaults(pool).await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
         })?;
 
-        // 先尝试精确匹配 model_name + provider
+        // 匹配 model_name + billing_dimension（计费维度）
         for p in &defaults {
-            if p.model_name == model_name && p.provider == provider {
+            if p.model_name == model_name && p.billing_dimension.as_str() == provider {
                 return Ok(SnapshotWithSource {
                     snapshot: PricingSnapshot {
                         model_name: p.model_name.clone(),
@@ -359,19 +388,18 @@ impl PricingService {
                         output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
                     },
                     source: PricingSource::DatabaseDefault,
-                    matched_provider: provider.to_string(),
                 });
             }
         }
 
-        // 如果找不到匹配的 provider，尝试只匹配 model_name（任意 provider）
+        // 如果找不到匹配的计费维度，尝试只匹配 model_name（任意 billing_dimension）
         for p in defaults {
             if p.model_name == model_name {
                 tracing::debug!(
                     model = %model_name,
-                    requested_provider = %provider,
-                    matched_provider = %p.provider,
-                    "Using default pricing from different provider"
+                    requested_dimension = %provider,
+                    fallback_dimension = %p.billing_dimension,
+                    "Using default pricing from different billing dimension"
                 );
                 return Ok(SnapshotWithSource {
                     snapshot: PricingSnapshot {
@@ -381,8 +409,6 @@ impl PricingService {
                         output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
                     },
                     source: PricingSource::DatabaseDefault,
-                    // 使用匹配到的 provider 作为缓存键
-                    matched_provider: p.provider.clone(),
                 });
             }
         }
@@ -397,8 +423,6 @@ impl PricingService {
         Ok(SnapshotWithSource {
             snapshot: self.get_default_pricing(model_name),
             source: PricingSource::HardcodedDefault,
-            // 硬编码默认价格使用请求的 provider
-            matched_provider: provider.to_string(),
         })
     }
 
@@ -472,8 +496,8 @@ impl PricingService {
                 input_price_per_1k: bigdecimal_to_decimal(&p.input_price_per_1k)?,
                 output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
             };
-            // 使用 nil tenant_id 和 provider 作为缓存 key
-            let key = Self::cache_key(&nil_tenant, &p.model_name, &p.provider);
+            // 使用 nil tenant_id 和计费维度作为缓存 key
+            let key = Self::cache_key(&nil_tenant, &p.model_name, p.billing_dimension.as_str());
             cache.put(key, CacheEntry::new(snapshot));
         }
 
@@ -530,14 +554,14 @@ mod tests {
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
 
-    /// 测试缓存 key 生成
+    /// 测试缓存 key 生成（包含计费维度）
     #[test]
     fn test_cache_key_generation() {
         let tenant_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
-        let key = PricingService::cache_key(&tenant_id, "gpt-4o", "openai");
+        let key = PricingService::cache_key(&tenant_id, "gpt-4o", "provideraccount");
 
         assert!(key.contains("gpt-4o"));
-        assert!(key.contains("openai"));
+        assert!(key.contains("provideraccount"));
         assert!(key.contains("00000000-0000-0000-0000-000000000001"));
     }
 
@@ -545,7 +569,7 @@ mod tests {
     #[test]
     fn test_cache_key_nil_tenant() {
         let nil_tenant = Uuid::nil();
-        let key = PricingService::cache_key(&nil_tenant, "gpt-4o", "openai");
+        let key = PricingService::cache_key(&nil_tenant, "gpt-4o", "provideraccount");
 
         assert!(key.starts_with("00000000-0000-0000-0000-000000000000"));
     }
@@ -730,7 +754,7 @@ mod tests {
         // 验证缓存中有 nil_tenant 的条目
         let cache = service.cache.write().await;
         let nil_tenant = Uuid::nil();
-        let default_key = PricingService::cache_key(&nil_tenant, "gpt-4o", "openai");
+        let default_key = PricingService::cache_key(&nil_tenant, "gpt-4o", "provideraccount");
         assert!(
             cache.contains(&default_key),
             "缓存应包含 nil_tenant 的默认定价"
@@ -757,37 +781,23 @@ mod tests {
         assert!(cache.is_empty());
     }
 
-    /// 测试缓存键使用匹配到的 provider（回退匹配场景）
-    /// 当请求的 provider 没有定价时，会回退到任意 provider
-    /// 此时缓存键应使用匹配到的 provider，而非请求的 provider
+    /// 测试不同计费维度请求的缓存拆分
+    /// 验证缓存按计费维度区分，不同计费维度有独立缓存
     #[tokio::test]
-    async fn test_cache_key_uses_matched_provider() {
+    async fn test_cache_split_by_provider_dimension() {
         let service = PricingService::new();
         let tenant1 = Uuid::new_v4();
         let tenant2 = Uuid::new_v4();
 
-        // 第一次请求：使用 provider="claude"（无数据库，使用默认价格）
-        // 由于没有数据库，会使用硬编码默认价格
+        // 第一次请求：使用 provideraccount 计费维度
         let snapshot1 = service
-            .create_snapshot("gpt-4o", &tenant1, Some("claude"))
+            .create_snapshot("gpt-4o", &tenant1, Some("provideraccount"))
             .await
             .unwrap();
 
-        // 验证缓存使用的是 "claude"（因为无数据库时使用请求的 provider）
-        {
-            let cache = service.cache.write().await;
-            let nil_tenant = Uuid::nil();
-            let claude_key = PricingService::cache_key(&nil_tenant, "gpt-4o", "claude");
-            assert!(
-                cache.contains(&claude_key),
-                "缓存应包含 nil:gpt-4o:claude 的默认定价"
-            );
-        }
-
-        // 第二次请求：使用 provider="openai"，不同租户
-        // 应该缓存到不同的 key（nil:gpt-4o:openai）
+        // 第二次请求：使用 node 计费维度，不同租户
         let snapshot2 = service
-            .create_snapshot("gpt-4o", &tenant2, Some("openai"))
+            .create_snapshot("node:llama3", &tenant2, Some("node"))
             .await
             .unwrap();
 
@@ -795,47 +805,11 @@ mod tests {
         assert_eq!(snapshot1.input_price_per_1k, snapshot2.input_price_per_1k);
         assert_eq!(snapshot1.output_price_per_1k, snapshot2.output_price_per_1k);
 
-        // 验证缓存中有两个不同的 key
+        // 验证缓存有 2 个条目（不同计费维度独立缓存）
         {
             let cache = service.cache.write().await;
-            let nil_tenant = Uuid::nil();
-            let claude_key = PricingService::cache_key(&nil_tenant, "gpt-4o", "claude");
-            let openai_key = PricingService::cache_key(&nil_tenant, "gpt-4o", "openai");
-            assert!(cache.contains(&claude_key));
-            assert!(cache.contains(&openai_key));
-            // 应该有 2 个缓存条目（不同 provider）
-            assert_eq!(cache.len(), 2, "应该有 2 个不同 provider 的缓存条目");
-        }
-    }
-
-    /// 测试相同 provider 请求的缓存命中
-    /// 验证第一次请求后，后续相同 provider 的请求能命中缓存
-    #[tokio::test]
-    async fn test_cache_hit_same_provider_request() {
-        let service = PricingService::new();
-        let tenant1 = Uuid::new_v4();
-        let tenant2 = Uuid::new_v4();
-
-        // 第一次请求 provider="claude"
-        let _snapshot1 = service
-            .create_snapshot("gpt-4o", &tenant1, Some("claude"))
-            .await
-            .unwrap();
-
-        // 清除跟踪变量，准备验证第二次请求命中缓存
-        // 第二次请求相同 provider="claude"，不同租户
-        // 由于硬编码默认定价缓存到了 nil:gpt-4o:claude，应该命中缓存
-        let _snapshot2 = service
-            .create_snapshot("gpt-4o", &tenant2, Some("claude"))
-            .await
-            .unwrap();
-
-        // 验证缓存只有一个条目（nil:gpt-4o:claude）
-        // 因为两个请求都应该使用同一个缓存
-        {
-            let cache = service.cache.write().await;
-            // 应该只有 1 个缓存条目，证明第二次请求命中了缓存
-            assert_eq!(cache.len(), 1, "第二次请求应命中缓存，不应新增缓存条目");
+            // 应该有 2 个缓存条目：一个 provideraccount，一个 node
+            assert_eq!(cache.len(), 2, "不同计费维度应该有独立的缓存条目");
         }
     }
 
@@ -865,12 +839,16 @@ mod tests {
         {
             let cache = service.cache.write().await;
             let nil_tenant = Uuid::nil();
-            let key0 = PricingService::cache_key(&nil_tenant, "model-0", "openai");
+            let key0 = PricingService::cache_key(&nil_tenant, "model-0", "provideraccount");
             assert!(!cache.contains(&key0), "model-0 应该被 LRU 淘汰");
 
             // 验证最新的 3 个条目存在
             for i in 1..4 {
-                let key = PricingService::cache_key(&nil_tenant, &format!("model-{}", i), "openai");
+                let key = PricingService::cache_key(
+                    &nil_tenant,
+                    &format!("model-{}", i),
+                    "provideraccount",
+                );
                 assert!(cache.contains(&key), "model-{} 应该在缓存中", i);
             }
         }
@@ -881,5 +859,47 @@ mod tests {
     fn test_pricing_service_with_cache_capacity() {
         let service = PricingService::new().with_cache_capacity(500);
         assert_eq!(service.cache_capacity, 500);
+    }
+
+    /// 测试 resolve_pricing_provider 函数
+    #[test]
+    fn test_resolve_pricing_provider() {
+        // Node 模型应返回 "node"
+        assert_eq!(resolve_pricing_provider("node:ollama-llama3"), "node");
+        assert_eq!(resolve_pricing_provider("node:test"), "node");
+        assert_eq!(resolve_pricing_provider("node:gpt-4o"), "node");
+        assert_eq!(resolve_pricing_provider("node:"), "node");
+
+        // 非 Node 模型应返回 "provideraccount"
+        assert_eq!(resolve_pricing_provider("gpt-4o"), "provideraccount");
+        assert_eq!(resolve_pricing_provider("gpt-3.5-turbo"), "provideraccount");
+        assert_eq!(
+            resolve_pricing_provider("claude-3-5-sonnet"),
+            "provideraccount"
+        );
+        assert_eq!(resolve_pricing_provider("deepseek-chat"), "provideraccount");
+        assert_eq!(
+            resolve_pricing_provider("gemini-1.5-flash"),
+            "provideraccount"
+        );
+
+        // 大小写敏感
+        assert_eq!(resolve_pricing_provider("NODE:test"), "provideraccount");
+        assert_eq!(resolve_pricing_provider("Node:test"), "provideraccount");
+
+        // 其他情况
+        assert_eq!(resolve_pricing_provider("mynode:test"), "provideraccount");
+        assert_eq!(
+            resolve_pricing_provider("test-node:model"),
+            "provideraccount"
+        );
+        assert_eq!(resolve_pricing_provider(""), "provideraccount");
+    }
+
+    /// 测试常量值
+    #[test]
+    fn test_pricing_provider_constants() {
+        assert_eq!(NODE_PRICING_PROVIDER, "node");
+        assert_eq!(DEFAULT_PRICING_PROVIDER, "provideraccount");
     }
 }

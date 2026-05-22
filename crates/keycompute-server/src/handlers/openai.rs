@@ -309,10 +309,12 @@ pub async fn chat_completions(
     }
 
     // 1. 构建 PricingSnapshot
-    // 注意：此时 provider 尚未确定（路由在之后执行），使用 None 采用默认值
+    // 注意：此时 provider 尚未确定（路由在之后执行）
+    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
+    let provider = keycompute_pricing::resolve_pricing_provider(&request.model);
     let pricing = state
         .pricing
-        .create_snapshot(&request.model, &auth.tenant_id, None)
+        .create_snapshot(&request.model, &auth.tenant_id, Some(provider))
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to create pricing snapshot: {}", e)))?;
 
@@ -360,13 +362,16 @@ pub async fn chat_completions(
             let ctx_mut = Arc::make_mut(&mut ctx);
             ctx_mut.model = model.clone();
 
-            // 更新定价快照（使用实际模型名和 "node" provider 进行定价查找）
+            // 更新定价快照（使用实际模型名和 NODE_PRICING_PROVIDER 进行定价查找）
             // 注意：必须先调用 update_context_pricing，再设置 provider
             // 因为 update_context_pricing 会检查 provider 是否变化
-            state.pricing.update_context_pricing(ctx_mut, "node").await;
+            state
+                .pricing
+                .update_context_pricing(ctx_mut, keycompute_pricing::NODE_PRICING_PROVIDER)
+                .await;
 
             // 设置 provider 字段（用于日志追踪和后续逻辑）
-            ctx_mut.set_provider("node");
+            ctx_mut.set_provider(keycompute_pricing::NODE_PRICING_PROVIDER);
 
             // 调用 node-gateway 执行
             let node_gateway = state
@@ -867,24 +872,13 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ListModel
         }
     }
 
-    // 如果数据库中没有模型，使用默认模型列表（向后兼容）
+    // 如果数据库中没有模型，使用默认模型列表（仅保留一个示例模型）
     if model_set.is_empty() {
-        model_set.insert("gpt-4o".to_string());
-        model_set.insert("gpt-4o-mini".to_string());
-        model_set.insert("gpt-4-turbo".to_string());
-        model_set.insert("gpt-3.5-turbo".to_string());
-        model_set.insert("claude-3-5-sonnet-20241022".to_string());
-        model_set.insert("deepseek-chat".to_string());
+        model_set.insert("model-empty".to_string());
 
-        provider_map.insert("gpt-4o".to_string(), "openai".to_string());
-        provider_map.insert("gpt-4o-mini".to_string(), "openai".to_string());
-        provider_map.insert("gpt-4-turbo".to_string(), "openai".to_string());
-        provider_map.insert("gpt-3.5-turbo".to_string(), "openai".to_string());
-        provider_map.insert(
-            "claude-3-5-sonnet-20241022".to_string(),
-            "anthropic".to_string(),
-        );
-        provider_map.insert("deepseek-chat".to_string(), "deepseek".to_string());
+        // 使用 provideraccount 计费维度
+        let provider = keycompute_pricing::DEFAULT_PRICING_PROVIDER;
+        provider_map.insert("model-empty".to_string(), provider.to_string());
     }
 
     let models: Vec<Model> = model_set

@@ -4,8 +4,8 @@ use client_api::error::Result;
 use client_api::{
     AdminApi,
     api::admin::{
-        CreatePricingRequest, CreatePricingResponse, MessageResponse, PricingInfo,
-        SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
+        CreatePricingRequest, CreatePricingResponse, MakeDefaultPricingResponse, MessageResponse,
+        PricingInfo, SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
     },
 };
 
@@ -33,6 +33,11 @@ pub async fn update(
 pub async fn delete(id: &str, token: &str) -> Result<MessageResponse> {
     let client = get_client();
     AdminApi::new(&client).delete_pricing(id, token).await
+}
+
+pub async fn make_default(id: &str, token: &str) -> Result<MakeDefaultPricingResponse> {
+    let client = get_client();
+    AdminApi::new(&client).make_pricing_default(id, token).await
 }
 
 pub async fn set_defaults(req: SetDefaultPricingRequest, token: &str) -> Result<MessageResponse> {

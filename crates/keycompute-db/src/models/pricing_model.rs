@@ -5,13 +5,87 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
 
+/// 全局默认定价的租户 ID（nil UUID）
+pub const GLOBAL_DEFAULT_TENANT_ID: Uuid = Uuid::nil();
+
+/// 计费维度解析错误
+#[derive(Debug, thiserror::Error)]
+#[error("Invalid billing dimension: '{0}'. Must be 'node' or 'provideraccount'")]
+pub struct BillingDimensionError(pub String);
+
+/// 计费维度枚举
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BillingDimension {
+    /// Node 路径（node: 前缀的模型）
+    #[serde(rename = "node")]
+    Node,
+    /// Provider Account 路径（所有非 Node 模型）
+    #[serde(rename = "provideraccount")]
+    ProviderAccount,
+}
+
+impl BillingDimension {
+    /// 转换为字符串
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BillingDimension::Node => "node",
+            BillingDimension::ProviderAccount => "provideraccount",
+        }
+    }
+}
+
+impl std::str::FromStr for BillingDimension {
+    type Err = BillingDimensionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "node" => Ok(BillingDimension::Node),
+            "provideraccount" => Ok(BillingDimension::ProviderAccount),
+            _ => Err(BillingDimensionError(s.to_string())),
+        }
+    }
+}
+
+impl std::fmt::Display for BillingDimension {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl sqlx::Type<sqlx::Postgres> for BillingDimension {
+    fn type_info() -> sqlx::postgres::PgTypeInfo {
+        sqlx::postgres::PgTypeInfo::with_name("varchar")
+    }
+}
+
+impl sqlx::Encode<'_, sqlx::Postgres> for BillingDimension {
+    fn encode_by_ref(
+        &self,
+        buf: &mut sqlx::postgres::PgArgumentBuffer,
+    ) -> Result<sqlx::encode::IsNull, Box<dyn std::error::Error + Send + Sync>> {
+        <String as sqlx::Encode<sqlx::Postgres>>::encode(self.as_str().to_string(), buf)
+    }
+}
+
+impl sqlx::Decode<'_, sqlx::Postgres> for BillingDimension {
+    fn decode(
+        value: sqlx::postgres::PgValueRef<'_>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let s = <String as sqlx::Decode<sqlx::Postgres>>::decode(value)?;
+        s.parse().map_err(|e: BillingDimensionError| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+                as Box<dyn std::error::Error + Send + Sync>
+        })
+    }
+}
+
 /// 定价模型
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct PricingModel {
     pub id: Uuid,
     pub tenant_id: Option<Uuid>,
     pub model_name: String,
-    pub provider: String,
+    pub billing_dimension: BillingDimension,
     pub currency: String,
     pub input_price_per_1k: BigDecimal,
     pub output_price_per_1k: BigDecimal,
@@ -27,7 +101,7 @@ pub struct PricingModel {
 pub struct CreatePricingRequest {
     pub tenant_id: Option<Uuid>,
     pub model_name: String,
-    pub provider: String,
+    pub billing_dimension: BillingDimension,
     pub currency: Option<String>,
     pub input_price_per_1k: BigDecimal,
     pub output_price_per_1k: BigDecimal,
@@ -53,7 +127,7 @@ impl PricingModel {
         let pricing = sqlx::query_as::<_, PricingModel>(
             r#"
             INSERT INTO pricing_models (
-                tenant_id, model_name, provider, currency,
+                tenant_id, model_name, billing_dimension, currency,
                 input_price_per_1k, output_price_per_1k,
                 is_default, effective_from, effective_until
             )
@@ -63,7 +137,7 @@ impl PricingModel {
         )
         .bind(req.tenant_id)
         .bind(&req.model_name)
-        .bind(&req.provider)
+        .bind(&req.billing_dimension)
         .bind(req.currency.as_deref().unwrap_or("CNY"))
         .bind(&req.input_price_per_1k)
         .bind(&req.output_price_per_1k)
@@ -115,23 +189,29 @@ impl PricingModel {
         pool: &sqlx::PgPool,
         tenant_id: Uuid,
         model_name: &str,
-        provider: &str,
+        billing_dimension: &str,
     ) -> Result<Option<PricingModel>, DbError> {
         let pricing = sqlx::query_as::<_, PricingModel>(
             r#"
             SELECT * FROM pricing_models
             WHERE model_name = $1
-              AND provider = $2
+              AND billing_dimension = $2
               AND effective_from <= NOW()
               AND (effective_until IS NULL OR effective_until > NOW())
-              AND (tenant_id = $3 OR (tenant_id IS NULL AND is_default = TRUE))
-            ORDER BY tenant_id NULLS LAST
+              AND (
+                  tenant_id = $3
+                  OR (tenant_id = $4 AND is_default = TRUE)
+              )
+            ORDER BY 
+                CASE WHEN tenant_id = $4 THEN 1 ELSE 0 END,
+                CASE WHEN is_default = TRUE THEN 0 ELSE 1 END
             LIMIT 1
             "#,
         )
         .bind(model_name)
-        .bind(provider)
+        .bind(billing_dimension)
         .bind(tenant_id)
+        .bind(GLOBAL_DEFAULT_TENANT_ID)
         .fetch_optional(pool)
         .await?;
 
@@ -207,5 +287,60 @@ impl PricingModel {
         }
 
         true
+    }
+
+    /// 初始化系统默认定价
+    ///
+    /// 系统启动时调用，如果 model-empty 模型的全局默认定价不存在则创建。
+    /// 全局默认定价使用 tenant_id = NULL，表示全局级别。
+    pub async fn init_default_pricing(pool: &sqlx::PgPool) -> Result<(), DbError> {
+        // 查询全局默认定价是否已存在（tenant_id = GLOBAL_DEFAULT_TENANT_ID）
+        let existing = sqlx::query_as::<_, PricingModel>(
+            r#"
+            SELECT * FROM pricing_models
+            WHERE model_name = $1
+              AND billing_dimension = $2
+              AND tenant_id = $3
+            "#,
+        )
+        .bind("model-empty")
+        .bind(BillingDimension::ProviderAccount.as_str())
+        .bind(GLOBAL_DEFAULT_TENANT_ID)
+        .fetch_optional(pool)
+        .await?;
+
+        if existing.is_some() {
+            tracing::debug!("Default pricing for model-empty already exists, skipping init");
+            return Ok(());
+        }
+
+        tracing::info!(
+            model_name = "model-empty",
+            "Creating global default pricing"
+        );
+
+        // 使用字符串解析 BigDecimal
+        let input_price_per_1k = "0.1".parse().unwrap_or_default();
+        let output_price_per_1k = "0.3".parse().unwrap_or_default();
+
+        // 创建 model-empty 模型的全局默认定价（tenant_id = GLOBAL_DEFAULT_TENANT_ID）
+        let db_req = CreatePricingRequest {
+            tenant_id: Some(GLOBAL_DEFAULT_TENANT_ID), // 全局默认：nil UUID
+            model_name: "model-empty".to_string(),
+            billing_dimension: BillingDimension::ProviderAccount,
+            currency: Some("CNY".to_string()),
+            input_price_per_1k,
+            output_price_per_1k,
+            is_default: Some(true),
+            effective_from: None,
+            effective_until: None,
+        };
+
+        Self::create(pool, &db_req).await?;
+        tracing::info!(
+            model_name = "model-empty",
+            "Global default pricing created successfully"
+        );
+        Ok(())
     }
 }

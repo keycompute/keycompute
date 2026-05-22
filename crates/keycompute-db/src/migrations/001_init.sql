@@ -113,7 +113,7 @@ CREATE TABLE pricing_models (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID,
     model_name VARCHAR(100) NOT NULL,
-    provider VARCHAR(50) NOT NULL,
+    billing_dimension VARCHAR(50) NOT NULL,
     currency VARCHAR(10) NOT NULL DEFAULT 'CNY',
     input_price_per_1k DECIMAL(20, 10) NOT NULL,
     output_price_per_1k DECIMAL(20, 10) NOT NULL,
@@ -122,13 +122,15 @@ CREATE TABLE pricing_models (
     effective_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, model_name, provider, effective_from)
+    UNIQUE(tenant_id, model_name, billing_dimension)
 );
 
 CREATE INDEX idx_pricing_models_tenant_id ON pricing_models(tenant_id);
 CREATE INDEX idx_pricing_models_model ON pricing_models(model_name);
-CREATE INDEX idx_pricing_models_provider ON pricing_models(provider);
+CREATE INDEX idx_pricing_models_billing_dimension ON pricing_models(billing_dimension);
 CREATE INDEX idx_pricing_models_default ON pricing_models(is_default) WHERE is_default = TRUE;
+
+COMMENT ON COLUMN pricing_models.billing_dimension IS '计费维度: node 或 provideraccount';
 -- usage_logs: 计费主账本，不可变
 CREATE TABLE usage_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

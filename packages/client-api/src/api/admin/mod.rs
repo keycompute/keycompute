@@ -30,7 +30,8 @@ pub use node_gateway::{
 pub use payment::PaymentOrderInfo;
 pub use pricing::{
     CalculateCostRequest, CostCalculationResponse, CreatePricingRequest, CreatePricingResponse,
-    PricingInfo, SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
+    MakeDefaultPricingResponse, PricingInfo, SetDefaultPricingRequest, UpdatePricingRequest,
+    UpdatePricingResponse,
 };
 pub use user::{
     ApiKeyInfo, UpdateBalanceRequest, UpdateBalanceResponse, UpdateUserRequest, UpdateUserResponse,
@@ -231,6 +232,21 @@ impl AdminApi {
     pub async fn delete_pricing(&self, id: &str, token: &str) -> Result<MessageResponse> {
         self.client
             .delete_json(&format!("/api/v1/pricing/{}", id), Some(token))
+            .await
+    }
+
+    /// 将定价设为默认
+    pub async fn make_pricing_default(
+        &self,
+        id: &str,
+        token: &str,
+    ) -> Result<MakeDefaultPricingResponse> {
+        self.client
+            .post_json(
+                &format!("/api/v1/pricing/{}/make-default", id),
+                &(),
+                Some(token),
+            )
             .await
     }
 

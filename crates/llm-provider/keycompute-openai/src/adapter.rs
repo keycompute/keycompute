@@ -147,12 +147,7 @@ impl ProviderAdapter for OpenAIProvider {
 
     fn supported_models(&self) -> Vec<&'static str> {
         vec![
-            "gpt-4o",
-            "gpt-4o-mini",
-            "gpt-4-turbo",
-            "gpt-4",
-            "gpt-3.5-turbo",
-            "gpt-3.5-turbo-16k",
+            "gpt-empty", // GPT 示例空模型名称
         ]
     }
 

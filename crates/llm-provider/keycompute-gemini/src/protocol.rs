@@ -10,15 +10,7 @@ pub const GEMINI_DEFAULT_ENDPOINT: &str = "https://generativelanguage.googleapis
 
 /// Gemini 支持的模型列表
 pub const GEMINI_MODELS: &[&str] = &[
-    "gemini-2.0-flash-exp",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-8b",
-    "gemini-1.5-pro",
-    "gemini-1.5-pro-latest",
-    "gemini-1.0-pro",
-    "gemini-1.0-pro-latest",
-    "gemini-pro",
-    "gemini-pro-vision",
+    "gemini-empty", // Gemini 示例空模型名称
 ];
 
 /// Gemini Generate Content 请求

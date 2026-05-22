@@ -9,7 +9,7 @@ pub mod provider_health;
 
 pub use account_state::{AccountState, AccountStateStore};
 use keycompute_db::Account;
-use keycompute_runtime::{CryptoError, EncryptedApiKey, decrypt_api_key};
+use keycompute_runtime::{EncryptedApiKey, decrypt_api_key};
 use keycompute_types::{
     ExecutionPlan, ExecutionTarget, KeyComputeError, PricingSnapshot, RequestContext, Result,
 };
@@ -610,19 +610,21 @@ impl RoutingEngine {
     /// 尝试解密存储的 API Key。如果全局加密密钥未设置，
     /// 说明系统可能还在使用明文存储，此时回退使用原始值。
     fn decrypt_upstream_api_key(encrypted_value: &str) -> Result<String> {
-        // 尝试使用全局密钥解密
+        // 先检查全局加密密钥是否已设置，避免与并行测试中的竞态
+        if keycompute_runtime::global_crypto().is_none() {
+            // 全局密钥未设置，回退使用原始值（可能存储的是明文）
+            tracing::warn!(
+                "Global crypto key not set, using stored value as plaintext. \n\
+                 This is acceptable for development but should be fixed in production."
+            );
+            return Ok(encrypted_value.to_string());
+        }
+
+        // 全局密钥已设置，尝试解密
         match decrypt_api_key(&EncryptedApiKey::from(encrypted_value)) {
             Ok(decrypted) => {
                 tracing::trace!("Successfully decrypted upstream API key");
                 Ok(decrypted)
-            }
-            Err(CryptoError::InvalidKey(msg)) if msg.contains("Global crypto key not set") => {
-                // 全局密钥未设置，回退使用原始值（可能存储的是明文）
-                tracing::warn!(
-                    "Global crypto key not set, using stored value as plaintext. \n\
-                     This is acceptable for development but should be fixed in production."
-                );
-                Ok(encrypted_value.to_string())
             }
             Err(e) => {
                 // 其他解密错误

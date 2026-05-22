@@ -101,15 +101,29 @@ async fn main() -> anyhow::Result<()> {
     let pool = Arc::new(db_manager.pool().clone());
 
     // ==================== 阶段 5: 初始化默认系统管理员 ====================
-    if let Err(e) = initialize_default_admin(&pool).await {
-        warn!("默认管理员初始化失败: {}", e);
-    }
+    let _system_tenant = match initialize_default_admin(&pool).await {
+        Ok(tenant) => {
+            info!(tenant_id = %tenant.id, "系统租户初始化成功");
+            Some(tenant)
+        }
+        Err(e) => {
+            warn!("默认管理员初始化失败: {}", e);
+            None
+        }
+    };
 
     // ==================== 阶段 5.5: 初始化系统默认设置 ====================
     info!("正在初始化系统默认设置...");
     match SystemSetting::init_default_settings(&pool).await {
         Ok(_) => info!("系统默认设置初始化完成"),
         Err(e) => warn!("系统默认设置初始化失败（非致命错误）: {}", e),
+    }
+
+    // ==================== 阶段 5.6: 初始化系统默认定价 ====================
+    info!("正在初始化系统默认定价...");
+    match keycompute_db::models::pricing_model::PricingModel::init_default_pricing(&pool).await {
+        Ok(_) => info!("系统默认定价初始化完成"),
+        Err(e) => warn!("系统默认定价初始化失败（非致命错误）: {}", e),
     }
 
     if let Err(e) = validate_distribution_public_base_url(&pool, &config).await {
@@ -206,7 +220,7 @@ fn env_var_or_default(key: &str, default: &str) -> String {
     non_empty_or_default(std::env::var(key).ok(), default)
 }
 
-async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<Tenant> {
     // 从环境变量读取配置
     let admin_email = env_var_or_default("KC__DEFAULT_ADMIN_EMAIL", "admin@keycompute.local");
     let admin_password = env_var_or_default("KC__DEFAULT_ADMIN_PASSWORD", "12345");
@@ -231,7 +245,12 @@ async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<()> {
                 "已存在 system 用户，跳过默认管理员初始化"
             );
         }
-        return Ok(());
+        // 获取 system 租户（复用已有租户）
+        let tenant = Tenant::find_by_slug(pool, "system")
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to find system tenant: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("system 租户不存在但 system 用户已存在，数据不一致"))?;
+        return Ok(tenant);
     }
 
     // 没有 system 用户时，配置邮箱也不能被普通账号占用。
@@ -320,7 +339,7 @@ async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         "默认系统管理员初始化成功"
     );
 
-    Ok(())
+    Ok(tenant)
 }
 
 async fn validate_distribution_public_base_url(

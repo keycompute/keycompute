@@ -580,6 +580,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.table_subtitle", "Review provider ownership, input/output rates, and default strategies for each model in a single place.");
     m.insert("pricing.items_suffix", "items");
     m.insert("pricing.model_provider", "Model / Provider");
+    m.insert("pricing.tenant_id", "Tenant ID");
+    m.insert("pricing.global", "Global Default");
     m.insert("pricing.input_price", "Input Price");
     m.insert("pricing.output_price", "Output Price");
     m.insert("pricing.billing_status", "Billing Status");
@@ -625,6 +627,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.edit_title", "Edit Pricing");
     m.insert("pricing.model_name", "Model Name");
     m.insert("pricing.model_placeholder", "e.g. gpt-4o");
+    m.insert("pricing.provider_type", "Provider Type");
+    m.insert("pricing.provider_type_placeholder", "Select provider type");
     m.insert("pricing.input_price_label", "Input Price (per 1K tokens)");
     m.insert("pricing.output_price_label", "Output Price (per 1K tokens)");
     m.insert("pricing.input_placeholder", "e.g. 0.000005");

@@ -107,9 +107,11 @@ pub async fn debug_routing(
     use keycompute_db::models::Account;
 
     // 1. 构建 PricingSnapshot
+    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
+    let provider = keycompute_pricing::resolve_pricing_provider(&query.model);
     let pricing = state
         .pricing
-        .create_snapshot(&query.model, &auth.tenant_id, None)
+        .create_snapshot(&query.model, &auth.tenant_id, Some(provider))
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to create pricing snapshot: {}", e)))?;
 

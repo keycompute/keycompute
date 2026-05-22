@@ -265,9 +265,11 @@ pub async fn calculate_cost(
 ) -> Result<Json<CalculateCostResponse>> {
     // 使用默认租户 ID 创建价格快照
     let tenant_id = Uuid::nil();
+    // Node 模型（node:前缀）使用 empty provider
+    let provider = keycompute_pricing::resolve_pricing_provider(&request.model);
     let pricing = state
         .pricing
-        .create_snapshot(&request.model, &tenant_id, None)
+        .create_snapshot(&request.model, &tenant_id, Some(provider))
         .await
         .map_err(|e| crate::error::ApiError::Internal(format!("Failed to get pricing: {}", e)))?;
 

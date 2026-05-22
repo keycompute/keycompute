@@ -65,9 +65,11 @@ pub async fn get_pricing(
     auth: AuthExtractor,
     Query(query): Query<PricingQuery>,
 ) -> Result<Json<PricingResponse>> {
+    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
+    let provider = keycompute_pricing::resolve_pricing_provider(&query.model);
     let snapshot = state
         .pricing
-        .create_snapshot(&query.model, &auth.tenant_id, None)
+        .create_snapshot(&query.model, &auth.tenant_id, Some(provider))
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to get pricing: {}", e)))?;
 
@@ -85,9 +87,11 @@ pub async fn calculate_cost(
     auth: AuthExtractor,
     Json(request): Json<CostCalculationRequest>,
 ) -> Result<Json<CostCalculationResponse>> {
+    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
+    let provider = keycompute_pricing::resolve_pricing_provider(&request.model);
     let snapshot = state
         .pricing
-        .create_snapshot(&request.model, &auth.tenant_id, None)
+        .create_snapshot(&request.model, &auth.tenant_id, Some(provider))
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to get pricing: {}", e)))?;
 

@@ -4,21 +4,36 @@ use ui::{Badge, BadgeVariant, Pagination, Table, TableHead};
 
 const PAGE_SIZE: usize = 20;
 
+/// 全局默认定价的租户 ID（nil UUID）
+const GLOBAL_DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000000";
+
+/// 检查是否为全局默认定价
+fn is_global_default(tenant_id: &Option<String>) -> bool {
+    tenant_id
+        .as_ref()
+        .is_some_and(|id| id == GLOBAL_DEFAULT_TENANT_ID)
+}
+
 use crate::hooks::use_i18n::use_i18n;
-use crate::services::{api_client::with_auto_refresh, pricing_service};
+use crate::services::{api_client::with_auto_refresh, pricing_service, tenant_service};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
 use crate::utils::time::format_time;
 
-fn pricing_provider_label(provider: &str) -> &str {
-    match provider {
-        "openai" => "OpenAI",
-        "anthropic" => "Anthropic",
-        "gemini" => "Gemini",
-        "deepseek" => "DeepSeek",
-        "ollama" => "Ollama",
-        "vllm" => "vLLM",
-        _ => provider,
+fn pricing_provider_label(dimension: &str) -> &str {
+    match dimension {
+        "provideraccount" => "ProviderAccount",
+        "node" => "Node",
+        _ => dimension,
+    }
+}
+
+/// 获取计费维度的 CSS 类名（短格式）
+fn pricing_provider_class(dimension: &str) -> &'static str {
+    match dimension {
+        "provideraccount" => "provider-pa",
+        "node" => "provider-node",
+        _ => "provider-unknown",
     }
 }
 
@@ -115,6 +130,7 @@ pub fn Pricing() -> Element {
                             thead {
                                 tr {
                                     TableHead { {i18n.t("pricing.model_provider")} }
+                                    TableHead { {i18n.t("pricing.tenant_id")} }
                                     TableHead { {i18n.t("pricing.input_price")} }
                                     TableHead { {i18n.t("pricing.output_price")} }
                                     TableHead { {i18n.t("pricing.billing_status")} }
@@ -137,11 +153,23 @@ pub fn Pricing() -> Element {
                                                     }
                                                     div { class: "pricing-provider-row",
                                                         span {
-                                                            class: "pricing-provider-badge pricing-provider-{p.provider}",
-                                                            "{pricing_provider_label(&p.provider)}"
+                                                            class: "pricing-provider-badge {pricing_provider_class(&p.billing_dimension)}",
+                                                            "{pricing_provider_label(&p.billing_dimension)}"
                                                         }
-                                                        span { class: "pricing-provider-code", "{p.provider}" }
+                                                        span { class: "pricing-provider-code", "{p.billing_dimension}" }
                                                     }
+                                                }
+                                            }
+                                            td {
+                                                // 显示租户 ID：nil UUID 表示全局默认
+                                                if let Some(tenant_id) = &p.tenant_id {
+                                                    if is_global_default(&p.tenant_id) {
+                                                        span { class: "pricing-tenant-global", {i18n.t("pricing.global")} }
+                                                    } else {
+                                                        span { class: "pricing-tenant-code", "{tenant_id.chars().take(8).collect::<String>()}" }
+                                                    }
+                                                } else {
+                                                    span { class: "pricing-tenant-code", "-" }
                                                 }
                                             }
                                             td {
@@ -181,9 +209,9 @@ pub fn Pricing() -> Element {
                                             if is_admin {
                                                 td {
                                                     div { class: "action-buttons pricing-actions",
-                                                    if !p.is_default {
-                                                        {
-                                                            let pid = p.id.clone();
+                                                        if !p.is_default {
+                                                            {
+                                                                let pid = p.id.clone();
                                                                 rsx! {
                                                                     button {
                                                                         class: "btn btn-sm btn-secondary",
@@ -191,9 +219,7 @@ pub fn Pricing() -> Element {
                                                                             let id = pid.clone();
                                                                             let token = auth_store.token().unwrap_or_default();
                                                                             spawn(async move {
-                                                                                use client_api::api::admin::SetDefaultPricingRequest;
-                                                                                let req = SetDefaultPricingRequest { model_ids: vec![id] };
-                                                                                match pricing_service::set_defaults(req, &token).await {
+                                                                                match pricing_service::make_default(&id, &token).await {
                                                                                     Ok(_) => {
                                                                                         op_ok.set(i18n.t("pricing.set_default_ok").to_string());
                                                                                         op_err.set(String::new());
@@ -214,50 +240,54 @@ pub fn Pricing() -> Element {
                                                                             });
                                                                         },
                                                                         {i18n.t("pricing.set_default")}
+                                                                    }
                                                                 }
                                                             }
                                                         }
-                                                    }
-                                                    {
-                                                        let pricing = p.clone();
-                                                        rsx! {
-                                                            button {
-                                                                class: "btn btn-sm btn-secondary",
-                                                                onclick: move |_| editing_pricing.set(Some(pricing.clone())),
-                                                                {i18n.t("form.edit")}
+                                                        // 编辑按钮：所有定价都可以编辑
+                                                        {
+                                                            let pricing = p.clone();
+                                                            rsx! {
+                                                                button {
+                                                                    class: "btn btn-sm btn-secondary",
+                                                                    onclick: move |_| editing_pricing.set(Some(pricing.clone())),
+                                                                    {i18n.t("form.edit")}
+                                                                }
                                                             }
                                                         }
-                                                    }
-                                                    {
-                                                        let pid = p.id.clone();
-                                                        rsx! {
-                                                                button {
-                                                                    class: "btn btn-sm btn-danger",
-                                                                    onclick: move |_| {
-                                                                        let id = pid.clone();
-                                                                        let token = auth_store.token().unwrap_or_default();
-                                                                        spawn(async move {
-                                                                            match pricing_service::delete(&id, &token).await {
-                                                                                Ok(_) => {
-                                                                                    op_ok.set(i18n.t("pricing.deleted").to_string());
-                                                                                    op_err.set(String::new());
-                                                                                    *refresh_tick.write() += 1;
-                                                                                    spawn(async move {
-                                                                                        gloo_timers::future::TimeoutFuture::new(3_000).await;
-                                                                                        op_ok.set(String::new());
-                                                                                    });
-                                                                                }
-                                                                                Err(e) => {
-                                                                                    op_err.set(format!("{}：{e}", i18n.t("pricing.delete_failed")));
-                                                                                    spawn(async move {
-                                                                                        gloo_timers::future::TimeoutFuture::new(3_000).await;
+                                                        // 全局默认定价不允许删除，仅保留编辑按钮
+                                                        if !is_global_default(&p.tenant_id) {
+                                                            {
+                                                                let pid = p.id.clone();
+                                                                rsx! {
+                                                                    button {
+                                                                        class: "btn btn-sm btn-danger",
+                                                                        onclick: move |_| {
+                                                                            let id = pid.clone();
+                                                                            let token = auth_store.token().unwrap_or_default();
+                                                                            spawn(async move {
+                                                                                match pricing_service::delete(&id, &token).await {
+                                                                                    Ok(_) => {
+                                                                                        op_ok.set(i18n.t("pricing.deleted").to_string());
                                                                                         op_err.set(String::new());
-                                                                                    });
+                                                                                        *refresh_tick.write() += 1;
+                                                                                        spawn(async move {
+                                                                                            gloo_timers::future::TimeoutFuture::new(3_000).await;
+                                                                                            op_ok.set(String::new());
+                                                                                        });
+                                                                                    }
+                                                                                    Err(e) => {
+                                                                                        op_err.set(format!("{}：{e}", i18n.t("pricing.delete_failed")));
+                                                                                        spawn(async move {
+                                                                                            gloo_timers::future::TimeoutFuture::new(3_000).await;
+                                                                                            op_err.set(String::new());
+                                                                                        });
+                                                                                    }
                                                                                 }
-                                                                            }
-                                                                        });
-                                                                    },
-                                                                    {i18n.t("form.delete")}
+                                                                            });
+                                                                        },
+                                                                        {i18n.t("form.delete")}
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -305,7 +335,7 @@ pub fn Pricing() -> Element {
                     auth_store,
                     pricing_id: pricing.id.clone(),
                     pricing_model: pricing.model_name.clone(),
-                    pricing_provider: pricing.provider.clone(),
+                    pricing_provider: pricing.billing_dimension.clone(),
                     pricing_currency: pricing.currency.clone(),
                     initial_input_price: pricing.input_price_per_1k.clone(),
                     initial_output_price: pricing.output_price_per_1k.clone(),
@@ -335,23 +365,40 @@ fn CreatePricingModal(
 ) -> Element {
     let i18n = use_i18n();
     let mut model = use_signal(String::new);
-    let mut provider = use_signal(|| "openai".to_string());
+    let mut provider = use_signal(|| "provideraccount".to_string());
+    let mut tenant_id = use_signal(|| None::<String>);
     let mut input_price = use_signal(String::new);
     let mut output_price = use_signal(String::new);
     let mut currency = use_signal(|| "CNY".to_string());
     let mut saving = use_signal(|| false);
     let mut form_err = use_signal(String::new);
 
+    // 获取租户列表
+    let tenant_list = use_resource(move || async move {
+        with_auto_refresh(auth_store, |token| async move {
+            tenant_service::list(None, &token).await
+        })
+        .await
+    });
+
     let on_submit = move |_| {
-        let m = model();
+        let mut m = model();
         let p = provider();
         let ip_str = input_price();
         let op_str = output_price();
         let cur = currency();
+        let tid = tenant_id();
         if m.is_empty() || p.is_empty() || ip_str.is_empty() || op_str.is_empty() {
             form_err.set(i18n.t("pricing.fill_all").to_string());
             return;
         }
+        // 如果选择 node 计费维度，自动补全 node: 前缀
+        if p == "node" && !m.starts_with("node:") {
+            m = format!("node:{}", m);
+        }
+        // tenant_id 保持原样（None 表示未选择，Some(id) 表示选择了具体租户）
+        // 注意：由于已移除“全局默认”选项，用户无法创建全局默认定价
+        let tid = tid.and_then(|id| if id.is_empty() { None } else { Some(id) });
         if ip_str.parse::<f64>().is_err() {
             form_err.set(i18n.t("pricing.invalid_input_price").to_string());
             return;
@@ -372,7 +419,17 @@ fn CreatePricingModal(
         form_err.set(String::new());
         let token = auth_store.token().unwrap_or_default();
         spawn(async move {
-            let req = CreatePricingRequest::new(m, p, ip_str, op_str, cur);
+            let req = CreatePricingRequest {
+                model_name: m,
+                billing_dimension: p,
+                tenant_id: tid,
+                input_price_per_1k: ip_str,
+                output_price_per_1k: op_str,
+                currency: cur,
+                is_default: false,
+                effective_from: None,
+                effective_until: None,
+            };
             match pricing_service::create(req, &token).await {
                 Ok(_) => {
                     saving.set(false);
@@ -416,17 +473,35 @@ fn CreatePricingModal(
                         }
                     }
                     div { class: "form-group",
-                        label { class: "form-label", "Provider" }
+                        label { class: "form-label", {i18n.t("pricing.provider_type")} }
                         select {
                             class: "input-field",
                             value: "{provider}",
                             onchange: move |e| provider.set(e.value()),
-                            option { value: "openai", "OpenAI" }
-                            option { value: "anthropic", "Anthropic" }
-                            option { value: "gemini", "Gemini" }
-                            option { value: "deepseek", "DeepSeek" }
-                            option { value: "ollama", "Ollama" }
-                            option { value: "vllm", "vLLM" }
+                            option { value: "provideraccount", "ProviderAccount" }
+                            option { value: "node", "Node" }
+                        }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("pricing.tenant_id")} }
+                        select {
+                            class: "input-field",
+                            value: "{tenant_id().unwrap_or_default()}",
+                            onchange: move |e| {
+                                let val = e.value();
+                                if val.is_empty() {
+                                    tenant_id.set(None);
+                                } else {
+                                    tenant_id.set(Some(val));
+                                }
+                            },
+                            // 移除“全局默认”选项，全局默认定价由系统自动管理，不允许手动创建
+                            for t in match tenant_list() {
+                                Some(Ok(list)) => list,
+                                _ => vec![],
+                            } {
+                                option { value: "{t.id}", "{t.name} ({t.id.chars().take(8).collect::<String>()})" }
+                            }
                         }
                     }
                     div { class: "form-group",
@@ -575,7 +650,7 @@ fn EditPricingModal(
                         }
                     }
                     div { class: "form-group",
-                        label { class: "form-label", "Provider" }
+                        label { class: "form-label", {i18n.t("pricing.provider_type")} }
                         input {
                             class: "input-field",
                             r#type: "text",

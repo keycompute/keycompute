@@ -73,6 +73,7 @@ use crate::{
         list_pricing,
         list_tenants,
         login_handler,
+        make_pricing_default,
         // 节点网关
         node_complete,
         node_heartbeat,
@@ -85,7 +86,6 @@ use crate::{
         reset_password_handler,
         retrieve_model,
         set_account_cooldown,
-        set_default_pricing,
         sync_payment_order,
         test_account,
         update_account,
@@ -242,7 +242,10 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/pricing/{id}",
             put(update_pricing).delete(delete_pricing),
         )
-        .route("/api/v1/pricing/batch-defaults", post(set_default_pricing))
+        .route(
+            "/api/v1/pricing/{id}/make-default",
+            post(make_pricing_default),
+        )
         .route("/api/v1/pricing/calculate", post(calculate_cost));
 
     // Node Gateway 管理（仅 Admin）
