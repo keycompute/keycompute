@@ -17,9 +17,10 @@ OPENAI_INITIAL_BACKOFF_SECONDS = max(
     float(os.getenv("OPENAI_INITIAL_BACKOFF_SECONDS", "5")),
     1.0,
 )
-OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "2000"))
-MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
-API_URL = "https://api.openai.com/v1/responses"
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "4000"))
+MODEL = os.getenv("OPENAI_MODEL", "deepseek-v4-flash")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+API_URL = f"{OPENAI_BASE_URL}/chat/completions"
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 CODE_EXTENSIONS = {
     ".c",
@@ -46,7 +47,7 @@ LOW_SIGNAL_FILENAMES = {"Cargo.lock", "package-lock.json", "pnpm-lock.yaml", "ya
 TRUNCATION_MARKER = "\n...[truncated]"
 
 
-class OpenAIRequestError(RuntimeError):
+class LLMRequestError(RuntimeError):
     def __init__(self, message: str, *, status_code: int | None = None, error_type: str = "", error_code: str = ""):
         super().__init__(message)
         self.status_code = status_code
@@ -271,9 +272,12 @@ def call_openai(instructions: str, user_input: str) -> str:
             },
             json={
                 "model": MODEL,
-                "instructions": instructions,
-                "input": user_input,
-                "max_output_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+                "messages": [
+                    {"role": "system", "content": instructions},
+                    {"role": "user", "content": user_input}
+                ],
+                "max_tokens": OPENAI_MAX_OUTPUT_TOKENS,
+                "stream": False,
             },
             timeout=180,
         )
@@ -293,8 +297,8 @@ def call_openai(instructions: str, user_input: str) -> str:
             continue
 
         if is_insufficient_quota(response.status_code, error_type, error_code, error_message):
-            raise OpenAIRequestError(
-                "OpenAI API quota exceeded (429). "
+            raise LLMRequestError(
+                "LLM API quota exceeded (429). "
                 f"Model: {MODEL}. "
                 f"Type: {error_type or 'unknown'}. "
                 f"Code: {error_code or 'unknown'}. "
@@ -305,8 +309,8 @@ def call_openai(instructions: str, user_input: str) -> str:
             )
 
         if response.status_code == 429:
-            raise OpenAIRequestError(
-                "OpenAI API rate limit exceeded (429). "
+            raise LLMRequestError(
+                "LLM API rate limit exceeded (429). "
                 f"Model: {MODEL}. "
                 f"Type: {error_type or 'unknown'}. "
                 f"Code: {error_code or 'unknown'}. "
@@ -324,6 +328,15 @@ def call_openai(instructions: str, user_input: str) -> str:
     if data.get("error"):
         raise RuntimeError(f"OpenAI API error: {data['error']}")
 
+    # Chat Completions API response format
+    choices = data.get("choices", [])
+    if choices and len(choices) > 0:
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if content:
+            return content.strip()
+
+    # Fallback: try output_text for compatibility
     output_text = data.get("output_text")
     if output_text:
         return output_text.strip()
@@ -373,8 +386,7 @@ Note: This review is generated from the PR diff and may not reflect code outside
 def build_failure_review(error: Exception) -> str:
     error_text = f"{type(error).__name__}: {str(error)}"
     suggestions = [
-        "- Check repository secrets.",
-        "- Check OpenAI API access and model availability.",
+        "- Check the LLM API access and model availability.",
         "- Check the workflow logs for the request/response path.",
     ]
     tests = [
@@ -386,8 +398,8 @@ def build_failure_review(error: Exception) -> str:
     lowered = error_text.lower()
     if "quota exceeded" in lowered or "insufficient_quota" in lowered or "billing_hard_limit_reached" in lowered:
         suggestions = [
-            "- The request reached the OpenAI project quota limit; this is usually not caused by a missing repository secret.",
-            "- Add quota/billing to the project behind `OPENAI_API_KEY`, or switch to a project with available spend.",
+            "- The request reached the LLM project quota limit; this is usually not caused by a missing repository secret.",
+            "- Add quota/billing to the project behind `OPENAI_API_KEY` (the LLM API key), or switch to a project with available spend.",
             "- Keep the configured model unchanged and retry after the project quota has been restored.",
         ]
         tests = [
@@ -397,7 +409,7 @@ def build_failure_review(error: Exception) -> str:
         ]
     elif "429" in error_text or "rate limit" in lowered:
         suggestions = [
-            "- The request hit an OpenAI rate limit; the key may still be valid.",
+            "- The request hit an LLM API rate limit; the key may still be valid.",
             "- Retry after a short wait, or reduce the diff context and retry with the same comment trigger.",
             "- If this happens often, reduce prompt size or lower concurrent workflow runs for this repository.",
         ]
