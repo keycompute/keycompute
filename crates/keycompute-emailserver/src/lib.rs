@@ -229,11 +229,23 @@ impl EmailService {
         // lettre 0.11 的 pool 配置在启用 pool feature 后自动生效
         // 使用默认连接池配置（最大 10 个连接）
         let timeout = smtp_timeout(config.timeout_secs);
+        
+        // 添加调试日志
+        tracing::info!(
+            host = %config.smtp_host,
+            port = config.smtp_port,
+            username = %config.smtp_username,
+            use_tls = config.use_tls,
+            "正在构建 SMTP 传输"
+        );
+        
         let transport = match smtp_security_mode(config) {
             SmtpSecurityMode::StartTls => {
                 match AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host) {
                     Ok(builder) => builder
                         .credentials(creds)
+                        // 163 邮箱可能需要显式指定认证机制
+                        .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Login])
                         .port(config.smtp_port)
                         .timeout(timeout)
                         .build(),
@@ -251,6 +263,8 @@ impl EmailService {
                 match AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host) {
                     Ok(builder) => builder
                         .credentials(creds)
+                        // 163 邮箱可能需要显式指定认证机制
+                        .authentication(vec![lettre::transport::smtp::authentication::Mechanism::Login])
                         .port(config.smtp_port)
                         .timeout(timeout)
                         .build(),
