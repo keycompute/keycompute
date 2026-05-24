@@ -60,7 +60,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: https://api.deepseek.com
-          OPENAI_MODEL: deepseek-v4-flash
+          OPENAI_MODEL: deepseek-reasoner
           OPENAI_MAX_TOTAL_PATCH_CHARS: "40000"
           OPENAI_MAX_PATCH_CHARS_PER_FILE: "3000"
           OPENAI_MAX_FILES: "20"
