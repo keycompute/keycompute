@@ -17,7 +17,7 @@ OPENAI_INITIAL_BACKOFF_SECONDS = max(
     float(os.getenv("OPENAI_INITIAL_BACKOFF_SECONDS", "5")),
     1.0,
 )
-OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "4000"))
+OPENAI_MAX_OUTPUT_TOKENS = int(os.getenv("OPENAI_MAX_OUTPUT_TOKENS", "16000"))
 MODEL = os.getenv("OPENAI_MODEL", "deepseek-v4-flash")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
 API_URL = f"{OPENAI_BASE_URL}/chat/completions"
