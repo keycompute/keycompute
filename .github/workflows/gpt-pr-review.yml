@@ -15,7 +15,7 @@ jobs:
       github.event.issue.pull_request != null &&
       contains(github.event.comment.body, '@gpt review') &&
       github.actor != 'github-actions[bot]' &&
-      github.event.comment.author_association == 'OWNER'
+      (github.event.comment.author_association == 'OWNER' || github.event.comment.author_association == 'MEMBER')
     runs-on: ubuntu-latest
 
     steps:
