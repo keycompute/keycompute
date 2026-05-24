@@ -22,6 +22,6 @@ pub mod sweeper;
 pub use config::NodeGatewayAppConfig;
 pub use node_index::PostgresNodeIndex;
 pub use redis::NodeGatewayRedis;
-pub use service::NodeGatewayService;
+pub use service::{NodeExecutionError, NodeGatewayService};
 pub use store::NodeGatewayStore;
 pub use sweeper::NodeGatewaySweeper;

@@ -399,7 +399,7 @@ pub async fn chat_completions(
                 let response = node_gateway
                     .enqueue_and_wait(auth.user_id, model.clone(), payload)
                     .await
-                    .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
+                    .map_err(ApiError::from)?;
 
                 // 更新 token 计数到 ctx（用于计费）
                 ctx.set_input_tokens(response.usage.prompt_tokens);
@@ -419,7 +419,7 @@ pub async fn chat_completions(
                 let response = node_gateway
                     .enqueue_and_wait(auth.user_id, model.clone(), payload)
                     .await
-                    .map_err(|e| ApiError::Internal(format!("Node execution failed: {}", e)))?;
+                    .map_err(ApiError::from)?;
 
                 // 更新 token 计数到 ctx（用于计费）
                 ctx.set_input_tokens(response.usage.prompt_tokens);

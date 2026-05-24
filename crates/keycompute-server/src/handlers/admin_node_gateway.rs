@@ -4,7 +4,10 @@ use crate::{
     error::{ApiError, Result},
     state::AppState,
 };
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::{Path, State},
+};
 use serde::Serialize;
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -155,5 +158,36 @@ pub async fn get_node_gateway_overview(
         task_stats,
         nodes,
         recent_tasks,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecoverNodeResponse {
+    pub id: Uuid,
+    pub status: String,
+    pub consecutive_failure_count: i32,
+}
+
+/// POST /api/v1/admin/nodes/{id}/recover (B6 修复)
+/// 把 excluded 节点重置为 online, 清零 consecutive_failure_count
+pub async fn recover_node(
+    State(state): State<AppState>,
+    Path(node_id): Path<Uuid>,
+) -> Result<Json<RecoverNodeResponse>> {
+    let service = state
+        .node_gateway
+        .as_ref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Node gateway not configured".to_string()))?;
+
+    let node = service
+        .store
+        .recover_node(node_id)
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(RecoverNodeResponse {
+        id: node.id,
+        status: node.status,
+        consecutive_failure_count: node.consecutive_failure_count,
     }))
 }

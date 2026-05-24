@@ -61,7 +61,7 @@ pub use admin_account::{
 };
 
 // Node Gateway 管理
-pub use admin_node_gateway::get_node_gateway_overview;
+pub use admin_node_gateway::{get_node_gateway_overview, recover_node};
 
 // 监控追踪
 pub use admin_monitoring::get_monitoring_overview;
