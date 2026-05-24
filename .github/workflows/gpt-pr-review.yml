@@ -60,11 +60,11 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: https://api.deepseek.com
-          OPENAI_MODEL: deepseek-reasoner
+          OPENAI_MODEL: deepseek-v4-pro
           OPENAI_MAX_TOTAL_PATCH_CHARS: "40000"
           OPENAI_MAX_PATCH_CHARS_PER_FILE: "3000"
           OPENAI_MAX_FILES: "20"
-          OPENAI_MAX_OUTPUT_TOKENS: "4000"
+          OPENAI_MAX_OUTPUT_TOKENS: "10000"
           OPENAI_RETRY_ATTEMPTS: "4"
           OPENAI_INITIAL_BACKOFF_SECONDS: "5"
           REPO_NAME: ${{ github.repository }}
