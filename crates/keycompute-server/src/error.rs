@@ -155,6 +155,19 @@ impl From<keycompute_db::DbError> for ApiError {
     }
 }
 
+/// 从 node-gateway 执行错误映射: client_error → 400, 其他 → 500 (B2 修复)
+impl From<node_gateway::NodeExecutionError> for ApiError {
+    fn from(err: node_gateway::NodeExecutionError) -> Self {
+        use node_gateway::NodeExecutionError as NE;
+        match err {
+            NE::ClientError { code, message } => {
+                ApiError::BadRequest(format!("{}: {}", code, message))
+            }
+            NE::Other(e) => ApiError::Internal(e.to_string()),
+        }
+    }
+}
+
 /// 从 keycompute-types 错误转换
 impl From<keycompute_types::KeyComputeError> for ApiError {
     fn from(err: keycompute_types::KeyComputeError) -> Self {

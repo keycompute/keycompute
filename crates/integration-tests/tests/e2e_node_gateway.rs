@@ -877,6 +877,7 @@ async fn test_node_excluded_after_failures() -> anyhow::Result<()> {
                 NodeTaskResult::Failed {
                     code: "test_error".to_string(),
                     message: format!("Test failure {}", i),
+                    is_client_error: false,
                 },
             )
             .await?;
@@ -906,6 +907,107 @@ async fn test_node_excluded_after_failures() -> anyhow::Result<()> {
 
     chain.print_report();
     assert!(chain.all_passed());
+    Ok(())
+}
+
+/// B1 修复回归: client_error 失败不应将 node 算下线
+///
+/// 提交 3 次 is_client_error=true 的失败,节点应仍 online,
+/// consecutive_failure_count 应保持 0,任务直接 terminal failed(不 requeue)。
+#[tokio::test]
+async fn test_client_error_does_not_exclude_node() -> anyhow::Result<()> {
+    let env = NodeTestEnv::new().await?;
+
+    let register_req = env.create_register_request("test-client-error-isolation");
+    let register_resp = env
+        .service
+        .register_node(&register_req, Uuid::new_v4())
+        .await?;
+
+    for i in 1..=3 {
+        let lease_id = Uuid::new_v4();
+        let task = sqlx::query_as::<_, NodeTask>(
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#
+        )
+        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4())
+        .bind("deepseek-chat")
+        .bind(serde_json::json!({}))
+        .bind(register_resp.node_id)
+        .bind(register_resp.session_id)
+        .bind(lease_id)
+        .fetch_one(&env.pool)
+        .await?;
+
+        let resp = env
+            .service
+            .complete_task(
+                task.id,
+                lease_id,
+                register_resp.node_id,
+                register_resp.session_id,
+                NodeTaskResult::Failed {
+                    code: "test_client_error".to_string(),
+                    message: format!("client mistake {}", i),
+                    is_client_error: true,
+                },
+            )
+            .await?;
+
+        // client_error 应该直接 Failed 终态,不 Requeue
+        assert_eq!(
+            resp.action,
+            NodeTaskCompleteAction::Failed,
+            "client_error should terminate task immediately, not requeue (got {:?})",
+            resp.action
+        );
+    }
+
+    // 节点应仍 online, failure_count 仍 0
+    let node = Node::find_by_id(&env.pool, register_resp.node_id)
+        .await?
+        .unwrap();
+    assert_eq!(node.status, "online", "node should not be excluded");
+    assert_eq!(
+        node.consecutive_failure_count, 0,
+        "client_error must not increment node failure_count"
+    );
+
+    Ok(())
+}
+
+/// B6 修复回归: admin 可以把 excluded 节点恢复为 online
+#[tokio::test]
+async fn test_admin_recover_excluded_node() -> anyhow::Result<()> {
+    let env = NodeTestEnv::new().await?;
+    let register_req = env.create_register_request("test-recover-target");
+    let register_resp = env
+        .service
+        .register_node(&register_req, Uuid::new_v4())
+        .await?;
+
+    // 手工把节点置为 excluded, failure_count=3
+    sqlx::query("UPDATE nodes SET status='excluded', consecutive_failure_count=3 WHERE id=$1")
+        .bind(register_resp.node_id)
+        .execute(&env.pool)
+        .await?;
+
+    // recover 调用应返回 online + count=0
+    let recovered = env.service.store.recover_node(register_resp.node_id).await?;
+    assert_eq!(recovered.status, "online");
+    assert_eq!(recovered.consecutive_failure_count, 0);
+
+    // DB 落地一致
+    let node = Node::find_by_id(&env.pool, register_resp.node_id)
+        .await?
+        .unwrap();
+    assert_eq!(node.status, "online");
+    assert_eq!(node.consecutive_failure_count, 0);
+
     Ok(())
 }
 

@@ -50,6 +50,7 @@ use crate::{
         get_my_usage,
         get_my_usage_stats,
         get_node_gateway_overview,
+        recover_node,
         get_payment_order,
         get_provider_health,
         // 公开设置
@@ -249,10 +250,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/pricing/calculate", post(calculate_cost));
 
     // Node Gateway 管理（仅 Admin）
-    let admin_node_gateway_routes = Router::new().route(
-        "/api/v1/admin/node-gateway/overview",
-        get(get_node_gateway_overview),
-    );
+    let admin_node_gateway_routes = Router::new()
+        .route(
+            "/api/v1/admin/node-gateway/overview",
+            get(get_node_gateway_overview),
+        )
+        .route("/api/v1/admin/nodes/{id}/recover", post(recover_node));
 
     // 监控追踪（仅 Admin）
     let admin_monitoring_routes = Router::new().route(

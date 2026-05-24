@@ -203,6 +203,12 @@ pub enum NodeTaskResult {
         code: String,
         /// 错误消息
         message: String,
+        /// 该失败是否由请求本身的问题引起(如模型不支持、参数非法)。
+        /// 若为 true: server 不计入 node failure_count, 不 requeue,
+        /// 任务直接 terminal failed, 立即返回错误给 HTTP client。
+        /// 老 client 不发该字段时默认 false, 保留原有行为。
+        #[serde(default)]
+        is_client_error: bool,
     },
 }
 

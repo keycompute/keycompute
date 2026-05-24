@@ -10,8 +10,20 @@ use keycompute_db::models::node_task::*;
 use keycompute_types::ChatCompletionResponse;
 use keycompute_types::node::*;
 use std::time::Duration;
+use thiserror::Error;
 use tracing;
 use uuid::Uuid;
+
+/// 节点任务执行失败的归因 — 让 HTTP handler 能映射到合适的 status code (B2 修复)
+#[derive(Debug, Error)]
+pub enum NodeExecutionError {
+    /// 请求本身有问题 (node 上报 is_client_error=true) → HTTP 4xx
+    #[error("{code}: {message}")]
+    ClientError { code: String, message: String },
+    /// 其他失败 (节点错、超时、过期、内部错) → HTTP 5xx
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
 
 /// Node Gateway Service
 #[derive(Clone)]
@@ -41,14 +53,15 @@ impl NodeGatewayService {
         user_id: Uuid,
         model: String,
         payload: NodeTaskPayload,
-    ) -> Result<ChatCompletionResponse, anyhow::Error> {
+    ) -> Result<ChatCompletionResponse, NodeExecutionError> {
         let deadline_secs = self.config.task_deadline_secs;
 
         // 1. 创建任务并入队
         let task = self
             .store
             .create_and_enqueue_task(user_id, model.clone(), payload)
-            .await?;
+            .await
+            .map_err(|e| NodeExecutionError::Other(anyhow::Error::from(e)))?;
 
         // 2. 推送到 Redis 队列
         if let Err(e) = self.redis.push_to_model_queue(&model, task.id).await {
@@ -81,42 +94,72 @@ impl NodeGatewayService {
 
         match result {
             Ok(Ok(response)) => Ok(response),
-            Ok(Err(e)) => Err(anyhow::anyhow!("Task failed: {}", e)),
-            Err(_) => {
-                // 超时
-                Err(anyhow::anyhow!(
-                    "Task {} timed out after {} seconds",
-                    task.id,
-                    deadline_secs
-                ))
-            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(NodeExecutionError::Other(anyhow::anyhow!(
+                "Task {} timed out after {} seconds",
+                task.id,
+                deadline_secs
+            ))),
         }
     }
 
     /// 查询任务结果
+    ///
+    /// 失败任务读 error_json.is_client_error, 分别映射到 ClientError / Other,
+    /// 让 HTTP handler 能区分 4xx vs 5xx (B2 修复)
     async fn query_task_result(
         &self,
         task_id: Uuid,
         status: &str,
-    ) -> Result<ChatCompletionResponse, anyhow::Error> {
+    ) -> Result<ChatCompletionResponse, NodeExecutionError> {
         let task = NodeTask::find_by_id(self.store.pool(), task_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("Task not found"))?;
+            .await
+            .map_err(|e| NodeExecutionError::Other(anyhow::Error::from(e)))?
+            .ok_or_else(|| NodeExecutionError::Other(anyhow::anyhow!("Task not found")))?;
 
         match status {
             "succeeded" => {
                 let response: ChatCompletionResponse = serde_json::from_value(
-                    task.result_json
-                        .ok_or_else(|| anyhow::anyhow!("Task succeeded but no result_json"))?,
-                )?;
+                    task.result_json.ok_or_else(|| {
+                        NodeExecutionError::Other(anyhow::anyhow!(
+                            "Task succeeded but no result_json"
+                        ))
+                    })?,
+                )
+                .map_err(|e| NodeExecutionError::Other(anyhow::Error::from(e)))?;
                 Ok(response)
             }
             "failed" => {
                 let error = task.error_json.unwrap_or(serde_json::json!({}));
-                Err(anyhow::anyhow!("Task failed: {}", error))
+                let is_client_error = error
+                    .get("is_client_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let code = error
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let message = error
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Task failed")
+                    .to_string();
+                if is_client_error {
+                    Err(NodeExecutionError::ClientError { code, message })
+                } else {
+                    Err(NodeExecutionError::Other(anyhow::anyhow!(
+                        "Task failed: {} - {}",
+                        code,
+                        message
+                    )))
+                }
             }
-            "expired" => Err(anyhow::anyhow!("Task expired")),
-            _ => Err(anyhow::anyhow!("Unknown task status: {}", status)),
+            "expired" => Err(NodeExecutionError::Other(anyhow::anyhow!("Task expired"))),
+            _ => Err(NodeExecutionError::Other(anyhow::anyhow!(
+                "Unknown task status: {}",
+                status
+            ))),
         }
     }
 

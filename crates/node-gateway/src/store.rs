@@ -217,6 +217,25 @@ impl NodeGatewayStore {
     }
 
     /// 处理心跳(在同一事务中完成所有操作)
+    /// Admin 把 excluded 节点恢复为 online (B6 修复)
+    /// 同时清零 consecutive_failure_count, 节点可重新接收任务。
+    pub async fn recover_node(&self, node_id: Uuid) -> Result<Node, DbError> {
+        sqlx::query_as::<_, Node>(
+            r#"
+            UPDATE nodes
+            SET status = 'online',
+                consecutive_failure_count = 0,
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(node_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))
+    }
+
     pub async fn heartbeat(
         &self,
         node_id: Uuid,
@@ -538,6 +557,7 @@ impl NodeGatewayStore {
                 let result_for_hash = NodeTaskResult::Failed {
                     code: "expired".to_string(),
                     message: "Task expired".to_string(),
+                    is_client_error: false,
                 };
                 let request_hash = Self::compute_request_hash(task_id, lease_id, &result_for_hash)?;
 
@@ -626,7 +646,11 @@ impl NodeGatewayStore {
                 )
                 .await
             }
-            NodeTaskResult::Failed { code, message } => {
+            NodeTaskResult::Failed {
+                code,
+                message,
+                is_client_error,
+            } => {
                 self.handle_failed_submission(
                     &mut tx,
                     &task,
@@ -636,6 +660,7 @@ impl NodeGatewayStore {
                     lease_id,
                     code,
                     message,
+                    is_client_error,
                 )
                 .await
             }
@@ -784,56 +809,89 @@ impl NodeGatewayStore {
         lease_id: Uuid,
         code: String,
         message: String,
+        is_client_error: bool,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
-        let error_json = serde_json::json!({ "code": code, "message": message });
+        let error_json = serde_json::json!({
+            "code": code,
+            "message": message,
+            "is_client_error": is_client_error,
+        });
 
-        // 1. 更新任务状态（单条 SQL 包含 failure_count 自增和 CASE 逻辑）
-        // 注意：使用 failure_count + 1 与 failure_threshold 比较，这是更新前的旧值加 1
-        let updated_task = sqlx::query_as::<_, NodeTask>(
-            r#"
-            UPDATE node_tasks
-            SET status = CASE
-                WHEN failure_count + 1 < failure_threshold THEN 'queued'
-                ELSE 'failed'
-              END,
-              failure_count = failure_count + 1,
-              assigned_node_id = CASE
-                WHEN failure_count + 1 < failure_threshold THEN NULL
-                ELSE assigned_node_id
-              END,
-              assigned_session_id = CASE
-                WHEN failure_count + 1 < failure_threshold THEN NULL
-                ELSE assigned_session_id
-              END,
-              lease_id = CASE
-                WHEN failure_count + 1 < failure_threshold THEN NULL
-                ELSE lease_id
-              END,
-              claimed_at = CASE
-                WHEN failure_count + 1 < failure_threshold THEN NULL
-                ELSE claimed_at
-              END,
-              error_json = CASE
-                WHEN failure_count + 1 >= failure_threshold THEN $1
-                ELSE error_json
-              END,
-              updated_at = NOW()
-            WHERE id = $2
-              AND assigned_node_id = $3
-              AND assigned_session_id = $4
-              AND lease_id = $5
-              AND status = 'leased'
-              AND deadline_at >= NOW()
-            RETURNING *
-            "#,
-        )
-        .bind(&error_json)
-        .bind(task.id)
-        .bind(node_id)
-        .bind(session_id)
-        .bind(lease_id)
-        .fetch_optional(&mut **tx)
-        .await?;
+        // 1. 更新任务状态
+        // is_client_error=true: 强制 terminal 'failed', 不 requeue (B1 修复)
+        // 否则: 现有 failure_count 自增 + CASE 决定 requeue/failed 的逻辑
+        let updated_task = if is_client_error {
+            sqlx::query_as::<_, NodeTask>(
+                r#"
+                UPDATE node_tasks
+                SET status = 'failed',
+                    failure_count = failure_count + 1,
+                    error_json = $1,
+                    updated_at = NOW()
+                WHERE id = $2
+                  AND assigned_node_id = $3
+                  AND assigned_session_id = $4
+                  AND lease_id = $5
+                  AND status = 'leased'
+                  AND deadline_at >= NOW()
+                RETURNING *
+                "#,
+            )
+            .bind(&error_json)
+            .bind(task.id)
+            .bind(node_id)
+            .bind(session_id)
+            .bind(lease_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        } else {
+            // 注意：使用 failure_count + 1 与 failure_threshold 比较，这是更新前的旧值加 1
+            sqlx::query_as::<_, NodeTask>(
+                r#"
+                UPDATE node_tasks
+                SET status = CASE
+                    WHEN failure_count + 1 < failure_threshold THEN 'queued'
+                    ELSE 'failed'
+                  END,
+                  failure_count = failure_count + 1,
+                  assigned_node_id = CASE
+                    WHEN failure_count + 1 < failure_threshold THEN NULL
+                    ELSE assigned_node_id
+                  END,
+                  assigned_session_id = CASE
+                    WHEN failure_count + 1 < failure_threshold THEN NULL
+                    ELSE assigned_session_id
+                  END,
+                  lease_id = CASE
+                    WHEN failure_count + 1 < failure_threshold THEN NULL
+                    ELSE lease_id
+                  END,
+                  claimed_at = CASE
+                    WHEN failure_count + 1 < failure_threshold THEN NULL
+                    ELSE claimed_at
+                  END,
+                  error_json = CASE
+                    WHEN failure_count + 1 >= failure_threshold THEN $1
+                    ELSE error_json
+                  END,
+                  updated_at = NOW()
+                WHERE id = $2
+                  AND assigned_node_id = $3
+                  AND assigned_session_id = $4
+                  AND lease_id = $5
+                  AND status = 'leased'
+                  AND deadline_at >= NOW()
+                RETURNING *
+                "#,
+            )
+            .bind(&error_json)
+            .bind(task.id)
+            .bind(node_id)
+            .bind(session_id)
+            .bind(lease_id)
+            .fetch_optional(&mut **tx)
+            .await?
+        };
 
         // 并发安全检查: 如果 UPDATE 返回 0 行,说明任务可能已被 sweeper 标记为 expired
         let updated_task = match updated_task {
@@ -858,21 +916,24 @@ impl NodeGatewayStore {
         };
 
         // 2. 增加节点连续失败计数并检查排除
-        sqlx::query(
-            r#"
-            UPDATE nodes
-            SET consecutive_failure_count = consecutive_failure_count + 1,
-                status = CASE
-                    WHEN consecutive_failure_count + 1 >= failure_threshold THEN 'excluded'
-                    ELSE status
-                END,
-                updated_at = NOW()
-            WHERE id = $1
-            "#,
-        )
-        .bind(node_id)
-        .execute(&mut **tx)
-        .await?;
+        //    is_client_error 是请求侧问题, 不归因到节点健康度, 跳过此步 (B1 修复)
+        if !is_client_error {
+            sqlx::query(
+                r#"
+                UPDATE nodes
+                SET consecutive_failure_count = consecutive_failure_count + 1,
+                    status = CASE
+                        WHEN consecutive_failure_count + 1 >= failure_threshold THEN 'excluded'
+                        ELSE status
+                    END,
+                    updated_at = NOW()
+                WHERE id = $1
+                "#,
+            )
+            .bind(node_id)
+            .execute(&mut **tx)
+            .await?;
+        }
 
         // 3. 写入 submission ACK (根据 updated_task.status 判断 action)
         let action = if updated_task.status == TASK_STATUS_QUEUED {
@@ -884,6 +945,7 @@ impl NodeGatewayStore {
         let result_for_hash = NodeTaskResult::Failed {
             code: code.clone(),
             message: message.clone(),
+            is_client_error,
         };
         let request_hash = Self::compute_request_hash(task.id, lease_id, &result_for_hash)?;
 
