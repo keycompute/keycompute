@@ -33,6 +33,7 @@ use crate::{
         delete_user,
         // 认证相关
         forgot_password_handler,
+        freeze_user_balance,
         // Distribution 分销
         generate_invite_link,
         get_billing_stats,
@@ -89,6 +90,7 @@ use crate::{
         set_account_cooldown,
         sync_payment_order,
         test_account,
+        unfreeze_user_balance,
         update_account,
         update_distribution_rule,
         update_pricing,
@@ -190,6 +192,14 @@ pub fn create_router(state: AppState) -> Router {
             get(get_user_by_id).put(update_user).delete(delete_user),
         )
         .route("/api/v1/users/{id}/balance", post(update_user_balance))
+        .route(
+            "/api/v1/users/{id}/balance/freeze",
+            post(freeze_user_balance),
+        )
+        .route(
+            "/api/v1/users/{id}/balance/unfreeze",
+            post(unfreeze_user_balance),
+        )
         .route("/api/v1/users/{id}/api-keys", get(list_all_api_keys));
 
     // 账号/渠道管理（仅 Admin）

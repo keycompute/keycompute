@@ -275,7 +275,7 @@ impl PaymentOrder {
                 updated_at = NOW()
             WHERE id = $4
             RETURNING *
-            ""#,
+            "#,
         )
         .bind(PaymentOrderStatus::Paid.as_str())
         .bind(trade_no)
@@ -298,7 +298,7 @@ impl PaymentOrder {
                 updated_at = NOW()
             WHERE id = $2 AND status = $3
             RETURNING *
-            ""#,
+            "#,
         )
         .bind(PaymentOrderStatus::Failed.as_str())
         .bind(id)

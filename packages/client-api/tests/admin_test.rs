@@ -179,8 +179,8 @@ async fn test_update_user_balance_success() {
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
     let resp = result.unwrap();
     assert!(resp.success);
-    assert_eq!(resp.new_balance, "150.00");
-    assert_eq!(resp.balance_before, "100.00");
+    assert_eq!(resp.new_balance.as_deref(), Some("150.00"));
+    assert_eq!(resp.available_balance_before.as_deref(), Some("100.00"));
 }
 
 // ==================== 账号管理测试 ====================

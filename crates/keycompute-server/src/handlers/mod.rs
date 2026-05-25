@@ -50,8 +50,8 @@ pub use user::{
 // 用户管理（admin_user）
 pub use admin_user::{
     AdminUserInfo, UpdateUserRequest, UserListQueryParams, UserListResponse, delete_user,
-    get_user_by_id, list_all_api_keys, list_all_users, list_tenants, update_user,
-    update_user_balance,
+    freeze_user_balance, get_user_by_id, list_all_api_keys, list_all_users, list_tenants,
+    unfreeze_user_balance, update_user, update_user_balance,
 };
 
 // 账号管理（admin_account）

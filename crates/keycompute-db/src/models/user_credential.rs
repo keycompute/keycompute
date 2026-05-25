@@ -138,6 +138,23 @@ impl UserCredential {
         Ok(())
     }
 
+    /// 批量根据用户 ID 列表查找凭证，返回以 user_id 为 key 的 HashMap
+    pub async fn find_by_user_ids(
+        pool: &sqlx::PgPool,
+        user_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, UserCredential>, DbError> {
+        if user_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let credentials = sqlx::query_as::<_, UserCredential>(
+            "SELECT * FROM user_credentials WHERE user_id = ANY($1)",
+        )
+        .bind(user_ids)
+        .fetch_all(pool)
+        .await?;
+        Ok(credentials.into_iter().map(|c| (c.user_id, c)).collect())
+    }
+
     /// 增加失败登录次数
     pub async fn increment_failed_attempts(
         &self,

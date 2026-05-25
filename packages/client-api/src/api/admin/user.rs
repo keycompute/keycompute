@@ -83,10 +83,14 @@ pub struct UserDetail {
     pub tenant_id: String,
     /// 租户名称（后端始终返回，默认 "Unknown"）
     pub tenant_name: String,
-    /// 用户余额（后端始终返回，默认 0.0）
+    /// 用户可用余额（后端始终返回，默认 0.0）
+    #[serde(default)]
     pub balance: f64,
+    /// 用户冻结余额（后端始终返回，默认 0.0）
+    #[serde(default)]
+    pub frozen_balance: f64,
     pub created_at: String,
-    pub updated_at: Option<String>,
+    pub updated_at: String,
     pub last_login_at: Option<String>,
 }
 
@@ -135,7 +139,8 @@ pub struct UpdateUserResponse {
 
 /// 更新余额请求
 ///
-/// 后端使用 amount 的正负值表示操作：正数为充值，负数为扣减
+/// 后端使用 amount 的正负值表示操作：正数为充值，负数为扣减。
+/// freeze/unfreeze 始终使用正数金额。
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateBalanceRequest {
     /// 金额（字符串格式避免浮点精度问题）
@@ -158,6 +163,14 @@ impl UpdateBalanceRequest {
     pub fn subtract(amount: f64, reason: impl Into<String>) -> Self {
         Self {
             amount: format_amount(-amount), // 负数
+            reason: reason.into(),
+        }
+    }
+
+    /// 创建通用请求（使用正数金额，适用于 freeze/unfreeze 等场景）
+    pub fn new(amount: f64, reason: impl Into<String>) -> Self {
+        Self {
+            amount: format_amount(amount),
             reason: reason.into(),
         }
     }
@@ -184,12 +197,21 @@ pub struct UpdateBalanceResponse {
     pub amount: String,
     /// 操作原因
     pub reason: String,
-    /// 操作前余额
-    pub balance_before: String,
-    /// 操作后余额
-    pub new_balance: String,
+    /// 操作前可用余额（充值/扣减/冻结场景）
+    /// 后端已统一为 "available_balance_before"，保留旧 "balance_before" alias 向后兼容
+    #[serde(default, alias = "balance_before")]
+    pub available_balance_before: Option<String>,
+    /// 操作前冻结余额（解冻场景）
+    #[serde(default)]
+    pub frozen_balance_before: Option<String>,
+    /// 操作后可用余额（充值/扣减/冻结/解冻接口均会返回）
+    #[serde(alias = "new_available_balance")]
+    pub new_balance: Option<String>,
     /// 操作人 ID
     pub updated_by: String,
+    /// 操作后冻结余额（冻结/解冻接口特有）
+    #[serde(default)]
+    pub new_frozen_balance: Option<String>,
 }
 
 /// API Key 信息（用于 Admin 查看用户 API Key 列表）

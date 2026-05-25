@@ -97,7 +97,7 @@ impl AdminApi {
             .await
     }
 
-    /// 更新用户余额
+    /// 更新用户余额（充值/扣除）
     pub async fn update_user_balance(
         &self,
         id: &str,
@@ -106,6 +106,38 @@ impl AdminApi {
     ) -> Result<UpdateBalanceResponse> {
         self.client
             .post_json(&format!("/api/v1/users/{}/balance", id), req, Some(token))
+            .await
+    }
+
+    /// 冻结用户余额
+    pub async fn freeze_user_balance(
+        &self,
+        id: &str,
+        req: &UpdateBalanceRequest,
+        token: &str,
+    ) -> Result<UpdateBalanceResponse> {
+        self.client
+            .post_json(
+                &format!("/api/v1/users/{}/balance/freeze", id),
+                req,
+                Some(token),
+            )
+            .await
+    }
+
+    /// 解冻用户余额
+    pub async fn unfreeze_user_balance(
+        &self,
+        id: &str,
+        req: &UpdateBalanceRequest,
+        token: &str,
+    ) -> Result<UpdateBalanceResponse> {
+        self.client
+            .post_json(
+                &format!("/api/v1/users/{}/balance/unfreeze", id),
+                req,
+                Some(token),
+            )
             .await
     }
 

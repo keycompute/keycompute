@@ -110,7 +110,7 @@ impl Default for PublicSettings {
     fn default() -> Self {
         Self {
             site_name: "KeyCompute".to_string(),
-            site_description: Some("AI Gateway Platform".to_string()),
+            site_description: Some("AI token compute service platform".to_string()),
             site_logo_url: None,
             site_favicon_url: None,
             api_base_url: None,

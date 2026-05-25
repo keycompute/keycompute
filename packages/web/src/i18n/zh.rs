@@ -802,6 +802,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.update_failed", "更新失败");
     m.insert("users.deleted", "用户已删除");
     m.insert("users.delete_failed", "删除失败");
+    m.insert("users.delete_self_forbidden", "不能删除自己的账户");
+    m.insert(
+        "users.delete_admin_forbidden",
+        "仅 system 角色可删除管理员用户",
+    );
     m.insert("users.edit_title", "编辑用户");
     m.insert("users.display_name", "显示名称");
     m.insert("users.display_name_placeholder", "留空则不修改");
@@ -815,6 +820,29 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.self_title", "我的账户");
     m.insert("users.self_desc", "查看和管理您的个人账户信息");
     m.insert("users.account_info", "账户信息");
+    m.insert("users.balance", "余额");
+    m.insert("users.frozen_short", "冻");
+    m.insert("users.balance_manage", "余额");
+    m.insert("users.balance_title", "余额管理");
+    m.insert("users.balance_available", "可用余额");
+    m.insert("users.balance_frozen", "冻结余额");
+    m.insert("users.balance_action", "操作类型");
+    m.insert("users.balance_recharge", "充值");
+    m.insert("users.balance_deduct", "扣除");
+    m.insert("users.balance_freeze", "冻结");
+    m.insert("users.balance_unfreeze", "解冻");
+    m.insert("users.balance_amount", "金额");
+    m.insert("users.balance_amount_placeholder", "请输入金额");
+    m.insert("users.balance_reason", "原因");
+    m.insert("users.balance_reason_placeholder", "请输入操作原因");
+    m.insert("users.balance_amount_required", "请输入金额");
+    m.insert("users.balance_amount_invalid", "金额必须大于 0");
+    m.insert("users.balance_amount_precision", "金额最多支持两位小数");
+    m.insert("users.balance_reason_required", "请输入操作原因");
+    m.insert("users.balance_action_invalid", "无效的操作类型");
+    m.insert("users.balance_updated", "余额操作成功");
+    m.insert("users.balance_update_failed", "余额操作失败");
+    m.insert("users.cannot_modify_system", "仅 system 角色可操作系统用户");
     m.insert("tenants.subtitle", "查看和管理平台所有租户信息");
     m.insert("tenants.search_placeholder", "搜索租户名称或 ID...");
     m.insert("tenants.empty", "暂无租户数据");

@@ -1,6 +1,6 @@
 use client_api::{
     AdminApi, AssignableUserRole, UserRole,
-    api::admin::{UpdateUserRequest, UserDetail, UserListResponse, UserQueryParams},
+    api::admin::{UpdateBalanceRequest, UpdateUserRequest, UserDetail, UserQueryParams},
 };
 use dioxus::prelude::*;
 use ui::{Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, Pagination, Table, TableHead};
@@ -66,47 +66,59 @@ fn AdminUsersView() -> Element {
     let mut delete_user = use_signal(|| Option::<UserDetail>::None);
     let mut delete_saving = use_signal(|| false);
 
-    let mut users = use_resource(move || async move {
-        with_auto_refresh(auth_store, |token| async move {
-            let client = get_client();
-            let params = UserQueryParams::new().with_page_size(200);
-            AdminApi::new(&client)
-                .list_all_users(Some(&params), &token)
-                .await
-                .map(|resp: UserListResponse| resp.users)
+    // 余额管理弹窗状态
+    let mut balance_user = use_signal(|| Option::<UserDetail>::None);
+    let mut balance_action = use_signal(|| "recharge".to_string());
+    let mut balance_amount = use_signal(String::new);
+    let mut balance_reason = use_signal(String::new);
+    let mut balance_saving = use_signal(|| false);
+    let mut balance_error = use_signal(String::new);
+
+    // 使用 memo 将 search + page 合并为单一响应式值，
+    // 避免在同一事件处理中同时写入两个信号时触发两次资源请求
+    let query_key = use_memo(move || (search(), page()));
+
+    let mut users_resource = use_resource(move || async move {
+        let (current_search, current_page) = query_key();
+        let params = UserQueryParams::new()
+            .with_page_size(PAGE_SIZE as i64)
+            .with_page(current_page as i64);
+        let params = if !current_search.is_empty() {
+            params.with_search(current_search)
+        } else {
+            params
+        };
+        with_auto_refresh(auth_store, move |token| {
+            let params = params.clone();
+            async move {
+                let client = get_client();
+                AdminApi::new(&client)
+                    .list_all_users(Some(&params), &token)
+                    .await
+            }
         })
         .await
     });
 
-    let filtered_users = move || -> Vec<UserDetail> {
-        let q = search().to_lowercase();
-        match users() {
-            Some(Ok(ref list)) => list
-                .iter()
-                .filter(|u| {
-                    q.is_empty()
-                        || u.email.to_lowercase().contains(&q)
-                        || u.name.as_deref().unwrap_or("").to_lowercase().contains(&q)
-                })
-                .cloned()
-                .collect::<Vec<UserDetail>>(),
+    let paged_users = move || -> Vec<UserDetail> {
+        match users_resource() {
+            Some(Ok(ref resp)) => resp.users.clone(),
             _ => vec![],
         }
     };
 
-    let total_pages = move || {
-        let len = filtered_users().len();
-        len.div_ceil(PAGE_SIZE).max(1) as u32
+    let total_items = move || -> i64 {
+        match users_resource() {
+            Some(Ok(ref resp)) => resp.total,
+            _ => 0,
+        }
     };
 
-    let paged_users = move || {
-        let p = page() as usize;
-        let all = filtered_users();
-        let start = (p - 1) * PAGE_SIZE;
-        all.into_iter()
-            .skip(start)
-            .take(PAGE_SIZE)
-            .collect::<Vec<_>>()
+    let total_pages = move || -> u32 {
+        match users_resource() {
+            Some(Ok(ref resp)) => resp.total_pages.max(1) as u32,
+            _ => 1,
+        }
     };
 
     // 提交编辑
@@ -145,7 +157,7 @@ fn AdminUsersView() -> Element {
                 Ok(_) => {
                     ui_store.show_success(i18n.t("users.updated"));
                     edit_user.set(None);
-                    users.restart();
+                    users_resource.restart();
                 }
                 Err(e) => {
                     ui_store.show_error(format!("{}: {e}", i18n.t("users.update_failed")));
@@ -162,7 +174,15 @@ fn AdminUsersView() -> Element {
             || u.role == UserRole::System.as_str()
             || (u.role == UserRole::Admin.as_str() && !can_current_user_delete_admins)
         {
-            ui_store.show_error(i18n.t("users.delete_failed"));
+            // 区分不同类型的禁止删除原因
+            let msg = if u.id == current_user_id_for_delete {
+                i18n.t("users.delete_self_forbidden")
+            } else if u.role == UserRole::System.as_str() {
+                i18n.t("users.cannot_modify_system")
+            } else {
+                i18n.t("users.delete_admin_forbidden")
+            };
+            ui_store.show_error(msg.to_string());
             delete_user.set(None);
             return;
         }
@@ -175,13 +195,96 @@ fn AdminUsersView() -> Element {
                 Ok(_) => {
                     ui_store.show_success(i18n.t("users.deleted"));
                     delete_user.set(None);
-                    users.restart();
+                    users_resource.restart();
                 }
                 Err(e) => {
                     ui_store.show_error(format!("{}: {e}", i18n.t("users.delete_failed")));
                 }
             }
             delete_saving.set(false);
+        });
+    };
+
+    // 提交余额操作
+    let on_balance_save = move |_| {
+        let Some(u) = balance_user() else { return };
+        let action = balance_action();
+        let amount_str = balance_amount();
+        let reason = balance_reason();
+
+        if amount_str.trim().is_empty() {
+            balance_error.set(i18n.t("users.balance_amount_required").to_string());
+            return;
+        }
+        let amount: f64 = match amount_str.trim().parse() {
+            Ok(v) if v > 0.0 => v,
+            _ => {
+                balance_error.set(i18n.t("users.balance_amount_invalid").to_string());
+                return;
+            }
+        };
+        // 校验小数位不超过两位
+        let trimmed = amount_str.trim();
+        let valid_precision = match trimmed.find('.') {
+            Some(pos) => trimmed.len() - pos - 1 <= 2,
+            None => true,
+        };
+        if !valid_precision {
+            balance_error.set(i18n.t("users.balance_amount_precision").to_string());
+            return;
+        }
+        if reason.trim().is_empty() {
+            balance_error.set(i18n.t("users.balance_reason_required").to_string());
+            return;
+        }
+
+        let id = u.id.clone();
+        balance_saving.set(true);
+        spawn(async move {
+            let token = auth_store.token().unwrap_or_default();
+            let client = get_client();
+            let result = match action.as_str() {
+                "recharge" => {
+                    let req = UpdateBalanceRequest::add(amount, &reason);
+                    AdminApi::new(&client)
+                        .update_user_balance(&id, &req, &token)
+                        .await
+                }
+                "deduct" => {
+                    let req = UpdateBalanceRequest::subtract(amount, &reason);
+                    AdminApi::new(&client)
+                        .update_user_balance(&id, &req, &token)
+                        .await
+                }
+                "freeze" => {
+                    let req = UpdateBalanceRequest::new(amount, &reason);
+                    AdminApi::new(&client)
+                        .freeze_user_balance(&id, &req, &token)
+                        .await
+                }
+                "unfreeze" => {
+                    let req = UpdateBalanceRequest::new(amount, &reason);
+                    AdminApi::new(&client)
+                        .unfreeze_user_balance(&id, &req, &token)
+                        .await
+                }
+                _ => {
+                    balance_error.set(i18n.t("users.balance_action_invalid").to_string());
+                    balance_saving.set(false);
+                    return;
+                }
+            };
+            match result {
+                Ok(_) => {
+                    ui_store.show_success(i18n.t("users.balance_updated"));
+                    balance_user.set(None);
+                    users_resource.restart();
+                }
+                Err(e) => {
+                    balance_error.set(format!("{}: {e}", i18n.t("users.balance_update_failed")));
+                }
+            }
+            balance_saving.set(false);
         });
     };
 
@@ -199,6 +302,14 @@ fn AdminUsersView() -> Element {
         .as_ref()
         .map(|u| can_current_user_manage_roles && u.id != current_user_id && u.role != "system")
         .unwrap_or(false);
+    let balance_save_label = move || -> String {
+        if balance_saving() {
+            i18n.t("form.saving").to_string()
+        } else {
+            i18n.t("form.confirm").to_string()
+        }
+    };
+    let fmt_balance = |v: f64| format!("{:.2}", v);
 
     rsx! {
         div { class: "page-header",
@@ -225,22 +336,23 @@ fn AdminUsersView() -> Element {
 
         div { class: "card",
             {
-                let (is_empty, empty_text) = match users() {
+                let (is_empty, empty_text) = match users_resource() {
                     None => (true, i18n.t("table.loading")),
                     Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                    Some(Ok(_)) if filtered_users().is_empty() => (true, i18n.t("users.empty")),
+                    Some(Ok(_)) if paged_users().is_empty() => (true, i18n.t("users.empty")),
                     _ => (false, ""),
                 };
                 rsx! {
                     Table {
                         empty: is_empty,
                         empty_text: empty_text.to_string(),
-                        col_count: 5,
+                        col_count: 6,
                         thead {
                             tr {
                                 TableHead { {i18n.t("users.user")} }
                                 TableHead { {i18n.t("table.role")} }
                                 TableHead { {i18n.t("users.tenant")} }
+                                TableHead { {i18n.t("users.balance")} }
                                 TableHead { {i18n.t("users.registered_at")} }
                                 TableHead { {i18n.t("table.actions")} }
                             }
@@ -260,21 +372,54 @@ fn AdminUsersView() -> Element {
                                         Badge { variant: BadgeVariant::Info, "{u.role}" }
                                     }
                                     td { "{u.tenant_id}" }
+                                    td {
+                                        div { class: "balance-cell",
+                                            span { class: "balance-available",
+                                                "{fmt_balance(u.balance)}"
+                                            }
+                                            if u.frozen_balance > 0.0 {
+                                                span { class: "balance-frozen text-secondary",
+                                                    "({i18n.t(\"users.frozen_short\")} {fmt_balance(u.frozen_balance)})"
+                                                }
+                                            }
+                                        }
+                                    }
                                     td { { format_time(&u.created_at) } }
                                     td {
                                         div { class: "btn-group",
-                                            Button {
-                                                variant: ButtonVariant::Ghost,
-                                                size: ButtonSize::Small,
-                                                onclick: {
-                                                    let uu = u.clone();
-                                                    move |_| {
-                                                        edit_name.set(uu.name.clone().unwrap_or_default());
-                                                        edit_role.set(uu.role.clone());
-                                                        edit_user.set(Some(uu.clone()));
-                                                    }
-                                                },
-                                                {i18n.t("form.edit")}
+                                            // 仅 system 角色可编辑 system 用户；admin 可编辑其他用户
+                                            if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let uu = u.clone();
+                                                        move |_| {
+                                                            edit_name.set(uu.name.clone().unwrap_or_default());
+                                                            edit_role.set(uu.role.clone());
+                                                            edit_user.set(Some(uu.clone()));
+                                                        }
+                                                    },
+                                                    {i18n.t("form.edit")}
+                                                }
+                                            }
+                                            // 仅 system 角色可管理 system 用户的余额；admin 可管理其他用户
+                                            if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let uu = u.clone();
+                                                        move |_| {
+                                                            balance_action.set("recharge".to_string());
+                                                            balance_amount.set(String::new());
+                                                            balance_reason.set(String::new());
+                                                            balance_error.set(String::new());
+                                                            balance_user.set(Some(uu.clone()));
+                                                        }
+                                                    },
+                                                    {i18n.t("users.balance_manage")}
+                                                }
                                             }
                                             if u.id != current_user_id
                                                 && u.role != UserRole::System.as_str()
@@ -301,7 +446,7 @@ fn AdminUsersView() -> Element {
 
         div { class: "pagination",
             span { class: "pagination-info",
-                "{i18n.t(\"common.total_items\")} {filtered_users().len()} {i18n.t(\"pricing.items_suffix\")}"
+                "{i18n.t(\"common.total_items\")} {total_items()} {i18n.t(\"pricing.items_suffix\")}"
             }
             Pagination {
                 current: page(),
@@ -400,6 +545,109 @@ fn AdminUsersView() -> Element {
                             loading: delete_saving(),
                             onclick: on_delete_confirm,
                             "{delete_button_label}"
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 余额管理弹窗 ──────────────────────────────────────────
+        if let Some(ref bu) = balance_user() {
+            div { class: "modal-backdrop",
+                onclick: move |_| {
+                    balance_error.set(String::new());
+                    balance_user.set(None);
+                },
+                div {
+                    class: "modal",
+                    onclick: move |e| e.stop_propagation(),
+                    div { class: "modal-header",
+                        h2 { class: "modal-title",
+                            "{i18n.t(\"users.balance_title\")} - {bu.name.clone().unwrap_or_else(|| bu.email.clone())}"
+                        }
+                        button {
+                            class: "btn btn-ghost btn-sm",
+                            r#type: "button",
+                            onclick: move |_| {
+                                balance_error.set(String::new());
+                                balance_user.set(None);
+                            },
+                            "✕"
+                        }
+                    }
+                    div { class: "modal-body",
+                        // 弹窗内联错误提示
+                        if !balance_error().is_empty() {
+                            div { class: "modal-inline-error", "{balance_error}" }
+                        }
+                        // 当前余额展示
+                        div { class: "balance-info",
+                            div { class: "balance-row",
+                                span { class: "balance-label", {i18n.t("users.balance_available")} }
+                                span { class: "balance-value", "{fmt_balance(bu.balance)}" }
+                            }
+                            div { class: "balance-row",
+                                span { class: "balance-label", {i18n.t("users.balance_frozen")} }
+                                span { class: "balance-value", "{fmt_balance(bu.frozen_balance)}" }
+                            }
+                        }
+                        // 操作选择
+                        div { class: "form-group",
+                            label { class: "form-label", {i18n.t("users.balance_action")} }
+                            select {
+                                class: "input-field",
+                                value: "{balance_action}",
+                                onchange: move |e| *balance_action.write() = e.value(),
+                                option { value: "recharge", {i18n.t("users.balance_recharge")} }
+                                option { value: "deduct", {i18n.t("users.balance_deduct")} }
+                                option { value: "freeze", {i18n.t("users.balance_freeze")} }
+                                option { value: "unfreeze", {i18n.t("users.balance_unfreeze")} }
+                            }
+                        }
+                        // 金额输入
+                        div { class: "form-group",
+                            label { class: "form-label", {i18n.t("users.balance_amount")} }
+                            input {
+                                class: "input-field",
+                                r#type: "number",
+                                step: "0.01",
+                                min: "0",
+                                placeholder: "{i18n.t(\"users.balance_amount_placeholder\")}",
+                                value: "{balance_amount}",
+                                oninput: move |e| {
+                                    *balance_amount.write() = e.value();
+                                    balance_error.set(String::new());
+                                },
+                            }
+                        }
+                        // 原因输入
+                        div { class: "form-group",
+                            label { class: "form-label",
+                                {i18n.t("users.balance_reason")}
+                                span { class: "required-mark", " *" }
+                            }
+                            input {
+                                class: "input-field",
+                                placeholder: "{i18n.t(\"users.balance_reason_placeholder\")}",
+                                value: "{balance_reason}",
+                                oninput: move |e| {
+                                    *balance_reason.write() = e.value();
+                                    balance_error.set(String::new());
+                                },
+                            }
+                        }
+                    }
+                    div { class: "modal-footer",
+                        Button {
+                            variant: ButtonVariant::Ghost,
+                            onclick: move |_| balance_user.set(None),
+                            {i18n.t("form.cancel")}
+                        }
+                        Button {
+                            variant: ButtonVariant::Primary,
+                            loading: balance_saving(),
+                            onclick: on_balance_save,
+                            "{balance_save_label()}"
                         }
                     }
                 }

@@ -195,7 +195,7 @@ impl PaymentService {
         let qr_code = precreate_response.qr_code.clone().unwrap_or_default();
 
         // 更新数据库订单的 pay_url 字段
-        sqlx::query(r#"UPDATE payment_orders SET pay_url = $1 WHERE id = $2""#)
+        sqlx::query(r#"UPDATE payment_orders SET pay_url = $1 WHERE id = $2"#)
             .bind(&qr_code)
             .bind(order.id)
             .execute(&self.pool)
@@ -330,7 +330,7 @@ impl PaymentService {
                 updated_at = NOW()
             WHERE id = $3 AND status = 'pending'
             RETURNING *
-            ""#,
+            "#,
         )
         .bind(&trade_no)
         .bind(sqlx::types::Json(&notify_data))
@@ -442,7 +442,7 @@ impl PaymentService {
                     updated_at = NOW()
                 WHERE id = $3 AND status = 'pending'
                 RETURNING *
-                ""#,
+                "#,
             )
             .bind(&trade_no)
             .bind(sqlx::types::Json(&notify_data))

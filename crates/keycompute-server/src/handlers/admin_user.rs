@@ -14,6 +14,7 @@ use axum::{
 use keycompute_db::models::api_key::ProduceAiKey;
 use keycompute_db::models::tenant::Tenant;
 use keycompute_db::models::user::User;
+use keycompute_db::models::user_credential::UserCredential;
 use keycompute_types::{AssignableUserRole, UserRole};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
@@ -31,8 +32,12 @@ pub struct AdminUserInfo {
     pub role: String,
     pub tenant_id: Uuid,
     pub tenant_name: String,
+    /// 可用余额
     pub balance: f64,
+    /// 冻结余额
+    pub frozen_balance: f64,
     pub created_at: String,
+    pub updated_at: String,
     pub last_login_at: Option<String>,
 }
 
@@ -61,6 +66,31 @@ fn default_page_size() -> i64 {
     20
 }
 
+/// 一阶保护：禁止非 system 角色对 system 用户执行任何修改操作。
+///
+/// 无论是改名称、改角色还是余额操作，非 system caller 一律拒绝。
+/// 此校验与 `validate_role_change_request` 互补：
+/// - 本函数覆盖"是否能触碰 system 用户"的全局边界
+/// - `validate_role_change_request` 覆盖"角色变更"的精细规则
+fn validate_not_admin_modifying_system(auth: &AuthExtractor, target_user: &User) -> Result<()> {
+    if auth.role != UserRole::System.as_str() && target_user.role == UserRole::System.as_str() {
+        return Err(ApiError::Forbidden(
+            "Only system role can modify system users".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 二阶保护：校验角色变更请求的合法性。
+///
+/// 规则（按检查顺序）：
+/// 1. 未请求变更角色 → 直接通过
+/// 2. 仅 system 角色可变更他人角色
+/// 3. system 角色不能变更自己的角色
+/// 4. system 角色的 role 字段不可被修改（即使 caller 是 system）
+///
+/// 调用约定：必须和 `validate_not_admin_modifying_system` 搭配使用，
+/// 后者负责拦截非 system caller 对 system 用户的任何修改。
 fn validate_role_change_request(
     auth: &AuthExtractor,
     target_user_id: Uuid,
@@ -137,7 +167,9 @@ pub struct UserListResponse {
 /// - page: 页码（默认 1）
 /// - page_size: 每页数量（默认 20）
 ///
-/// Admin 可以查询所有租户的用户
+/// Admin 可以查询所有租户的用户。
+///
+/// 过滤条件下推到 SQL 层以保证分页准确性。
 pub async fn list_all_users(
     auth: AuthExtractor,
     State(state): State<AppState>,
@@ -156,13 +188,24 @@ pub async fn list_all_users(
     // 计算分页偏移量
     let offset = (params.page - 1) * params.page_size;
 
-    // 查询所有用户（Admin 全局查询）
-    let users = User::find_all(pool, params.page_size, offset)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query users: {}", e)))?;
+    // 过滤条件下推到 SQL 层，保证分页准确性
+    let tenant_id_filter = params.tenant_id;
+    let role_filter = params.role.as_deref();
+    let search_filter = params.search.as_deref();
 
-    // 统计用户总数
-    let total = User::count_all(pool)
+    let users = User::find_all_filtered(
+        pool,
+        tenant_id_filter,
+        role_filter,
+        search_filter,
+        params.page_size,
+        offset,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to query users: {}", e)))?;
+
+    // 统计过滤后的用户总数（同样下推到 SQL）
+    let total = User::count_all_filtered(pool, tenant_id_filter, role_filter, search_filter)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
 
@@ -173,49 +216,22 @@ pub async fn list_all_users(
     let tenant_map: std::collections::HashMap<Uuid, String> =
         tenants.into_iter().map(|t| (t.id, t.name)).collect();
 
-    // 第一遍：应用过滤条件，收集过滤后的用户
-    let filtered_users: Vec<_> = users
-        .into_iter()
-        .filter(|user| {
-            // 应用租户过滤
-            if let Some(filter_tenant_id) = params.tenant_id
-                && user.tenant_id != filter_tenant_id
-            {
-                return false;
-            }
-            // 应用角色过滤
-            if let Some(ref filter_role) = params.role
-                && &user.role != filter_role
-            {
-                return false;
-            }
-            // 应用搜索过滤
-            if let Some(ref search) = params.search {
-                let search_lower = search.to_lowercase();
-                let email_match = user.email.to_lowercase().contains(&search_lower);
-                let name_match = user
-                    .name
-                    .as_ref()
-                    .map(|n| n.to_lowercase().contains(&search_lower))
-                    .unwrap_or(false);
-                if !email_match && !name_match {
-                    return false;
-                }
-            }
-            true
-        })
-        .collect();
-
     // 批量预加载余额（避免 N+1 查询）
-    let user_ids: Vec<Uuid> = filtered_users.iter().map(|u| u.id).collect();
+    let user_ids: Vec<Uuid> = users.iter().map(|u| u.id).collect();
     let balance_map = if let Some(bs) = state.billing.balance_service() {
         bs.find_by_users(&user_ids).await.ok().unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
 
-    // 第二遍：构建用户信息列表
-    let result: Vec<AdminUserInfo> = filtered_users
+    // 批量预加载用户的最后登录时间（避免 N+1 查询）
+    let credential_map: std::collections::HashMap<Uuid, UserCredential> =
+        UserCredential::find_by_user_ids(pool, &user_ids)
+            .await
+            .unwrap_or_default();
+
+    // 构建用户信息列表
+    let result: Vec<AdminUserInfo> = users
         .into_iter()
         .map(|user| {
             let balance = balance_map.get(&user.id);
@@ -234,13 +250,19 @@ pub async fn list_all_users(
                 balance: balance
                     .map(|b| b.available_balance.to_f64().unwrap_or(0.0))
                     .unwrap_or(0.0),
+                frozen_balance: balance
+                    .map(|b| b.frozen_balance.to_f64().unwrap_or(0.0))
+                    .unwrap_or(0.0),
                 created_at: user.created_at.to_rfc3339(),
-                last_login_at: None,
+                updated_at: user.updated_at.to_rfc3339(),
+                last_login_at: credential_map
+                    .get(&user.id)
+                    .and_then(|c| c.last_login_at.map(|t| t.to_rfc3339())),
             }
         })
         .collect();
 
-    // 计算总页数
+    // 基于过滤后的 total 计算总页数
     let total_pages = (total + params.page_size - 1) / params.page_size;
 
     Ok(Json(UserListResponse {
@@ -289,6 +311,12 @@ pub async fn get_user_by_id(
         None
     };
 
+    // 获取用户最后登录时间
+    let last_login = UserCredential::find_by_user_id(pool, user_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query credentials: {}", e)))?
+        .and_then(|c| c.last_login_at.map(|t| t.to_rfc3339()));
+
     Ok(Json(AdminUserInfo {
         id: user.id,
         email: user.email,
@@ -300,8 +328,13 @@ pub async fn get_user_by_id(
             .as_ref()
             .map(|b| b.available_balance.to_f64().unwrap_or(0.0))
             .unwrap_or(0.0),
+        frozen_balance: balance
+            .as_ref()
+            .map(|b| b.frozen_balance.to_f64().unwrap_or(0.0))
+            .unwrap_or(0.0),
         created_at: user.created_at.to_rfc3339(),
-        last_login_at: None,
+        updated_at: user.updated_at.to_rfc3339(),
+        last_login_at: last_login,
     }))
 }
 
@@ -335,6 +368,8 @@ pub async fn update_user(
         .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
 
+    // 禁止非 system 角色修改 system 用户（包括仅修改名称）
+    validate_not_admin_modifying_system(&auth, &user)?;
     validate_role_change_request(&auth, user_id, &user, &req.role)?;
 
     let update_req = keycompute_db::models::user::UpdateUserRequest {
@@ -400,6 +435,69 @@ pub struct UpdateBalanceRequest {
     pub reason: String,
 }
 
+/// 余额操作的公共上下文
+struct BalanceOpContext {
+    pub amount: Decimal,
+    pub reason: String,
+}
+
+/// 余额操作公共前置校验，返回已校验的上下文
+///
+/// 统一处理：权限检查、用户查询、system 保护、金额解析、原因校验
+async fn validate_balance_request(
+    auth: &AuthExtractor,
+    state: &AppState,
+    user_id: Uuid,
+    req: &UpdateBalanceRequest,
+    require_positive: bool,
+) -> Result<BalanceOpContext> {
+    if !auth.is_admin() {
+        return Err(ApiError::Auth("Admin permission required".to_string()));
+    }
+
+    let pool = state
+        .pool
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+
+    // 禁止非 system 角色修改 system 用户的余额
+    let target_user = User::find_by_id(pool, user_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
+        .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
+    validate_not_admin_modifying_system(auth, &target_user)?;
+
+    // 解析金额
+    let amount: Decimal = req
+        .amount
+        .parse()
+        .map_err(|_| ApiError::BadRequest("Invalid amount format".to_string()))?;
+
+    // 校验精度：最多两位小数（防止绕过前端限制传入过高精度金额）
+    if amount != amount.round_dp(2) {
+        return Err(ApiError::BadRequest(
+            "Amount must have at most 2 decimal places".to_string(),
+        ));
+    }
+
+    // 金额校验
+    if require_positive && amount <= Decimal::ZERO {
+        return Err(ApiError::BadRequest("Amount must be positive".to_string()));
+    }
+    if !require_positive && amount == Decimal::ZERO {
+        return Err(ApiError::BadRequest("Amount cannot be zero".to_string()));
+    }
+
+    if req.reason.trim().is_empty() {
+        return Err(ApiError::BadRequest("Reason is required".to_string()));
+    }
+
+    Ok(BalanceOpContext {
+        amount,
+        reason: req.reason.clone(),
+    })
+}
+
 /// 更新用户余额
 ///
 /// POST /api/v1/users/{id}/balance
@@ -409,55 +507,111 @@ pub async fn update_user_balance(
     State(state): State<AppState>,
     Json(req): Json<UpdateBalanceRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    let ctx = validate_balance_request(&auth, &state, user_id, &req, false).await?;
 
     let balance_service = state
         .billing
         .balance_service()
         .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?;
 
-    // 解析金额
-    let amount: Decimal = req
-        .amount
-        .parse()
-        .map_err(|_| ApiError::BadRequest("Invalid amount format".to_string()))?;
-
-    if amount == Decimal::ZERO {
-        return Err(ApiError::BadRequest("Amount cannot be zero".to_string()));
-    }
-
     // 更新余额
     // 注意：余额检查由 BalanceService 内部通过 FOR UPDATE 锁保证原子性
     // 不在此处预检查，避免 TOCTOU 竞争条件
-    let (updated_balance, _transaction) = if amount > Decimal::ZERO {
+    let (updated_balance, transaction) = if ctx.amount > Decimal::ZERO {
         balance_service
-            .recharge(user_id, auth.tenant_id, amount, None, Some(&req.reason))
+            .recharge(user_id, auth.tenant_id, ctx.amount, None, Some(&ctx.reason))
             .await
             .map_err(ApiError::from)?
     } else {
         // 负数金额视为消费
         balance_service
-            .consume(user_id, -amount, None, Some(&req.reason))
+            .consume(user_id, -ctx.amount, None, Some(&ctx.reason))
             .await
             .map_err(ApiError::from)?
     };
-
-    // 计算操作前的余额
-    // balance_before = new_balance - amount 对两种情况都成立
-    // 充值: balance_before = new_balance - positive_amount
-    // 消费: balance_before = new_balance - negative_amount = new_balance + |amount|
-    let balance_before = updated_balance.available_balance - amount;
 
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Balance updated",
         "user_id": user_id,
-        "amount": amount.to_string(),
-        "reason": req.reason,
-        "balance_before": balance_before.to_string(),
+        "amount": ctx.amount.to_string(),
+        "reason": ctx.reason,
+        "available_balance_before": transaction.balance_before.to_string(),
         "new_balance": updated_balance.available_balance.to_string(),
+        "updated_by": auth.user_id,
+    })))
+}
+
+/// 冻结用户余额
+///
+/// POST /api/v1/users/{id}/balance/freeze
+pub async fn freeze_user_balance(
+    auth: AuthExtractor,
+    Path(user_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(req): Json<UpdateBalanceRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let ctx = validate_balance_request(&auth, &state, user_id, &req, true).await?;
+
+    let balance_service = state
+        .billing
+        .balance_service()
+        .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?;
+
+    let (updated_balance, transaction) = balance_service
+        .freeze(user_id, ctx.amount, Some(&ctx.reason))
+        .await
+        .map_err(ApiError::from)?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Balance frozen",
+        "user_id": user_id,
+        "amount": ctx.amount.to_string(),
+        "reason": ctx.reason,
+        "available_balance_before": transaction.balance_before.to_string(),
+        "new_available_balance": updated_balance.available_balance.to_string(),
+        "new_frozen_balance": updated_balance.frozen_balance.to_string(),
+        "updated_by": auth.user_id,
+    })))
+}
+
+/// 解冻用户余额
+///
+/// POST /api/v1/users/{id}/balance/unfreeze
+pub async fn unfreeze_user_balance(
+    auth: AuthExtractor,
+    Path(user_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(req): Json<UpdateBalanceRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let ctx = validate_balance_request(&auth, &state, user_id, &req, true).await?;
+
+    let balance_service = state
+        .billing
+        .balance_service()
+        .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?;
+
+    let (updated_balance, transaction) = balance_service
+        .unfreeze(user_id, ctx.amount, Some(&ctx.reason))
+        .await
+        .map_err(ApiError::from)?;
+
+    // transaction.balance_before 跟踪的是操作前可用余额（available_balance），
+    // 不含冻结余额信息。由于 FOR UPDATE 行锁保证并发安全，可通过更新后余额反推：
+    // frozen_before = updated.frozen_balance + amount（因为解冻操作: frozen -= amount）
+    let frozen_before = updated_balance.frozen_balance + ctx.amount;
+    let _ = transaction; // balance_before 在此场景无直接用途，明确忽略
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Balance unfrozen",
+        "user_id": user_id,
+        "amount": ctx.amount.to_string(),
+        "reason": ctx.reason,
+        "frozen_balance_before": frozen_before.to_string(),
+        "new_available_balance": updated_balance.available_balance.to_string(),
+        "new_frozen_balance": updated_balance.frozen_balance.to_string(),
         "updated_by": auth.user_id,
     })))
 }
@@ -536,25 +690,28 @@ pub async fn list_tenants(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query tenants: {}", e)))?;
 
-    let mut result = Vec::new();
-    for tenant in tenants {
-        // 统计租户用户数量
-        let users = User::find_by_tenant(pool, tenant.id)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
+    // 批量统计各租户用户数量（避免 N+1 查询）
+    let tenant_ids: Vec<Uuid> = tenants.iter().map(|t| t.id).collect();
+    let user_counts = User::count_by_tenants(pool, &tenant_ids)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
 
-        let is_active = tenant.is_active();
-        let description = tenant.description.clone();
+    let result: Vec<TenantInfo> = tenants
+        .into_iter()
+        .map(|tenant| {
+            let is_active = tenant.is_active();
+            let description = tenant.description.clone();
 
-        result.push(TenantInfo {
-            id: tenant.id,
-            name: tenant.name,
-            description,
-            user_count: users.len() as i64,
-            is_active,
-            created_at: tenant.created_at.to_rfc3339(),
-        });
-    }
+            TenantInfo {
+                id: tenant.id,
+                name: tenant.name,
+                description,
+                user_count: user_counts.get(&tenant.id).copied().unwrap_or(0),
+                is_active,
+                created_at: tenant.created_at.to_rfc3339(),
+            }
+        })
+        .collect();
 
     Ok(Json(result))
 }
@@ -573,7 +730,9 @@ mod tests {
             tenant_id: Uuid::new_v4(),
             tenant_name: "Test".to_string(),
             balance: 1000.0,
+            frozen_balance: 0.0,
             created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
             last_login_at: None,
         };
 

@@ -803,6 +803,59 @@ input, textarea, select {
   font-weight: 600;
 }
 
+.form-label .required-mark {
+  color: var(--color-error);
+  font-weight: 700;
+}
+
+.modal-inline-error {
+  background-color: var(--color-error);
+  color: #fff; /* 错误背景上使用白色以保证可读性，项目暂无 --text-on-error 变量 */
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: 16px;
+}
+
+.balance-info {
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+
+.balance-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+}
+
+.balance-label {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.balance-value {
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.balance-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.balance-available {
+  font-weight: var(--font-weight-semibold);
+}
+
+.balance-frozen {
+  font-size: var(--font-size-xs);
+}
+
 .form-input {
   width: 100%;
   padding: 13px 14px;

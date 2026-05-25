@@ -935,6 +935,14 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.update_failed", "Update failed");
     m.insert("users.deleted", "User deleted");
     m.insert("users.delete_failed", "Delete failed");
+    m.insert(
+        "users.delete_self_forbidden",
+        "Cannot delete your own account",
+    );
+    m.insert(
+        "users.delete_admin_forbidden",
+        "Only system role can delete admin users",
+    );
     m.insert("users.edit_title", "Edit User");
     m.insert("users.display_name", "Display Name");
     m.insert(
@@ -957,6 +965,41 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Review and manage your personal account information",
     );
     m.insert("users.account_info", "Account Information");
+    m.insert("users.balance", "Balance");
+    m.insert("users.frozen_short", "Frozen");
+    m.insert("users.balance_manage", "Balance");
+    m.insert("users.balance_title", "Balance Management");
+    m.insert("users.balance_available", "Available Balance");
+    m.insert("users.balance_frozen", "Frozen Balance");
+    m.insert("users.balance_action", "Action Type");
+    m.insert("users.balance_recharge", "Recharge");
+    m.insert("users.balance_deduct", "Deduct");
+    m.insert("users.balance_freeze", "Freeze");
+    m.insert("users.balance_unfreeze", "Unfreeze");
+    m.insert("users.balance_amount", "Amount");
+    m.insert("users.balance_amount_placeholder", "Enter amount");
+    m.insert("users.balance_reason", "Reason");
+    m.insert(
+        "users.balance_reason_placeholder",
+        "Enter reason for this operation",
+    );
+    m.insert("users.balance_amount_required", "Please enter an amount");
+    m.insert(
+        "users.balance_amount_invalid",
+        "Amount must be greater than 0",
+    );
+    m.insert(
+        "users.balance_amount_precision",
+        "Amount supports up to 2 decimal places",
+    );
+    m.insert("users.balance_reason_required", "Please enter a reason");
+    m.insert("users.balance_action_invalid", "Invalid action type");
+    m.insert("users.balance_updated", "Balance updated successfully");
+    m.insert("users.balance_update_failed", "Balance update failed");
+    m.insert(
+        "users.cannot_modify_system",
+        "Only system role can manage system users",
+    );
     m.insert(
         "tenants.subtitle",
         "View and manage all tenant records on the platform",

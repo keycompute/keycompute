@@ -106,7 +106,7 @@ pub fn Sidebar(
                 div { class: "sidebar-logo-icon", "K" }
                 div { class: "sidebar-logo-copy",
                     span { class: "sidebar-logo-text", "KeyCompute" }
-                    span { class: "sidebar-logo-kicker", "AI Gateway" }
+                    span { class: "sidebar-logo-kicker", "AI token platform" }
                 }
             }
 

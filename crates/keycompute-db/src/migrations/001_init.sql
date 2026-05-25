@@ -516,7 +516,7 @@ CREATE INDEX IF NOT EXISTS idx_system_settings_key ON system_settings(key);
 INSERT INTO system_settings (key, value, value_type, description) VALUES
     -- 站点设置
     ('site_name', 'KeyCompute', 'string', '站点名称'),
-    ('site_description', 'AI Gateway Platform', 'string', '站点描述'),
+    ('site_description', 'Next-generation high-performance AI token compute service platform', 'string', '站点描述'),
     ('site_logo_url', '', 'string', '站点 Logo URL'),
     ('site_favicon_url', '', 'string', '站点 Favicon URL'),
     
