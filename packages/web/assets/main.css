@@ -4613,6 +4613,12 @@ select.form-input:focus {
   background: rgba(255, 255, 255, 0.9);
 }
 
+/* 明亮主题下移动端下拉面板 */
+[data-theme="light"] .kc-home-nav-actions,
+.kc-home-header.kc-home-light .kc-home-nav-actions {
+  background: rgba(255, 255, 255, 0.97);
+}
+
 .kc-home-nav {
   display: flex;
   align-items: center;
@@ -4650,6 +4656,26 @@ select.form-input:focus {
   display: flex;
   align-items: center;
   gap: 16px;
+}
+
+/* 移动端汉堡菜单按钮（默认隐藏） */
+.kc-home-mobile-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 10px;
+  background: var(--kc-home-surface);
+  color: var(--kc-home-text-secondary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+.kc-home-mobile-menu-btn:hover {
+  background: var(--kc-home-surface-hover);
+  color: var(--kc-home-accent);
 }
 
 .kc-home-theme-toggle {
@@ -5283,11 +5309,133 @@ select.form-input:focus {
   .kc-home-feature-tag { padding: 6px 12px; font-size: 0.8rem; }
   .kc-home-features-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
   .kc-home-feature-card { padding: 20px; }
+
+  /* 显示汉堡菜单 */
+  .kc-home-mobile-menu-btn { display: flex; }
+
+  /* 移动端 Logo 文本缩小 */
+  .kc-home-logo-text { font-size: 1.25rem; }
+
+  /* 导航功能区：默认隐藏，打开时显示 */
+  .kc-home-nav-actions {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 16px;
+    background: var(--kc-home-header-bg, rgba(10,15,26,0.95));
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--kc-home-border);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+    z-index: 200;
+    animation: kc-nav-slide-down 0.2s ease;
+  }
+  .kc-home-nav-actions-open { display: flex; }
+
+  /* ── 移动端下拉菜单项：统一全宽行式样式 ── */
+
+  /* GitHub 链接 → 全宽行 + 图标 + 文字标签 */
+  .kc-home-nav-actions .kc-home-github-link {
+    width: 100%;
+    height: auto;
+    min-height: 44px;
+    border-radius: 10px;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 10px 16px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--kc-home-text-secondary);
+    text-decoration: none;
+  }
+  .kc-home-nav-actions .kc-home-github-link::after {
+    content: "GitHub";
+    white-space: nowrap;
+  }
+
+  /* 主题切换按钮 → 全宽行 + 图标 + 文字标签 */
+  .kc-home-nav-actions .kc-home-theme-toggle {
+    width: 100%;
+    height: auto;
+    min-height: 44px;
+    border-radius: 10px;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 10px 16px;
+  }
+  .kc-home-nav-actions .kc-home-theme-toggle::after {
+    content: attr(title);
+    white-space: nowrap;
+    font-size: 0.9rem;
+    font-weight: 500;
+    margin-left: 2px;
+  }
+
+  /* 语言切换按钮 → 全宽行 */
+  .kc-home-nav-actions .kc-home-lang-toggle {
+    width: 100%;
+    height: auto;
+    min-height: 44px;
+    border-radius: 10px;
+    justify-content: flex-start;
+    gap: 12px;
+    padding: 10px 16px;
+  }
+  .kc-home-nav-actions .kc-home-lang-btn-text {
+    font-size: 0.9rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  /* 控制台/登录/注册按钮 → 全宽块状 */
+  .kc-home-nav-actions .kc-home-btn-register,
+  .kc-home-nav-actions .kc-home-btn-login {
+    width: 100%;
+    height: 44px;
+    border-radius: 10px;
+    justify-content: center;
+    font-size: 0.9rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    margin-top: 4px;
+  }
+
+  /* 登录注册按钮组 → 纵向堆叠 */
+  .kc-home-nav-actions .kc-home-auth-buttons {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    gap: 8px;
+  }
+  .kc-home-nav-actions .kc-home-auth-buttons .kc-home-btn-login,
+  .kc-home-nav-actions .kc-home-auth-buttons .kc-home-btn-register {
+    margin-top: 0;
+  }
+
+  /* 用户头像在移动端隐藏（控制台按钮已替代） */
+  .kc-home-nav-actions .header-avatar,
+  .kc-home-nav-actions .header-user-dropdown { display: none !important; }
+
+  @keyframes kc-nav-slide-down {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* 导航栏需要相对定位以容纳下拉 */
+  .kc-home-header { position: relative; }
+
+  /* 移动端主题切换不使用旋转动画 */
+  .kc-theme-switching .kc-home-theme-toggle {
+    animation: none;
+  }
 }
 
 @media (max-width: 480px) {
   .container { padding: 0 16px; }
-  .kc-home-logo-text { display: none; }
+  .kc-home-logo-text { font-size: 1.15rem; }
   .kc-home-auth-buttons { gap: 8px; }
   .kc-home-btn-login, .kc-home-btn-register { width: 84px; height: 36px; padding: 0 12px; font-size: 0.8rem; }
   .kc-home-hero { padding: 40px 0 30px; }

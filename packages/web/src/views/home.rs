@@ -18,6 +18,9 @@ pub fn Home() -> Element {
     let mut show_login_modal = use_signal(|| false);
     let mut show_register_modal = use_signal(|| false);
 
+    // 移动端菜单折叠状态
+    let mut nav_menu_open = use_signal(|| false);
+
     // 主题状态
     let mut theme = use_context::<Signal<String>>();
     let is_dark = theme().as_str() == "dark";
@@ -145,7 +148,7 @@ pub fn Home() -> Element {
                 class: "kc-home-header",
                 div {
                     class: "kc-home-nav container",
-                    // Logo 区域
+                    // Logo + 标题区域
                     div {
                         class: "kc-home-logo",
                         img {
@@ -155,9 +158,43 @@ pub fn Home() -> Element {
                         span { class: "kc-home-logo-text", "KeyCompute" }
                     }
 
-                    // 导航功能区
+                    // 移动端汉堡菜单按钮
+                    button {
+                        class: "kc-home-mobile-menu-btn",
+                        r#type: "button",
+                        title: if is_zh { "菜单" } else { "Menu" },
+                        onclick: move |_| nav_menu_open.toggle(),
+                        if nav_menu_open() {
+                            svg {
+                                width: "22",
+                                height: "22",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                line { x1: "18", y1: "6", x2: "6", y2: "18" }
+                                line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                            }
+                        } else {
+                            svg {
+                                width: "22",
+                                height: "22",
+                                view_box: "0 0 24 24",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "2",
+                                stroke_linecap: "round",
+                                line { x1: "3", y1: "6", x2: "21", y2: "6" }
+                                line { x1: "3", y1: "12", x2: "21", y2: "12" }
+                                line { x1: "3", y1: "18", x2: "21", y2: "18" }
+                            }
+                        }
+                    }
+
+                    // 导航功能区（移动端可折叠）
                     div {
-                        class: "kc-home-nav-actions",
+                        class: if nav_menu_open() { "kc-home-nav-actions kc-home-nav-actions-open" } else { "kc-home-nav-actions" },
                         // GitHub 仓库链接
                         a {
                             class: "kc-home-github-link",

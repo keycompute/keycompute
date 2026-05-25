@@ -103,6 +103,17 @@ pub fn Header(
 
             // 右侧工具栏
             div { class: "header-right",
+                // 移动端返回首页按钮（PC 端左侧已有，此处仅移动端显示）
+                button {
+                    class: "header-icon-btn header-home-btn-mobile hide-desktop hide-tablet",
+                    title: "{home_title}",
+                    onclick: move |_| {
+                        let nav = use_navigator();
+                        nav.push("/");
+                    },
+                    IconHome { size: 18 }
+                }
+
                 // GitHub 仓库链接（与首页样式一致，按后台比例缩放）
                 a {
                     class: "header-github-link",
