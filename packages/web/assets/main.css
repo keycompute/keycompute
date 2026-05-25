@@ -4374,6 +4374,12 @@ select.form-input:focus {
   100% { transform: rotate(360deg) scale(1); }
 }
 
+/* 移动端主题图标旋转：仅旋转，无缩放，避免视觉偏移 */
+@keyframes kc-theme-mobile-icon-rotate {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
 /* 主题切换时的闪光效果 */
 .kc-theme-switching::after {
   content: "";
@@ -5427,9 +5433,19 @@ select.form-input:focus {
   /* 导航栏需要相对定位以容纳下拉 */
   .kc-home-header { position: relative; }
 
-  /* 移动端主题切换不使用旋转动画 */
+  /* 移动端主题切换：仅旋转图标，不旋转整个按钮，禁用 hover 倾斜 */
+  .kc-home-nav-actions .kc-home-theme-toggle {
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+  .kc-home-nav-actions .kc-home-theme-toggle:hover {
+    transform: none;
+  }
   .kc-theme-switching .kc-home-theme-toggle {
     animation: none;
+  }
+  .kc-theme-switching .kc-home-theme-toggle svg {
+    animation: kc-theme-mobile-icon-rotate 0.5s ease-in-out;
+    transform-origin: center center;
   }
 }
 
