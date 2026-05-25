@@ -119,14 +119,13 @@ impl NodeGatewayService {
 
         match status {
             "succeeded" => {
-                let response: ChatCompletionResponse = serde_json::from_value(
-                    task.result_json.ok_or_else(|| {
+                let response: ChatCompletionResponse =
+                    serde_json::from_value(task.result_json.ok_or_else(|| {
                         NodeExecutionError::Other(anyhow::anyhow!(
                             "Task succeeded but no result_json"
                         ))
-                    })?,
-                )
-                .map_err(|e| NodeExecutionError::Other(anyhow::Error::from(e)))?;
+                    })?)
+                    .map_err(|e| NodeExecutionError::Other(anyhow::Error::from(e)))?;
                 Ok(response)
             }
             "failed" => {

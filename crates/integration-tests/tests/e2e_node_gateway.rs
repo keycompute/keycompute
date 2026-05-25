@@ -997,7 +997,11 @@ async fn test_admin_recover_excluded_node() -> anyhow::Result<()> {
         .await?;
 
     // recover 调用应返回 online + count=0
-    let recovered = env.service.store.recover_node(register_resp.node_id).await?;
+    let recovered = env
+        .service
+        .store
+        .recover_node(register_resp.node_id)
+        .await?;
     assert_eq!(recovered.status, "online");
     assert_eq!(recovered.consecutive_failure_count, 0);
 

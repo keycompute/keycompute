@@ -51,7 +51,6 @@ use crate::{
         get_my_usage,
         get_my_usage_stats,
         get_node_gateway_overview,
-        recover_node,
         get_payment_order,
         get_provider_health,
         // 公开设置
@@ -81,6 +80,7 @@ use crate::{
         node_heartbeat,
         node_poll,
         node_register,
+        recover_node,
         refresh_account,
         refresh_token_handler,
         register_handler,

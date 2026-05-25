@@ -76,7 +76,7 @@ pub async fn update_profile(
     auth: AuthExtractor,
     State(state): State<AppState>,
     Json(req): Json<UpdateProfileRequest>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Json<CurrentUserResponse>> {
     let pool = state
         .pool
         .as_ref()
@@ -97,12 +97,14 @@ pub async fn update_profile(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to update profile: {}", e)))?;
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "Profile updated",
-        "user_id": updated.id,
-        "name": updated.name,
-    })))
+    Ok(Json(CurrentUserResponse {
+        id: updated.id,
+        email: updated.email,
+        name: updated.name,
+        role: updated.role,
+        tenant_id: updated.tenant_id,
+        created_at: updated.created_at.to_rfc3339(),
+    }))
 }
 
 /// 修改密码请求
