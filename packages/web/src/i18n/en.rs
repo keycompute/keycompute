@@ -386,7 +386,23 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "account_settings.password_too_short",
-        "The new password must be at least 8 characters",
+        "New password must be at least 8 characters",
+    );
+    m.insert(
+        "account_settings.password_no_uppercase",
+        "New password must contain at least one uppercase letter",
+    );
+    m.insert(
+        "account_settings.password_no_lowercase",
+        "New password must contain at least one lowercase letter",
+    );
+    m.insert(
+        "account_settings.password_no_digit",
+        "New password must contain at least one digit",
+    );
+    m.insert(
+        "account_settings.password_no_special",
+        "New password must contain at least one special character",
     );
     m.insert(
         "account_settings.password_changed",

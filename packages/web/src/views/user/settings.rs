@@ -35,6 +35,33 @@ pub fn UserSettings() -> Element {
             ));
             return;
         }
+        if !new_pwd().chars().any(|c| c.is_uppercase()) {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_uppercase").to_string(),
+            ));
+            return;
+        }
+        if !new_pwd().chars().any(|c| c.is_lowercase()) {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_lowercase").to_string(),
+            ));
+            return;
+        }
+        if !new_pwd().chars().any(|c| c.is_ascii_digit()) {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_digit").to_string(),
+            ));
+            return;
+        }
+        if !new_pwd()
+            .chars()
+            .any(|c| "!@#$%^&*()_+-=[]{}|;:',.<>?/~`".contains(c))
+        {
+            error_msg.set(Some(
+                i18n.t("account_settings.password_no_special").to_string(),
+            ));
+            return;
+        }
         saving.set(true);
         error_msg.set(None);
         success_msg.set(None);

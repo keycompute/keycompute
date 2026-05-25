@@ -337,6 +337,22 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("account_settings.fill_all_passwords", "请填写所有密码字段");
     m.insert("account_settings.password_mismatch", "两次新密码输入不一致");
     m.insert("account_settings.password_too_short", "新密码至少需要 8 位");
+    m.insert(
+        "account_settings.password_no_uppercase",
+        "新密码需包含至少一个大写字母",
+    );
+    m.insert(
+        "account_settings.password_no_lowercase",
+        "新密码需包含至少一个小写字母",
+    );
+    m.insert(
+        "account_settings.password_no_digit",
+        "新密码需包含至少一个数字",
+    );
+    m.insert(
+        "account_settings.password_no_special",
+        "新密码需包含至少一个特殊字符",
+    );
     m.insert("account_settings.password_changed", "密码修改成功");
     m.insert("account_settings.change_failed", "修改失败");
     m.insert("account_settings.change_password", "修改密码");
