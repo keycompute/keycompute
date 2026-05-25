@@ -37,9 +37,9 @@ pub fn Home() -> Element {
     let i18n = I18n::new(Lang::from_str(&current_lang));
     let is_zh = current_lang == "zh";
 
-    // 检查是否已登录
+    // 检查是否已登录（使用 memo 响应 auth_store.state 的变化）
     let auth_store = use_context::<AuthStore>();
-    let is_authenticated = auth_store.is_authenticated();
+    let is_authenticated = use_memo(move || auth_store.is_authenticated());
 
     // 提前提取所有 i18n 文本
     let t_toggle_theme = i18n.t("home.toggle_theme");
@@ -73,13 +73,6 @@ pub fn Home() -> Element {
     let t_distribution_desc = i18n.t("home.features.distribution.desc");
     let t_custom_title = i18n.t("home.features.custom.title");
     let t_custom_desc = i18n.t("home.features.custom.desc");
-
-    // 已登录则跳转到仪表板
-    use_effect(move || {
-        if is_authenticated {
-            nav.replace(Route::Dashboard {});
-        }
-    });
 
     rsx! {
         div {
@@ -255,8 +248,17 @@ pub fn Home() -> Element {
                             }
                         }
 
-                        // 登录/注册按钮
-                        if !is_authenticated {
+                        // 登录/注册按钮 或 控制台按钮
+                        if is_authenticated() {
+                            button {
+                                class: "kc-home-btn-register",
+                                r#type: "button",
+                                onclick: move |_| {
+                                    nav.push(Route::Dashboard {});
+                                },
+                                "{i18n.t(\"home.console\")}"
+                            }
+                        } else {
                             div {
                                 class: "kc-home-auth-buttons",
                                 button {
@@ -748,6 +750,10 @@ fn RegisterModal(
     let mut completed = use_signal(|| false);
     let mut error_msg = use_signal(|| Option::<String>::None);
     let mut success_msg = use_signal(|| Option::<String>::None);
+    let mut saved_email = use_signal(String::new);
+    let mut saved_password = use_signal(String::new);
+    let mut auth_store = use_context::<AuthStore>();
+    let mut user_store = use_context::<UserStore>();
 
     // 提取 i18n 文本
     let t_register = i18n.t("auth.register");
@@ -774,6 +780,7 @@ fn RegisterModal(
     let t_request_code = i18n.t("auth.request_code");
     let t_registration_success = i18n.t("auth.registration_success");
     let t_login_now = i18n.t("auth.login_now");
+    let t_login_failed = i18n.t("auth.login_failed");
     let t_has_account = i18n.t("auth.has_account");
 
     let on_submit = move |evt: Event<FormData>| {
@@ -846,6 +853,8 @@ fn RegisterModal(
                     code_requested.set(false);
                     success_msg.set(Some(t_registration_success.to_string()));
                     verification_code.set(String::new());
+                    saved_email.set(email_val.clone());
+                    saved_password.set(password_val.clone());
                     loading.set(false);
                 }
                 Err(e) => {
@@ -883,11 +892,41 @@ fn RegisterModal(
                         button {
                             class: "kc-auth-submit-btn",
                             r#type: "button",
+                            disabled: loading(),
                             onclick: move |_| {
-                                onclose.call(());
-                                nav.push(Route::Login {});
+                                loading.set(true);
+                                error_msg.set(None);
+                                let email_val = saved_email();
+                                let password_val = saved_password();
+                                spawn(async move {
+                                    match auth_service::login(&email_val, &password_val).await {
+                                        Ok(resp) => {
+                                            get_client().set_token(&resp.access_token);
+                                            auth_store.login_with_persist(resp.access_token.clone(), false);
+                                            *user_store.info.write() = Some(UserInfo {
+                                                id: resp.user_id.clone(),
+                                                email: resp.email.clone(),
+                                                name: None,
+                                                role: resp.role.clone(),
+                                                tenant_id: resp.tenant_id.clone(),
+                                            });
+                                            onclose.call(());
+                                            nav.replace(Route::Dashboard {});
+                                        }
+                                        Err(e) => {
+                                            let err_text = user_error_message(&e);
+                                            error_msg.set(Some(format!("{t_login_failed}：{err_text}")));
+                                            loading.set(false);
+                                        }
+                                    }
+                                });
                             },
-                            "{t_login_now}"
+                            if loading() {
+                                span { class: "kc-auth-spinner" }
+                                " {t_login_now}"
+                            } else {
+                                "{t_login_now}"
+                            }
                         }
                     }
                 } else {

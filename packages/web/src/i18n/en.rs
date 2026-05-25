@@ -292,7 +292,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.revoked", "Revoked");
 
     // ── Layout ──────────────────────────────────
-    m.insert("layout.toggle_sidebar", "Toggle sidebar");
+    m.insert("layout.back_to_home", "Back to Home");
     m.insert("layout.open_menu", "Open menu");
     m.insert("layout.switch_to_light", "Switch to light theme");
     m.insert("layout.switch_to_dark", "Switch to dark theme");
@@ -312,6 +312,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("home.welcome", "Welcome to KeyCompute");
     m.insert("home.login", "Sign In");
     m.insert("home.register", "Sign Up");
+    m.insert("home.console", "Console");
     m.insert("home.toggle_theme", "Toggle Theme");
     m.insert("home.features.title", "Core Features");
     m.insert("home.features.routing.title", "Smart Routing");

@@ -303,7 +303,7 @@ pub fn AppLayout() -> Element {
             nav_sections,
             user_name,
             current_path,
-            toggle_sidebar_title: i18n.t("layout.toggle_sidebar"),
+            home_title: i18n.t("layout.back_to_home"),
             open_menu_title: i18n.t("layout.open_menu"),
             switch_to_light_theme_title: i18n.t("layout.switch_to_light"),
             switch_to_dark_theme_title: i18n.t("layout.switch_to_dark"),

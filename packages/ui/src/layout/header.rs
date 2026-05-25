@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use crate::icons::{IconChevronDown, IconLogOut, IconMenu, IconSettings, IconUser};
+use crate::icons::{IconChevronDown, IconHome, IconLogOut, IconMenu, IconSettings, IconUser};
 
 /// 用户下拉菜单项回调
 #[derive(Clone, Copy, PartialEq)]
@@ -31,7 +31,7 @@ pub fn Header(
     sidebar_mobile_open: Signal<bool>,
     theme: Signal<String>,
     lang: Signal<String>,
-    #[props(default)] toggle_sidebar_title: String,
+    #[props(default)] home_title: String,
     #[props(default)] open_menu_title: String,
     #[props(default)] switch_to_light_theme_title: String,
     #[props(default)] switch_to_dark_theme_title: String,
@@ -74,15 +74,15 @@ pub fn Header(
         header { class: "header",
             // 左侧
             div { class: "header-left",
-                // PC 端折叠/展开按钮
+                // PC 端返回首页按钮
                 button {
                     class: "header-toggle-btn hide-mobile",
-                    title: "{toggle_sidebar_title}",
+                    title: "{home_title}",
                     onclick: move |_| {
-                        let cur = sidebar_collapsed();
-                        *sidebar_collapsed.write() = !cur;
+                        let nav = use_navigator();
+                        nav.push("/");
                     },
-                    IconMenu { size: 20 }
+                    IconHome { size: 20 }
                 }
                 // 移动端汉堡菜单
                 button {

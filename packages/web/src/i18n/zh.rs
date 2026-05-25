@@ -259,7 +259,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.revoked", "已撤销");
 
     // ── Layout ──────────────────────────────────
-    m.insert("layout.toggle_sidebar", "切换侧边栏");
+    m.insert("layout.back_to_home", "返回首页");
     m.insert("layout.open_menu", "打开菜单");
     m.insert("layout.switch_to_light", "切换到亮色主题");
     m.insert("layout.switch_to_dark", "切换到暗色主题");
@@ -276,6 +276,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("home.welcome", "欢迎使用 KeyCompute");
     m.insert("home.login", "登录");
     m.insert("home.register", "注册");
+    m.insert("home.console", "控制台");
     m.insert("home.toggle_theme", "切换主题");
     m.insert("home.features.title", "核心优势");
     m.insert("home.features.routing.title", "智能路由");
