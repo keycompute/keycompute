@@ -7,6 +7,7 @@ use client_api::api::payment::CreatePaymentOrderRequest;
 use crate::router::Route;
 use crate::services::payment_service;
 use crate::stores::auth_store::AuthStore;
+use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::ui_store::UiStore;
 
 /// 支付方式枚举
@@ -55,6 +56,12 @@ enum OrderState {
 pub fn Recharge() -> Element {
     let auth_store = use_context::<AuthStore>();
     let mut ui_store = use_context::<UiStore>();
+    let public_settings_store = use_context::<PublicSettingsStore>();
+    let site_name = use_memo(move || {
+        public_settings_store
+            .site_name()
+            .unwrap_or_else(|| "KeyCompute".to_string())
+    });
     let nav = use_navigator();
 
     let mut amount = use_signal(String::new);
@@ -168,8 +175,9 @@ pub fn Recharge() -> Element {
         order_state.set(OrderState::Idle);
         spawn(async move {
             let token = auth_store.token().unwrap_or_default();
+            let body_name = site_name();
             let req = CreatePaymentOrderRequest::new(amount_val, "账户充值", payment_type)
-                .with_body(format!("KeyCompute 账户充值 {} 元", amount_val));
+                .with_body(format!("{} 账户充值 {} 元", body_name, amount_val));
             match payment_service::create_order(req, &token).await {
                 Ok(order) => {
                     loading.set(false);

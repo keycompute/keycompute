@@ -50,6 +50,7 @@ pub fn AppShell(
     #[props(default)] collapse_sidebar_title: String,
     #[props(default)] expand_label: String,
     #[props(default)] collapse_label: String,
+    #[props(default = "KeyCompute".to_string())] site_name: String,
     #[props(default)] on_user_menu: EventHandler<UserMenuAction>,
     children: Element,
 ) -> Element {
@@ -142,6 +143,7 @@ pub fn AppShell(
                 collapse_sidebar_title: collapse_sidebar_title.clone(),
                 expand_label: expand_label.clone(),
                 collapse_label: collapse_label.clone(),
+                site_name: site_name.clone(),
             }
 
             div { class: "{main_class}",
@@ -170,7 +172,9 @@ pub fn AppShell(
                     }
                 }
 
-                Footer {}
+                Footer {
+                    site_name: site_name.clone(),
+                }
             }
         }
     }

@@ -203,6 +203,9 @@ pub fn AppLayout() -> Element {
     let r_admin_node_gateway = Route::NodeGateway {}.to_string();
     let r_admin_monitoring = Route::Monitoring {}.to_string();
     let r_admin_system_settings = Route::Settings {}.to_string();
+    let site_name = public_settings_store
+        .site_name()
+        .unwrap_or_else(|| "KeyCompute".to_string());
     let show_distribution_nav = public_settings_store.loaded()
         && !matches!(public_settings_store.distribution_enabled(), Some(false));
 
@@ -299,10 +302,13 @@ pub fn AppLayout() -> Element {
     let current_path = use_route::<Route>().to_string();
 
     rsx! {
+        document::Title { "{site_name}" }
+
         AppShell {
             nav_sections,
             user_name,
             current_path,
+            site_name,
             home_title: i18n.t("layout.back_to_home"),
             open_menu_title: i18n.t("layout.open_menu"),
             switch_to_light_theme_title: i18n.t("layout.switch_to_light"),

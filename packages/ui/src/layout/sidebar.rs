@@ -77,6 +77,7 @@ pub fn Sidebar(
     #[props(default)] collapse_sidebar_title: String,
     #[props(default)] expand_label: String,
     #[props(default)] collapse_label: String,
+    #[props(default = "KeyCompute".to_string())] site_name: String,
 ) -> Element {
     let is_collapsed = collapsed();
     let is_mobile_open = mobile_open();
@@ -105,7 +106,7 @@ pub fn Sidebar(
             div { class: "sidebar-logo",
                 div { class: "sidebar-logo-icon", "K" }
                 div { class: "sidebar-logo-copy",
-                    span { class: "sidebar-logo-text", "KeyCompute" }
+                    span { class: "sidebar-logo-text", "{site_name}" }
                     span { class: "sidebar-logo-kicker", "AI token platform" }
                 }
             }

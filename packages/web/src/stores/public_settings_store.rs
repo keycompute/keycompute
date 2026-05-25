@@ -21,6 +21,14 @@ impl PublicSettingsStore {
         self.state.read().loaded
     }
 
+    pub fn site_name(&self) -> Option<String> {
+        self.state
+            .read()
+            .settings
+            .as_ref()
+            .map(|settings| settings.site_name.clone())
+    }
+
     pub fn distribution_enabled(&self) -> Option<bool> {
         self.state
             .read()

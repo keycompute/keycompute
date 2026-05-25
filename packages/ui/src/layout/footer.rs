@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 /// 页脚组件
 #[component]
-pub fn Footer() -> Element {
+pub fn Footer(#[props(default = "KeyCompute".to_string())] site_name: String) -> Element {
     rsx! {
         footer { class: "footer",
             span { class: "footer-text",
@@ -12,7 +12,7 @@ pub fn Footer() -> Element {
                     href: "https://github.com/aiqubits/keycompute",
                     target: "_blank",
                     rel: "noopener noreferrer",
-                    "KeyCompute"
+                    "{site_name}"
                 }
                 ". All Rights Reserved."
             }

@@ -6,6 +6,7 @@ use crate::router::Route;
 use crate::services::api_client::{get_client, user_error_message};
 use crate::services::auth_service;
 use crate::stores::auth_store::AuthStore;
+use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::user_store::{UserInfo, UserStore};
 use ui::components::modal::Modal;
 
@@ -44,6 +45,14 @@ pub fn Home() -> Element {
     let auth_store = use_context::<AuthStore>();
     let is_authenticated = use_memo(move || auth_store.is_authenticated());
 
+    // 平台名称（从公开设置读取，动态加载）
+    let public_settings_store = use_context::<PublicSettingsStore>();
+    let site_name = use_memo(move || {
+        public_settings_store
+            .site_name()
+            .unwrap_or_else(|| "KeyCompute".to_string())
+    });
+
     // 提前提取所有 i18n 文本
     let t_toggle_theme = i18n.t("home.toggle_theme");
     let t_toggle_lang = if is_zh {
@@ -78,6 +87,8 @@ pub fn Home() -> Element {
     let t_custom_desc = i18n.t("home.features.custom.desc");
 
     rsx! {
+        document::Title { "{site_name}" }
+
         div {
             class: "kc-home-page",
             // 背景动画效果 - 根据主题显示不同背景
@@ -155,7 +166,7 @@ pub fn Home() -> Element {
                             src: asset!("/assets/logo.jpg"),
                             alt: "KeyCompute",
                         }
-                        span { class: "kc-home-logo-text", "KeyCompute" }
+                        span { class: "kc-home-logo-text", "{site_name}" }
                     }
 
                     // 移动端汉堡菜单按钮
@@ -505,9 +516,9 @@ pub fn Home() -> Element {
                     }
                     p { class: "kc-home-tip-subtitle",
                         if is_zh {
-                            "如果您喜欢 KeyCompute，欢迎请我们喝杯咖啡 ☕"
+                            "如果您喜欢 " {site_name} "，欢迎请我们喝杯咖啡 ☕"
                         } else {
-                            "If you like KeyCompute, feel free to buy us a coffee ☕"
+                            "If you like " {site_name} ", feel free to buy us a coffee ☕"
                         }
                     }
                     div {
@@ -547,7 +558,7 @@ pub fn Home() -> Element {
                         href: "https://github.com/aiqubits/keycompute",
                         target: "_blank",
                         rel: "noopener noreferrer",
-                        "KeyCompute"
+                        {site_name}
                     }
                     ". All Rights Reserved."
                 }

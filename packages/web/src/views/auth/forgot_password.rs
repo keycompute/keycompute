@@ -5,6 +5,7 @@ use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::api_client::user_error_message;
 use crate::services::auth_service;
+use crate::stores::public_settings_store::PublicSettingsStore;
 
 const FORGOT_PASSWORD_IDENTITY_ERROR: &str = "邮箱地址或用户名错误，无法发送重置密码链接";
 const FORGOT_PASSWORD_ERROR_COOLDOWN_SECS: u32 = 30;
@@ -24,6 +25,12 @@ fn start_error_cooldown(mut cooldown_seconds: Signal<u32>) {
 #[component]
 pub fn ForgotPassword() -> Element {
     let i18n = use_i18n();
+    let public_settings_store = use_context::<PublicSettingsStore>();
+    let site_name = use_memo(move || {
+        public_settings_store
+            .site_name()
+            .unwrap_or_else(|| "KeyCompute".to_string())
+    });
     let mut name = use_signal(String::new);
     let mut email = use_signal(String::new);
     let mut loading = use_signal(|| false);
@@ -79,6 +86,8 @@ pub fn ForgotPassword() -> Element {
     };
 
     rsx! {
+        document::Title { "{site_name}" }
+
         div {
             class: "kc-login-page",
             div { class: "kc-login-bg-grid" }
@@ -93,7 +102,7 @@ pub fn ForgotPassword() -> Element {
                         div {
                             class: "kc-login-logo",
                             div { class: "kc-login-logo-icon" }
-                            div { class: "kc-login-logo-text", "KeyCompute" }
+                            div { class: "kc-login-logo-text", "{site_name}" }
                         }
                         h1 {
                             class: "kc-login-tagline",
