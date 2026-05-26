@@ -93,14 +93,23 @@ pub fn App() -> Element {
         // 恢复 token 到 API 客户端
         get_client().set_token(&token);
         spawn(async move {
-            if let Ok(user) = user_service::get_current_user(&token).await {
-                *user_store.info.write() = Some(UserInfo {
-                    id: user.id.to_string(),
-                    email: user.email,
-                    name: user.name,
-                    role: user.role,
-                    tenant_id: user.tenant_id.to_string(),
-                });
+            match user_service::get_current_user(&token).await {
+                Ok(user) => {
+                    *user_store.info.write() = Some(UserInfo {
+                        id: user.id.to_string(),
+                        email: user.email,
+                        name: user.name,
+                        role: user.role,
+                        tenant_id: user.tenant_id.to_string(),
+                    });
+                }
+                Err(err) if err.is_auth_error() => {
+                    let mut auth_store = auth_store;
+                    auth_store.logout();
+                    get_client().clear_token();
+                    *user_store.info.write() = None;
+                }
+                Err(_) => {}
             }
         });
     });

@@ -47,7 +47,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.password", "密码");
     m.insert("auth.confirm_password", "确认密码");
     m.insert("auth.name", "姓名");
-    m.insert("auth.remember_me", "记住我");
+    m.insert("auth.remember_me", "记住密码");
     m.insert("auth.no_account", "还没有账号？");
     m.insert("auth.has_account", "已有账号？");
     m.insert("auth.send_reset_email", "发送重置邮件");
