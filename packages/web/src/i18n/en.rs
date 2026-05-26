@@ -48,6 +48,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("auth.confirm_password", "Confirm Password");
     m.insert("auth.name", "Name");
     m.insert("auth.remember_me", "Remember me");
+    m.insert("auth.remember_me_hint", "Stay signed in after closing the browser");
     m.insert("auth.no_account", "Don't have an account?");
     m.insert("auth.has_account", "Already have an account?");
     m.insert("auth.send_reset_email", "Send Reset Email");

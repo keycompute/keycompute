@@ -600,7 +600,7 @@ fn LoginModal(
     let mut loading = use_signal(|| false);
     let mut error_msg = use_signal(|| Option::<String>::None);
     let mut show_password = use_signal(|| false);
-    let mut remember_me = use_signal(|| false);
+    let mut remember_password = use_signal(|| false);
     let mut auth_store = use_context::<AuthStore>();
     let mut user_store = use_context::<UserStore>();
     let nav = use_navigator();
@@ -613,6 +613,7 @@ fn LoginModal(
     let t_password = i18n.t("auth.password");
     let t_password_placeholder = i18n.t("auth.password_placeholder");
     let t_remember_me = i18n.t("auth.remember_me");
+    let t_remember_me_hint = i18n.t("auth.remember_me_hint");
     let t_forgot_password = i18n.t("auth.forgot_password");
     let t_fill_all = i18n.t("auth.fill_all");
     let t_login_failed = i18n.t("auth.login_failed");
@@ -631,11 +632,13 @@ fn LoginModal(
         }
         loading.set(true);
         error_msg.set(None);
+        let should_remember_password = remember_password();
         spawn(async move {
             match auth_service::login(&email_val, &password_val).await {
                 Ok(resp) => {
                     get_client().set_token(&resp.access_token);
-                    auth_store.login_with_persist(resp.access_token.clone(), remember_me());
+                    auth_store
+                        .login_with_persist(resp.access_token.clone(), should_remember_password);
                     *user_store.info.write() = Some(UserInfo {
                         id: resp.user_id.clone(),
                         email: resp.email.clone(),
@@ -672,6 +675,7 @@ fn LoginModal(
                 }
 
                 form {
+                    autocomplete: "on",
                     onsubmit: on_submit,
                     div {
                         class: "kc-auth-form-group",
@@ -679,6 +683,7 @@ fn LoginModal(
                         input {
                             class: "kc-auth-form-input",
                             r#type: "email",
+                            autocomplete: "username",
                             placeholder: "{t_email_placeholder}",
                             value: "{email}",
                             oninput: move |e| email.set(e.value()),
@@ -693,6 +698,7 @@ fn LoginModal(
                             input {
                                 class: "kc-auth-form-input",
                                 r#type: "{password_type}",
+                                autocomplete: "current-password",
                                 placeholder: "{t_password_placeholder}",
                                 value: "{password}",
                                 oninput: move |e| password.set(e.value()),
@@ -730,14 +736,18 @@ fn LoginModal(
 
                     div {
                         class: "kc-auth-form-options",
-                        label {
-                            class: "kc-auth-checkbox-label",
-                            input {
-                                r#type: "checkbox",
-                                checked: remember_me(),
-                                onclick: move |_| remember_me.set(!remember_me()),
+                        div {
+                            class: "kc-auth-remember-group",
+                            label {
+                                class: "kc-auth-checkbox-label",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: remember_password(),
+                                    onchange: move |e| remember_password.set(e.checked()),
+                                }
+                                span { "{t_remember_me}" }
                             }
-                            span { "{t_remember_me}" }
+                            p { class: "kc-auth-remember-hint", "{t_remember_me_hint}" }
                         }
                         button {
                             class: "kc-auth-link-btn",

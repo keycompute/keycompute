@@ -3444,6 +3444,17 @@ select.form-input:focus {
   min-width: 0;
 }
 
+.setting-input-row > .input-field[type="number"] {
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+
+.setting-input-row > .input-field[type="number"]::-webkit-inner-spin-button,
+.setting-input-row > .input-field[type="number"]::-webkit-outer-spin-button {
+  margin: 0;
+  -webkit-appearance: none;
+}
+
 .setting-control {
   min-height: 40px;
 }
@@ -5161,9 +5172,13 @@ select.form-input:focus {
 .kc-auth-toggle-password:hover { color: var(--kc-home-accent); }
 .kc-auth-form-options {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
+  gap: 16px;
   margin-bottom: 20px;
+}
+.kc-auth-remember-group {
+  min-width: 0;
 }
 .kc-auth-checkbox-label {
   display: flex;
@@ -5177,6 +5192,12 @@ select.form-input:focus {
   width: 16px;
   height: 16px;
   accent-color: var(--kc-home-accent);
+}
+.kc-auth-remember-hint {
+  margin: 4px 0 0 24px;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--kc-home-text-muted);
 }
 .kc-auth-link-btn {
   background: none;

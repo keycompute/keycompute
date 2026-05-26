@@ -188,6 +188,27 @@ fn normalize_setting_update(key: &str, value: impl Into<String>) -> Result<Strin
         return Ok(quota.to_string());
     }
 
+    if key == setting_keys::JWT_EXPIRE_HOURS {
+        let hours = value.parse::<i64>().map_err(|_| {
+            ApiError::BadRequest("Setting jwt_expire_hours must be a valid integer".to_string())
+        })?;
+
+        if hours <= 0 {
+            return Err(ApiError::BadRequest(
+                "Setting jwt_expire_hours must be positive".to_string(),
+            ));
+        }
+
+        if hours > setting_keys::JWT_EXPIRE_HOURS_MAX {
+            return Err(ApiError::BadRequest(format!(
+                "Setting jwt_expire_hours must be less than or equal to {}",
+                setting_keys::JWT_EXPIRE_HOURS_MAX
+            )));
+        }
+
+        return Ok(hours.to_string());
+    }
+
     Ok(value)
 }
 
@@ -503,6 +524,39 @@ mod tests {
         let err =
             normalize_setting_update(setting_keys::DEFAULT_USER_QUOTA, "not-a-number").unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("default_user_quota")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_invalid_jwt_expire_hours() {
+        let err = normalize_setting_update(setting_keys::JWT_EXPIRE_HOURS, "0").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("jwt_expire_hours")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_non_numeric_jwt_expire_hours() {
+        let err = normalize_setting_update(setting_keys::JWT_EXPIRE_HOURS, "abc").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("jwt_expire_hours")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_negative_jwt_expire_hours() {
+        let err = normalize_setting_update(setting_keys::JWT_EXPIRE_HOURS, "-1").unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("jwt_expire_hours")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_rejects_too_large_jwt_expire_hours() {
+        let too_large = (setting_keys::JWT_EXPIRE_HOURS_MAX + 1).to_string();
+        let err = normalize_setting_update(setting_keys::JWT_EXPIRE_HOURS, too_large).unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("jwt_expire_hours")));
+    }
+
+    #[test]
+    fn test_normalize_setting_update_accepts_valid_jwt_expire_hours() {
+        assert_eq!(
+            normalize_setting_update(setting_keys::JWT_EXPIRE_HOURS, "12").unwrap(),
+            "12"
+        );
     }
 
     #[test]

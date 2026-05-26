@@ -95,6 +95,7 @@ pub mod setting_keys {
     pub const LOGIN_FAILED_LIMIT: &str = "login_failed_limit";
     pub const LOGIN_LOCKOUT_MINUTES: &str = "login_lockout_minutes";
     pub const JWT_EXPIRE_HOURS: &str = "jwt_expire_hours";
+    pub const JWT_EXPIRE_HOURS_MAX: i64 = 8760;
     // 密码策略使用硬编码，参见 keycompute-auth/src/password/validator.rs
 
     // 公告设置
