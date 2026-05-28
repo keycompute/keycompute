@@ -32,36 +32,40 @@ async fn configured_jwt_validator(state: &AppState) -> Result<JwtValidator> {
         .ok_or_else(|| ApiError::Internal("JWT not configured".into()))?
         .clone();
 
-    if let Some(pool) = state.pool.as_ref() {
-        if let Some(setting) =
+    if let Some(pool) = state.pool.as_ref()
+        && let Some(setting) =
             keycompute_db::SystemSetting::find_by_key(pool, setting_keys::JWT_EXPIRE_HOURS)
                 .await
                 .map_err(|e| {
                     ApiError::Internal(format!("Failed to query JWT expiry setting: {}", e))
                 })?
-        {
-            let hours = setting.value.parse::<i64>().map_err(|_| {
-                ApiError::Config("Invalid setting jwt_expire_hours: must be an integer".to_string())
-            })?;
-            if hours <= 0 {
-                return Err(ApiError::Config(
-                    "Invalid setting jwt_expire_hours: must be positive".to_string(),
-                ));
-            }
-            if hours > setting_keys::JWT_EXPIRE_HOURS_MAX {
-                return Err(ApiError::Config(format!(
-                    "Invalid setting jwt_expire_hours: must be less than or equal to {}",
-                    setting_keys::JWT_EXPIRE_HOURS_MAX
-                )));
-            }
-            let expiration_seconds = hours.checked_mul(3600).ok_or_else(|| {
-                ApiError::Config("Invalid setting jwt_expire_hours: overflow".to_string())
-            })?;
-            validator = validator.with_expiration(expiration_seconds);
-        }
+    {
+        let expiration_seconds = jwt_expiration_seconds_from_setting(&setting.value)?;
+        validator = validator.with_expiration(expiration_seconds);
     }
 
     Ok(validator)
+}
+
+/// 解析并校验 `jwt_expire_hours` 设置值，返回对应的过期秒数。
+fn jwt_expiration_seconds_from_setting(value: &str) -> Result<i64> {
+    let hours = value.parse::<i64>().map_err(|_| {
+        ApiError::Config("Invalid setting jwt_expire_hours: must be an integer".to_string())
+    })?;
+    if hours <= 0 {
+        return Err(ApiError::Config(
+            "Invalid setting jwt_expire_hours: must be positive".to_string(),
+        ));
+    }
+    if hours > setting_keys::JWT_EXPIRE_HOURS_MAX {
+        return Err(ApiError::Config(format!(
+            "Invalid setting jwt_expire_hours: must be less than or equal to {}",
+            setting_keys::JWT_EXPIRE_HOURS_MAX
+        )));
+    }
+    hours
+        .checked_mul(3600)
+        .ok_or_else(|| ApiError::Config("Invalid setting jwt_expire_hours: overflow".to_string()))
 }
 
 // ============================================================================
@@ -480,5 +484,43 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("Success"));
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_valid() {
+        assert_eq!(
+            jwt_expiration_seconds_from_setting("12").unwrap(),
+            12 * 3600
+        );
+        assert_eq!(
+            jwt_expiration_seconds_from_setting(&setting_keys::JWT_EXPIRE_HOURS_MAX.to_string())
+                .unwrap(),
+            setting_keys::JWT_EXPIRE_HOURS_MAX * 3600
+        );
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_rejects_non_integer() {
+        let err = jwt_expiration_seconds_from_setting("abc").unwrap_err();
+        assert!(matches!(err, ApiError::Config(msg) if msg.contains("integer")));
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_rejects_non_positive() {
+        assert!(matches!(
+            jwt_expiration_seconds_from_setting("0").unwrap_err(),
+            ApiError::Config(msg) if msg.contains("positive")
+        ));
+        assert!(matches!(
+            jwt_expiration_seconds_from_setting("-1").unwrap_err(),
+            ApiError::Config(msg) if msg.contains("positive")
+        ));
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_rejects_above_max() {
+        let too_large = (setting_keys::JWT_EXPIRE_HOURS_MAX + 1).to_string();
+        let err = jwt_expiration_seconds_from_setting(&too_large).unwrap_err();
+        assert!(matches!(err, ApiError::Config(msg) if msg.contains("less than or equal to")));
     }
 }

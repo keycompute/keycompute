@@ -600,7 +600,7 @@ fn LoginModal(
     let mut loading = use_signal(|| false);
     let mut error_msg = use_signal(|| Option::<String>::None);
     let mut show_password = use_signal(|| false);
-    let mut remember_password = use_signal(|| false);
+    let mut remember_me = use_signal(|| false);
     let mut auth_store = use_context::<AuthStore>();
     let mut user_store = use_context::<UserStore>();
     let nav = use_navigator();
@@ -632,13 +632,12 @@ fn LoginModal(
         }
         loading.set(true);
         error_msg.set(None);
-        let should_remember_password = remember_password();
+        let should_remember = remember_me();
         spawn(async move {
             match auth_service::login(&email_val, &password_val).await {
                 Ok(resp) => {
                     get_client().set_token(&resp.access_token);
-                    auth_store
-                        .login_with_persist(resp.access_token.clone(), should_remember_password);
+                    auth_store.login_with_persist(resp.access_token.clone(), should_remember);
                     *user_store.info.write() = Some(UserInfo {
                         id: resp.user_id.clone(),
                         email: resp.email.clone(),
@@ -742,8 +741,8 @@ fn LoginModal(
                                 class: "kc-auth-checkbox-label",
                                 input {
                                     r#type: "checkbox",
-                                    checked: remember_password(),
-                                    onchange: move |e| remember_password.set(e.checked()),
+                                    checked: remember_me(),
+                                    onchange: move |e| remember_me.set(e.checked()),
                                 }
                                 span { "{t_remember_me}" }
                             }
