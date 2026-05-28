@@ -15,13 +15,58 @@ use axum::{
     response::IntoResponse,
 };
 use keycompute_auth::{
-    CompleteRegistrationRequest, LoginRequest, PasswordResetService, RegistrationService,
-    RequestPasswordResetRequest, RequestRegistrationCodeRequest, ResetPasswordRequest,
+    CompleteRegistrationRequest, JwtValidator, LoginRequest, PasswordResetService,
+    RegistrationService, RequestPasswordResetRequest, RequestRegistrationCodeRequest,
+    ResetPasswordRequest,
 };
+use keycompute_db::models::system_setting::setting_keys;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 const FORGOT_PASSWORD_IDENTITY_ERROR: &str = "邮箱地址或用户名错误，无法发送重置密码链接";
+
+async fn configured_jwt_validator(state: &AppState) -> Result<JwtValidator> {
+    let mut validator = state
+        .auth
+        .get_jwt_validator()
+        .ok_or_else(|| ApiError::Internal("JWT not configured".into()))?
+        .clone();
+
+    if let Some(pool) = state.pool.as_ref()
+        && let Some(setting) =
+            keycompute_db::SystemSetting::find_by_key(pool, setting_keys::JWT_EXPIRE_HOURS)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(format!("Failed to query JWT expiry setting: {}", e))
+                })?
+    {
+        let expiration_seconds = jwt_expiration_seconds_from_setting(&setting.value)?;
+        validator = validator.with_expiration(expiration_seconds);
+    }
+
+    Ok(validator)
+}
+
+/// 解析并校验 `jwt_expire_hours` 设置值，返回对应的过期秒数。
+fn jwt_expiration_seconds_from_setting(value: &str) -> Result<i64> {
+    let hours = value.parse::<i64>().map_err(|_| {
+        ApiError::Config("Invalid setting jwt_expire_hours: must be an integer".to_string())
+    })?;
+    if hours <= 0 {
+        return Err(ApiError::Config(
+            "Invalid setting jwt_expire_hours: must be positive".to_string(),
+        ));
+    }
+    if hours > setting_keys::JWT_EXPIRE_HOURS_MAX {
+        return Err(ApiError::Config(format!(
+            "Invalid setting jwt_expire_hours: must be less than or equal to {}",
+            setting_keys::JWT_EXPIRE_HOURS_MAX
+        )));
+    }
+    hours
+        .checked_mul(3600)
+        .ok_or_else(|| ApiError::Config("Invalid setting jwt_expire_hours: overflow".to_string()))
+}
 
 // ============================================================================
 // 请求/响应类型
@@ -183,11 +228,7 @@ pub async fn login_handler(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
 
-    let jwt_validator = state
-        .auth
-        .get_jwt_validator()
-        .ok_or_else(|| ApiError::Internal("JWT not configured".into()))?
-        .clone();
+    let jwt_validator = configured_jwt_validator(&state).await?;
 
     let login_req = LoginRequest {
         email: req.email,
@@ -335,15 +376,14 @@ pub async fn refresh_token_handler(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
 
-    let jwt_validator = state
-        .auth
-        .get_jwt_validator()
-        .ok_or_else(|| ApiError::Internal("JWT not configured".into()))?
-        .clone();
+    let jwt_validator = configured_jwt_validator(&state).await?;
 
     let service = keycompute_auth::LoginService::new(Arc::clone(pool), jwt_validator);
+    let token = req
+        .token()
+        .ok_or_else(|| ApiError::BadRequest("Missing token or refresh_token".to_string()))?;
     let response = service
-        .refresh_token(&req.token)
+        .refresh_token(token)
         .await
         .map_err(|e| ApiError::Auth(format!("Token refresh failed: {}", e)))?;
 
@@ -364,7 +404,17 @@ pub async fn refresh_token_handler(
 /// 刷新 Token 请求
 #[derive(Debug, Deserialize)]
 pub struct RefreshTokenRequestJson {
-    pub token: String,
+    pub token: Option<String>,
+    pub refresh_token: Option<String>,
+}
+
+impl RefreshTokenRequestJson {
+    fn token(&self) -> Option<&str> {
+        self.token
+            .as_deref()
+            .or(self.refresh_token.as_deref())
+            .filter(|token| !token.trim().is_empty())
+    }
 }
 
 #[cfg(test)]
@@ -434,5 +484,43 @@ mod tests {
 
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("Success"));
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_valid() {
+        assert_eq!(
+            jwt_expiration_seconds_from_setting("12").unwrap(),
+            12 * 3600
+        );
+        assert_eq!(
+            jwt_expiration_seconds_from_setting(&setting_keys::JWT_EXPIRE_HOURS_MAX.to_string())
+                .unwrap(),
+            setting_keys::JWT_EXPIRE_HOURS_MAX * 3600
+        );
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_rejects_non_integer() {
+        let err = jwt_expiration_seconds_from_setting("abc").unwrap_err();
+        assert!(matches!(err, ApiError::Config(msg) if msg.contains("integer")));
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_rejects_non_positive() {
+        assert!(matches!(
+            jwt_expiration_seconds_from_setting("0").unwrap_err(),
+            ApiError::Config(msg) if msg.contains("positive")
+        ));
+        assert!(matches!(
+            jwt_expiration_seconds_from_setting("-1").unwrap_err(),
+            ApiError::Config(msg) if msg.contains("positive")
+        ));
+    }
+
+    #[test]
+    fn test_jwt_expiration_seconds_from_setting_rejects_above_max() {
+        let too_large = (setting_keys::JWT_EXPIRE_HOURS_MAX + 1).to_string();
+        let err = jwt_expiration_seconds_from_setting(&too_large).unwrap_err();
+        assert!(matches!(err, ApiError::Config(msg) if msg.contains("less than or equal to")));
     }
 }
