@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://github.com/keycompute/keycompute/stargazers"><img src="https://img.shields.io/github/stars/keycompute/keycompute?style=social" alt="GitHub Stars" /></a>
-  <a href="https://github.com/keycompute/keycompute/issues"><img src="https://img.shields.io/github/issues/keycompute/keycompute" alt="GitHub Issues" /></a>
+  <a href="https://github.com/keycompute/keycompute/issues"><img src="https://img.shields.io/github/issues/aiqubits/keycompute" alt="GitHub Issues" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs Welcome" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.92%2B-orange?logo=rust" alt="Rust Version" /></a>
@@ -252,7 +252,7 @@ keycompute/
 | `KC__REDIS__URL` | Redis 連線字串 | ⚪ |
 | `KC__AUTH__JWT_SECRET` | JWT 簽名金鑰 | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | API Key 加密金鑰 | ✅ |
-| `KC__NODE_GATEWAY__REGISTRATION_TOKEN` | 節點註冊令牌；用於驗證節點註冊請求，所有節點共享 | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | HMAC 簽名金鑰；用於簽發一次性節點註冊 token（審批制） | ✅ |
 | `KC__EMAIL__SMTP_HOST` | SMTP 伺服器位址 | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | SMTP 伺服器連接埠 | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | SMTP 使用者名稱 | ⚪ |

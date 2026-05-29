@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 /// - `footer`   — 卡片底部区（可选）
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// Card {
 ///     title: "API Keys",
 ///     Card {

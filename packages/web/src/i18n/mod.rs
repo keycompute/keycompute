@@ -50,4 +50,16 @@ impl I18n {
         };
         map.get(key).copied().unwrap_or("?")
     }
+
+    /// 获取带参数的翻译文本。
+    /// 在翻译值中使用 `{key}` 作为占位符，例如：
+    ///   "hello_user": "Hello, {name}!"
+    /// 调用：`i18n.t_with_args("hello_user", &[("name", "Alice")]`
+    pub fn t_with_args(&self, key: &str, args: &[(&str, &str)]) -> String {
+        let mut s = self.t(key).to_string();
+        for (k, v) in args {
+            s = s.replace(&format!("{{{}}}", k), v);
+        }
+        s
+    }
 }

@@ -24,8 +24,9 @@ pub use monitoring::{
     MonitoringNodeHealth, MonitoringOverviewResponse, MonitoringSummary, MonitoringTraceEntry,
 };
 pub use node_gateway::{
-    NodeGatewayNodeInfo, NodeGatewayNodeStats, NodeGatewayOverviewResponse, NodeGatewayTaskInfo,
-    NodeGatewayTaskStats,
+    ApproveTokenRequest, DeleteNodeResponse, ExcludeNodeResponse, NodeGatewayNodeInfo,
+    NodeGatewayNodeStats, NodeGatewayOverviewResponse, NodeGatewayTaskInfo, NodeGatewayTaskStats,
+    PendingTokenWithUser, RecoverNodeResponse, RevokeNodeRequest, RevokeNodeTokenResponse,
 };
 pub use payment::PaymentOrderInfo;
 pub use pricing::{
@@ -221,6 +222,77 @@ impl AdminApi {
     pub async fn node_gateway_overview(&self, token: &str) -> Result<NodeGatewayOverviewResponse> {
         self.client
             .get_json("/api/v1/admin/node-gateway/overview", Some(token))
+            .await
+    }
+
+    /// 获取待审批的注册令牌列表
+    pub async fn list_pending_tokens(&self, token: &str) -> Result<Vec<PendingTokenWithUser>> {
+        self.client
+            .get_json("/api/v1/admin/node-gateway/tokens/pending", Some(token))
+            .await
+    }
+
+    /// 审批/拒绝注册令牌
+    pub async fn approve_token(
+        &self,
+        token_id: &str,
+        req: &ApproveTokenRequest,
+        auth_token: &str,
+    ) -> Result<serde_json::Value> {
+        self.client
+            .post_json(
+                &format!("/api/v1/admin/node-gateway/tokens/{}/approve", token_id),
+                req,
+                Some(auth_token),
+            )
+            .await
+    }
+
+    /// 排除节点（从节点池中移除）
+    pub async fn exclude_node(&self, node_id: &str, token: &str) -> Result<ExcludeNodeResponse> {
+        self.client
+            .post_json(
+                &format!("/api/v1/admin/nodes/{}/exclude", node_id),
+                &(),
+                Some(token),
+            )
+            .await
+    }
+
+    /// 恢复被排除的节点
+    pub async fn recover_node(&self, node_id: &str, token: &str) -> Result<RecoverNodeResponse> {
+        self.client
+            .post_json(
+                &format!("/api/v1/admin/nodes/{}/recover", node_id),
+                &(),
+                Some(token),
+            )
+            .await
+    }
+
+    /// 吊销节点注册令牌（排除节点 + 将对应 token 标记为 rejected 并记录原因）
+    pub async fn revoke_node_token(
+        &self,
+        node_id: &str,
+        reason: &str,
+        token: &str,
+    ) -> Result<RevokeNodeTokenResponse> {
+        let req = RevokeNodeRequest {
+            reason: reason.to_string(),
+        };
+        self.client
+            .post_json(
+                &format!("/api/v1/admin/nodes/{}/revoke-token", node_id),
+                &req,
+                Some(token),
+            )
+            .await
+    }
+
+    /// 删除节点（彻底删除节点数据，清除关联 token）
+    pub async fn delete_node(&self, node_id: &str, token: &str) -> Result<DeleteNodeResponse> {
+        self.client
+            .delete_json(&format!("/api/v1/admin/nodes/{}", node_id), Some(token))
             .await
     }
 

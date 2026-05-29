@@ -1862,6 +1862,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenv"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77c90badedccf4105eca100756a0b1289e191f6fcbdadd3cee1d2f614f97da8f"
+
+[[package]]
 name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3104,6 +3110,7 @@ dependencies = [
  "bytes",
  "chrono",
  "dashmap",
+ "dotenv",
  "futures",
  "hex",
  "keycompute-auth",
@@ -3424,11 +3431,15 @@ version = "0.2.0"
 dependencies = [
  "bigdecimal",
  "chrono",
+ "hex",
+ "hmac",
  "keycompute-types",
  "rust_decimal",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -7481,6 +7492,7 @@ dependencies = [
  "serde_json",
  "ui",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

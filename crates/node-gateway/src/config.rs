@@ -5,11 +5,22 @@
 use keycompute_config::NodeGatewayConfig;
 use std::time::Duration;
 
+/// Node Gateway 配置加载错误
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// 生产环境下 registration_token_secret 为必填项
+    #[error(
+        "生产环境禁止使用默认 registration_token_secret，\
+         请设置 KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET 环境变量"
+    )]
+    RegistrationTokenSecretRequired,
+}
+
 /// Node Gateway 配置
 #[derive(Debug, Clone)]
 pub struct NodeGatewayAppConfig {
-    /// 注册 token (全局 token,用于验证节点注册请求)
-    pub registration_token: String,
+    /// HMAC 签名密钥（用于验证节点注册 token 的 HMAC 签名）
+    pub registration_token_secret: String,
     /// 会话 TTL(秒)
     pub session_ttl_secs: u64,
     /// 心跳间隔(秒)
@@ -33,7 +44,7 @@ pub struct NodeGatewayAppConfig {
 impl Default for NodeGatewayAppConfig {
     fn default() -> Self {
         Self {
-            registration_token: "change-me-in-production".to_string(),
+            registration_token_secret: "change-me-node-registration-token-secret".to_string(),
             session_ttl_secs: 300, // 5 分钟
             heartbeat_interval_secs: 30,
             poll_timeout_secs: 30,
@@ -49,12 +60,30 @@ impl Default for NodeGatewayAppConfig {
 
 impl NodeGatewayAppConfig {
     /// 从配置文件中加载
-    pub fn from_config(config: &NodeGatewayConfig) -> Self {
-        Self {
-            registration_token: config
-                .registration_token
-                .clone()
-                .unwrap_or_else(|| "change-me-in-production".to_string()),
+    ///
+    /// # Errors
+    ///
+    /// 生产环境下 `registration_token_secret` 为必填项，缺失时返回 `ConfigError`。
+    /// Debug 构建允许使用硬编码默认密钥以便本地开发。
+    pub fn from_config(config: &NodeGatewayConfig) -> Result<Self, ConfigError> {
+        let secret = config
+            .registration_token_secret
+            .clone()
+            .filter(|s| !s.is_empty())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                if cfg!(debug_assertions) {
+                    tracing::warn!(
+                        "Using default registration_token_secret — insecure for production!"
+                    );
+                    Ok("change-me-node-registration-token-secret".to_string())
+                } else {
+                    Err(ConfigError::RegistrationTokenSecretRequired)
+                }
+            })?;
+
+        Ok(Self {
+            registration_token_secret: secret,
             session_ttl_secs: config.session_ttl_secs.unwrap_or(300),
             heartbeat_interval_secs: config.heartbeat_interval_secs.unwrap_or(30),
             poll_timeout_secs: config.poll_timeout_secs.unwrap_or(30),
@@ -64,7 +93,7 @@ impl NodeGatewayAppConfig {
             task_failure_threshold: config.task_failure_threshold.unwrap_or(3),
             sweeper_heartbeat_ttl_secs: config.sweeper_heartbeat_ttl_secs.unwrap_or(600),
             sweeper_repush_interval_secs: config.sweeper_repush_interval_secs.unwrap_or(10),
-        }
+        })
     }
 
     /// 获取会话 TTL 的 Duration

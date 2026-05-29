@@ -38,6 +38,8 @@ pub enum MockEmailType {
     PasswordReset,
     /// 欢迎邮件
     Welcome,
+    /// 节点网关注册令牌邮件
+    NodeGatewayToken,
     /// 普通邮件
     Generic,
 }
@@ -143,6 +145,35 @@ impl MockEmailService {
             html_body: Some(format!("<h1>欢迎 {}!</h1>", greeting)),
             email_type: MockEmailType::Welcome,
             token: None,
+            sent_at: chrono::Utc::now(),
+        };
+
+        self.records.lock().unwrap().push(record);
+        Ok(())
+    }
+
+    /// 发送节点网关注册令牌邮件
+    pub async fn send_node_gateway_token_email(
+        &self,
+        to: &str,
+        token_plaintext: &str,
+        token_preview: &str,
+    ) -> Result<(), EmailError> {
+        if *self.should_fail.lock().unwrap() {
+            return Err(EmailError::SendError("Mock send failed".to_string()));
+        }
+
+        let record = MockEmailRecord {
+            id: Uuid::new_v4(),
+            to: to.to_string(),
+            subject: "您的节点网关注册令牌已审批通过".to_string(),
+            text_body: format!("令牌: {}\n预览: {}", token_plaintext, token_preview),
+            html_body: Some(format!(
+                "<code>{}</code><p>预览: {}</p>",
+                token_plaintext, token_preview
+            )),
+            email_type: MockEmailType::NodeGatewayToken,
+            token: Some(token_plaintext.to_string()),
             sent_at: chrono::Utc::now(),
         };
 

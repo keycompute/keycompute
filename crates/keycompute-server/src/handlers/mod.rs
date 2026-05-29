@@ -16,6 +16,8 @@ pub mod distribution;
 pub mod gateway;
 pub mod health;
 pub mod node;
+pub mod node_gateway_token;
+pub mod node_tips;
 pub mod openai;
 pub mod payment;
 pub mod pricing;
@@ -61,7 +63,9 @@ pub use admin_account::{
 };
 
 // Node Gateway 管理
-pub use admin_node_gateway::{get_node_gateway_overview, recover_node};
+pub use admin_node_gateway::{
+    delete_node, exclude_node, get_node_gateway_overview, recover_node, revoke_node_token,
+};
 
 // 监控追踪
 pub use admin_monitoring::get_monitoring_overview;
@@ -91,6 +95,19 @@ pub use health::health_check;
 
 // 节点网关
 pub use node::{node_complete, node_heartbeat, node_poll, node_register};
+
+// 用户节点网关 token 管理
+pub use node_gateway_token::{
+    admin_approve_token, admin_list_pending_tokens, create_my_node_gateway_token,
+    delete_my_node_gateway_token, get_my_node_gateway_token, list_my_node_gateway_tokens,
+};
+
+// 节点租赁小费管理
+pub use node_tips::{
+    admin_approve_withdrawal, admin_complete_withdrawal, admin_get_tip_ratio,
+    admin_list_pending_withdrawals, admin_update_tip_ratio, create_tip_withdrawal,
+    get_my_tips_history, get_my_tips_summary, get_my_withdrawals,
+};
 
 // 支付相关
 pub use payment::{

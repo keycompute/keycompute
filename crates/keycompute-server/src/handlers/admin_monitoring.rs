@@ -76,7 +76,11 @@ pub async fn get_monitoring_overview(
             (SELECT COUNT(*) FROM node_tasks WHERE status IN ('queued', 'leased'))::BIGINT AS active_node_tasks,
             (SELECT COUNT(*) FROM node_tasks WHERE status = 'succeeded')::BIGINT AS succeeded_node_tasks,
             (SELECT COUNT(*) FROM node_tasks WHERE status IN ('failed', 'expired'))::BIGINT AS failed_node_tasks,
-            (SELECT COUNT(*) FROM nodes WHERE status = 'online')::BIGINT AS online_nodes,
+            (SELECT COUNT(*) FROM nodes
+             WHERE status = 'online'
+               AND (last_heartbeat_at IS NULL
+                    OR last_heartbeat_at >= NOW() - INTERVAL '3 minutes')
+            )::BIGINT AS online_nodes,
             (
                 SELECT AVG(EXTRACT(EPOCH FROM (finished_at - queued_at)) * 1000)::BIGINT
                 FROM node_tasks
@@ -134,7 +138,14 @@ pub async fn get_monitoring_overview(
         SELECT
             n.id,
             n.display_name,
-            n.status,
+            -- 心跳超时检测：与 admin 节点网关列表保持一致
+            CASE
+                WHEN n.status = 'online'
+                     AND n.last_heartbeat_at IS NOT NULL
+                     AND n.last_heartbeat_at < NOW() - INTERVAL '3 minutes'
+                THEN 'offline'
+                ELSE n.status
+            END AS status,
             COALESCE(latest_session.accepted_models_json, '[]'::jsonb) AS accepted_models_json,
             n.last_heartbeat_at,
             COUNT(nt.id) FILTER (WHERE nt.status IN ('queued', 'leased'))::BIGINT AS active_tasks,
@@ -149,7 +160,7 @@ pub async fn get_monitoring_overview(
             LIMIT 1
         ) latest_session ON TRUE
         LEFT JOIN node_tasks nt ON nt.assigned_node_id = n.id
-        GROUP BY n.id, latest_session.accepted_models_json
+        GROUP BY n.id, n.status, n.last_heartbeat_at, latest_session.accepted_models_json
         ORDER BY n.last_heartbeat_at DESC NULLS LAST, n.updated_at DESC
         LIMIT 20
         "#,

@@ -10,22 +10,8 @@ use crate::services::{
 use crate::stores::{
     auth_store::AuthStore, public_settings_store::PublicSettingsStore, ui_store::UiStore,
 };
+use crate::utils::copy_to_clipboard;
 use crate::utils::time::format_time;
-
-/// 复制文本到剪贴板（WASM 环境）
-fn copy_to_clipboard(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = web_sys::window().map(|w| {
-            let clipboard = w.navigator().clipboard();
-            clipboard.write_text(text)
-        });
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text;
-    }
-}
 
 fn is_distribution_disabled_error<T>(result: &Option<Result<T, ClientError>>) -> bool {
     matches!(

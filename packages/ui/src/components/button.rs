@@ -22,7 +22,7 @@ pub enum ButtonSize {
 /// 通用按钮组件
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// Button {
 ///     variant: ButtonVariant::Primary,
 ///     onclick: move |_| { /* ... */ },

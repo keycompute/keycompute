@@ -422,14 +422,14 @@ CREATE TABLE IF NOT EXISTS user_balances (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     -- 用户ID
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE UNIQUE,
-    -- 可用余额（单位：元）
-    available_balance DECIMAL(12, 2) NOT NULL DEFAULT 0,
+    -- 可用余额（单位：元，10 位小数与计费精度对齐）
+    available_balance DECIMAL(20, 10) NOT NULL DEFAULT 0,
     -- 冻结余额（单位：元）
-    frozen_balance DECIMAL(12, 2) NOT NULL DEFAULT 0,
+    frozen_balance DECIMAL(20, 10) NOT NULL DEFAULT 0,
     -- 累计充值金额
-    total_recharged DECIMAL(12, 2) NOT NULL DEFAULT 0,
+    total_recharged DECIMAL(20, 10) NOT NULL DEFAULT 0,
     -- 累计消费金额
-    total_consumed DECIMAL(12, 2) NOT NULL DEFAULT 0,
+    total_consumed DECIMAL(20, 10) NOT NULL DEFAULT 0,
     -- 创建时间
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- 更新时间
@@ -460,12 +460,12 @@ CREATE TABLE IF NOT EXISTS balance_transactions (
     usage_log_id UUID REFERENCES usage_logs(id),
     -- 交易类型: recharge/consume/freeze/unfreeze
     transaction_type VARCHAR(20) NOT NULL,
-    -- 变动金额（正数为增加，负数为减少）
-    amount DECIMAL(12, 2) NOT NULL,
+    -- 变动金额（正数为增加，负数为减少，10 位小数与计费精度对齐）
+    amount DECIMAL(20, 10) NOT NULL,
     -- 变动前余额
-    balance_before DECIMAL(12, 2) NOT NULL,
+    balance_before DECIMAL(20, 10) NOT NULL,
     -- 变动后余额
-    balance_after DECIMAL(12, 2) NOT NULL,
+    balance_after DECIMAL(20, 10) NOT NULL,
     -- 币种
     currency VARCHAR(8) NOT NULL DEFAULT 'CNY',
     -- 备注
@@ -484,7 +484,7 @@ CREATE INDEX idx_balance_transactions_created_at ON balance_transactions(created
 
 -- 添加注释
 COMMENT ON TABLE balance_transactions IS '余额变动记录表';
-COMMENT ON COLUMN balance_transactions.transaction_type IS '交易类型: recharge/consume/freeze/unfreeze';
+COMMENT ON COLUMN balance_transactions.transaction_type IS '交易类型: recharge/consume/freeze/unfreeze/tip_credit';
 COMMENT ON COLUMN balance_transactions.amount IS '变动金额（正数为增加，负数为减少）';
 COMMENT ON COLUMN balance_transactions.balance_before IS '变动前余额';
 COMMENT ON COLUMN balance_transactions.balance_after IS '变动后余额';
@@ -510,7 +510,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 );
 
 -- 创建索引
-CREATE INDEX IF NOT EXISTS idx_system_settings_key ON system_settings(key);
+-- key 上有 UNIQUE 约束，PG 自动创建唯一索引，无需额外 B-tree 索引
 
 -- 插入默认系统设置
 INSERT INTO system_settings (key, value, value_type, description) VALUES
@@ -557,6 +557,9 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
     -- 公告设置
     ('system_notice', '', 'string', '系统公告内容'),
     ('system_notice_enabled', 'false', 'bool', '是否显示系统公告'),
+    
+    -- 节点租赁小费设置
+    ('node_tip_ratio', '0.90', 'decimal', '节点租赁小费比例（计费金额 * 比例 = 小费）'),
     
     -- 其他设置
     ('footer_content', '', 'string', '页脚自定义内容'),
@@ -625,8 +628,8 @@ CREATE TABLE node_tasks (
     model TEXT NOT NULL,
     payload_json JSONB NOT NULL,
     status TEXT NOT NULL,
-    assigned_node_id UUID REFERENCES nodes(id),
-    assigned_session_id UUID REFERENCES node_sessions(id),
+    assigned_node_id UUID REFERENCES nodes(id) ON DELETE SET NULL,
+    assigned_session_id UUID REFERENCES node_sessions(id) ON DELETE SET NULL,
     lease_id UUID,
     failure_count INTEGER NOT NULL DEFAULT 0,
     failure_threshold INTEGER NOT NULL DEFAULT 3,
@@ -650,8 +653,8 @@ CREATE TABLE node_task_submissions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     task_id UUID NOT NULL REFERENCES node_tasks(id) ON DELETE CASCADE,
     lease_id UUID NOT NULL,
-    node_id UUID NOT NULL REFERENCES nodes(id),
-    session_id UUID NOT NULL REFERENCES node_sessions(id),
+    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    session_id UUID NOT NULL REFERENCES node_sessions(id) ON DELETE CASCADE,
     result_kind TEXT NOT NULL,
     request_hash TEXT NOT NULL,
     action TEXT NOT NULL,
@@ -681,3 +684,175 @@ CREATE INDEX idx_node_task_submissions_task_id_created_at ON node_task_submissio
 -- 用于 admin_monitoring.rs 和 admin_node_gateway.rs 中的 LEFT JOIN LATERAL 子查询
 -- （WHERE node_id = n.id ORDER BY last_seen_at DESC LIMIT 1）
 CREATE INDEX idx_node_sessions_node_id_last_seen_at ON node_sessions(node_id, last_seen_at DESC);
+
+-- ============================================================================
+-- user_node_gateway_tokens: 用户节点网关注册令牌表
+--
+-- 审批流程：
+--   1. 用户申请 → status='pending'
+--   2. Admin 审批 → status='approved'，token 可被 GET 返回明文（始终可重建）
+--   3. 用户注册节点 → status='consumed'（一次性使用）
+--
+-- Token 格式: kcng-{token_id}-{signature}
+--   - token_id = UUID v4 去连字符（同时也是本表的 id）
+--   - signature = HMAC-SHA256(secret, token_id) 后 32 个十六进制字符（取 HMAC 后 16 字节）
+-- ============================================================================
+
+CREATE TABLE user_node_gateway_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- token 的 SHA-256 hash（冗余存储，用于额外校验）
+    token_hash TEXT NOT NULL UNIQUE,
+    -- token 预览（前 16 位，用于 UI 展示，例如 "kcng-a1b2c3d4e5f6"）
+    token_preview TEXT NOT NULL,
+    -- 状态：pending(待审批) / approved(已审批) / rejected(已拒绝) / consumed(已使用)
+    status TEXT NOT NULL DEFAULT 'pending',
+    -- token 是否已被用户查看过明文（标记已查看，用于安全提醒）
+    is_revealed BOOLEAN NOT NULL DEFAULT FALSE,
+    -- 审批人 ID
+    approved_by UUID REFERENCES users(id),
+    -- 管理员操作时间（审批通过/拒绝时均会更新）
+    actioned_at TIMESTAMPTZ,
+    -- 消费时间（节点注册时设置）
+    consumed_at TIMESTAMPTZ,
+    -- 消费该 token 注册的节点 ID
+    consumed_node_id UUID REFERENCES nodes(id) ON DELETE SET NULL,
+    -- 吊销原因（Admin 吊销令牌时填写）
+    revoke_reason TEXT,
+    -- 签发时间（用户申请时间）
+    issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 索引
+CREATE INDEX idx_user_node_gateway_tokens_user_id ON user_node_gateway_tokens(user_id);
+-- 待审批列表查询
+CREATE INDEX idx_user_node_gateway_tokens_pending ON user_node_gateway_tokens(status) WHERE status = 'pending';
+-- 已审批且未被消费的 token 查询（注册时使用）
+CREATE INDEX idx_user_node_gateway_tokens_approved ON user_node_gateway_tokens(status) WHERE status = 'approved';
+-- token_hash 上有 UNIQUE 约束，已自动创建唯一索引，无需额外 B-tree 索引
+-- 确保每用户同一时间仅有一个活跃 token（pending 或 approved），防止并发 POST 创建多个
+CREATE UNIQUE INDEX idx_user_node_gateway_tokens_one_active ON user_node_gateway_tokens(user_id) WHERE status IN ('pending', 'approved');
+
+-- 注释
+COMMENT ON TABLE user_node_gateway_tokens IS '用户节点网关注册令牌表（审批制 + HMAC 签名 + 一次性使用）';
+COMMENT ON COLUMN user_node_gateway_tokens.id IS '令牌记录 ID（同时也是 token 中的 token_id）';
+COMMENT ON COLUMN user_node_gateway_tokens.user_id IS '所属用户 ID';
+COMMENT ON COLUMN user_node_gateway_tokens.token_hash IS '令牌 SHA-256 hash';
+COMMENT ON COLUMN user_node_gateway_tokens.token_preview IS '令牌预览（前 16 位）';
+COMMENT ON COLUMN user_node_gateway_tokens.status IS '状态：pending/approved/rejected/consumed';
+COMMENT ON COLUMN user_node_gateway_tokens.is_revealed IS 'token 明文是否已被用户查看';
+COMMENT ON COLUMN user_node_gateway_tokens.approved_by IS '审批人 ID';
+COMMENT ON COLUMN user_node_gateway_tokens.actioned_at IS '管理员操作时间（审批通过/拒绝时均会更新）';
+COMMENT ON COLUMN user_node_gateway_tokens.consumed_at IS 'token 使用时间';
+COMMENT ON COLUMN user_node_gateway_tokens.consumed_node_id IS '使用 token 注册的节点 ID';
+COMMENT ON COLUMN user_node_gateway_tokens.issued_at IS '签发时间（用户申请时间）';
+COMMENT ON COLUMN user_node_gateway_tokens.updated_at IS '最后更新时间';
+
+-- ============================================================================
+-- node_tips: 节点租赁小费表
+--
+-- 当用户通过 node gateway 发起会话并完成计费后，节点提供者（owner）获得小费
+-- tips = usage_log.user_amount * node_tip_ratio
+-- ============================================================================
+
+CREATE TABLE node_tips (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- 关联的计费记录
+    usage_log_id UUID NOT NULL REFERENCES usage_logs(id) ON DELETE CASCADE,
+    -- 提供服务的节点 ID
+    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    -- 节点所有者（同时也是 tips 受益人）
+    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- 消费该服务的用户（付费方）
+    consumer_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- 小费金额（10 位小数，与 usage_logs.user_amount DECIMAL(20,10) 对齐）
+    tip_amount DECIMAL(20, 10) NOT NULL,
+    -- 币种
+    currency VARCHAR(8) NOT NULL DEFAULT 'CNY',
+    -- 计算比例（快照，如 0.9000）
+    tip_ratio DECIMAL(5, 4) NOT NULL,
+    -- 原始计费金额（快照，审计用，10 位小数与 usage_logs.user_amount DECIMAL(20,10) 对齐）
+    bill_amount DECIMAL(20, 10) NOT NULL,
+    -- 创建时间
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- 最后更新时间
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_node_tips_owner_user_id ON node_tips(owner_user_id);
+-- usage_log_id 上有 UNIQUE 约束，已自动创建唯一索引，无需额外 B-tree 索引
+-- 按用户查询历史记录的复合索引（覆盖 list_by_user 的 ORDER BY created_at DESC）
+CREATE INDEX idx_node_tips_owner_created ON node_tips(owner_user_id, created_at DESC);
+-- 幂等性保护：同一 usage_log 只允许一条 tips 记录
+ALTER TABLE node_tips ADD CONSTRAINT uk_node_tips_usage_log_id UNIQUE (usage_log_id);
+
+COMMENT ON TABLE node_tips IS '节点租赁小费表';
+COMMENT ON COLUMN node_tips.usage_log_id IS '关联的计费记录 ID';
+COMMENT ON COLUMN node_tips.node_id IS '提供服务的节点 ID';
+COMMENT ON COLUMN node_tips.owner_user_id IS '节点所有者（tips 受益人）';
+COMMENT ON COLUMN node_tips.consumer_user_id IS '消费用户（付费方）';
+COMMENT ON COLUMN node_tips.tip_amount IS '小费金额（元）';
+COMMENT ON COLUMN node_tips.tip_ratio IS '计算比例（快照）';
+COMMENT ON COLUMN node_tips.bill_amount IS '原始计费金额（快照，审计用）';
+
+-- ============================================================================
+-- node_tip_withdrawals: 小费提现记录表
+--
+-- 支持两种提现方式：
+--   1. alipay  - 用户提供支付宝账户+姓名，管理员线下打款
+--   2. balance - 直接转入用户 available_balance
+--
+-- PII 敏感信息加密存储：
+--   - alipay_account 和 real_name 使用 AES-256-GCM 加密
+--   - 加密格式：base64(nonce || ciphertext)
+--   - 密钥复用 CRYPTO__SECRET_KEY 配置
+-- ============================================================================
+
+CREATE TABLE node_tip_withdrawals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- 申请人
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- 提现方式：alipay / balance
+    withdrawal_type VARCHAR(20) NOT NULL
+        CONSTRAINT chk_node_tip_withdrawals_type CHECK (withdrawal_type IN ('alipay', 'balance')),
+    -- 提现总额（10 位小数与计费精度对齐）
+    total_amount DECIMAL(20, 10) NOT NULL,
+    -- 币种
+    currency VARCHAR(8) NOT NULL DEFAULT 'CNY',
+    -- 加密的支付宝账号（仅 alipay 方式）
+    -- 格式：base64(nonce || ciphertext)，使用 AES-256-GCM 加密
+    -- 密钥复用 CRYPTO__SECRET_KEY 配置
+    encrypted_alipay_account TEXT,
+    -- 加密的真实姓名（仅 alipay 方式）
+    -- 格式：base64(nonce || ciphertext)，使用 AES-256-GCM 加密
+    -- 密钥复用 CRYPTO__SECRET_KEY 配置
+    encrypted_real_name TEXT,
+    -- 状态：pending / approved / completed / rejected
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CONSTRAINT chk_node_tip_withdrawals_status CHECK (status IN ('pending', 'approved', 'completed', 'rejected')),
+    -- 处理该提现的管理员
+    admin_id UUID REFERENCES users(id),
+    -- 管理员备注
+    admin_remark TEXT,
+    -- 管理员操作时间
+    actioned_at TIMESTAMPTZ,
+    -- 创建时间
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- 更新时间
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_node_tip_withdrawals_user_id ON node_tip_withdrawals(user_id);
+CREATE INDEX idx_node_tip_withdrawals_status ON node_tip_withdrawals(status);
+-- 待审批提现列表查询优化
+CREATE INDEX idx_node_tip_withdrawals_pending ON node_tip_withdrawals(status) WHERE status = 'pending';
+
+COMMENT ON TABLE node_tip_withdrawals IS '小费提现记录表';
+COMMENT ON COLUMN node_tip_withdrawals.withdrawal_type IS '提现方式：alipay / balance';
+COMMENT ON COLUMN node_tip_withdrawals.encrypted_alipay_account IS '加密的支付宝账号（仅 alipay 方式，AES-256-GCM 加密，格式：base64(nonce || ciphertext)）';
+COMMENT ON COLUMN node_tip_withdrawals.encrypted_real_name IS '加密的真实姓名（仅 alipay 方式，AES-256-GCM 加密，格式：base64(nonce || ciphertext)）';
+COMMENT ON COLUMN node_tip_withdrawals.status IS '状态：pending / approved / completed / rejected';
+COMMENT ON COLUMN node_tip_withdrawals.admin_remark IS '管理员备注（审批/操作备注，非审计日志，生产环境建议独立审计表）';
+
+

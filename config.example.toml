@@ -138,13 +138,16 @@ max_total_ratio = 0.30
 # 用于个人 PC 节点接入，支持 Ollama 本地模型执行
 # 节点通过 node-token 客户端连接，主动轮询任务并提交结果
 #
+# 审批流程：
+#   1. 用户申请 → status='pending'（前端 Dashboard 申请）
+#   2. Admin 审批 → 下发 HMAC 签名 token → 用户端展示 token 明文
+#   3. 用户使用 token 注册节点 → token 一次性消费（status='consumed'）
+#
 [node_gateway]
-# 节点注册 token（生产环境必须修改！）
-# 用于验证节点注册请求，所有节点共享此 token
-# 生成命令：openssl rand -base64 32
-# 安全警告：一旦有节点注册后不可更改（会导致已注册节点失效）
-# openssl rand -base64 32
-registration_token = "change-me-in-production"
+# HMAC 签名密钥（用于签发/验证节点注册 token）
+# 生产环境必须修改！生成命令：openssl rand -base64 32
+# 环境变量: KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET
+registration_token_secret = "change-me-node-registration-token-secret"
 # 会话 TTL（秒），节点会话有效期，默认 300（5 分钟）
 # 超过此时间未心跳的会话将被标记为过期
 session_ttl_secs = 300
@@ -165,8 +168,15 @@ sweeper_heartbeat_ttl_secs = 600
 # Sweeper 补推间隔（秒），创建超过此时间的 queued 任务补推到 Redis，默认 10
 sweeper_repush_interval_secs = 10
 #
+# 节点租赁小费功能
+# ==========================
+# 小费比例 (node_tip_ratio) 不是 [node_gateway] 配置项，而是存储在 system_settings 表中。
+# 管理员可通过 API 或管理面板 > 系统设置 动态调整，默认值 0.90。
+# 计费公式: tip = user_billed_amount × node_tip_ratio
+# 提现方式: alipay（管理员线下打款）或 balance（直接转入可用余额）
+#
 # 环境变量方式（推荐，优先级更高）：
-# KC__NODE_GATEWAY__REGISTRATION_TOKEN=change-me-in-production
+# KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET=change-me-node-registration-token-secret
 # KC__NODE_GATEWAY__SESSION_TTL_SECS=300
 # KC__NODE_GATEWAY__HEARTBEAT_INTERVAL_SECS=30
 # KC__NODE_GATEWAY__POLL_TIMEOUT_SECS=30

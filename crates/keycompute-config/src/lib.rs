@@ -542,19 +542,24 @@ impl AppConfig {
 
         // Node Gateway 配置检查
         if let Some(ref node_gateway_config) = self.node_gateway {
-            // 检查 registration_token 是否使用了占位符
-            if let Some(ref token) = node_gateway_config.registration_token
-                && (token == "change-me-node-registration-token"
-                    || token == "change-me-in-production")
-            {
+            // 检查 registration_token_secret (HMAC 签名密钥)
+            if let Some(ref secret) = node_gateway_config.registration_token_secret {
+                if secret.len() < 16 {
+                    tracing::warn!(
+                        "⚠️  安全警告: Node Gateway registration_token_secret 长度不足 16 字节，建议使用更长的密钥"
+                    );
+                }
+                if secret == "change-me-in-production"
+                    || secret == "change-me-node-registration-token-secret"
+                {
+                    tracing::warn!(
+                        "⚠️  安全警告: Node Gateway registration_token_secret 使用默认占位符，生产环境必须修改！"
+                    );
+                }
+            } else {
                 tracing::warn!(
-                    "⚠️  安全警告: Node Gateway registration_token 使用默认占位符，生产环境必须修改！请设置 KC__NODE_GATEWAY__REGISTRATION_TOKEN 环境变量"
+                    "⚠️  安全警告: 未设置 Node Gateway registration_token_secret，节点注册功能将不可用"
                 );
-                // 生产环境强制报错
-                #[cfg(not(debug_assertions))]
-                return Err(ConfigLoadError::ValidationError(
-                    "生产环境禁止使用默认 Node Gateway registration_token，请设置 KC__NODE_GATEWAY__REGISTRATION_TOKEN 环境变量".to_string(),
-                ));
             }
 
             // 检查超时配置合理性

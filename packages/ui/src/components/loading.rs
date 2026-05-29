@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 /// 旋转加载指示器
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// LoadingSpinner {}                  // 默认 24px，primary 色
 /// LoadingSpinner { size: 16 }        // 小尺寸
 /// ```
@@ -56,7 +56,7 @@ pub fn LoadingOverlay(
 /// 骨架屏动画块
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// Skeleton { width: "100%", height: "20px" }
 /// Skeleton { width: "60%", height: "16px" }
 /// ```

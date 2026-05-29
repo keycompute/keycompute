@@ -17,6 +17,9 @@ pub mod tables {
     pub const USER_BALANCES: &str = "user_balances";
     pub const BALANCE_TRANSACTIONS: &str = "balance_transactions";
     pub const SYSTEM_SETTINGS: &str = "system_settings";
+    pub const USER_NODE_GATEWAY_TOKENS: &str = "user_node_gateway_tokens";
+    pub const NODE_TIPS: &str = "node_tips";
+    pub const NODE_TIP_WITHDRAWALS: &str = "node_tip_withdrawals";
 }
 
 /// users 表列名
@@ -218,6 +221,37 @@ pub mod system_settings {
     pub const VALUE_TYPE: &str = "value_type";
     pub const DESCRIPTION: &str = "description";
     pub const IS_SENSITIVE: &str = "is_sensitive";
+    pub const CREATED_AT: &str = "created_at";
+    pub const UPDATED_AT: &str = "updated_at";
+}
+
+/// node_tips 表列名
+pub mod node_tips {
+    pub const ID: &str = "id";
+    pub const USAGE_LOG_ID: &str = "usage_log_id";
+    pub const NODE_ID: &str = "node_id";
+    pub const OWNER_USER_ID: &str = "owner_user_id";
+    pub const CONSUMER_USER_ID: &str = "consumer_user_id";
+    pub const TIP_AMOUNT: &str = "tip_amount";
+    pub const CURRENCY: &str = "currency";
+    pub const TIP_RATIO: &str = "tip_ratio";
+    pub const BILL_AMOUNT: &str = "bill_amount";
+    pub const CREATED_AT: &str = "created_at";
+}
+
+/// node_tip_withdrawals 表列名
+pub mod node_tip_withdrawals {
+    pub const ID: &str = "id";
+    pub const USER_ID: &str = "user_id";
+    pub const WITHDRAWAL_TYPE: &str = "withdrawal_type";
+    pub const TOTAL_AMOUNT: &str = "total_amount";
+    pub const CURRENCY: &str = "currency";
+    pub const ALIPAY_ACCOUNT: &str = "encrypted_alipay_account";
+    pub const REAL_NAME: &str = "encrypted_real_name";
+    pub const STATUS: &str = "status";
+    pub const ADMIN_ID: &str = "admin_id";
+    pub const ADMIN_REMARK: &str = "admin_remark";
+    pub const ACTIONED_AT: &str = "actioned_at";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
 }

@@ -354,6 +354,7 @@ impl AppState {
         // 创建节点网关配置
         let config = if let Some(node_config) = node_config {
             NodeGatewayAppConfig::from_config(&node_config)
+                .map_err(|e| anyhow::anyhow!("Node gateway config error: {}", e))?
         } else {
             NodeGatewayAppConfig::default()
         };
@@ -614,6 +615,20 @@ impl AppState {
     /// 检查是否有数据库连接
     pub fn has_pool(&self) -> bool {
         self.pool.is_some()
+    }
+
+    /// 获取节点网关 HMAC 签名密钥
+    ///
+    /// 单一数据源：始终从 `node_gateway.config.registration_token_secret` 读取，
+    /// 避免与独立字段重复存储导致的值不一致问题。
+    pub fn node_gateway_secret(&self) -> Option<&str> {
+        self.node_gateway.as_ref().and_then(|s| {
+            if s.config.registration_token_secret.is_empty() {
+                None
+            } else {
+                Some(s.config.registration_token_secret.as_str())
+            }
+        })
     }
 }
 

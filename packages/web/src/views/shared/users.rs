@@ -309,7 +309,7 @@ fn AdminUsersView() -> Element {
             i18n.t("form.confirm").to_string()
         }
     };
-    let fmt_balance = |v: f64| format!("{:.2}", v);
+    let fmt_balance = |v: f64| crate::utils::format_money(v);
 
     rsx! {
         div { class: "page-header",

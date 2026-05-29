@@ -5,7 +5,9 @@
 use crate::config::NodeGatewayAppConfig;
 use chrono::Utc;
 use keycompute_db::DbError;
-use keycompute_db::models::{node::*, node_session::*, node_task::*, node_task_submission::*};
+use keycompute_db::models::{
+    node::*, node_session::*, node_task::*, node_task_submission::*, user_node_gateway_token::*,
+};
 use keycompute_types::node::*;
 use serde_json;
 use sha2::{Digest, Sha256};
@@ -55,22 +57,61 @@ impl NodeGatewayStore {
     }
 
     /// 注册节点
+    ///
+    /// 认证策略：
+    /// 1. HMAC 签名验证 → 解析 token_id
+    /// 2. 查 DB 确认 token 状态为 `approved`
+    /// 3. 在事务中原子消费 token（一次性）+ 创建节点
+    ///
+    /// 不再支持全局 fallback token。
     pub async fn register_node(
         &self,
         req: &NodeRegisterRequest,
-        owner_user_id: Uuid,
     ) -> Result<NodeRegisterResponse, DbError> {
-        // 0. 校验 registration_token
-        if req.registration_token != self.config.registration_token {
-            return Err(DbError::Other("Invalid registration token".to_string()));
-        }
+        // 0. HMAC 签名验证（O(1) 内存操作，零 DB 查询）
+        let token_id = UserNodeGatewayToken::validate_hmac_token(
+            &req.registration_token,
+            self.config.registration_token_secret.as_bytes(),
+        )
+        .map_err(|e| DbError::Other(format!("Invalid registration token: {}", e)))?;
 
         let now = Utc::now();
 
-        // 1. 开始事务
+        // 1. 开始事务（通过 FOR UPDATE 行级锁防止 TOCTOU，使用默认 READ COMMITTED 隔离级别）
         let mut tx = self.pool.begin().await?;
 
-        // 2. 查找或创建节点(在事务中)
+        // 2. 在事务内查询 token 并检查是否可消费（消除 TOCTOU 窗口）
+        //    使用 FOR UPDATE 锁定行，防止并发修改
+        let token = sqlx::query_as::<_, UserNodeGatewayToken>(
+            r#"
+            SELECT * FROM user_node_gateway_tokens
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(token_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| DbError::Other("Registration token not found".to_string()))?;
+
+        if !token.is_consumable() {
+            let status_msg = match token.status.as_str() {
+                "consumed" =>
+                    "Token has already been consumed by another node registration. Each token can only be used once."
+                        .to_string(),
+                "rejected" =>
+                    "Token was rejected by admin. Please re-apply.".to_string(),
+                _ => format!(
+                    "Token is not approved (current status: {}). Please wait for admin approval.",
+                    token.status
+                ),
+            };
+            return Err(DbError::Other(status_msg));
+        }
+
+        let owner_user_id = token.user_id;
+
+        // 3. 查找或创建节点(在事务中)
         let existing_node = sqlx::query_as::<_, Node>(
             r#"
             SELECT * FROM nodes
@@ -102,7 +143,7 @@ impl NodeGatewayStore {
                     INSERT INTO nodes (owner_user_id, client_instance_id, display_name, status, capabilities_json)
                     VALUES ($1, $2, $3, $4, $5)
                     RETURNING *
-                    "#
+                    "#,
                 )
                 .bind(owner_user_id)
                 .bind(&req.client_instance_id)
@@ -114,10 +155,17 @@ impl NodeGatewayStore {
             }
         };
 
-        // 3. 在同一事务中:创建 session + 更新节点状态 + 更新心跳
+        // 4. 在同一事务中：消费 token（一次性使用）+ 创建 session + 更新节点状态
+        let consumed = UserNodeGatewayToken::consume(&mut *tx, token_id, node.id).await?;
+        if !consumed {
+            // Token 可能在事务外检查通过后、事务内 consume 之前被 admin reject 或并发消费
+            return Err(DbError::Other(
+                "Token is no longer valid (may have been rejected or consumed by another request). Please re-apply for a new token.".to_string(),
+            ));
+        }
 
         let session_token = Uuid::new_v4().to_string();
-        let session_token_hash = hash_token(&session_token);
+        let session_token_hash = UserNodeGatewayToken::hash_token(&session_token);
         let expires_at = now + self.config.session_ttl();
 
         // 提取注册能力中的模型名
@@ -136,13 +184,13 @@ impl NodeGatewayStore {
                 .map_err(|e| DbError::Other(e.to_string()))?,
         };
 
-        // 2.1 创建 session (在事务中)
+        // 4.1 创建 session (在事务中)
         let session = sqlx::query_as::<_, NodeSession>(
             r#"
             INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json)
             VALUES ($1, $2, $3, $4)
             RETURNING *
-            "#
+            "#,
         )
         .bind(create_session_req.node_id)
         .bind(&create_session_req.session_token_hash)
@@ -151,7 +199,7 @@ impl NodeGatewayStore {
         .fetch_one(&mut *tx)
         .await?;
 
-        // 2.2 更新节点状态为 online (如果原来是 offline,在事务中)
+        // 4.2 更新节点状态为 online (如果原来是 offline,在事务中)
         if node.status == NODE_STATUS_OFFLINE {
             sqlx::query(
                 r#"
@@ -165,7 +213,7 @@ impl NodeGatewayStore {
             .await?;
         }
 
-        // 2.3 更新节点心跳时间 (在事务中)
+        // 4.3 更新节点心跳时间 (在事务中)
         sqlx::query(
             r#"
             UPDATE nodes
@@ -195,7 +243,7 @@ impl NodeGatewayStore {
         &self,
         session_token: &str,
     ) -> Result<(Node, NodeSession), DbError> {
-        let token_hash = hash_token(session_token);
+        let token_hash = UserNodeGatewayToken::hash_token(session_token);
 
         let session = NodeSession::find_by_token_hash(&self.pool, &token_hash).await?;
 
@@ -216,8 +264,7 @@ impl NodeGatewayStore {
         }
     }
 
-    /// 处理心跳(在同一事务中完成所有操作)
-    /// Admin 把 excluded 节点恢复为 online (B6 修复)
+    /// Admin 把 excluded 节点恢复为 online
     /// 同时清零 consecutive_failure_count, 节点可重新接收任务。
     pub async fn recover_node(&self, node_id: Uuid) -> Result<Node, DbError> {
         sqlx::query_as::<_, Node>(
@@ -451,7 +498,7 @@ impl NodeGatewayStore {
 
         // 3. 如果已有 submission,处理幂等逻辑
         if let Some(submission) = existing_submission {
-            // 先检查 session 是否被撤销(AGENTS.md: 已撤销 session 一律拒绝,包括查询已有 submission)
+            // 先检查 session 是否被撤销
             let session = NodeSession::find_by_id(&self.pool, authenticated_session_id).await?;
             if session.map(|s| s.is_revoked()).unwrap_or(true) {
                 return Err(DbError::Other("Session has been revoked".to_string()));
@@ -472,14 +519,12 @@ impl NodeGatewayStore {
 
             if is_not_archived {
                 // 未归档，检查 request_hash
-                // 计算当前请求的 request_hash
                 let current_request_hash = Self::compute_request_hash(task_id, lease_id, &result)?;
 
                 if submission.request_hash == current_request_hash {
                     // request_hash 相同,直接返回已保存的 ACK
                     let action = parse_action(&submission.action)?;
 
-                    // 查询节点状态(从事务中查询,保证读到最新数据)
                     let node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
                         .bind(authenticated_node_id)
                         .fetch_optional(&mut *tx)
@@ -684,7 +729,6 @@ impl NodeGatewayStore {
         lease_id: Uuid,
         response: keycompute_types::ChatCompletionResponse,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
-        // 1. 更新任务状态为 succeeded (包含完整的 WHERE 条件保证并发安全)
         let response_json =
             serde_json::to_value(&response).map_err(|e| DbError::Other(e.to_string()))?;
         let updated_task = sqlx::query_as::<_, NodeTask>(
@@ -712,11 +756,9 @@ impl NodeGatewayStore {
         .fetch_optional(&mut **tx)
         .await?;
 
-        // 并发安全检查: 如果 UPDATE 返回 0 行,说明任务可能已被 sweeper 标记为 expired
         let updated_task = match updated_task {
             Some(t) => t,
             None => {
-                // 查询任务当前状态,判断是否已过期
                 let current_task =
                     sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
                         .bind(task.id)
@@ -734,7 +776,7 @@ impl NodeGatewayStore {
             }
         };
 
-        // 2. 清零节点连续失败计数（仅非 excluded 节点）
+        // 清零节点连续失败计数（仅非 excluded 节点）
         if !node.is_excluded() {
             sqlx::query(
                 r#"
@@ -748,7 +790,7 @@ impl NodeGatewayStore {
             .await?;
         }
 
-        // 3. 写入 submission ACK
+        // 写入 submission ACK
         let result_for_hash = NodeTaskResult::Succeeded { response };
         let request_hash = Self::compute_request_hash(task.id, lease_id, &result_for_hash)?;
 
@@ -779,9 +821,6 @@ impl NodeGatewayStore {
         .fetch_one(&mut **tx)
         .await?;
 
-        // 不在这里 commit,由调用方 commit
-
-        // 查询最新节点状态(从事务中查询)
         let updated_node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
             .bind(node_id)
             .fetch_optional(&mut **tx)
@@ -817,9 +856,6 @@ impl NodeGatewayStore {
             "is_client_error": is_client_error,
         });
 
-        // 1. 更新任务状态
-        // is_client_error=true: 强制 terminal 'failed', 不 requeue (B1 修复)
-        // 否则: 现有 failure_count 自增 + CASE 决定 requeue/failed 的逻辑
         let updated_task = if is_client_error {
             sqlx::query_as::<_, NodeTask>(
                 r#"
@@ -845,7 +881,6 @@ impl NodeGatewayStore {
             .fetch_optional(&mut **tx)
             .await?
         } else {
-            // 注意：使用 failure_count + 1 与 failure_threshold 比较，这是更新前的旧值加 1
             sqlx::query_as::<_, NodeTask>(
                 r#"
                 UPDATE node_tasks
@@ -893,11 +928,9 @@ impl NodeGatewayStore {
             .await?
         };
 
-        // 并发安全检查: 如果 UPDATE 返回 0 行,说明任务可能已被 sweeper 标记为 expired
         let updated_task = match updated_task {
             Some(t) => t,
             None => {
-                // 查询任务当前状态,判断是否已过期
                 let current_task =
                     sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
                         .bind(task.id)
@@ -915,8 +948,7 @@ impl NodeGatewayStore {
             }
         };
 
-        // 2. 增加节点连续失败计数并检查排除
-        //    is_client_error 是请求侧问题, 不归因到节点健康度, 跳过此步 (B1 修复)
+        // 增加节点连续失败计数并检查排除
         if !is_client_error {
             sqlx::query(
                 r#"
@@ -935,7 +967,6 @@ impl NodeGatewayStore {
             .await?;
         }
 
-        // 3. 写入 submission ACK (根据 updated_task.status 判断 action)
         let action = if updated_task.status == TASK_STATUS_QUEUED {
             "requeued"
         } else {
@@ -976,9 +1007,6 @@ impl NodeGatewayStore {
         .fetch_one(&mut **tx)
         .await?;
 
-        // 不在这里 commit,由调用方 commit
-
-        // 查询最新节点状态(从事务中查询)
         let updated_node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
             .bind(node_id)
             .fetch_optional(&mut **tx)
@@ -999,14 +1027,6 @@ impl NodeGatewayStore {
             failure_threshold: updated_node.failure_threshold as u32,
         })
     }
-}
-
-/// 计算 token 的 SHA-256 hash
-fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let result = hasher.finalize();
-    format!("{:x}", result)
 }
 
 /// 解析 action 字符串

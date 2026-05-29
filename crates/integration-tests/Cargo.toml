@@ -42,6 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono"] }
 sha2 = "0.10"
 hex = "0.4"
+dotenv = "0.15"
 
 # 测试框架
 anyhow = "1.0"

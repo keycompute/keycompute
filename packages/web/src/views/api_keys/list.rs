@@ -22,22 +22,8 @@ fn model_display_rank(model: &str) -> usize {
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, api_key_service, model_service};
 use crate::stores::auth_store::AuthStore;
+use crate::utils::copy_to_clipboard;
 use crate::utils::time::format_time;
-
-/// 复制文本到剪贴板（WASM 环境）
-fn copy_to_clipboard(text: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = web_sys::window().map(|w| {
-            let clipboard = w.navigator().clipboard();
-            clipboard.write_text(text)
-        });
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = text; // 非 WASM 环境暂不支持
-    }
-}
 
 #[component]
 pub fn ApiKeyList() -> Element {

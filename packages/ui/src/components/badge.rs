@@ -14,7 +14,7 @@ pub enum BadgeVariant {
 /// 状态徽章组件
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// Badge { variant: BadgeVariant::Success, "活跃" }
 /// Badge { variant: BadgeVariant::Error, "已禁用" }
 /// ```

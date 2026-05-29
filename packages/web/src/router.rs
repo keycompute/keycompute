@@ -7,6 +7,7 @@ use crate::views::{
     auth::{ForgotPassword, Login, Register, ResetPassword},
     dashboard::Dashboard,
     distribution::DistributionOverview,
+    node::{node_earnings::NodeEarnings, node_token::NodeToken},
     payments::{PaymentsOverview, Recharge},
     shared::{
         Accounts, DistributionRecords, Monitoring, NodeGateway, PaymentOrders, Pricing, Settings,
@@ -52,6 +53,10 @@ pub enum Route {
         UserProfile {},
         #[route("/user/settings")]
         UserSettings {},
+        #[route("/node/token")]
+        NodeToken {},
+        #[route("/node/earnings")]
+        NodeEarnings {},
 
         // Admin 功能页面（额外加一层 AdminLayout 做角色验证）
         #[layout(AdminLayout)]

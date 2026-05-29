@@ -58,8 +58,8 @@ pub fn calculate_shares(
 ) -> Vec<DistributionShare> {
     let mut shares = Vec::new();
 
-    // 第一级分成
-    let level1_amount = user_amount * level1_ratio;
+    // 第一级分成（统一精度 10 位小数，与 distribution_records.share_amount DECIMAL(20,10) 对齐）
+    let level1_amount = (user_amount * level1_ratio).round_dp(10);
     shares.push(DistributionShare::new(
         level1_beneficiary,
         level1_amount,
@@ -69,7 +69,7 @@ pub fn calculate_shares(
 
     // 第二级分成（如果有）
     if let Some(beneficiary_id) = level2_beneficiary {
-        let level2_amount = user_amount * level2_ratio;
+        let level2_amount = (user_amount * level2_ratio).round_dp(10);
         shares.push(DistributionShare::new(
             beneficiary_id,
             level2_amount,

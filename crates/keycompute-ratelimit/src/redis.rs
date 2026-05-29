@@ -287,9 +287,19 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    fn create_test_limiter() -> Option<RedisRateLimiter> {
+    async fn create_test_limiter() -> Option<RedisRateLimiter> {
         match RedisRateLimiter::new("redis://127.0.0.1:6379") {
-            Ok(limiter) => Some(limiter),
+            Ok(limiter) => {
+                // 验证实际连接可用，避免本地 Redis 无认证时报错
+                if limiter.flush_all().await.is_ok() {
+                    Some(limiter)
+                } else {
+                    eprintln!(
+                        "Warning: Redis not available (connection failed), skipping Redis tests"
+                    );
+                    None
+                }
+            }
             Err(_) => {
                 eprintln!("Warning: Redis not available, skipping Redis tests");
                 None
@@ -299,7 +309,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_rate_limiter_check_and_record() {
-        let Some(limiter) = create_test_limiter() else {
+        let Some(limiter) = create_test_limiter().await else {
             return;
         };
 

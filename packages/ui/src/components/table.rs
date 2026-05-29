@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 /// 通过 `children` 传入 `thead` 和 `tbody` 内容。
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// Table {
 ///     thead {
 ///         tr {

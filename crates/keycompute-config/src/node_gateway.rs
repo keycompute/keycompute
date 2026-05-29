@@ -7,8 +7,10 @@ use serde::Deserialize;
 /// Node Gateway 配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct NodeGatewayConfig {
-    /// 注册 token (全局 token,用于验证节点注册请求)
-    pub registration_token: Option<String>,
+    /// HMAC 签名密钥（用于签发/验证节点注册 token 的 HMAC 签名）
+    /// 环境变量: KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET
+    /// 默认值: change-me-node-registration-token-secret（生产环境必须修改）
+    pub registration_token_secret: Option<String>,
     /// 会话 TTL(秒),默认 300
     pub session_ttl_secs: Option<u64>,
     /// 心跳间隔(秒),默认 30
@@ -32,7 +34,7 @@ pub struct NodeGatewayConfig {
 impl Default for NodeGatewayConfig {
     fn default() -> Self {
         Self {
-            registration_token: None,
+            registration_token_secret: None,
             session_ttl_secs: Some(300),
             heartbeat_interval_secs: Some(30),
             poll_timeout_secs: Some(30),

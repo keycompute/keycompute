@@ -30,7 +30,8 @@ pub enum NodeExecutionError {
 pub struct NodeGatewayService {
     pub store: NodeGatewayStore,
     redis: NodeGatewayRedis,
-    config: NodeGatewayAppConfig,
+    /// 节点网关应用配置（包含 registration_token_secret）
+    pub config: NodeGatewayAppConfig,
 }
 
 impl NodeGatewayService {
@@ -163,12 +164,13 @@ impl NodeGatewayService {
     }
 
     /// 注册节点
+    ///
+    /// owner_user_id 通过 registration_token 自动解析，不再需要调用方传入
     pub async fn register_node(
         &self,
         req: &NodeRegisterRequest,
-        owner_user_id: Uuid,
     ) -> Result<NodeRegisterResponse, DbError> {
-        self.store.register_node(req, owner_user_id).await
+        self.store.register_node(req).await
     }
 
     /// 心跳

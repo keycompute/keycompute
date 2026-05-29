@@ -5,6 +5,7 @@ pub mod dashboard;
 pub mod distribution;
 pub mod error;
 pub mod home;
+pub mod node;
 pub mod payments;
 pub mod shared;
 pub mod usage;

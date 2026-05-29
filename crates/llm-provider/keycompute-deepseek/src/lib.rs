@@ -15,7 +15,7 @@
 //!
 //! let provider = DeepSeekProvider::new();
 //! assert_eq!(provider.name(), "deepseek");
-//! assert!(provider.supports_model("deepseek-chat"));
+//! assert!(provider.supports_model("deepseek-empty"));
 //! ```
 
 pub mod adapter;

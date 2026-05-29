@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://github.com/keycompute/keycompute/stargazers"><img src="https://img.shields.io/github/stars/keycompute/keycompute?style=social" alt="GitHub Stars" /></a>
-  <a href="https://github.com/keycompute/keycompute/issues"><img src="https://img.shields.io/github/issues/keycompute/keycompute" alt="GitHub Issues" /></a>
+  <a href="https://github.com/keycompute/keycompute/issues"><img src="https://img.shields.io/github/issues/aiqubits/keycompute" alt="GitHub Issues" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs Welcome" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.92%2B-orange?logo=rust" alt="Rust Version" /></a>
@@ -252,7 +252,7 @@ Variables de entorno principales:
 | `KC__REDIS__URL` | Cadena de conexión de Redis | ⚪ |
 | `KC__AUTH__JWT_SECRET` | Secreto de firma JWT | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | Secreto de cifrado para API keys | ✅ |
-| `KC__NODE_GATEWAY__REGISTRATION_TOKEN` | Token de registro de nodo; utilizado para verificar solicitudes de registro, compartido por todos los nodos | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | Secreto de firma HMAC; utilizado para emitir tokens de registro únicos (basado en aprobación) | ✅ |
 | `KC__EMAIL__SMTP_HOST` | Host SMTP | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | Puerto SMTP | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | Usuario SMTP | ⚪ |

@@ -202,6 +202,8 @@ pub fn AppLayout() -> Element {
     let r_distribution = Route::DistributionOverview {}.to_string();
     let r_profile = Route::UserProfile {}.to_string();
     let r_settings = Route::UserSettings {}.to_string();
+    let r_node_token = Route::NodeToken {}.to_string();
+    let r_node_earnings = Route::NodeEarnings {}.to_string();
     let r_admin_users = Route::Users {}.to_string();
     let r_admin_accounts = Route::Accounts {}.to_string();
     let r_admin_pricing = Route::Pricing {}.to_string();
@@ -259,6 +261,18 @@ pub fn AppLayout() -> Element {
                     i18n.t("nav.account_settings"),
                     r_settings,
                     NavIcon::Settings,
+                ),
+            ],
+        },
+        // 节点分组（所有已登录用户可见）
+        NavSection {
+            title: Some(i18n.t("nav.group.node").to_string()),
+            items: vec![
+                NavItem::new(i18n.t("nav.node_token"), r_node_token, NavIcon::Key),
+                NavItem::new(
+                    i18n.t("nav.node_earnings"),
+                    r_node_earnings,
+                    NavIcon::Wallet,
                 ),
             ],
         },

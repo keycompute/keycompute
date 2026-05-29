@@ -27,7 +27,8 @@ pub fn calculate_amount(
     let input_cost = Decimal::from(input_tokens) / Decimal::from(1000) * pricing.input_price_per_1k;
     let output_cost =
         Decimal::from(output_tokens) / Decimal::from(1000) * pricing.output_price_per_1k;
-    input_cost + output_cost
+    // 统一精度 10 位小数，与 usage_logs(user_amount DECIMAL(20,10)) 对齐
+    (input_cost + output_cost).round_dp(10)
 }
 
 /// 计算上游成本（与计算用户金额使用相同公式）

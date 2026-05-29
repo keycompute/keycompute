@@ -102,6 +102,9 @@ pub mod setting_keys {
     pub const SYSTEM_NOTICE: &str = "system_notice";
     pub const SYSTEM_NOTICE_ENABLED: &str = "system_notice_enabled";
 
+    // 节点租赁小费设置
+    pub const NODE_TIP_RATIO: &str = "node_tip_ratio";
+
     // 其他设置
     pub const FOOTER_CONTENT: &str = "footer_content";
     pub const ABOUT_CONTENT: &str = "about_content";
@@ -355,6 +358,8 @@ impl SystemSetting {
                 "decimal",
             ), // 二级分销默认 2%
             (setting_keys::DISTRIBUTION_MIN_WITHDRAW, "100.0", "decimal"), // 最小提现金额 100元
+            // 节点租赁小费设置
+            (setting_keys::NODE_TIP_RATIO, "0.90", "decimal"), // 小费比例 90%
         ];
 
         for (key, value, value_type) in defaults {

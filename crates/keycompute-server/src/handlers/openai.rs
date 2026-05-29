@@ -469,7 +469,7 @@ pub async fn chat_completions(
                         &ctx,
                         "node",
                         uuid::Uuid::nil(),
-                        model.as_str(),
+                        "success",
                         auth.user_id,
                     )
                     .await;
@@ -1017,7 +1017,7 @@ fn simulate_node_stream(
                 &ctx,
                 "node",
                 uuid::Uuid::nil(),
-                &model,
+                "success",
                 ctx.user_id,
             )
             .await;

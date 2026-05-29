@@ -44,6 +44,8 @@ pub enum ApiError {
     },
     /// 节点任务提交冲突（409）
     NodeTaskConflict(String),
+    /// 通用冲突错误（409），如并发操作冲突
+    Conflict(String),
 }
 
 impl fmt::Display for ApiError {
@@ -62,6 +64,7 @@ impl fmt::Display for ApiError {
             ApiError::Forbidden(msg) => write!(f, "Forbidden: {}", msg),
             ApiError::NodeIdentityMismatch { .. } => write!(f, "Node identity mismatch"),
             ApiError::NodeTaskConflict(msg) => write!(f, "Node task conflict: {}", msg),
+            ApiError::Conflict(msg) => write!(f, "Conflict: {}", msg),
         }
     }
 }
@@ -88,6 +91,7 @@ impl IntoResponse for ApiError {
                     .to_string(),
             ),
             ApiError::NodeTaskConflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
         };
 
         let body = Json(json!({
@@ -117,6 +121,7 @@ fn error_type(error: &ApiError) -> &'static str {
         ApiError::Forbidden(_) => "forbidden_error",
         ApiError::NodeIdentityMismatch { .. } => "node_identity_mismatch_error",
         ApiError::NodeTaskConflict(_) => "node_task_conflict_error",
+        ApiError::Conflict(_) => "conflict_error",
     }
 }
 

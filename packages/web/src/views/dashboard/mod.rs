@@ -164,13 +164,18 @@ pub fn Dashboard() -> Element {
     let total_cost_value = usage_stats()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|stats| format!("¥{:.2}", stats.total_cost))
+        .map(|stats| format!("¥{}", crate::utils::format_money(stats.total_cost)))
         .unwrap_or_else(|| "—".to_string());
 
     let balance_value = balance()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|balance| format!("¥{}", balance.available_balance))
+        .map(|balance| {
+            format!(
+                "¥{}",
+                crate::utils::format_money_str(&balance.available_balance)
+            )
+        })
         .unwrap_or_else(|| "—".to_string());
 
     let active_key_value = api_keys()
@@ -235,10 +240,22 @@ pub fn Dashboard() -> Element {
         .and_then(|result| result.as_ref().ok())
         .and_then(|earnings| earnings.as_ref());
     let total_distribution_earnings_value = distribution_earnings_data
-        .map(|earnings| format!("{} {}", earnings.currency, earnings.total_earnings))
+        .map(|earnings| {
+            format!(
+                "{} {}",
+                earnings.currency,
+                crate::utils::format_money_str(&earnings.total_earnings)
+            )
+        })
         .unwrap_or_else(|| "—".to_string());
     let pending_distribution_earnings_value = distribution_earnings_data
-        .map(|earnings| format!("{} {}", earnings.currency, earnings.pending_earnings))
+        .map(|earnings| {
+            format!(
+                "{} {}",
+                earnings.currency,
+                crate::utils::format_money_str(&earnings.pending_earnings)
+            )
+        })
         .unwrap_or_else(|| "—".to_string());
     let distribution_referral_count_value = distribution_earnings_data
         .map(|earnings| earnings.referral_count.to_string())
@@ -428,7 +445,7 @@ pub fn Dashboard() -> Element {
                                             }
                                         }
                                         div { class: "dashboard-activity-time", { format_time(&record.created_at) } }
-                                        div { class: "dashboard-activity-time", "¥{record.cost:.4}" }
+                                        div { class: "dashboard-activity-time", "¥{crate::utils::format_money(record.cost)}" }
                                     }
                                 }
                             }

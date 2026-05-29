@@ -3,7 +3,7 @@
 //! 通过 JS 互调直接使用 ECharts 渲染折线图，无需 charming 中间层。
 //!
 //! # 示例
-//! ```rust
+//! ```rust,ignore
 //! LineChart {
 //!     id: "usage-chart",
 //!     title: "用量趋势",

@@ -5573,3 +5573,623 @@ select.form-input:focus {
 .custom-select-option:last-child {
   border-radius: 0 0 7px 7px;
 }
+
+/* ── Node Earnings ──────────────────────────── */
+
+/* 汇总卡片网格 */
+.earnings-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 768px) {
+  .earnings-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 汇总卡片 */
+.earnings-card {
+  padding: 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  transition: border-color 0.18s ease, background-color 0.18s ease;
+}
+
+.earnings-card:hover {
+  background: color-mix(in srgb, var(--bg-card) 94%, var(--bg-tertiary));
+  border-color: color-mix(in srgb, var(--color-primary) 28%, var(--border-color));
+}
+
+.earnings-card-label {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.earnings-card-value {
+  margin: 10px 0 0;
+  color: var(--text-primary);
+  font-size: 28px;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.earnings-card-meta {
+  margin: 6px 0 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* 骨架屏 */
+.earnings-card-skeleton {
+  padding: 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  min-height: 90px;
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* 提现按钮区域 */
+.earnings-actions {
+  margin-bottom: 20px;
+}
+
+/* 弹窗关闭按钮 */
+.modal-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.modal-close:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.modal-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* 提现方式选择网格 */
+.withdraw-method-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-top: 8px;
+}
+
+@media (max-width: 480px) {
+  .withdraw-method-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 提现方式卡片 */
+.withdraw-method-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 14px 16px;
+  background: var(--bg-primary);
+  border: 1.5px solid var(--border-color);
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+.withdraw-method-card:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 40%, var(--border-color));
+  background: color-mix(in srgb, var(--bg-primary) 96%, var(--color-primary));
+}
+
+.withdraw-method-card.active {
+  border-color: var(--color-primary);
+  background: color-mix(in srgb, var(--bg-primary) 92%, var(--color-primary));
+  box-shadow: 0 0 0 3px var(--color-accent-glow, rgba(59, 130, 246, 0.15));
+}
+
+.withdraw-method-card strong {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.withdraw-method-card p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* 提现提示 */
+.withdraw-hint {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── Node Token 页面现代化样式 ──────────────────── */
+
+/* 空状态 */
+.node-token-empty-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 280px;
+  padding: 40px 24px;
+}
+
+.node-token-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  max-width: 380px;
+  animation: kc-console-enter 0.45s ease-out both;
+}
+
+.node-token-empty-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 88px;
+  height: 88px;
+  margin-bottom: 20px;
+  color: var(--text-disabled, #6b7280);
+  background: color-mix(in srgb, var(--bg-tertiary, #f3f4f6) 50%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+}
+
+.node-token-empty-title {
+  margin: 0 0 10px;
+  color: var(--text-primary);
+  font-family: var(--font-display, "Space Grotesk", sans-serif);
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.node-token-empty-desc {
+  margin: 0 0 24px;
+  color: var(--text-secondary);
+  font-size: 0.92rem;
+  line-height: 1.6;
+}
+
+/* 主卡片 */
+.node-token-main-card {
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+/* Card Header */
+.node-token-card-header {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.node-token-card-header .node-gateway-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.node-token-card-header .card-title {
+  margin: 0;
+}
+
+.node-token-approved-hint {
+  display: block;
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* 列表容器 */
+.node-token-list-body {
+  padding: 0;
+}
+
+/* ── 令牌子卡片 ── */
+.node-token-card {
+  border-bottom: 1px solid var(--border-color);
+  transition: background 0.2s ease;
+}
+
+.node-token-card:last-child {
+  border-bottom: none;
+}
+
+.node-token-card:hover {
+  background: color-mix(in srgb, var(--bg-secondary) 40%, transparent);
+}
+
+/* 卡片摘要行 */
+.node-token-card-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 22px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.node-token-card-summary:hover {
+  background: color-mix(in srgb, var(--bg-secondary) 30%, transparent);
+}
+
+.node-token-card-summary-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* 状态指示灯 */
+.node-token-status-dot {
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 4px currentColor);
+}
+
+/* 状态徽章 */
+.node-token-card-status-badge {
+  flex-shrink: 0;
+}
+
+/* 令牌预览码 */
+.node-token-card-preview {
+  color: var(--text-primary);
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 摘要行右侧元信息 */
+.node-token-card-summary-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+.node-token-card-time {
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.node-token-card-expand {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  transition: color 0.15s ease;
+}
+
+.node-token-card-summary:hover .node-token-card-expand {
+  color: var(--color-primary);
+}
+
+/* 展开详情区 */
+.node-token-card-detail {
+  padding: 0 22px 18px;
+  animation: node-token-detail-in 0.25s ease-out both;
+}
+
+@keyframes node-token-detail-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 状态说明区块 */
+.node-token-card-status-section {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: color-mix(in srgb, var(--bg-secondary) 35%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+}
+
+.node-token-card-status-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+}
+
+.node-token-card-status-icon.pending {
+  color: #ff9800;
+  background: rgba(255, 152, 0, 0.08);
+}
+
+.node-token-card-status-icon.info {
+  color: #2196f3;
+  background: rgba(33, 150, 243, 0.08);
+}
+
+.node-token-card-status-icon.error {
+  color: #f44336;
+  background: rgba(244, 67, 54, 0.08);
+}
+
+.node-token-card-status-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.node-token-card-status-title {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-weight: 500;
+  line-height: 1.55;
+}
+
+.node-token-card-status-desc {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* 元信息行 */
+.node-token-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--bg-secondary) 20%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.node-token-card-meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.node-token-card-meta-label {
+  flex-shrink: 0;
+  min-width: 70px;
+  color: var(--text-tertiary);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.node-token-card-meta-value {
+  color: var(--text-primary);
+  font-size: 0.85rem;
+}
+
+.node-token-card-meta-value code {
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 0.82rem;
+}
+
+/* 令牌复制区域 */
+.node-token-copy-section {
+  margin: 12px 0 8px;
+}
+
+.node-token-copy-section .kc-api-copy-block {
+  margin-top: 0;
+}
+
+.node-token-copy-section .kc-api-example {
+  min-height: 44px;
+  padding: 16px 88px 16px 18px;
+  font-family: var(--font-mono, "SFMono-Regular", Consolas, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  background: rgba(5, 10, 20, 0.64);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+}
+
+.node-token-copy-section .kc-api-copy-button {
+  top: 12px;
+  right: 12px;
+}
+
+/* 提示文本 */
+.node-token-hint-text {
+  margin: 10px 0;
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+/* 已注册节点信息 */
+.node-token-registered-node {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: color-mix(in srgb, var(--bg-secondary) 25%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+}
+
+.node-token-registered-node-header,
+.node-token-registered-node-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.node-token-node-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.node-token-node-status::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.node-token-node-status.node-status-online::before {
+  background: #00c853;
+  box-shadow: 0 0 6px rgba(0, 200, 83, 0.5);
+}
+
+.node-token-node-status.node-status-offline::before {
+  background: #ff9800;
+  box-shadow: 0 0 6px rgba(255, 152, 0, 0.4);
+}
+
+.node-token-node-status.node-status-excluded::before {
+  background: #f44336;
+  box-shadow: 0 0 6px rgba(244, 67, 54, 0.4);
+}
+
+/* 吊销原因 */
+.node-token-revoke-reason {
+  margin-bottom: 10px;
+}
+
+/* 使用说明卡片 */
+.node-token-help-card {
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.node-token-help-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: help-step;
+}
+
+.node-token-help-list li {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--border-color) 60%, transparent);
+}
+
+.node-token-help-list li:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.node-token-help-step-num {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  color: var(--color-primary);
+  font-family: var(--font-display, "Space Grotesk", sans-serif);
+  font-size: 0.85rem;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--color-primary) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 20%, transparent);
+  border-radius: 8px;
+}
+
+.node-token-help-step-text {
+  flex: 1;
+  padding-top: 3px;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+/* 响应式 */
+@media (max-width: 780px) {
+  .node-token-card-summary {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .node-token-card-summary-meta {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .node-token-card-time {
+    font-size: 0.78rem;
+  }
+
+  .node-token-copy-section .kc-api-example {
+    padding-right: 18px;
+  }
+
+  .node-token-copy-section .kc-api-copy-button {
+    position: static;
+    justify-content: center;
+    width: calc(100% - 24px);
+    margin: 10px 12px;
+  }
+
+  .node-token-card-status-section {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .node-token-empty {
+    padding: 20px 0;
+  }
+}

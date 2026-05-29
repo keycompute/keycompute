@@ -19,6 +19,8 @@ pub enum TransactionType {
     Freeze,
     /// 解冻
     Unfreeze,
+    /// 小费入账（tips 转为可用余额）
+    TipCredit,
 }
 
 impl TransactionType {
@@ -28,6 +30,7 @@ impl TransactionType {
             TransactionType::Consume => "consume",
             TransactionType::Freeze => "freeze",
             TransactionType::Unfreeze => "unfreeze",
+            TransactionType::TipCredit => "tip_credit",
         }
     }
 
@@ -37,6 +40,7 @@ impl TransactionType {
             "consume" => Some(TransactionType::Consume),
             "freeze" => Some(TransactionType::Freeze),
             "unfreeze" => Some(TransactionType::Unfreeze),
+            "tip_credit" => Some(TransactionType::TipCredit),
             _ => None,
         }
     }
@@ -327,6 +331,70 @@ impl UserBalance {
             None,
             TransactionType::Freeze,
             -amount,
+            balance_before,
+            balance_after,
+            description,
+        )
+        .await?;
+
+        Ok((updated_balance, transaction))
+    }
+
+    /// 小费入账（tips 转为可用余额）
+    ///
+    /// 将 tips 金额转入用户可用余额，同时更新 total_recharged。
+    ///
+    /// 接受 `&mut PgConnection`（通过 `DerefMut` 自动兼容 `&mut Transaction`），
+    /// 与 `recharge`/`consume` 等方法保持一致。如需泛型 `Executor` 支持，
+    /// 可参照 `UserNodeGatewayToken::consume` 模式重构。
+    ///
+    /// # 注意
+    /// 如果用户余额记录不存在，会使用传入的 tenant_id 创建新记录
+    pub async fn credit_tips(
+        pool: &mut sqlx::PgConnection,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        amount: Decimal,
+        description: Option<&str>,
+    ) -> Result<(UserBalance, BalanceTransaction), DbError> {
+        let balance = sqlx::query_as::<_, UserBalance>(
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *pool)
+        .await?;
+
+        let effective_tenant_id = balance.as_ref().map(|b| b.tenant_id).unwrap_or(tenant_id);
+
+        let updated_balance = sqlx::query_as::<_, UserBalance>(
+            r#"
+            INSERT INTO user_balances (user_id, tenant_id, available_balance, total_recharged)
+            VALUES ($1, $2, $3, $3)
+            ON CONFLICT (user_id) DO UPDATE SET
+                available_balance = user_balances.available_balance + $3,
+                total_recharged = user_balances.total_recharged + $3,
+                updated_at = NOW()
+            RETURNING *
+            "#,
+        )
+        .bind(user_id)
+        .bind(effective_tenant_id)
+        .bind(amount)
+        .fetch_one(&mut *pool)
+        .await?;
+
+        // 从 RETURNING 的最终值反推 balance_before，确保并发场景下准确
+        let balance_after = updated_balance.available_balance;
+        let balance_before = balance_after - amount;
+
+        let transaction = BalanceTransaction::create_internal(
+            &mut *pool,
+            updated_balance.tenant_id,
+            user_id,
+            None,
+            None,
+            TransactionType::TipCredit,
+            amount,
             balance_before,
             balance_after,
             description,

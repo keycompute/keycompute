@@ -3,7 +3,7 @@
 //! 通过 JS 互调直接使用 ECharts 渲染饼图，无需 charming 中间层。
 //!
 //! # 示例
-//! ```rust
+//! ```rust,ignore
 //! PieChart {
 //!     id: "model-dist-chart",
 //!     title: "模型调用分布",

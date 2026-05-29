@@ -731,11 +731,81 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_gateway.status_online", "在线");
     m.insert("node_gateway.status_offline", "离线");
     m.insert("node_gateway.status_excluded", "已排除");
+    m.insert("node_gateway.token_status_pending", "待审批");
     m.insert("node_gateway.task_queued", "排队中");
     m.insert("node_gateway.task_leased", "执行中");
     m.insert("node_gateway.task_succeeded", "成功");
     m.insert("node_gateway.task_failed", "失败");
     m.insert("node_gateway.task_expired", "已过期");
+    // ── 令牌审批（Admin）────────────────────────
+    m.insert("node_gateway.token_approval_title", "注册令牌审批");
+    m.insert(
+        "node_gateway.token_approval_desc",
+        "审核用户提交的节点注册令牌申请",
+    );
+    m.insert("node_gateway.token_approval_email", "用户邮箱");
+    m.insert("node_gateway.token_approval_preview", "令牌预览");
+    m.insert("node_gateway.token_approval_apply_time", "申请时间");
+    m.insert("node_gateway.no_pending_tokens", "暂无待审批的注册令牌申请");
+    m.insert(
+        "node_gateway.token_approval_pending_count",
+        "{count} 条待审批",
+    );
+    m.insert("node_gateway.approve", "通过");
+    m.insert("node_gateway.reject", "拒绝");
+    m.insert("node_gateway.approve_confirm_title", "确认通过");
+    m.insert(
+        "node_gateway.approve_confirm_msg",
+        "确认通过该用户的令牌申请？通过后用户将可以查看令牌明文并用于节点注册。",
+    );
+    m.insert("node_gateway.reject_confirm_title", "确认拒绝");
+    m.insert(
+        "node_gateway.reject_confirm_msg",
+        "确认拒绝该用户的令牌申请？用户可重新申请。",
+    );
+    m.insert("node_gateway.approve_success", "令牌已审批通过");
+    m.insert("node_gateway.reject_success", "令牌申请已拒绝");
+    m.insert("node_gateway.approve_failed", "审批操作失败");
+    m.insert("node_gateway.token_conflict", "该申请已被其他管理员处理");
+    m.insert("node_gateway.exclude", "排除");
+    m.insert("node_gateway.exclude_success", "节点已排除");
+    m.insert("node_gateway.exclude_failed", "排除节点失败");
+    m.insert("node_gateway.exclude_confirm_title", "确认排除节点");
+    m.insert(
+        "node_gateway.exclude_confirm_msg",
+        "排除后该节点将不再接收任务分配，但节点仍可通过心跳保持连接。确定要排除吗？",
+    );
+    m.insert("node_gateway.revoke", "吊销");
+    m.insert("node_gateway.revoke_success", "注册令牌已吊销");
+    m.insert("node_gateway.revoke_failed", "吊销注册令牌失败");
+    m.insert("node_gateway.revoke_confirm_title", "确认吊销节点");
+    m.insert(
+        "node_gateway.revoke_confirm_msg",
+        "吊销后该节点将被排除且注册令牌作废，节点无法注册新实例。可通过恢复按钮撤销。",
+    );
+    m.insert("node_gateway.recover", "恢复");
+    m.insert("node_gateway.recover_success", "节点已恢复上线");
+    m.insert("node_gateway.recover_failed", "恢复节点失败");
+    m.insert("node_gateway.recover_confirm_title", "确认恢复节点");
+    m.insert(
+        "node_gateway.recover_confirm_msg",
+        "恢复后该节点将重新上线并可接收任务分配，连续失败计数将清零。确定要恢复吗？",
+    );
+    m.insert("node_gateway.token_preview", "注册令牌");
+    m.insert("node_gateway.revoke_reason_label", "吊销原因");
+    m.insert(
+        "node_gateway.revoke_reason_placeholder",
+        "请填写吊销原因...",
+    );
+    m.insert("node_gateway.delete_confirm_title", "确认删除节点");
+    m.insert(
+        "node_gateway.delete_confirm_msg",
+        "删除后该节点所有数据将被彻底清除，用户的注册令牌记录将被删除，用户需重新申请。此操作不可撤销。",
+    );
+    m.insert("node_gateway.delete", "删除");
+    m.insert("node_gateway.delete_success", "节点已删除");
+    m.insert("node_gateway.delete_failed", "删除节点失败");
+
     m.insert(
         "monitoring.subtitle",
         "追踪 gateway 到 node 的请求生命周期、节点健康和用量落账状态。",
@@ -1000,6 +1070,191 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "accounts.models_placeholder_default",
         "输入模型名称，多个用逗号分隔",
+    );
+
+    // ── 导航（节点分组）────────────────────────────
+    m.insert("nav.group.node", "节点");
+    m.insert("nav.node_token", "注册令牌");
+    m.insert("nav.node_earnings", "收益管理");
+    m.insert("page.node_token", "注册令牌");
+    m.insert("page.node_earnings", "收益管理");
+
+    // ── 注册令牌 ─────────────────────────────
+    m.insert(
+        "node_token.subtitle",
+        "申请节点注册令牌，用于将自己的节点接入平台",
+    );
+    m.insert("node_token.title", "我的令牌");
+    m.insert("node_token.empty_title", "尚未申请注册令牌");
+    m.insert(
+        "node_token.empty_desc",
+        "申请令牌后，您可以将自己的节点注册到平台，开始赚取收益。",
+    );
+    m.insert("node_token.apply", "申请令牌");
+    m.insert("node_token.applying", "申请中...");
+    m.insert("node_token.apply_success", "申请已提交，请等待管理员审批");
+    m.insert("node_token.apply_failed", "申请失败");
+    m.insert(
+        "node_token.already_approved",
+        "您已有已审批通过的令牌。如需申请新令牌，请联系管理员吊销当前令牌。",
+    );
+    m.insert(
+        "node_token.cannot_apply",
+        "当前已有活跃令牌，请先处理现有令牌后方可重新申请",
+    );
+    m.insert("node_token.status_pending", "待审批");
+    m.insert("node_token.status_consumed", "已使用");
+    m.insert("node_token.status_approved", "已通过");
+    m.insert("node_token.status_rejected", "已拒绝");
+    m.insert("node_token.delete", "删除记录");
+    m.insert("node_token.delete_confirm_title", "确认删除");
+    m.insert(
+        "node_token.delete_confirm_msg",
+        "确定要删除此令牌记录吗？删除后可重新申请。",
+    );
+    m.insert("node_token.delete_success", "记录已删除");
+    m.insert("node_token.delete_failed", "删除失败");
+    m.insert("node_token.status_revoked", "已吊销");
+    m.insert(
+        "node_token.pending_desc",
+        "您的令牌申请正在等待管理员审批，请耐心等待。",
+    );
+    m.insert(
+        "node_token.consumed_desc",
+        "该令牌已被用于节点注册。如需新令牌，请重新申请。",
+    );
+    m.insert(
+        "node_token.consumed_hint",
+        "每个用户同时只能持有一个有效令牌。",
+    );
+    m.insert(
+        "node_token.rejected_desc",
+        "您的令牌申请被拒绝，您可以重新申请或联系管理员。",
+    );
+    m.insert(
+        "node_token.revoked_desc",
+        "该注册令牌已被管理员吊销，令牌已作废。但已注册的节点可能仍在运行中。",
+    );
+    m.insert("node_token.preview", "令牌预览");
+    m.insert("node_token.issued_at", "申请时间");
+    m.insert(
+        "node_token.revealed_warning",
+        "此令牌已查看过，请确认您已安全保存该令牌。如果遗失，需重新申请。",
+    );
+    m.insert(
+        "node_token.first_view_hint",
+        "请立即保存此令牌！令牌仅在此处完整显示一次，后续无法再查看明文。",
+    );
+    m.insert(
+        "node_token.no_revoke_hint",
+        "令牌为一次性注册凭证，注册后自动失效，无需手动吊销。",
+    );
+    m.insert("node_token.registered_node", "已注册节点");
+    m.insert("node_token.node_status", "节点状态");
+    m.insert("node_token.last_heartbeat", "最近心跳");
+    m.insert(
+        "node_token.node_excluded_hint",
+        "节点当前处于排除状态，已停止接收任务。如需恢复，请联系管理员。",
+    );
+    m.insert(
+        "node_token.node_online_hint",
+        "节点当前在线运行中，无需重新申请令牌。如需注册新节点，请重新申请。",
+    );
+    m.insert(
+        "node_token.reapply_hint",
+        "如需注册新的节点，请重新申请令牌。",
+    );
+    m.insert(
+        "node_token.token_hint",
+        "将令牌配置到您的节点配置文件中即可完成注册。",
+    );
+    m.insert("node_token.copy", "复制");
+    m.insert("node_token.copied", "已复制");
+    m.insert("node_token.copy_hint", "点击复制");
+    m.insert("node_token.help_title", "使用说明");
+    m.insert("node_token.help_1", "点击「申请令牌」提交审批请求");
+    m.insert(
+        "node_token.help_2",
+        "等待管理员审批通过后，查看令牌明文并保存",
+    );
+    m.insert(
+        "node_token.help_3",
+        "将令牌配置到节点配置文件中的 NODE_GATEWAY_TOKEN 字段",
+    );
+    m.insert(
+        "node_token.help_4",
+        "启动节点，系统将自动完成注册并开始接单",
+    );
+    m.insert("node_token.view_reason", "查看原因");
+    m.insert(
+        "node_token.no_tokens",
+        "暂无令牌记录，点击上方按钮申请第一个令牌",
+    );
+    m.insert("node_token.expand", "展开详情");
+
+    // ── 收益管理 ─────────────────────────────
+    m.insert(
+        "node_earnings.subtitle",
+        "查看节点收益、小费历史，并发起提现",
+    );
+    m.insert("node_earnings.pending_amount", "待提现");
+    m.insert("node_earnings.pending_count", "共 {count} 笔待提现");
+    m.insert("node_earnings.withdrawn_amount", "已提现");
+    m.insert("node_earnings.withdrawn_meta", "累计已提现金额");
+    m.insert("node_earnings.total_amount", "累计收益");
+    m.insert("node_earnings.total_meta", "累计产生的小费收益");
+    m.insert("node_earnings.history_title", "小费历史");
+    m.insert("node_earnings.withdrawals_title", "提现记录");
+    m.insert("node_earnings.no_history", "暂无小费记录");
+    m.insert("node_earnings.no_withdrawals", "暂无提现记录");
+    m.insert("node_earnings.col_time", "时间");
+    m.insert("node_earnings.col_bill_amount", "账单金额");
+    m.insert("node_earnings.col_tip_amount", "小费金额");
+    m.insert("node_earnings.col_tip_ratio", "分成比例");
+    m.insert("node_earnings.col_status", "状态");
+    m.insert("node_earnings.col_amount", "金额");
+    m.insert("node_earnings.col_method", "方式");
+    m.insert("node_earnings.col_remark", "备注");
+    m.insert("node_earnings.status_pending", "待审批");
+    m.insert("node_earnings.status_approved", "已审批");
+    m.insert("node_earnings.status_completed", "已完成");
+    m.insert("node_earnings.status_rejected", "已拒绝");
+    m.insert("node_earnings.withdraw_btn", "发起提现");
+    m.insert("node_earnings.withdraw_title", "发起提现");
+    m.insert("node_earnings.withdraw_method", "提现方式");
+    m.insert("node_earnings.method_balance", "转入余额");
+    m.insert(
+        "node_earnings.method_balance_desc",
+        "即时到账，提现后金额将直接进入您的账户余额",
+    );
+    m.insert("node_earnings.method_alipay", "支付宝");
+    m.insert(
+        "node_earnings.method_alipay_desc",
+        "管理员审批通过后，将线下打款到您的支付宝账户",
+    );
+    m.insert("node_earnings.alipay_account", "支付宝账号");
+    m.insert("node_earnings.alipay_placeholder", "请输入支付宝账号");
+    m.insert("node_earnings.real_name", "真实姓名");
+    m.insert(
+        "node_earnings.real_name_placeholder",
+        "请输入支付宝实名姓名",
+    );
+    m.insert(
+        "node_earnings.fill_alipay",
+        "使用支付宝提现需填写账号和真实姓名",
+    );
+    m.insert(
+        "node_earnings.withdraw_hint",
+        "支付宝提现需管理员审批，审批通过后将在 7 个工作日内打款。",
+    );
+    m.insert("node_earnings.withdraw_failed", "提现失败");
+    m.insert(
+        "node_earnings.withdraw_balance_success",
+        "提现成功！金额已转入余额",
+    );
+    m.insert(
+        "node_earnings.withdraw_alipay_success",
+        "提现申请已提交，请等待管理员审批",
     );
 
     m

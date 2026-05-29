@@ -371,12 +371,22 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn create_test_store() -> Option<RedisRuntimeStore> {
+    async fn create_test_store() -> Option<RedisRuntimeStore> {
         let test_id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
         let prefix = format!("keycompute:test:{}", test_id);
 
         match RedisRuntimeStore::with_prefix("redis://127.0.0.1:6379", prefix) {
-            Ok(store) => Some(store),
+            Ok(store) => {
+                // 验证实际连接可用，避免本地 Redis 无认证时报错
+                if store.flush_prefix().await.is_ok() {
+                    Some(store)
+                } else {
+                    eprintln!(
+                        "Warning: Redis not available (connection failed), skipping Redis tests"
+                    );
+                    None
+                }
+            }
             Err(_) => {
                 eprintln!("Warning: Redis not available, skipping Redis tests");
                 None
@@ -386,12 +396,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_store_basic() {
-        let Some(store) = create_test_store() else {
+        let Some(store) = create_test_store().await else {
             return;
         };
-
-        // 清理测试数据
-        let _ = store.flush_prefix().await;
 
         // 测试 set/get
         store.set("test_key", "test_value", None).await.unwrap();
@@ -406,13 +413,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_store_incr_decr() {
-        let Some(store) = create_test_store() else {
+        let Some(store) = create_test_store().await else {
             return;
         };
-
-        let _ = store.flush_prefix().await;
-
-        // 测试 incr
         let count1 = store.incr("counter").await.unwrap();
         assert_eq!(count1, 1);
 
@@ -426,13 +429,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_store_ttl() {
-        let Some(store) = create_test_store() else {
+        let Some(store) = create_test_store().await else {
             return;
         };
-
-        let _ = store.flush_prefix().await;
-
-        // 设置带 TTL 的值
         store
             .set("ttl_key", "ttl_value", Some(Duration::from_secs(10)))
             .await

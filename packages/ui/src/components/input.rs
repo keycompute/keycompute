@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 /// 文本输入框组件
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// let mut email = use_signal(String::new);
 /// Input {
 ///     label: "邮箱",

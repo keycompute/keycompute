@@ -10,6 +10,8 @@ pub mod common;
 pub mod debug;
 pub mod distribution;
 pub mod health;
+pub mod node_gateway_token;
+pub mod node_tips;
 pub mod openai;
 pub mod payment;
 pub mod settings;

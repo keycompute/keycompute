@@ -6,7 +6,7 @@ use crate::balance::BalanceService;
 use crate::calculator::calculate_amount;
 use crate::usage_source::UsageSource;
 use chrono::{DateTime, Utc};
-use keycompute_db::{CreateUsageLogRequest, UsageLog};
+use keycompute_db::{CreateUsageLogRequest, UsageLog, models::node_tip::NodeTip};
 use keycompute_distribution::{
     DistributionContext, DistributionService, calculator::calculate_shares,
 };
@@ -167,11 +167,11 @@ impl BillingService {
                 total_tokens: new_log.total_tokens,
                 input_unit_price_snapshot: decimal_to_bigdecimal(
                     &new_log.input_unit_price_snapshot,
-                ),
+                )?,
                 output_unit_price_snapshot: decimal_to_bigdecimal(
                     &new_log.output_unit_price_snapshot,
-                ),
-                user_amount: decimal_to_bigdecimal(&new_log.user_amount),
+                )?,
+                user_amount: decimal_to_bigdecimal(&new_log.user_amount)?,
                 currency: new_log.currency,
                 usage_source: new_log.usage_source,
                 status: new_log.status,
@@ -191,9 +191,9 @@ impl BillingService {
             account_id: new_log.account_id,
             input_tokens: new_log.input_tokens,
             output_tokens: new_log.output_tokens,
-            input_unit_price_snapshot: decimal_to_bigdecimal(&new_log.input_unit_price_snapshot),
-            output_unit_price_snapshot: decimal_to_bigdecimal(&new_log.output_unit_price_snapshot),
-            user_amount: decimal_to_bigdecimal(&new_log.user_amount),
+            input_unit_price_snapshot: decimal_to_bigdecimal(&new_log.input_unit_price_snapshot)?,
+            output_unit_price_snapshot: decimal_to_bigdecimal(&new_log.output_unit_price_snapshot)?,
+            user_amount: decimal_to_bigdecimal(&new_log.user_amount)?,
             currency: new_log.currency,
             usage_source: new_log.usage_source,
             status: new_log.status,
@@ -241,7 +241,7 @@ impl BillingService {
             .finalize_and_save(ctx, provider_name, account_id, status)
             .await?;
 
-        let user_amount = bigdecimal_to_decimal(&usage_log.user_amount);
+        let user_amount = bigdecimal_to_decimal(&usage_log.user_amount)?;
 
         // 扣除用户余额（失败不影响主流程）
         self.deduct_balance_if_configured(
@@ -256,6 +256,9 @@ impl BillingService {
         // 触发分销处理（失败不影响主流程）
         self.process_distribution_if_configured(ctx, &usage_log, user_id, user_amount)
             .await;
+
+        // 触发节点租赁小费（失败不影响主流程）
+        self.process_tips_if_configured(usage_log.id).await;
 
         Ok(usage_log)
     }
@@ -384,7 +387,7 @@ impl BillingService {
         let level1_ratio = rules
             .iter()
             .find(|r| r.beneficiary_id == l1_id)
-            .map(|r| bigdecimal_to_decimal(&r.commission_rate))
+            .and_then(|r| bigdecimal_to_decimal(&r.commission_rate).ok())
             .unwrap_or(default_level1_ratio);
 
         let level2_ratio = level2_beneficiary
@@ -392,7 +395,7 @@ impl BillingService {
                 rules
                     .iter()
                     .find(|r| r.beneficiary_id == l2_id)
-                    .map(|r| bigdecimal_to_decimal(&r.commission_rate))
+                    .and_then(|r| bigdecimal_to_decimal(&r.commission_rate).ok())
             })
             .unwrap_or(default_level2_ratio);
 
@@ -424,6 +427,46 @@ impl BillingService {
                     usage_log_id = %usage_log.id,
                     error = %e,
                     "Distribution processing failed"
+                );
+            }
+        }
+    }
+
+    /// 触发节点租赁小费（如果已配置数据库连接）
+    ///
+    /// 根据 usage_log 查询对应的 node_task，为节点所有者创建小费记录。
+    /// 架构约束：小费创建失败不影响主计费流程，仅记录错误。
+    async fn process_tips_if_configured(&self, usage_log_id: Uuid) {
+        let Some(pool) = &self.pool else {
+            tracing::debug!(
+                %usage_log_id,
+                "No database pool configured, skipping tips processing"
+            );
+            return;
+        };
+
+        match NodeTip::create_from_usage_log(pool, usage_log_id).await {
+            Ok(Some(tip)) => {
+                tracing::info!(
+                    %usage_log_id,
+                    tip_id = %tip.id,
+                    owner_user_id = %tip.owner_user_id,
+                    tip_amount = %tip.tip_amount,
+                    "Node tip created successfully"
+                );
+            }
+            Ok(None) => {
+                tracing::debug!(
+                    %usage_log_id,
+                    "No tip created (not a node gateway request or ratio is zero)"
+                );
+            }
+            Err(e) => {
+                // 架构约束：小费创建失败不影响主计费流程
+                tracing::error!(
+                    %usage_log_id,
+                    error = %e,
+                    "Failed to create node tip"
                 );
             }
         }
@@ -665,40 +708,45 @@ impl NewUsageLogBuilder {
 
 /// 将 Decimal 转换为 BigDecimal
 ///
-/// # Panics
-/// 如果转换失败会记录警告并返回 0（理论上不应该发生）
-fn decimal_to_bigdecimal(value: &Decimal) -> bigdecimal::BigDecimal {
-    let s = value.to_string();
-    match s.parse() {
-        Ok(bd) => bd,
-        Err(e) => {
-            tracing::warn!(
-                value = %s,
+/// 通过字符串桥接以避免 f64 精度损失。
+///
+/// # Errors
+/// 理论上不会失败（两种类型都使用字符串表示），但若失败则返回错误而非静默归零。
+fn decimal_to_bigdecimal(value: &Decimal) -> Result<bigdecimal::BigDecimal> {
+    value
+        .to_string()
+        .parse()
+        .map_err(|e: bigdecimal::ParseBigDecimalError| {
+            tracing::error!(
+                value = %value,
                 error = %e,
-                "Failed to convert Decimal to BigDecimal, returning 0"
+                "Critical: Failed to convert Decimal to BigDecimal"
             );
-            bigdecimal::BigDecimal::from(0)
-        }
-    }
+            KeyComputeError::Internal(format!(
+                "Decimal → BigDecimal conversion failed for value {}: {}",
+                value, e
+            ))
+        })
 }
 
 /// 将 BigDecimal 转换为 Decimal
 ///
-/// # Panics
-/// 如果转换失败会记录警告并返回 0（理论上不应该发生）
-fn bigdecimal_to_decimal(value: &bigdecimal::BigDecimal) -> Decimal {
-    let s = value.to_string();
-    match s.parse() {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(
-                value = %s,
-                error = %e,
-                "Failed to convert BigDecimal to Decimal, returning 0"
-            );
-            Decimal::from(0)
-        }
-    }
+/// 通过字符串桥接以避免 f64 精度损失。
+///
+/// # Errors
+/// 理论上不会失败，但若失败则返回错误而非静默归零（计费核心路径不允许静默数据损坏）。
+fn bigdecimal_to_decimal(value: &bigdecimal::BigDecimal) -> Result<Decimal> {
+    value.to_string().parse().map_err(|e: rust_decimal::Error| {
+        tracing::error!(
+            value = %value,
+            error = %e,
+            "Critical: Failed to convert BigDecimal to Decimal"
+        );
+        KeyComputeError::Internal(format!(
+            "BigDecimal → Decimal conversion failed for value {}: {}",
+            value, e
+        ))
+    })
 }
 
 #[cfg(test)]

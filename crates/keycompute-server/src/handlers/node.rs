@@ -22,20 +22,16 @@ use uuid::Uuid;
 /// 节点注册 Handler
 /// POST /node/v1/register
 ///
-/// 不需要 session token 认证，使用 registration_token 验证
+/// 不需要 session token 认证，使用 HMAC 签名的 registration_token 验证。
+/// token 由用户申请 → Admin 审批后下发 → 注册时一次性消费。
 pub async fn node_register(
     State(state): State<AppState>,
     Json(request): Json<NodeRegisterRequest>,
 ) -> Result<Json<NodeRegisterResponse>> {
     let node_gateway = get_node_gateway(&state)?;
 
-    // 注意：register_node 需要 owner_user_id
-    // MVP 阶段使用 nil UUID，后续应从认证上下文或配置读取真实的 user_id
-    // 根据 AGENTS.md：nodes.owner_user_id 表示节点注册归属和管理主体
-    let owner_user_id = uuid::Uuid::nil(); // TODO: MVP 临时方案，需从配置读取
-
     let response = node_gateway
-        .register_node(&request, owner_user_id)
+        .register_node(&request)
         .await
         .map_err(ApiError::from)?;
 

@@ -73,7 +73,7 @@ pub fn PaymentsOverview() -> Element {
                         None => rsx! { p { class: "stat-value", {i18n.t("table.loading")} } },
                         Some(Err(e)) => rsx! { p { class: "stat-value text-error", "{i18n.t(\"common.error\")}: {e}" } },
                         Some(Ok(b)) => rsx! {
-                            p { class: "stat-value", "¥ {b.available_balance}" }
+                            p { class: "stat-value", "¥ {crate::utils::format_money_str(&b.available_balance)}" }
                         },
                     }
                 }
@@ -81,7 +81,7 @@ pub fn PaymentsOverview() -> Element {
                     class: "stat-card",
                     p { class: "stat-title", {i18n.t("payments.frozen_amount")} }
                     match balance() {
-                        Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {b.frozen_balance}" } },
+                        Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {crate::utils::format_money_str(&b.frozen_balance)}" } },
                         _ => rsx! { p { class: "stat-value", "—" } },
                     }
                 }
@@ -89,7 +89,7 @@ pub fn PaymentsOverview() -> Element {
                     class: "stat-card",
                     p { class: "stat-title", {i18n.t("payments.total_recharge")} }
                     match balance() {
-                        Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {b.total_recharged}" } },
+                        Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {crate::utils::format_money_str(&b.total_recharged)}" } },
                         _ => rsx! { p { class: "stat-value", "—" } },
                     }
                 }
@@ -97,7 +97,7 @@ pub fn PaymentsOverview() -> Element {
                     class: "stat-card",
                     p { class: "stat-title", {i18n.t("payments.total_consumed")} }
                     match balance() {
-                        Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {b.total_consumed}" } },
+                        Some(Ok(b)) => rsx! { p { class: "stat-value", "¥ {crate::utils::format_money_str(&b.total_consumed)}" } },
                         _ => rsx! { p { class: "stat-value", "—" } },
                     }
                 }
@@ -117,7 +117,7 @@ pub fn PaymentsOverview() -> Element {
                         }
                         div { class: "stat-card",
                             p { class: "stat-title", {i18n.t("payments.total_cost")} }
-                            p { class: "stat-value", "¥{s.total_cost:.2}" }
+                            p { class: "stat-value", "¥{crate::utils::format_money(s.total_cost)}" }
                         }
                     },
                     _ => rsx! {},
@@ -151,7 +151,7 @@ pub fn PaymentsOverview() -> Element {
                                             tr {
                                                 key: "{order.id}",
                                                 td { code { "{order.out_trade_no}" } }
-                                                td { "¥ {order.amount}" }
+                                                td { "¥ {crate::utils::format_money_str(&order.amount)}" }
                                                 td { "{order.subject}" }
                                                 td {
                                                     Badge {
@@ -204,7 +204,7 @@ pub fn PaymentsOverview() -> Element {
                                                     td { "{r.prompt_tokens}" }
                                                     td { "{r.completion_tokens}" }
                                                     td { "{r.total_tokens}" }
-                                                    td { "¥{r.cost:.2}" }
+                                                    td { "¥{crate::utils::format_money(r.cost)}" }
                                                     td {
                                                         span {
                                                             class: if r.status == "success" { "badge badge-success" } else { "badge badge-warning" },

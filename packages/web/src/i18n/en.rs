@@ -861,11 +861,96 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_gateway.status_online", "Online");
     m.insert("node_gateway.status_offline", "Offline");
     m.insert("node_gateway.status_excluded", "Excluded");
+    m.insert("node_gateway.token_status_pending", "Pending Approval");
     m.insert("node_gateway.task_queued", "Queued");
     m.insert("node_gateway.task_leased", "Leased");
     m.insert("node_gateway.task_succeeded", "Succeeded");
     m.insert("node_gateway.task_failed", "Failed");
     m.insert("node_gateway.task_expired", "Expired");
+    // ── Token Approval (Admin) ─────────────────────
+    m.insert(
+        "node_gateway.token_approval_title",
+        "Registration Token Approval",
+    );
+    m.insert(
+        "node_gateway.token_approval_desc",
+        "Review and approve user-submitted node registration token applications",
+    );
+    m.insert("node_gateway.token_approval_email", "User Email");
+    m.insert("node_gateway.token_approval_preview", "Token Preview");
+    m.insert("node_gateway.token_approval_apply_time", "Applied At");
+    m.insert(
+        "node_gateway.no_pending_tokens",
+        "No pending registration token applications",
+    );
+    m.insert(
+        "node_gateway.token_approval_pending_count",
+        "{count} pending",
+    );
+    m.insert("node_gateway.approve", "Approve");
+    m.insert("node_gateway.reject", "Reject");
+    m.insert("node_gateway.approve_confirm_title", "Confirm Approval");
+    m.insert(
+        "node_gateway.approve_confirm_msg",
+        "Approve this token application? Once approved, the user can view the full token and use it for node registration.",
+    );
+    m.insert("node_gateway.reject_confirm_title", "Confirm Rejection");
+    m.insert(
+        "node_gateway.reject_confirm_msg",
+        "Reject this token application? The user may reapply.",
+    );
+    m.insert(
+        "node_gateway.approve_success",
+        "Token approved successfully",
+    );
+    m.insert("node_gateway.reject_success", "Token application rejected");
+    m.insert("node_gateway.approve_failed", "Approval operation failed");
+    m.insert(
+        "node_gateway.token_conflict",
+        "This application has been processed by another admin",
+    );
+    m.insert("node_gateway.exclude", "Exclude");
+    m.insert("node_gateway.exclude_success", "Node excluded");
+    m.insert("node_gateway.exclude_failed", "Failed to exclude node");
+    m.insert("node_gateway.exclude_confirm_title", "Confirm Exclude Node");
+    m.insert(
+        "node_gateway.exclude_confirm_msg",
+        "After exclusion, this node will no longer receive task assignments, but the node can still maintain connection via heartbeat. Are you sure?",
+    );
+    m.insert("node_gateway.revoke", "Revoke");
+    m.insert("node_gateway.revoke_success", "Registration token revoked");
+    m.insert(
+        "node_gateway.revoke_failed",
+        "Failed to revoke registration token",
+    );
+    m.insert("node_gateway.revoke_confirm_title", "Confirm Revoke Node");
+    m.insert(
+        "node_gateway.revoke_confirm_msg",
+        "After revocation, this node will be excluded and its registration token will be invalidated. The node will not be able to register new instances. This can be undone via the recover button.",
+    );
+    m.insert("node_gateway.recover", "Recover");
+    m.insert("node_gateway.recover_success", "Node recovered");
+    m.insert("node_gateway.recover_failed", "Failed to recover node");
+    m.insert("node_gateway.recover_confirm_title", "Confirm Recover Node");
+    m.insert(
+        "node_gateway.recover_confirm_msg",
+        "After recovery, this node will be back online and eligible for task scheduling. The consecutive failure count will be reset to zero. Are you sure?",
+    );
+    m.insert("node_gateway.token_preview", "Reg. Token");
+    m.insert("node_gateway.revoke_reason_label", "Revocation Reason");
+    m.insert(
+        "node_gateway.revoke_reason_placeholder",
+        "Please enter revocation reason...",
+    );
+    m.insert("node_gateway.delete_confirm_title", "Confirm Delete Node");
+    m.insert(
+        "node_gateway.delete_confirm_msg",
+        "After deletion, all node data will be permanently removed, including the registration token record. The user will need to reapply for a new token. This action cannot be undone.",
+    );
+    m.insert("node_gateway.delete", "Delete");
+    m.insert("node_gateway.delete_success", "Node deleted");
+    m.insert("node_gateway.delete_failed", "Failed to delete node");
+
     m.insert(
         "monitoring.subtitle",
         "Trace gateway-to-node request lifecycles, node health, and usage logging state.",
@@ -1190,6 +1275,174 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "accounts.models_placeholder_default",
         "Enter model names, separated by commas",
+    );
+
+    // ── Navigation (Node group) ──────────────────────
+    m.insert("nav.group.node", "Node");
+    m.insert("nav.node_token", "Registration Token");
+    m.insert("nav.node_earnings", "Earnings");
+    m.insert("page.node_token", "Registration Token");
+    m.insert("page.node_earnings", "Earnings");
+
+    // ── Node Token ─────────────────────────────
+    m.insert(
+        "node_token.subtitle",
+        "Apply for a node registration token to connect your node to the platform",
+    );
+    m.insert("node_token.title", "My Tokens");
+    m.insert("node_token.empty_title", "No registration token yet");
+    m.insert(
+        "node_token.empty_desc",
+        "After applying, you can register your node and start earning.",
+    );
+    m.insert("node_token.apply", "Apply for Token");
+    m.insert("node_token.applying", "Applying...");
+    m.insert(
+        "node_token.apply_success",
+        "Application submitted, please wait for admin approval",
+    );
+    m.insert("node_token.apply_failed", "Apply failed");
+    m.insert("node_token.already_approved", "You already have an approved token. Contact an admin to revoke it before applying for a new one.");
+    m.insert("node_token.status_pending", "Pending");
+    m.insert("node_token.status_consumed", "Consumed");
+    m.insert("node_token.status_approved", "Approved");
+    m.insert("node_token.status_rejected", "Rejected");
+    m.insert("node_token.status_revoked", "Revoked");
+    m.insert(
+        "node_token.pending_desc",
+        "Your token application is pending admin approval. Please wait.",
+    );
+    m.insert(
+        "node_token.consumed_desc",
+        "This token has been used for node registration. Apply again if needed.",
+    );
+    m.insert(
+        "node_token.consumed_hint",
+        "Each user can only have one active token at a time.",
+    );
+    m.insert(
+        "node_token.rejected_desc",
+        "Your token application was rejected. You may reapply or contact admin.",
+    );
+    m.insert("node_token.revoked_desc", "This registration token has been revoked by admin. The token is invalid, but the registered node may still be operational.");
+    m.insert("node_token.preview", "Token Preview");
+    m.insert("node_token.issued_at", "Applied At");
+    m.insert("node_token.revealed_warning", "This token has been viewed before. Please confirm you have saved it securely. If lost, you must reapply.");
+    m.insert(
+        "node_token.first_view_hint",
+        "Save this token now! The full plaintext is only shown once.",
+    );
+    m.insert(
+        "node_token.token_hint",
+        "Configure the token in your node config file to complete registration.",
+    );
+    m.insert("node_token.copy", "Copy");
+    m.insert("node_token.copied", "Copied");
+    m.insert("node_token.copy_hint", "Click to copy");
+    m.insert("node_token.no_revoke_hint", "Token is a one-time registration credential; it automatically becomes invalid after use. No need to manually revoke.");
+    m.insert("node_token.registered_node", "Registered Node");
+    m.insert("node_token.node_status", "Node Status");
+    m.insert("node_token.last_heartbeat", "Last Heartbeat");
+    m.insert(
+        "node_token.node_excluded_hint",
+        "This node is currently excluded and not receiving tasks. Contact admin to recover.",
+    );
+    m.insert("node_token.node_online_hint", "This node is online and running. No need to reapply. To register a new node, apply for a new token.");
+    m.insert(
+        "node_token.reapply_hint",
+        "To register a new node, apply for a new token.",
+    );
+    m.insert("node_token.help_title", "Usage Guide");
+    m.insert(
+        "node_token.help_1",
+        "Click \"Apply for Token\" to submit an approval request",
+    );
+    m.insert(
+        "node_token.help_2",
+        "After admin approval, view and save the full token plaintext",
+    );
+    m.insert(
+        "node_token.help_3",
+        "Set the token in your node config as NODE_GATEWAY_TOKEN",
+    );
+    m.insert(
+        "node_token.help_4",
+        "Start your node, and it will auto-register and start receiving tasks",
+    );
+    m.insert("node_token.view_reason", "View Reason");
+    m.insert("node_token.revoke_reason_label", "Revocation Reason");
+    m.insert(
+        "node_token.no_tokens",
+        "No token records. Click the button above to apply for your first token.",
+    );
+    m.insert("node_token.expand", "Expand");
+
+    // ── Node Earnings ─────────────────────────────
+    m.insert(
+        "node_earnings.subtitle",
+        "View node earnings, tip history, and request withdrawals",
+    );
+    m.insert("node_earnings.pending_amount", "Pending");
+    m.insert("node_earnings.pending_count", "{count} pending");
+    m.insert("node_earnings.withdrawn_amount", "Withdrawn");
+    m.insert("node_earnings.withdrawn_meta", "Total withdrawn amount");
+    m.insert("node_earnings.total_amount", "Total Earnings");
+    m.insert("node_earnings.total_meta", "Total tip earnings generated");
+    m.insert("node_earnings.history_title", "Tip History");
+    m.insert("node_earnings.withdrawals_title", "Withdrawal Records");
+    m.insert("node_earnings.no_history", "No tip records yet");
+    m.insert("node_earnings.no_withdrawals", "No withdrawal records yet");
+    m.insert("node_earnings.col_time", "Time");
+    m.insert("node_earnings.col_bill_amount", "Bill Amount");
+    m.insert("node_earnings.col_tip_amount", "Tip Amount");
+    m.insert("node_earnings.col_tip_ratio", "Tip Ratio");
+    m.insert("node_earnings.col_status", "Status");
+    m.insert("node_earnings.col_amount", "Amount");
+    m.insert("node_earnings.col_method", "Method");
+    m.insert("node_earnings.col_remark", "Remark");
+    m.insert("node_earnings.status_pending", "Pending");
+    m.insert("node_earnings.status_approved", "Approved");
+    m.insert("node_earnings.status_completed", "Completed");
+    m.insert("node_earnings.status_rejected", "Rejected");
+    m.insert("node_earnings.withdraw_btn", "Request Withdrawal");
+    m.insert("node_earnings.withdraw_title", "Request Withdrawal");
+    m.insert("node_earnings.withdraw_method", "Withdrawal Method");
+    m.insert("node_earnings.method_balance", "To Balance");
+    m.insert(
+        "node_earnings.method_balance_desc",
+        "Instant credit — amount will be added to your account balance",
+    );
+    m.insert("node_earnings.method_alipay", "Alipay");
+    m.insert(
+        "node_earnings.method_alipay_desc",
+        "Admin will transfer offline after approval",
+    );
+    m.insert("node_earnings.alipay_account", "Alipay Account");
+    m.insert(
+        "node_earnings.alipay_placeholder",
+        "Enter your Alipay account",
+    );
+    m.insert("node_earnings.real_name", "Real Name");
+    m.insert(
+        "node_earnings.real_name_placeholder",
+        "Enter your real name (for Alipay verification)",
+    );
+    m.insert(
+        "node_earnings.fill_alipay",
+        "Alipay account and real name are required for Alipay withdrawal",
+    );
+    m.insert(
+        "node_earnings.withdraw_hint",
+        "Alipay withdrawals require admin approval and will be processed within 7 business days.",
+    );
+    m.insert("node_earnings.withdraw_failed", "Withdrawal request failed");
+    m.insert(
+        "node_earnings.withdraw_balance_success",
+        "Withdrawal successful! Amount has been credited to your balance.",
+    );
+    m.insert(
+        "node_earnings.withdraw_alipay_success",
+        "Withdrawal request submitted. Please wait for admin approval.",
     );
 
     m

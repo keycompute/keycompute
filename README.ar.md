@@ -16,7 +16,7 @@
 
 <p align="center">
   <a href="https://github.com/keycompute/keycompute/stargazers"><img src="https://img.shields.io/github/stars/keycompute/keycompute?style=social" alt="GitHub Stars" /></a>
-  <a href="https://github.com/keycompute/keycompute/issues"><img src="https://img.shields.io/github/issues/keycompute/keycompute" alt="GitHub Issues" /></a>
+  <a href="https://github.com/keycompute/keycompute/issues"><img src="https://img.shields.io/github/issues/aiqubits/keycompute" alt="GitHub Issues" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
   <a href="./CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen" alt="PRs Welcome" /></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.92%2B-orange?logo=rust" alt="Rust Version" /></a>
@@ -252,7 +252,7 @@ keycompute/
 | `KC__REDIS__URL` | سلسلة اتصال Redis | ⚪ |
 | `KC__AUTH__JWT_SECRET` | سر توقيع JWT | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | سر تشفير مفاتيح API | ✅ |
-| `KC__NODE_GATEWAY__REGISTRATION_TOKEN` | رمز تسجيل العقدة؛ يُستخدم للتحقق من طلبات تسجيل العقدة، مشترك بين جميع العقد | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | سر توقيع HMAC؛ يُستخدم لإصدار رموز تسجيل للعقدة لمرة واحدة (قائم على الموافقة) | ✅ |
 | `KC__EMAIL__SMTP_HOST` | مضيف SMTP | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | منفذ SMTP | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | اسم مستخدم SMTP | ⚪ |

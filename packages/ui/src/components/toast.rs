@@ -33,7 +33,7 @@ impl ToastKind {
 /// 通过 `toast` Signal 控制显示，值为 `None` 时不渲染任何内容。
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// let toast: Signal<Option<ToastMsg>> = use_signal(|| None);
 /// rsx! {
 ///     Toast { toast }

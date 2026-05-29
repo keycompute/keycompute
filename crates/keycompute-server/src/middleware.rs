@@ -655,7 +655,7 @@ pub async fn maintenance_mode_middleware(
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
         && let Some(token) = auth_header.strip_prefix("Bearer ")
-        && let Ok(auth_context) = state.auth.verify_api_key(token).await
+        && let Ok(auth_context) = state.auth.verify_token(token).await
         && auth_context.role == "admin"
     {
         // 管理员绕过维护模式

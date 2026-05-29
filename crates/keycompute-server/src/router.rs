@@ -9,8 +9,16 @@
 
 use crate::{
     handlers::{
+        admin_approve_token,
+        admin_approve_withdrawal,
+        admin_complete_withdrawal,
+        admin_get_tip_ratio,
         // 支付相关
         admin_list_payment_orders,
+        // 节点网关 token 审批（Admin）
+        admin_list_pending_tokens,
+        admin_list_pending_withdrawals,
+        admin_update_tip_ratio,
         alipay_notify,
         calculate_cost,
         change_password,
@@ -21,16 +29,22 @@ use crate::{
         create_account,
         create_api_key,
         create_distribution_rule,
+        // 节点网关 token（用户自服务）
+        create_my_node_gateway_token,
         create_payment_order,
         // 定价管理（Admin）
         create_pricing,
+        create_tip_withdrawal,
         // 调试接口
         debug_routing,
         delete_account,
         delete_api_key,
         delete_distribution_rule,
+        delete_my_node_gateway_token,
+        delete_node,
         delete_pricing,
         delete_user,
+        exclude_node,
         // 认证相关
         forgot_password_handler,
         freeze_user_balance,
@@ -46,10 +60,15 @@ use crate::{
         get_monitoring_overview,
         get_my_balance,
         get_my_distribution_earnings,
+        get_my_node_gateway_token,
         get_my_referral_code,
         get_my_referrals,
+        get_my_tips_history,
+        // 节点租赁小费
+        get_my_tips_summary,
         get_my_usage,
         get_my_usage_stats,
+        get_my_withdrawals,
         get_node_gateway_overview,
         get_payment_order,
         get_provider_health,
@@ -69,6 +88,7 @@ use crate::{
         list_distribution_rules,
         list_models,
         list_my_api_keys,
+        list_my_node_gateway_tokens,
         list_my_payment_orders,
         // 定价管理
         list_pricing,
@@ -87,6 +107,7 @@ use crate::{
         reset_health,
         reset_password_handler,
         retrieve_model,
+        revoke_node_token,
         set_account_cooldown,
         sync_payment_order,
         test_account,
@@ -181,9 +202,27 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/me/referral/invite-link",
             post(generate_invite_link),
         )
+        // 节点网关 token 管理
+        .route(
+            "/api/v1/me/node-gateway/token/{id}",
+            delete(delete_my_node_gateway_token),
+        )
+        .route(
+            "/api/v1/me/node-gateway/token",
+            get(get_my_node_gateway_token).post(create_my_node_gateway_token),
+        )
+        .route(
+            "/api/v1/me/node-gateway/tokens",
+            get(list_my_node_gateway_tokens),
+        )
+        // 节点租赁小费
+        .route("/api/v1/me/tips", get(get_my_tips_summary))
+        .route("/api/v1/me/tips/history", get(get_my_tips_history))
+        .route("/api/v1/me/tips/withdraw", post(create_tip_withdrawal))
+        .route("/api/v1/me/tips/withdrawals", get(get_my_withdrawals))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
-    // ==================== 4. 管理功能 API（需要 Admin 权限） ====================
+    // ==================== 5. 管理功能 API（需要 Admin 权限） ====================
     // 用户管理（Admin 可以管理所有用户，普通用户只能看自己）
     let admin_user_routes = Router::new()
         .route("/api/v1/users", get(list_all_users))
@@ -265,7 +304,41 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/admin/node-gateway/overview",
             get(get_node_gateway_overview),
         )
-        .route("/api/v1/admin/nodes/{id}/recover", post(recover_node));
+        .route("/api/v1/admin/nodes/{id}/recover", post(recover_node))
+        .route("/api/v1/admin/nodes/{id}/exclude", post(exclude_node))
+        .route(
+            "/api/v1/admin/nodes/{id}/revoke-token",
+            post(revoke_node_token),
+        )
+        .route("/api/v1/admin/nodes/{id}", delete(delete_node))
+        // 节点注册 token 审批
+        .route(
+            "/api/v1/admin/node-gateway/tokens/pending",
+            get(admin_list_pending_tokens),
+        )
+        .route(
+            "/api/v1/admin/node-gateway/tokens/{id}/approve",
+            post(admin_approve_token),
+        );
+
+    // 小费管理（仅 Admin）
+    let admin_tips_routes = Router::new()
+        .route(
+            "/api/v1/admin/tips/withdrawals/pending",
+            get(admin_list_pending_withdrawals),
+        )
+        .route(
+            "/api/v1/admin/tips/withdrawals/{id}/approve",
+            post(admin_approve_withdrawal),
+        )
+        .route(
+            "/api/v1/admin/tips/withdrawals/{id}/complete",
+            post(admin_complete_withdrawal),
+        )
+        .route(
+            "/api/v1/admin/tips/settings/ratio",
+            get(admin_get_tip_ratio).put(admin_update_tip_ratio),
+        );
 
     // 监控追踪（仅 Admin）
     let admin_monitoring_routes = Router::new().route(
@@ -283,20 +356,21 @@ pub fn create_router(state: AppState) -> Router {
         .merge(admin_distribution_routes)
         .merge(admin_pricing_routes)
         .merge(admin_node_gateway_routes)
+        .merge(admin_tips_routes)
         .merge(admin_monitoring_routes)
         // 先添加限流层（后执行）
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         // 再添加 Admin 认证层（先执行），统一保护所有 Admin 路由
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware));
 
-    // ==================== 5. 定价和账单 API ====================
+    // ==================== 6. 定价和账单 API ====================
     let billing_routes = Router::new()
         // 账单记录（用户看自己的，Admin 看所有）
         .route("/api/v1/billing/records", get(list_billing_records))
         .route("/api/v1/billing/stats", get(get_billing_stats))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
-    // ==================== 6. 调试接口（仅 Admin 使用） ====================
+    // ==================== 7. 调试接口（仅 Admin 使用） ====================
     let debug_routes = Router::new()
         .route("/api/v1/debug/routing", get(debug_routing))
         .route("/api/v1/debug/providers", get(get_provider_health))
@@ -311,7 +385,7 @@ pub fn create_router(state: AppState) -> Router {
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware));
 
-    // ==================== 7. 支付 API ====================
+    // ==================== 8. 支付 API ====================
     // 用户支付路由（需要认证 + 限流）
     let payment_routes = Router::new()
         // 创建支付订单（支持跳转支付和扫码支付）
@@ -342,10 +416,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
-    // ==================== 8. 健康检查（公开） ====================
+    // ==================== 9. 健康检查（公开） ====================
     let health_routes = Router::new().route("/health", get(health_check));
 
-    // ==================== 9. 节点网关 API（使用 session token 认证） ====================
+    // ==================== 10. 节点网关 API（使用 session token 认证） ====================
     let node_routes = Router::new()
         .route("/node/v1/register", post(node_register))
         .route("/node/v1/heartbeat", post(node_heartbeat))

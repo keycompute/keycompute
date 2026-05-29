@@ -565,6 +565,64 @@ KeyCompute 团队
 
         Ok(())
     }
+
+    /// 发送节点网关注册令牌邮件（管理员审批通过后通知用户）
+    ///
+    /// 邮件中包含完整的 token 明文，用户可使用该 token 注册节点。
+    /// 邮件发送失败不阻塞审批流程。
+    pub async fn send_node_gateway_token_email(
+        &self,
+        to: &str,
+        token_plaintext: &str,
+        token_preview: &str,
+    ) -> Result<(), EmailError> {
+        let subject = "您的节点网关注册令牌已审批通过";
+        let text_body = format!(
+            r#"您好！
+
+您的节点网关注册令牌已通过管理员审批。
+
+您的令牌（Token）：
+{token_plaintext}
+
+令牌预览：{token_preview}
+
+使用方式：
+在节点的配置文件中设置此令牌，即可完成节点注册。
+请注意：此令牌为一次性使用，注册后即失效。
+
+请妥善保管此令牌，切勿泄露给他人。
+
+祝好，
+KeyCompute 团队
+"#
+        );
+
+        let html_body = format!(
+            r#"<html>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+<div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+<h2 style="color: #2c5282;">节点网关注册令牌已审批通过</h2>
+<p>您好！</p>
+<p>您的节点网关注册令牌已通过管理员审批。</p>
+<div style="margin: 24px 0; padding: 16px; background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px;">
+<p style="margin: 0 0 8px 0; color: #718096; font-size: 14px;">您的令牌（Token）：</p>
+<code style="display: block; padding: 12px; background: #edf2f7; border-radius: 4px; word-break: break-all; font-size: 14px; color: #2d3748;">{token_plaintext}</code>
+<p style="margin: 8px 0 0 0; color: #a0aec0; font-size: 12px;">令牌预览：{token_preview}</p>
+</div>
+<p>使用方式：在节点的配置文件中设置此令牌，即可完成节点注册。</p>
+<p style="color: #e53e3e; font-weight: bold;">请注意：此令牌为一次性使用，注册后即失效。</p>
+<p style="color: #e53e3e;">请妥善保管此令牌，切勿泄露给他人。</p>
+<hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
+<p style="color: #718096; font-size: 12px;">KeyCompute 团队</p>
+</div>
+</body>
+</html>"#
+        );
+
+        self.send_html_email(to, subject, &text_body, &html_body)
+            .await
+    }
 }
 
 impl std::fmt::Debug for EmailService {

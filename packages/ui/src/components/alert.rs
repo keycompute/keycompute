@@ -13,7 +13,7 @@ pub enum AlertVariant {
 /// 内联提示横幅组件
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// Alert { variant: AlertVariant::Success, "操作成功！" }
 /// Alert {
 ///     variant: AlertVariant::Warning,

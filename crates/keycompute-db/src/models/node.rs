@@ -172,4 +172,14 @@ impl Node {
     pub fn is_online(&self) -> bool {
         self.status == NODE_STATUS_ONLINE
     }
+
+    /// 删除节点（CASCADE 自动清理 sessions/submissions，tasks 的 assigned_node_id 设为 NULL）
+    pub async fn delete(pool: &sqlx::PgPool, node_id: Uuid) -> Result<bool, DbError> {
+        let result = sqlx::query("DELETE FROM nodes WHERE id = $1")
+            .bind(node_id)
+            .execute(pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }

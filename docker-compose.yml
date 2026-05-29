@@ -138,8 +138,8 @@ services:
       KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}
 
       # 节点网关配置（Node Gateway）
-      # 生产环境必须修改 REGISTRATION_TOKEN！
-      KC__NODE_GATEWAY__REGISTRATION_TOKEN: ${KC__NODE_GATEWAY__REGISTRATION_TOKEN:-change-me-node-registration-token}
+      # 生产环境必须修改 REGISTRATION_TOKEN_SECRET！
+      KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET: ${KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET:-change-me-node-registration-token-secret}
       # 其他节点网关参数使用默认值，如需自定义可取消注释：
       # KC__NODE_GATEWAY__SESSION_TTL_SECS: ${KC__NODE_GATEWAY__SESSION_TTL_SECS:-300}
       # KC__NODE_GATEWAY__HEARTBEAT_INTERVAL_SECS: ${KC__NODE_GATEWAY__HEARTBEAT_INTERVAL_SECS:-30}

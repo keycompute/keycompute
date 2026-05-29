@@ -19,7 +19,7 @@ pub mod store;
 pub mod sweeper;
 
 // 重新导出关键类型
-pub use config::NodeGatewayAppConfig;
+pub use config::{ConfigError, NodeGatewayAppConfig};
 pub use node_index::PostgresNodeIndex;
 pub use redis::NodeGatewayRedis;
 pub use service::{NodeExecutionError, NodeGatewayService};

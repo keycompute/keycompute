@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 /// 对话框组件（受控模式）
 ///
 /// # 示例
-/// ```rust
+/// ```rust,ignore
 /// let mut open = use_signal(|| false);
 /// Modal {
 ///     open,
