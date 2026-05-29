@@ -333,16 +333,19 @@ async fn test_node_reregistration() -> anyhow::Result<()> {
         &env.config.registration_token_secret,
     )
     .await;
+
+    // 首次注册
+    let req1 = env.create_register_request(client_id, &token1);
+    let resp1 = env.service.register_node(&req1).await?;
+
+    // token1 已被消费，此时 token1 的 status='consumed'，不再被活跃 token 唯一约束覆盖
+    // 再创建第二个 token 用于重复注册测试
     let token2 = create_test_hmac_token(
         &env.pool,
         test_user_id,
         &env.config.registration_token_secret,
     )
     .await;
-
-    // 首次注册
-    let req1 = env.create_register_request(client_id, &token1);
-    let resp1 = env.service.register_node(&req1).await?;
 
     chain.add_step(
         "node-gateway",
