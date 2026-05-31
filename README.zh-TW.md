@@ -12,7 +12,7 @@
   <a href="./README.ar.md">العربية</a>
 </p>
 
-**新一代高效能 AI Token 算力服務平台**
+**新一代高性能 AI Token 算力服務平台**
 
 <p align="center">
   <a href="https://github.com/keycompute/keycompute/stargazers"><img src="https://img.shields.io/github/stars/keycompute/keycompute?style=social" alt="GitHub Stars" /></a>
@@ -24,9 +24,12 @@
 
 <p align="center">
   <a href="#功能特色">功能特色</a> •
+  <a href="#架構總覽">架構總覽</a> •
   <a href="#快速開始">快速開始</a> •
   <a href="#設定說明">設定說明</a> •
-  <a href="#專案結構">專案結構</a>
+  <a href="#專案結構">專案結構</a> •
+  <a href="#api-介面">API 介面</a> •
+  <a href="#開發指南">開發指南</a>
 </p>
 
 </div>
@@ -35,7 +38,9 @@
 
 ## 專案簡介
 
-KeyCompute 是一個**高效能**、**易於擴充**、**開箱即用**的 AI Token 算力服務平台，提供統一的大模型接入、智慧路由、計量計費、多層分銷與可觀測性等企業級能力。
+KeyCompute 是一個**高性能**、**易擴充**、**開箱即用**的 AI Token 算力服務平台，提供統一的大模型接入、智慧路由、計量計費、算力節點租賃、多層分銷與可觀測性等企業級能力。
+
+> **純 Rust 全棧**：後端 (Axum) + 前端 (Dioxus WASM) + CLI 客戶端，共享型別與邏輯，極致效能與安全。
 
 > **注意**：本專案僅供個人學習使用，使用者必須在遵循 OpenAI [使用條款](https://openai.com/policies) 以及相關法律法規的前提下使用，不得用於非法用途。根據《生成式人工智慧服務管理暫行辦法》的要求，請勿向中國地區公眾提供任何未經備案的生成式人工智慧服務。
 
@@ -43,61 +48,100 @@ KeyCompute 是一個**高效能**、**易於擴充**、**開箱即用**的 AI To
 
 ## 功能特色
 
-### 多模型支援
+### 算力節點租賃
+算力節點透過**拉取式輪詢**接入成為計算節點，**無需公網 IP**，在本地硬體上運行託管模型，按貢獻獲取收益。
 
-透過標準 **OpenAI API 格式** 存取所有主流模型，開箱即用：
+- **一鍵接入**：運行獨立 CLI 二進位即可自動註冊 → 心跳 → 輪詢任務 → 本地執行 → 提交結果
+- **節點路由**：使用 `node:<模型名>` 顯式將請求路由到節點池
+- **自動故障轉移**：失敗節點自動排除，任務重新入隊
+- **會話持久化**：本地 Session 避免重複註冊，優雅關閉保障任務完整性
+- **小費機制**：節點所有者可賺取並提現小費
 
-| Provider | 模型系列 | 狀態 |
+### 統一多模型閘道
+透過標準 **OpenAI API** 一行程式碼切換所有大模型：
+
+| Provider | 模型系列 | 實現 |
 |:---|:---|:---:|
-| 🟢 OpenAI | GPT-5/GPT-4/GPT-4o/... | ✅ |
-| 🟣 Anthropic | Claude 4/3.7/3.5/... | ✅ |
-| 🔵 Google | Gemini 3/2.5/2.0/... | ✅ |
-| 🔴 DeepSeek | DeepSeek-V4/V3/R1/... | ✅ |
-| 🟠 Zhipu | GLM-5.1/5/4.7/... | ✅ |
-| 🔴 MiniMax | MiniMax-M2.7/M2.5/... | ✅ |
-| 🟤 Ollama | 本地模型 (Llama/Qwen/...) | ✅ |
-| 🟡 vLLM | 自行部署模型 | ✅ |
+| 🟢 OpenAI | GPT-4o / GPT-4 / GPT-3.5 等 | ✅ |
+| 🟣 Anthropic | Claude 3.5 Sonnet / Opus / Haiku 等 | ✅ |
+| 🔵 Google | Gemini 1.5 / 2.0 Flash / Pro 等 | ✅ |
+| 🔴 DeepSeek | DeepSeek-V3 / R1 / Chat 等 | ✅ |
+| 🟤 Ollama | 本地部署模型 (Llama / Qwen / GLM / MiniMax 等) | ✅ |
+| 🟡 vLLM | 自部署任意模型 | ✅ |
 
-### 智慧路由
+> GLM（智譜）和 MiniMax 等可透過 Ollama 配接器本地部署執行，而非獨立 Provider 實現。
 
-- **雙層路由引擎**：模型層路由 + 帳號池路由
-- **負載平衡**：支援多帳號加權隨機分配
-- **失敗自動重試**：請求失敗時自動切換通道
-- **健康檢查**：即時監控 Provider 可用性
+### 智慧路由引擎
+**雙層路由架構**，多因子加權評分保障最優選擇：
 
-### 消費級 PC 節點
+```text
+score = 0.30 × 成本因子 + 0.25 × 延遲因子 + 0.25 × 成功率 + 0.20 × 健康狀態
+```
 
-- **自帶算力接入**：個人 PC 透過拉取式輪詢接入成為運算節點，無需公網 IP
-- **本地模型執行**：在個人硬體上執行 Ollama 託管的本地模型
-- **模型前綴路由**：使用 `node:<模型名>` 顯式將請求路由到節點池
-- **自動故障轉移**：失敗節點自動排除，任務自動重新排隊
+- **模型級路由** → **帳號池路由**：自動在 Provider 和帳號間擇優分配
+- **回退鏈機制**：主目標失敗自動切換備用目標
+- **指數退避重試**：最多 3 次重試，初始 100ms，最大 10s
+- **請求級代理**：支援 Provider 級/帳號級/通配符級 HTTP 代理
 
-### 計費與支付
+### 計費與支付體系
 
-- **即時計費**：請求級價格快照，事後精準結算
-- **線上儲值**：支付寶、微信支付
-- **用量統計**：詳細的 Token 消耗明細
-- **餘額管理**：使用者儲值與消費追蹤
+- **流結束結算**：請求完成後精確計算，不預扣餘額，不影響執行結果
+- **三層定價**：租戶特定定價 → 資料庫預設 → 硬編碼兜底（LRU 快取）
+- **精確用量**：優先 Provider 精確 usage，回退 tiktoken 估算
+- **線上儲值**：支付寶/微信支付 + 餘額管理
+- **用量統計**：詳細的 Token 消耗明細與視覺化
 
-### 二級分銷
+### 二級分銷系統
 
-- **推薦獎勵**：邀請新使用者可獲得獎勵
-- **分銷規則**：可彈性設定分銷比例
-- **收益統計**：即時檢視分銷收益
+- **推薦返傭**：預設一級 3% + 二級 2% 自動計算
 - **邀請連結**：一鍵產生專屬邀請連結
+- **靈活配置**：管理員可透過 API 配置分銷比例
+- **收益統計**：即時檢視分銷收益與推薦列表
 
-### 使用者與權限
+### 認證與權限
 
-- **多使用者支援**：使用者註冊、登入與權限管理
-- **電子郵件驗證碼**：註冊驗證碼與密碼重設
-- **API Key 管理**：建立、刪除與檢視 API Key
-- **分組限流**：使用者級請求限流
+- **雙認證體系**：JWT（使用者工作階段）+ API Key（`sk-...`，API 存取）
+- **權限分離**：API Key 即便有 admin 角色也無法存取管理介面
+- **完整使用者管理**：註冊 → 郵箱驗證 → 登入 → 密碼重設 → 角色管理
+- **分組限流**：使用者級/租戶級/API Key 級限流（記憶體 / Redis 雙後端）
 
 ### 可觀測性
 
-- **Prometheus 指標**：請求量、延遲與錯誤率
-- **結構化日誌**：JSON 格式日誌，方便分析
-- **健康檢查端點**：`/health` 介面監控服務狀態
+- **Prometheus 指標**：請求量、延遲、錯誤率、Provider 健康度
+- **分散式追蹤**：Provider Span / Request Span / Stream Span
+- **結構化日誌**：JSON 格式，開發/生產分層輸出
+- **主機監控**：CPU / 記憶體 / 磁碟 / 網路即時指標
+- **健康檢查**：`/health` 介面一鍵監控服務狀態
+
+### 跨平台前端
+
+- **Web 管理後台**：Dioxus WASM SPA，9 個管理模組
+- **桌面端**：Dioxus Desktop 原生應用
+- **行動端**：Dioxus Mobile 跨平台支援
+- **路由級權限控制**：Admin 角色驗證，安全可控
+
+---
+
+## 架構總覽
+
+```text
+[客戶端: Web / Desktop / Mobile (Dioxus)]
+                ↕ HTTP/SSE
+[API 層: keycompute-server (Axum)]
+       ├── 認證 (JWT + API Key)
+       ├── 限流 (記憶體/Redis)
+       ├── 路由 (雙層引擎)
+       └── Gateway (唯一上游執行層)
+                ↕
+[Provider 適配層]
+  ├── OpenAI / Anthropic / Google
+  ├── DeepSeek
+  ├── Ollama (本地模型)
+  └── vLLM (自部署)
+
+[節點計算網路]
+  node-token (CLI) ↔ node-gateway ↔ Redis 任務佇列 ↔ 本地推理
+```
 
 ---
 
@@ -111,7 +155,7 @@ KeyCompute 是一個**高效能**、**易於擴充**、**開箱即用**的 AI To
 | Axum | ≥ 0.8.0 |
 | Dioxus | ≥ 0.7.1 (前端開發) |
 | PostgreSQL | ≥ 16 |
-| Redis | ≥ 7 (選用，用於分散式限流) |
+| Redis | ≥ 7 (選用，用於分散式限流/節點佇列) |
 | Docker | 最新版 (容器部署) |
 
 ### 方式一：Docker Compose 部署（推薦）
@@ -162,7 +206,7 @@ docker run -d \
   --restart unless-stopped \
   postgres:16-alpine
 
-# Redis（使用 .env 中的密碼）
+# Redis（選用，用於分散式限流和節點佇列）
 docker run -d \
   --name keycompute-redis \
   --network keycompute-internal \
@@ -178,24 +222,12 @@ docker run -d \
 # 安裝 dioxus-cli
 curl -sSL http://dioxus.dev/install.sh | sh
 
-# 啟動後端服務
-# 方式 A：使用 .env 檔案（推薦）：
-#   cp .env.example .env
-#   # 編輯 .env 並填入實際設定值
-#   set -a && source .env && set +a  # 載入所有變數到環境變數
-#   # 然後跳過下方的 export 命令，直接執行：cargo run -p keycompute-server --features redis
-#
-# 方式 B：手動匯出環境變數：
-
-# 載入 .env 檔案（包含資料庫密碼等敏感資訊）
+# 載入環境變數（推薦使用 .env 檔案）
+cp .env.example .env
+# 編輯 .env 填入實際設定值
 set -a && source .env && set +a
 
-export KC__DATABASE__URL="postgres://keycompute:${POSTGRES_PASSWORD:-change-me-strong-password}@localhost:5432/keycompute"
-export KC__REDIS__URL="redis://:${REDIS_PASSWORD:-change-me-redis-password}@localhost:6379"
-export KC__AUTH__JWT_SECRET="${KC__AUTH__JWT_SECRET:-change-me-jwt-secret-key}"
-export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
-export KC__DEFAULT_ADMIN_PASSWORD="${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}"
-
+# 啟動後端
 cargo run -p keycompute-server --features redis
 
 # 啟動前端開發伺服器（另一個終端）
@@ -208,34 +240,43 @@ API_BASE_URL=http://localhost:3000 dx serve --package web --platform web --addr 
 
 ```text
 keycompute/
-├── crates/                    # 後端核心模組 (Rust)
-│   ├── keycompute-server/      # Axum HTTP 服務
-│   ├── keycompute-types/       # 全域共享型別
-│   ├── keycompute-db/          # 資料庫存取層
-│   ├── keycompute-auth/        # 認證與授權
-│   ├── keycompute-ratelimit/   # 分散式限流
-│   ├── keycompute-pricing/     # 定價引擎
-│   ├── keycompute-routing/     # 智慧路由
-│   ├── keycompute-runtime/     # 執行時狀態
-│   ├── keycompute-billing/     # 計費與結算
-│   ├── keycompute-distribution/# 二級分銷
-│   ├── keycompute-observability/# 可觀測性
-│   ├── keycompute-config/      # 設定管理
-│   ├── keycompute-emailserver/ # 郵件服務
-│   ├── llm-gateway/            # LLM 執行閘道
-│   └── llm-provider/           # Provider 適配器
-│       ├── keycompute-openai/  # OpenAI/Claude/Gemini
-│       ├── keycompute-deepseek/# DeepSeek
-│       ├── keycompute-ollama/  # Ollama 本地模型
-│       └── keycompute-vllm/    # vLLM 自行部署模型
-├── packages/                   # 前端 (Dioxus 0.7)
-│   ├── web/                    # Web 管理後台
-│   ├── ui/                     # 共用 UI 元件
-│   └── client-api/             # API 用戶端
-├── nginx/                      # Nginx 設定
-├── Dockerfile.server           # 後端映像
-├── Dockerfile.web              # 前端映像
-└── docker-compose.yml          # 容器編排
+├── crates/                          # 後端核心模組 (Rust)
+│   ├── keycompute-server/            # Axum HTTP 服務（整合所有模組）
+│   ├── keycompute-types/             # 全域共享型別與巨集
+│   ├── keycompute-db/                # 資料庫 ORM（23 張表）
+│   ├── keycompute-auth/              # 認證與鑑權（JWT + API Key + 密碼）
+│   ├── keycompute-ratelimit/         # 限流引擎（記憶體/Redis 雙後端）
+│   ├── keycompute-pricing/           # 定價引擎（三層兜底 + LRU 快取）
+│   ├── keycompute-routing/           # 雙層智慧路由引擎
+│   ├── keycompute-runtime/           # 執行時（AES-256-GCM 加密 + 儲存抽象）
+│   ├── keycompute-billing/           # 計費結算（流結束後精確結算）
+│   ├── keycompute-distribution/      # 二級分銷系統
+│   ├── keycompute-observability/     # 可觀測性三大支柱
+│   ├── keycompute-config/            # 設定管理（環境變數 + TOML）
+│   ├── keycompute-emailserver/       # SMTP 郵件服務
+│   ├── keycompute-payment/           # 支付整合
+│   │   ├── keycompute-alipay/        # 支付寶支付
+│   │   └── keycompute-wechatpay/     # 微信支付
+│   ├── llm-gateway/                  # LLM 執行閘道（唯一上游層）
+│   ├── llm-provider/                 # Provider 適配器
+│   │   ├── keycompute-openai/        # OpenAI
+│   │   ├── keycompute-claude/        # Anthropic Claude
+│   │   ├── keycompute-gemini/        # Google Gemini
+│   │   ├── keycompute-deepseek/      # DeepSeek
+│   │   ├── keycompute-ollama/        # Ollama 本地模型
+│   │   └── keycompute-vllm/          # vLLM 自部署
+│   ├── node-gateway/                 # 節點閘道（註冊/心跳/任務管理）
+│   └── integration-tests/           # 端到端整合測試（30+ 場景）
+├── packages/                         # 前端 (Dioxus 0.7)
+│   ├── web/                          # Web 管理後台（9 個管理模組）
+│   ├── ui/                           # 共享 UI 元件庫
+│   ├── desktop/                      # 桌面端原生應用
+│   ├── mobile/                       # 行動端跨平台應用
+│   └── client-api/                   # API 用戶端封裝（17 個模組）
+├── nginx/                            # Nginx 反向代理設定
+├── Dockerfile.server                 # 後端容器映像
+├── Dockerfile.web                    # 前端容器映像
+└── docker-compose.yml                # 容器編排
 ```
 
 ---
@@ -244,26 +285,22 @@ keycompute/
 
 ### 環境變數
 
-主要環境變數如下：
-
 | 變數名 | 說明 | 必填 |
 |:---|:---|:---:|
 | `KC__DATABASE__URL` | PostgreSQL 連線字串 | ✅ |
-| `KC__REDIS__URL` | Redis 連線字串 | ⚪ |
 | `KC__AUTH__JWT_SECRET` | JWT 簽名金鑰 | ✅ |
-| `KC__CRYPTO__SECRET_KEY` | API Key 加密金鑰 | ✅ |
-| `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | HMAC 簽名金鑰；用於簽發一次性節點註冊 token（審批制） | ✅ |
-| `KC__EMAIL__SMTP_HOST` | SMTP 伺服器位址 | ⚪ |
-| `KC__EMAIL__SMTP_PORT` | SMTP 伺服器連接埠 | ⚪ |
-| `KC__EMAIL__SMTP_USERNAME` | SMTP 使用者名稱 | ⚪ |
-| `KC__EMAIL__SMTP_PASSWORD` | SMTP 密碼 | ⚪ |
-| `KC__EMAIL__FROM_ADDRESS` | 寄件者電子郵件地址 | ⚪ |
-| `KC__EMAIL__FROM_NAME` | 寄件者顯示名稱 | ⚪ |
-| `APP_BASE_URL` | 用於密碼重設與邀請連結的公開前端位址；啟用郵件或邀請連結時必須明確設定 | ⚪ |
+| `KC__CRYPTO__SECRET_KEY` | API Key AES-256-GCM 加密金鑰（寫入後不可更改） | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | HMAC 簽名金鑰；用於簽發一次性節點註冊 token | ✅ |
+| `KC__REDIS__URL` | Redis 連線字串（選用，透過 `--features redis` 啟用） | ⚪ |
+| `KC__EMAIL__SMTP_HOST` | SMTP 伺服器位址（選用） | ⚪ |
+| `KC__EMAIL__SMTP_PORT` | SMTP 伺服器連接埠（選用） | ⚪ |
+| `KC__EMAIL__SMTP_USERNAME` | SMTP 使用者名稱（選用） | ⚪ |
+| `KC__EMAIL__SMTP_PASSWORD` | SMTP 密碼（選用） | ⚪ |
+| `KC__EMAIL__FROM_ADDRESS` | 寄件者電子郵件地址（選用） | ⚪ |
+| `KC__EMAIL__FROM_NAME` | 寄件者顯示名稱（選用） | ⚪ |
+| `APP_BASE_URL` | 公開前端地址（密碼重設/邀請連結必需） | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | 預設管理員電子郵件 | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | 預設管理員密碼 | ⚪ |
-
-> 💡 提示：`KC__CRYPTO__SECRET_KEY` 一旦資料庫寫入資料後便不可更改，否則歷史資料將無法解密。
 
 ---
 
@@ -272,69 +309,74 @@ keycompute/
 ### OpenAI 相容 API
 
 ```bash
-# Chat Completions
-curl https://your-domain/v1/chat/completions \
+# Chat Completions（串流 + 非串流）
+curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer sk-xxx" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-4",
-    "messages": [{"role": "user", "content": "Hello!"}]
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
   }'
-```
 
-```bash
-# 範例
-curl -s http://192.168.100.100:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-329939d678d24433bc0277311c576481bc23b86ebc724354" \
-  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}],"stream":true}'
-
-data: {"id":"chatcmpl-7370f2606a6a4f5fa516fe54d9196c9d-kc","object":"chat.completion.chunk","created":1775231430,"model":"deepseek-chat","system_fingerprint":"fp_deepseek","choices":[{"index":0,"delta":{"role":"assistant","content":"你好！👋 很高興見到你！\n今天有什麼我可以幫忙的嗎？"},"finish_reason":null}]}
-```
-
-```bash
-# 列出模型
-curl https://your-domain/v1/models \
+# 列出可用模型
+curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer sk-xxx"
 ```
 
-### 管理 API
+### 管理 API 概覽
 
-| 介面 | 說明 |
-|:---|:---|
-| `POST /api/v1/auth/register` | 使用者註冊 |
-| `POST /api/v1/auth/login` | 使用者登入 |
-| `GET /api/v1/me` | 取得目前使用者 |
-| `GET /api/v1/keys` | 列出我的 API Keys |
-| `POST /api/v1/keys` | 建立 API Key |
-| `GET /api/v1/usage` | 用量統計 |
-| `GET /api/v1/billing/records` | 帳單紀錄 |
-| `POST /api/v1/payments/orders` | 建立支付訂單 |
+| 分類 | 介面 | 說明 |
+|:---|:---|:---|
+| 認證 | `POST /api/v1/auth/register` | 使用者註冊 |
+| | `POST /api/v1/auth/login` | 使用者登入 |
+| | `POST /api/v1/auth/forgot-password` | 忘記密碼 |
+| 使用者 | `GET /api/v1/me` | 目前使用者資訊 |
+| | `GET/POST /api/v1/keys` | API Key 管理 |
+| 計費 | `GET /api/v1/usage` | 用量統計 |
+| | `GET /api/v1/billing/records` | 帳單記錄 |
+| 支付 | `POST /api/v1/payments/orders` | 建立支付訂單 |
+| | `GET /api/v1/payments/balance` | 餘額查詢 |
+| 分銷 | `GET /api/v1/me/distribution/earnings` | 分銷收益 |
+| 節點 | `GET /api/v1/me/node-gateway/token` | 節點令牌 |
+| | `GET /api/v1/me/tips` | 小費摘要 |
+| 管理 | `GET/POST /api/v1/accounts` | 上游帳號管理 |
+| | `GET/POST /api/v1/settings` | 系統設定 |
+| | `GET/POST /api/v1/pricing` | 定價管理 |
+| | `GET /api/v1/admin/monitoring/overview` | 監控概覽 |
+
+> 完整的 API 文件請參考專案原始碼中的路由定義。
 
 ---
 
 ## 開發指南
 
 ```bash
-# 編譯
+# 編譯（排除桌面端和行動端）
 cargo build --workspace --exclude desktop --exclude mobile --verbose
 
-# 執行測試
+# 執行單元測試
 cargo test --lib --workspace --exclude desktop --exclude mobile --verbose
-cargo test --package client-api --tests --verbose
+
+# 執行整合測試
 cargo test --package integration-tests --tests --verbose
 
-# 程式碼檢查
+# 執行前端 API 用戶端測試
+cargo test --package client-api --tests --verbose
+
+# Clippy 程式碼檢查
 cargo clippy --workspace --exclude desktop --exclude mobile --all-targets --all-features --future-incompat-report -- -D warnings
+
+# 程式碼格式化檢查
 cargo fmt --all --check
 
-# 啟用 Redis 後端
+# 啟用 Redis 後端構建
 cargo build -p keycompute-server --features redis
 ```
 
 ---
 
-# 如何貢獻
+## 如何貢獻
 
 我們歡迎各種形式的貢獻！請閱讀 [CONTRIBUTING.md](CONTRIBUTING.md) 了解如何參與專案開發。
 
@@ -344,7 +386,7 @@ cargo build -p keycompute-server --features redis
 
 ---
 
-# 授權條款
+## 授權條款
 
 本專案採用 [MIT](LICENSE) 授權條款開源。
 

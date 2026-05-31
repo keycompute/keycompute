@@ -1662,7 +1662,10 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
     chain.add_step(
         "node-gateway",
         "unsupported_format::task_queued",
-        format!("Task status: {}, failure_count: {}", updated_task.status, updated_task.failure_count),
+        format!(
+            "Task status: {}, failure_count: {}",
+            updated_task.status, updated_task.failure_count
+        ),
         updated_task.status == "queued" && updated_task.failure_count == 1,
     );
 

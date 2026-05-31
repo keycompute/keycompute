@@ -24,9 +24,12 @@
 
 <p align="center">
   <a href="#features">Features</a> •
+  <a href="#architecture">Architecture</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#configuration">Configuration</a> •
-  <a href="#project-structure">Project Structure</a>
+  <a href="#project-structure">Project Structure</a> •
+  <a href="#api">API</a> •
+  <a href="#development-guide">Development</a>
 </p>
 
 </div>
@@ -35,7 +38,9 @@
 
 ## Overview
 
-KeyCompute is a **high-performance**, **extensible**, and **out-of-the-box** AI token compute service platform. It provides enterprise-grade capabilities including unified LLM access, smart routing, metering and billing, multi-level distribution, and observability.
+KeyCompute is a **high-performance**, **extensible**, and **out-of-the-box** AI token compute service platform, providing enterprise-grade capabilities including unified LLM access, smart routing, metering and billing, compute node leasing, multi-level distribution, and observability.
+
+> **Pure Rust Full Stack**: Backend (Axum) + Frontend (Dioxus WASM) + CLI client, sharing types and logic, ultimate performance and security.
 
 > **Note**: This project is for personal learning only. You must use it in compliance with OpenAI [Terms of Use](https://openai.com/policies) and applicable laws and regulations. Do not use it for illegal purposes. In accordance with the Interim Measures for the Administration of Generative Artificial Intelligence Services, do not provide any unregistered generative AI services to the public in China.
 
@@ -43,61 +48,100 @@ KeyCompute is a **high-performance**, **extensible**, and **out-of-the-box** AI 
 
 ## Features
 
-### Multi-model support
+### Compute Node Leasing
+Compute nodes connect via **pull-based polling** without requiring a **public IP**. They run hosted models on local hardware and earn rewards based on contributions.
 
-Access all major models through the standard **OpenAI API format** out of the box:
+- **One-click connection**: Run the standalone CLI binary to auto-register → heartbeat → poll tasks → local execution → submit results
+- **Node routing**: Use `node:<model_name>` to explicitly route requests to the node pool
+- **Automatic failover**: Failed nodes are excluded from scheduling, tasks are automatically requeued
+- **Session persistence**: Local sessions prevent duplicate registration; graceful shutdown ensures task integrity
+- **Tip mechanism**: Node owners can earn and withdraw tips
 
-| Provider | Model Families | Status |
+### Unified Multi-model Gateway
+Seamlessly switch between all major models with the standard **OpenAI API** — just one line of code:
+
+| Provider | Model Families | Implementation |
 |:---|:---|:---:|
-| 🟢 OpenAI | GPT-5/GPT-4/GPT-4o/... | ✅ |
-| 🟣 Anthropic | Claude 4/3.7/3.5/... | ✅ |
-| 🔵 Google | Gemini 3/2.5/2.0/... | ✅ |
-| 🔴 DeepSeek | DeepSeek-V4/V3/R1/... | ✅ |
-| 🟠 Zhipu | GLM-5.1/5/4.7/... | ✅ |
-| 🔴 MiniMax | MiniMax-M2.7/M2.5/... | ✅ |
-| 🟤 Ollama | Local models (Llama/Qwen/...) | ✅ |
+| 🟢 OpenAI | GPT-4o / GPT-4 / GPT-3.5 etc. | ✅ |
+| 🟣 Anthropic | Claude 3.5 Sonnet / Opus / Haiku etc. | ✅ |
+| 🔵 Google | Gemini 1.5 / 2.0 Flash / Pro etc. | ✅ |
+| 🔴 DeepSeek | DeepSeek-V3 / R1 / Chat etc. | ✅ |
+| 🟤 Ollama | Local models (Llama / Qwen / GLM / MiniMax etc.) | ✅ |
 | 🟡 vLLM | Self-hosted models | ✅ |
 
-### Smart routing
+> GLM (Zhipu) and MiniMax can be deployed locally via the Ollama adapter, not as standalone Provider implementations.
 
-- **Two-layer routing engine**: model-level routing + account-pool routing
-- **Load balancing**: weighted random allocation across multiple accounts
-- **Automatic retry on failure**: switch channels automatically when a request fails
-- **Health checks**: monitor provider availability in real time
+### Smart Routing Engine
+**Two-layer routing architecture** with multi-factor weighted scoring for optimal selection:
 
-### Consumer-grade PC Nodes
+```text
+score = 0.30 × Cost Factor + 0.25 × Latency Factor + 0.25 × Success Rate + 0.20 × Health Status
+```
 
-- **Bring your own compute**: personal PCs can join as compute nodes via pull-based polling behind NAT
-- **Local model execution**: run Ollama-hosted models on personal hardware
-- **Model prefix routing**: use `node:<model>` to explicitly route requests to the node pool
-- **Automatic failover**: failed nodes are excluded from scheduling, and tasks are automatically requeued
+- **Model-level routing** → **Account pool routing**: Automatically distributes across providers and accounts
+- **Fallback chain**: Automatically switches to backup targets when primary target fails
+- **Exponential backoff retry**: Up to 3 retries, initial 100ms, max 10s
+- **Request-level proxy**: Supports provider-level / account-level / wildcard HTTP proxies
 
-### Billing & payments
+### Billing & Payment System
 
-- **Real-time billing**: request-level price snapshots with precise post-settlement
-- **Online top-up**: Alipay and WeChat Pay
-- **Usage analytics**: detailed token consumption breakdowns
-- **Balance management**: top-up and spending tracking
+- **Post-stream settlement**: Precise calculation after request completion, no pre-deduction, no impact on results
+- **Three-tier pricing**: Tenant-specific pricing → Database default → Hardcoded fallback (LRU cache)
+- **Precise usage**: Priority to provider-precise usage, falls back to tiktoken estimation
+- **Online top-up**: Alipay/WeChat Pay + balance management
+- **Usage analytics**: Detailed token consumption breakdowns with visualization
 
-### Referral distribution
+### Referral Distribution System
 
-- **Referral rewards**: earn rewards for inviting new users
-- **Distribution rules**: flexibly configure commission ratios
-- **Revenue analytics**: view referral earnings in real time
-- **Invite links**: generate exclusive invite links with one click
+- **Referral commissions**: Default 3% for first level + 2% for second level, auto-calculated
+- **Invite links**: Generate exclusive invite links with one click
+- **Flexible configuration**: Admins configure distribution ratios via API
+- **Revenue analytics**: View referral earnings and referral list in real time
 
-### Users & permissions
+### Authentication & Permissions
 
-- **Multi-user support**: user registration, login, and permission management
-- **Email codes**: signup email codes and password reset
-- **API key management**: create, delete, and view API keys
-- **Group-based rate limiting**: user-level request throttling
+- **Dual authentication**: JWT (user sessions) + API Key (`sk-...`, API access)
+- **Permission separation**: API Key with admin role cannot access management interface
+- **Complete user management**: Registration → Email verification → Login → Password reset → Role management
+- **Group-based rate limiting**: User-level / tenant-level / API Key-level throttling (in-memory / Redis dual backend)
 
 ### Observability
 
-- **Prometheus metrics**: request volume, latency, and error rate
-- **Structured logging**: JSON logs for easier analysis
-- **Health check endpoint**: `/health` for service status monitoring
+- **Prometheus metrics**: Request volume, latency, error rate, provider health
+- **Distributed tracing**: Provider Span / Request Span / Stream Span
+- **Structured logging**: JSON format, development/production tiered output
+- **Host monitoring**: CPU / Memory / Disk / Network real-time metrics
+- **Health check**: `/health` endpoint for one-click service status monitoring
+
+### Cross-platform Frontend
+
+- **Web admin dashboard**: Dioxus WASM SPA, 9 management modules
+- **Desktop**: Dioxus Desktop native application
+- **Mobile**: Dioxus Mobile cross-platform support
+- **Route-level permission control**: Admin role verification, secure and manageable
+
+---
+
+## Architecture
+
+```text
+[Client: Web / Desktop / Mobile (Dioxus)]
+                ↕ HTTP/SSE
+[API Layer: keycompute-server (Axum)]
+       ├── Authentication (JWT + API Key)
+       ├── Rate Limiting (In-memory/Redis)
+       ├── Routing (Two-layer engine)
+       └── Gateway (Single upstream execution layer)
+                ↕
+[Provider Adapter Layer]
+  ├── OpenAI / Anthropic / Google
+  ├── DeepSeek
+  ├── Ollama (Local models)
+  └── vLLM (Self-hosted)
+
+[Compute Node Network]
+  node-token (CLI) ↔ node-gateway ↔ Redis task queue ↔ Local inference
+```
 
 ---
 
@@ -111,7 +155,7 @@ Access all major models through the standard **OpenAI API format** out of the bo
 | Axum | ≥ 0.8.0 |
 | Dioxus | ≥ 0.7.1 (frontend development) |
 | PostgreSQL | ≥ 16 |
-| Redis | ≥ 7 (optional, for distributed rate limiting) |
+| Redis | ≥ 7 (optional, for distributed rate limiting/node queue) |
 | Docker | Latest (container deployment) |
 
 ### Option 1: Docker Compose deployment (recommended)
@@ -162,7 +206,7 @@ docker run -d \
   --restart unless-stopped \
   postgres:16-alpine
 
-# Redis (using the password from .env)
+# Redis (optional, for distributed rate limiting and node queue)
 docker run -d \
   --name keycompute-redis \
   --network keycompute-internal \
@@ -178,24 +222,12 @@ docker run -d \
 # Install dioxus-cli
 curl -sSL http://dioxus.dev/install.sh | sh
 
-# Start the backend service
-# Option A: Use .env file (recommended):
-#   cp .env.example .env
-#   # Edit .env with your actual configuration values
-#   set -a && source .env && set +a  # Load all variables into environment
-#   # Then skip the export commands below and run: cargo run -p keycompute-server --features redis
-#
-# Option B: Manually export environment variables:
-
-# Load .env file (contains sensitive info like database password)
+# Load environment variables (recommended to use .env file)
+cp .env.example .env
+# Edit .env with your actual configuration values
 set -a && source .env && set +a
 
-export KC__DATABASE__URL="postgres://keycompute:${POSTGRES_PASSWORD:-change-me-strong-password}@localhost:5432/keycompute"
-export KC__REDIS__URL="redis://:${REDIS_PASSWORD:-change-me-redis-password}@localhost:6379"
-export KC__AUTH__JWT_SECRET="${KC__AUTH__JWT_SECRET:-change-me-jwt-secret-key}"
-export KC__DEFAULT_ADMIN_EMAIL="admin@keycompute.local"
-export KC__DEFAULT_ADMIN_PASSWORD="${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}"
-
+# Start the backend
 cargo run -p keycompute-server --features redis
 
 # Start the frontend development server (in another terminal)
@@ -208,34 +240,43 @@ API_BASE_URL=http://localhost:3000 dx serve --package web --platform web --addr 
 
 ```text
 keycompute/
-├── crates/                    # Backend core modules (Rust)
-│   ├── keycompute-server/      # Axum HTTP service
-│   ├── keycompute-types/       # Shared types
-│   ├── keycompute-db/          # Database access layer
-│   ├── keycompute-auth/        # Authentication and authorization
-│   ├── keycompute-ratelimit/   # Distributed rate limiting
-│   ├── keycompute-pricing/     # Pricing engine
-│   ├── keycompute-routing/     # Smart routing
-│   ├── keycompute-runtime/     # Runtime state
-│   ├── keycompute-billing/     # Billing and settlement
-│   ├── keycompute-distribution/# Referral distribution
-│   ├── keycompute-observability/# Observability
-│   ├── keycompute-config/      # Configuration management
-│   ├── keycompute-emailserver/ # Email service
-│   ├── llm-gateway/            # LLM execution gateway
-│   └── llm-provider/           # Provider adapters
-│       ├── keycompute-openai/  # OpenAI/Claude/Gemini
-│       ├── keycompute-deepseek/# DeepSeek
-│       ├── keycompute-ollama/  # Ollama local models
-│       └── keycompute-vllm/    # vLLM self-hosted models
-├── packages/                   # Frontend (Dioxus 0.7)
-│   ├── web/                    # Web admin dashboard
-│   ├── ui/                     # Shared UI components
-│   └── client-api/             # API client
-├── nginx/                      # Nginx configuration
-├── Dockerfile.server           # Backend image
-├── Dockerfile.web              # Frontend image
-└── docker-compose.yml          # Container orchestration
+├── crates/                          # Backend core modules (Rust)
+│   ├── keycompute-server/            # Axum HTTP service (integrates all modules)
+│   ├── keycompute-types/             # Shared types and macros
+│   ├── keycompute-db/                # Database ORM (23 tables)
+│   ├── keycompute-auth/              # Auth & authorization (JWT + API Key + Password)
+│   ├── keycompute-ratelimit/         # Rate limiting engine (In-memory/Redis dual backend)
+│   ├── keycompute-pricing/           # Pricing engine (Three-tier + LRU cache)
+│   ├── keycompute-routing/           # Two-layer smart routing engine
+│   ├── keycompute-runtime/           # Runtime (AES-256-GCM encryption + storage abstraction)
+│   ├── keycompute-billing/           # Billing & settlement (Post-stream precise settlement)
+│   ├── keycompute-distribution/      # Referral distribution system
+│   ├── keycompute-observability/     # Observability three pillars
+│   ├── keycompute-config/            # Configuration management (Env vars + TOML)
+│   ├── keycompute-emailserver/       # SMTP email service
+│   ├── keycompute-payment/           # Payment integration
+│   │   ├── keycompute-alipay/        # Alipay payment
+│   │   └── keycompute-wechatpay/     # WeChat Pay
+│   ├── llm-gateway/                  # LLM execution gateway (single upstream layer)
+│   ├── llm-provider/                 # Provider adapters
+│   │   ├── keycompute-openai/        # OpenAI
+│   │   ├── keycompute-claude/        # Anthropic Claude
+│   │   ├── keycompute-gemini/        # Google Gemini
+│   │   ├── keycompute-deepseek/      # DeepSeek
+│   │   ├── keycompute-ollama/        # Ollama local models
+│   │   └── keycompute-vllm/          # vLLM self-hosted
+│   ├── node-gateway/                 # Node gateway (registration/heartbeat/task management)
+│   └── integration-tests/           # End-to-end integration tests (30+ scenarios)
+├── packages/                         # Frontend (Dioxus 0.7)
+│   ├── web/                          # Web admin dashboard (9 management modules)
+│   ├── ui/                           # Shared UI component library
+│   ├── desktop/                      # Desktop native application
+│   ├── mobile/                       # Mobile cross-platform application
+│   └── client-api/                   # API client wrapper (17 modules)
+├── nginx/                            # Nginx reverse proxy configuration
+├── Dockerfile.server                 # Backend container image
+├── Dockerfile.web                    # Frontend container image
+└── docker-compose.yml                # Container orchestration
 ```
 
 ---
@@ -244,26 +285,22 @@ keycompute/
 
 ### Environment variables
 
-Primary environment variables:
-
 | Variable | Description | Required |
 |:---|:---|:---:|
 | `KC__DATABASE__URL` | PostgreSQL connection string | ✅ |
-| `KC__REDIS__URL` | Redis connection string | ⚪ |
 | `KC__AUTH__JWT_SECRET` | JWT signing secret | ✅ |
-| `KC__CRYPTO__SECRET_KEY` | API key encryption secret | ✅ |
-| `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | HMAC signing secret; used to issue one-time node registration tokens (approval-based) | ✅ |
-| `KC__EMAIL__SMTP_HOST` | SMTP host | ⚪ |
-| `KC__EMAIL__SMTP_PORT` | SMTP port | ⚪ |
-| `KC__EMAIL__SMTP_USERNAME` | SMTP username | ⚪ |
-| `KC__EMAIL__SMTP_PASSWORD` | SMTP password | ⚪ |
-| `KC__EMAIL__FROM_ADDRESS` | Sender email address | ⚪ |
-| `KC__EMAIL__FROM_NAME` | Sender display name | ⚪ |
-| `APP_BASE_URL` | Public frontend base URL for password reset and invite links; must be explicitly configured when email or invite links are enabled | ⚪ |
-| `KC__DEFAULT_ADMIN_EMAIL` | Default administrator email | ⚪ |
-| `KC__DEFAULT_ADMIN_PASSWORD` | Default administrator password | ⚪ |
-
-> 💡 Tip: Once data has been written to the database, `KC__CRYPTO__SECRET_KEY` must not be changed, or historical data will no longer be decryptable.
+| `KC__CRYPTO__SECRET_KEY` | API Key AES-256-GCM encryption key (cannot be changed after writing) | ✅ |
+| `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | HMAC signing secret; issues one-time node registration tokens | ✅ |
+| `KC__REDIS__URL` | Redis connection string (optional, enabled via `--features redis`) | ⚪ |
+| `KC__EMAIL__SMTP_HOST` | SMTP host (optional) | ⚪ |
+| `KC__EMAIL__SMTP_PORT` | SMTP port (optional) | ⚪ |
+| `KC__EMAIL__SMTP_USERNAME` | SMTP username (optional) | ⚪ |
+| `KC__EMAIL__SMTP_PASSWORD` | SMTP password (optional) | ⚪ |
+| `KC__EMAIL__FROM_ADDRESS` | Sender email address (optional) | ⚪ |
+| `KC__EMAIL__FROM_NAME` | Sender display name (optional) | ⚪ |
+| `APP_BASE_URL` | Public frontend base URL (required for password reset/invite links) | ⚪ |
+| `KC__DEFAULT_ADMIN_EMAIL` | Default administrator email (optional) | ⚪ |
+| `KC__DEFAULT_ADMIN_PASSWORD` | Default administrator password (optional) | ⚪ |
 
 ---
 
@@ -272,69 +309,74 @@ Primary environment variables:
 ### OpenAI-compatible API
 
 ```bash
-# Chat Completions
-curl https://your-domain/v1/chat/completions \
+# Chat Completions (streaming + non-streaming)
+curl http://localhost:3000/v1/chat/completions \
   -H "Authorization: Bearer sk-xxx" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-4",
-    "messages": [{"role": "user", "content": "Hello!"}]
+    "model": "deepseek-chat",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
   }'
-```
 
-```bash
-# Example
-curl -s http://192.168.100.100:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-329939d678d24433bc0277311c576481bc23b86ebc724354" \
-  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"hello"}],"stream":true}'
-
-data: {"id":"chatcmpl-7370f2606a6a4f5fa516fe54d9196c9d-kc","object":"chat.completion.chunk","created":1775231430,"model":"deepseek-chat","system_fingerprint":"fp_deepseek","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello! 👋 Nice to meet you!\nHow can I help today?"},"finish_reason":null}]}
-```
-
-```bash
-# List models
-curl https://your-domain/v1/models \
+# List available models
+curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer sk-xxx"
 ```
 
-### Admin API
+### Admin API Overview
 
-| Endpoint | Description |
-|:---|:---|
-| `POST /api/v1/auth/register` | User registration |
-| `POST /api/v1/auth/login` | User login |
-| `GET /api/v1/me` | Get current user |
-| `GET /api/v1/keys` | List my API keys |
-| `POST /api/v1/keys` | Create an API key |
-| `GET /api/v1/usage` | Usage statistics |
-| `GET /api/v1/billing/records` | Billing records |
-| `POST /api/v1/payments/orders` | Create a payment order |
+| Category | Endpoint | Description |
+|:---|:---|:---|
+| Auth | `POST /api/v1/auth/register` | User registration |
+| | `POST /api/v1/auth/login` | User login |
+| | `POST /api/v1/auth/forgot-password` | Forgot password |
+| User | `GET /api/v1/me` | Current user info |
+| | `GET/POST /api/v1/keys` | API Key management |
+| Billing | `GET /api/v1/usage` | Usage statistics |
+| | `GET /api/v1/billing/records` | Billing records |
+| Payment | `POST /api/v1/payments/orders` | Create payment order |
+| | `GET /api/v1/payments/balance` | Balance inquiry |
+| Distribution | `GET /api/v1/me/distribution/earnings` | Distribution earnings |
+| Node | `GET /api/v1/me/node-gateway/token` | Node token |
+| | `GET /api/v1/me/tips` | Tip summary |
+| Admin | `GET/POST /api/v1/accounts` | Upstream account management |
+| | `GET/POST /api/v1/settings` | System settings |
+| | `GET/POST /api/v1/pricing` | Pricing management |
+| | `GET /api/v1/admin/monitoring/overview` | Monitoring overview |
+
+> For complete API documentation, refer to the route definitions in the project source code.
 
 ---
 
 ## Development Guide
 
 ```bash
-# Build
+# Build (exclude desktop and mobile)
 cargo build --workspace --exclude desktop --exclude mobile --verbose
 
-# Run tests
+# Run unit tests
 cargo test --lib --workspace --exclude desktop --exclude mobile --verbose
-cargo test --package client-api --tests --verbose
+
+# Run integration tests
 cargo test --package integration-tests --tests --verbose
 
-# Code checks
+# Run frontend API client tests
+cargo test --package client-api --tests --verbose
+
+# Clippy code checks
 cargo clippy --workspace --exclude desktop --exclude mobile --all-targets --all-features --future-incompat-report -- -D warnings
+
+# Code formatting check
 cargo fmt --all --check
 
-# Enable the Redis backend
+# Enable Redis backend
 cargo build -p keycompute-server --features redis
 ```
 
 ---
 
-# Contributing
+## Contributing
 
 We welcome contributions of all kinds. Please read [CONTRIBUTING.md](CONTRIBUTING.md) to learn how to get involved.
 
@@ -344,7 +386,7 @@ We welcome contributions of all kinds. Please read [CONTRIBUTING.md](CONTRIBUTIN
 
 ---
 
-# License
+## License
 
 This project is open sourced under the [MIT](LICENSE) License.
 
