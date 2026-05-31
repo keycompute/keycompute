@@ -1628,7 +1628,7 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
     .fetch_one(&env.pool)
     .await?;
 
-    // 4. 节点返回不支持的格式错误
+    // 4. 节点返回不支持的格式错误（第一次失败，应该 requeue）
     let complete_result = env
         .service
         .complete_task(
@@ -1645,14 +1645,15 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
         )
         .await?;
 
+    // 第一次失败应该 requeue（failure_count=1 < threshold=3）
     chain.add_step(
         "node-gateway",
-        "unsupported_format::failed",
-        format!("Unsupported format result: {:?}", complete_result.action),
-        complete_result.action == NodeTaskCompleteAction::Failed,
+        "unsupported_format::first_requeued",
+        format!("First failure result: {:?}", complete_result.action),
+        complete_result.action == NodeTaskCompleteAction::Requeued,
     );
 
-    // 5. 验证任务状态为 failed
+    // 5. 验证任务状态为 queued（等待重试）
     let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
         .bind(task.id)
         .fetch_one(&env.pool)
@@ -1660,12 +1661,12 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
 
     chain.add_step(
         "node-gateway",
-        "unsupported_format::task_failed",
-        format!("Task status: {}", updated_task.status),
-        updated_task.status == "failed",
+        "unsupported_format::task_queued",
+        format!("Task status: {}, failure_count: {}", updated_task.status, updated_task.failure_count),
+        updated_task.status == "queued" && updated_task.failure_count == 1,
     );
 
-    // 6. 验证失败未计入节点连续失败计数（因为是非客户端错误）
+    // 6. 验证节点失败计数增加
     let node = Node::find_by_id(&env.pool, register_resp.node_id)
         .await?
         .unwrap();
@@ -1674,7 +1675,7 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
         "node-gateway",
         "unsupported_format::node_failure_count",
         format!("Node failure count: {}", node.consecutive_failure_count),
-        node.consecutive_failure_count > 0, // 非客户端错误应计入节点失败
+        node.consecutive_failure_count == 1, // 非客户端错误应计入节点失败
     );
 
     chain.print_report();
