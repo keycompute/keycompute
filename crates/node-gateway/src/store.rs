@@ -691,6 +691,18 @@ impl NodeGatewayStore {
                 )
                 .await
             }
+            NodeTaskResult::ImageSucceeded { image_response } => {
+                self.handle_image_success_submission(
+                    &mut tx,
+                    &task,
+                    &node,
+                    authenticated_node_id,
+                    authenticated_session_id,
+                    lease_id,
+                    image_response,
+                )
+                .await
+            }
             NodeTaskResult::Failed {
                 code,
                 message,
@@ -717,7 +729,7 @@ impl NodeGatewayStore {
         Ok(response)
     }
 
-    /// 处理成功提交
+    /// 处理成功提交（Chat 完成）
     #[allow(clippy::too_many_arguments)]
     async fn handle_success_submission(
         &self,
@@ -731,6 +743,84 @@ impl NodeGatewayStore {
     ) -> Result<NodeTaskCompleteResponse, DbError> {
         let response_json =
             serde_json::to_value(&response).map_err(|e| DbError::Other(e.to_string()))?;
+        let result_for_hash = NodeTaskResult::Succeeded { response };
+        self.handle_success_submission_inner(
+            tx,
+            task,
+            node,
+            node_id,
+            session_id,
+            lease_id,
+            response_json,
+            "succeeded",
+            result_for_hash,
+        )
+        .await
+    }
+
+    /// 处理图片成功提交
+    ///
+    /// 注意：`ImageGenerationResponse` 中的 `b64_json` 字段可能携带大量 base64 图片数据
+    ///（单张可达数 MB），直接存入 `node_tasks.result_json` JSONB 列存在存储膨胀风险。
+    /// TODO: 后续考虑将图片数据上传至对象存储（S3/MinIO），DB 仅保留 URL 引用。
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_image_success_submission(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        task: &NodeTask,
+        node: &Node,
+        node_id: Uuid,
+        session_id: Uuid,
+        lease_id: Uuid,
+        image_response: keycompute_types::node::ImageGenerationResponse,
+    ) -> Result<NodeTaskCompleteResponse, DbError> {
+        // 对大体积图片响应记录告警日志
+        let b64_total_chars: usize = image_response
+            .data
+            .iter()
+            .filter_map(|d| d.b64_json.as_ref())
+            .map(|s| s.len())
+            .sum();
+        if b64_total_chars > 512 * 1024 {
+            tracing::warn!(
+                task_id = %task.id,
+                b64_json_chars = b64_total_chars,
+                image_count = image_response.data.len(),
+                "Image response b64_json exceeds 512KB (base64-encoded), ~384KB raw; may cause DB storage bloat"
+            );
+        }
+
+        let response_json = serde_json::to_value(&image_response)
+            .map_err(|e| DbError::Other(format!("Failed to serialize image response: {}", e)))?;
+        let result_for_hash = NodeTaskResult::ImageSucceeded { image_response };
+        self.handle_success_submission_inner(
+            tx,
+            task,
+            node,
+            node_id,
+            session_id,
+            lease_id,
+            response_json,
+            "image_succeeded",
+            result_for_hash,
+        )
+        .await
+    }
+
+    /// 成功提交的公共逻辑：更新任务状态、清零失败计数、写入 submission ACK
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_success_submission_inner(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        task: &NodeTask,
+        node: &Node,
+        node_id: Uuid,
+        session_id: Uuid,
+        lease_id: Uuid,
+        response_json: serde_json::Value,
+        result_kind: &str,
+        result_for_hash: NodeTaskResult,
+    ) -> Result<NodeTaskCompleteResponse, DbError> {
         let updated_task = sqlx::query_as::<_, NodeTask>(
             r#"
             UPDATE node_tasks
@@ -791,7 +881,6 @@ impl NodeGatewayStore {
         }
 
         // 写入 submission ACK
-        let result_for_hash = NodeTaskResult::Succeeded { response };
         let request_hash = Self::compute_request_hash(task.id, lease_id, &result_for_hash)?;
 
         let submission_req = CreateNodeTaskSubmissionRequest {
@@ -799,7 +888,7 @@ impl NodeGatewayStore {
             lease_id,
             node_id,
             session_id,
-            result_kind: "succeeded".to_string(),
+            result_kind: result_kind.to_string(),
             request_hash,
             action: "succeeded".to_string(),
         };

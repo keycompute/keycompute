@@ -779,7 +779,8 @@ async fn test_concurrent_error_handling() {
         let p = success_provider.clone();
         let transport = keycompute_provider_trait::DefaultHttpTransport::new();
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
+            let request =
+                UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             p.stream_chat(&transport, request).await
         });
     }
@@ -788,7 +789,8 @@ async fn test_concurrent_error_handling() {
         let p = failing_provider.clone();
         let transport = keycompute_provider_trait::DefaultHttpTransport::new();
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
+            let request =
+                UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             p.stream_chat(&transport, request).await
         });
     }
@@ -797,7 +799,8 @@ async fn test_concurrent_error_handling() {
         let p = flaky_provider.clone();
         let transport = keycompute_provider_trait::DefaultHttpTransport::new();
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
+            let request =
+                UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             p.stream_chat(&transport, request).await
         });
     }

@@ -20,8 +20,8 @@ use keycompute_db::models::{
     user_node_gateway_token::*,
 };
 use keycompute_types::node::{
-    NodeCapabilities, NodeModelCapability, NodeRegisterRequest, NodeTaskCompleteAction,
-    NodeTaskPayload, NodeTaskResult,
+    ImageData, ImageGenerationResponse, NodeCapabilities, NodeModelCapability, NodeRegisterRequest,
+    NodeTaskCompleteAction, NodeTaskPayload, NodeTaskResult,
 };
 use node_gateway::config::NodeGatewayAppConfig;
 use node_gateway::redis::NodeGatewayRedis;
@@ -435,7 +435,7 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
 
     let payload = NodeTaskPayload {
         request_id: Uuid::new_v4(),
-        chat: keycompute_types::ChatCompletionRequest {
+        chat: Some(keycompute_types::ChatCompletionRequest {
             model: "deepseek-chat".to_string(),
             messages: vec![keycompute_types::Message {
                 role: keycompute_types::MessageRole::User,
@@ -447,7 +447,9 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
             top_p: None,
             n: None,
             stop: None,
-        },
+        }),
+        image_generation: None,
+        image_edit: None,
     };
 
     let _task = env
@@ -788,6 +790,166 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
         "concurrent::single_submission",
         format!("Submission count: {}", submissions.len()),
         submissions.len() == 1,
+    );
+
+    chain.print_report();
+    assert!(chain.all_passed());
+    Ok(())
+}
+
+/// 测试: ImageSucceeded 结果提交、DB 落盘与幂等性
+///
+/// 验证节点提交 `NodeTaskResult::ImageSucceeded` 后：
+/// 1. `node_task_submissions.result_kind` 为 `"image_succeeded"`
+/// 2. `node_tasks.result_json` 正确存储 `ImageGenerationResponse`
+/// 3. 幂等提交：同一 {task_id, lease_id, result} 重复提交只产生一条 submission
+#[tokio::test]
+async fn test_image_succeeded_submission() -> anyhow::Result<()> {
+    let env = NodeTestEnv::new().await?;
+    let mut chain = VerificationChain::new();
+
+    let test_user_id = create_test_user(&env.pool, "imgsuc").await;
+    let token = create_test_hmac_token(
+        &env.pool,
+        test_user_id,
+        &env.config.registration_token_secret,
+    )
+    .await;
+
+    // 1. 注册节点
+    let register_req = env.create_register_request("test-client-image-succeeded", &token);
+    let register_resp = env.service.register_node(&register_req).await?;
+
+    // 2. 创建 leased 任务
+    let lease_id = Uuid::new_v4();
+    let task = sqlx::query_as::<_, NodeTask>(
+        r#"
+        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+        RETURNING *
+        "#
+    )
+    .bind(Uuid::new_v4())
+    .bind(Uuid::new_v4())
+    .bind("stable-diffusion")
+    .bind(serde_json::json!({}))
+    .bind(register_resp.node_id)
+    .bind(register_resp.session_id)
+    .bind(lease_id)
+    .fetch_one(&env.pool)
+    .await?;
+
+    // 3. 构造 ImageGenerationResponse 并提交 ImageSucceeded
+    let image_response = ImageGenerationResponse {
+        created: 1717200000,
+        data: vec![ImageData {
+            url: Some("https://example.com/image.png".to_string()),
+            b64_json: Some("aGVsbG8=".to_string()),
+            revised_prompt: Some("A beautiful landscape".to_string()),
+        }],
+    };
+
+    let result1 = env
+        .service
+        .complete_task(
+            task.id,
+            lease_id,
+            register_resp.node_id,
+            register_resp.session_id,
+            NodeTaskResult::ImageSucceeded {
+                image_response: image_response.clone(),
+            },
+        )
+        .await?;
+
+    chain.add_step(
+        "node-gateway",
+        "image_succeeded::first_complete",
+        format!("First image complete: {:?}", result1.action),
+        result1.action == NodeTaskCompleteAction::Succeeded,
+    );
+
+    // 4. 验证 submission 的 result_kind 为 "image_succeeded"
+    let submissions = sqlx::query_as::<_, NodeTaskSubmission>(
+        "SELECT * FROM node_task_submissions WHERE task_id = $1",
+    )
+    .bind(task.id)
+    .fetch_all(&env.pool)
+    .await?;
+
+    chain.add_step(
+        "node-gateway",
+        "image_succeeded::result_kind",
+        format!(
+            "Submission count: {}, result_kind: {:?}",
+            submissions.len(),
+            submissions.first().map(|s| &s.result_kind)
+        ),
+        submissions.len() == 1
+            && submissions.first().map(|s| s.result_kind.as_str()) == Some("image_succeeded"),
+    );
+
+    // 5. 验证 node_tasks.result_json 存储了正确的 ImageGenerationResponse
+    let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
+        .bind(task.id)
+        .fetch_one(&env.pool)
+        .await?;
+
+    let stored_json = updated_task
+        .result_json
+        .ok_or_else(|| anyhow::anyhow!("result_json should not be null after ImageSucceeded"))?;
+    let stored_response: ImageGenerationResponse = serde_json::from_value(stored_json.clone())?;
+
+    chain.add_step(
+        "node-gateway",
+        "image_succeeded::task_status_and_result_json",
+        format!(
+            "Task status: {}, stored created: {}, data len: {}",
+            updated_task.status,
+            stored_response.created,
+            stored_response.data.len()
+        ),
+        updated_task.status == "succeeded"
+            && stored_response.created == 1717200000
+            && stored_response.data.len() == 1
+            && stored_response.data[0].b64_json.as_deref() == Some("aGVsbG8="),
+    );
+
+    // 6. 幂等性：同一 result 重复提交，应返回已保存的 ACK，且 submission 仍为 1 条
+    let result2 = env
+        .service
+        .complete_task(
+            task.id,
+            lease_id,
+            register_resp.node_id,
+            register_resp.session_id,
+            NodeTaskResult::ImageSucceeded { image_response },
+        )
+        .await?;
+
+    chain.add_step(
+        "node-gateway",
+        "image_succeeded::idempotent",
+        format!("Idempotent image complete: {:?}", result2.action),
+        result2.action == NodeTaskCompleteAction::Succeeded,
+    );
+
+    // 验证 submission 仍为 1 条
+    let submissions_after = sqlx::query_as::<_, NodeTaskSubmission>(
+        "SELECT * FROM node_task_submissions WHERE task_id = $1",
+    )
+    .bind(task.id)
+    .fetch_all(&env.pool)
+    .await?;
+
+    chain.add_step(
+        "node-gateway",
+        "image_succeeded::single_submission",
+        format!(
+            "Submission count after idempotent retry: {}",
+            submissions_after.len()
+        ),
+        submissions_after.len() == 1,
     );
 
     chain.print_report();

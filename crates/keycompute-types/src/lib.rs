@@ -16,10 +16,11 @@ pub mod user;
 pub use error::{ErrorCategory, KeyComputeError, Result};
 pub use execution_plan::{ExecutionPlan, ExecutionTarget, SensitiveString};
 pub use node::{
-    NodeCapabilities, NodeHeartbeatRequest, NodeHeartbeatResponse, NodeId, NodeLeaseId,
-    NodeModelCapability, NodePollRequest, NodePollResponse, NodeRegisterRequest,
-    NodeRegisterResponse, NodeSessionId, NodeTaskCompleteAction, NodeTaskCompleteRequest,
-    NodeTaskCompleteResponse, NodeTaskEnvelope, NodeTaskId, NodeTaskPayload, NodeTaskResult,
+    ImageData, ImageEditRequest, ImageGenerationRequest, ImageGenerationResponse, NodeCapabilities,
+    NodeHeartbeatRequest, NodeHeartbeatResponse, NodeId, NodeLeaseId, NodeModelCapability,
+    NodePollRequest, NodePollResponse, NodeRegisterRequest, NodeRegisterResponse, NodeSessionId,
+    NodeTaskCompleteAction, NodeTaskCompleteRequest, NodeTaskCompleteResponse, NodeTaskEnvelope,
+    NodeTaskId, NodeTaskPayload, NodeTaskResult,
 };
 pub use pricing::PricingSnapshot;
 pub use request::{

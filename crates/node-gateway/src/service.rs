@@ -129,6 +129,14 @@ impl NodeGatewayService {
                     .map_err(|e| NodeExecutionError::Other(anyhow::Error::from(e)))?;
                 Ok(response)
             }
+            "image_succeeded" => {
+                // Image 任务成功，但 enqueue_and_wait 当前仅支持 Chat 完成路径。
+                // 如果 Image API handler 将来接入 enqueue_and_wait，
+                // 需要扩展返回类型为 TaskResult 枚举（Chat / Image）。
+                Err(NodeExecutionError::Other(anyhow::anyhow!(
+                    "Image task succeeded but enqueue_and_wait does not support image results yet"
+                )))
+            }
             "failed" => {
                 let error = task.error_json.unwrap_or(serde_json::json!({}));
                 let is_client_error = error
@@ -287,6 +295,10 @@ impl NodeGatewayService {
         session_id: Uuid,
         result: NodeTaskResult,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
+        // 在 result 被 move 进 store 之前，记录是否为图片任务，
+        // 以便后续推送正确的 Redis 通知 key（防止 query_task_result 反序列化错类型）。
+        let is_image = matches!(&result, NodeTaskResult::ImageSucceeded { .. });
+
         let response = self
             .store
             .complete_task(task_id, lease_id, node_id, session_id, result)
@@ -295,9 +307,14 @@ impl NodeGatewayService {
         // 推送结果通知到 Redis(best-effort)
         match response.action {
             NodeTaskCompleteAction::Succeeded => {
+                let notification_status = if is_image {
+                    "image_succeeded"
+                } else {
+                    "succeeded"
+                };
                 if let Err(e) = self
                     .redis
-                    .push_result_notification(task_id, "succeeded")
+                    .push_result_notification(task_id, notification_status)
                     .await
                 {
                     tracing::warn!(

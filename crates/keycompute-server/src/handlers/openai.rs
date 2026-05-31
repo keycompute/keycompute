@@ -385,7 +385,7 @@ pub async fn chat_completions(
             // 构建 NodeTaskPayload
             let payload = keycompute_types::node::NodeTaskPayload {
                 request_id: ctx.request_id,
-                chat: keycompute_types::ChatCompletionRequest {
+                chat: Some(keycompute_types::ChatCompletionRequest {
                     model: model.clone(), // 使用去掉 node: 前缀的实际模型名
                     messages: ctx.messages.clone(),
                     stream: Some(request.stream), // 传递 stream 标志
@@ -394,8 +394,18 @@ pub async fn chat_completions(
                     top_p: request.top_p,
                     n: request.n,
                     stop: None, // StopSequence 不支持 Clone，暂时使用 None
-                },
+                }),
+                image_generation: None,
+                image_edit: None,
             };
+
+            // 防御性校验 payload 互斥性
+            if let Err(e) = payload.validate() {
+                return Err(ApiError::Internal(format!(
+                    "Invalid NodeTaskPayload: {}",
+                    e
+                )));
+            }
 
             if request.stream {
                 // 流式路径：获取完整响应后模拟流式输出
