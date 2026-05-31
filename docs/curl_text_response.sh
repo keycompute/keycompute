@@ -141,7 +141,8 @@ curl_with_check() {
     trap "rm -f '${tmpfile}'" RETURN
 
     # 非流式请求：设 30s 连接超时 + 180s 总超时
-    http_code=$(curl -sS --connect-timeout 30 --max-time 180 \
+    # --noproxy '*' 绕过全局代理，避免 localhost 请求被转发到外部
+    http_code=$(curl -sS --noproxy '*' --connect-timeout 30 --max-time 180 \
         -w '%{http_code}' -o "$tmpfile" "$@") || {
         local rc=$?
         printf '    ⚠ curl 请求失败 (退出码 %d)\n' "$rc" >&2
@@ -232,7 +233,8 @@ example_stream() {
     printf '\n'
 
     # 流式响应: 使用 -N (--no-buffer) 实时显示 SSE 事件
-    curl -sS -N -X POST "${BASE_URL}/v1/chat/completions" \
+    # --noproxy '*' 绕过全局代理，避免 localhost 请求被转发到外部
+    curl -sS --noproxy '*' -N -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "$body" || {
@@ -280,7 +282,8 @@ example_node_stream() {
     printf '    model: %s (stream=true, node: 前缀 → 服务端模拟流式输出)\n' "$model"
     printf '\n'
 
-    curl -sS -N -X POST "${BASE_URL}/v1/chat/completions" \
+    # --noproxy '*' 绕过全局代理，避免 localhost 请求被转发到外部
+    curl -sS --noproxy '*' -N -X POST "${BASE_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "$body" || {
