@@ -8,7 +8,7 @@ use crate::proxy::ProxyConfig;
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use keycompute_provider_trait::{ByteStream, HttpTransport};
+use keycompute_provider_trait::{ByteStream, GetBinaryResponse, HttpTransport};
 use reqwest::{Client, ClientBuilder, Proxy, RequestBuilder, Response};
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ impl HttpClient {
     /// 创建新的 HTTP 客户端
     pub fn new(config: &ProxyConfig, proxy_url: Option<&str>) -> Self {
         let mut builder = ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(config.connect_timeout)
             .timeout(config.request_timeout)
             .pool_max_idle_per_host(config.pool_max_idle_per_host)
@@ -245,12 +246,109 @@ impl HttpTransport for HttpClient {
         Ok(Box::pin(stream))
     }
 
+    async fn post_raw(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> keycompute_types::Result<String> {
+        let mut request = self.client.post(url);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+
+        let response = request
+            .body(body)
+            .timeout(self.config.request_timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                keycompute_types::KeyComputeError::ProviderError(format!(
+                    "HTTP request failed: {}",
+                    e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(keycompute_types::KeyComputeError::ProviderError(format!(
+                "HTTP error ({}): {}",
+                status, error_text
+            )));
+        }
+
+        response.text().await.map_err(|e| {
+            keycompute_types::KeyComputeError::ProviderError(format!(
+                "Failed to read response: {}",
+                e
+            ))
+        })
+    }
+
     fn request_timeout(&self) -> Duration {
         self.config.request_timeout
     }
 
     fn stream_timeout(&self) -> Duration {
         self.config.stream_timeout
+    }
+
+    async fn get_binary(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+    ) -> keycompute_types::Result<GetBinaryResponse> {
+        let mut builder = self.client.get(url);
+        for (key, value) in headers {
+            builder = builder.header(key, value);
+        }
+
+        let response = builder
+            .timeout(self.config.request_timeout)
+            .send()
+            .await
+            .map_err(|e| {
+                keycompute_types::KeyComputeError::ProviderError(format!(
+                    "HTTP GET request failed: {}",
+                    e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(keycompute_types::KeyComputeError::ProviderError(format!(
+                "HTTP error ({}): {}",
+                status, error_text
+            )));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+
+        response
+            .bytes()
+            .await
+            .map(|b| GetBinaryResponse {
+                body: b.to_vec(),
+                content_type,
+            })
+            .map_err(|e| {
+                keycompute_types::KeyComputeError::ProviderError(format!(
+                    "Failed to read response: {}",
+                    e
+                ))
+            })
     }
 }
 

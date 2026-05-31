@@ -18,7 +18,7 @@ use axum::{
 };
 use futures::stream::Stream;
 use keycompute_db::models::account::Account;
-use keycompute_types::{ExecutionTarget, Message, MessageRole, RequestContext};
+use keycompute_types::{ExecutionTarget, Message, MessageContent, MessageRole, RequestContext};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -80,8 +80,8 @@ fn default_n() -> Option<u32> {
 pub struct ChatCompletionMessage {
     /// 角色: system, user, assistant, tool
     pub role: String,
-    /// 内容
-    pub content: Option<String>,
+    /// 内容：支持纯文本字符串或 Vision 多模态内容块数组
+    pub content: Option<MessageContent>,
     /// 工具调用 (assistant 消息中)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
@@ -332,7 +332,10 @@ pub async fn chat_completions(
             };
             Message {
                 role,
-                content: m.content.clone().unwrap_or_default(),
+                content: m
+                    .content
+                    .clone()
+                    .unwrap_or(MessageContent::Text(String::new())),
             }
         })
         .collect();
@@ -441,7 +444,10 @@ pub async fn chat_completions(
                         index: 0,
                         message: ChatCompletionMessage {
                             role: "assistant".to_string(),
-                            content: response.choices.first().map(|c| c.message.content.clone()),
+                            content: response
+                                .choices
+                                .first()
+                                .map(|c| MessageContent::text(c.message.content.clone())),
                             tool_calls: None,
                             tool_call_id: None,
                             name: None,
@@ -654,7 +660,7 @@ async fn create_openai_response(
             index: 0,
             message: ChatCompletionMessage {
                 role: "assistant".to_string(),
-                content: Some(content),
+                content: Some(MessageContent::text(content)),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,

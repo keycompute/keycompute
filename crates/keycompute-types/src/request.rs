@@ -130,34 +130,120 @@ impl fmt::Display for MessageRole {
     }
 }
 
+/// 消息内容：支持纯文本和 Vision 多模态内容
+///
+/// 反序列化时拒绝空数组 `[]`，避免静默丢失数据。
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// 纯文本内容
+    Text(String),
+    /// Vision 内容块列表（图片理解等）
+    Parts(Vec<ContentPart>),
+}
+
+// 使用宏生成自定义 Deserialize 实现，拒绝空数组 []
+crate::impl_untagged_content_deserialize!(
+    MessageContent,
+    ContentPart,
+    "non-empty array of content parts"
+);
+
+impl MessageContent {
+    /// 从纯文本创建
+    pub fn text(content: impl Into<String>) -> Self {
+        Self::Text(content.into())
+    }
+
+    /// 提取纯文本内容（用于日志/计费等场景）
+    pub fn extract_text(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    ContentPart::ImageUrl { .. } => None,
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+        }
+    }
+
+    /// 是否为纯文本
+    pub fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_))
+    }
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        Self::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        Self::Text(s.to_string())
+    }
+}
+
+impl std::fmt::Display for MessageContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.extract_text())
+    }
+}
+
+/// Vision 内容块
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentPart {
+    /// 文本块
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// 图片 URL 块
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+}
+
+/// 图片 URL 描述
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrl {
+    /// 图片 URL（支持 http/https URL 或 base64 data URI）
+    pub url: String,
+    /// 细节级别：low / high / auto（可选）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// 消息结构
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: MessageRole,
-    pub content: String,
+    pub content: MessageContent,
 }
 
 impl Message {
-    pub fn new(role: MessageRole, content: impl Into<String>) -> Self {
+    pub fn new(role: MessageRole, content: impl Into<MessageContent>) -> Self {
         Self {
             role,
             content: content.into(),
         }
     }
 
-    pub fn system(content: impl Into<String>) -> Self {
+    pub fn system(content: impl Into<MessageContent>) -> Self {
         Self::new(MessageRole::System, content)
     }
 
-    pub fn user(content: impl Into<String>) -> Self {
+    pub fn user(content: impl Into<MessageContent>) -> Self {
         Self::new(MessageRole::User, content)
     }
 
-    pub fn assistant(content: impl Into<String>) -> Self {
+    pub fn assistant(content: impl Into<MessageContent>) -> Self {
         Self::new(MessageRole::Assistant, content)
     }
 
-    pub fn tool(content: impl Into<String>) -> Self {
+    pub fn tool(content: impl Into<MessageContent>) -> Self {
         Self::new(MessageRole::Tool, content)
     }
 }
@@ -259,7 +345,7 @@ mod tests {
     fn test_message_creation() {
         let msg = Message::new(MessageRole::User, "Hello");
         assert_eq!(msg.role, MessageRole::User);
-        assert_eq!(msg.content, "Hello");
+        assert_eq!(msg.content.extract_text(), "Hello");
     }
 
     #[test]
@@ -286,11 +372,28 @@ mod tests {
     }
 
     #[test]
+    fn test_message_vision_deserialize() {
+        let json = r#"{"role":"user","content":[{"type":"text","text":"What's in this image?"},{"type":"image_url","image_url":{"url":"https://example.com/image.png","detail":"high"}}]}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.role, MessageRole::User);
+        assert!(matches!(msg.content, MessageContent::Parts(_)));
+        assert_eq!(msg.content.extract_text(), "What's in this image?");
+    }
+
+    #[test]
+    fn test_message_content_text_serde_roundtrip() {
+        let msg = Message::user("Hello");
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.content.extract_text(), "Hello");
+    }
+
+    #[test]
     fn test_message_deserialize() {
         let json = r#"{"role":"assistant","content":"Hello!"}"#;
         let msg: Message = serde_json::from_str(json).unwrap();
         assert_eq!(msg.role, MessageRole::Assistant);
-        assert_eq!(msg.content, "Hello!");
+        assert_eq!(msg.content.extract_text(), "Hello!");
     }
 
     #[test]
@@ -352,5 +455,13 @@ mod tests {
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"model\":\"gpt-4\""));
         assert!(json.contains("\"role\":\"user\""));
+    }
+
+    #[test]
+    fn test_message_content_rejects_empty_array() {
+        // 空数组 [] 应该被拒绝，不能反序列化为 MessageContent::Text("")
+        let json = r#"{"role":"user","content":[]}"#;
+        let result: Result<Message, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "Empty array [] should be rejected");
     }
 }

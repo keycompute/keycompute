@@ -439,7 +439,7 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
             model: "deepseek-chat".to_string(),
             messages: vec![keycompute_types::Message {
                 role: keycompute_types::MessageRole::User,
-                content: "Hello".to_string(),
+                content: "Hello".into(),
             }],
             stream: Some(false),
             max_tokens: None,

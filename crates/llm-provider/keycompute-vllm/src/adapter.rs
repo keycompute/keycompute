@@ -90,7 +90,9 @@ impl VllmProvider {
             .iter()
             .map(|m| OpenAIMessage {
                 role: m.role.clone(),
-                content: Some(m.content.clone()),
+                content: Some(keycompute_openai::convert_message_content(
+                    m.content.clone(),
+                )),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -156,6 +158,7 @@ impl VllmProvider {
             .into_iter()
             .next()
             .and_then(|c| c.message.content)
+            .map(|c| c.extract_text())
             .unwrap_or_default();
 
         Ok(content)

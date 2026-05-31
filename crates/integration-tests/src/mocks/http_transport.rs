@@ -10,7 +10,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::stream;
-use keycompute_provider_trait::{ByteStream, HttpTransport};
+use keycompute_provider_trait::{ByteStream, GetBinaryResponse, HttpTransport};
 use keycompute_types::{KeyComputeError, Result};
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -220,8 +220,10 @@ pub struct RequestRecord {
     pub url: String,
     /// 请求头
     pub headers: Vec<(String, String)>,
-    /// 请求体
+    /// 请求体（文本；对于二进制请求使用 lossy UTF-8 转换）
     pub body: String,
+    /// 原始请求体字节（仅 post_raw 场景填充，用于检查二进制 body）
+    pub raw_body: Option<Vec<u8>>,
     /// 请求时间
     pub timestamp: std::time::Instant,
 }
@@ -357,12 +359,26 @@ impl MockHttpTransport {
         &self.proxy_config
     }
 
-    /// 记录请求
+    /// 记录请求（文本 body）
     fn record_request(&self, url: &str, headers: Vec<(String, String)>, body: String) {
         self.request_history.lock().unwrap().push(RequestRecord {
             url: url.to_string(),
             headers,
             body,
+            raw_body: None,
+            timestamp: std::time::Instant::now(),
+        });
+    }
+
+    /// 记录请求（原始二进制 body，用于 multipart/form-data 等场景）
+    fn record_request_raw(&self, url: &str, headers: Vec<(String, String)>, body: Vec<u8>) {
+        // 使用 lossy UTF-8 转换存储文本表示，同时保留原始字节
+        let body_str = String::from_utf8_lossy(&body).to_string();
+        self.request_history.lock().unwrap().push(RequestRecord {
+            url: url.to_string(),
+            headers,
+            body: body_str,
+            raw_body: Some(body),
             timestamp: std::time::Instant::now(),
         });
     }
@@ -467,12 +483,84 @@ impl HttpTransport for MockHttpTransport {
         }
     }
 
+    async fn post_raw(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Result<String> {
+        // 记录请求（保留原始字节）
+        self.record_request_raw(url, headers.clone(), body.clone());
+
+        // 模拟延迟
+        if let Some(response) = self.get_next_response() {
+            if let Some(delay) = response.delay {
+                tokio::time::sleep(delay).await;
+            }
+
+            if response.status >= 200 && response.status < 300 {
+                Ok(response.body)
+            } else {
+                Err(KeyComputeError::ProviderError(format!(
+                    "HTTP error ({}): {}",
+                    response.status, response.body
+                )))
+            }
+        } else if self.should_fail {
+            Err(KeyComputeError::ProviderError(self.failure_message.clone()))
+        } else {
+            // 默认返回空成功响应
+            Ok(r#"{"status": "ok"}"#.to_string())
+        }
+    }
+
     fn request_timeout(&self) -> Duration {
         self.request_timeout
     }
 
     fn stream_timeout(&self) -> Duration {
         self.stream_timeout
+    }
+
+    async fn get_binary(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+    ) -> Result<GetBinaryResponse> {
+        // 记录请求（GET）
+        self.record_request(url, headers.clone(), String::new());
+
+        // 模拟延迟
+        if let Some(response) = self.get_next_response() {
+            if let Some(delay) = response.delay {
+                tokio::time::sleep(delay).await;
+            }
+
+            if response.status >= 200 && response.status < 300 {
+                let content_type = response
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, v)| v.clone());
+                Ok(GetBinaryResponse {
+                    body: response.body.into_bytes(),
+                    content_type,
+                })
+            } else {
+                Err(KeyComputeError::ProviderError(format!(
+                    "HTTP error ({}): {}",
+                    response.status, response.body
+                )))
+            }
+        } else if self.should_fail {
+            Err(KeyComputeError::ProviderError(self.failure_message.clone()))
+        } else {
+            // 默认返回空字节
+            Ok(GetBinaryResponse {
+                body: Vec::new(),
+                content_type: None,
+            })
+        }
     }
 }
 

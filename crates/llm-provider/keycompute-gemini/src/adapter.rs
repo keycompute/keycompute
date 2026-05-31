@@ -22,7 +22,7 @@ use futures::StreamExt;
 use keycompute_provider_trait::{
     ByteStream, HttpTransport, ProviderAdapter, StreamBox, StreamEvent, UpstreamRequest,
 };
-use keycompute_types::{KeyComputeError, Result};
+use keycompute_types::{KeyComputeError, MessageContent, Result};
 use serde_json;
 
 use crate::protocol::{
@@ -48,16 +48,25 @@ impl GeminiProvider {
     }
 
     /// 构建 Gemini 请求体
-    fn build_request_body(&self, request: &UpstreamRequest) -> GeminiRequest {
+    fn build_request_body(&self, request: &UpstreamRequest) -> Result<GeminiRequest> {
         // 分离 system 消息和普通消息
         let mut system_content = None;
         let mut contents = Vec::new();
 
-        for msg in &request.messages {
+        for (msg_idx, msg) in request.messages.iter().enumerate() {
             if msg.role == "system" {
-                // Gemini 的 system 是独立字段
-                system_content = Some(msg.content.clone());
+                system_content = Some(msg.content.to_string());
             } else {
+                // 检查是否包含 Vision 内容（Gemini 适配器当前不支持）
+                match &msg.content {
+                    MessageContent::Parts(_) => {
+                        return Err(KeyComputeError::ProviderError(format!(
+                            "Gemini adapter does not currently support Vision/multimodal content (message index {})",
+                            msg_idx
+                        )));
+                    }
+                    MessageContent::Text(_) => {}
+                }
                 // 转换角色: OpenAI 的 "assistant" -> Gemini 的 "model"
                 let role = if msg.role == "assistant" {
                     "model"
@@ -68,7 +77,7 @@ impl GeminiProvider {
                 contents.push(GeminiContent {
                     role: role.to_string(),
                     parts: vec![GeminiPart {
-                        text: Some(msg.content.clone()),
+                        text: Some(msg.content.to_string()),
                         inlineData: None,
                     }],
                 });
@@ -105,7 +114,7 @@ impl GeminiProvider {
             gemini_request.generationConfig = Some(config);
         }
 
-        gemini_request
+        Ok(gemini_request)
     }
 
     /// 获取实际请求端点
@@ -145,7 +154,7 @@ impl GeminiProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> Result<String> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
         let endpoint = self.get_endpoint(&request, false);
 
         let body_json = serde_json::to_string(&body).map_err(|e| {
@@ -173,7 +182,7 @@ impl GeminiProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> Result<StreamBox> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
         let endpoint = self.get_endpoint(&request, true);
 
         let body_json = serde_json::to_string(&body).map_err(|e| {
@@ -271,7 +280,7 @@ mod tests {
         .with_temperature(0.7)
         .with_max_tokens(1024);
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request).unwrap();
 
         // 验证系统指令
         assert!(body.systemInstruction.is_some());
@@ -321,19 +330,19 @@ mod tests {
             messages: vec![
                 UpstreamMessage {
                     role: "system".to_string(),
-                    content: "You are helpful".to_string(),
+                    content: MessageContent::text("You are helpful"),
                 },
                 UpstreamMessage {
                     role: "user".to_string(),
-                    content: "Hello".to_string(),
+                    content: MessageContent::text("Hello"),
                 },
                 UpstreamMessage {
                     role: "assistant".to_string(),
-                    content: "Hi there!".to_string(),
+                    content: MessageContent::text("Hi there!"),
                 },
                 UpstreamMessage {
                     role: "user".to_string(),
-                    content: "How are you?".to_string(),
+                    content: MessageContent::text("How are you?"),
                 },
             ],
             stream: true,
@@ -342,7 +351,7 @@ mod tests {
             top_p: None,
         };
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request).unwrap();
 
         // system 应该被提取到独立字段
         assert!(body.systemInstruction.is_some());

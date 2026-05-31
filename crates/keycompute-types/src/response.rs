@@ -72,13 +72,13 @@ pub struct ChatCompletionResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionChoice {
     pub index: u32,
-    pub message: MessageContent,
+    pub message: ResponseMessage,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageContent {
+pub struct ResponseMessage {
     pub role: String,
     pub content: String,
 }

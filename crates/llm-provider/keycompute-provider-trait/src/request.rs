@@ -7,7 +7,7 @@
 //! - 这些值通常从数据库中的 Account 表获取，而非配置文件
 //! - 管理员可通过前端界面动态配置 Provider 端点和 Upstream API Key，无需重启系统
 
-use keycompute_types::SensitiveString;
+use keycompute_types::{MessageContent, SensitiveString};
 use serde::{Deserialize, Serialize};
 
 /// 上游请求结构
@@ -58,7 +58,11 @@ impl UpstreamRequest {
     }
 
     /// 添加消息
-    pub fn with_message(mut self, role: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn with_message(
+        mut self,
+        role: impl Into<String>,
+        content: impl Into<MessageContent>,
+    ) -> Self {
         self.messages.push(UpstreamMessage {
             role: role.into(),
             content: content.into(),
@@ -90,13 +94,13 @@ impl UpstreamRequest {
 pub struct UpstreamMessage {
     /// 角色：system / user / assistant
     pub role: String,
-    /// 消息内容
-    pub content: String,
+    /// 消息内容（支持纯文本和 Vision 多模态）
+    pub content: MessageContent,
 }
 
 impl UpstreamMessage {
     /// 创建系统消息
-    pub fn system(content: impl Into<String>) -> Self {
+    pub fn system(content: impl Into<MessageContent>) -> Self {
         Self {
             role: "system".to_string(),
             content: content.into(),
@@ -104,7 +108,7 @@ impl UpstreamMessage {
     }
 
     /// 创建用户消息
-    pub fn user(content: impl Into<String>) -> Self {
+    pub fn user(content: impl Into<MessageContent>) -> Self {
         Self {
             role: "user".to_string(),
             content: content.into(),
@@ -112,10 +116,26 @@ impl UpstreamMessage {
     }
 
     /// 创建助手消息
-    pub fn assistant(content: impl Into<String>) -> Self {
+    pub fn assistant(content: impl Into<MessageContent>) -> Self {
         Self {
             role: "assistant".to_string(),
             content: content.into(),
+        }
+    }
+
+    /// 从纯文本创建消息（便捷方法）
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: MessageContent::text(content),
+        }
+    }
+
+    /// 创建带 Vision 内容的消息
+    pub fn with_parts(role: impl Into<String>, parts: Vec<keycompute_types::ContentPart>) -> Self {
+        Self {
+            role: role.into(),
+            content: MessageContent::Parts(parts),
         }
     }
 }

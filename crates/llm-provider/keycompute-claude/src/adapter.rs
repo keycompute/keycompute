@@ -22,7 +22,7 @@ use futures::StreamExt;
 use keycompute_provider_trait::{
     ByteStream, HttpTransport, ProviderAdapter, StreamBox, StreamEvent, UpstreamRequest,
 };
-use keycompute_types::{KeyComputeError, Result};
+use keycompute_types::{KeyComputeError, MessageContent, Result};
 use serde_json;
 
 use crate::protocol::{ClaudeContent, ClaudeMessage, ClaudeRequest, ClaudeResponse};
@@ -63,16 +63,26 @@ impl ClaudeProvider {
     /// 构建 Claude 请求体
     ///
     /// 将标准化的 UpstreamRequest 转换为 Claude Messages API 格式
-    fn build_request_body(&self, request: &UpstreamRequest) -> ClaudeRequest {
+    fn build_request_body(&self, request: &UpstreamRequest) -> Result<ClaudeRequest> {
         // 分离 system 消息和普通消息
         let mut system_content = None;
         let mut messages = Vec::new();
 
-        for msg in &request.messages {
+        for (msg_idx, msg) in request.messages.iter().enumerate() {
             if msg.role == "system" {
                 // Claude 的 system 是独立字段，不是消息角色
-                system_content = Some(msg.content.clone());
+                system_content = Some(msg.content.to_string());
             } else {
+                // 检查是否包含 Vision 内容（Claude 适配器当前不支持）
+                match &msg.content {
+                    MessageContent::Parts(_) => {
+                        return Err(KeyComputeError::ProviderError(format!(
+                            "Claude adapter does not currently support Vision/multimodal content (message index {})",
+                            msg_idx
+                        )));
+                    }
+                    MessageContent::Text(_) => {}
+                }
                 // 转换角色: OpenAI 的 "assistant" -> Claude 的 "assistant"
                 // OpenAI 的 "user" -> Claude 的 "user"
                 let role = if msg.role == "assistant" {
@@ -83,7 +93,7 @@ impl ClaudeProvider {
 
                 messages.push(ClaudeMessage {
                     role: role.to_string(),
-                    content: ClaudeContent::Text(msg.content.clone()),
+                    content: ClaudeContent::Text(msg.content.to_string()),
                 });
             }
         }
@@ -91,7 +101,7 @@ impl ClaudeProvider {
         // 默认 max_tokens（Claude 要求必须提供）
         let max_tokens = request.max_tokens.unwrap_or(4096);
 
-        ClaudeRequest {
+        Ok(ClaudeRequest {
             model: request.model.clone(),
             max_tokens,
             messages,
@@ -101,7 +111,7 @@ impl ClaudeProvider {
             top_p: request.top_p,
             stop_sequences: None,
             metadata: None,
-        }
+        })
     }
 
     /// 获取实际请求端点
@@ -131,7 +141,7 @@ impl ClaudeProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> Result<String> {
-        let body = self.build_request_body(&request);
+        let body = self.build_request_body(&request)?;
         let endpoint = self.get_endpoint(&request);
         let body_json = serde_json::to_string(&body).map_err(|e| {
             KeyComputeError::ProviderError(format!("Failed to serialize request: {}", e))
@@ -157,7 +167,7 @@ impl ClaudeProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> Result<StreamBox> {
-        let mut body = self.build_request_body(&request);
+        let mut body = self.build_request_body(&request)?;
         let endpoint = self.get_endpoint(&request);
 
         // 确保启用流式输出
@@ -263,7 +273,7 @@ mod tests {
         .with_stream(true)
         .with_temperature(0.7);
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request).unwrap();
 
         assert_eq!(body.model, "claude-3-5-sonnet-20241022");
         assert_eq!(body.system, Some("You are helpful".to_string()));
@@ -284,7 +294,7 @@ mod tests {
         .with_message("user", "Hello")
         .with_max_tokens(1024);
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request).unwrap();
         assert_eq!(body.max_tokens, 1024);
     }
 
@@ -342,19 +352,19 @@ mod tests {
             messages: vec![
                 UpstreamMessage {
                     role: "system".to_string(),
-                    content: "You are helpful".to_string(),
+                    content: MessageContent::text("You are helpful"),
                 },
                 UpstreamMessage {
                     role: "user".to_string(),
-                    content: "Hello".to_string(),
+                    content: MessageContent::text("Hello"),
                 },
                 UpstreamMessage {
                     role: "assistant".to_string(),
-                    content: "Hi there!".to_string(),
+                    content: MessageContent::text("Hi there!"),
                 },
                 UpstreamMessage {
                     role: "user".to_string(),
-                    content: "How are you?".to_string(),
+                    content: MessageContent::text("How are you?"),
                 },
             ],
             stream: true,
@@ -363,7 +373,7 @@ mod tests {
             top_p: None,
         };
 
-        let body = provider.build_request_body(&request);
+        let body = provider.build_request_body(&request).unwrap();
 
         // system 应该被提取到独立字段
         assert_eq!(body.system, Some("You are helpful".to_string()));

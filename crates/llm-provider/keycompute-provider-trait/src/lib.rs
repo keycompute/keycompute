@@ -11,7 +11,7 @@ pub mod http;
 pub mod request;
 pub mod stream;
 
-pub use http::{ByteStream, DefaultHttpTransport, HttpTransport};
+pub use http::{ByteStream, DefaultHttpTransport, GetBinaryResponse, HttpTransport};
 pub use request::{UpstreamMessage, UpstreamRequest};
 pub use stream::StreamEvent;
 
@@ -66,6 +66,16 @@ pub trait ProviderAdapter: Send + Sync + std::fmt::Debug {
         }
 
         Ok(content)
+    }
+
+    /// 是否支持图片生成（默认不支持）
+    fn supports_image_generation(&self) -> bool {
+        false
+    }
+
+    /// 是否支持图片编辑（默认不支持）
+    fn supports_image_editing(&self) -> bool {
+        false
     }
 }
 

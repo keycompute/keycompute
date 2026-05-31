@@ -585,7 +585,7 @@ mod tests {
         // 测试单个消息的 token 估算
         let messages = vec![keycompute_provider_trait::UpstreamMessage {
             role: "user".to_string(),
-            content: "Hello".to_string(),
+            content: keycompute_types::MessageContent::text("Hello"),
         }];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         // 单个 "Hello" 约 1-2 tokens，加上 JSON 格式化和 role 名称
@@ -608,11 +608,11 @@ mod tests {
         let messages = vec![
             keycompute_provider_trait::UpstreamMessage {
                 role: "system".to_string(),
-                content: "You are a helpful assistant.".to_string(),
+                content: keycompute_types::MessageContent::text("You are a helpful assistant."),
             },
             keycompute_provider_trait::UpstreamMessage {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: keycompute_types::MessageContent::text("Hello"),
             },
         ];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
@@ -645,7 +645,7 @@ mod tests {
         // 测试中文消息的 token 估算
         let messages = vec![keycompute_provider_trait::UpstreamMessage {
             role: "user".to_string(),
-            content: "你好世界".to_string(),
+            content: keycompute_types::MessageContent::text("你好世界"),
         }];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         assert!(tokens > 0, "Chinese content should have token count > 0");
@@ -657,7 +657,7 @@ mod tests {
         // 将 messages 序列化为 JSON，确保包含 role 信息
         let messages = vec![keycompute_provider_trait::UpstreamMessage {
             role: "user".to_string(),
-            content: "test".to_string(),
+            content: keycompute_types::MessageContent::text("test"),
         }];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         let json = serde_json::to_string(&messages).unwrap();

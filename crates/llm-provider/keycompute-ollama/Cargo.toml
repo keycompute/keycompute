@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22"
 bytes = "1.5"
 futures = "0.3"
 keycompute-openai = { path = "../keycompute-openai" }
