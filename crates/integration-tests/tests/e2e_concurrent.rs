@@ -402,7 +402,7 @@ async fn test_concurrent_provider_requests() {
         let events = total_events.clone();
 
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             let result = provider.stream_chat(&*transport, request).await;
 
             match result {
@@ -482,7 +482,7 @@ async fn test_concurrent_mixed_providers() {
             let t = transport.clone();
             let r = results.clone();
             tasks.spawn(async move {
-                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
                 if p.stream_chat(&*t, request).await.is_ok() {
                     r.lock().unwrap().0 += 1;
                 }
@@ -495,7 +495,7 @@ async fn test_concurrent_mixed_providers() {
             let t = transport.clone();
             let r = results.clone();
             tasks.spawn(async move {
-                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
                 if p.stream_chat(&*t, request).await.is_err() {
                     r.lock().unwrap().1 += 1;
                 }
@@ -508,7 +508,7 @@ async fn test_concurrent_mixed_providers() {
             let t = transport.clone();
             let r = results.clone();
             tasks.spawn(async move {
-                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
                 if p.stream_chat(&*t, request).await.is_err() {
                     r.lock().unwrap().2 += 1;
                 }
@@ -521,7 +521,7 @@ async fn test_concurrent_mixed_providers() {
             let t = transport.clone();
             let r = results.clone();
             tasks.spawn(async move {
-                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
                 let result = p.stream_chat(&*t, request).await;
                 if result.is_ok() {
                     r.lock().unwrap().3 += 1;
@@ -782,7 +782,7 @@ async fn test_full_chain_concurrent_pressure() {
                     if !engine.is_account_cooling(account_id) {
                         // Step 3: Provider request
                         let request =
-                            UpstreamRequest::new(endpoint, upstream_api_key.clone(), &ctx.model);
+                            UpstreamRequest::new(endpoint, upstream_api_key.clone(), &ctx.model).with_stream(true);
 
                         if let Ok(mut stream) = provider.stream_chat(&*transport, request).await {
                             // Step 4: Consume stream
@@ -891,7 +891,7 @@ async fn test_burst_traffic_handling() {
             let processed = processed.clone();
 
             all_tasks.spawn(async move {
-                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+                let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
                 if provider.stream_chat(&*transport, request).await.is_ok() {
                     processed.fetch_add(1, Ordering::Relaxed);
                 }
@@ -971,7 +971,7 @@ async fn test_sustained_high_load() {
         let success = success_count.clone();
 
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             if provider.stream_chat(&*transport, request).await.is_ok() {
                 success.fetch_add(1, Ordering::Relaxed);
             }

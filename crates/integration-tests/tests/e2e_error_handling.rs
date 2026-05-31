@@ -37,7 +37,7 @@ async fn test_timeout_simulation() {
 
     // 2. 发送请求
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
     let result = provider.stream_chat(&transport, request).await;
 
     // 3. 验证超时错误
@@ -77,7 +77,7 @@ async fn test_delayed_response() {
 
     // 2. 测量响应时间
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     let start = std::time::Instant::now();
     let result = provider.stream_chat(&transport, request).await;
@@ -119,7 +119,7 @@ async fn test_slow_stream() {
 
     // 2. 消费流
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
     let stream = provider.stream_chat(&transport, request).await;
 
     chain.add_step(
@@ -374,7 +374,7 @@ async fn test_flaky_provider_recovery() {
     // 1. 创建 Flaky Provider（前 3 次失败）
     let provider = MockProviderFactory::create_flaky(3);
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     chain.add_step(
         "integration-tests::mocks",
@@ -419,7 +419,7 @@ async fn test_stream_error_injection() {
     // 1. 创建在第二个 chunk 后注入错误的 Provider
     let provider = MockProviderFactory::create_with_stream_error(2);
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     chain.add_step(
         "integration-tests::mocks",
@@ -483,7 +483,7 @@ async fn test_stream_continue_after_error() {
     // 1. 创建在第三个 chunk 后注入错误的 Provider
     let provider = MockProviderFactory::create_with_stream_error(3);
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     // 2. 消费流
     let mut stream = provider.stream_chat(&transport, request).await.unwrap();
@@ -551,7 +551,7 @@ async fn test_fallback_on_stream_error() {
 
     // 2. 尝试主 Provider
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     let primary_result = failing_provider
         .stream_chat(&transport, request.clone())
@@ -605,7 +605,7 @@ async fn test_empty_response() {
     let provider = MockProviderFactory::create_openai().with_chunks(vec![]); // 空 chunks
 
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     // 2. 消费流
     let stream = provider.stream_chat(&transport, request).await;
@@ -658,7 +658,7 @@ async fn test_large_token_count() {
     let provider = MockProviderFactory::create_openai().with_tokens(u32::MAX, u32::MAX); // 最大值
 
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     // 2. 消费流
     let mut stream = provider.stream_chat(&transport, request).await.unwrap();
@@ -711,7 +711,7 @@ async fn test_failure_count_reset() {
     // 1. 创建 Flaky Provider
     let provider = MockProviderFactory::create_flaky(2);
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
-    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+    let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
 
     // 2. 前 2 次失败
     let _ = provider.stream_chat(&transport, request.clone()).await;
@@ -779,7 +779,7 @@ async fn test_concurrent_error_handling() {
         let p = success_provider.clone();
         let transport = keycompute_provider_trait::DefaultHttpTransport::new();
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             p.stream_chat(&transport, request).await
         });
     }
@@ -788,7 +788,7 @@ async fn test_concurrent_error_handling() {
         let p = failing_provider.clone();
         let transport = keycompute_provider_trait::DefaultHttpTransport::new();
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             p.stream_chat(&transport, request).await
         });
     }
@@ -797,7 +797,7 @@ async fn test_concurrent_error_handling() {
         let p = flaky_provider.clone();
         let transport = keycompute_provider_trait::DefaultHttpTransport::new();
         tasks.spawn(async move {
-            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o");
+            let request = UpstreamRequest::new("http://test", "test-key", "gpt-4o").with_stream(true);
             p.stream_chat(&transport, request).await
         });
     }

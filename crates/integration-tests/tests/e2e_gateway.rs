@@ -188,6 +188,7 @@ async fn test_gateway_provider_stream() {
     // 2. 构建请求
     let request =
         keycompute_provider_trait::UpstreamRequest::new("http://mock-openai", "mock-key", "gpt-4o")
+            .with_stream(true)
             .with_message("user", "Hello");
 
     // 3. 执行流请求
@@ -261,7 +262,7 @@ async fn test_gateway_fallback_chain() {
 
     // 2. 尝试失败 Provider
     let request =
-        keycompute_provider_trait::UpstreamRequest::new("http://mock", "mock-key", "gpt-4o");
+        keycompute_provider_trait::UpstreamRequest::new("http://mock", "mock-key", "gpt-4o").with_stream(true);
 
     // 使用默认 HTTP 传输层
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();

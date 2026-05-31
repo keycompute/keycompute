@@ -50,7 +50,7 @@ impl UpstreamRequest {
             upstream_api_key: upstream_api_key.into(),
             model: model.into(),
             messages: Vec::new(),
-            stream: true,
+            stream: false,
             max_tokens: None,
             temperature: None,
             top_p: None,

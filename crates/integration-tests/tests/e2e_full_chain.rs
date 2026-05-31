@@ -76,6 +76,7 @@ async fn test_full_request_chain() {
     // 4. 执行 Provider 请求（模拟 Gateway 行为）
     let upstream_request =
         keycompute_provider_trait::UpstreamRequest::new("http://mock-openai", "mock-key", "gpt-4o")
+            .with_stream(true)
             .with_message("user", "Hello");
 
     let transport = keycompute_provider_trait::DefaultHttpTransport::new();
