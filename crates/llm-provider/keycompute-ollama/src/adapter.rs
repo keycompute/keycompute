@@ -420,7 +420,7 @@ impl OllamaProvider {
     /// 攻击者可利用超低 TTL DNS 记录实施重绑定攻击（预检时返回公网 IP，请求时切换到内网 IP）。
     /// 以下措施将此窗口的利用难度提升至极高水平：
     /// - `HttpTransport::get_binary` 实现方禁止 HTTP 重定向（trait 安全要求），阻断间接 SSRF
-    /// - 30 秒超时限制慢速攻击
+    /// - DNS 10s + HTTP 30s 独立超时，防止慢速攻击和网络不通导致的无限阻塞
     /// - 下载后校验 Content-Type 为 `image/*`，防止返回非图片内容
     /// - 20 MB 下载大小限制防止内存耗尽
     ///
@@ -503,6 +503,14 @@ impl OllamaProvider {
     /// 攻击者注册低 TTL 域名，验证时解析到公网 IP，请求时解析到内网 IP。
     /// 此方法在实际 HTTP 请求前解析 DNS 并检查所有解析出的 IP。
     ///
+    /// # 重要：调用方必须包裹超时
+    ///
+    /// 本方法内部使用 `tokio::net::lookup_host` 进行 DNS 解析，
+    /// 该调用**没有内置超时**——网络不通时可能永久挂起。
+    /// **所有调用方必须用 `tokio::time::timeout` 包裹本方法**，
+    /// 否则将重现已修复的 504 Gateway Timeout 问题。
+    /// 当前唯一调用方 `download_image_to_base64` 使用 10s DNS 超时。
+    ///
     /// 返回解析出的 IP 地址列表。
     /// 注意：调用方仅需校验 `Ok`（所有 IP 均为公网地址），
     /// 不再使用返回值进行 IP 固定连接（会导致 HTTPS 的 TLS SNI 不匹配问题）。
@@ -555,23 +563,30 @@ impl OllamaProvider {
     ///
     /// 安全措施（多层防御）：
     /// - URL 前缀匹配快速拦截内网地址
-    /// - DNS 预检解析验证实际 IP 非私有地址
+    /// - DNS 预检解析验证实际 IP 非私有地址（10s 独立超时）
     /// - 禁止 HTTP 重定向（transport 层保证）
     /// - 限制最大下载大小为 20MB，防止内存耗尽攻击
-    /// - `tokio::time::timeout` 包裹整个下载流程，防止慢速攻击
+    /// - DNS 解析 + HTTP 下载各有独立超时，防止慢速攻击和网络不通导致的无限阻塞
     async fn download_image_to_base64(transport: &dyn HttpTransport, url: &str) -> Result<String> {
         const MAX_IMAGE_SIZE: u64 = 20 * 1024 * 1024; // 20 MB
         const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30);
 
-        // 防 SSRF: 验证 URL 安全性（阻止内网地址）
+        // 防 SSRF: 验证 URL 安全性（阻止内网地址）—— 同步操作，无需 timeout
         Self::validate_image_url(url)?;
-        // 防 DNS 重绑定: 预检 DNS 并验证实际 IP 非私有地址
-        let _resolved_ips = Self::validate_dns_no_private(url).await?;
 
-        // 使用原始 URL 直接发起请求，确保 TLS SNI 正确匹配 hostname。
-        // reqwest 会根据 URL 的 hostname 自动设置 TLS SNI（如 upload.wikimedia.org），
-        // 而非之前用 IP 重写 URL 导致的 SNI 不匹配问题。
-        // DNS 重绑定 TOCTOU 窗口极小（毫秒级），且多层防御可充分兜底。
+        // DNS 解析超时（10s）：防止容器网络不通时 tokio::net::lookup_host 永久挂起
+        const DNS_TIMEOUT: Duration = Duration::from_secs(10);
+        let _resolved_ips = tokio::time::timeout(DNS_TIMEOUT, Self::validate_dns_no_private(url))
+            .await
+            .map_err(|_| {
+                KeyComputeError::ProviderError(format!(
+                    "DNS resolution timed out ({}s) for image host: {}",
+                    DNS_TIMEOUT.as_secs(),
+                    url
+                ))
+            })??;
+
+        // HTTP GET 超时（30s）：防止慢速下载阻塞
         let get_response =
             tokio::time::timeout(DOWNLOAD_TIMEOUT, transport.get_binary(url, vec![]))
                 .await
@@ -582,6 +597,8 @@ impl OllamaProvider {
                         url
                     ))
                 })??;
+
+        // 使用原始 URL 直接发起请求，确保 TLS SNI 正确匹配 hostname。
 
         // 校验 Content-Type 为 image/*，防止下载到非图片内容
         if let Some(ref ct) = get_response.content_type {

@@ -151,8 +151,10 @@ services:
       # KC__NODE_GATEWAY__SWEEPER_HEARTBEAT_TTL_SECS: ${KC__NODE_GATEWAY__SWEEPER_HEARTBEAT_TTL_SECS:-600}
       # KC__NODE_GATEWAY__SWEEPER_REPUSH_INTERVAL_SECS: ${KC__NODE_GATEWAY__SWEEPER_REPUSH_INTERVAL_SECS:-10}
     networks:
-      - keycompute-internal
+      # keycompute-public 必须在 keycompute-internal 之前，确保默认路由
+      # 走 public 网络（有外网访问），否则后端无法下载外部图片 URL
       - keycompute-public
+      - keycompute-internal
     # 后端端口不对外直接暴露，通过 Nginx 代理访问
     # 如需直接调试 API，可取消下行注释：
     # ports:
@@ -261,6 +263,9 @@ volumes:
 # =============================================================================
 networks:
   # 内部网络：Postgres/Redis/Server 之间通信，外部不可访问
+  # internal: true 是安全设计——防止该网络上的容器意外访问外网
+  # 需要外网访问的服务（如 keycompute-server 下载外部图片）
+  # 必须同时接入 keycompute-public 且将其排在 networks 列表第一位
   keycompute-internal:
     driver: bridge
     internal: true
