@@ -3650,6 +3650,7 @@ dependencies = [
  "async-trait",
  "axum",
  "bigdecimal",
+ "bytes",
  "chrono",
  "futures",
  "hex",

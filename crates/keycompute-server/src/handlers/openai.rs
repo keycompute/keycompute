@@ -18,7 +18,9 @@ use axum::{
 };
 use futures::stream::Stream;
 use keycompute_db::models::account::Account;
-use keycompute_types::{ExecutionTarget, Message, MessageContent, MessageRole, RequestContext};
+use keycompute_types::{
+    ContentPart, ExecutionTarget, Message, MessageContent, MessageRole, RequestContext,
+};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -578,23 +580,36 @@ pub async fn chat_completions(
                 );
                 Ok(Sse::new(stream).into_response())
             } else {
-                // 非流式响应：收集所有内容后返回完整 JSON
-                let response = create_openai_response(
-                    rx,
-                    ctx,
-                    model,
-                    primary_provider,
-                    primary_account_id,
-                    billing,
-                )
-                .await?;
-                Ok(Json(response).into_response())
+                // 非流式响应
+                if has_image_content(&ctx.messages) {
+                    // 多模态请求：使用 chunked keepalive 防止图片下载超时
+                    Ok(create_non_streaming_json_with_keepalive(
+                        rx,
+                        ctx,
+                        model,
+                        primary_provider,
+                        primary_account_id,
+                        billing,
+                    ))
+                } else {
+                    // 纯文本请求：直接返回 JSON（原快速路径）
+                    let response = create_openai_response(
+                        rx,
+                        ctx,
+                        model,
+                        primary_provider,
+                        primary_account_id,
+                        billing,
+                    )
+                    .await?;
+                    Ok(Json(response).into_response())
+                }
             }
         }
     }
 }
 
-/// 创建 OpenAI 格式的非流式响应
+/// 创建 OpenAI 格式的非流式响应（纯文本快速路径）
 async fn create_openai_response(
     mut rx: tokio::sync::mpsc::Receiver<keycompute_provider_trait::StreamEvent>,
     ctx: Arc<RequestContext>,
@@ -603,36 +618,16 @@ async fn create_openai_response(
     account_id: uuid::Uuid,
     billing: Arc<keycompute_billing::BillingService>,
 ) -> Result<ChatCompletionResponse> {
-    let completion_id = format!(
-        "chatcmpl-{}-kc",
-        uuid::Uuid::new_v4()
-            .to_string()
-            .replace("-", "")
-            .to_lowercase()
-    );
+    let completion_id = generate_completion_id();
     let created = chrono::Utc::now().timestamp();
+    let mut collector = StreamCollector::new();
 
-    let mut content = String::new();
-    let mut finish_reason: Option<String> = None;
-    let mut status = "success".to_string();
-
-    // 收集所有内容
+    // 收集所有事件
     while let Some(event) = rx.recv().await {
-        match event {
-            keycompute_provider_trait::StreamEvent::Delta {
-                content: delta,
-                finish_reason: reason,
-            } => {
-                content.push_str(&delta);
-                if reason.is_some() {
-                    finish_reason = reason;
-                }
-            }
-            keycompute_provider_trait::StreamEvent::Done => {
-                break;
-            }
-            keycompute_provider_trait::StreamEvent::Error { message } => {
-                status = "error".to_string();
+        match collector.process_event(event) {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(message) => {
                 tracing::error!(
                     request_id = %ctx.request_id,
                     error = %message,
@@ -643,25 +638,91 @@ async fn create_openai_response(
                         &ctx,
                         &provider_name,
                         account_id,
-                        &status,
+                        &collector.status,
                         ctx.user_id,
                     )
                     .await;
                 return Err(ApiError::Internal(message));
             }
-            _ => {}
         }
+    }
+
+    // 检查流完成状态
+    collector.check_completion(&ctx.request_id);
+
+    // 流意外结束：先执行计费，再返回错误而非空 content 的 200 响应
+    if collector.status == "incomplete" {
+        let _ = billing
+            .finalize_and_trigger_distribution(
+                &ctx,
+                &provider_name,
+                account_id,
+                &collector.status,
+                ctx.user_id,
+            )
+            .await;
+        return Err(ApiError::Internal(
+            "Stream ended unexpectedly: channel closed without Done/Error event".to_string(),
+        ));
     }
 
     // 执行 billing
     let _ = billing
-        .finalize_and_trigger_distribution(&ctx, &provider_name, account_id, &status, ctx.user_id)
+        .finalize_and_trigger_distribution(
+            &ctx,
+            &provider_name,
+            account_id,
+            &collector.status,
+            ctx.user_id,
+        )
         .await;
 
     // 获取用量信息
     let (prompt_tokens, completion_tokens) = ctx.usage_snapshot();
 
-    Ok(ChatCompletionResponse {
+    Ok(build_chat_completion_response(
+        completion_id,
+        created,
+        model,
+        collector.content,
+        collector.finish_reason,
+        prompt_tokens,
+        completion_tokens,
+        provider_name,
+    ))
+}
+
+/// 检测消息列表中是否包含需要网络下载的图片 URL
+///
+/// 仅当存在 `ContentPart::ImageUrl` 且 URL 为 HTTP(S) 协议（非 data URI）时才返回 true。
+/// data URI（如 `data:image/png;base64,...`）图片数据已内嵌在请求体中，
+/// 上游 Provider 无需额外网络下载即可处理，不会触发超时问题。
+/// 纯文本或仅有文本块的 Parts 不属于多模态。
+fn has_image_content(messages: &[Message]) -> bool {
+    messages.iter().any(|m| match &m.content {
+        MessageContent::Parts(parts) => parts.iter().any(|p| match p {
+            ContentPart::ImageUrl { image_url } => !image_url.url.starts_with("data:"),
+            _ => false,
+        }),
+        MessageContent::Text(_) => false,
+    })
+}
+
+/// 构建 OpenAI 格式的 ChatCompletion 响应
+///
+/// create_openai_response 与 create_non_streaming_json_with_keepalive 共享
+#[allow(clippy::too_many_arguments)]
+fn build_chat_completion_response(
+    completion_id: String,
+    created: i64,
+    model: String,
+    content: String,
+    finish_reason: Option<String>,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    provider_name: String,
+) -> ChatCompletionResponse {
+    ChatCompletionResponse {
         id: completion_id,
         object: "chat.completion".to_string(),
         created,
@@ -686,7 +747,283 @@ async fn create_openai_response(
             completion_tokens_details: None,
         },
         system_fingerprint: Some(format!("fp_{}", provider_name)),
-    })
+    }
+}
+
+/// 流事件收集器
+///
+/// 封装非流式响应路径中共享的事件处理状态与逻辑，
+/// 消除 `create_openai_response` 与 `create_non_streaming_json_with_keepalive` 之间的重复。
+struct StreamCollector {
+    content: String,
+    finish_reason: Option<String>,
+    status: String,
+    completed: bool,
+}
+
+impl StreamCollector {
+    fn new() -> Self {
+        Self {
+            content: String::new(),
+            finish_reason: None,
+            status: "success".to_string(),
+            completed: false,
+        }
+    }
+
+    /// 处理单个流事件
+    ///
+    /// 返回值：
+    /// - `Ok(true)` — 继续收集
+    /// - `Ok(false)` — 流正常结束（收到 Done 事件）
+    /// - `Err(message)` — 流异常（收到 Error 事件），调用者负责执行计费并决定错误输出方式
+    fn process_event(
+        &mut self,
+        event: keycompute_provider_trait::StreamEvent,
+    ) -> std::result::Result<bool, String> {
+        match event {
+            keycompute_provider_trait::StreamEvent::Delta {
+                content: delta,
+                finish_reason: reason,
+            } => {
+                self.content.push_str(&delta);
+                if reason.is_some() {
+                    self.finish_reason = reason;
+                }
+                Ok(true)
+            }
+            keycompute_provider_trait::StreamEvent::Done => {
+                self.completed = true;
+                Ok(false)
+            }
+            keycompute_provider_trait::StreamEvent::Error { message } => {
+                self.status = "error".to_string();
+                Err(message)
+            }
+            keycompute_provider_trait::StreamEvent::Usage { .. }
+            | keycompute_provider_trait::StreamEvent::Raw { .. } => Ok(true),
+        }
+    }
+
+    /// 检查流是否意外结束（channel 关闭但没有收到 Done/Error 事件）
+    fn check_completion(&mut self, request_id: &uuid::Uuid) {
+        if !self.completed {
+            tracing::warn!(
+                request_id = %request_id,
+                "Non-streaming response: channel closed without Done/Error event"
+            );
+            self.status = "incomplete".to_string();
+        }
+    }
+}
+
+/// 生成 OpenAI 格式的 completion ID
+fn generate_completion_id() -> String {
+    format!(
+        "chatcmpl-{}-kc",
+        uuid::Uuid::new_v4()
+            .to_string()
+            .replace("-", "")
+            .to_lowercase()
+    )
+}
+
+/// 创建带 chunked keepalive 的非流式 JSON 响应
+///
+/// 利用 HTTP chunked transfer encoding，在等待上游 Provider 响应期间，
+/// 每 10 秒发送一个空格字符 chunk，保持 TCP 连接活跃。
+/// 空格是 JSON 规范（RFC 8259）允许的前导空白字符，JSON 解析器会自动忽略，
+/// 因此客户端收到的是完全合法的 JSON 响应，协议无变更。
+///
+/// 适用场景：非流式请求中包含图片 URL 需要下载时，
+/// 图片下载可能耗时 30-40 秒，期间无任何数据返回，
+/// 云平台 ~60s 超时会导致 504 Gateway Timeout。
+///
+/// ## 错误处理说明
+///
+/// 由于 HTTP chunked 响应的特性，一旦第一个数据帧发出，HTTP 状态码 (200)
+/// 即已提交，无法后续修改。因此当流内发生上游 Provider 错误时，错误以
+/// JSON error body 形式嵌入响应体（而非 HTTP 5xx），客户端需同时检查
+/// HTTP 状态码和响应体中的 `error` 字段来判定请求是否成功。
+///
+/// 首个 keepalive 在 ~10s 时发送（而非立即发送），为上游连接阶段的错误
+/// （如 DNS 解析失败、TLS 握手超时等）保留一个窗口期。上游 Provider
+/// 的连接错误通常在数秒内暴露，10s 间隔足以覆盖绝大多数场景。
+fn create_non_streaming_json_with_keepalive(
+    mut rx: tokio::sync::mpsc::Receiver<keycompute_provider_trait::StreamEvent>,
+    ctx: Arc<RequestContext>,
+    model: String,
+    provider_name: String,
+    account_id: uuid::Uuid,
+    billing: Arc<keycompute_billing::BillingService>,
+) -> axum::response::Response {
+    use std::time::Duration;
+
+    let stream = async_stream::stream! {
+        let completion_id = generate_completion_id();
+        let created = chrono::Utc::now().timestamp();
+        let mut collector = StreamCollector::new();
+
+        // 首个 keepalive 不在此时发送，而是在 loop 内通过 tokio::select! 的
+        // sleep 分支延迟 ~10s 触发。这样为上游连接阶段的错误（DNS/TLS 等）
+        // 保留一个窗口期，避免过早提交 HTTP 200 状态码。
+        //
+        // 最大 keepalive 持续时间 120s，防止上游 Provider 后台任务停滞
+        // 导致循环无限期发送空格字节。120s 足够覆盖图片下载（~30-40s）+
+        // LLM 推理（~20-40s），同时避免服务端资源长期占用。
+        let max_keepalive = Duration::from_secs(120);
+        let deadline = tokio::time::sleep(max_keepalive);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    collector.status = "timeout".to_string();
+                    tracing::error!(
+                        request_id = %ctx.request_id,
+                        "Non-streaming keepalive: max duration (120s) exceeded, terminating"
+                    );
+                    let _ = billing
+                        .finalize_and_trigger_distribution(
+                            &ctx, &provider_name, account_id, &collector.status, ctx.user_id,
+                        )
+                        .await;
+                    let error_json = serde_json::json!({
+                        "error": {
+                            "message": "Request timed out",
+                            "type": "server_error",
+                            "param": null,
+                            "code": "timeout"
+                        }
+                    });
+                    yield Ok(bytes::Bytes::from(error_json.to_string()));
+                    return;
+                }
+                _ = tokio::time::sleep(Duration::from_secs(10)) => {
+                    // 空格是合法 JSON 前导空白 (RFC 8259 §2)，
+                    // 作为 chunked encoding 的数据帧，重置 Nginx proxy_read_timeout
+                    yield Ok::<bytes::Bytes, Infallible>(
+                        bytes::Bytes::from_static(b" ")
+                    );
+                }
+                event = rx.recv() => {
+                    match event {
+                        Some(event) => match collector.process_event(event) {
+                            Ok(true) => {}
+                            Ok(false) => break,
+                            Err(message) => {
+                                tracing::error!(
+                                    request_id = %ctx.request_id,
+                                    error = %message,
+                                    "Stream error during non-streaming keepalive response"
+                                );
+                                let _ = billing
+                                    .finalize_and_trigger_distribution(
+                                        &ctx, &provider_name, account_id, &collector.status, ctx.user_id,
+                                    )
+                                    .await;
+                                // 错误格式与 OpenAI API 对齐，包含 param 字段
+                                let error_json = serde_json::json!({
+                                    "error": {
+                                        "message": message,
+                                        "type": "api_error",
+                                        "param": null,
+                                        "code": "internal_error"
+                                    }
+                                });
+                                yield Ok(bytes::Bytes::from(error_json.to_string()));
+                                return;
+                            }
+                        },
+                        None => {
+                            // Channel 关闭但没有收到 Done 事件，将在循环后标记为 incomplete
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 检查流完成状态
+        collector.check_completion(&ctx.request_id);
+
+        // 流意外结束：先执行计费，再返回 error JSON 而非空 content 的 200 响应
+        if collector.status == "incomplete" {
+            let _ = billing
+                .finalize_and_trigger_distribution(
+                    &ctx, &provider_name, account_id, &collector.status, ctx.user_id,
+                )
+                .await;
+            let error_json = serde_json::json!({
+                "error": {
+                    "message": "Stream ended unexpectedly",
+                    "type": "server_error",
+                    "param": null,
+                    "code": "incomplete"
+                }
+            });
+            yield Ok(bytes::Bytes::from(error_json.to_string()));
+            return;
+        }
+
+        // 执行计费
+        let _ = billing
+            .finalize_and_trigger_distribution(
+                &ctx, &provider_name, account_id, &collector.status, ctx.user_id,
+            )
+            .await;
+
+        // 获取用量信息
+        let (prompt_tokens, completion_tokens) = ctx.usage_snapshot();
+
+        // 构建最终 JSON 响应
+        let response = build_chat_completion_response(
+            completion_id,
+            created,
+            model,
+            collector.content,
+            collector.finish_reason,
+            prompt_tokens,
+            completion_tokens,
+            provider_name,
+        );
+
+        let json = serde_json::to_string(&response)
+            .unwrap_or_else(|e| {
+                tracing::error!(
+                    request_id = %ctx.request_id,
+                    error = %e,
+                    "Failed to serialize chat completion response"
+                );
+                serde_json::json!({
+                    "error": {
+                        "message": "Internal error: failed to serialize response",
+                        "type": "server_error",
+                        "param": null,
+                        "code": null
+                    }
+                })
+                .to_string()
+            });
+        yield Ok(bytes::Bytes::from(json));
+    };
+
+    axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from_stream(stream))
+        .unwrap_or_else(|e| {
+            tracing::error!(
+                error = %e,
+                "Failed to build keepalive response headers, returning 500"
+            );
+            axum::response::Response::builder()
+                .status(500)
+                .header("Content-Type", "application/json")
+                .body(axum::body::Body::from(
+                    r#"{"error":{"message":"Internal server error","type":"server_error","param":null,"code":null}}"#,
+                ))
+                .expect("500 response with static body should always succeed")
+        })
 }
 
 /// 创建 OpenAI 格式的 SSE 流
@@ -703,7 +1040,7 @@ fn create_openai_stream(
         let mut status = "success".to_string();
         let mut completed = false; // 跟踪流是否正常完成
         let mut first_chunk = true;
-        let completion_id = format!("chatcmpl-{}-kc", uuid::Uuid::new_v4().to_string().replace("-", "").to_lowercase());
+        let completion_id = generate_completion_id();
         let created = chrono::Utc::now().timestamp();
 
         while let Some(event) = rx.recv().await {
@@ -820,6 +1157,7 @@ fn create_openai_stream(
                         "error": {
                             "message": message,
                             "type": "api_error",
+                            "param": null,
                             "code": "internal_error"
                         }
                     });
@@ -961,7 +1299,7 @@ fn simulate_node_stream(
     stream_options: Option<StreamOptions>,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
     async_stream::stream! {
-        let completion_id = format!("chatcmpl-{}-kc", uuid::Uuid::new_v4().to_string().replace("-", "").to_lowercase());
+        let completion_id = generate_completion_id();
         let created = chrono::Utc::now().timestamp();
 
         // 获取响应内容
@@ -1102,4 +1440,76 @@ mod tests {
 
     // 注意：retrieve_model 需要 AppState 和数据库连接，
     // 适合在集成测试中测试，这里不再单独测试
+
+    #[test]
+    fn test_has_image_content_empty() {
+        assert!(!has_image_content(&[]));
+    }
+
+    #[test]
+    fn test_has_image_content_text_only() {
+        let msg = Message::new(MessageRole::User, MessageContent::text("Hello"));
+        assert!(!has_image_content(&[msg]));
+    }
+
+    #[test]
+    fn test_has_image_content_text_parts() {
+        let msg = Message {
+            role: MessageRole::User,
+            content: MessageContent::Parts(vec![ContentPart::Text {
+                text: "Hello".to_string(),
+            }]),
+        };
+        assert!(!has_image_content(&[msg]));
+    }
+
+    #[test]
+    fn test_has_image_content_with_image_url() {
+        use keycompute_types::ImageUrl;
+        let msg = Message {
+            role: MessageRole::User,
+            content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "https://example.com/image.png".to_string(),
+                    detail: None,
+                },
+            }]),
+        };
+        assert!(has_image_content(&[msg]));
+    }
+
+    #[test]
+    fn test_has_image_content_mixed_parts() {
+        use keycompute_types::ImageUrl;
+        let msg = Message {
+            role: MessageRole::User,
+            content: MessageContent::Parts(vec![
+                ContentPart::Text {
+                    text: "Describe this".to_string(),
+                },
+                ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/photo.jpg".to_string(),
+                        detail: None,
+                    },
+                },
+            ]),
+        };
+        assert!(has_image_content(&[msg]));
+    }
+
+    #[test]
+    fn test_has_image_content_data_uri() {
+        use keycompute_types::ImageUrl;
+        let msg = Message {
+            role: MessageRole::User,
+            content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,iVBORw0KGgo...".to_string(),
+                    detail: None,
+                },
+            }]),
+        };
+        assert!(!has_image_content(&[msg]));
+    }
 }
