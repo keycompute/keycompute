@@ -196,21 +196,18 @@ impl HttpTransport for HttpClient {
         headers: Vec<(String, String)>,
         body: String,
     ) -> keycompute_types::Result<ByteStream> {
-        eprintln!("[DEBUG] HttpClient post_stream: url={}", url);
         let mut request = self.client.post(url);
 
         for (key, value) in headers {
             request = request.header(key, value);
         }
 
-        eprintln!("[DEBUG] HttpClient post_stream: sending request");
         let response = request
             .body(body)
             .timeout(self.config.stream_timeout)
             .send()
             .await
             .map_err(|e| {
-                eprintln!("[DEBUG] HttpClient post_stream: send error: {}", e);
                 keycompute_types::KeyComputeError::ProviderError(format!(
                     "HTTP stream request failed: {}",
                     e
@@ -218,17 +215,12 @@ impl HttpTransport for HttpClient {
             })?;
 
         let status = response.status();
-        eprintln!("[DEBUG] HttpClient post_stream: response status={}", status);
 
         if !status.is_success() {
             let error_text = response
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            eprintln!(
-                "[DEBUG] HttpClient post_stream: error response: {}",
-                error_text
-            );
             return Err(keycompute_types::KeyComputeError::ProviderError(format!(
                 "HTTP error ({}): {}",
                 status, error_text
@@ -236,7 +228,6 @@ impl HttpTransport for HttpClient {
         }
 
         // 转换字节流
-        eprintln!("[DEBUG] HttpClient post_stream: converting to byte stream");
         let stream = response.bytes_stream().map(|result| {
             result.map_err(|e| {
                 keycompute_types::KeyComputeError::ProviderError(format!("Stream error: {}", e))

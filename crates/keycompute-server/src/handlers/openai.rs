@@ -480,12 +480,12 @@ pub async fn chat_completions(
                     system_fingerprint: None,
                 };
 
-                // 触发计费
+                // 触发计费（使用 NODE_PRICING_PROVIDER 常量，与路由层定价维度一致）
                 let billing = Arc::clone(&state.billing);
                 let _ = billing
                     .finalize_and_trigger_distribution(
                         &ctx,
-                        "node",
+                        keycompute_pricing::NODE_PRICING_PROVIDER,
                         uuid::Uuid::nil(),
                         "success",
                         auth.user_id,
@@ -569,16 +569,31 @@ pub async fn chat_completions(
 
             if is_stream {
                 // 流式响应
-                let stream = create_openai_stream(
-                    rx,
-                    ctx,
-                    model,
-                    primary_provider,
-                    primary_account_id,
-                    billing,
-                    stream_options,
-                );
-                Ok(Sse::new(stream).into_response())
+                if has_image_content(&ctx.messages) {
+                    // 流式 + 多模态：SSE keepalive 防止图片下载超时
+                    let stream = create_openai_stream_with_keepalive(
+                        rx,
+                        ctx,
+                        model,
+                        primary_provider,
+                        primary_account_id,
+                        billing,
+                        stream_options,
+                    );
+                    Ok(Sse::new(stream).into_response())
+                } else {
+                    // 流式 + 纯文本：原逻辑，无 keepalive
+                    let stream = create_openai_stream(
+                        rx,
+                        ctx,
+                        model,
+                        primary_provider,
+                        primary_account_id,
+                        billing,
+                        stream_options,
+                    );
+                    Ok(Sse::new(stream).into_response())
+                }
             } else {
                 // 非流式响应
                 if has_image_content(&ctx.messages) {
@@ -1026,6 +1041,113 @@ fn create_non_streaming_json_with_keepalive(
         })
 }
 
+/// 构建流式 Delta chunk 的 SSE 数据字符串
+///
+/// 供 `create_openai_stream` 与 `create_openai_stream_with_keepalive` 共享，
+/// 消除 chunk 构建逻辑的重复。仅首个 chunk 携带 `role: "assistant"`，
+/// 遵循 OpenAI SSE 协议规范。
+fn make_delta_chunk_data(
+    content: String,
+    finish_reason: &Option<String>,
+    first_chunk: &mut bool,
+    completion_id: &str,
+    created: i64,
+    model: &str,
+    provider_name: &str,
+) -> String {
+    let delta = if *first_chunk {
+        *first_chunk = false;
+        ChatCompletionChunkDelta {
+            role: Some("assistant".to_string()),
+            content: Some(content),
+            tool_calls: None,
+        }
+    } else {
+        ChatCompletionChunkDelta {
+            role: None,
+            content: Some(content),
+            tool_calls: None,
+        }
+    };
+
+    let chunk = ChatCompletionChunk {
+        id: completion_id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created,
+        model: model.to_string(),
+        system_fingerprint: Some(format!("fp_{}", provider_name)),
+        choices: vec![ChatCompletionChunkChoice {
+            index: 0,
+            delta,
+            finish_reason: finish_reason.clone(),
+            logprobs: None,
+        }],
+        usage: None,
+    };
+
+    serde_json::to_string(&chunk).unwrap_or_else(|e| {
+        tracing::error!(
+            completion_id = %completion_id,
+            error = %e,
+            "Failed to serialize delta chunk"
+        );
+        serde_json::json!({
+            "error": {
+                "message": "Internal error: failed to serialize delta chunk",
+                "type": "server_error",
+                "param": null,
+                "code": null
+            }
+        })
+        .to_string()
+    })
+}
+
+/// 构建流式 Usage chunk 的 SSE 数据字符串
+///
+/// 供 `create_openai_stream` 与 `create_openai_stream_with_keepalive` 共享。
+fn make_usage_chunk_data(
+    input_tokens: u32,
+    output_tokens: u32,
+    completion_id: &str,
+    created: i64,
+    model: &str,
+    provider_name: &str,
+) -> String {
+    let usage_chunk = ChatCompletionChunk {
+        id: completion_id.to_string(),
+        object: "chat.completion.chunk".to_string(),
+        created,
+        model: model.to_string(),
+        system_fingerprint: Some(format!("fp_{}", provider_name)),
+        choices: vec![],
+        usage: Some(CompletionUsage {
+            prompt_tokens: input_tokens,
+            completion_tokens: output_tokens,
+            total_tokens: input_tokens + output_tokens,
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+        }),
+    };
+
+    serde_json::to_string(&usage_chunk).unwrap_or_else(|e| {
+        tracing::error!(
+            completion_id = %completion_id,
+            error = %e,
+            "Failed to serialize usage chunk"
+        );
+        serde_json::json!({
+            "error": {
+                "message": "Internal error: failed to serialize usage chunk",
+                "type": "server_error",
+                "param": null,
+                "code": null
+            }
+        })
+        .to_string()
+    })
+}
+
 /// 创建 OpenAI 格式的 SSE 流
 fn create_openai_stream(
     mut rx: tokio::sync::mpsc::Receiver<keycompute_provider_trait::StreamEvent>,
@@ -1046,37 +1168,10 @@ fn create_openai_stream(
         while let Some(event) = rx.recv().await {
             match event {
                 keycompute_provider_trait::StreamEvent::Delta { content, finish_reason } => {
-                    let delta = if first_chunk {
-                        first_chunk = false;
-                        ChatCompletionChunkDelta {
-                            role: Some("assistant".to_string()),
-                            content: Some(content),
-                            tool_calls: None,
-                        }
-                    } else {
-                        ChatCompletionChunkDelta {
-                            role: None,
-                            content: Some(content),
-                            tool_calls: None,
-                        }
-                    };
-
-                    let chunk = ChatCompletionChunk {
-                        id: completion_id.clone(),
-                        object: "chat.completion.chunk".to_string(),
-                        created,
-                        model: model.clone(),
-                        system_fingerprint: Some(format!("fp_{}", provider_name)),
-                        choices: vec![ChatCompletionChunkChoice {
-                            index: 0,
-                            delta,
-                            finish_reason: finish_reason.clone(),
-                            logprobs: None,
-                        }],
-                        usage: None,
-                    };
-
-                    let data = serde_json::to_string(&chunk).unwrap();
+                    let data = make_delta_chunk_data(
+                        content, &finish_reason, &mut first_chunk,
+                        &completion_id, created, &model, &provider_name,
+                    );
                     yield Ok(Event::default().data(data));
 
                     // 如果有 finish_reason，这是最后一块，发送 [DONE] 并结束
@@ -1090,22 +1185,10 @@ fn create_openai_stream(
                         // 如果需要包含用量信息
                         if stream_options.as_ref().map(|o| o.include_usage).unwrap_or(false) {
                             let (input_tokens, output_tokens) = ctx.usage_snapshot();
-                            let usage_chunk = ChatCompletionChunk {
-                                id: completion_id.clone(),
-                                object: "chat.completion.chunk".to_string(),
-                                created,
-                                model: model.clone(),
-                                system_fingerprint: Some(format!("fp_{}", provider_name)),
-                                choices: vec![],
-                                usage: Some(CompletionUsage {
-                                    prompt_tokens: input_tokens,
-                                    completion_tokens: output_tokens,
-                                    total_tokens: input_tokens + output_tokens,
-                                    prompt_tokens_details: None,
-                                    completion_tokens_details: None,
-                                }),
-                            };
-                            let data = serde_json::to_string(&usage_chunk).unwrap();
+                            let data = make_usage_chunk_data(
+                                input_tokens, output_tokens,
+                                &completion_id, created, &model, &provider_name,
+                            );
                             yield Ok(Event::default().data(data));
                         }
 
@@ -1124,22 +1207,10 @@ fn create_openai_stream(
                     // 如果需要包含用量信息
                     if stream_options.as_ref().map(|o| o.include_usage).unwrap_or(false) {
                         let (input_tokens, output_tokens) = ctx.usage_snapshot();
-                        let usage_chunk = ChatCompletionChunk {
-                            id: completion_id.clone(),
-                            object: "chat.completion.chunk".to_string(),
-                            created,
-                            model: model.clone(),
-                            system_fingerprint: Some(format!("fp_{}", provider_name)),
-                            choices: vec![],
-                            usage: Some(CompletionUsage {
-                                prompt_tokens: input_tokens,
-                                completion_tokens: output_tokens,
-                                total_tokens: input_tokens + output_tokens,
-                                prompt_tokens_details: None,
-                                completion_tokens_details: None,
-                            }),
-                        };
-                        let data = serde_json::to_string(&usage_chunk).unwrap();
+                        let data = make_usage_chunk_data(
+                            input_tokens, output_tokens,
+                            &completion_id, created, &model, &provider_name,
+                        );
                         yield Ok(Event::default().data(data));
                     }
 
@@ -1164,7 +1235,11 @@ fn create_openai_stream(
                     yield Ok(Event::default().data(error_chunk.to_string()));
                     break;
                 }
-                _ => {}
+                keycompute_provider_trait::StreamEvent::Usage { .. }
+                | keycompute_provider_trait::StreamEvent::Raw { .. } => {
+                    // Usage 由 executor 层通过 ctx.set_*_tokens() 消费，
+                    // Raw 为 provider 原始事件不需要透传
+                }
             }
         }
 
@@ -1179,6 +1254,159 @@ fn create_openai_stream(
                 &ctx, &provider_name, account_id, &status, ctx.user_id
             ).await;
         }
+    }
+}
+
+/// 创建带 keepalive 的 SSE 流式响应（多模态专用）
+///
+/// 与非流式 `create_non_streaming_json_with_keepalive` 用途一致：
+/// 图片下载期间每 10s 发送 SSE 空事件，防止 Nginx / 云平台
+/// `proxy_read_timeout` 超时触发 504。
+///
+/// SSE 空事件（`data:\\n\\n`）对 OpenAI 兼容客户端透明，
+/// 客户端 parser 会忽略空 data 字段。
+fn create_openai_stream_with_keepalive(
+    mut rx: tokio::sync::mpsc::Receiver<keycompute_provider_trait::StreamEvent>,
+    ctx: Arc<RequestContext>,
+    model: String,
+    provider_name: String,
+    account_id: uuid::Uuid,
+    billing: Arc<keycompute_billing::BillingService>,
+    stream_options: Option<StreamOptions>,
+) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+    async_stream::stream! {
+        let mut status = "success".to_string();
+        let mut first_chunk = true;
+        let completion_id = generate_completion_id();
+        let created = chrono::Utc::now().timestamp();
+
+        // 最大 keepalive 持续时间 120s，防止上游 Provider 后台任务停滞
+        // 导致循环无限期发送空事件。120s 足够覆盖图片下载（~30-40s）+
+        // LLM 推理（~20-40s），同时避免服务端资源长期占用。
+        //
+        // 注：此值与 GatewayConfig.timeout_secs 解耦，原因如下：
+        // - executor 超时由 tokio::time::timeout 在后台任务中实现
+        // - keepalive 是在 handler 层维护 TCP 连接存活，职责不同
+        // - 两者设为相同默认值（120s）是巧合；运维调大 timeout_secs 时
+        //   也应同步调整此值，反之亦然
+        let max_keepalive = std::time::Duration::from_secs(120);
+        let deadline = tokio::time::sleep(max_keepalive);
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    status = "timeout".to_string();
+                    tracing::error!(
+                        request_id = %ctx.request_id,
+                        "SSE stream keepalive: max duration (120s) exceeded, terminating"
+                    );
+                    let _ = billing.finalize_and_trigger_distribution(
+                        &ctx, &provider_name, account_id, &status, ctx.user_id
+                    ).await;
+                    let error_json = serde_json::json!({
+                        "error": {
+                            "message": "Request timed out",
+                            "type": "server_error",
+                            "param": null,
+                            "code": "timeout"
+                        }
+                    });
+                    yield Ok(Event::default().data(error_json.to_string()));
+                    yield Ok(Event::default().data("[DONE]"));
+                    return;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                    // SSE 空事件作 keepalive：客户端 parser 忽略空 data，
+                    // 但 Nginx / 云平台网关将其视为有效数据流，重置 proxy_read_timeout
+                    yield Ok(Event::default().data(""));
+                }
+                event = rx.recv() => {
+                    match event {
+                        Some(event) => match event {
+                            keycompute_provider_trait::StreamEvent::Delta { content, finish_reason } => {
+                                let data = make_delta_chunk_data(
+                                    content, &finish_reason, &mut first_chunk,
+                                    &completion_id, created, &model, &provider_name,
+                                );
+                                yield Ok(Event::default().data(data));
+
+                                if finish_reason.is_some() {
+                                    let _ = billing.finalize_and_trigger_distribution(
+                                        &ctx, &provider_name, account_id, &status, ctx.user_id
+                                    ).await;
+
+                                    if stream_options.as_ref().map(|o| o.include_usage).unwrap_or(false) {
+                                        let (input_tokens, output_tokens) = ctx.usage_snapshot();
+                                        let data = make_usage_chunk_data(
+                                            input_tokens, output_tokens,
+                                            &completion_id, created, &model, &provider_name,
+                                        );
+                                        yield Ok(Event::default().data(data));
+                                    }
+
+                                    yield Ok(Event::default().data("[DONE]"));
+                                    return;
+                                }
+                            }
+                            keycompute_provider_trait::StreamEvent::Done => {
+                                let _ = billing.finalize_and_trigger_distribution(
+                                    &ctx, &provider_name, account_id, &status, ctx.user_id
+                                ).await;
+
+                                if stream_options.as_ref().map(|o| o.include_usage).unwrap_or(false) {
+                                    let (input_tokens, output_tokens) = ctx.usage_snapshot();
+                                    let data = make_usage_chunk_data(
+                                        input_tokens, output_tokens,
+                                        &completion_id, created, &model, &provider_name,
+                                    );
+                                    yield Ok(Event::default().data(data));
+                                }
+
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            keycompute_provider_trait::StreamEvent::Error { message } => {
+                                status = "error".to_string();
+                                let _ = billing.finalize_and_trigger_distribution(
+                                    &ctx, &provider_name, account_id, &status, ctx.user_id
+                                ).await;
+
+                                let error_chunk = serde_json::json!({
+                                    "error": {
+                                        "message": message,
+                                        "type": "api_error",
+                                        "param": null,
+                                        "code": "internal_error"
+                                    }
+                                });
+                                yield Ok(Event::default().data(error_chunk.to_string()));
+                                yield Ok(Event::default().data("[DONE]"));
+                                return;
+                            }
+                            keycompute_provider_trait::StreamEvent::Usage { .. }
+                            | keycompute_provider_trait::StreamEvent::Raw { .. } => {
+                                // Usage 由 executor 层通过 ctx.set_*_tokens() 消费，
+                                // Raw 为 provider 原始事件不需要透传
+                            }
+                        },
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // 流意外结束（channel 关闭但没有收到完成事件）
+        // 所有正常完成路径（finish_reason / Done / Error / deadline）均使用 return 退出，
+        // 只有 channel 关闭（None）通过 break 到达此处
+        tracing::warn!(
+            request_id = %ctx.request_id,
+            "SSE stream keepalive: ended without Done/Error/finish_reason event"
+        );
+        status = "incomplete".to_string();
+        let _ = billing.finalize_and_trigger_distribution(
+            &ctx, &provider_name, account_id, &status, ctx.user_id
+        ).await;
     }
 }
 
@@ -1298,11 +1526,17 @@ fn simulate_node_stream(
     billing: Arc<keycompute_billing::BillingService>,
     stream_options: Option<StreamOptions>,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+    // 伪流式（simulated streaming）：
+    // - Node 路径先通过 enqueue_and_wait() 获取完整响应
+    // - 再将完整文本按字符拆分为 ~20 个块，每块间隔 10ms 发送
+    // - 模拟真实 SSE 流式输出的用户体验
+    //
+    // 注：Node 响应目前仅包含单个 choice（n=1），多 choice 场景暂不支持。
     async_stream::stream! {
         let completion_id = generate_completion_id();
         let created = chrono::Utc::now().timestamp();
 
-        // 获取响应内容
+        // 获取第一个 choice 的文本内容
         let content = response.choices.first().map(|c| c.message.content.clone()).unwrap_or_default();
 
         // 将内容拆分为字符级别的 chunk（模拟 token 级输出）
@@ -1310,9 +1544,21 @@ fn simulate_node_stream(
         let chars: Vec<char> = content.chars().collect();
         let chunk_size = std::cmp::max(1, chars.len() / 20); // 至少 1 个字符，最多 20 个 chunk
 
-        // 发送 content chunks
+        // 发送 content chunks，仅首个 chunk 携带 role（遵循 OpenAI SSE 协议）
+        let mut first_chunk = true;
         for chunk in chars.chunks(chunk_size) {
             let chunk_content: String = chunk.iter().collect();
+            let delta = if first_chunk {
+                first_chunk = false;
+                serde_json::json!({
+                    "role": "assistant",
+                    "content": chunk_content
+                })
+            } else {
+                serde_json::json!({
+                    "content": chunk_content
+                })
+            };
             let data = serde_json::json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1320,14 +1566,11 @@ fn simulate_node_stream(
                 "model": model,
                 "choices": [{
                     "index": 0,
-                    "delta": {
-                        "role": "assistant",
-                        "content": chunk_content
-                    },
+                    "delta": delta,
                     "finish_reason": null
                 }]
             });
-            yield Ok(Event::default().event("message").data(data.to_string()));
+            yield Ok(Event::default().data(data.to_string()));
 
             // 小延迟，模拟真实流式输出
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -1346,10 +1589,10 @@ fn simulate_node_stream(
                 "finish_reason": finish_reason
             }]
         });
-        yield Ok(Event::default().event("message").data(data.to_string()));
+        yield Ok(Event::default().data(data.to_string()));
 
         // 如果请求了 usage，发送 usage chunk
-        if stream_options.map(|o| o.include_usage).unwrap_or(false) {
+        if stream_options.as_ref().map(|o| o.include_usage).unwrap_or(false) {
             let data = serde_json::json!({
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -1362,14 +1605,17 @@ fn simulate_node_stream(
                     "total_tokens": response.usage.total_tokens
                 }
             });
-            yield Ok(Event::default().event("message").data(data.to_string()));
+            yield Ok(Event::default().data(data.to_string()));
         }
 
-        // 计费（与 Provider 路径一致）
+        // 发送 [DONE] 标记，声明流式传输结束（OpenAI SSE 协议要求）
+        yield Ok(Event::default().data("[DONE]"));
+
+        // 计费（使用 NODE_PRICING_PROVIDER 常量，与路由层定价维度一致）
         let _ = billing
             .finalize_and_trigger_distribution(
                 &ctx,
-                "node",
+                keycompute_pricing::NODE_PRICING_PROVIDER,
                 uuid::Uuid::nil(),
                 "success",
                 ctx.user_id,

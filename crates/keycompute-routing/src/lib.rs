@@ -160,7 +160,8 @@ impl RoutingEngine {
     /// - 不存在: 返回 `NoReadyNode` 错误,不 fallback
     /// - 无前缀: 走现有 Provider 路由逻辑
     ///
-    /// **注**: Node 路径支持 stream=true,服务端会模拟流式输出
+    /// **注**: Node 路径支持 stream=true，流式由 handler 层的 `simulate_node_stream()`
+    /// 模拟实现（获取完整响应后按块拆分输出），不经过 GatewayExecutor
     pub async fn route(&self, ctx: &RequestContext) -> Result<ExecutionPlan> {
         tracing::info!(
             request_id = %ctx.request_id,

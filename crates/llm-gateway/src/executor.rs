@@ -14,14 +14,15 @@
 
 use crate::{GatewayConfig, HttpProxy, streaming::StreamPipeline};
 use futures::StreamExt;
-use keycompute_provider_trait::{HttpTransport, ProviderAdapter, StreamEvent, UpstreamRequest};
-use keycompute_routing::{AccountStateStore, ProviderHealthStore};
-use keycompute_types::{
-    ExecutionPlan, ExecutionTarget, KeyComputeError, RequestContext, Result, SensitiveString,
+use keycompute_provider_trait::{
+    DefaultHttpTransport, HttpTransport, ProviderAdapter, StreamEvent, UpstreamMessage,
+    UpstreamRequest,
 };
+use keycompute_routing::{AccountStateStore, ProviderHealthStore};
+use keycompute_types::{ExecutionPlan, ExecutionTarget, KeyComputeError, RequestContext, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 /// Gateway 执行器
@@ -43,6 +44,8 @@ pub struct GatewayExecutor {
     providers: HashMap<String, Arc<dyn ProviderAdapter>>,
     /// Internal HTTP Proxy（统一上游连接管理）
     http_proxy: Option<Arc<HttpProxy>>,
+    /// 默认 HTTP 传输层（无代理时复用，避免每次请求重建 reqwest::Client 连接池）
+    default_transport: Arc<DefaultHttpTransport>,
 }
 
 impl GatewayExecutor {
@@ -55,6 +58,7 @@ impl GatewayExecutor {
             config,
             providers,
             http_proxy: None,
+            default_transport: Arc::new(DefaultHttpTransport::new()),
         }
     }
 
@@ -68,6 +72,7 @@ impl GatewayExecutor {
             config,
             providers,
             http_proxy: Some(http_proxy),
+            default_transport: Arc::new(DefaultHttpTransport::new()),
         }
     }
 
@@ -108,25 +113,52 @@ impl GatewayExecutor {
             config: self.config.clone(),
             providers: self.providers.clone(),
             http_proxy: self.http_proxy.clone(),
+            default_transport: Arc::clone(&self.default_transport),
         };
 
+        // 执行超时：防止上游 Provider 无限阻塞导致资源泄漏。
+        // 与 handler 层 keepalive (120s) 保持同一量级，确保 executor 不会在
+        // handler 超时断开客户端后继续消耗资源（图片下载、上游 API 调用等）。
+        let exec_timeout = Duration::from_secs(self.config.timeout_secs);
+
         tokio::spawn(async move {
-            if let Err(error) = runner
-                .run_plan(
+            let result = tokio::time::timeout(
+                exec_timeout,
+                runner.run_plan(
                     Arc::clone(&ctx),
                     plan,
                     tx.clone(),
                     account_states,
                     provider_health,
-                )
-                .await
-            {
-                tracing::error!(
-                    request_id = %ctx.request_id,
-                    error = %error,
-                    "Execution task failed"
-                );
-                let _ = tx.send(StreamEvent::error(error.to_string())).await;
+                ),
+            )
+            .await;
+
+            match result {
+                Ok(Ok(())) => {
+                    // 正常完成，run_plan 内部已将事件写入 tx
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(
+                        request_id = %ctx.request_id,
+                        error = %error,
+                        "Execution task failed"
+                    );
+                    let _ = tx.send(StreamEvent::error(error.to_string())).await;
+                }
+                Err(_elapsed) => {
+                    tracing::error!(
+                        request_id = %ctx.request_id,
+                        timeout_secs = exec_timeout.as_secs(),
+                        "Gateway execution timed out: run_plan cancelled"
+                    );
+                    let _ = tx
+                        .send(StreamEvent::error(format!(
+                            "Request timed out after {}s",
+                            exec_timeout.as_secs()
+                        )))
+                        .await;
+                }
             }
         });
 
@@ -229,6 +261,9 @@ impl GatewayExecutor {
                 ..
             } => (provider, endpoint, upstream_api_key),
             ExecutionTarget::Node { .. } => {
+                // 防护性检查：Node 执行在 handler 层分流（openai.rs），
+                // 通过 node_gateway.enqueue_and_wait() + simulate_node_stream() 实现，
+                // 正常流程不应到达此处
                 return Err(KeyComputeError::Internal(
                     "Node execution not supported in stream executor".into(),
                 ));
@@ -248,16 +283,33 @@ impl GatewayExecutor {
             .get(provider.as_str())
             .ok_or_else(|| KeyComputeError::Internal(format!("Provider {} not found", provider)))?;
 
-        // 获取 HTTP 传输层（优先使用 HttpProxy 中的客户端）
+        // 获取 HTTP 传输层（优先 HttpProxy，否则复用缓存的默认 transport 避免重复建连接池）
         let transport: Arc<dyn HttpTransport> = if let Some(ref proxy) = self.http_proxy {
             Arc::clone(proxy.default_client()) as Arc<dyn HttpTransport>
         } else {
-            // 使用默认传输
-            Arc::new(keycompute_provider_trait::DefaultHttpTransport::new())
+            Arc::clone(&self.default_transport) as Arc<dyn HttpTransport>
         };
 
-        // 构建上游请求
-        let request = self.build_upstream_request(ctx, provider, endpoint, upstream_api_key);
+        // 构建上游消息（一次转换，同时用于 UpstreamRequest 和 token 估算，消除 DRY 违反）
+        let upstream_messages: Vec<UpstreamMessage> = ctx
+            .messages
+            .iter()
+            .map(|m| UpstreamMessage {
+                role: m.role.to_string(),
+                content: m.content.clone(),
+            })
+            .collect();
+
+        let request = UpstreamRequest {
+            endpoint: endpoint.to_string(),
+            upstream_api_key: upstream_api_key.clone(),
+            model: ctx.model.clone(),
+            messages: upstream_messages,
+            stream: ctx.stream,
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+        };
 
         tracing::info!(
             request_id = %ctx.request_id,
@@ -281,15 +333,7 @@ impl GatewayExecutor {
 
         // 流开始前：使用 tiktoken 估算输入 token 数
         // 注意：这只是估算，最终会被 StreamEvent::Usage 事件中的精确值覆盖
-        let upstream_messages: Vec<keycompute_provider_trait::UpstreamMessage> = ctx
-            .messages
-            .iter()
-            .map(|m| keycompute_provider_trait::UpstreamMessage {
-                role: m.role.to_string(),
-                content: m.content.clone(),
-            })
-            .collect();
-        let estimated_input_tokens = Self::estimate_input_tokens(&upstream_messages);
+        let estimated_input_tokens = Self::estimate_input_tokens(&ctx.messages);
         ctx.set_input_tokens(estimated_input_tokens);
 
         tracing::debug!(
@@ -298,16 +342,22 @@ impl GatewayExecutor {
             "Stream started, input tokens estimated"
         );
 
+        // pending_done: 收到 finish_reason 但尚未发送 Done 事件
+        // 修复 Usage 事件被跳过的问题：finish_reason 后不立即 break，
+        // 继续处理可能的 Usage 事件，直到收到 Done 或流结束
+        let mut pending_done = false;
+
         while let Some(event) = stream.next().await {
             match event? {
                 StreamEvent::Delta {
                     content,
                     finish_reason,
                 } => {
-                    // 使用 tiktoken 估算输出 token（累积）
-                    // 注意：这里的估算会在收到 StreamEvent::Usage 时被覆盖
-                    let tokens = Self::estimate_tokens(&content);
-                    ctx.add_output_tokens(tokens);
+                    // 尚未收到 Provider 精确 Usage 时，使用 tiktoken 估算
+                    if !ctx.is_usage_finalized() {
+                        let tokens = Self::estimate_tokens(&content);
+                        ctx.add_output_tokens(tokens);
+                    }
 
                     // 转发给客户端
                     let event = StreamEvent::Delta {
@@ -319,15 +369,13 @@ impl GatewayExecutor {
                         .await
                         .map_err(|_| KeyComputeError::Internal("Send error".into()))?;
 
-                    // 如果有 finish_reason，发送 Done 并退出
                     if finish_reason.is_some() {
                         tracing::debug!(
                             request_id = %ctx.request_id,
                             finish_reason = ?finish_reason,
-                            "try_execute: received finish_reason, sending Done and exiting"
+                            "try_execute: finish_reason received, waiting for Usage/Done"
                         );
-                        // 注意：不发送 Done 事件，让 handler 根据 finish_reason 结束
-                        break;
+                        pending_done = true;
                     }
                 }
                 StreamEvent::Usage {
@@ -355,6 +403,7 @@ impl GatewayExecutor {
                     tx.send(StreamEvent::Done)
                         .await
                         .map_err(|_| KeyComputeError::Internal("Send error".into()))?;
+                    pending_done = false;
                     break;
                 }
                 StreamEvent::Error { message } => {
@@ -369,6 +418,13 @@ impl GatewayExecutor {
             }
         }
 
+        // 如果只收到 finish_reason 没有 Done 事件，补发 Done 通知 handler 流结束。
+        // 这里 pending_done = false 在 Done 分支中也设置了（冗余安全），
+        // 但该分支通过 break 退出循环，到达此处时 pending_done 必定为 false。
+        if pending_done {
+            let _ = tx.send(StreamEvent::Done).await;
+        }
+
         tracing::debug!(
             request_id = %ctx.request_id,
             provider = %provider,
@@ -376,35 +432,6 @@ impl GatewayExecutor {
         );
 
         Ok(())
-    }
-
-    /// 构建上游请求
-    fn build_upstream_request(
-        &self,
-        ctx: &RequestContext,
-        _provider: &str,
-        endpoint: &str,
-        upstream_api_key: &SensitiveString,
-    ) -> UpstreamRequest {
-        let messages: Vec<keycompute_provider_trait::UpstreamMessage> = ctx
-            .messages
-            .iter()
-            .map(|m| keycompute_provider_trait::UpstreamMessage {
-                role: m.role.to_string(),
-                content: m.content.clone(),
-            })
-            .collect();
-
-        UpstreamRequest {
-            endpoint: endpoint.to_string(),
-            upstream_api_key: upstream_api_key.clone(),
-            model: ctx.model.clone(),
-            messages,
-            stream: ctx.stream,
-            max_tokens: None,
-            temperature: None,
-            top_p: None,
-        }
     }
 
     /// 估算 token 数（使用 tiktoken-rs）
@@ -436,8 +463,13 @@ impl GatewayExecutor {
     /// 不使用 get_chat_completion_max_tokens，因为它返回的是"剩余可用token数"而非"输入token数"
     /// 而是直接序列化messages为JSON，然后用tiktoken计算整个JSON的token数
     /// 这样可以正确包含role名称、格式化等所有token
-    fn estimate_input_tokens(messages: &[keycompute_provider_trait::UpstreamMessage]) -> u32 {
-        // 将messages序列化为JSON，保留所有格式（包括role名称）
+    fn estimate_input_tokens(messages: &[keycompute_types::Message]) -> u32 {
+        // 直接序列化 keycompute_types::Message 而非 UpstreamMessage 进行估算。
+        // 原因：两者 JSON 输出等价（MessageRole 经 #[serde(rename_all = "lowercase")]
+        // 序列化为 "user"/"system" 字符串，与 UpstreamMessage.role 一致），
+        // 且 ctx.messages 已经以 Message 形式存在，避免了额外的 Vec<UpstreamMessage> 构建。
+        // 注：若 Message 新增字段而 UpstreamMessage 未同步，估算值可能偏离实际发送 JSON，
+        // 届时需考虑恢复 UpstreamMessage 构建。
         let json_str = serde_json::to_string(messages).unwrap_or_default();
 
         // 使用tiktoken直接计算JSON的token数
@@ -583,10 +615,7 @@ mod tests {
     #[test]
     fn test_estimate_input_tokens_single_message() {
         // 测试单个消息的 token 估算
-        let messages = vec![keycompute_provider_trait::UpstreamMessage {
-            role: "user".to_string(),
-            content: keycompute_types::MessageContent::text("Hello"),
-        }];
+        let messages = vec![keycompute_types::Message::user("Hello")];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         // 单个 "Hello" 约 1-2 tokens，加上 JSON 格式化和 role 名称
         assert!(
@@ -606,14 +635,8 @@ mod tests {
     fn test_estimate_input_tokens_multiple_messages() {
         // 测试多个消息的 token 估算
         let messages = vec![
-            keycompute_provider_trait::UpstreamMessage {
-                role: "system".to_string(),
-                content: keycompute_types::MessageContent::text("You are a helpful assistant."),
-            },
-            keycompute_provider_trait::UpstreamMessage {
-                role: "user".to_string(),
-                content: keycompute_types::MessageContent::text("Hello"),
-            },
+            keycompute_types::Message::system("You are a helpful assistant."),
+            keycompute_types::Message::user("Hello"),
         ];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         assert!(tokens > 0, "Token count should be greater than 0");
@@ -629,7 +652,7 @@ mod tests {
     fn test_estimate_input_tokens_empty() {
         // 测试空消息列表
         // 注意：空列表序列化后是 "[]"，这本身也是有 token 的
-        let messages: Vec<keycompute_provider_trait::UpstreamMessage> = vec![];
+        let messages: Vec<keycompute_types::Message> = vec![];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         // 空 JSON "[]" 在 tiktoken 中也会计算为约 1 token
         // 这是正确的，因为即使空消息数组也有序列化开销
@@ -643,10 +666,7 @@ mod tests {
     #[test]
     fn test_estimate_input_tokens_chinese() {
         // 测试中文消息的 token 估算
-        let messages = vec![keycompute_provider_trait::UpstreamMessage {
-            role: "user".to_string(),
-            content: keycompute_types::MessageContent::text("你好世界"),
-        }];
+        let messages = vec![keycompute_types::Message::user("你好世界")];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         assert!(tokens > 0, "Chinese content should have token count > 0");
     }
@@ -655,10 +675,7 @@ mod tests {
     fn test_estimate_input_tokens_includes_role_format() {
         // 测试估算是否包含 role 和格式
         // 将 messages 序列化为 JSON，确保包含 role 信息
-        let messages = vec![keycompute_provider_trait::UpstreamMessage {
-            role: "user".to_string(),
-            content: keycompute_types::MessageContent::text("test"),
-        }];
+        let messages = vec![keycompute_types::Message::user("test")];
         let tokens = GatewayExecutor::estimate_input_tokens(&messages);
         let json = serde_json::to_string(&messages).unwrap();
         let json_tokens = GatewayExecutor::estimate_tokens(&json);
