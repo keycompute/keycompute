@@ -21,6 +21,7 @@ pub mod node_tips;
 pub mod openai;
 pub mod payment;
 pub mod pricing;
+pub mod requirement;
 pub mod routing;
 pub mod user;
 
@@ -29,6 +30,9 @@ pub use auth::{
     complete_registration_handler, forgot_password_handler, login_handler, refresh_token_handler,
     register_handler, reset_password_handler, verify_reset_token_handler,
 };
+
+// 需求收集
+pub use requirement::submit_requirement_handler;
 
 // OpenAI 兼容 API (统一入口)
 pub use openai::{

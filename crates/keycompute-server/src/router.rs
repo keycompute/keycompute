@@ -109,6 +109,7 @@ use crate::{
         retrieve_model,
         revoke_node_token,
         set_account_cooldown,
+        submit_requirement_handler,
         sync_payment_order,
         test_account,
         unfreeze_user_balance,
@@ -145,6 +146,8 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/auth/register/complete",
             post(complete_registration_handler),
         )
+        // 首页需求收集表单（公开，按 IP/设备限流防滥用）
+        .route("/api/v1/requirements", post(submit_requirement_handler))
         .layer(from_fn_with_state(
             state.clone(),
             public_auth_rate_limit_middleware,

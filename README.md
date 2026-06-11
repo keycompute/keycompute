@@ -298,6 +298,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | SMTP password (optional) | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | Sender email address (optional) | ⚪ |
 | `KC__EMAIL__FROM_NAME` | Sender display name (optional) | ⚪ |
+| `KC__EMAIL__REQUIREMENT_RECIPIENT` | Requirement collection recipient email (optional; required to receive homepage submissions) | ⚪ |
 | `APP_BASE_URL` | Public frontend base URL (required for password reset/invite links) | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | Default administrator email (optional) | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | Default administrator password (optional) | ⚪ |

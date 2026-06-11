@@ -286,6 +286,7 @@ fn test_email_service_config() {
         from_name: Some("KeyCompute".to_string()),
         use_tls: true,
         timeout_secs: 30,
+        requirement_recipient: None,
     };
 
     chain.add_step(

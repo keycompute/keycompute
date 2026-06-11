@@ -298,6 +298,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | Contraseña SMTP (opcional) | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | Dirección de correo del remitente (opcional) | ⚪ |
 | `KC__EMAIL__FROM_NAME` | Nombre visible del remitente (opcional) | ⚪ |
+| `KC__EMAIL__REQUIREMENT_RECIPIENT` | Correo receptor para solicitudes de requisitos (opcional; necesario para recibir envíos desde la página inicial) | ⚪ |
 | `APP_BASE_URL` | Dirección pública del frontend (necesaria para restablecimiento/invitación) | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | Correo del administrador por defecto | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | Contraseña del administrador por defecto | ⚪ |
