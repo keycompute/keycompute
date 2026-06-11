@@ -409,7 +409,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("req.success", "Received. We will contact you shortly");
     m.insert("req.err.contact_required", "Please provide a contact");
     m.insert("req.err.contact_invalid", "Invalid contact format");
-    m.insert("req.err.failed", "Submission failed, please try again later");
+    m.insert(
+        "req.err.failed",
+        "Submission failed, please try again later",
+    );
 
     // ── Login ───────────────────────────────────
     m.insert("login.tagline_1", "Next-Gen");

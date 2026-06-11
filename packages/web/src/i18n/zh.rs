@@ -331,9 +331,15 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("req.deploy.label", "节点部署方案");
     m.insert("req.deploy.image", "容器镜像部署");
     m.insert("req.deploy.recommended", "推荐");
-    m.insert("req.deploy.image_desc", "预置镜像，一键拉起运行；快速部署，便于标准运维");
+    m.insert(
+        "req.deploy.image_desc",
+        "预置镜像，一键拉起运行；快速部署，便于标准运维",
+    );
     m.insert("req.deploy.binary", "二进制 Systemd 部署");
-    m.insert("req.deploy.binary_desc", "二进制部署，Systemd 管理；轻量部署，适合定制环境");
+    m.insert(
+        "req.deploy.binary_desc",
+        "二进制部署，Systemd 管理；轻量部署，适合定制环境",
+    );
     m.insert("req.contact.label", "联系方式");
     m.insert("req.contact.wechat", "微信");
     m.insert("req.contact.email", "邮箱");
@@ -345,10 +351,16 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("req.contact.placeholder.phone", "请输入您的手机号");
     m.insert("req.note.label", "补充说明");
     m.insert("req.note.optional", "选填");
-    m.insert("req.note.placeholder", "请详细描述您的需求、使用场景、预算、期望目标等");
+    m.insert(
+        "req.note.placeholder",
+        "请详细描述您的需求、使用场景、预算、期望目标等",
+    );
     m.insert("req.submit", "提交需求");
     m.insert("req.submitting", "提交中…");
-    m.insert("req.privacy", "提交即表示同意隐私政策，我们会严格保护您的信息安全");
+    m.insert(
+        "req.privacy",
+        "提交即表示同意隐私政策，我们会严格保护您的信息安全",
+    );
     m.insert("req.success", "已收到，我们会尽快与您联系");
     m.insert("req.err.contact_required", "请填写联系方式");
     m.insert("req.err.contact_invalid", "联系方式格式不正确");

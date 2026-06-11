@@ -1191,6 +1191,7 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
     let mut error_msg = use_signal(|| Option::<String>::None);
     // 提交动作级错误（如网络/服务失败，显示在提交按钮上方）
     let mut submit_error = use_signal(|| Option::<String>::None);
+    let mut success_message = use_signal(String::new);
     let mut success = use_signal(|| false);
 
     // i18n 文本
@@ -1237,10 +1238,26 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
     ];
     // 联系方式：(key, 标签, 占位符)
     let contact_tabs = vec![
-        ("wechat", i18n.t("req.contact.wechat"), i18n.t("req.contact.placeholder.wechat")),
-        ("email", i18n.t("req.contact.email"), i18n.t("req.contact.placeholder.email")),
-        ("telegram", i18n.t("req.contact.telegram"), i18n.t("req.contact.placeholder.telegram")),
-        ("phone", i18n.t("req.contact.phone"), i18n.t("req.contact.placeholder.phone")),
+        (
+            "wechat",
+            i18n.t("req.contact.wechat"),
+            i18n.t("req.contact.placeholder.wechat"),
+        ),
+        (
+            "email",
+            i18n.t("req.contact.email"),
+            i18n.t("req.contact.placeholder.email"),
+        ),
+        (
+            "telegram",
+            i18n.t("req.contact.telegram"),
+            i18n.t("req.contact.placeholder.telegram"),
+        ),
+        (
+            "phone",
+            i18n.t("req.contact.phone"),
+            i18n.t("req.contact.placeholder.phone"),
+        ),
     ];
 
     // 当前联系方式占位符（随 tab 切换）
@@ -1301,7 +1318,13 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
         };
         spawn(async move {
             match submit_requirement(&submission).await {
-                Ok(_) => {
+                Ok(resp) => {
+                    let message = if resp.message.trim().is_empty() {
+                        t_success.to_string()
+                    } else {
+                        resp.message
+                    };
+                    success_message.set(message);
                     success.set(true);
                     loading.set(false);
                 }
@@ -1336,7 +1359,7 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
                             path { d: "M22 11.08V12a10 10 0 1 1-5.93-9.14" }
                             path { d: "M22 4 12 14.01l-3-3" }
                         }
-                        p { "{t_success}" }
+                        p { "{success_message}" }
                     }
                 } else {
                     p { class: "kc-req-subtitle", "{t_subtitle}" }

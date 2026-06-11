@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 /// 补充说明最大长度
 const MAX_NOTE_LEN: usize = 500;
+const ALLOWED_CONTACT_METHODS: &[&str] = &["wechat", "email", "telegram", "phone"];
 
 /// 需求提交请求体
 #[derive(Debug, Deserialize)]
@@ -48,18 +49,7 @@ pub async fn submit_requirement_handler(
     State(state): State<AppState>,
     Json(req): Json<RequirementRequest>,
 ) -> Result<impl IntoResponse> {
-    // 基础校验（前端为主，后端兜底）
-    if req.requirement_type.trim().is_empty() {
-        return Err(ApiError::BadRequest("需求类型不能为空".to_string()));
-    }
-    if req.contact_value.trim().is_empty() {
-        return Err(ApiError::BadRequest("联系方式不能为空".to_string()));
-    }
-    if let Some(note) = &req.note
-        && note.chars().count() > MAX_NOTE_LEN
-    {
-        return Err(ApiError::BadRequest("补充说明长度超过限制".to_string()));
-    }
+    validate_requirement_request(&req)?;
 
     // 接收人未配置 → 功能不可用
     let recipient = state
@@ -89,6 +79,50 @@ pub async fn submit_requirement_handler(
             message: "已收到您的需求".to_string(),
         }),
     ))
+}
+
+fn validate_requirement_request(req: &RequirementRequest) -> Result<()> {
+    let requirement_type = req.requirement_type.trim();
+    if requirement_type.is_empty() {
+        return Err(ApiError::BadRequest("需求类型不能为空".to_string()));
+    }
+    if requirement_type.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest("需求类型不能包含控制字符".to_string()));
+    }
+
+    let contact_method = req.contact_method.trim();
+    if !ALLOWED_CONTACT_METHODS.contains(&contact_method) {
+        return Err(ApiError::BadRequest("联系方式类型无效".to_string()));
+    }
+
+    let contact_value = req.contact_value.trim();
+    if contact_value.is_empty() {
+        return Err(ApiError::BadRequest("联系方式不能为空".to_string()));
+    }
+    validate_contact_value(contact_method, contact_value)?;
+
+    if let Some(note) = &req.note
+        && note.chars().count() > MAX_NOTE_LEN
+    {
+        return Err(ApiError::BadRequest("补充说明长度超过限制".to_string()));
+    }
+
+    Ok(())
+}
+
+fn validate_contact_value(contact_method: &str, contact_value: &str) -> Result<()> {
+    let valid = match contact_method {
+        "email" => contact_value.contains('@') && contact_value.contains('.'),
+        "phone" => contact_value.chars().filter(|c| c.is_ascii_digit()).count() == 11,
+        "wechat" | "telegram" => true,
+        _ => false,
+    };
+
+    if valid {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest("联系方式格式不正确".to_string()))
+    }
 }
 
 /// 转义 HTML 特殊字符，避免用户输入破坏邮件结构
@@ -138,4 +172,105 @@ fn build_email_bodies(req: &RequirementRequest) -> (String, String) {
     );
 
     (text_body, html_body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_request() -> RequirementRequest {
+        RequirementRequest {
+            requirement_type: "API 调用".to_string(),
+            model: Some("deepseek-chat".to_string()),
+            usage_scale: Some("10w tokens/day".to_string()),
+            deployment: "容器镜像部署".to_string(),
+            contact_method: "email".to_string(),
+            contact_value: "buyer@example.com".to_string(),
+            note: Some("需要稳定吞吐".to_string()),
+        }
+    }
+
+    fn assert_bad_request(result: Result<()>, expected: &str) {
+        match result {
+            Err(ApiError::BadRequest(msg)) => assert!(msg.contains(expected), "{msg}"),
+            other => panic!("expected BadRequest containing {expected}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validates_required_fields() {
+        let mut req = valid_request();
+        req.requirement_type = "   ".to_string();
+        assert_bad_request(validate_requirement_request(&req), "需求类型");
+
+        let mut req = valid_request();
+        req.contact_value = "   ".to_string();
+        assert_bad_request(validate_requirement_request(&req), "联系方式不能为空");
+    }
+
+    #[test]
+    fn rejects_control_characters_in_subject_source() {
+        let mut req = valid_request();
+        req.requirement_type = "API 调用\nBcc: attacker@example.com".to_string();
+
+        assert_bad_request(validate_requirement_request(&req), "控制字符");
+    }
+
+    #[test]
+    fn validates_contact_method_and_format() {
+        let mut req = valid_request();
+        req.contact_method = "discord".to_string();
+        assert_bad_request(validate_requirement_request(&req), "联系方式类型");
+
+        let mut req = valid_request();
+        req.contact_value = "not-an-email".to_string();
+        assert_bad_request(validate_requirement_request(&req), "联系方式格式");
+
+        let mut req = valid_request();
+        req.contact_method = "phone".to_string();
+        req.contact_value = "12345".to_string();
+        assert_bad_request(validate_requirement_request(&req), "联系方式格式");
+    }
+
+    #[test]
+    fn validates_note_length() {
+        let mut req = valid_request();
+        req.note = Some("x".repeat(MAX_NOTE_LEN + 1));
+
+        assert_bad_request(validate_requirement_request(&req), "补充说明");
+    }
+
+    #[test]
+    fn builds_email_bodies_with_html_escaping_and_defaults() {
+        let req = RequirementRequest {
+            requirement_type: "API <调用>".to_string(),
+            model: None,
+            usage_scale: None,
+            deployment: "容器 & 镜像".to_string(),
+            contact_method: "wechat".to_string(),
+            contact_value: "wx<unsafe>&id".to_string(),
+            note: Some("预算 < 100 & 需要稳定".to_string()),
+        };
+
+        let (text_body, html_body) = build_email_bodies(&req);
+
+        assert!(text_body.contains("模型需求：-"));
+        assert!(text_body.contains("预计使用规模：-"));
+        assert!(html_body.contains("API &lt;调用&gt;"));
+        assert!(html_body.contains("容器 &amp; 镜像"));
+        assert!(html_body.contains("wx&lt;unsafe&gt;&amp;id"));
+        assert!(html_body.contains("预算 &lt; 100 &amp; 需要稳定"));
+    }
+
+    #[tokio::test]
+    async fn returns_service_unavailable_without_requirement_recipient() {
+        let result =
+            submit_requirement_handler(State(AppState::new()), Json(valid_request())).await;
+
+        match result {
+            Err(ApiError::ServiceUnavailable(msg)) => assert!(msg.contains("暂未开放"), "{msg}"),
+            Err(other) => panic!("expected ServiceUnavailable, got {other:?}"),
+            Ok(_) => panic!("expected ServiceUnavailable, got success"),
+        }
+    }
 }

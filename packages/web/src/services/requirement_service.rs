@@ -1,7 +1,6 @@
 //! 需求收集服务
 //!
 //! 提交首页"提交算力需求"表单到后端公开接口 `/api/v1/requirements`。
-#![allow(dead_code)]
 
 use client_api::error::Result;
 use serde::{Deserialize, Serialize};
