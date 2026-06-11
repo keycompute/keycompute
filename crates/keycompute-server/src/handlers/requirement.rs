@@ -12,6 +12,10 @@ use serde::{Deserialize, Serialize};
 
 /// 补充说明最大长度
 const MAX_NOTE_LEN: usize = 500;
+const MAX_REQUIREMENT_TYPE_LEN: usize = 128;
+const MAX_OPTIONAL_FIELD_LEN: usize = 256;
+const MAX_DEPLOYMENT_LEN: usize = 128;
+const MAX_CONTACT_VALUE_LEN: usize = 512;
 const ALLOWED_CONTACT_METHODS: &[&str] = &["wechat", "email", "telegram", "phone"];
 
 /// 需求提交请求体
@@ -89,6 +93,20 @@ fn validate_requirement_request(req: &RequirementRequest) -> Result<()> {
     if requirement_type.chars().any(char::is_control) {
         return Err(ApiError::BadRequest("需求类型不能包含控制字符".to_string()));
     }
+    validate_max_len(requirement_type, MAX_REQUIREMENT_TYPE_LEN, "需求类型")?;
+
+    validate_optional_max_len(req.model.as_deref(), MAX_OPTIONAL_FIELD_LEN, "模型需求")?;
+    validate_optional_max_len(
+        req.usage_scale.as_deref(),
+        MAX_OPTIONAL_FIELD_LEN,
+        "预计使用规模",
+    )?;
+
+    let deployment = req.deployment.trim();
+    if deployment.is_empty() {
+        return Err(ApiError::BadRequest("节点部署方案不能为空".to_string()));
+    }
+    validate_max_len(deployment, MAX_DEPLOYMENT_LEN, "节点部署方案")?;
 
     let contact_method = req.contact_method.trim();
     if !ALLOWED_CONTACT_METHODS.contains(&contact_method) {
@@ -99,12 +117,28 @@ fn validate_requirement_request(req: &RequirementRequest) -> Result<()> {
     if contact_value.is_empty() {
         return Err(ApiError::BadRequest("联系方式不能为空".to_string()));
     }
+    validate_max_len(contact_value, MAX_CONTACT_VALUE_LEN, "联系方式")?;
     validate_contact_value(contact_method, contact_value)?;
 
-    if let Some(note) = &req.note
-        && note.chars().count() > MAX_NOTE_LEN
-    {
-        return Err(ApiError::BadRequest("补充说明长度超过限制".to_string()));
+    validate_optional_max_len(req.note.as_deref(), MAX_NOTE_LEN, "补充说明")?;
+
+    Ok(())
+}
+
+fn validate_optional_max_len(value: Option<&str>, max_len: usize, field_name: &str) -> Result<()> {
+    if let Some(value) = value {
+        let value = value.trim();
+        if !value.is_empty() {
+            validate_max_len(value, max_len, field_name)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_max_len(value: &str, max_len: usize, field_name: &str) -> Result<()> {
+    if value.chars().count() > max_len {
+        return Err(ApiError::BadRequest(format!("{field_name}长度超过限制")));
     }
 
     Ok(())
@@ -130,6 +164,8 @@ fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// 构建纯文本与 HTML 两种邮件正文
@@ -241,25 +277,48 @@ mod tests {
     }
 
     #[test]
+    fn validates_field_lengths() {
+        let mut req = valid_request();
+        req.requirement_type = "x".repeat(MAX_REQUIREMENT_TYPE_LEN + 1);
+        assert_bad_request(validate_requirement_request(&req), "需求类型");
+
+        let mut req = valid_request();
+        req.model = Some("x".repeat(MAX_OPTIONAL_FIELD_LEN + 1));
+        assert_bad_request(validate_requirement_request(&req), "模型需求");
+
+        let mut req = valid_request();
+        req.usage_scale = Some("x".repeat(MAX_OPTIONAL_FIELD_LEN + 1));
+        assert_bad_request(validate_requirement_request(&req), "预计使用规模");
+
+        let mut req = valid_request();
+        req.deployment = "x".repeat(MAX_DEPLOYMENT_LEN + 1);
+        assert_bad_request(validate_requirement_request(&req), "节点部署方案");
+
+        let mut req = valid_request();
+        req.contact_value = format!("{}@example.com", "x".repeat(MAX_CONTACT_VALUE_LEN));
+        assert_bad_request(validate_requirement_request(&req), "联系方式");
+    }
+
+    #[test]
     fn builds_email_bodies_with_html_escaping_and_defaults() {
         let req = RequirementRequest {
-            requirement_type: "API <调用>".to_string(),
+            requirement_type: "API <调用> \"quoted\"".to_string(),
             model: None,
             usage_scale: None,
             deployment: "容器 & 镜像".to_string(),
             contact_method: "wechat".to_string(),
-            contact_value: "wx<unsafe>&id".to_string(),
-            note: Some("预算 < 100 & 需要稳定".to_string()),
+            contact_value: "wx<unsafe>&id'".to_string(),
+            note: Some("预算 < 100 & 需要 \"稳定\"".to_string()),
         };
 
         let (text_body, html_body) = build_email_bodies(&req);
 
         assert!(text_body.contains("模型需求：-"));
         assert!(text_body.contains("预计使用规模：-"));
-        assert!(html_body.contains("API &lt;调用&gt;"));
+        assert!(html_body.contains("API &lt;调用&gt; &quot;quoted&quot;"));
         assert!(html_body.contains("容器 &amp; 镜像"));
-        assert!(html_body.contains("wx&lt;unsafe&gt;&amp;id"));
-        assert!(html_body.contains("预算 &lt; 100 &amp; 需要稳定"));
+        assert!(html_body.contains("wx&lt;unsafe&gt;&amp;id&#39;"));
+        assert!(html_body.contains("预算 &lt; 100 &amp; 需要 &quot;稳定&quot;"));
     }
 
     #[tokio::test]
