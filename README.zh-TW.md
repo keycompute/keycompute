@@ -298,6 +298,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | SMTP 密碼（選用） | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | 寄件者電子郵件地址（選用） | ⚪ |
 | `KC__EMAIL__FROM_NAME` | 寄件者顯示名稱（選用） | ⚪ |
+| `KC__EMAIL__REQUIREMENT_RECIPIENT` | 需求收集表單接收信箱（選用；接收首頁提交需求時需要設定） | ⚪ |
 | `APP_BASE_URL` | 公開前端地址（密碼重設/邀請連結必需） | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | 預設管理員電子郵件 | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | 預設管理員密碼 | ⚪ |

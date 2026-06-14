@@ -298,6 +298,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | كلمة مرور SMTP (اختياري) | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | عنوان بريد المرسل (اختياري) | ⚪ |
 | `KC__EMAIL__FROM_NAME` | الاسم الظاهر للمرسل (اختياري) | ⚪ |
+| `KC__EMAIL__REQUIREMENT_RECIPIENT` | بريد استلام طلبات المتطلبات (اختياري؛ مطلوب لاستلام طلبات الصفحة الرئيسية) | ⚪ |
 | `APP_BASE_URL` | العنوان العام للواجهة الأمامية (ضروري لإعادة التعيين/الدعوات) | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | بريد المدير الافتراضي | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | كلمة مرور المدير الافتراضية | ⚪ |

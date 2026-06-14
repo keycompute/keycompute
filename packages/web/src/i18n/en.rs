@@ -350,6 +350,70 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "On-demand configuration, flexible business adaptation",
     );
 
+    // ── Requirement Collection ──────────────────
+    m.insert("req.bubble", "Request Consult");
+    m.insert("req.title", "Submit Compute Request");
+    m.insert(
+        "req.subtitle",
+        "Tell us your needs and our team will reach out shortly",
+    );
+    m.insert("req.single_choice", "single choice");
+    m.insert("req.type.label", "Request Type");
+    m.insert("req.type.api", "API Access");
+    m.insert("req.type.private", "Private Deployment");
+    m.insert("req.type.rental", "Node Rental");
+    m.insert("req.type.distributed", "Distributed Inference");
+    m.insert("req.type.cost", "Cost Optimization");
+    m.insert("req.type.other", "Other");
+    m.insert("req.model.label", "Model Requirement");
+    m.insert("req.model.placeholder", "Select or enter a model name");
+    m.insert("req.scale.label", "Estimated Usage Scale");
+    m.insert("req.scale.test", "Testing Phase");
+    m.insert("req.scale.lt1w", "Under 10K tokens/day");
+    m.insert("req.scale.10w", "100K tokens/day");
+    m.insert("req.scale.100w", "1M tokens/day+");
+    m.insert("req.scale.unknown", "Not sure");
+    m.insert("req.deploy.label", "Node Deployment");
+    m.insert("req.deploy.image", "Container Image Deploy");
+    m.insert("req.deploy.recommended", "Recommended");
+    m.insert(
+        "req.deploy.image_desc",
+        "Prebuilt image, one-click launch; fast and standardized ops",
+    );
+    m.insert("req.deploy.binary", "Binary Systemd Deploy");
+    m.insert(
+        "req.deploy.binary_desc",
+        "Binary deploy managed by Systemd; lightweight, custom-friendly",
+    );
+    m.insert("req.contact.label", "Contact");
+    m.insert("req.contact.wechat", "WeChat");
+    m.insert("req.contact.email", "Email");
+    m.insert("req.contact.telegram", "Telegram");
+    m.insert("req.contact.phone", "Phone");
+    m.insert("req.contact.placeholder.wechat", "Enter your WeChat ID");
+    m.insert("req.contact.placeholder.email", "Enter your email");
+    m.insert("req.contact.placeholder.telegram", "Enter your Telegram");
+    m.insert("req.contact.placeholder.phone", "Enter your phone number");
+    m.insert("req.note.label", "Additional Notes");
+    m.insert("req.note.optional", "optional");
+    m.insert(
+        "req.note.placeholder",
+        "Describe your needs, use case, budget and goals in detail",
+    );
+    m.insert("req.submit", "Submit Request");
+    m.insert("req.submitting", "Submitting…");
+    m.insert(
+        "req.privacy",
+        "By submitting you agree to the Privacy Policy; we keep your information secure",
+    );
+    m.insert("req.success", "Received. We will contact you shortly");
+    m.insert("req.err.contact_required", "Please provide a contact");
+    m.insert("req.err.contact_invalid", "Invalid contact format");
+    m.insert(
+        "req.err.failed",
+        "Submission failed, please try again later",
+    );
+
     // ── Login ───────────────────────────────────
     m.insert("login.tagline_1", "Next-Gen");
     m.insert("login.tagline_highlight", "AI Token Compute Platform");

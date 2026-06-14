@@ -217,6 +217,16 @@ impl EmailService {
         Self::new((*config).clone())
     }
 
+    /// 获取需求收集表单的接收人邮箱地址（来自配置）
+    pub async fn requirement_recipient(&self) -> Option<String> {
+        self.runtime
+            .read()
+            .await
+            .config
+            .requirement_recipient
+            .clone()
+    }
+
     /// 构建 SMTP 传输
     fn build_transport(config: &EmailConfig) -> TransportState {
         if !config.is_configured() {
@@ -649,6 +659,7 @@ mod tests {
             from_name: Some("KeyCompute".to_string()),
             use_tls: true,
             timeout_secs: 30,
+            requirement_recipient: None,
         }
     }
 

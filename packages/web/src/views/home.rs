@@ -5,6 +5,7 @@ use crate::i18n::{I18n, Lang};
 use crate::router::Route;
 use crate::services::api_client::{get_client, user_error_message};
 use crate::services::auth_service;
+use crate::services::requirement_service::{RequirementSubmission, submit_requirement};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::user_store::{UserInfo, UserStore};
@@ -18,6 +19,7 @@ pub fn Home() -> Element {
     // 弹窗状态管理
     let mut show_login_modal = use_signal(|| false);
     let mut show_register_modal = use_signal(|| false);
+    let mut show_requirement_modal = use_signal(|| false);
 
     // 移动端菜单折叠状态
     let mut nav_menu_open = use_signal(|| false);
@@ -85,6 +87,7 @@ pub fn Home() -> Element {
     let t_distribution_desc = i18n.t("home.features.distribution.desc");
     let t_custom_title = i18n.t("home.features.custom.title");
     let t_custom_desc = i18n.t("home.features.custom.desc");
+    let t_req_bubble = i18n.t("req.bubble");
 
     rsx! {
         document::Title { "{site_name}" }
@@ -582,6 +585,33 @@ pub fn Home() -> Element {
                     show_register_modal.set(false);
                     show_login_modal.set(true);
                 },
+            }
+
+            // 需求收集弹窗
+            RequirementModal {
+                open: show_requirement_modal,
+                onclose: move |_| show_requirement_modal.set(false),
+            }
+
+            // 右下角常驻"需求咨询"悬浮入口；弹窗打开后隐藏，避免与遮罩层抢焦点。
+            if !show_requirement_modal() {
+                button {
+                    class: "kc-req-bubble",
+                    r#type: "button",
+                    onclick: move |_| show_requirement_modal.set(true),
+                    svg {
+                        width: "20",
+                        height: "20",
+                        view_box: "0 0 24 24",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        stroke_linecap: "round",
+                        stroke_linejoin: "round",
+                        path { d: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" }
+                    }
+                    span { "{t_req_bubble}" }
+                }
             }
         }
     }
@@ -1136,6 +1166,411 @@ fn save_lang_to_storage(lang: &str) {
     if let Some(window) = web_sys::window() {
         if let Ok(Some(storage)) = window.local_storage() {
             let _ = storage.set_item("lang", lang);
+        }
+    }
+}
+
+/// 需求收集弹窗组件
+///
+/// 首页"提交算力需求"表单：收集需求类型、模型、规模、部署方案、联系方式与备注，
+/// 提交至后端公开接口，由后端发邮件给配置的接收人。
+#[component]
+fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Element {
+    let i18n = use_i18n();
+
+    // 表单状态
+    let mut requirement_type = use_signal(|| i18n.t("req.type.api"));
+    let mut model = use_signal(String::new);
+    let mut usage_scale = use_signal(|| "");
+    let mut deployment = use_signal(|| i18n.t("req.deploy.image"));
+    let mut contact_method = use_signal(|| "wechat");
+    let mut contact_value = use_signal(String::new);
+    let mut note = use_signal(String::new);
+    let mut loading = use_signal(|| false);
+    // 联系方式字段级校验错误（显示在联系方式输入框下方）
+    let mut error_msg = use_signal(|| Option::<String>::None);
+    // 提交动作级错误（如网络/服务失败，显示在提交按钮上方）
+    let mut submit_error = use_signal(|| Option::<String>::None);
+    let mut success_message = use_signal(String::new);
+    let mut success = use_signal(|| false);
+
+    // i18n 文本
+    let t_title = i18n.t("req.title");
+    let t_subtitle = i18n.t("req.subtitle");
+    let t_single = i18n.t("req.single_choice");
+    let t_type_label = i18n.t("req.type.label");
+    let t_model_label = i18n.t("req.model.label");
+    let t_model_ph = i18n.t("req.model.placeholder");
+    let t_scale_label = i18n.t("req.scale.label");
+    let t_deploy_label = i18n.t("req.deploy.label");
+    let t_deploy_image = i18n.t("req.deploy.image");
+    let t_deploy_recommended = i18n.t("req.deploy.recommended");
+    let t_deploy_image_desc = i18n.t("req.deploy.image_desc");
+    let t_deploy_binary = i18n.t("req.deploy.binary");
+    let t_deploy_binary_desc = i18n.t("req.deploy.binary_desc");
+    let t_contact_label = i18n.t("req.contact.label");
+    let t_note_label = i18n.t("req.note.label");
+    let t_note_optional = i18n.t("req.note.optional");
+    let t_note_ph = i18n.t("req.note.placeholder");
+    let t_submit = i18n.t("req.submit");
+    let t_submitting = i18n.t("req.submitting");
+    let t_privacy = i18n.t("req.privacy");
+    let t_success = i18n.t("req.success");
+    let t_err_required = i18n.t("req.err.contact_required");
+    let t_err_invalid = i18n.t("req.err.contact_invalid");
+    let t_err_failed = i18n.t("req.err.failed");
+
+    // 选项集合（直接存储展示文案，提交时即所见即所得）
+    let type_options = vec![
+        i18n.t("req.type.api"),
+        i18n.t("req.type.private"),
+        i18n.t("req.type.rental"),
+        i18n.t("req.type.distributed"),
+        i18n.t("req.type.cost"),
+        i18n.t("req.type.other"),
+    ];
+    let scale_options = vec![
+        i18n.t("req.scale.test"),
+        i18n.t("req.scale.lt1w"),
+        i18n.t("req.scale.10w"),
+        i18n.t("req.scale.100w"),
+        i18n.t("req.scale.unknown"),
+    ];
+    // 联系方式：(key, 标签, 占位符)
+    let contact_tabs = vec![
+        (
+            "wechat",
+            i18n.t("req.contact.wechat"),
+            i18n.t("req.contact.placeholder.wechat"),
+        ),
+        (
+            "email",
+            i18n.t("req.contact.email"),
+            i18n.t("req.contact.placeholder.email"),
+        ),
+        (
+            "telegram",
+            i18n.t("req.contact.telegram"),
+            i18n.t("req.contact.placeholder.telegram"),
+        ),
+        (
+            "phone",
+            i18n.t("req.contact.phone"),
+            i18n.t("req.contact.placeholder.phone"),
+        ),
+    ];
+
+    // 当前联系方式占位符（随 tab 切换）
+    let current_method = contact_method();
+    let contact_placeholder = contact_tabs
+        .iter()
+        .find(|(k, _, _)| *k == current_method)
+        .map(|(_, _, ph)| *ph)
+        .unwrap_or_default();
+
+    let deploy_image_label = t_deploy_image;
+    let deploy_binary_label = t_deploy_binary;
+
+    let on_submit = move |evt: Event<FormData>| {
+        evt.prevent_default();
+        submit_error.set(None);
+        let contact = contact_value().trim().to_string();
+        if contact.is_empty() {
+            error_msg.set(Some(t_err_required.to_string()));
+            return;
+        }
+        let method = contact_method();
+        let valid = match method {
+            "email" => contact.contains('@') && contact.contains('.'),
+            "phone" => contact.chars().filter(|c| c.is_ascii_digit()).count() == 11,
+            _ => true,
+        };
+        if !valid {
+            error_msg.set(Some(t_err_invalid.to_string()));
+            return;
+        }
+        error_msg.set(None);
+        loading.set(true);
+
+        let model_val = model();
+        let scale_val = usage_scale();
+        let note_val = note();
+        let submission = RequirementSubmission {
+            requirement_type: requirement_type().to_string(),
+            model: if model_val.trim().is_empty() {
+                None
+            } else {
+                Some(model_val)
+            },
+            usage_scale: if scale_val.is_empty() {
+                None
+            } else {
+                Some(scale_val.to_string())
+            },
+            deployment: deployment().to_string(),
+            contact_method: method.to_string(),
+            contact_value: contact,
+            note: if note_val.trim().is_empty() {
+                None
+            } else {
+                Some(note_val)
+            },
+        };
+        spawn(async move {
+            match submit_requirement(&submission).await {
+                Ok(resp) => {
+                    let message = if resp.message.trim().is_empty() {
+                        t_success.to_string()
+                    } else {
+                        resp.message
+                    };
+                    success_message.set(message);
+                    success.set(true);
+                    loading.set(false);
+                }
+                Err(_) => {
+                    submit_error.set(Some(t_err_failed.to_string()));
+                    loading.set(false);
+                }
+            }
+        });
+    };
+
+    rsx! {
+        Modal {
+            open,
+            title: t_title.to_string(),
+            onclose,
+            max_width: "620px".to_string(),
+            div {
+                class: "kc-req-modal",
+                if success() {
+                    div {
+                        class: "kc-req-success",
+                        svg {
+                            width: "48",
+                            height: "48",
+                            view_box: "0 0 24 24",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "2",
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            path { d: "M22 11.08V12a10 10 0 1 1-5.93-9.14" }
+                            path { d: "M22 4 12 14.01l-3-3" }
+                        }
+                        p { "{success_message}" }
+                    }
+                } else {
+                    p { class: "kc-req-subtitle", "{t_subtitle}" }
+
+                    form {
+                        onsubmit: on_submit,
+
+                        // 1. 需求类型
+                        div { class: "kc-req-group",
+                            label { class: "kc-req-label",
+                                "1. {t_type_label} "
+                                span { class: "kc-req-hint", "({t_single})" }
+                            }
+                            div { class: "kc-req-chips",
+                                {type_options.into_iter().map(|label| {
+                                    let active = requirement_type() == label;
+                                    rsx! {
+                                        button {
+                                            key: "{label}",
+                                            r#type: "button",
+                                            class: if active { "kc-req-chip kc-req-chip-active" } else { "kc-req-chip" },
+                                            onclick: move |_| requirement_type.set(label),
+                                            span { class: "kc-req-choice-dot" }
+                                            "{label}"
+                                        }
+                                    }
+                                })}
+                            }
+                        }
+
+                        // 2. 模型需求
+                        div { class: "kc-req-group",
+                            label { class: "kc-req-label", "2. {t_model_label}" }
+                            input {
+                                class: "kc-auth-form-input kc-req-input",
+                                placeholder: "{t_model_ph}",
+                                value: "{model}",
+                                oninput: move |e| model.set(e.value()),
+                            }
+                        }
+
+                        // 3. 预计使用规模
+                        div { class: "kc-req-group",
+                            label { class: "kc-req-label",
+                                "3. {t_scale_label} "
+                                span { class: "kc-req-hint", "({t_single})" }
+                            }
+                            div { class: "kc-req-chips",
+                                {scale_options.into_iter().map(|label| {
+                                    let active = usage_scale() == label;
+                                    rsx! {
+                                        button {
+                                            key: "{label}",
+                                            r#type: "button",
+                                            class: if active { "kc-req-chip kc-req-chip-active" } else { "kc-req-chip" },
+                                            onclick: move |_| usage_scale.set(label),
+                                            span { class: "kc-req-choice-dot" }
+                                            "{label}"
+                                        }
+                                    }
+                                })}
+                            }
+                        }
+
+                        // 4. 节点部署方案
+                        div { class: "kc-req-group",
+                            label { class: "kc-req-label",
+                                "4. {t_deploy_label} "
+                                span { class: "kc-req-hint", "({t_single})" }
+                            }
+                            div { class: "kc-req-deploy-cards",
+                                {
+                                    let active = deployment() == deploy_image_label;
+                                    rsx! {
+                                        button {
+                                            r#type: "button",
+                                            class: if active { "kc-req-deploy-card kc-req-deploy-card-active" } else { "kc-req-deploy-card" },
+                                            onclick: move |_| deployment.set(deploy_image_label),
+                                            span { class: "kc-req-deploy-check" }
+                                            div { class: "kc-req-deploy-head",
+                                                span { class: "kc-req-deploy-icon kc-req-deploy-icon-image",
+                                                    svg {
+                                                        width: "22",
+                                                        height: "22",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        path { d: "M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" }
+                                                        path { d: "m3.3 7 8.7 5 8.7-5" }
+                                                        path { d: "M12 22V12" }
+                                                    }
+                                                }
+                                                span { class: "kc-req-deploy-title", "{t_deploy_image}" }
+                                                span { class: "kc-req-deploy-badge", "{t_deploy_recommended}" }
+                                            }
+                                            p { class: "kc-req-deploy-desc", "{t_deploy_image_desc}" }
+                                        }
+                                    }
+                                }
+                                {
+                                    let active = deployment() == deploy_binary_label;
+                                    rsx! {
+                                        button {
+                                            r#type: "button",
+                                            class: if active { "kc-req-deploy-card kc-req-deploy-card-active" } else { "kc-req-deploy-card" },
+                                            onclick: move |_| deployment.set(deploy_binary_label),
+                                            span { class: "kc-req-deploy-check" }
+                                            div { class: "kc-req-deploy-head",
+                                                span { class: "kc-req-deploy-icon kc-req-deploy-icon-binary",
+                                                    svg {
+                                                        width: "22",
+                                                        height: "22",
+                                                        view_box: "0 0 24 24",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        stroke_width: "2",
+                                                        stroke_linecap: "round",
+                                                        stroke_linejoin: "round",
+                                                        path { d: "M4 17 10 11 4 5" }
+                                                        path { d: "M12 19h8" }
+                                                    }
+                                                }
+                                                span { class: "kc-req-deploy-title", "{t_deploy_binary}" }
+                                            }
+                                            p { class: "kc-req-deploy-desc", "{t_deploy_binary_desc}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // 5. 联系方式
+                        div { class: "kc-req-group",
+                            label { class: "kc-req-label", "5. {t_contact_label}" }
+                            div { class: "kc-req-tabs",
+                                {contact_tabs.into_iter().map(|(key, label, _)| {
+                                    let active = contact_method() == key;
+                                    rsx! {
+                                        button {
+                                            key: "{key}",
+                                            r#type: "button",
+                                            class: if active { "kc-req-tab kc-req-tab-active" } else { "kc-req-tab" },
+                                            onclick: move |_| contact_method.set(key),
+                                            span { class: "kc-req-tab-icon" }
+                                            "{label}"
+                                        }
+                                    }
+                                })}
+                            }
+                            input {
+                                class: "kc-auth-form-input kc-req-input",
+                                placeholder: "{contact_placeholder}",
+                                value: "{contact_value}",
+                                oninput: move |e| contact_value.set(e.value()),
+                            }
+                            if let Some(err) = error_msg() {
+                                p { class: "kc-req-field-error", "{err}" }
+                            }
+                        }
+
+                        // 6. 补充说明
+                        div { class: "kc-req-group",
+                            label { class: "kc-req-label",
+                                "6. {t_note_label} "
+                                span { class: "kc-req-hint", "({t_note_optional})" }
+                            }
+                            textarea {
+                                class: "kc-auth-form-input kc-req-textarea",
+                                rows: "3",
+                                maxlength: "500",
+                                placeholder: "{t_note_ph}",
+                                value: "{note}",
+                                oninput: move |e| note.set(e.value()),
+                            }
+                        }
+
+                        if let Some(err) = submit_error() {
+                            div { class: "kc-auth-status kc-auth-status-error", "{err}" }
+                        }
+
+                        button {
+                            class: "kc-auth-submit-btn",
+                            r#type: "submit",
+                            disabled: loading(),
+                            if loading() {
+                                span { class: "kc-auth-spinner" }
+                                " {t_submitting}"
+                            } else {
+                                svg {
+                                    width: "20",
+                                    height: "20",
+                                    view_box: "0 0 24 24",
+                                    fill: "none",
+                                    stroke: "currentColor",
+                                    stroke_width: "2",
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    path { d: "M22 2 11 13" }
+                                    path { d: "m22 2-7 20-4-9-9-4 20-7Z" }
+                                }
+                                "{t_submit}"
+                            }
+                        }
+
+                        p { class: "kc-req-privacy", "{t_privacy}" }
+                    }
+                }
+            }
         }
     }
 }

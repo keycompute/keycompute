@@ -29,6 +29,9 @@ pub struct EmailConfig {
     /// 邮件发送超时（秒，默认 30）
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
+    /// 需求收集表单的接收人邮箱地址（首页"提交算力需求"提交后发送至此，可选）
+    #[serde(default)]
+    pub requirement_recipient: Option<String>,
 }
 
 fn default_smtp_port() -> u16 {
@@ -54,6 +57,7 @@ impl Default for EmailConfig {
             from_name: Some("KeyCompute".to_string()),
             use_tls: true,
             timeout_secs: 30,
+            requirement_recipient: None,
         }
     }
 }

@@ -298,6 +298,7 @@ keycompute/
 | `KC__EMAIL__SMTP_PASSWORD` | SMTP 密码（可选） | ⚪ |
 | `KC__EMAIL__FROM_ADDRESS` | 发件邮箱地址（可选） | ⚪ |
 | `KC__EMAIL__FROM_NAME` | 发件人显示名称（可选） | ⚪ |
+| `KC__EMAIL__REQUIREMENT_RECIPIENT` | 需求收集表单接收邮箱（可选；接收首页提交需求时需要配置） | ⚪ |
 | `APP_BASE_URL` | 公开前端地址（密码重置/邀请链接必需） | ⚪ |
 | `KC__DEFAULT_ADMIN_EMAIL` | 默认管理员邮箱 | ⚪ |
 | `KC__DEFAULT_ADMIN_PASSWORD` | 默认管理员密码 | ⚪ |

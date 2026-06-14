@@ -112,6 +112,8 @@ from_name = "KeyCompute"
 use_tls = true
 # 邮件发送超时（秒，默认 30）
 timeout_secs = 30
+# 需求收集表单接收人邮箱（首页"提交算力需求"提交后发送至此邮箱，可选；未配置则该功能返回失败）
+requirement_recipient = "sales@example.com"
 
 # ==================== 分销配置（可选） ====================
 # 提供二级分销的默认比例配置
