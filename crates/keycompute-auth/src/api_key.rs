@@ -4,8 +4,8 @@
 
 use keycompute_db::{ProduceAiKey, User};
 use keycompute_types::{KeyComputeError, Result};
+use sea_orm::DatabaseConnection;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -16,13 +16,13 @@ use crate::permission::{AuthType, build_permissions};
 #[derive(Clone)]
 pub struct ProduceAiKeyValidator {
     /// 数据库连接池（可选）
-    pool: Option<Arc<PgPool>>,
+    pool: Option<Arc<DatabaseConnection>>,
 }
 
 impl std::fmt::Debug for ProduceAiKeyValidator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProduceAiKeyValidator")
-            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field("pool", &self.pool.as_ref().map(|_| "DatabaseConnection"))
             .finish()
     }
 }
@@ -34,7 +34,7 @@ impl ProduceAiKeyValidator {
     }
 
     /// 创建带数据库连接的验证器
-    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+    pub fn with_pool(pool: Arc<DatabaseConnection>) -> Self {
         Self { pool: Some(pool) }
     }
 
@@ -104,7 +104,11 @@ impl ProduceAiKeyValidator {
     }
 
     /// 从数据库验证 Produce AI Key
-    async fn validate_from_database(&self, pool: &PgPool, key_hash: &str) -> Result<AuthContext> {
+    async fn validate_from_database(
+        &self,
+        pool: &DatabaseConnection,
+        key_hash: &str,
+    ) -> Result<AuthContext> {
         // 查询 Produce AI Key
         let produce_ai_key = ProduceAiKey::find_by_hash(pool, key_hash)
             .await

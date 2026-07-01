@@ -15,4 +15,5 @@
 //! 10. Observability (keycompute-observability): 指标采集
 
 pub mod common;
+pub mod db;
 pub mod mocks;

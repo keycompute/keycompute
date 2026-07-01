@@ -6,12 +6,14 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult, Statement,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 
 /// 待完成注册记录
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct PendingRegistration {
     pub id: Uuid,
     pub email: String,
@@ -40,24 +42,24 @@ pub struct UpsertPendingRegistrationRequest {
 
 impl PendingRegistration {
     /// 对同一个邮箱加事务级 advisory lock，串行化注册验证码请求。
-    pub async fn lock_email_slot(
-        tx: &mut Transaction<'_, Postgres>,
-        email: &str,
-    ) -> Result<(), DbError> {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)")
-            .bind(email)
-            .execute(&mut **tx)
-            .await?;
+    pub async fn lock_email_slot(txn: &DatabaseTransaction, email: &str) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+            [email.into()],
+        );
+        txn.execute(stmt).await?;
 
         Ok(())
     }
 
     /// 在事务中创建待完成注册记录。
     pub async fn create_in_tx(
-        tx: &mut Transaction<'_, Postgres>,
+        txn: &DatabaseTransaction,
         req: &UpsertPendingRegistrationRequest,
     ) -> Result<PendingRegistration, DbError> {
-        let pending = sqlx::query_as::<_, PendingRegistration>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO pending_registrations (
                 email,
@@ -72,29 +74,33 @@ impl PendingRegistration {
             ON CONFLICT (email) DO NOTHING
             RETURNING *
             "#,
-        )
-        .bind(&req.email)
-        .bind(req.referral_code)
-        .bind(&req.verification_code_hash)
-        .bind(req.expires_at)
-        .bind(req.resend_count)
-        .bind(req.last_sent_at)
-        .bind(&req.requested_from_ip)
-        .fetch_optional(&mut **tx)
-        .await?;
+            [
+                req.email.as_str().into(),
+                req.referral_code.into(),
+                req.verification_code_hash.as_str().into(),
+                req.expires_at.into(),
+                req.resend_count.into(),
+                req.last_sent_at.into(),
+                req.requested_from_ip.clone().into(),
+            ],
+        );
+        let pending = PendingRegistration::find_by_statement(stmt)
+            .one(txn)
+            .await?;
 
         pending.ok_or_else(|| DbError::duplicate_key("pending_registrations", "email", &req.email))
     }
 
     /// 在事务中刷新验证码和冷却时间。
     ///
-    /// 当前注册链路采用“记录发送尝试即进入冷却”，因此该方法会在发信前调用。
+    /// 当前注册链路采用"记录发送尝试即进入冷却"，因此该方法会在发信前调用。
     pub async fn refresh_code_in_tx(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        txn: &DatabaseTransaction,
         req: &UpsertPendingRegistrationRequest,
     ) -> Result<PendingRegistration, DbError> {
-        let pending = sqlx::query_as::<_, PendingRegistration>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE pending_registrations
             SET verification_code_hash = $2,
@@ -107,44 +113,50 @@ impl PendingRegistration {
             WHERE id = $1
             RETURNING *
             "#,
-        )
-        .bind(self.id)
-        .bind(&req.verification_code_hash)
-        .bind(req.expires_at)
-        .bind(req.last_sent_at)
-        .bind(&req.requested_from_ip)
-        .fetch_one(&mut **tx)
-        .await?;
+            [
+                self.id.into(),
+                req.verification_code_hash.as_str().into(),
+                req.expires_at.into(),
+                req.last_sent_at.into(),
+                req.requested_from_ip.clone().into(),
+            ],
+        );
+        let pending = PendingRegistration::find_by_statement(stmt)
+            .one(txn)
+            .await?
+            .ok_or_else(|| DbError::not_found("PendingRegistration", self.id.to_string()))?;
 
         Ok(pending)
     }
 
     /// 根据邮箱查找待完成注册记录。
     pub async fn find_by_email(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         email: &str,
     ) -> Result<Option<PendingRegistration>, DbError> {
-        let pending = sqlx::query_as::<_, PendingRegistration>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM pending_registrations WHERE email = $1",
-        )
-        .bind(email)
-        .fetch_optional(pool)
-        .await?;
+            [email.into()],
+        );
+        let pending = PendingRegistration::find_by_statement(stmt).one(db).await?;
 
         Ok(pending)
     }
 
     /// 在事务中锁定并查询待完成注册记录。
     pub async fn find_by_email_for_update(
-        tx: &mut Transaction<'_, Postgres>,
+        txn: &DatabaseTransaction,
         email: &str,
     ) -> Result<Option<PendingRegistration>, DbError> {
-        let pending = sqlx::query_as::<_, PendingRegistration>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM pending_registrations WHERE email = $1 FOR UPDATE",
-        )
-        .bind(email)
-        .fetch_optional(&mut **tx)
-        .await?;
+            [email.into()],
+        );
+        let pending = PendingRegistration::find_by_statement(stmt)
+            .one(txn)
+            .await?;
 
         Ok(pending)
     }
@@ -152,9 +164,10 @@ impl PendingRegistration {
     /// 在事务中增加验证码尝试次数。
     pub async fn increment_attempts(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        txn: &DatabaseTransaction,
     ) -> Result<PendingRegistration, DbError> {
-        let pending = sqlx::query_as::<_, PendingRegistration>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE pending_registrations
             SET verify_attempts = verify_attempts + 1,
@@ -162,20 +175,24 @@ impl PendingRegistration {
             WHERE id = $1
             RETURNING *
             "#,
-        )
-        .bind(self.id)
-        .fetch_one(&mut **tx)
-        .await?;
+            [self.id.into()],
+        );
+        let pending = PendingRegistration::find_by_statement(stmt)
+            .one(txn)
+            .await?
+            .ok_or_else(|| DbError::not_found("PendingRegistration", self.id.to_string()))?;
 
         Ok(pending)
     }
 
     /// 在事务中删除待完成注册记录。
-    pub async fn delete_in_tx(tx: &mut Transaction<'_, Postgres>, id: Uuid) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM pending_registrations WHERE id = $1")
-            .bind(id)
-            .execute(&mut **tx)
-            .await?;
+    pub async fn delete_in_tx(txn: &DatabaseTransaction, id: Uuid) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM pending_registrations WHERE id = $1",
+            [id.into()],
+        );
+        txn.execute(stmt).await?;
 
         Ok(())
     }

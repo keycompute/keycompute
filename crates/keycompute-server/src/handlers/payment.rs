@@ -12,6 +12,7 @@ use axum::{
     extract::{Path, Query, State},
 };
 use rust_decimal::Decimal;
+use sea_orm::{DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -470,20 +471,28 @@ pub async fn admin_list_payment_orders(
     // 管理员可以查看所有订单
     let offset = (params.page - 1) * params.page_size;
 
-    let orders = sqlx::query_as::<_, keycompute_db::PaymentOrder>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT * FROM payment_orders
         WHERE ($1::text IS NULL OR status = $1)
         ORDER BY created_at DESC
         LIMIT $2 OFFSET $3
         "#,
-    )
-    .bind(&params.status)
-    .bind(params.page_size)
-    .bind(offset)
-    .fetch_all(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("查询订单失败: {}", e)))?;
+        [
+            params
+                .status
+                .as_deref()
+                .map(|s| s.into())
+                .unwrap_or(sea_orm::Value::String(None)),
+            params.page_size.into(),
+            offset.into(),
+        ],
+    );
+    let orders = keycompute_db::PaymentOrder::find_by_statement(stmt)
+        .all(pool.as_ref())
+        .await
+        .map_err(|e| ApiError::Internal(format!("查询订单失败: {}", e)))?;
 
     Ok(Json(serde_json::json!({
         "orders": orders.iter().map(|o| serde_json::json!({

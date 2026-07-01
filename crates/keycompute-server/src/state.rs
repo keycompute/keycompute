@@ -10,7 +10,7 @@ use keycompute_routing::{AccountStateStore, ProviderHealthStore, RoutingEngine};
 use keycompute_runtime::set_global_crypto;
 use llm_gateway::{GatewayBuilder, GatewayExecutor, HttpProxy, ProxyConfig as HttpProxyConfig};
 use node_gateway::{NodeGatewayService, PostgresNodeIndex};
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -127,7 +127,7 @@ pub struct AppState {
     /// 对外公开的前端应用基础 URL（可选）
     pub app_base_url: Option<String>,
     /// 数据库连接池（可选）
-    pub pool: Option<Arc<PgPool>>,
+    pub pool: Option<Arc<DatabaseConnection>>,
     /// 认证服务
     pub auth: Arc<AuthService>,
     /// 限流服务
@@ -162,7 +162,7 @@ impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
             .field("app_base_url", &self.app_base_url)
-            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field("pool", &self.pool.as_ref().map(|_| "DatabaseConnection"))
             .field("auth", &"<AuthService>")
             .field("rate_limiter", &"<RateLimitService>")
             .field("pricing", &"<PricingService>")
@@ -341,7 +341,7 @@ impl AppState {
 
     /// 创建 Node Gateway 服务
     fn create_node_gateway(
-        pool: &PgPool,
+        pool: &DatabaseConnection,
         redis_url: &str,
         node_config: Option<keycompute_config::NodeGatewayConfig>,
     ) -> Result<NodeGatewayService, anyhow::Error> {
@@ -368,12 +368,12 @@ impl AppState {
     }
 
     /// 创建带数据库连接的应用状态（使用默认配置）
-    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+    pub fn with_pool(pool: Arc<DatabaseConnection>) -> Self {
         Self::with_pool_and_config(pool, AppStateConfig::default())
     }
 
     /// 创建带数据库连接和自定义配置的应用状态
-    pub fn with_pool_and_config(pool: Arc<PgPool>, config: AppStateConfig) -> Self {
+    pub fn with_pool_and_config(pool: Arc<DatabaseConnection>, config: AppStateConfig) -> Self {
         // 创建带数据库连接的 API Key 验证器
         let api_key_validator = ProduceAiKeyValidator::with_pool(Arc::clone(&pool));
         // 创建 JWT 验证器
@@ -383,7 +383,7 @@ impl AppState {
         let auth_service = AuthService::new(api_key_validator).with_jwt(jwt_validator);
 
         // 创建带数据库连接的定价服务
-        let pricing_service = keycompute_pricing::PricingService::with_pool(Arc::clone(&pool));
+        let pricing_service = keycompute_pricing::PricingService::with_pool((*pool).clone());
 
         // 创建运行时状态存储
         let account_states = Arc::new(AccountStateStore::new());
@@ -399,7 +399,7 @@ impl AppState {
         let routing_engine = Arc::new(RoutingEngine::with_node_index(
             Arc::clone(&account_states),
             Arc::clone(&provider_health),
-            Arc::clone(&pool),
+            (*pool).clone(),
             provider_names,
             node_index,
         ));
@@ -418,7 +418,7 @@ impl AppState {
         let gateway = Arc::new(gateway_builder.build());
 
         // 创建带数据库连接的计费服务
-        let billing = Arc::new(BillingService::with_pool(Arc::clone(&pool)));
+        let billing = Arc::new(BillingService::with_pool((*pool).clone()));
 
         // 根据配置创建限流服务
         let rate_limiter = Self::create_rate_limiter(&config.rate_limit);

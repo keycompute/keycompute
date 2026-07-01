@@ -4,7 +4,7 @@
 
 use keycompute_db::{Tenant, User};
 use keycompute_types::{KeyComputeError, Result};
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -133,13 +133,13 @@ impl TenantInfo {
 #[derive(Clone)]
 pub struct UserService {
     /// 数据库连接池（可选）
-    pool: Option<Arc<PgPool>>,
+    pool: Option<Arc<DatabaseConnection>>,
 }
 
 impl std::fmt::Debug for UserService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UserService")
-            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field("pool", &self.pool.as_ref().map(|_| "DatabaseConnection"))
             .finish()
     }
 }
@@ -151,7 +151,7 @@ impl UserService {
     }
 
     /// 创建带数据库连接的用户服务
-    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+    pub fn with_pool(pool: Arc<DatabaseConnection>) -> Self {
         Self { pool: Some(pool) }
     }
 

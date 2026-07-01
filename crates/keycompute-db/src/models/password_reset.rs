@@ -4,12 +4,12 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 密码重置记录
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct PasswordReset {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -33,10 +33,11 @@ pub struct CreatePasswordResetRequest {
 impl PasswordReset {
     /// 创建新重置记录
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreatePasswordResetRequest,
     ) -> Result<PasswordReset, DbError> {
-        let reset = sqlx::query_as::<_, PasswordReset>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO password_resets (user_id, token, expires_at, requested_from_ip)
             VALUES ($1, $2, $3, $4::INET)
@@ -50,77 +51,58 @@ impl PasswordReset {
                 requested_from_ip::TEXT AS requested_from_ip,
                 created_at
             "#,
-        )
-        .bind(req.user_id)
-        .bind(&req.token)
-        .bind(req.expires_at)
-        .bind(&req.requested_from_ip)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.user_id.into(),
+                req.token.as_str().into(),
+                req.expires_at.into(),
+                req.requested_from_ip.clone().into(),
+            ],
+        );
+        let reset = PasswordReset::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(reset)
     }
 
     /// 根据 ID 查找
     pub async fn find_by_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         id: Uuid,
     ) -> Result<Option<PasswordReset>, DbError> {
-        let reset = sqlx::query_as::<_, PasswordReset>(
-            r#"
-                SELECT
-                    id,
-                    user_id,
-                    token,
-                    expires_at,
-                    used,
-                    used_at,
-                    requested_from_ip::TEXT AS requested_from_ip,
-                    created_at
-                FROM password_resets
-                WHERE id = $1
-                "#,
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id, user_id, token, expires_at, used, used_at, requested_from_ip::TEXT AS requested_from_ip, created_at FROM password_resets WHERE id = $1",
+            [id.into()],
+        );
+        let reset = PasswordReset::find_by_statement(stmt).one(db).await?;
 
         Ok(reset)
     }
 
     /// 根据令牌查找
     pub async fn find_by_token(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         token: &str,
     ) -> Result<Option<PasswordReset>, DbError> {
-        let reset = sqlx::query_as::<_, PasswordReset>(
-            r#"
-                SELECT
-                    id,
-                    user_id,
-                    token,
-                    expires_at,
-                    used,
-                    used_at,
-                    requested_from_ip::TEXT AS requested_from_ip,
-                    created_at
-                FROM password_resets
-                WHERE token = $1
-                "#,
-        )
-        .bind(token)
-        .fetch_optional(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id, user_id, token, expires_at, used, used_at, requested_from_ip::TEXT AS requested_from_ip, created_at FROM password_resets WHERE token = $1",
+            [token.into()],
+        );
+        let reset = PasswordReset::find_by_statement(stmt).one(db).await?;
 
         Ok(reset)
     }
 
     /// 查找用户的有效重置记录
     pub async fn find_valid_by_user(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<Option<PasswordReset>, DbError> {
-        let reset = sqlx::query_as::<_, PasswordReset>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT
                 id,
@@ -138,17 +120,17 @@ impl PasswordReset {
             ORDER BY created_at DESC 
             LIMIT 1
             "#,
-        )
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
+            [user_id.into()],
+        );
+        let reset = PasswordReset::find_by_statement(stmt).one(db).await?;
 
         Ok(reset)
     }
 
     /// 标记为已使用
-    pub async fn mark_used(&self, pool: &sqlx::PgPool) -> Result<PasswordReset, DbError> {
-        let reset = sqlx::query_as::<_, PasswordReset>(
+    pub async fn mark_used(&self, db: &DatabaseConnection) -> Result<PasswordReset, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE password_resets
             SET used = TRUE,
@@ -164,30 +146,39 @@ impl PasswordReset {
                 requested_from_ip::TEXT AS requested_from_ip,
                 created_at
             "#,
-        )
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+            [self.id.into()],
+        );
+        let reset = PasswordReset::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("PasswordReset", self.id.to_string()))?;
 
         Ok(reset)
     }
 
     /// 删除重置记录
-    pub async fn delete(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM password_resets WHERE id = $1")
-            .bind(self.id)
-            .execute(pool)
-            .await?;
+    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM password_resets WHERE id = $1",
+            [self.id.into()],
+        );
+        db.execute(stmt).await?;
 
         Ok(())
     }
 
     /// 删除用户的所有重置记录
-    pub async fn delete_all_by_user(pool: &sqlx::PgPool, user_id: Uuid) -> Result<u64, DbError> {
-        let result = sqlx::query("DELETE FROM password_resets WHERE user_id = $1")
-            .bind(user_id)
-            .execute(pool)
-            .await?;
+    pub async fn delete_all_by_user(
+        db: &DatabaseConnection,
+        user_id: Uuid,
+    ) -> Result<u64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM password_resets WHERE user_id = $1",
+            [user_id.into()],
+        );
+        let result = db.execute(stmt).await?;
 
         Ok(result.rows_affected())
     }

@@ -4,12 +4,12 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 用户密码凭证
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct UserCredential {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -46,49 +46,48 @@ pub struct UpdateUserCredentialRequest {
 impl UserCredential {
     /// 创建新凭证
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreateUserCredentialRequest,
     ) -> Result<UserCredential, DbError> {
-        let credential = sqlx::query_as::<_, UserCredential>(
-            r#"
-            INSERT INTO user_credentials (user_id, password_hash)
-            VALUES ($1, $2)
-            RETURNING *
-            "#,
-        )
-        .bind(req.user_id)
-        .bind(&req.password_hash)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_credentials (user_id, password_hash) VALUES ($1, $2) RETURNING *"#,
+            [req.user_id.into(), req.password_hash.as_str().into()],
+        );
+        let credential = UserCredential::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(credential)
     }
 
     /// 根据 ID 查找凭证
     pub async fn find_by_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         id: Uuid,
     ) -> Result<Option<UserCredential>, DbError> {
-        let credential =
-            sqlx::query_as::<_, UserCredential>("SELECT * FROM user_credentials WHERE id = $1")
-                .bind(id)
-                .fetch_optional(pool)
-                .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_credentials WHERE id = $1",
+            [id.into()],
+        );
+        let credential = UserCredential::find_by_statement(stmt).one(db).await?;
 
         Ok(credential)
     }
 
     /// 根据用户 ID 查找凭证
     pub async fn find_by_user_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<Option<UserCredential>, DbError> {
-        let credential = sqlx::query_as::<_, UserCredential>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM user_credentials WHERE user_id = $1",
-        )
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
+            [user_id.into()],
+        );
+        let credential = UserCredential::find_by_statement(stmt).one(db).await?;
 
         Ok(credential)
     }
@@ -96,10 +95,11 @@ impl UserCredential {
     /// 更新凭证
     pub async fn update(
         &self,
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &UpdateUserCredentialRequest,
     ) -> Result<UserCredential, DbError> {
-        let credential = sqlx::query_as::<_, UserCredential>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE user_credentials
             SET password_hash = COALESCE($1, password_hash),
@@ -113,65 +113,68 @@ impl UserCredential {
             WHERE id = $8
             RETURNING *
             "#,
-        )
-        .bind(&req.password_hash)
-        .bind(req.email_verified)
-        .bind(req.email_verified_at)
-        .bind(req.failed_login_attempts)
-        .bind(req.locked_until)
-        .bind(req.last_login_at)
-        .bind(&req.last_login_ip)
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.password_hash.clone().into(),
+                req.email_verified.into(),
+                req.email_verified_at.into(),
+                req.failed_login_attempts.into(),
+                req.locked_until.into(),
+                req.last_login_at.into(),
+                req.last_login_ip.clone().into(),
+                self.id.into(),
+            ],
+        );
+        let credential = UserCredential::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("update failed to return row".to_string()))?;
 
         Ok(credential)
     }
 
     /// 删除凭证
-    pub async fn delete(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM user_credentials WHERE id = $1")
-            .bind(self.id)
-            .execute(pool)
-            .await?;
+    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM user_credentials WHERE id = $1",
+            [self.id.into()],
+        );
+        db.execute(stmt).await?;
 
         Ok(())
     }
 
     /// 批量根据用户 ID 列表查找凭证，返回以 user_id 为 key 的 HashMap
     pub async fn find_by_user_ids(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserCredential>, DbError> {
         if user_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-        let credentials = sqlx::query_as::<_, UserCredential>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM user_credentials WHERE user_id = ANY($1)",
-        )
-        .bind(user_ids)
-        .fetch_all(pool)
-        .await?;
+            [user_ids.to_vec().into()],
+        );
+        let credentials = UserCredential::find_by_statement(stmt).all(db).await?;
         Ok(credentials.into_iter().map(|c| (c.user_id, c)).collect())
     }
 
     /// 增加失败登录次数
     pub async fn increment_failed_attempts(
         &self,
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
     ) -> Result<UserCredential, DbError> {
-        let credential = sqlx::query_as::<_, UserCredential>(
-            r#"
-            UPDATE user_credentials
-            SET failed_login_attempts = failed_login_attempts + 1,
-                updated_at = NOW()
-            WHERE id = $1
-            RETURNING *
-            "#,
-        )
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_credentials SET failed_login_attempts = failed_login_attempts + 1, updated_at = NOW() WHERE id = $1 RETURNING *"#,
+            [self.id.into()],
+        );
+        let credential = UserCredential::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserCredential", self.id.to_string()))?;
 
         Ok(credential)
     }
@@ -179,25 +182,18 @@ impl UserCredential {
     /// 重置失败登录次数并更新登录信息
     pub async fn record_successful_login(
         &self,
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         ip: Option<String>,
     ) -> Result<UserCredential, DbError> {
-        let credential = sqlx::query_as::<_, UserCredential>(
-            r#"
-            UPDATE user_credentials
-            SET failed_login_attempts = 0,
-                locked_until = NULL,
-                last_login_at = NOW(),
-                last_login_ip = $1,
-                updated_at = NOW()
-            WHERE id = $2
-            RETURNING *
-            "#,
-        )
-        .bind(ip)
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_credentials SET failed_login_attempts = 0, locked_until = NULL, last_login_at = NOW(), last_login_ip = $1, updated_at = NOW() WHERE id = $2 RETURNING *"#,
+            [ip.into(), self.id.into()],
+        );
+        let credential = UserCredential::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserCredential", self.id.to_string()))?;
 
         Ok(credential)
     }
@@ -205,24 +201,19 @@ impl UserCredential {
     /// 锁定账户
     pub async fn lock(
         &self,
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         duration_minutes: i64,
     ) -> Result<UserCredential, DbError> {
         let locked_until = Utc::now() + chrono::Duration::minutes(duration_minutes);
-
-        let credential = sqlx::query_as::<_, UserCredential>(
-            r#"
-            UPDATE user_credentials
-            SET locked_until = $1,
-                updated_at = NOW()
-            WHERE id = $2
-            RETURNING *
-            "#,
-        )
-        .bind(locked_until)
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_credentials SET locked_until = $1, updated_at = NOW() WHERE id = $2 RETURNING *"#,
+            [locked_until.into(), self.id.into()],
+        );
+        let credential = UserCredential::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserCredential", self.id.to_string()))?;
 
         Ok(credential)
     }

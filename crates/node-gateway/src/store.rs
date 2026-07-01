@@ -9,26 +9,29 @@ use keycompute_db::models::{
     node::*, node_session::*, node_task::*, node_task_submission::*, user_node_gateway_token::*,
 };
 use keycompute_types::node::*;
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
+    Statement, TransactionTrait,
+};
 use serde_json;
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 /// Node Gateway Store
 #[derive(Clone)]
 pub struct NodeGatewayStore {
-    pool: PgPool,
+    pool: DatabaseConnection,
     config: NodeGatewayAppConfig,
 }
 
 impl NodeGatewayStore {
     /// 创建新的 Store 实例
-    pub fn new(pool: PgPool, config: NodeGatewayAppConfig) -> Self {
+    pub fn new(pool: DatabaseConnection, config: NodeGatewayAppConfig) -> Self {
         Self { pool, config }
     }
 
     /// 获取 pool 引用
-    pub fn pool(&self) -> &PgPool {
+    pub fn pool(&self) -> &DatabaseConnection {
         &self.pool
     }
 
@@ -78,19 +81,20 @@ impl NodeGatewayStore {
         let now = Utc::now();
 
         // 1. 开始事务（通过 FOR UPDATE 行级锁防止 TOCTOU，使用默认 READ COMMITTED 隔离级别）
-        let mut tx = self.pool.begin().await?;
+        let tx = self.pool.begin().await?;
 
         // 2. 在事务内查询 token 并检查是否可消费（消除 TOCTOU 窗口）
         //    使用 FOR UPDATE 锁定行，防止并发修改
-        let token = sqlx::query_as::<_, UserNodeGatewayToken>(
+        let token = UserNodeGatewayToken::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT * FROM user_node_gateway_tokens
             WHERE id = $1
             FOR UPDATE
             "#,
-        )
-        .bind(token_id)
-        .fetch_optional(&mut *tx)
+            [token_id.into()],
+        ))
+        .one(&tx)
         .await?
         .ok_or_else(|| DbError::Other("Registration token not found".to_string()))?;
 
@@ -112,15 +116,15 @@ impl NodeGatewayStore {
         let owner_user_id = token.user_id;
 
         // 3. 查找或创建节点(在事务中)
-        let existing_node = sqlx::query_as::<_, Node>(
+        let existing_node = Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT * FROM nodes
             WHERE owner_user_id = $1 AND client_instance_id = $2
             "#,
-        )
-        .bind(owner_user_id)
-        .bind(&req.client_instance_id)
-        .fetch_optional(&mut *tx)
+            [owner_user_id.into(), req.client_instance_id.as_str().into()],
+        ))
+        .one(&tx)
         .await?;
 
         let node = match existing_node {
@@ -138,25 +142,35 @@ impl NodeGatewayStore {
                 let capabilities_json = serde_json::to_value(&req.capabilities)
                     .map_err(|e| DbError::Other(e.to_string()))?;
 
-                sqlx::query_as::<_, Node>(
+                Node::find_by_statement(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     r#"
                     INSERT INTO nodes (owner_user_id, client_instance_id, display_name, status, capabilities_json)
                     VALUES ($1, $2, $3, $4, $5)
                     RETURNING *
                     "#,
-                )
-                .bind(owner_user_id)
-                .bind(&req.client_instance_id)
-                .bind(&req.display_name)
-                .bind(NODE_STATUS_OFFLINE)
-                .bind(&capabilities_json)
-                .fetch_one(&mut *tx)
+                    [
+                        owner_user_id.into(),
+                        req.client_instance_id.as_str().into(),
+                        req.display_name.as_str().into(),
+                        NODE_STATUS_OFFLINE.into(),
+                        capabilities_json.clone().into(),
+                    ],
+                ))
+                .one(&tx)
                 .await?
+                .ok_or_else(|| DbError::Other("Failed to create node".to_string()))?
             }
         };
 
         // 4. 在同一事务中：消费 token（一次性使用）+ 创建 session + 更新节点状态
-        let consumed = UserNodeGatewayToken::consume(&mut *tx, token_id, node.id).await?;
+        let consume_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_node_gateway_tokens SET status = 'consumed', consumed_at = NOW(), consumed_node_id = $1, updated_at = NOW() WHERE id = $2 AND status = 'approved'"#,
+            [node.id.into(), token_id.into()],
+        );
+        let consume_result = tx.execute(consume_stmt).await?;
+        let consumed = consume_result.rows_affected() > 0;
         if !consumed {
             // Token 可能在事务外检查通过后、事务内 consume 之前被 admin reject 或并发消费
             return Err(DbError::Other(
@@ -185,44 +199,48 @@ impl NodeGatewayStore {
         };
 
         // 4.1 创建 session (在事务中)
-        let session = sqlx::query_as::<_, NodeSession>(
+        let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json)
             VALUES ($1, $2, $3, $4)
             RETURNING *
             "#,
-        )
-        .bind(create_session_req.node_id)
-        .bind(&create_session_req.session_token_hash)
-        .bind(create_session_req.expires_at)
-        .bind(&create_session_req.accepted_models_json)
-        .fetch_one(&mut *tx)
-        .await?;
+            [
+                create_session_req.node_id.into(),
+                create_session_req.session_token_hash.as_str().into(),
+                create_session_req.expires_at.into(),
+                create_session_req.accepted_models_json.clone().into(),
+            ],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::Other("Failed to create session".to_string()))?;
 
         // 4.2 更新节点状态为 online (如果原来是 offline,在事务中)
         if node.status == NODE_STATUS_OFFLINE {
-            sqlx::query(
+            tx.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE nodes
                 SET status = 'online', updated_at = NOW()
                 WHERE id = $1
                 "#,
-            )
-            .bind(node.id)
-            .execute(&mut *tx)
+                [node.id.into()],
+            ))
             .await?;
         }
 
         // 4.3 更新节点心跳时间 (在事务中)
-        sqlx::query(
+        tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE nodes
             SET last_heartbeat_at = NOW(), updated_at = NOW()
             WHERE id = $1
             "#,
-        )
-        .bind(node.id)
-        .execute(&mut *tx)
+            [node.id.into()],
+        ))
         .await?;
 
         // 提交事务
@@ -267,7 +285,8 @@ impl NodeGatewayStore {
     /// Admin 把 excluded 节点恢复为 online
     /// 同时清零 consecutive_failure_count, 节点可重新接收任务。
     pub async fn recover_node(&self, node_id: Uuid) -> Result<Node, DbError> {
-        sqlx::query_as::<_, Node>(
+        Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE nodes
             SET status = 'online',
@@ -276,9 +295,9 @@ impl NodeGatewayStore {
             WHERE id = $1
             RETURNING *
             "#,
-        )
-        .bind(node_id)
-        .fetch_optional(&self.pool)
+            [node_id.into()],
+        ))
+        .one(&self.pool)
         .await?
         .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))
     }
@@ -289,24 +308,28 @@ impl NodeGatewayStore {
         session_id: Uuid,
         accepted_models: Vec<String>,
     ) -> Result<NodeHeartbeatResponse, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let tx = self.pool.begin().await?;
         let now = Utc::now();
         let expires_at = now + self.config.session_ttl();
 
         // 1. 获取节点和会话(FOR UPDATE)
-        let node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1 FOR UPDATE")
-            .bind(node_id)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|_e| DbError::not_found("Node", node_id.to_string()))?;
+        let node = Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM nodes WHERE id = $1 FOR UPDATE",
+            [node_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
 
-        let session = sqlx::query_as::<_, NodeSession>(
+        let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM node_sessions WHERE id = $1 FOR UPDATE",
-        )
-        .bind(session_id)
-        .fetch_one(&mut *tx)
-        .await
-        .map_err(|_e| DbError::not_found("Session", session_id.to_string()))?;
+            [session_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Session", session_id.to_string()))?;
 
         // 2. 校验请求体与认证结果一致
         if session.node_id != node_id {
@@ -316,16 +339,15 @@ impl NodeGatewayStore {
         // 3. 根据节点状态分支处理
         if node.is_excluded() {
             // excluded 节点:只更新会话可见性,不改变节点状态
-            sqlx::query(
+            tx.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE node_sessions
                 SET last_seen_at = NOW(), expires_at = $1
                 WHERE id = $2
                 "#,
-            )
-            .bind(expires_at)
-            .bind(session_id)
-            .execute(&mut *tx)
+                [expires_at.into(), session_id.into()],
+            ))
             .await?;
         } else {
             // 非 excluded 节点:校验并持久化 accepted_models
@@ -351,46 +373,47 @@ impl NodeGatewayStore {
 
             // 在同一事务中:
             // 1) 更新会话的 accepted_models 和可见性
-            sqlx::query(
+            let accepted_models_value = serde_json::to_value(&accepted_models)
+                .map_err(|e| DbError::Other(e.to_string()))?;
+            tx.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE node_sessions
                 SET accepted_models_json = $1, last_seen_at = NOW(), expires_at = $2
                 WHERE id = $3
                 "#,
-            )
-            .bind(
-                &serde_json::to_value(&accepted_models)
-                    .map_err(|e| DbError::Other(e.to_string()))?,
-            )
-            .bind(expires_at)
-            .bind(session_id)
-            .execute(&mut *tx)
+                [
+                    accepted_models_value.into(),
+                    expires_at.into(),
+                    session_id.into(),
+                ],
+            ))
             .await?;
 
             // 2) 更新节点状态为 online(如果原来是 offline)
             if node.status != NODE_STATUS_ONLINE {
-                sqlx::query(
+                tx.execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     r#"
                     UPDATE nodes
                     SET status = 'online', updated_at = NOW()
                     WHERE id = $1
                     "#,
-                )
-                .bind(node_id)
-                .execute(&mut *tx)
+                    [node_id.into()],
+                ))
                 .await?;
             }
 
             // 3) 更新节点心跳时间
-            sqlx::query(
+            tx.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE nodes
                 SET last_heartbeat_at = NOW(), updated_at = NOW()
                 WHERE id = $1
                 "#,
-            )
-            .bind(node_id)
-            .execute(&mut *tx)
+                [node_id.into()],
+            ))
             .await?;
         }
 
@@ -478,28 +501,32 @@ impl NodeGatewayStore {
         authenticated_session_id: Uuid,
         result: NodeTaskResult,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
-        let mut tx = self.pool.begin().await?;
+        let tx = self.pool.begin().await?;
 
         // 1. 查询任务（FOR UPDATE）
-        let task =
-            sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1 FOR UPDATE")
-                .bind(task_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM node_tasks WHERE id = $1 FOR UPDATE",
+            [task_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
 
         // 2. 查询已有 submission
-        let existing_submission = sqlx::query_as::<_, NodeTaskSubmission>(
-            "SELECT * FROM node_task_submissions WHERE task_id = $1 AND lease_id = $2",
-        )
-        .bind(task_id)
-        .bind(lease_id)
-        .fetch_optional(&mut *tx)
-        .await?;
+        let existing_submission =
+            NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT * FROM node_task_submissions WHERE task_id = $1 AND lease_id = $2",
+                [task_id.into(), lease_id.into()],
+            ))
+            .one(&tx)
+            .await?;
 
         // 3. 如果已有 submission,处理幂等逻辑
         if let Some(submission) = existing_submission {
             // 先检查 session 是否被撤销
-            let session = NodeSession::find_by_id(&self.pool, authenticated_session_id).await?;
+            let session = NodeSession::find_by_id(&tx, authenticated_session_id).await?;
             if session.map(|s| s.is_revoked()).unwrap_or(true) {
                 return Err(DbError::Other("Session has been revoked".to_string()));
             }
@@ -515,7 +542,7 @@ impl NodeGatewayStore {
 
             // 检查 submission 是否未归档（24 小时内且任务未终态）
             let is_not_archived =
-                NodeTaskSubmission::is_not_archived(&self.pool, task_id, lease_id).await?;
+                NodeTaskSubmission::is_not_archived(&tx, task_id, lease_id).await?;
 
             if is_not_archived {
                 // 未归档，检查 request_hash
@@ -525,13 +552,14 @@ impl NodeGatewayStore {
                     // request_hash 相同,直接返回已保存的 ACK
                     let action = parse_action(&submission.action)?;
 
-                    let node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
-                        .bind(authenticated_node_id)
-                        .fetch_optional(&mut *tx)
-                        .await?
-                        .ok_or_else(|| {
-                            DbError::not_found("Node", authenticated_node_id.to_string())
-                        })?;
+                    let node = Node::find_by_statement(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "SELECT * FROM nodes WHERE id = $1",
+                        [authenticated_node_id.into()],
+                    ))
+                    .one(&tx)
+                    .await?
+                    .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
 
                     return Ok(NodeTaskCompleteResponse {
                         action,
@@ -548,11 +576,14 @@ impl NodeGatewayStore {
                 // 已归档,仍然返回已保存的 ACK (幂等)
                 let action = parse_action(&submission.action)?;
 
-                let node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
-                    .bind(authenticated_node_id)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                    .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
+                let node = Node::find_by_statement(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT * FROM nodes WHERE id = $1",
+                    [authenticated_node_id.into()],
+                ))
+                .one(&tx)
+                .await?
+                .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
 
                 return Ok(NodeTaskCompleteResponse {
                     action,
@@ -565,21 +596,27 @@ impl NodeGatewayStore {
         }
 
         // 4. 无 submission，检查 session 状态
-        let session = sqlx::query_as::<_, NodeSession>("SELECT * FROM node_sessions WHERE id = $1")
-            .bind(authenticated_session_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| DbError::not_found("Session", authenticated_session_id.to_string()))?;
+        let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM node_sessions WHERE id = $1",
+            [authenticated_session_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Session", authenticated_session_id.to_string()))?;
 
         if session.is_revoked() {
             return Err(DbError::Other("Session revoked".to_string()));
         }
 
-        let node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
-            .bind(authenticated_node_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
+        let node = Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM nodes WHERE id = $1",
+            [authenticated_node_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
 
         let session_expired = session.is_expired();
         let task_expired = task.is_expired();
@@ -616,26 +653,31 @@ impl NodeGatewayStore {
                     action: "expired".to_string(),
                 };
 
-                sqlx::query_as::<_, NodeTaskSubmission>(
+                NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     r#"
                     INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
                     VALUES ($1, $2, $3, $4, $5, $6, $7)
                     RETURNING *
                     "#,
-                )
-                .bind(submission_req.task_id)
-                .bind(submission_req.lease_id)
-                .bind(submission_req.node_id)
-                .bind(submission_req.session_id)
-                .bind(&submission_req.result_kind)
-                .bind(&submission_req.request_hash)
-                .bind(&submission_req.action)
-                .fetch_one(&mut *tx)
-                .await?;
+                    [
+                        submission_req.task_id.into(),
+                        submission_req.lease_id.into(),
+                        submission_req.node_id.into(),
+                        submission_req.session_id.into(),
+                        submission_req.result_kind.as_str().into(),
+                        submission_req.request_hash.as_str().into(),
+                        submission_req.action.as_str().into(),
+                    ],
+                ))
+                .one(&tx)
+                .await?
+                .ok_or_else(|| DbError::Other("Failed to insert expired submission".to_string()))?;
 
                 // 如果任务不是终态，标记为 expired
                 if !task.is_terminal() {
-                    sqlx::query_as::<_, NodeTask>(
+                    NodeTask::find_by_statement(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
                         r#"
                         UPDATE node_tasks
                         SET status = $1,
@@ -644,10 +686,9 @@ impl NodeGatewayStore {
                         WHERE id = $2
                         RETURNING *
                         "#,
-                    )
-                    .bind(TASK_STATUS_EXPIRED)
-                    .bind(task_id)
-                    .fetch_one(&mut *tx)
+                        [TASK_STATUS_EXPIRED.into(), task_id.into()],
+                    ))
+                    .one(&tx)
                     .await?;
                 }
 
@@ -681,7 +722,7 @@ impl NodeGatewayStore {
         let response = match result {
             NodeTaskResult::Succeeded { response } => {
                 self.handle_success_submission(
-                    &mut tx,
+                    &tx,
                     &task,
                     &node,
                     authenticated_node_id,
@@ -693,7 +734,7 @@ impl NodeGatewayStore {
             }
             NodeTaskResult::ImageSucceeded { image_response } => {
                 self.handle_image_success_submission(
-                    &mut tx,
+                    &tx,
                     &task,
                     &node,
                     authenticated_node_id,
@@ -709,7 +750,7 @@ impl NodeGatewayStore {
                 is_client_error,
             } => {
                 self.handle_failed_submission(
-                    &mut tx,
+                    &tx,
                     &task,
                     &node,
                     authenticated_node_id,
@@ -733,7 +774,7 @@ impl NodeGatewayStore {
     #[allow(clippy::too_many_arguments)]
     async fn handle_success_submission(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         task: &NodeTask,
         node: &Node,
         node_id: Uuid,
@@ -766,7 +807,7 @@ impl NodeGatewayStore {
     #[allow(clippy::too_many_arguments)]
     async fn handle_image_success_submission(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         task: &NodeTask,
         node: &Node,
         node_id: Uuid,
@@ -811,7 +852,7 @@ impl NodeGatewayStore {
     #[allow(clippy::too_many_arguments)]
     async fn handle_success_submission_inner(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         task: &NodeTask,
         node: &Node,
         node_id: Uuid,
@@ -821,7 +862,8 @@ impl NodeGatewayStore {
         result_kind: &str,
         result_for_hash: NodeTaskResult,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
-        let updated_task = sqlx::query_as::<_, NodeTask>(
+        let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE node_tasks
             SET status = $1,
@@ -836,25 +878,29 @@ impl NodeGatewayStore {
               AND deadline_at >= NOW()
             RETURNING *
             "#,
-        )
-        .bind(TASK_STATUS_SUCCEEDED)
-        .bind(&response_json)
-        .bind(task.id)
-        .bind(node_id)
-        .bind(session_id)
-        .bind(lease_id)
-        .fetch_optional(&mut **tx)
+            [
+                TASK_STATUS_SUCCEEDED.into(),
+                response_json.clone().into(),
+                task.id.into(),
+                node_id.into(),
+                session_id.into(),
+                lease_id.into(),
+            ],
+        ))
+        .one(tx)
         .await?;
 
         let updated_task = match updated_task {
             Some(t) => t,
             None => {
-                let current_task =
-                    sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-                        .bind(task.id)
-                        .fetch_optional(&mut **tx)
-                        .await?
-                        .ok_or_else(|| DbError::not_found("Task", task.id.to_string()))?;
+                let current_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT * FROM node_tasks WHERE id = $1",
+                    [task.id.into()],
+                ))
+                .one(tx)
+                .await?
+                .ok_or_else(|| DbError::not_found("Task", task.id.to_string()))?;
 
                 if current_task.status == TASK_STATUS_EXPIRED
                     || current_task.deadline_at < Utc::now()
@@ -868,15 +914,15 @@ impl NodeGatewayStore {
 
         // 清零节点连续失败计数（仅非 excluded 节点）
         if !node.is_excluded() {
-            sqlx::query(
+            tx.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE nodes
                 SET consecutive_failure_count = 0, updated_at = NOW()
                 WHERE id = $1
                 "#,
-            )
-            .bind(node_id)
-            .execute(&mut **tx)
+                [node_id.into()],
+            ))
             .await?;
         }
 
@@ -893,28 +939,35 @@ impl NodeGatewayStore {
             action: "succeeded".to_string(),
         };
 
-        sqlx::query_as::<_, NodeTaskSubmission>(
+        NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             "#,
-        )
-        .bind(submission_req.task_id)
-        .bind(submission_req.lease_id)
-        .bind(submission_req.node_id)
-        .bind(submission_req.session_id)
-        .bind(&submission_req.result_kind)
-        .bind(&submission_req.request_hash)
-        .bind(&submission_req.action)
-        .fetch_one(&mut **tx)
-        .await?;
+            [
+                submission_req.task_id.into(),
+                submission_req.lease_id.into(),
+                submission_req.node_id.into(),
+                submission_req.session_id.into(),
+                submission_req.result_kind.as_str().into(),
+                submission_req.request_hash.as_str().into(),
+                submission_req.action.as_str().into(),
+            ],
+        ))
+        .one(tx)
+        .await?
+        .ok_or_else(|| DbError::Other("Failed to insert submission".to_string()))?;
 
-        let updated_node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
-            .bind(node_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
+        let updated_node = Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM nodes WHERE id = $1",
+            [node_id.into()],
+        ))
+        .one(tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
 
         Ok(NodeTaskCompleteResponse {
             action: NodeTaskCompleteAction::Succeeded,
@@ -929,7 +982,7 @@ impl NodeGatewayStore {
     #[allow(clippy::too_many_arguments)]
     async fn handle_failed_submission(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         task: &NodeTask,
         _node: &Node,
         node_id: Uuid,
@@ -946,7 +999,8 @@ impl NodeGatewayStore {
         });
 
         let updated_task = if is_client_error {
-            sqlx::query_as::<_, NodeTask>(
+            NodeTask::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE node_tasks
                 SET status = 'failed',
@@ -961,16 +1015,19 @@ impl NodeGatewayStore {
                   AND deadline_at >= NOW()
                 RETURNING *
                 "#,
-            )
-            .bind(&error_json)
-            .bind(task.id)
-            .bind(node_id)
-            .bind(session_id)
-            .bind(lease_id)
-            .fetch_optional(&mut **tx)
+                [
+                    error_json.clone().into(),
+                    task.id.into(),
+                    node_id.into(),
+                    session_id.into(),
+                    lease_id.into(),
+                ],
+            ))
+            .one(tx)
             .await?
         } else {
-            sqlx::query_as::<_, NodeTask>(
+            NodeTask::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE node_tasks
                 SET status = CASE
@@ -1007,25 +1064,29 @@ impl NodeGatewayStore {
                   AND deadline_at >= NOW()
                 RETURNING *
                 "#,
-            )
-            .bind(&error_json)
-            .bind(task.id)
-            .bind(node_id)
-            .bind(session_id)
-            .bind(lease_id)
-            .fetch_optional(&mut **tx)
+                [
+                    error_json.clone().into(),
+                    task.id.into(),
+                    node_id.into(),
+                    session_id.into(),
+                    lease_id.into(),
+                ],
+            ))
+            .one(tx)
             .await?
         };
 
         let updated_task = match updated_task {
             Some(t) => t,
             None => {
-                let current_task =
-                    sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-                        .bind(task.id)
-                        .fetch_optional(&mut **tx)
-                        .await?
-                        .ok_or_else(|| DbError::not_found("Task", task.id.to_string()))?;
+                let current_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT * FROM node_tasks WHERE id = $1",
+                    [task.id.into()],
+                ))
+                .one(tx)
+                .await?
+                .ok_or_else(|| DbError::not_found("Task", task.id.to_string()))?;
 
                 if current_task.status == TASK_STATUS_EXPIRED
                     || current_task.deadline_at < Utc::now()
@@ -1039,7 +1100,8 @@ impl NodeGatewayStore {
 
         // 增加节点连续失败计数并检查排除
         if !is_client_error {
-            sqlx::query(
+            tx.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 UPDATE nodes
                 SET consecutive_failure_count = consecutive_failure_count + 1,
@@ -1050,9 +1112,8 @@ impl NodeGatewayStore {
                     updated_at = NOW()
                 WHERE id = $1
                 "#,
-            )
-            .bind(node_id)
-            .execute(&mut **tx)
+                [node_id.into()],
+            ))
             .await?;
         }
 
@@ -1079,28 +1140,35 @@ impl NodeGatewayStore {
             action: action.to_string(),
         };
 
-        sqlx::query_as::<_, NodeTaskSubmission>(
+        NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             "#,
-        )
-        .bind(submission_req.task_id)
-        .bind(submission_req.lease_id)
-        .bind(submission_req.node_id)
-        .bind(submission_req.session_id)
-        .bind(&submission_req.result_kind)
-        .bind(&submission_req.request_hash)
-        .bind(&submission_req.action)
-        .fetch_one(&mut **tx)
-        .await?;
+            [
+                submission_req.task_id.into(),
+                submission_req.lease_id.into(),
+                submission_req.node_id.into(),
+                submission_req.session_id.into(),
+                submission_req.result_kind.as_str().into(),
+                submission_req.request_hash.as_str().into(),
+                submission_req.action.as_str().into(),
+            ],
+        ))
+        .one(tx)
+        .await?
+        .ok_or_else(|| DbError::Other("Failed to insert submission".to_string()))?;
 
-        let updated_node = sqlx::query_as::<_, Node>("SELECT * FROM nodes WHERE id = $1")
-            .bind(node_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
+        let updated_node = Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM nodes WHERE id = $1",
+            [node_id.into()],
+        ))
+        .one(tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
 
         let complete_action = if updated_task.status == TASK_STATUS_QUEUED {
             NodeTaskCompleteAction::Requeued

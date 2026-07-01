@@ -33,6 +33,7 @@ use keycompute_db::models::{
 };
 use keycompute_runtime::crypto::{self};
 use rust_decimal::Decimal;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -261,7 +262,7 @@ pub async fn create_tip_withdrawal(
     }
 
     // 开始事务
-    let mut tx = pool
+    let tx = pool
         .begin()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to begin transaction: {}", e)))?;
@@ -276,12 +277,17 @@ pub async fn create_tip_withdrawal(
     let id_bytes = auth.user_id.as_bytes();
     let key1 = i64::from_be_bytes(id_bytes[..8].try_into().unwrap());
     let key2 = i64::from_be_bytes(id_bytes[8..].try_into().unwrap());
-    let lock_acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1, $2)")
-        .bind(key1)
-        .bind(key2)
-        .fetch_one(&mut *tx)
+    let lock_acquired: bool = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT pg_try_advisory_xact_lock($1, $2)",
+            [key1.into(), key2.into()],
+        ))
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to acquire lock: {}", e)))?;
+        .map_err(|e| ApiError::Internal(format!("Failed to acquire lock: {}", e)))?
+        .ok_or_else(|| ApiError::Internal("Lock query returned no result".to_string()))?
+        .try_get_by_index::<bool>(0)
+        .map_err(|e| ApiError::Internal(format!("Failed to parse lock result: {}", e)))?;
 
     if !lock_acquired {
         return Err(ApiError::Conflict(
@@ -290,8 +296,10 @@ pub async fn create_tip_withdrawal(
     }
 
     // 事务内重新计算待提现金额（确保锁内快照一致）
-    let actual_amount: Decimal = sqlx::query_scalar(
-        r#"
+    let actual_amount: Decimal = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
         SELECT
             COALESCE((
                 SELECT SUM(nt.tip_amount)
@@ -304,11 +312,13 @@ pub async fn create_tip_withdrawal(
                 WHERE ntw.user_id = $1 AND ntw.status != 'rejected'
             ), 0)
         "#,
-    )
-    .bind(auth.user_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to calculate pending amount: {}", e)))?;
+            [auth.user_id.into()],
+        ))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to calculate pending amount: {}", e)))?
+        .ok_or_else(|| ApiError::Internal("Amount query returned no result".to_string()))?
+        .try_get_by_index::<Decimal>(0)
+        .map_err(|e| ApiError::Internal(format!("Failed to parse amount: {}", e)))?;
 
     if actual_amount <= Decimal::ZERO {
         return Err(ApiError::BadRequest(
@@ -352,7 +362,7 @@ pub async fn create_tip_withdrawal(
 
     // 创建提现记录（两种方式共享）
     let withdrawal = NodeTipWithdrawal::create(
-        &mut tx,
+        &tx,
         auth.user_id,
         withdrawal_type,
         actual_amount,
@@ -366,7 +376,7 @@ pub async fn create_tip_withdrawal(
     if withdrawal_type == WITHDRAWAL_TYPE_BALANCE {
         // Balance 方式：标记提现记录为 completed（用户自助提现，无 admin 操作）
         let _ = NodeTipWithdrawal::mark_completed(
-            &mut tx,
+            &tx,
             withdrawal.id,
             None, // no admin — user self-service
             None, // preserve admin_remark
@@ -377,7 +387,7 @@ pub async fn create_tip_withdrawal(
 
         // 转入用户可用余额
         UserBalance::credit_tips(
-            &mut tx,
+            &tx,
             auth.user_id,
             auth.tenant_id,
             actual_amount,
@@ -560,12 +570,12 @@ pub async fn admin_approve_withdrawal(
     if action == "reject" {
         // 在事务中 reject withdrawal
         // 无需恢复 tips 状态（tips 不再追踪单笔提现状态）
-        let mut tx = pool
+        let tx = pool
             .begin()
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
-        NodeTipWithdrawal::reject(&mut tx, id, auth.user_id, req.remark.as_deref())
+        NodeTipWithdrawal::reject(&tx, id, auth.user_id, req.remark.as_deref())
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to reject withdrawal: {}", e)))?;
 
@@ -583,22 +593,29 @@ pub async fn admin_approve_withdrawal(
     // approve: 批准提现
     //
     // 在事务内查询提现类型并审批，消除 TOCTOU 窗口
-    let mut tx = pool
+    let tx = pool
         .begin()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
-    let withdrawal_type: String =
-        sqlx::query_scalar("SELECT withdrawal_type FROM node_tip_withdrawals WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to query withdrawal: {}", e)))?
-            .ok_or_else(|| ApiError::NotFound("Withdrawal not found".to_string()))?;
+    let withdrawal_type: String = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT withdrawal_type FROM node_tip_withdrawals WHERE id = $1",
+            [id.into()],
+        ))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query withdrawal: {}", e)))?
+        .ok_or_else(|| ApiError::NotFound("Withdrawal not found".to_string()))?
+        .try_get_by_index::<String>(0)
+        .map_err(|e| ApiError::Internal(format!("Failed to parse withdrawal type: {}", e)))?;
 
     // balance 方式在小费提现创建时已自动完成（自助转账），
     // 无需 admin 审批，直接返回错误提示。
     if withdrawal_type == WITHDRAWAL_TYPE_BALANCE {
+        tx.rollback()
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to rollback transaction: {}", e)))?;
         return Err(ApiError::BadRequest(
             "Balance withdrawals are auto-completed at creation time and do not require admin approval."
                 .to_string(),
@@ -607,7 +624,7 @@ pub async fn admin_approve_withdrawal(
 
     // alipay 方式：仅审批，管理员后续线下打款
     // approve 内部通过 WHERE status = 'pending' 做行级原子保护
-    NodeTipWithdrawal::approve(&mut tx, id, auth.user_id, req.remark.as_deref())
+    NodeTipWithdrawal::approve(&tx, id, auth.user_id, req.remark.as_deref())
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to approve withdrawal: {}", e)))?;
     tx.commit()
@@ -645,14 +662,14 @@ pub async fn admin_complete_withdrawal(
         ));
     }
 
-    let mut tx = pool
+    let tx = pool
         .begin()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
     // 标记提现为 completed（total_amount 在创建时已设定，无需重新计算）
     NodeTipWithdrawal::mark_completed(
-        &mut tx,
+        &tx,
         id,
         Some(auth.user_id),
         None, // NULL → preserves admin_remark from approval stage
@@ -723,7 +740,7 @@ pub async fn admin_get_tip_ratio(
 // 工具函数
 // ============================================================================
 
-fn get_pool(state: &AppState) -> Result<&sqlx::PgPool> {
+fn get_pool(state: &AppState) -> Result<&DatabaseConnection> {
     state
         .pool
         .as_ref()

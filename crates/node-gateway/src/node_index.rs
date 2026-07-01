@@ -4,17 +4,17 @@
 
 use async_trait::async_trait;
 use keycompute_routing::NodeCapabilityIndex;
-use sqlx::PgPool;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use std::sync::Arc;
 
 /// 基于 PostgreSQL 的 Node 能力索引
 pub struct PostgresNodeIndex {
-    pool: Arc<PgPool>,
+    pool: Arc<DatabaseConnection>,
 }
 
 impl PostgresNodeIndex {
     /// 创建新的 PostgresNodeIndex 实例
-    pub fn new(pool: Arc<PgPool>) -> Self {
+    pub fn new(pool: Arc<DatabaseConnection>) -> Self {
         Self { pool }
     }
 }
@@ -22,17 +22,11 @@ impl PostgresNodeIndex {
 #[async_trait]
 impl NodeCapabilityIndex for PostgresNodeIndex {
     /// 检查是否存在 ready 节点可以处理指定模型
-    ///
-    /// Ready predicate 条件：
-    /// - nodes.status = 'online'
-    /// - node_sessions.expires_at > NOW()
-    /// - node_sessions.revoked_at IS NULL
-    /// - node_sessions.accepted_models_json 包含目标模型
-    /// - nodes.capabilities_json->>'runtime' = 'ollama'
     async fn has_ready_node(&self, model: &str) -> bool {
-        let model_json = serde_json::json!([model]).to_string();
+        let model_json: serde_json::Value = serde_json::json!([model]);
 
-        let result = sqlx::query_as::<_, (bool,)>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT EXISTS (
                 SELECT 1 FROM nodes n
@@ -45,14 +39,14 @@ impl NodeCapabilityIndex for PostgresNodeIndex {
                 LIMIT 1
             )
             "#,
-        )
-        .bind(model_json)
-        .fetch_one(self.pool.as_ref())
-        .await;
+            [model_json.into()],
+        );
+
+        let result = self.pool.query_one(stmt).await;
 
         match result {
-            Ok((exists,)) => exists,
-            Err(_) => false,
+            Ok(Some(row)) => row.try_get_by_index::<bool>(0).unwrap_or(false),
+            _ => false,
         }
     }
 }

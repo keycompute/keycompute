@@ -10,8 +10,8 @@ use keycompute_db::{
 use keycompute_emailserver::EmailService;
 use keycompute_types::{KeyComputeError, Result};
 use rand::Rng;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde::Deserialize;
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -41,7 +41,7 @@ pub struct RequestPasswordResetRequest {
 #[derive(Clone)]
 pub struct PasswordResetService {
     /// 数据库连接池
-    pool: Arc<PgPool>,
+    pool: Arc<DatabaseConnection>,
     /// 密码哈希器
     password_hasher: PasswordHasher,
     /// 密码验证器
@@ -64,7 +64,7 @@ impl std::fmt::Debug for PasswordResetService {
 
 impl PasswordResetService {
     /// 创建新的密码重置服务
-    pub fn new(pool: Arc<PgPool>) -> Self {
+    pub fn new(pool: Arc<DatabaseConnection>) -> Self {
         Self {
             pool,
             password_hasher: PasswordHasher::new(),
@@ -320,16 +320,13 @@ impl PasswordResetService {
     ///
     /// 删除所有已过期或已使用的重置令牌
     pub async fn cleanup_expired_tokens(&self) -> Result<u64> {
-        let result =
-            sqlx::query("DELETE FROM password_resets WHERE expires_at < NOW() OR used = TRUE")
-                .execute(&*self.pool)
-                .await
-                .map_err(|e| {
-                    KeyComputeError::DatabaseError(format!(
-                        "Failed to cleanup expired tokens: {}",
-                        e
-                    ))
-                })?;
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            "DELETE FROM password_resets WHERE expires_at < NOW() OR used = TRUE".to_string(),
+        );
+        let result = self.pool.execute(stmt).await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to cleanup expired tokens: {}", e))
+        })?;
 
         let deleted = result.rows_affected();
         if deleted > 0 {

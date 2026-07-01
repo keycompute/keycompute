@@ -6,8 +6,7 @@ use crate::{DistributionContext, DistributionLevel, calculator::DistributionShar
 use chrono::{DateTime, Utc};
 use keycompute_db::CreateDistributionRecordRequest;
 use rust_decimal::Decimal;
-use sqlx::PgPool;
-use std::sync::Arc;
+use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 
 /// 分销模块错误类型
@@ -82,14 +81,14 @@ impl DistributionRecord {
 /// 分销服务
 #[derive(Clone, Default)]
 pub struct DistributionService {
-    /// 数据库连接池（可选）
-    pool: Option<Arc<PgPool>>,
+    /// 数据库连接（可选）
+    pool: Option<DatabaseConnection>,
 }
 
 impl std::fmt::Debug for DistributionService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DistributionService")
-            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field("pool", &"DatabaseConnection")
             .finish()
     }
 }
@@ -101,7 +100,7 @@ impl DistributionService {
     }
 
     /// 创建带数据库连接的分销服务
-    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+    pub fn with_pool(pool: DatabaseConnection) -> Self {
         Self { pool: Some(pool) }
     }
 

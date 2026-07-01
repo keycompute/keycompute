@@ -15,6 +15,7 @@ use bigdecimal::BigDecimal;
 use keycompute_db::models::pricing_model::{
     CreatePricingRequest, GLOBAL_DEFAULT_TENANT_ID, PricingModel, UpdatePricingRequest,
 };
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 
 /// 将某个定价设为默认
 ///
@@ -47,7 +48,8 @@ pub async fn make_pricing_default(
     );
 
     // 查询同一模型+计费维度+租户的所有定价（实现作用域内互斥）
-    let all_pricing: Vec<keycompute_db::models::pricing_model::PricingModel> = sqlx::query_as(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT * FROM pricing_models
         WHERE model_name = $1
@@ -58,13 +60,19 @@ pub async fn make_pricing_default(
           )
         ORDER BY model_name, tenant_id NULLS LAST
         "#,
-    )
-    .bind(&target.model_name)
-    .bind(target.billing_dimension.as_str())
-    .bind(target.tenant_id)
-    .fetch_all(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
+        [
+            target.model_name.as_str().into(),
+            target.billing_dimension.as_str().into(),
+            target
+                .tenant_id
+                .map(|id| id.into())
+                .unwrap_or(sea_orm::Value::Uuid(None)),
+        ],
+    );
+    let all_pricing: Vec<PricingModel> = PricingModel::find_by_statement(stmt)
+        .all(pool.as_ref())
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
 
     let mut updated_count = 0;
     // 将同一模型+计费维度的所有记录（无论租户还是全局）的 is_default 互斥更新
@@ -82,14 +90,15 @@ pub async fn make_pricing_default(
                     new_is_default = new_is_default,
                     "Updating is_default flag"
                 );
-                sqlx::query(
+                let stmt = Statement::from_sql_and_values(
+                    DbBackend::Postgres,
                     "UPDATE pricing_models SET is_default = $1, updated_at = NOW() WHERE id = $2",
-                )
-                .bind(new_is_default)
-                .bind(pricing.id)
-                .execute(pool.as_ref())
-                .await
-                .map_err(|e| ApiError::Internal(format!("Failed to update pricing: {}", e)))?;
+                    [new_is_default.into(), pricing.id.into()],
+                );
+                pool.as_ref()
+                    .execute(stmt)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("Failed to update pricing: {}", e)))?;
                 updated_count += 1;
             }
         }
@@ -189,15 +198,18 @@ pub async fn list_pricing(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // Admin 查看所有定价（包括所有租户和全局默认）
-    let pricing_models = sqlx::query_as::<_, PricingModel>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT * FROM pricing_models
         ORDER BY model_name, tenant_id NULLS LAST, created_at DESC
-        "#,
-    )
-    .fetch_all(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
+    "#,
+        [],
+    );
+    let pricing_models = PricingModel::find_by_statement(stmt)
+        .all(pool.as_ref())
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
 
     let pricing_list: Vec<PricingInfo> = pricing_models
         .into_iter()

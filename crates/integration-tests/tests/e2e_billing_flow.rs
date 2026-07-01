@@ -2,6 +2,7 @@
 //!
 //! 验证数据链路：UsageAccumulator -> BillingCalculator -> UsageLog -> Distribution
 
+use bigdecimal::BigDecimal;
 use integration_tests::common::VerificationChain;
 use integration_tests::mocks::MockExecutionContext;
 use integration_tests::mocks::database::MockUsageLog;
@@ -9,7 +10,6 @@ use keycompute_billing::{UsageSource, calculate_amount};
 use keycompute_distribution::{DistributionLevel, DistributionShare};
 use keycompute_types::{PricingSnapshot, UsageAccumulator};
 use rust_decimal::Decimal;
-use sqlx::types::BigDecimal;
 
 /// 测试完整的计费计算流程
 #[test]

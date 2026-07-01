@@ -1,5 +1,5 @@
 -- tenants: 租户/组织表
-CREATE TABLE tenants (
+CREATE TABLE IF NOT EXISTS tenants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(100) NOT NULL UNIQUE,
@@ -12,11 +12,11 @@ CREATE TABLE tenants (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_tenants_slug ON tenants(slug);
-CREATE INDEX idx_tenants_status ON tenants(status);
+CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
+CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
 
 -- users: 用户表
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     email VARCHAR(255) NOT NULL UNIQUE,
@@ -27,9 +27,9 @@ CREATE TABLE users (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_users_tenant_id ON users(tenant_id);
-CREATE INDEX idx_users_email ON users(email);
-CREATE UNIQUE INDEX uq_users_single_system_role ON users (role) WHERE role = 'system';
+CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_single_system_role ON users (role) WHERE role = 'system';
 
 CREATE OR REPLACE FUNCTION prevent_system_role_change()
 RETURNS TRIGGER AS $$
@@ -46,6 +46,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_prevent_system_role_change ON users;
 CREATE TRIGGER trg_prevent_system_role_change
 BEFORE UPDATE OF role ON users
 FOR EACH ROW
@@ -62,13 +63,14 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trg_prevent_system_user_delete ON users;
 CREATE TRIGGER trg_prevent_system_user_delete
 BEFORE DELETE ON users
 FOR EACH ROW
 EXECUTE FUNCTION prevent_system_user_delete();
 
 -- produce_ai_keys: Produce AI Key 表（用户访问系统的 API Key）
-CREATE TABLE produce_ai_keys (
+CREATE TABLE IF NOT EXISTS produce_ai_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL,
     user_id UUID NOT NULL,
@@ -83,12 +85,12 @@ CREATE TABLE produce_ai_keys (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_produce_ai_keys_tenant ON produce_ai_keys(tenant_id);
-CREATE INDEX idx_produce_ai_keys_user ON produce_ai_keys(user_id);
-CREATE INDEX idx_produce_ai_keys_hash ON produce_ai_keys(produce_ai_key_hash);
-CREATE INDEX idx_produce_ai_keys_revoked ON produce_ai_keys(revoked) WHERE revoked = FALSE;
+CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_tenant ON produce_ai_keys(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_user ON produce_ai_keys(user_id);
+CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_hash ON produce_ai_keys(produce_ai_key_hash);
+CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_revoked ON produce_ai_keys(revoked) WHERE revoked = FALSE;
 -- accounts: 上游 Provider 账号池
-CREATE TABLE accounts (
+CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL,
     provider VARCHAR(50) NOT NULL,
@@ -106,12 +108,12 @@ CREATE TABLE accounts (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_accounts_tenant_id ON accounts(tenant_id);
-CREATE INDEX idx_accounts_provider ON accounts(provider);
-CREATE INDEX idx_accounts_enabled ON accounts(enabled) WHERE enabled = TRUE;
-CREATE INDEX idx_accounts_visibility ON accounts(visibility) WHERE visibility = 'global';
+CREATE INDEX IF NOT EXISTS idx_accounts_tenant_id ON accounts(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_accounts_provider ON accounts(provider);
+CREATE INDEX IF NOT EXISTS idx_accounts_enabled ON accounts(enabled) WHERE enabled = TRUE;
+CREATE INDEX IF NOT EXISTS idx_accounts_visibility ON accounts(visibility) WHERE visibility = 'global';
 -- pricing_models: 模型定价表
-CREATE TABLE pricing_models (
+CREATE TABLE IF NOT EXISTS pricing_models (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID,
     model_name VARCHAR(100) NOT NULL,
@@ -127,14 +129,14 @@ CREATE TABLE pricing_models (
     UNIQUE(tenant_id, model_name, billing_dimension)
 );
 
-CREATE INDEX idx_pricing_models_tenant_id ON pricing_models(tenant_id);
-CREATE INDEX idx_pricing_models_model ON pricing_models(model_name);
-CREATE INDEX idx_pricing_models_billing_dimension ON pricing_models(billing_dimension);
-CREATE INDEX idx_pricing_models_default ON pricing_models(is_default) WHERE is_default = TRUE;
+CREATE INDEX IF NOT EXISTS idx_pricing_models_tenant_id ON pricing_models(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_pricing_models_model ON pricing_models(model_name);
+CREATE INDEX IF NOT EXISTS idx_pricing_models_billing_dimension ON pricing_models(billing_dimension);
+CREATE INDEX IF NOT EXISTS idx_pricing_models_default ON pricing_models(is_default) WHERE is_default = TRUE;
 
 COMMENT ON COLUMN pricing_models.billing_dimension IS '计费维度: node 或 provideraccount';
 -- usage_logs: 计费主账本，不可变
-CREATE TABLE usage_logs (
+CREATE TABLE IF NOT EXISTS usage_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id UUID NOT NULL UNIQUE,
     tenant_id UUID NOT NULL,
@@ -157,13 +159,13 @@ CREATE TABLE usage_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_usage_logs_tenant ON usage_logs(tenant_id);
-CREATE INDEX idx_usage_logs_user ON usage_logs(user_id);
-CREATE INDEX idx_usage_logs_produce_ai_key ON usage_logs(produce_ai_key_id);
-CREATE INDEX idx_usage_logs_created ON usage_logs(created_at);
-CREATE INDEX idx_usage_logs_request ON usage_logs(request_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_tenant ON usage_logs(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_user ON usage_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_produce_ai_key ON usage_logs(produce_ai_key_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_created ON usage_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_request ON usage_logs(request_id);
 -- distribution_records: 二级分销记录
-CREATE TABLE distribution_records (
+CREATE TABLE IF NOT EXISTS distribution_records (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     usage_log_id UUID NOT NULL REFERENCES usage_logs(id) ON DELETE CASCADE,
     tenant_id UUID NOT NULL,
@@ -175,12 +177,12 @@ CREATE TABLE distribution_records (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_distribution_records_tenant_id ON distribution_records(tenant_id);
-CREATE INDEX idx_distribution_records_usage_log_id ON distribution_records(usage_log_id);
-CREATE INDEX idx_distribution_records_beneficiary_id ON distribution_records(beneficiary_id);
-CREATE INDEX idx_distribution_records_status ON distribution_records(status);
+CREATE INDEX IF NOT EXISTS idx_distribution_records_tenant_id ON distribution_records(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_distribution_records_usage_log_id ON distribution_records(usage_log_id);
+CREATE INDEX IF NOT EXISTS idx_distribution_records_beneficiary_id ON distribution_records(beneficiary_id);
+CREATE INDEX IF NOT EXISTS idx_distribution_records_status ON distribution_records(status);
 -- tenant_distribution_rules: 租户分销规则
-CREATE TABLE tenant_distribution_rules (
+CREATE TABLE IF NOT EXISTS tenant_distribution_rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL,
     beneficiary_id UUID NOT NULL,
@@ -196,12 +198,12 @@ CREATE TABLE tenant_distribution_rules (
     UNIQUE(tenant_id, beneficiary_id, effective_from)
 );
 
-CREATE INDEX idx_tenant_distribution_rules_tenant ON tenant_distribution_rules(tenant_id);
-CREATE INDEX idx_tenant_distribution_rules_active ON tenant_distribution_rules(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_tenant_distribution_rules_tenant ON tenant_distribution_rules(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_tenant_distribution_rules_active ON tenant_distribution_rules(is_active) WHERE is_active = TRUE;
 -- pending_registrations: 待完成注册表
 -- 用于邮箱验证码注册流程，在验证码验证成功前暂存注册占位状态
 
-CREATE TABLE pending_registrations (
+CREATE TABLE IF NOT EXISTS pending_registrations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email VARCHAR(255) NOT NULL UNIQUE,
     -- 首次触达时锁定的推荐码（可选）
@@ -222,13 +224,13 @@ CREATE TABLE pending_registrations (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_pending_registrations_email ON pending_registrations(email);
-CREATE INDEX idx_pending_registrations_expires ON pending_registrations(expires_at);
-CREATE INDEX idx_pending_registrations_referral_code ON pending_registrations(referral_code);
+CREATE INDEX IF NOT EXISTS idx_pending_registrations_email ON pending_registrations(email);
+CREATE INDEX IF NOT EXISTS idx_pending_registrations_expires ON pending_registrations(expires_at);
+CREATE INDEX IF NOT EXISTS idx_pending_registrations_referral_code ON pending_registrations(referral_code);
 -- user_credentials: 用户密码凭证表
 -- 存储用户密码哈希和登录安全相关信息
 
-CREATE TABLE user_credentials (
+CREATE TABLE IF NOT EXISTS user_credentials (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     -- 密码哈希 (argon2id)
@@ -250,15 +252,15 @@ CREATE TABLE user_credentials (
 );
 
 -- 索引
-CREATE INDEX idx_user_credentials_user ON user_credentials(user_id);
-CREATE INDEX idx_user_credentials_locked ON user_credentials(locked_until) 
+CREATE INDEX IF NOT EXISTS idx_user_credentials_user ON user_credentials(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_credentials_locked ON user_credentials(locked_until) 
     WHERE locked_until IS NOT NULL;
-CREATE INDEX idx_user_credentials_verified ON user_credentials(email_verified) 
+CREATE INDEX IF NOT EXISTS idx_user_credentials_verified ON user_credentials(email_verified) 
     WHERE email_verified = FALSE;
 -- password_resets: 密码重置令牌表
 -- 管理用户密码重置流程
 
-CREATE TABLE password_resets (
+CREATE TABLE IF NOT EXISTS password_resets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     -- 重置令牌
@@ -274,14 +276,14 @@ CREATE TABLE password_resets (
 );
 
 -- 索引
-CREATE INDEX idx_password_resets_token ON password_resets(token);
-CREATE INDEX idx_password_resets_expires ON password_resets(expires_at) 
+CREATE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets(token);
+CREATE INDEX IF NOT EXISTS idx_password_resets_expires ON password_resets(expires_at) 
     WHERE used = FALSE;
-CREATE INDEX idx_password_resets_user ON password_resets(user_id);
+CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id);
 -- user_referrals: 用户推荐关系表
 -- 用于存储谁推荐了谁，支持二级分销
 
-CREATE TABLE user_referrals (
+CREATE TABLE IF NOT EXISTS user_referrals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 被推荐人（新用户）
     user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
@@ -298,18 +300,18 @@ CREATE TABLE user_referrals (
 );
 
 -- 索引
-CREATE INDEX idx_user_referrals_user ON user_referrals(user_id);
-CREATE INDEX idx_user_referrals_level1 ON user_referrals(level1_referrer_id);
-CREATE INDEX idx_user_referrals_level2 ON user_referrals(level2_referrer_id);
-CREATE INDEX idx_user_referrals_status ON user_referrals(status);
+CREATE INDEX IF NOT EXISTS idx_user_referrals_user ON user_referrals(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_referrals_level1 ON user_referrals(level1_referrer_id);
+CREATE INDEX IF NOT EXISTS idx_user_referrals_level2 ON user_referrals(level2_referrer_id);
+CREATE INDEX IF NOT EXISTS idx_user_referrals_status ON user_referrals(status);
 -- 为 distribution_records 添加 level 字段
 -- 用于明确标识分销层级（level1 或 level2）
 
 ALTER TABLE distribution_records
-ADD COLUMN level VARCHAR(20) NOT NULL DEFAULT 'level1';
+ADD COLUMN IF NOT EXISTS level VARCHAR(20) NOT NULL DEFAULT 'level1';
 
 -- 创建索引以支持按层级查询
-CREATE INDEX idx_distribution_records_level ON distribution_records(level);
+CREATE INDEX IF NOT EXISTS idx_distribution_records_level ON distribution_records(level);
 
 -- 更新已有数据（根据 share_ratio 推断层级）
 -- share_ratio > 2% 的为 level1，否则为 level2
@@ -337,9 +339,16 @@ WHERE id IN (
 
 -- 添加唯一约束防止重复分销记录
 -- 同一 usage_log 的同一受益人在同一层级只能有一条记录
-ALTER TABLE distribution_records
-ADD CONSTRAINT uk_distribution_records_unique
-UNIQUE (usage_log_id, beneficiary_id, level);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uk_distribution_records_unique'
+    ) THEN
+        ALTER TABLE distribution_records
+        ADD CONSTRAINT uk_distribution_records_unique
+        UNIQUE (usage_log_id, beneficiary_id, level);
+    END IF;
+END $$;
 
 -- 添加注释说明幂等性保护
 COMMENT ON CONSTRAINT uk_distribution_records_unique ON distribution_records IS 
@@ -388,12 +397,12 @@ CREATE TABLE IF NOT EXISTS payment_orders (
 );
 
 -- 创建索引
-CREATE INDEX idx_payment_orders_tenant_id ON payment_orders(tenant_id);
-CREATE INDEX idx_payment_orders_user_id ON payment_orders(user_id);
-CREATE INDEX idx_payment_orders_out_trade_no ON payment_orders(out_trade_no);
-CREATE INDEX idx_payment_orders_trade_no ON payment_orders(trade_no);
-CREATE INDEX idx_payment_orders_status ON payment_orders(status);
-CREATE INDEX idx_payment_orders_created_at ON payment_orders(created_at);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_tenant_id ON payment_orders(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_user_id ON payment_orders(user_id);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_out_trade_no ON payment_orders(out_trade_no);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_trade_no ON payment_orders(trade_no);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_status ON payment_orders(status);
+CREATE INDEX IF NOT EXISTS idx_payment_orders_created_at ON payment_orders(created_at);
 
 -- 添加注释
 COMMENT ON TABLE payment_orders IS '支付订单表';
@@ -437,8 +446,8 @@ CREATE TABLE IF NOT EXISTS user_balances (
 );
 
 -- 创建索引
-CREATE INDEX idx_user_balances_tenant_id ON user_balances(tenant_id);
-CREATE INDEX idx_user_balances_user_id ON user_balances(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_balances_tenant_id ON user_balances(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_user_balances_user_id ON user_balances(user_id);
 
 -- 添加注释
 COMMENT ON TABLE user_balances IS '用户余额表';
@@ -475,12 +484,12 @@ CREATE TABLE IF NOT EXISTS balance_transactions (
 );
 
 -- 创建索引
-CREATE INDEX idx_balance_transactions_tenant_id ON balance_transactions(tenant_id);
-CREATE INDEX idx_balance_transactions_user_id ON balance_transactions(user_id);
-CREATE INDEX idx_balance_transactions_order_id ON balance_transactions(order_id);
-CREATE INDEX idx_balance_transactions_usage_log_id ON balance_transactions(usage_log_id);
-CREATE INDEX idx_balance_transactions_type ON balance_transactions(transaction_type);
-CREATE INDEX idx_balance_transactions_created_at ON balance_transactions(created_at);
+CREATE INDEX IF NOT EXISTS idx_balance_transactions_tenant_id ON balance_transactions(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_balance_transactions_user_id ON balance_transactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_balance_transactions_order_id ON balance_transactions(order_id);
+CREATE INDEX IF NOT EXISTS idx_balance_transactions_usage_log_id ON balance_transactions(usage_log_id);
+CREATE INDEX IF NOT EXISTS idx_balance_transactions_type ON balance_transactions(transaction_type);
+CREATE INDEX IF NOT EXISTS idx_balance_transactions_created_at ON balance_transactions(created_at);
 
 -- 添加注释
 COMMENT ON TABLE balance_transactions IS '余额变动记录表';
@@ -577,6 +586,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS trigger_update_system_settings_updated_at ON system_settings;
 CREATE TRIGGER trigger_update_system_settings_updated_at
     BEFORE UPDATE ON system_settings
     FOR EACH ROW
@@ -587,7 +597,7 @@ CREATE TRIGGER trigger_update_system_settings_updated_at
 -- ============================================================================
 
 -- nodes: 节点注册信息表
-CREATE TABLE nodes (
+CREATE TABLE IF NOT EXISTS nodes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_user_id UUID NOT NULL,
     client_instance_id TEXT NOT NULL,
@@ -602,11 +612,11 @@ CREATE TABLE nodes (
     UNIQUE (owner_user_id, client_instance_id)
 );
 
-CREATE INDEX idx_nodes_status ON nodes(status);
-CREATE INDEX idx_nodes_last_heartbeat_at ON nodes(last_heartbeat_at);
+CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
+CREATE INDEX IF NOT EXISTS idx_nodes_last_heartbeat_at ON nodes(last_heartbeat_at);
 
 -- node_sessions: 节点会话管理表
-CREATE TABLE node_sessions (
+CREATE TABLE IF NOT EXISTS node_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     session_token_hash TEXT NOT NULL UNIQUE,
@@ -617,11 +627,11 @@ CREATE TABLE node_sessions (
     revoked_at TIMESTAMPTZ
 );
 
-CREATE INDEX idx_node_sessions_node_id_expires_at ON node_sessions(node_id, expires_at);
-CREATE INDEX idx_node_sessions_accepted_models ON node_sessions USING GIN (accepted_models_json);
+CREATE INDEX IF NOT EXISTS idx_node_sessions_node_id_expires_at ON node_sessions(node_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_node_sessions_accepted_models ON node_sessions USING GIN (accepted_models_json);
 
 -- node_tasks: 节点任务生命周期表
-CREATE TABLE node_tasks (
+CREATE TABLE IF NOT EXISTS node_tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id UUID NOT NULL UNIQUE,
     user_id UUID NOT NULL,
@@ -644,12 +654,12 @@ CREATE TABLE node_tasks (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_node_tasks_status_model_deadline ON node_tasks(status, model, deadline_at);
-CREATE INDEX idx_node_tasks_assigned_node_status ON node_tasks(assigned_node_id, status);
-CREATE INDEX idx_node_tasks_assigned_session_lease ON node_tasks(assigned_session_id, lease_id);
+CREATE INDEX IF NOT EXISTS idx_node_tasks_status_model_deadline ON node_tasks(status, model, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_node_tasks_assigned_node_status ON node_tasks(assigned_node_id, status);
+CREATE INDEX IF NOT EXISTS idx_node_tasks_assigned_session_lease ON node_tasks(assigned_session_id, lease_id);
 
 -- node_task_submissions: 节点任务提交结果表 (幂等控制)
-CREATE TABLE node_task_submissions (
+CREATE TABLE IF NOT EXISTS node_task_submissions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     task_id UUID NOT NULL REFERENCES node_tasks(id) ON DELETE CASCADE,
     lease_id UUID NOT NULL,
@@ -662,7 +672,7 @@ CREATE TABLE node_task_submissions (
     UNIQUE (task_id, lease_id)
 );
 
-CREATE INDEX idx_node_task_submissions_task_lease ON node_task_submissions(task_id, lease_id);
+CREATE INDEX IF NOT EXISTS idx_node_task_submissions_task_lease ON node_task_submissions(task_id, lease_id);
 
 -- ============================================================================
 -- 管理端监控查询性能优化索引
@@ -670,20 +680,20 @@ CREATE INDEX idx_node_task_submissions_task_lease ON node_task_submissions(task_
 
 -- node_tasks 监控追踪查询优化索引
 -- 用于 admin_monitoring.rs 中的 traces 查询（ORDER BY created_at DESC LIMIT 50）
-CREATE INDEX idx_node_tasks_created_at_desc ON node_tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_node_tasks_created_at_desc ON node_tasks(created_at DESC);
 
 -- node_tasks 完成时间统计优化索引（部分索引）
 -- 用于 admin_monitoring.rs 中的 avg_node_latency_ms 统计（WHERE finished_at IS NOT NULL）
-CREATE INDEX idx_node_tasks_finished_at ON node_tasks(finished_at) WHERE finished_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_node_tasks_finished_at ON node_tasks(finished_at) WHERE finished_at IS NOT NULL;
 
 -- node_task_submissions 监控查询优化索引
 -- 用于 admin_monitoring.rs 中的 LEFT JOIN LATERAL 子查询（WHERE task_id = nt.id ORDER BY created_at DESC）
-CREATE INDEX idx_node_task_submissions_task_id_created_at ON node_task_submissions(task_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_node_task_submissions_task_id_created_at ON node_task_submissions(task_id, created_at DESC);
 
 -- node_sessions 监控查询优化索引
 -- 用于 admin_monitoring.rs 和 admin_node_gateway.rs 中的 LEFT JOIN LATERAL 子查询
 -- （WHERE node_id = n.id ORDER BY last_seen_at DESC LIMIT 1）
-CREATE INDEX idx_node_sessions_node_id_last_seen_at ON node_sessions(node_id, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_node_sessions_node_id_last_seen_at ON node_sessions(node_id, last_seen_at DESC);
 
 -- ============================================================================
 -- user_node_gateway_tokens: 用户节点网关注册令牌表
@@ -698,7 +708,7 @@ CREATE INDEX idx_node_sessions_node_id_last_seen_at ON node_sessions(node_id, la
 --   - signature = HMAC-SHA256(secret, token_id) 后 32 个十六进制字符（取 HMAC 后 16 字节）
 -- ============================================================================
 
-CREATE TABLE user_node_gateway_tokens (
+CREATE TABLE IF NOT EXISTS user_node_gateway_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     -- token 的 SHA-256 hash（冗余存储，用于额外校验）
@@ -725,14 +735,14 @@ CREATE TABLE user_node_gateway_tokens (
 );
 
 -- 索引
-CREATE INDEX idx_user_node_gateway_tokens_user_id ON user_node_gateway_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_user_id ON user_node_gateway_tokens(user_id);
 -- 待审批列表查询
-CREATE INDEX idx_user_node_gateway_tokens_pending ON user_node_gateway_tokens(status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_pending ON user_node_gateway_tokens(status) WHERE status = 'pending';
 -- 已审批且未被消费的 token 查询（注册时使用）
-CREATE INDEX idx_user_node_gateway_tokens_approved ON user_node_gateway_tokens(status) WHERE status = 'approved';
+CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_approved ON user_node_gateway_tokens(status) WHERE status = 'approved';
 -- token_hash 上有 UNIQUE 约束，已自动创建唯一索引，无需额外 B-tree 索引
 -- 确保每用户同一时间仅有一个活跃 token（pending 或 approved），防止并发 POST 创建多个
-CREATE UNIQUE INDEX idx_user_node_gateway_tokens_one_active ON user_node_gateway_tokens(user_id) WHERE status IN ('pending', 'approved');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_one_active ON user_node_gateway_tokens(user_id) WHERE status IN ('pending', 'approved');
 
 -- 注释
 COMMENT ON TABLE user_node_gateway_tokens IS '用户节点网关注册令牌表（审批制 + HMAC 签名 + 一次性使用）';
@@ -756,7 +766,7 @@ COMMENT ON COLUMN user_node_gateway_tokens.updated_at IS '最后更新时间';
 -- tips = usage_log.user_amount * node_tip_ratio
 -- ============================================================================
 
-CREATE TABLE node_tips (
+CREATE TABLE IF NOT EXISTS node_tips (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 关联的计费记录
     usage_log_id UUID NOT NULL REFERENCES usage_logs(id) ON DELETE CASCADE,
@@ -780,12 +790,19 @@ CREATE TABLE node_tips (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_node_tips_owner_user_id ON node_tips(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_node_tips_owner_user_id ON node_tips(owner_user_id);
 -- usage_log_id 上有 UNIQUE 约束，已自动创建唯一索引，无需额外 B-tree 索引
 -- 按用户查询历史记录的复合索引（覆盖 list_by_user 的 ORDER BY created_at DESC）
-CREATE INDEX idx_node_tips_owner_created ON node_tips(owner_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_node_tips_owner_created ON node_tips(owner_user_id, created_at DESC);
 -- 幂等性保护：同一 usage_log 只允许一条 tips 记录
-ALTER TABLE node_tips ADD CONSTRAINT uk_node_tips_usage_log_id UNIQUE (usage_log_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'uk_node_tips_usage_log_id'
+    ) THEN
+        ALTER TABLE node_tips ADD CONSTRAINT uk_node_tips_usage_log_id UNIQUE (usage_log_id);
+    END IF;
+END $$;
 
 COMMENT ON TABLE node_tips IS '节点租赁小费表';
 COMMENT ON COLUMN node_tips.usage_log_id IS '关联的计费记录 ID';
@@ -809,7 +826,7 @@ COMMENT ON COLUMN node_tips.bill_amount IS '原始计费金额（快照，审计
 --   - 密钥复用 CRYPTO__SECRET_KEY 配置
 -- ============================================================================
 
-CREATE TABLE node_tip_withdrawals (
+CREATE TABLE IF NOT EXISTS node_tip_withdrawals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 申请人
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -843,10 +860,10 @@ CREATE TABLE node_tip_withdrawals (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_node_tip_withdrawals_user_id ON node_tip_withdrawals(user_id);
-CREATE INDEX idx_node_tip_withdrawals_status ON node_tip_withdrawals(status);
+CREATE INDEX IF NOT EXISTS idx_node_tip_withdrawals_user_id ON node_tip_withdrawals(user_id);
+CREATE INDEX IF NOT EXISTS idx_node_tip_withdrawals_status ON node_tip_withdrawals(status);
 -- 待审批提现列表查询优化
-CREATE INDEX idx_node_tip_withdrawals_pending ON node_tip_withdrawals(status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_node_tip_withdrawals_pending ON node_tip_withdrawals(status) WHERE status = 'pending';
 
 COMMENT ON TABLE node_tip_withdrawals IS '小费提现记录表';
 COMMENT ON COLUMN node_tip_withdrawals.withdrawal_type IS '提现方式：alipay / balance';

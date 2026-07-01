@@ -1,11 +1,11 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 用户推荐关系模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct UserReferral {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -27,7 +27,7 @@ pub struct CreateUserReferralRequest {
 }
 
 /// 推荐统计
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromQueryResult)]
 pub struct ReferralStats {
     pub total_referrals: i64,
     pub level1_count: i64,
@@ -37,98 +37,86 @@ pub struct ReferralStats {
 impl UserReferral {
     /// 创建推荐关系
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreateUserReferralRequest,
     ) -> Result<UserReferral, DbError> {
-        let referral = sqlx::query_as::<_, UserReferral>(
-            r#"
-            INSERT INTO user_referrals (
-                user_id, level1_referrer_id, level2_referrer_id, source
-            )
-            VALUES ($1, $2, $3, $4)
-            RETURNING *
-            "#,
-        )
-        .bind(req.user_id)
-        .bind(req.level1_referrer_id)
-        .bind(req.level2_referrer_id)
-        .bind(&req.source)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_referrals (user_id, level1_referrer_id, level2_referrer_id, source) VALUES ($1, $2, $3, $4) RETURNING *"#,
+            [
+                req.user_id.into(),
+                req.level1_referrer_id.into(),
+                req.level2_referrer_id.into(),
+                req.source.clone().into(),
+            ],
+        );
+        let referral = UserReferral::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(referral)
     }
 
     /// 根据用户 ID 查找推荐关系
     pub async fn find_by_user(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<Option<UserReferral>, DbError> {
-        let referral =
-            sqlx::query_as::<_, UserReferral>("SELECT * FROM user_referrals WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_optional(pool)
-                .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_referrals WHERE user_id = $1",
+            [user_id.into()],
+        );
+        let referral = UserReferral::find_by_statement(stmt).one(db).await?;
 
         Ok(referral)
     }
 
     /// 查找一级推荐人推荐的所有用户
     pub async fn find_by_level1_referrer(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         referrer_id: Uuid,
     ) -> Result<Vec<UserReferral>, DbError> {
-        let referrals = sqlx::query_as::<_, UserReferral>(
-            r#"
-            SELECT * FROM user_referrals
-            WHERE level1_referrer_id = $1
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(referrer_id)
-        .fetch_all(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_referrals WHERE level1_referrer_id = $1 ORDER BY created_at DESC",
+            [referrer_id.into()],
+        );
+        let referrals = UserReferral::find_by_statement(stmt).all(db).await?;
 
         Ok(referrals)
     }
 
     /// 查找二级推荐人推荐的所有用户
     pub async fn find_by_level2_referrer(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         referrer_id: Uuid,
     ) -> Result<Vec<UserReferral>, DbError> {
-        let referrals = sqlx::query_as::<_, UserReferral>(
-            r#"
-            SELECT * FROM user_referrals
-            WHERE level2_referrer_id = $1
-            ORDER BY created_at DESC
-            "#,
-        )
-        .bind(referrer_id)
-        .fetch_all(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_referrals WHERE level2_referrer_id = $1 ORDER BY created_at DESC",
+            [referrer_id.into()],
+        );
+        let referrals = UserReferral::find_by_statement(stmt).all(db).await?;
 
         Ok(referrals)
     }
 
     /// 获取用户的推荐统计
     pub async fn get_stats_by_referrer(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         referrer_id: Uuid,
     ) -> Result<ReferralStats, DbError> {
-        let stats = sqlx::query_as::<_, ReferralStats>(
-            r#"
-            SELECT
-                COUNT(*) as total_referrals,
-                COUNT(CASE WHEN level1_referrer_id = $1 THEN 1 END) as level1_count,
-                COUNT(CASE WHEN level2_referrer_id = $1 THEN 1 END) as level2_count
-            FROM user_referrals
-            WHERE level1_referrer_id = $1 OR level2_referrer_id = $1
-            "#,
-        )
-        .bind(referrer_id)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"SELECT COUNT(*) as total_referrals, COUNT(CASE WHEN level1_referrer_id = $1 THEN 1 END) as level1_count, COUNT(CASE WHEN level2_referrer_id = $1 THEN 1 END) as level2_count FROM user_referrals WHERE level1_referrer_id = $1 OR level2_referrer_id = $1"#,
+            [referrer_id.into()],
+        );
+        let stats = ReferralStats::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("stats query failed".to_string()))?;
 
         Ok(stats)
     }
@@ -136,21 +124,18 @@ impl UserReferral {
     /// 更新推荐关系状态
     pub async fn update_status(
         &self,
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         status: &str,
     ) -> Result<UserReferral, DbError> {
-        let referral = sqlx::query_as::<_, UserReferral>(
-            r#"
-            UPDATE user_referrals
-            SET status = $1, updated_at = NOW()
-            WHERE id = $2
-            RETURNING *
-            "#,
-        )
-        .bind(status)
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE user_referrals SET status = $1, updated_at = NOW() WHERE id = $2 RETURNING *",
+            [status.into(), self.id.into()],
+        );
+        let referral = UserReferral::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserReferral", self.id.to_string()))?;
 
         Ok(referral)
     }

@@ -9,8 +9,7 @@
 use keycompute_db::{BalanceTransaction, UserBalance};
 use keycompute_types::{KeyComputeError, Result};
 use rust_decimal::Decimal;
-use sqlx::PgPool;
-use std::sync::Arc;
+use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 
 /// 余额不足阈值（元）
@@ -28,20 +27,20 @@ pub fn min_balance_threshold() -> Decimal {
 /// - 冻结/解冻
 #[derive(Clone)]
 pub struct BalanceService {
-    pool: Arc<PgPool>,
+    pool: DatabaseConnection,
 }
 
 impl std::fmt::Debug for BalanceService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BalanceService")
-            .field("pool", &"PgPool")
+            .field("pool", &"DatabaseConnection")
             .finish()
     }
 }
 
 impl BalanceService {
     /// 创建新的余额服务
-    pub fn new(pool: Arc<PgPool>) -> Self {
+    pub fn new(pool: DatabaseConnection) -> Self {
         Self { pool }
     }
 
@@ -148,19 +147,18 @@ impl BalanceService {
         order_id: Option<Uuid>,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
-        // 开启事务
-        let mut tx = self.pool.begin().await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to begin transaction: {}", e))
-        })?;
-
-        let result =
-            UserBalance::recharge(&mut tx, user_id, tenant_id, amount, order_id, description).await;
+        let result = UserBalance::recharge(
+            &self.pool,
+            user_id,
+            tenant_id,
+            amount,
+            order_id,
+            description,
+        )
+        .await;
 
         match result {
             Ok((balance, transaction)) => {
-                tx.commit().await.map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to commit transaction: {}", e))
-                })?;
                 tracing::info!(
                     user_id = %user_id,
                     amount = %amount,
@@ -169,13 +167,10 @@ impl BalanceService {
                 );
                 Ok((balance, transaction))
             }
-            Err(e) => {
-                tx.rollback().await.ok();
-                Err(KeyComputeError::DatabaseError(format!(
-                    "Failed to recharge balance: {}",
-                    e
-                )))
-            }
+            Err(e) => Err(KeyComputeError::DatabaseError(format!(
+                "Failed to recharge balance: {}",
+                e
+            ))),
         }
     }
 
@@ -200,19 +195,11 @@ impl BalanceService {
         usage_log_id: Option<Uuid>,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
-        // 开启事务
-        let mut tx = self.pool.begin().await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to begin transaction: {}", e))
-        })?;
-
         let result =
-            UserBalance::consume(&mut tx, user_id, amount, usage_log_id, description).await;
+            UserBalance::consume(&self.pool, user_id, amount, usage_log_id, description).await;
 
         match result {
             Ok((balance, transaction)) => {
-                tx.commit().await.map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to commit transaction: {}", e))
-                })?;
                 tracing::info!(
                     user_id = %user_id,
                     amount = %amount,
@@ -222,26 +209,19 @@ impl BalanceService {
                 Ok((balance, transaction))
             }
             Err(e) if e.is_insufficient_balance() => {
-                tx.rollback().await.ok();
                 Err(KeyComputeError::ValidationError(format!(
                     "Insufficient balance for user {}: required {}",
                     user_id, amount
                 )))
             }
-            Err(e) if e.is_not_found() => {
-                tx.rollback().await.ok();
-                Err(KeyComputeError::ValidationError(format!(
-                    "User balance not found for user {}",
-                    user_id
-                )))
-            }
-            Err(e) => {
-                tx.rollback().await.ok();
-                Err(KeyComputeError::DatabaseError(format!(
-                    "Failed to consume balance: {}",
-                    e
-                )))
-            }
+            Err(e) if e.is_not_found() => Err(KeyComputeError::ValidationError(format!(
+                "User balance not found for user {}",
+                user_id
+            ))),
+            Err(e) => Err(KeyComputeError::DatabaseError(format!(
+                "Failed to consume balance: {}",
+                e
+            ))),
         }
     }
 
@@ -254,18 +234,10 @@ impl BalanceService {
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
-        // 开启事务
-        let mut tx = self.pool.begin().await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to begin transaction: {}", e))
-        })?;
-
-        let result = UserBalance::freeze(&mut tx, user_id, amount, description).await;
+        let result = UserBalance::freeze(&self.pool, user_id, amount, description).await;
 
         match result {
             Ok((balance, transaction)) => {
-                tx.commit().await.map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to commit transaction: {}", e))
-                })?;
                 tracing::info!(
                     user_id = %user_id,
                     amount = %amount,
@@ -275,26 +247,19 @@ impl BalanceService {
                 Ok((balance, transaction))
             }
             Err(e) if e.is_insufficient_balance() => {
-                tx.rollback().await.ok();
                 Err(KeyComputeError::ValidationError(format!(
                     "Insufficient available balance for user {}: required {}",
                     user_id, amount
                 )))
             }
-            Err(e) if e.is_not_found() => {
-                tx.rollback().await.ok();
-                Err(KeyComputeError::ValidationError(format!(
-                    "User balance not found for user {}",
-                    user_id
-                )))
-            }
-            Err(e) => {
-                tx.rollback().await.ok();
-                Err(KeyComputeError::DatabaseError(format!(
-                    "Failed to freeze balance: {}",
-                    e
-                )))
-            }
+            Err(e) if e.is_not_found() => Err(KeyComputeError::ValidationError(format!(
+                "User balance not found for user {}",
+                user_id
+            ))),
+            Err(e) => Err(KeyComputeError::DatabaseError(format!(
+                "Failed to freeze balance: {}",
+                e
+            ))),
         }
     }
 
@@ -319,18 +284,10 @@ impl BalanceService {
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
-        // 开启事务
-        let mut tx = self.pool.begin().await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to begin transaction: {}", e))
-        })?;
-
-        let result = UserBalance::unfreeze(&mut tx, user_id, amount, description).await;
+        let result = UserBalance::unfreeze(&self.pool, user_id, amount, description).await;
 
         match result {
             Ok((balance, transaction)) => {
-                tx.commit().await.map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to commit transaction: {}", e))
-                })?;
                 tracing::info!(
                     user_id = %user_id,
                     amount = %amount,
@@ -340,26 +297,19 @@ impl BalanceService {
                 Ok((balance, transaction))
             }
             Err(e) if e.is_insufficient_balance() => {
-                tx.rollback().await.ok();
                 Err(KeyComputeError::ValidationError(format!(
                     "Insufficient frozen balance for user {}: required {}",
                     user_id, amount
                 )))
             }
-            Err(e) if e.is_not_found() => {
-                tx.rollback().await.ok();
-                Err(KeyComputeError::ValidationError(format!(
-                    "User balance not found for user {}",
-                    user_id
-                )))
-            }
-            Err(e) => {
-                tx.rollback().await.ok();
-                Err(KeyComputeError::DatabaseError(format!(
-                    "Failed to unfreeze balance: {}",
-                    e
-                )))
-            }
+            Err(e) if e.is_not_found() => Err(KeyComputeError::ValidationError(format!(
+                "User balance not found for user {}",
+                user_id
+            ))),
+            Err(e) => Err(KeyComputeError::DatabaseError(format!(
+                "Failed to unfreeze balance: {}",
+                e
+            ))),
         }
     }
 

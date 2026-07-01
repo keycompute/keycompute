@@ -7,7 +7,7 @@ use keycompute_db::PricingModel;
 use keycompute_types::{KeyComputeError, PricingSnapshot, Result};
 use lru::LruCache;
 use rust_decimal::Decimal;
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -103,7 +103,7 @@ impl CacheEntry {
 #[derive(Clone)]
 pub struct PricingService {
     /// 数据库连接池（可选，用于测试时可以不提供）
-    pool: Option<Arc<PgPool>>,
+    pool: Option<DatabaseConnection>,
     /// 价格缓存：key = "tenant_id:model_name:provider"，使用 LRU 淘汰策略
     cache: Arc<RwLock<LruCache<String, CacheEntry>>>,
     /// 缓存 TTL（秒）
@@ -115,7 +115,7 @@ pub struct PricingService {
 impl std::fmt::Debug for PricingService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PricingService")
-            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field("pool", &"DatabaseConnection")
             .field("cache", &"LruCache")
             .field("cache_ttl_secs", &self.cache_ttl_secs)
             .field("cache_capacity", &self.cache_capacity)
@@ -143,7 +143,7 @@ impl PricingService {
     }
 
     /// 创建带数据库连接的定价服务
-    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+    pub fn with_pool(pool: DatabaseConnection) -> Self {
         Self {
             pool: Some(pool),
             cache: Arc::new(RwLock::new(LruCache::new(
@@ -348,7 +348,7 @@ impl PricingService {
     /// 定价仅按计费维度（"node" / "provideraccount"）区分，不按真实 provider 区分
     async fn load_from_database_with_source(
         &self,
-        pool: &PgPool,
+        pool: &DatabaseConnection,
         model_name: &str,
         tenant_id: &Uuid,
         provider: &str,

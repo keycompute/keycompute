@@ -12,15 +12,14 @@ use keycompute_distribution::{
 };
 use keycompute_types::{KeyComputeError, RequestContext, Result};
 use rust_decimal::Decimal;
-use sqlx::PgPool;
-use std::sync::Arc;
+use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 
 /// 计费服务
 #[derive(Clone)]
 pub struct BillingService {
-    /// 数据库连接池（可选）
-    pool: Option<Arc<PgPool>>,
+    /// 数据库连接（可选）
+    pool: Option<DatabaseConnection>,
     /// 分销服务（可选）
     distribution: Option<DistributionService>,
     /// 余额服务（可选）
@@ -30,7 +29,7 @@ pub struct BillingService {
 impl std::fmt::Debug for BillingService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BillingService")
-            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field("pool", &"DatabaseConnection")
             .field(
                 "distribution",
                 &self.distribution.as_ref().map(|_| "DistributionService"),
@@ -51,21 +50,21 @@ impl BillingService {
     }
 
     /// 创建带数据库连接的计费服务
-    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+    pub fn with_pool(pool: DatabaseConnection) -> Self {
         Self {
-            pool: Some(Arc::clone(&pool)),
-            distribution: Some(DistributionService::with_pool(Arc::clone(&pool))),
+            pool: Some(pool.clone()),
+            distribution: Some(DistributionService::with_pool(pool.clone())),
             balance: Some(BalanceService::new(pool)),
         }
     }
 
     /// 创建带数据库连接和自定义分销服务的计费服务
     pub fn with_pool_and_distribution(
-        pool: Arc<PgPool>,
+        pool: DatabaseConnection,
         distribution: DistributionService,
     ) -> Self {
         Self {
-            pool: Some(Arc::clone(&pool)),
+            pool: Some(pool.clone()),
             distribution: Some(distribution),
             balance: Some(BalanceService::new(pool)),
         }

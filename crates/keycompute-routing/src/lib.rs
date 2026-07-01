@@ -14,7 +14,7 @@ use keycompute_types::{
     ExecutionPlan, ExecutionTarget, KeyComputeError, PricingSnapshot, RequestContext, Result,
 };
 pub use provider_health::{ProviderHealth, ProviderHealthStore};
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -59,7 +59,7 @@ pub struct RoutingEngine {
     /// Provider 健康状态存储（只读）
     provider_health: Arc<ProviderHealthStore>,
     /// 数据库连接池（可选）
-    pool: Option<Arc<PgPool>>,
+    pool: Option<DatabaseConnection>,
     /// 可用 Provider 列表
     providers: Vec<String>,
     /// Node 能力索引（可选）
@@ -71,7 +71,7 @@ impl std::fmt::Debug for RoutingEngine {
         f.debug_struct("RoutingEngine")
             .field("account_states", &"AccountStateStore")
             .field("provider_health", &"ProviderHealthStore")
-            .field("pool", &self.pool.as_ref().map(|_| "PgPool"))
+            .field("pool", &"DatabaseConnection")
             .field("providers", &self.providers)
             .field(
                 "node_index",
@@ -112,7 +112,7 @@ impl RoutingEngine {
     pub fn with_pool(
         account_states: Arc<AccountStateStore>,
         provider_health: Arc<ProviderHealthStore>,
-        pool: Arc<PgPool>,
+        pool: DatabaseConnection,
         providers: Vec<String>,
     ) -> Self {
         Self {
@@ -135,7 +135,7 @@ impl RoutingEngine {
     pub fn with_node_index(
         account_states: Arc<AccountStateStore>,
         provider_health: Arc<ProviderHealthStore>,
-        pool: Arc<PgPool>,
+        pool: DatabaseConnection,
         providers: Vec<String>,
         node_index: Arc<dyn NodeCapabilityIndex>,
     ) -> Self {
@@ -479,7 +479,7 @@ impl RoutingEngine {
     /// 返回该租户专属的 + 全局可见的、支持指定 provider 的启用账号列表
     async fn load_accounts_from_database(
         &self,
-        pool: &PgPool,
+        pool: &DatabaseConnection,
         provider: &str,
         tenant_id: Uuid,
     ) -> Result<Vec<Account>> {
@@ -518,7 +518,7 @@ impl RoutingEngine {
     /// 返回该租户可见的、支持指定模型和 provider 的启用账号列表
     async fn load_accounts_for_model(
         &self,
-        pool: &PgPool,
+        pool: &DatabaseConnection,
         provider: &str,
         tenant_id: Uuid,
         model: &str,
@@ -958,7 +958,7 @@ mod tests {
         // 创建带有 ready node 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let pool = DatabaseConnection::Disconnected;
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec!["deepseek-chat".to_string()],
@@ -1000,7 +1000,7 @@ mod tests {
         // 创建没有 ready node 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let pool = DatabaseConnection::Disconnected;
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec![], // 没有 ready 模型
@@ -1036,7 +1036,7 @@ mod tests {
         // 创建带有 ready node 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let pool = DatabaseConnection::Disconnected;
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec!["deepseek-chat".to_string()],
@@ -1098,7 +1098,7 @@ mod tests {
         // 创建带有 node_index 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = Arc::new(PgPool::connect_lazy("postgresql://localhost/test").unwrap());
+        let pool = DatabaseConnection::Disconnected;
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec!["deepseek-chat".to_string()],

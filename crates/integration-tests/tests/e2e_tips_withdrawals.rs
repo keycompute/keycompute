@@ -5,23 +5,37 @@
 //! - 小费计算流程 (create_from_usage_log)
 //! - 提现流程 (创建、审批、完成、拒绝)
 
+use bigdecimal::BigDecimal;
+use chrono::Utc;
 use dotenv::dotenv;
 use integration_tests::common::VerificationChain;
 use keycompute_db::models::system_setting::setting_keys::NODE_TIP_RATIO;
 use keycompute_db::models::{
-    node::*, node_tip::*, node_tip_withdrawal::*, system_setting::SystemSetting, tenant::*,
-    usage_log::*, user::*, user_node_gateway_token::*,
+    api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
+    node::*,
+    node_tip::*,
+    node_tip_withdrawal::*,
+    system_setting::SystemSetting,
+    tenant::*,
+    usage_log::{CreateUsageLogRequest, UsageLog},
+    user::*,
+    user_node_gateway_token::*,
 };
 use keycompute_types::UserRole;
-use sqlx::PgPool;
+use sea_orm::{
+    ConnectionTrait, Database, DatabaseConnection, DbBackend, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use uuid::Uuid;
 
 /// 测试环境
 #[allow(dead_code)]
 struct TipWithdrawalTestEnv {
-    pool: PgPool,
+    pool: DatabaseConnection,
     test_user_id: Uuid,
     admin_user_id: Uuid,
+    tenant_id: Uuid,
+    produce_ai_key_id: Uuid,
     node_id: Uuid,
 }
 
@@ -45,16 +59,11 @@ impl TipWithdrawalTestEnv {
             password.len()
         );
 
-        let options = sqlx::postgres::PgConnectOptions::new()
-            .host("localhost")
-            .port(5432)
-            .username(&user)
-            .password(&password)
-            .database(&db);
-
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(5)
-            .connect_with(options)
+        let database_url = format!("postgres://{}:{}@localhost:5432/{}", user, password, db);
+        use sea_orm::ConnectOptions;
+        let mut opt = ConnectOptions::new(&database_url);
+        opt.max_connections(5);
+        let pool = Database::connect(opt)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to database: {}", e))?;
 
@@ -110,6 +119,20 @@ impl TipWithdrawalTestEnv {
         )
         .await?;
 
+        // 为测试用户创建 API Key（用于创建 usage_log）
+        let api_key = ProduceAiKey::create(
+            &pool,
+            &CreateProduceAiKeyRequest {
+                tenant_id: tenant.id,
+                user_id: test_user.id,
+                name: format!("tip-test-key-{}", suffix),
+                produce_ai_key_hash: format!("hash-tip-{}-{}", suffix, Uuid::new_v4()),
+                produce_ai_key_preview: "sk-tip-****".to_string(),
+                expires_at: None,
+            },
+        )
+        .await?;
+
         // 创建测试节点（属于普通用户）
         let node = Node::create(
             &pool,
@@ -135,85 +158,99 @@ impl TipWithdrawalTestEnv {
             pool,
             test_user_id: test_user.id,
             admin_user_id: admin_user.id,
+            tenant_id: tenant.id,
+            produce_ai_key_id: api_key.id,
             node_id: node.id,
         })
     }
 
     /// 清理测试数据
-    async fn cleanup_test_data(pool: &PgPool) -> anyhow::Result<()> {
+    async fn cleanup_test_data(pool: &DatabaseConnection) -> anyhow::Result<()> {
         // 按 FK 依赖逆序删除
-        sqlx::query("DELETE FROM node_tip_withdrawals WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')")
-            .execute(pool)
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tip_withdrawals WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
             .await?;
 
-        sqlx::query("DELETE FROM node_tips WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')")
-            .execute(pool)
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tips WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
             .await?;
 
-        sqlx::query("DELETE FROM usage_logs WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')")
-            .execute(pool)
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM usage_logs WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
             .await?;
 
-        sqlx::query("DELETE FROM node_tasks WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')")
-            .execute(pool)
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tasks WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
             .await?;
 
-        sqlx::query("DELETE FROM nodes WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')")
-            .execute(pool)
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM nodes WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
             .await?;
 
-        sqlx::query("DELETE FROM user_node_gateway_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')")
-            .execute(pool)
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM user_node_gateway_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
             .await?;
 
-        sqlx::query("DELETE FROM users WHERE email LIKE 'tip-test-%'")
-            .execute(pool)
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM produce_ai_keys WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
             .await?;
 
-        sqlx::query("DELETE FROM tenants WHERE slug LIKE 'tip-test-%'")
-            .execute(pool)
-            .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM users WHERE email LIKE 'tip-test-%'",
+            [],
+        ))
+        .await?;
+
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM tenants WHERE slug LIKE 'tip-test-%'",
+            [],
+        ))
+        .await?;
 
         Ok(())
     }
 
     /// 创建模拟的 usage_log 和对应的 node_task，触发小费计算
+    /// consumer 设置为管理员用户，与节点所有者不同，从而确保小费产生
     async fn create_usage_log_with_tip(&self, bill_amount: f64) -> anyhow::Result<Uuid> {
         // 1. 创建 usage_log
-        let usage_log_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
 
-        sqlx::query(
-            r#"
-            INSERT INTO usage_logs (id, user_id, request_id, model, endpoint, 
-                                   input_tokens, output_tokens, total_tokens,
-                                   user_amount, provider_amount, currency, status)
-            VALUES ($1, $2, $3, 'deepseek-chat', '/v1/chat/completions',
-                    100, 50, 150, $4, $5, 'CNY', 'success')
-            "#,
+        let now = Utc::now();
+        let user_amount =
+            BigDecimal::try_from(bill_amount).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+
+        let usage_log = UsageLog::create(
+            &self.pool,
+            &CreateUsageLogRequest {
+                request_id,
+                tenant_id: self.tenant_id,
+                user_id: self.admin_user_id,
+                produce_ai_key_id: self.produce_ai_key_id,
+                model_name: "deepseek-chat".to_string(),
+                provider_name: "openai".to_string(),
+                account_id: Uuid::new_v4(),
+                input_tokens: 100,
+                output_tokens: 50,
+                input_unit_price_snapshot: BigDecimal::from(1),
+                output_unit_price_snapshot: BigDecimal::from(2),
+                user_amount,
+                currency: "CNY".to_string(),
+                usage_source: "api".to_string(),
+                status: "success".to_string(),
+                started_at: now,
+                finished_at: now,
+            },
         )
-        .bind(usage_log_id)
-        .bind(self.test_user_id) // 消费者是测试用户
-        .bind(request_id)
-        .bind(rust_decimal::Decimal::from_f64_retain(bill_amount).unwrap())
-        .bind(rust_decimal::Decimal::from_f64_retain(bill_amount * 0.5).unwrap())
-        .execute(&self.pool)
         .await?;
 
         // 2. 创建对应的 node_task（成功的任务，关联到测试节点）
-        sqlx::query(
+        self.pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id)
             VALUES ($1, $2, 'deepseek-chat', '{}', 'succeeded', $3)
             "#,
-        )
-        .bind(request_id)
-        .bind(self.test_user_id)
-        .bind(self.node_id)
-        .execute(&self.pool)
+            [request_id.into(), self.admin_user_id.into(), self.node_id.into()],
+        ))
         .await?;
 
-        Ok(usage_log_id)
+        Ok(usage_log.id)
     }
 }
 
@@ -450,10 +487,10 @@ async fn test_create_balance_withdrawal() -> anyhow::Result<()> {
     // 这里直接测试数据库层面的操作
 
     // 3. 创建提现记录（模拟 balance 方式）
-    let mut tx = env.pool.begin().await?;
+    let tx = env.pool.begin().await?;
 
     let withdrawal = NodeTipWithdrawal::create(
-        &mut tx,
+        &tx,
         env.test_user_id,
         WITHDRAWAL_TYPE_BALANCE,
         summary.pending_amount,
@@ -464,7 +501,7 @@ async fn test_create_balance_withdrawal() -> anyhow::Result<()> {
 
     // balance 方式自动完成
     let completed_withdrawal = NodeTipWithdrawal::mark_completed(
-        &mut tx,
+        &tx,
         withdrawal.id,
         None, // 自助提现，无 admin
         None, // 保留 admin_remark
@@ -499,7 +536,7 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
     let _tip = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
 
     // 2. 创建 alipay 提现申请
-    let mut tx = env.pool.begin().await?;
+    let tx = env.pool.begin().await?;
 
     let summary = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
 
@@ -508,7 +545,7 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
     let encrypted_name = Some("encrypted_real_name_data".to_string());
 
     let withdrawal = NodeTipWithdrawal::create(
-        &mut tx,
+        &tx,
         env.test_user_id,
         WITHDRAWAL_TYPE_ALIPAY,
         summary.pending_amount,
@@ -530,10 +567,10 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
     );
 
     // 3. 管理员审批通过
-    let mut tx2 = env.pool.begin().await?;
+    let tx2 = env.pool.begin().await?;
 
     let approved_withdrawal = NodeTipWithdrawal::approve(
-        &mut tx2,
+        &tx2,
         withdrawal.id,
         env.admin_user_id,
         Some("Approved by admin"),
@@ -553,10 +590,10 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
     );
 
     // 4. 管理员完成提现（线下打款后）
-    let mut tx3 = env.pool.begin().await?;
+    let tx3 = env.pool.begin().await?;
 
     let completed_withdrawal = NodeTipWithdrawal::mark_completed(
-        &mut tx3,
+        &tx3,
         withdrawal.id,
         Some(env.admin_user_id),
         Some("Payment sent"),
@@ -594,12 +631,12 @@ async fn test_reject_withdrawal() -> anyhow::Result<()> {
     let _tip = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
 
     // 2. 创建 alipay 提现申请
-    let mut tx = env.pool.begin().await?;
+    let tx = env.pool.begin().await?;
 
     let summary = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
 
     let withdrawal = NodeTipWithdrawal::create(
-        &mut tx,
+        &tx,
         env.test_user_id,
         WITHDRAWAL_TYPE_ALIPAY,
         summary.pending_amount,
@@ -618,10 +655,10 @@ async fn test_reject_withdrawal() -> anyhow::Result<()> {
     );
 
     // 3. 拒绝提现
-    let mut tx2 = env.pool.begin().await?;
+    let tx2 = env.pool.begin().await?;
 
     let rejected_withdrawal = NodeTipWithdrawal::reject(
-        &mut tx2,
+        &tx2,
         withdrawal.id,
         env.admin_user_id,
         Some("Rejected by admin"),
@@ -663,44 +700,53 @@ async fn test_tip_self_consumption_no_tip() -> anyhow::Result<()> {
     let env = TipWithdrawalTestEnv::new("self_consumption").await?;
     let mut chain = VerificationChain::new();
 
-    // 创建 usage_log，但 consumer_user_id = owner_user_id（自己消费自己的节点）
-    let usage_log_id = Uuid::new_v4();
+    // 创建 usage_log，但 consumer = test_user_id（与节点所有者相同，自消费不产生小费）
     let request_id = Uuid::new_v4();
+    let now = Utc::now();
 
-    sqlx::query(
-        r#"
-        INSERT INTO usage_logs (id, user_id, request_id, model, endpoint, 
-                               input_tokens, output_tokens, total_tokens,
-                               user_amount, provider_amount, currency, status)
-        VALUES ($1, $2, $3, 'deepseek-chat', '/v1/chat/completions',
-                100, 50, 150, $4, $5, 'CNY', 'success')
-        "#,
+    let usage_log = UsageLog::create(
+        &env.pool,
+        &CreateUsageLogRequest {
+            request_id,
+            tenant_id: env.tenant_id,
+            user_id: env.test_user_id, // 消费者 = test_user = 节点所有者
+            produce_ai_key_id: env.produce_ai_key_id,
+            model_name: "deepseek-chat".to_string(),
+            provider_name: "openai".to_string(),
+            account_id: Uuid::new_v4(),
+            input_tokens: 100,
+            output_tokens: 50,
+            input_unit_price_snapshot: BigDecimal::from(1),
+            output_unit_price_snapshot: BigDecimal::from(2),
+            user_amount: BigDecimal::from(100),
+            currency: "CNY".to_string(),
+            usage_source: "api".to_string(),
+            status: "success".to_string(),
+            started_at: now,
+            finished_at: now,
+        },
     )
-    .bind(usage_log_id)
-    .bind(env.test_user_id) // 消费者
-    .bind(request_id)
-    .bind(rust_decimal::Decimal::from_f64_retain(100.0).unwrap())
-    .bind(rust_decimal::Decimal::from_f64_retain(50.0).unwrap())
-    .execute(&env.pool)
     .await?;
 
-    // 创建 node_task，assigned_node_id 指向测试节点的 owner 是 test_user_id
-    // 但 consumer_user_id (usage_log.user_id) 也是 test_user_id
-    // 所以应该不产生小费
-    sqlx::query(
-        r#"
+    // 创建 node_task，assigned_node_id 指向测试节点（owner = test_user）
+    // node_task.user_id 也是 test_user_id → 等于节点所有者 → 自消费，不产生小费
+    env.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
         INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id)
         VALUES ($1, $2, 'deepseek-chat', '{}', 'succeeded', $3)
         "#,
-    )
-    .bind(request_id)
-    .bind(env.test_user_id) // 同一个用户
-    .bind(env.node_id)
-    .execute(&env.pool)
-    .await?;
+            [
+                request_id.into(),
+                env.test_user_id.into(),
+                env.node_id.into(),
+            ],
+        ))
+        .await?;
 
     // 调用小费计算
-    let tip = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
+    let tip = NodeTip::create_from_usage_log(&env.pool, usage_log.id).await?;
 
     chain.add_step(
         "keycompute-db",
@@ -728,12 +774,12 @@ async fn test_withdrawal_pending_amount_calculation() -> anyhow::Result<()> {
     }
 
     // 2. 计算小费（批量）
-    let usage_logs = sqlx::query_as::<_, UsageLog>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT * FROM usage_logs WHERE user_id = $1 ORDER BY created_at",
-    )
-    .bind(env.test_user_id)
-    .fetch_all(&env.pool)
-    .await?;
+        [env.admin_user_id.into()],
+    );
+    let usage_logs = UsageLog::find_by_statement(stmt).all(&env.pool).await?;
 
     for log in usage_logs {
         let _ = NodeTip::create_from_usage_log(&env.pool, log.id).await?;
@@ -749,10 +795,10 @@ async fn test_withdrawal_pending_amount_calculation() -> anyhow::Result<()> {
     );
 
     // 3. 创建提现（balance 方式）
-    let mut tx = env.pool.begin().await?;
+    let tx = env.pool.begin().await?;
 
     let withdrawal = NodeTipWithdrawal::create(
-        &mut tx,
+        &tx,
         env.test_user_id,
         WITHDRAWAL_TYPE_BALANCE,
         summary_before.pending_amount,
@@ -761,7 +807,7 @@ async fn test_withdrawal_pending_amount_calculation() -> anyhow::Result<()> {
     )
     .await?;
 
-    NodeTipWithdrawal::mark_completed(&mut tx, withdrawal.id, None, None, None).await?;
+    NodeTipWithdrawal::mark_completed(&tx, withdrawal.id, None, None, None).await?;
 
     tx.commit().await?;
 

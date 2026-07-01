@@ -1,12 +1,12 @@
 use crate::DbError;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 租户分销规则模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct TenantDistributionRule {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -49,10 +49,11 @@ pub struct UpdateDistributionRuleRequest {
 impl TenantDistributionRule {
     /// 创建新分销规则
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreateDistributionRuleRequest,
     ) -> Result<TenantDistributionRule, DbError> {
-        let rule = sqlx::query_as::<_, TenantDistributionRule>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO tenant_distribution_rules (
                 tenant_id, beneficiary_id, name, description, commission_rate,
@@ -61,42 +62,49 @@ impl TenantDistributionRule {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             RETURNING *
             "#,
-        )
-        .bind(req.tenant_id)
-        .bind(req.beneficiary_id)
-        .bind(&req.name)
-        .bind(&req.description)
-        .bind(&req.commission_rate)
-        .bind(req.priority.unwrap_or(0))
-        .bind(req.effective_from.unwrap_or_else(Utc::now))
-        .bind(req.effective_until)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.tenant_id.into(),
+                req.beneficiary_id.into(),
+                req.name.as_str().into(),
+                req.description.clone().into(),
+                req.commission_rate.clone().into(),
+                req.priority.unwrap_or(0).into(),
+                req.effective_from.unwrap_or_else(Utc::now).into(),
+                req.effective_until.into(),
+            ],
+        );
+        let rule = TenantDistributionRule::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(rule)
     }
 
     /// 根据 ID 查找规则
     pub async fn find_by_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         id: Uuid,
     ) -> Result<Option<TenantDistributionRule>, DbError> {
-        let rule = sqlx::query_as::<_, TenantDistributionRule>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM tenant_distribution_rules WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+            [id.into()],
+        );
+        let rule = TenantDistributionRule::find_by_statement(stmt)
+            .one(db)
+            .await?;
 
         Ok(rule)
     }
 
     /// 查找租户的所有有效规则
     pub async fn find_by_tenant(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         tenant_id: Uuid,
     ) -> Result<Vec<TenantDistributionRule>, DbError> {
-        let rules = sqlx::query_as::<_, TenantDistributionRule>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT * FROM tenant_distribution_rules
             WHERE tenant_id = $1
@@ -105,25 +113,28 @@ impl TenantDistributionRule {
               AND (effective_until IS NULL OR effective_until > NOW())
             ORDER BY priority DESC, created_at ASC
             "#,
-        )
-        .bind(tenant_id)
-        .fetch_all(pool)
-        .await?;
+            [tenant_id.into()],
+        );
+        let rules = TenantDistributionRule::find_by_statement(stmt)
+            .all(db)
+            .await?;
 
         Ok(rules)
     }
 
     /// 查找租户的所有规则（包括已禁用）
     pub async fn find_all_by_tenant(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         tenant_id: Uuid,
     ) -> Result<Vec<TenantDistributionRule>, DbError> {
-        let rules = sqlx::query_as::<_, TenantDistributionRule>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM tenant_distribution_rules WHERE tenant_id = $1 ORDER BY priority DESC",
-        )
-        .bind(tenant_id)
-        .fetch_all(pool)
-        .await?;
+            [tenant_id.into()],
+        );
+        let rules = TenantDistributionRule::find_by_statement(stmt)
+            .all(db)
+            .await?;
 
         Ok(rules)
     }
@@ -131,10 +142,11 @@ impl TenantDistributionRule {
     /// 更新规则
     pub async fn update(
         &self,
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &UpdateDistributionRuleRequest,
     ) -> Result<TenantDistributionRule, DbError> {
-        let rule = sqlx::query_as::<_, TenantDistributionRule>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE tenant_distribution_rules
             SET name = COALESCE($1, name),
@@ -147,26 +159,32 @@ impl TenantDistributionRule {
             WHERE id = $7
             RETURNING *
             "#,
-        )
-        .bind(&req.name)
-        .bind(&req.description)
-        .bind(&req.commission_rate)
-        .bind(req.priority)
-        .bind(req.is_active)
-        .bind(req.effective_until)
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.name.clone().into(),
+                req.description.clone().into(),
+                req.commission_rate.clone().into(),
+                req.priority.into(),
+                req.is_active.into(),
+                req.effective_until.into(),
+                self.id.into(),
+            ],
+        );
+        let rule = TenantDistributionRule::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("update failed to return row".to_string()))?;
 
         Ok(rule)
     }
 
     /// 删除规则
-    pub async fn delete(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM tenant_distribution_rules WHERE id = $1")
-            .bind(self.id)
-            .execute(pool)
-            .await?;
+    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM tenant_distribution_rules WHERE id = $1",
+            [self.id.into()],
+        );
+        db.execute(stmt).await?;
 
         Ok(())
     }

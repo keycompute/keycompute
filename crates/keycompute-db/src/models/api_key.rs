@@ -1,11 +1,11 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// Produce AI Key 模型（用户访问系统的 API Key）
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct ProduceAiKey {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -67,104 +67,112 @@ impl From<ProduceAiKey> for ProduceAiKeyResponse {
 impl ProduceAiKey {
     /// 创建新 Produce AI Key
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreateProduceAiKeyRequest,
     ) -> Result<ProduceAiKey, DbError> {
-        let key = sqlx::query_as::<_, ProduceAiKey>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO produce_ai_keys (tenant_id, user_id, name, produce_ai_key_hash, produce_ai_key_preview, expires_at)
             VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *
             "#,
-        )
-        .bind(req.tenant_id)
-        .bind(req.user_id)
-        .bind(&req.name)
-        .bind(&req.produce_ai_key_hash)
-        .bind(&req.produce_ai_key_preview)
-        .bind(req.expires_at)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.tenant_id.into(),
+                req.user_id.into(),
+                req.name.as_str().into(),
+                req.produce_ai_key_hash.as_str().into(),
+                req.produce_ai_key_preview.as_str().into(),
+                req.expires_at.into(),
+            ],
+        );
+        let key = ProduceAiKey::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(key)
     }
 
     /// 根据 ID 查找 Produce AI Key
     pub async fn find_by_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         id: Uuid,
     ) -> Result<Option<ProduceAiKey>, DbError> {
-        let key = sqlx::query_as::<_, ProduceAiKey>("SELECT * FROM produce_ai_keys WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM produce_ai_keys WHERE id = $1",
+            [id.into()],
+        );
+        let key = ProduceAiKey::find_by_statement(stmt).one(db).await?;
 
         Ok(key)
     }
 
     /// 根据 produce_ai_key_hash 查找 Produce AI Key
     pub async fn find_by_hash(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         produce_ai_key_hash: &str,
     ) -> Result<Option<ProduceAiKey>, DbError> {
-        let key = sqlx::query_as::<_, ProduceAiKey>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM produce_ai_keys WHERE produce_ai_key_hash = $1",
-        )
-        .bind(produce_ai_key_hash)
-        .fetch_optional(pool)
-        .await?;
+            [produce_ai_key_hash.into()],
+        );
+        let key = ProduceAiKey::find_by_statement(stmt).one(db).await?;
 
         Ok(key)
     }
 
     /// 查找用户的所有 Produce AI Key
     pub async fn find_by_user(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<Vec<ProduceAiKey>, DbError> {
-        let keys = sqlx::query_as::<_, ProduceAiKey>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM produce_ai_keys WHERE user_id = $1 ORDER BY created_at DESC",
-        )
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
+            [user_id.into()],
+        );
+        let keys = ProduceAiKey::find_by_statement(stmt).all(db).await?;
 
         Ok(keys)
     }
 
     /// 查找用户的活跃 Produce AI Key（未撤销的）
     pub async fn find_active_by_user(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<Vec<ProduceAiKey>, DbError> {
-        let keys = sqlx::query_as::<_, ProduceAiKey>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM produce_ai_keys WHERE user_id = $1 AND revoked = FALSE ORDER BY created_at DESC",
-        )
-        .bind(user_id)
-        .fetch_all(pool)
-        .await?;
+            [user_id.into()],
+        );
+        let keys = ProduceAiKey::find_by_statement(stmt).all(db).await?;
 
         Ok(keys)
     }
 
     /// 查找租户的所有 Produce AI Key
     pub async fn find_by_tenant(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         tenant_id: Uuid,
     ) -> Result<Vec<ProduceAiKey>, DbError> {
-        let keys = sqlx::query_as::<_, ProduceAiKey>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM produce_ai_keys WHERE tenant_id = $1 ORDER BY created_at DESC",
-        )
-        .bind(tenant_id)
-        .fetch_all(pool)
-        .await?;
+            [tenant_id.into()],
+        );
+        let keys = ProduceAiKey::find_by_statement(stmt).all(db).await?;
 
         Ok(keys)
     }
 
     /// 撤销 Produce AI Key
-    pub async fn revoke(&self, pool: &sqlx::PgPool) -> Result<ProduceAiKey, DbError> {
-        let key = sqlx::query_as::<_, ProduceAiKey>(
+    pub async fn revoke(&self, db: &DatabaseConnection) -> Result<ProduceAiKey, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE produce_ai_keys
             SET revoked = TRUE,
@@ -173,42 +181,36 @@ impl ProduceAiKey {
             WHERE id = $1
             RETURNING *
             "#,
-        )
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+            [self.id.into()],
+        );
+        let key = ProduceAiKey::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("ProduceAiKey", self.id.to_string()))?;
 
         Ok(key)
     }
 
     /// 物理删除 Produce AI Key
-    pub async fn delete(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
-        sqlx::query(
-            r#"
-            DELETE FROM produce_ai_keys
-            WHERE id = $1
-            "#,
-        )
-        .bind(self.id)
-        .execute(pool)
-        .await?;
+    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM produce_ai_keys WHERE id = $1",
+            [self.id.into()],
+        );
+        db.execute(stmt).await?;
 
         Ok(())
     }
 
     /// 更新最后使用时间
-    pub async fn update_last_used(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
-        sqlx::query(
-            r#"
-            UPDATE produce_ai_keys
-            SET last_used_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $1
-            "#,
-        )
-        .bind(self.id)
-        .execute(pool)
-        .await?;
+    pub async fn update_last_used(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE produce_ai_keys SET last_used_at = NOW(), updated_at = NOW() WHERE id = $1",
+            [self.id.into()],
+        );
+        db.execute(stmt).await?;
 
         Ok(())
     }

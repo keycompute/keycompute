@@ -22,7 +22,7 @@ pub use permission::{AuthType, Permission, PermissionChecker, build_permissions}
 pub use user::{TenantConfig, TenantInfo, UserInfo, UserService};
 
 use keycompute_types::{KeyComputeError, Result};
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -155,7 +155,7 @@ impl AuthService {
     }
 
     /// 创建完整的 AuthService（带数据库连接）
-    pub fn with_pool(pool: Arc<PgPool>) -> Self {
+    pub fn with_pool(pool: Arc<DatabaseConnection>) -> Self {
         let produce_ai_key_validator = ProduceAiKeyValidator::with_pool(Arc::clone(&pool));
         let user_service = UserService::with_pool(Arc::clone(&pool));
 

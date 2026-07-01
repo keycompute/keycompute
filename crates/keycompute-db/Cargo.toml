@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 keycompute-types.workspace = true
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "bigdecimal", "migrate", "json", "rust_decimal"] }
+sea-orm = { workspace = true }
 tokio = { version = "1.44", features = ["full"] }
 uuid = { version = "1.16", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

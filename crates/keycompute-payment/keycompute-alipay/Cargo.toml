@@ -34,7 +34,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rust_decimal = { version = "1", features = ["serde-str"] }
 
 # 数据库
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "rust_decimal"] }
+sea-orm = { workspace = true }
 
 # 错误处理
 thiserror = "2"

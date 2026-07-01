@@ -6,6 +6,7 @@ use crate::client::{AlipayClient, QueryResponse};
 use crate::config::AlipayConfig;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use sea_orm::{ConnectionTrait, FromQueryResult, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -21,18 +22,21 @@ mod urlencoding {
 /// 支付服务
 pub struct PaymentService {
     client: AlipayClient,
-    pool: sqlx::PgPool,
+    pool: sea_orm::DatabaseConnection,
 }
 
 impl PaymentService {
     /// 创建新的支付服务
-    pub fn new(config: AlipayConfig, pool: sqlx::PgPool) -> Result<Self, PaymentError> {
+    pub fn new(
+        config: AlipayConfig,
+        pool: sea_orm::DatabaseConnection,
+    ) -> Result<Self, PaymentError> {
         let client = AlipayClient::new(config)?;
         Ok(Self { client, pool })
     }
 
     /// 从环境变量创建支付服务
-    pub async fn from_env(pool: sqlx::PgPool) -> Result<Self, PaymentError> {
+    pub async fn from_env(pool: sea_orm::DatabaseConnection) -> Result<Self, PaymentError> {
         let config = AlipayConfig::from_env()?;
         Self::new(config, pool)
     }
@@ -195,10 +199,13 @@ impl PaymentService {
         let qr_code = precreate_response.qr_code.clone().unwrap_or_default();
 
         // 更新数据库订单的 pay_url 字段
-        sqlx::query(r#"UPDATE payment_orders SET pay_url = $1 WHERE id = $2"#)
-            .bind(&qr_code)
-            .bind(order.id)
-            .execute(&self.pool)
+        let stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
+            r#"UPDATE payment_orders SET pay_url = $1 WHERE id = $2"#,
+            [qr_code.as_str().into(), order.id.into()],
+        );
+        self.pool
+            .execute(stmt)
             .await
             .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
@@ -310,7 +317,7 @@ impl PaymentService {
         }
 
         // 开始事务处理支付成功
-        let mut tx = self
+        let tx = self
             .pool
             .begin()
             .await
@@ -320,7 +327,8 @@ impl PaymentService {
         let notify_data = serde_json::to_value(&params)
             .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
-        let updated_order = sqlx::query_as::<_, keycompute_db::PaymentOrder>(
+        let updated_order_stmt = sea_orm::Statement::from_sql_and_values(
+            sea_orm::DbBackend::Postgres,
             r#"
             UPDATE payment_orders
             SET status = 'paid',
@@ -331,13 +339,16 @@ impl PaymentService {
             WHERE id = $3 AND status = 'pending'
             RETURNING *
             "#,
-        )
-        .bind(&trade_no)
-        .bind(sqlx::types::Json(&notify_data))
-        .bind(order.id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+            [
+                trade_no.as_str().into(),
+                notify_data.clone().into(),
+                order.id.into(),
+            ],
+        );
+        let updated_order = keycompute_db::PaymentOrder::find_by_statement(updated_order_stmt)
+            .one(&tx)
+            .await
+            .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
         // 如果订单已被其他事务处理，直接返回成功（幂等）
         let updated_order = match updated_order {
@@ -356,10 +367,10 @@ impl PaymentService {
             }
         };
 
-        // 充值用户余额（使用订单中的金额，更安全）
+        // 充值用户余额（在同一事务中，保证原子性）
         let description = format!("支付宝充值 - 订单号: {}", out_trade_no);
-        keycompute_db::UserBalance::recharge(
-            &mut tx,
+        keycompute_db::UserBalance::recharge_in_tx(
+            &tx,
             order.user_id,
             order.tenant_id,
             order.amount, // 使用订单金额，而非回调金额
@@ -369,7 +380,7 @@ impl PaymentService {
         .await
         .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
-        // 提交事务
+        // 提交事务（包含订单更新和余额充值，保证原子性）
         tx.commit()
             .await
             .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
@@ -425,14 +436,15 @@ impl PaymentService {
             let notify_data = serde_json::to_value(&query_result)
                 .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
-            let mut tx = self
+            let tx = self
                 .pool
                 .begin()
                 .await
                 .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
             // 更新订单状态（幂等：只有 pending 状态才能更新）
-            let updated_order = sqlx::query_as::<_, keycompute_db::PaymentOrder>(
+            let updated_order_stmt = sea_orm::Statement::from_sql_and_values(
+                sea_orm::DbBackend::Postgres,
                 r#"
                 UPDATE payment_orders
                 SET status = 'paid',
@@ -443,13 +455,16 @@ impl PaymentService {
                 WHERE id = $3 AND status = 'pending'
                 RETURNING *
                 "#,
-            )
-            .bind(&trade_no)
-            .bind(sqlx::types::Json(&notify_data))
-            .bind(order.id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+                [
+                    trade_no.as_str().into(),
+                    notify_data.clone().into(),
+                    order.id.into(),
+                ],
+            );
+            let updated_order = keycompute_db::PaymentOrder::find_by_statement(updated_order_stmt)
+                .one(&tx)
+                .await
+                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
             // 如果订单已被其他事务处理，直接返回成功（幂等）
             let updated_order = match updated_order {
@@ -467,10 +482,10 @@ impl PaymentService {
                 }
             };
 
-            // 充值余额
+            // 充值余额（在同一事务中，保证原子性）
             let description = format!("支付宝充值(同步) - 订单号: {}", out_trade_no);
-            keycompute_db::UserBalance::recharge(
-                &mut tx,
+            keycompute_db::UserBalance::recharge_in_tx(
+                &tx,
                 order.user_id,
                 order.tenant_id,
                 order.amount,
@@ -480,6 +495,7 @@ impl PaymentService {
             .await
             .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
+            // 提交事务（包含订单更新和余额充值，保证原子性）
             tx.commit()
                 .await
                 .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;

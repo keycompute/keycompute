@@ -6,19 +6,23 @@ use crate::config::NodeGatewayAppConfig;
 use crate::redis::NodeGatewayRedis;
 use keycompute_db::DbError;
 use keycompute_db::models::node_task::*;
-use sqlx::PgPool;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use tracing;
 
 /// Node Gateway Sweeper
 pub struct NodeGatewaySweeper {
-    pool: PgPool,
+    pool: DatabaseConnection,
     redis: NodeGatewayRedis,
     config: NodeGatewayAppConfig,
 }
 
 impl NodeGatewaySweeper {
     /// 创建新的 Sweeper
-    pub fn new(pool: PgPool, redis: NodeGatewayRedis, config: NodeGatewayAppConfig) -> Self {
+    pub fn new(
+        pool: DatabaseConnection,
+        redis: NodeGatewayRedis,
+        config: NodeGatewayAppConfig,
+    ) -> Self {
         Self {
             pool,
             redis,
@@ -61,17 +65,17 @@ impl NodeGatewaySweeper {
     async fn expire_offline_nodes(&self) -> Result<(), DbError> {
         let ttl = self.config.sweeper_heartbeat_ttl_secs as i64;
 
-        let result = sqlx::query(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE nodes
             SET status = 'offline', updated_at = NOW()
             WHERE status = 'online'
-              AND last_heartbeat_at < NOW() - ($1 || ' seconds')::interval
+              AND last_heartbeat_at < NOW() - MAKE_INTERVAL(secs => $1)
             "#,
-        )
-        .bind(ttl.to_string())
-        .execute(&self.pool)
-        .await?;
+            [ttl.into()],
+        );
+        let result = self.pool.execute(stmt).await?;
 
         if result.rows_affected() > 0 {
             tracing::info!("Marked {} nodes as offline", result.rows_affected());
@@ -96,17 +100,18 @@ impl NodeGatewaySweeper {
         let repush_interval = self.config.sweeper_repush_interval_secs as i64;
 
         // 查询需要补推的任务
-        let tasks_to_repush = sqlx::query_as::<_, NodeTask>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT * FROM node_tasks
             WHERE status = 'queued'
               AND deadline_at > NOW()
-              AND queued_at < NOW() - ($1 || ' seconds')::interval
+              AND queued_at < NOW() - MAKE_INTERVAL(secs => $1)
             "#,
-        )
-        .bind(repush_interval.to_string())
-        .fetch_all(&self.pool)
-        .await?;
+            [repush_interval.into()],
+        );
+        let tasks_to_repush: Vec<NodeTask> =
+            NodeTask::find_by_statement(stmt).all(&self.pool).await?;
 
         for task in &tasks_to_repush {
             if let Err(e) = self.redis.repush_queued_task(&task.model, task.id).await {

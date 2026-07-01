@@ -10,7 +10,7 @@ async-trait = "0.1"
 bigdecimal = { version = "0.4", features = ["serde"] }
 lru = "0.12"
 rust_decimal = "1.40"
-sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "bigdecimal"] }
+sea-orm = { workspace = true }
 tokio = { version = "1", features = ["sync", "rt", "macros"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }

@@ -9,11 +9,12 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use chrono;
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct NodeGatewayNodeInfo {
     pub id: Uuid,
     pub display_name: String,
@@ -28,7 +29,7 @@ pub struct NodeGatewayNodeInfo {
     pub token_preview: Option<String>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct NodeGatewayTaskInfo {
     pub id: Uuid,
     pub model: String,
@@ -41,7 +42,7 @@ pub struct NodeGatewayTaskInfo {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct NodeGatewayNodeStats {
     pub total: i64,
     pub online: i64,
@@ -49,7 +50,7 @@ pub struct NodeGatewayNodeStats {
     pub excluded: i64,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct NodeGatewayTaskStats {
     pub total: i64,
     pub queued: i64,
@@ -76,7 +77,8 @@ pub async fn get_node_gateway_overview(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let node_stats = sqlx::query_as::<_, NodeGatewayNodeStats>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
             COUNT(*)::BIGINT AS total,
@@ -85,12 +87,15 @@ pub async fn get_node_gateway_overview(
             COUNT(*) FILTER (WHERE status = 'excluded')::BIGINT AS excluded
         FROM nodes
         "#,
-    )
-    .fetch_one(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to load node stats: {}", e)))?;
+        [],
+    );
+    let node_stats = NodeGatewayNodeStats::find_by_statement(stmt)
+        .one(pool.as_ref())
+        .await?
+        .ok_or_else(|| ApiError::Internal("Failed to load node stats: no data".to_string()))?;
 
-    let task_stats = sqlx::query_as::<_, NodeGatewayTaskStats>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
             COUNT(*)::BIGINT AS total,
@@ -101,18 +106,20 @@ pub async fn get_node_gateway_overview(
             COUNT(*) FILTER (WHERE status = 'expired')::BIGINT AS expired
         FROM node_tasks
         "#,
-    )
-    .fetch_one(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to load node task stats: {}", e)))?;
+        [],
+    );
+    let task_stats = NodeGatewayTaskStats::find_by_statement(stmt)
+        .one(pool.as_ref())
+        .await?
+        .ok_or_else(|| ApiError::Internal("Failed to load task stats: no data".to_string()))?;
 
-    let nodes = sqlx::query_as::<_, NodeGatewayNodeInfo>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
             n.id,
             n.display_name,
             n.client_instance_id,
-            -- 心跳超时检测：超过 3 分钟未心跳且原状态为 online 的节点标记为 offline
             CASE
                 WHEN n.status = 'online'
                      AND n.last_heartbeat_at IS NOT NULL
@@ -138,12 +145,14 @@ pub async fn get_node_gateway_overview(
         ORDER BY n.updated_at DESC
         LIMIT 20
         "#,
-    )
-    .fetch_all(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to load nodes: {}", e)))?;
+        [],
+    );
+    let nodes = NodeGatewayNodeInfo::find_by_statement(stmt)
+        .all(pool.as_ref())
+        .await?;
 
-    let recent_tasks = sqlx::query_as::<_, NodeGatewayTaskInfo>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
             id,
@@ -159,10 +168,11 @@ pub async fn get_node_gateway_overview(
         ORDER BY created_at DESC
         LIMIT 20
         "#,
-    )
-    .fetch_all(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to load node tasks: {}", e)))?;
+        [],
+    );
+    let recent_tasks = NodeGatewayTaskInfo::find_by_statement(stmt)
+        .all(pool.as_ref())
+        .await?;
 
     Ok(Json(NodeGatewayOverviewResponse {
         enabled: state.node_gateway.is_some(),
@@ -199,7 +209,7 @@ pub async fn recover_node(
         .map_err(ApiError::from)?;
 
     // 同步恢复关联的被吊销 token
-    // 使用 clone 获取独立的 Arc<PgPool>，避免与 service 同时借用 state 的不同字段
+    // 使用 clone 获取独立的 Arc<DatabaseConnection>，避免与 service 同时借用 state 的不同字段
     let pool = state
         .pool
         .clone()
@@ -389,41 +399,44 @@ pub async fn delete_node(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 使用事务确保原子性
-    let mut tx = pool
+    let tx = pool
         .begin()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to begin transaction: {}", e)))?;
 
-    // 0. 查找并删除关联 token（在事务内，使用 &mut *tx 消除 TOCTOU 竞态窗口）
+    // 0. 查找并删除关联 token（在事务内）
     let token = keycompute_db::models::user_node_gateway_token::UserNodeGatewayToken::find_by_consumed_node_id(
-        &mut *tx, node_id,
+        &tx, node_id,
     )
     .await
     .map_err(|e| ApiError::Internal(format!("Failed to find token: {}", e)))?;
 
     if let Some(t) = token {
-        sqlx::query("DELETE FROM user_node_gateway_tokens WHERE id = $1")
-            .bind(t.id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to delete token: {}", e)))?;
+        tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM user_node_gateway_tokens WHERE id = $1",
+            [t.id.into()],
+        ))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to delete token: {}", e)))?;
     }
 
-    // 1. 显式清理 node_tasks 引用（安全网：在 FK ON DELETE CASCADE 已生效的环境下为冗余操作，
-    //    但在迁移未执行或 FK 约束降级的场景下可防止删除阻塞）
-    //    将 assigned_node_id 和 assigned_session_id 设为 NULL
-    sqlx::query("UPDATE node_tasks SET assigned_node_id = NULL WHERE assigned_node_id = $1")
-        .bind(node_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            ApiError::Internal(format!(
-                "Failed to update node_tasks.assigned_node_id: {}",
-                e
-            ))
-        })?;
+    // 1. 显式清理 node_tasks 引用
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE node_tasks SET assigned_node_id = NULL WHERE assigned_node_id = $1",
+        [node_id.into()],
+    ))
+    .await
+    .map_err(|e| {
+        ApiError::Internal(format!(
+            "Failed to update node_tasks.assigned_node_id: {}",
+            e
+        ))
+    })?;
 
-    sqlx::query(
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         UPDATE node_tasks
         SET assigned_session_id = NULL
@@ -431,9 +444,8 @@ pub async fn delete_node(
             SELECT id FROM node_sessions WHERE node_id = $1
         )
         "#,
-    )
-    .bind(node_id)
-    .execute(&mut *tx)
+        [node_id.into()],
+    ))
     .await
     .map_err(|e| {
         ApiError::Internal(format!(
@@ -442,26 +454,25 @@ pub async fn delete_node(
         ))
     })?;
 
-    // 2. 显式清理 node_task_submissions（安全网：FK ON DELETE CASCADE 已覆盖此清理，
-    //    此处为双重保护，确保在任何 FK 约束状态下都能安全删除）
-    sqlx::query("DELETE FROM node_task_submissions WHERE node_id = $1")
-        .bind(node_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            ApiError::Internal(format!("Failed to delete node_task_submissions: {}", e))
-        })?;
+    // 2. 显式清理 node_task_submissions
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "DELETE FROM node_task_submissions WHERE node_id = $1",
+        [node_id.into()],
+    ))
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to delete node_task_submissions: {}", e)))?;
 
-    sqlx::query(
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         DELETE FROM node_task_submissions
         WHERE session_id IN (
             SELECT id FROM node_sessions WHERE node_id = $1
         )
         "#,
-    )
-    .bind(node_id)
-    .execute(&mut *tx)
+        [node_id.into()],
+    ))
     .await
     .map_err(|e| {
         ApiError::Internal(format!(
@@ -471,9 +482,12 @@ pub async fn delete_node(
     })?;
 
     // 3. 删除节点（CASCADE 自动清理 node_sessions）
-    let result = sqlx::query("DELETE FROM nodes WHERE id = $1")
-        .bind(node_id)
-        .execute(&mut *tx)
+    let result = tx
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM nodes WHERE id = $1",
+            [node_id.into()],
+        ))
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to delete node: {}", e)))?;
 

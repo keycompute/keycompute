@@ -1,11 +1,11 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 租户模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: Uuid,
     pub name: String,
@@ -46,61 +46,78 @@ pub struct UpdateTenantRequest {
 
 impl Tenant {
     /// 创建新租户
-    pub async fn create(pool: &sqlx::PgPool, req: &CreateTenantRequest) -> Result<Tenant, DbError> {
-        let tenant = sqlx::query_as::<_, Tenant>(
+    pub async fn create(
+        db: &DatabaseConnection,
+        req: &CreateTenantRequest,
+    ) -> Result<Tenant, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO tenants (name, slug, description, default_rpm_limit, default_tpm_limit)
             VALUES ($1, $2, $3, $4, $5)
             RETURNING *
             "#,
-        )
-        .bind(&req.name)
-        .bind(&req.slug)
-        .bind(&req.description)
-        .bind(req.default_rpm_limit.unwrap_or(60))
-        .bind(req.default_tpm_limit.unwrap_or(100000))
-        .fetch_one(pool)
-        .await?;
+            [
+                req.name.as_str().into(),
+                req.slug.as_str().into(),
+                req.description.clone().into(),
+                req.default_rpm_limit.unwrap_or(60).into(),
+                req.default_tpm_limit.unwrap_or(100000).into(),
+            ],
+        );
+        let tenant = Tenant::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(tenant)
     }
 
     /// 根据 ID 查找租户
-    pub async fn find_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<Tenant>, DbError> {
-        let tenant = sqlx::query_as::<_, Tenant>("SELECT * FROM tenants WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+    pub async fn find_by_id(db: &DatabaseConnection, id: Uuid) -> Result<Option<Tenant>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM tenants WHERE id = $1",
+            [id.into()],
+        );
+        let tenant = Tenant::find_by_statement(stmt).one(db).await?;
 
         Ok(tenant)
     }
 
     /// 根据 slug 查找租户
-    pub async fn find_by_slug(pool: &sqlx::PgPool, slug: &str) -> Result<Option<Tenant>, DbError> {
-        let tenant = sqlx::query_as::<_, Tenant>("SELECT * FROM tenants WHERE slug = $1")
-            .bind(slug)
-            .fetch_optional(pool)
-            .await?;
+    pub async fn find_by_slug(
+        db: &DatabaseConnection,
+        slug: &str,
+    ) -> Result<Option<Tenant>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM tenants WHERE slug = $1",
+            [slug.into()],
+        );
+        let tenant = Tenant::find_by_statement(stmt).one(db).await?;
 
         Ok(tenant)
     }
 
     /// 查找所有租户
-    pub async fn find_all(pool: &sqlx::PgPool) -> Result<Vec<Tenant>, DbError> {
-        let tenants = sqlx::query_as::<_, Tenant>("SELECT * FROM tenants ORDER BY created_at DESC")
-            .fetch_all(pool)
-            .await?;
+    pub async fn find_all(db: &DatabaseConnection) -> Result<Vec<Tenant>, DbError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT * FROM tenants ORDER BY created_at DESC".to_string(),
+        );
+        let tenants = Tenant::find_by_statement(stmt).all(db).await?;
 
         Ok(tenants)
     }
 
     /// 查找激活的租户
-    pub async fn find_active(pool: &sqlx::PgPool) -> Result<Vec<Tenant>, DbError> {
-        let tenants = sqlx::query_as::<_, Tenant>(
-            "SELECT * FROM tenants WHERE status = 'active' ORDER BY created_at DESC",
-        )
-        .fetch_all(pool)
-        .await?;
+    pub async fn find_active(db: &DatabaseConnection) -> Result<Vec<Tenant>, DbError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT * FROM tenants WHERE status = 'active' ORDER BY created_at DESC".to_string(),
+        );
+        let tenants = Tenant::find_by_statement(stmt).all(db).await?;
 
         Ok(tenants)
     }
@@ -108,10 +125,11 @@ impl Tenant {
     /// 更新租户
     pub async fn update(
         &self,
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &UpdateTenantRequest,
     ) -> Result<Tenant, DbError> {
-        let tenant = sqlx::query_as::<_, Tenant>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE tenants
             SET name = COALESCE($1, name),
@@ -123,25 +141,31 @@ impl Tenant {
             WHERE id = $6
             RETURNING *
             "#,
-        )
-        .bind(&req.name)
-        .bind(&req.description)
-        .bind(&req.status)
-        .bind(req.default_rpm_limit)
-        .bind(req.default_tpm_limit)
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.name.clone().into(),
+                req.description.clone().into(),
+                req.status.clone().into(),
+                req.default_rpm_limit.into(),
+                req.default_tpm_limit.into(),
+                self.id.into(),
+            ],
+        );
+        let tenant = Tenant::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("update failed to return row".to_string()))?;
 
         Ok(tenant)
     }
 
     /// 删除租户
-    pub async fn delete(&self, pool: &sqlx::PgPool) -> Result<(), DbError> {
-        sqlx::query("DELETE FROM tenants WHERE id = $1")
-            .bind(self.id)
-            .execute(pool)
-            .await?;
+    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM tenants WHERE id = $1",
+            [self.id.into()],
+        );
+        db.execute(stmt).await?;
 
         Ok(())
     }

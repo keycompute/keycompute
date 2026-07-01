@@ -4,8 +4,8 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 任务状态
@@ -16,7 +16,7 @@ pub const TASK_STATUS_FAILED: &str = "failed";
 pub const TASK_STATUS_EXPIRED: &str = "expired";
 
 /// 节点任务模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct NodeTask {
     pub id: Uuid,
     pub request_id: Uuid,
@@ -54,61 +54,74 @@ pub struct CreateNodeTaskRequest {
 impl NodeTask {
     /// 创建新任务
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreateNodeTaskRequest,
     ) -> Result<NodeTask, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, deadline_at, complete_grace_until)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             "#,
-        )
-        .bind(req.request_id)
-        .bind(req.user_id)
-        .bind(&req.model)
-        .bind(&req.payload_json)
-        .bind(TASK_STATUS_QUEUED)
-        .bind(req.deadline_at)
-        .bind(req.complete_grace_until)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.request_id.into(),
+                req.user_id.into(),
+                req.model.as_str().into(),
+                req.payload_json.clone().into(),
+                TASK_STATUS_QUEUED.into(),
+                req.deadline_at.into(),
+                req.complete_grace_until.into(),
+            ],
+        );
+        let task = NodeTask::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(task)
     }
 
     /// 根据 ID 查询任务
-    pub async fn find_by_id(pool: &sqlx::PgPool, id: Uuid) -> Result<Option<NodeTask>, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+    pub async fn find_by_id(
+        db: &DatabaseConnection,
+        id: Uuid,
+    ) -> Result<Option<NodeTask>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM node_tasks WHERE id = $1",
+            [id.into()],
+        );
+        let task = NodeTask::find_by_statement(stmt).one(db).await?;
 
         Ok(task)
     }
 
     /// 根据 request_id 查询任务
     pub async fn find_by_request_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         request_id: Uuid,
     ) -> Result<Option<NodeTask>, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE request_id = $1")
-            .bind(request_id)
-            .fetch_optional(pool)
-            .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM node_tasks WHERE request_id = $1",
+            [request_id.into()],
+        );
+        let task = NodeTask::find_by_statement(stmt).one(db).await?;
 
         Ok(task)
     }
 
     /// 原子领取任务（claim）
     pub async fn claim(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         task_id: Uuid,
         node_id: Uuid,
         session_id: Uuid,
         lease_id: Uuid,
     ) -> Result<Option<NodeTask>, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE node_tasks
             SET status = $1,
@@ -122,26 +135,28 @@ impl NodeTask {
               AND deadline_at >= NOW()
             RETURNING *
             "#,
-        )
-        .bind(TASK_STATUS_LEASED)
-        .bind(node_id)
-        .bind(session_id)
-        .bind(lease_id)
-        .bind(task_id)
-        .bind(TASK_STATUS_QUEUED)
-        .fetch_optional(pool)
-        .await?;
+            [
+                TASK_STATUS_LEASED.into(),
+                node_id.into(),
+                session_id.into(),
+                lease_id.into(),
+                task_id.into(),
+                TASK_STATUS_QUEUED.into(),
+            ],
+        );
+        let task = NodeTask::find_by_statement(stmt).one(db).await?;
 
         Ok(task)
     }
 
     /// 标记任务成功
     pub async fn mark_succeeded(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         task_id: Uuid,
         result_json: &serde_json::Value,
     ) -> Result<NodeTask, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE node_tasks
             SET status = $1,
@@ -151,23 +166,28 @@ impl NodeTask {
             WHERE id = $3
             RETURNING *
             "#,
-        )
-        .bind(TASK_STATUS_SUCCEEDED)
-        .bind(result_json)
-        .bind(task_id)
-        .fetch_one(pool)
-        .await?;
+            [
+                TASK_STATUS_SUCCEEDED.into(),
+                result_json.clone().into(),
+                task_id.into(),
+            ],
+        );
+        let task = NodeTask::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
 
         Ok(task)
     }
 
     /// 标记任务失败
     pub async fn mark_failed(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         task_id: Uuid,
         error_json: &serde_json::Value,
     ) -> Result<NodeTask, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE node_tasks
             SET status = $1,
@@ -177,19 +197,24 @@ impl NodeTask {
             WHERE id = $3
             RETURNING *
             "#,
-        )
-        .bind(TASK_STATUS_FAILED)
-        .bind(error_json)
-        .bind(task_id)
-        .fetch_one(pool)
-        .await?;
+            [
+                TASK_STATUS_FAILED.into(),
+                error_json.clone().into(),
+                task_id.into(),
+            ],
+        );
+        let task = NodeTask::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
 
         Ok(task)
     }
 
     /// 标记任务过期
-    pub async fn mark_expired(pool: &sqlx::PgPool, task_id: Uuid) -> Result<NodeTask, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>(
+    pub async fn mark_expired(db: &DatabaseConnection, task_id: Uuid) -> Result<NodeTask, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE node_tasks
             SET status = $1,
@@ -198,18 +223,20 @@ impl NodeTask {
             WHERE id = $2
             RETURNING *
             "#,
-        )
-        .bind(TASK_STATUS_EXPIRED)
-        .bind(task_id)
-        .fetch_one(pool)
-        .await?;
+            [TASK_STATUS_EXPIRED.into(), task_id.into()],
+        );
+        let task = NodeTask::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
 
         Ok(task)
     }
 
     /// 恢复任务为 queued（重新入队）
-    pub async fn requeue(pool: &sqlx::PgPool, task_id: Uuid) -> Result<NodeTask, DbError> {
-        let task = sqlx::query_as::<_, NodeTask>(
+    pub async fn requeue(db: &DatabaseConnection, task_id: Uuid) -> Result<NodeTask, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE node_tasks
             SET status = $1,
@@ -222,18 +249,20 @@ impl NodeTask {
             WHERE id = $2
             RETURNING *
             "#,
-        )
-        .bind(TASK_STATUS_QUEUED)
-        .bind(task_id)
-        .fetch_one(pool)
-        .await?;
+            [TASK_STATUS_QUEUED.into(), task_id.into()],
+        );
+        let task = NodeTask::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
 
         Ok(task)
     }
 
     /// 批量标记过期任务
-    pub async fn expire_overdue_tasks(pool: &sqlx::PgPool) -> Result<Vec<NodeTask>, DbError> {
-        let tasks = sqlx::query_as::<_, NodeTask>(
+    pub async fn expire_overdue_tasks(db: &DatabaseConnection) -> Result<Vec<NodeTask>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             UPDATE node_tasks
             SET status = $1,
@@ -243,12 +272,13 @@ impl NodeTask {
               AND deadline_at < NOW()
             RETURNING *
             "#,
-        )
-        .bind(TASK_STATUS_EXPIRED)
-        .bind(TASK_STATUS_QUEUED)
-        .bind(TASK_STATUS_LEASED)
-        .fetch_all(pool)
-        .await?;
+            [
+                TASK_STATUS_EXPIRED.into(),
+                TASK_STATUS_QUEUED.into(),
+                TASK_STATUS_LEASED.into(),
+            ],
+        );
+        let tasks = NodeTask::find_by_statement(stmt).all(db).await?;
 
         Ok(tasks)
     }

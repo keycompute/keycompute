@@ -4,8 +4,14 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    TransactionTrait,
+    {
+        ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
+        Statement,
+    },
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 
 /// 设置值类型
@@ -44,7 +50,7 @@ impl std::fmt::Display for SettingValueType {
 }
 
 /// 系统设置模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct SystemSetting {
     pub id: Uuid,
     pub key: String,
@@ -96,7 +102,6 @@ pub mod setting_keys {
     pub const LOGIN_LOCKOUT_MINUTES: &str = "login_lockout_minutes";
     pub const JWT_EXPIRE_HOURS: &str = "jwt_expire_hours";
     pub const JWT_EXPIRE_HOURS_MAX: i64 = 8760;
-    // 密码策略使用硬编码，参见 keycompute-auth/src/password/validator.rs
 
     // 公告设置
     pub const SYSTEM_NOTICE: &str = "system_notice";
@@ -212,47 +217,51 @@ impl SystemSetting {
 
     /// 根据键名查找设置
     pub async fn find_by_key(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         key: &str,
     ) -> Result<Option<SystemSetting>, DbError> {
-        let setting =
-            sqlx::query_as::<_, SystemSetting>("SELECT * FROM system_settings WHERE key = $1")
-                .bind(key)
-                .fetch_optional(pool)
-                .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM system_settings WHERE key = $1",
+            [key.into()],
+        );
+        let setting = SystemSetting::find_by_statement(stmt).one(db).await?;
 
         Ok(setting)
     }
 
     /// 获取所有设置
-    pub async fn find_all(pool: &sqlx::PgPool) -> Result<Vec<SystemSetting>, DbError> {
-        let settings =
-            sqlx::query_as::<_, SystemSetting>("SELECT * FROM system_settings ORDER BY key ASC")
-                .fetch_all(pool)
-                .await?;
+    pub async fn find_all(db: &DatabaseConnection) -> Result<Vec<SystemSetting>, DbError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT * FROM system_settings ORDER BY key ASC".to_string(),
+        );
+        let settings = SystemSetting::find_by_statement(stmt).all(db).await?;
 
         Ok(settings)
     }
 
     /// 获取所有非敏感设置
-    pub async fn find_non_sensitive(pool: &sqlx::PgPool) -> Result<Vec<SystemSetting>, DbError> {
-        let settings = sqlx::query_as::<_, SystemSetting>(
-            "SELECT * FROM system_settings WHERE is_sensitive = false ORDER BY key ASC",
-        )
-        .fetch_all(pool)
-        .await?;
+    pub async fn find_non_sensitive(
+        db: &DatabaseConnection,
+    ) -> Result<Vec<SystemSetting>, DbError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT * FROM system_settings WHERE is_sensitive = false ORDER BY key ASC".to_string(),
+        );
+        let settings = SystemSetting::find_by_statement(stmt).all(db).await?;
 
         Ok(settings)
     }
 
     /// 更新设置值（如果不存在则创建）
     pub async fn update_value(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         key: &str,
         value: &str,
     ) -> Result<SystemSetting, DbError> {
-        // 使用 INSERT ... ON CONFLICT 实现 UPSERT
-        let setting = sqlx::query_as::<_, SystemSetting>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO system_settings (key, value, value_type, description, created_at, updated_at)
             VALUES ($1, $2, 'string', '', NOW(), NOW())
@@ -261,11 +270,12 @@ impl SystemSetting {
                 updated_at = NOW()
             RETURNING *
             "#,
-        )
-        .bind(key)
-        .bind(value)
-        .fetch_one(pool)
-        .await?;
+            [key.into(), value.into()],
+        );
+        let setting = SystemSetting::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("upsert failed to return row".to_string()))?;
 
         Ok(setting)
     }
@@ -274,12 +284,12 @@ impl SystemSetting {
     ///
     /// 所有更新在同一事务中执行，保证原子性
     pub async fn batch_update(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         settings: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<SystemSetting>, DbError> {
-        let mut tx = pool.begin().await?;
-        let updated = Self::batch_update_tx(&mut tx, settings).await?;
-        tx.commit().await?;
+        let txn = db.begin().await?;
+        let updated = Self::batch_update_tx(&txn, settings).await?;
+        txn.commit().await?;
         Ok(updated)
     }
 
@@ -287,13 +297,14 @@ impl SystemSetting {
     ///
     /// 用于在调用者已有事务中执行批量更新
     pub async fn batch_update_tx(
-        tx: &mut Transaction<'_, Postgres>,
+        txn: &DatabaseTransaction,
         settings: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<SystemSetting>, DbError> {
         let mut updated = Vec::with_capacity(settings.len());
 
         for (key, value) in settings {
-            let setting = sqlx::query_as::<_, SystemSetting>(
+            let stmt = Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                 INSERT INTO system_settings (key, value, value_type, description, created_at, updated_at)
                 VALUES ($1, $2, 'string', '', NOW(), NOW())
@@ -302,11 +313,12 @@ impl SystemSetting {
                     updated_at = NOW()
                 RETURNING *
                 "#,
-            )
-            .bind(key)
-            .bind(value)
-            .fetch_one(&mut **tx)
-            .await?;
+                [key.as_str().into(), value.as_str().into()],
+            );
+            let setting = SystemSetting::find_by_statement(stmt)
+                .one(txn)
+                .await?
+                .ok_or_else(|| DbError::Other("upsert failed to return row".to_string()))?;
 
             updated.push(setting);
         }
@@ -317,66 +329,50 @@ impl SystemSetting {
     /// 初始化默认设置
     ///
     /// 如果设置不存在，则使用默认值创建
-    pub async fn init_default_settings(pool: &sqlx::PgPool) -> Result<(), DbError> {
+    pub async fn init_default_settings(db: &DatabaseConnection) -> Result<(), DbError> {
         let defaults = vec![
-            // 站点设置
             (setting_keys::SITE_NAME, "KeyCompute", "string"),
             (setting_keys::SITE_DESCRIPTION, "AI 模型聚合平台", "string"),
-            // 注册设置
             (setting_keys::DEFAULT_USER_QUOTA, "10.00", "decimal"),
             (setting_keys::DEFAULT_USER_ROLE, "user", "string"),
-            // 限流设置
             (setting_keys::DEFAULT_RPM_LIMIT, "60", "int"),
             (setting_keys::DEFAULT_TPM_LIMIT, "10000", "int"),
-            // 系统状态
             (setting_keys::MAINTENANCE_MODE, "false", "bool"),
             (
                 setting_keys::MAINTENANCE_MESSAGE,
                 "系统维护中，请稍后再试",
                 "string",
             ),
-            // 支付设置
             (setting_keys::MIN_RECHARGE_AMOUNT, "1.0", "decimal"),
             (setting_keys::MAX_RECHARGE_AMOUNT, "10000.0", "decimal"),
             (setting_keys::DEFAULT_CURRENCY, "CNY", "string"),
-            // 安全设置
             (setting_keys::LOGIN_FAILED_LIMIT, "5", "int"),
             (setting_keys::LOGIN_LOCKOUT_MINUTES, "30", "int"),
             (setting_keys::JWT_EXPIRE_HOURS, "72", "int"),
-            // 公告设置
             (setting_keys::SYSTEM_NOTICE_ENABLED, "false", "bool"),
-            // 分销设置 - 默认分销比例 (与 RuleEngine 硬编码保持一致)
             (setting_keys::DISTRIBUTION_ENABLED, "true", "bool"),
             (
                 setting_keys::DISTRIBUTION_LEVEL1_DEFAULT_RATIO,
                 "0.03",
                 "decimal",
-            ), // 一级分销默认 3%
+            ),
             (
                 setting_keys::DISTRIBUTION_LEVEL2_DEFAULT_RATIO,
                 "0.02",
                 "decimal",
-            ), // 二级分销默认 2%
-            (setting_keys::DISTRIBUTION_MIN_WITHDRAW, "100.0", "decimal"), // 最小提现金额 100元
-            // 节点租赁小费设置
-            (setting_keys::NODE_TIP_RATIO, "0.90", "decimal"), // 小费比例 90%
+            ),
+            (setting_keys::DISTRIBUTION_MIN_WITHDRAW, "100.0", "decimal"),
+            (setting_keys::NODE_TIP_RATIO, "0.90", "decimal"),
         ];
 
         for (key, value, value_type) in defaults {
-            // 检查设置是否已存在
-            if Self::find_by_key(pool, key).await?.is_none() {
-                // 不存在则创建
-                sqlx::query(
-                    r#"
-                    INSERT INTO system_settings (key, value, value_type, description, created_at, updated_at)
-                    VALUES ($1, $2, $3, '', NOW(), NOW())
-                    "#,
-                )
-                .bind(key)
-                .bind(value)
-                .bind(value_type)
-                .execute(pool)
-                .await?;
+            if Self::find_by_key(db, key).await?.is_none() {
+                let stmt = Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    r#"INSERT INTO system_settings (key, value, value_type, description, created_at, updated_at) VALUES ($1, $2, $3, '', NOW(), NOW())"#,
+                    [key.into(), value.into(), value_type.into()],
+                );
+                db.execute(stmt).await?;
             }
         }
 
@@ -384,40 +380,40 @@ impl SystemSetting {
     }
 
     /// 获取设置的字符串值，不存在则返回默认值
-    pub async fn get_string(pool: &sqlx::PgPool, key: &str, default: &str) -> String {
-        match Self::find_by_key(pool, key).await {
+    pub async fn get_string(db: &DatabaseConnection, key: &str, default: &str) -> String {
+        match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.value,
             _ => default.to_string(),
         }
     }
 
     /// 获取设置的布尔值，不存在则返回默认值
-    pub async fn get_bool(pool: &sqlx::PgPool, key: &str, default: bool) -> bool {
-        match Self::find_by_key(pool, key).await {
+    pub async fn get_bool(db: &DatabaseConnection, key: &str, default: bool) -> bool {
+        match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.parse_bool(),
             _ => default,
         }
     }
 
     /// 获取设置的整数值，不存在则返回默认值
-    pub async fn get_int(pool: &sqlx::PgPool, key: &str, default: i32) -> i32 {
-        match Self::find_by_key(pool, key).await {
+    pub async fn get_int(db: &DatabaseConnection, key: &str, default: i32) -> i32 {
+        match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.parse_int().unwrap_or(default),
             _ => default,
         }
     }
 
     /// 获取设置的浮点数值，不存在则返回默认值
-    pub async fn get_decimal(pool: &sqlx::PgPool, key: &str, default: f64) -> f64 {
-        match Self::find_by_key(pool, key).await {
+    pub async fn get_decimal(db: &DatabaseConnection, key: &str, default: f64) -> f64 {
+        match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.parse_decimal().unwrap_or(default),
             _ => default,
         }
     }
 
     /// 获取公开设置
-    pub async fn get_public_settings(pool: &sqlx::PgPool) -> PublicSettings {
-        let settings = Self::find_non_sensitive(pool).await.unwrap_or_default();
+    pub async fn get_public_settings(db: &DatabaseConnection) -> PublicSettings {
+        let settings = Self::find_non_sensitive(db).await.unwrap_or_default();
 
         let get_value = |key: &str| -> Option<String> {
             settings

@@ -135,6 +135,13 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+/// 从 sea-orm 错误转换
+impl From<sea_orm::DbErr> for ApiError {
+    fn from(err: sea_orm::DbErr) -> Self {
+        ApiError::Internal(err.to_string())
+    }
+}
+
 /// 从数据库错误转换
 impl From<keycompute_db::DbError> for ApiError {
     fn from(err: keycompute_db::DbError) -> Self {

@@ -6,8 +6,8 @@ use crate::jwt::JwtValidator;
 use crate::password::{EmailValidator, PasswordHasher};
 use keycompute_db::{User, UserCredential};
 use keycompute_types::{KeyComputeError, Result};
+use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -43,7 +43,7 @@ pub struct LoginResponse {
 #[derive(Clone)]
 pub struct LoginService {
     /// 数据库连接池
-    pool: Arc<PgPool>,
+    pool: Arc<DatabaseConnection>,
     /// 密码哈希器
     password_hasher: PasswordHasher,
     /// 邮箱验证器
@@ -67,7 +67,7 @@ impl std::fmt::Debug for LoginService {
 
 impl LoginService {
     /// 创建新的登录服务
-    pub fn new(pool: Arc<PgPool>, jwt_validator: JwtValidator) -> Self {
+    pub fn new(pool: Arc<DatabaseConnection>, jwt_validator: JwtValidator) -> Self {
         Self {
             pool,
             password_hasher: PasswordHasher::new(),

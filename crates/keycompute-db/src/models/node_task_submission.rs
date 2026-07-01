@@ -4,12 +4,12 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 节点任务提交模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct NodeTaskSubmission {
     pub id: Uuid,
     pub task_id: Uuid,
@@ -37,45 +37,46 @@ pub struct CreateNodeTaskSubmissionRequest {
 impl NodeTaskSubmission {
     /// 创建新提交记录
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreateNodeTaskSubmissionRequest,
     ) -> Result<NodeTaskSubmission, DbError> {
-        let submission = sqlx::query_as::<_, NodeTaskSubmission>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO node_task_submissions (task_id, lease_id, node_id, session_id, result_kind, request_hash, action)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             RETURNING *
             "#,
-        )
-        .bind(req.task_id)
-        .bind(req.lease_id)
-        .bind(req.node_id)
-        .bind(req.session_id)
-        .bind(&req.result_kind)
-        .bind(&req.request_hash)
-        .bind(&req.action)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.task_id.into(),
+                req.lease_id.into(),
+                req.node_id.into(),
+                req.session_id.into(),
+                req.result_kind.as_str().into(),
+                req.request_hash.as_str().into(),
+                req.action.as_str().into(),
+            ],
+        );
+        let submission = NodeTaskSubmission::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(submission)
     }
 
     /// 根据 task_id 和 lease_id 查询提交记录
     pub async fn find_by_task_and_lease(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         task_id: Uuid,
         lease_id: Uuid,
     ) -> Result<Option<NodeTaskSubmission>, DbError> {
-        let submission = sqlx::query_as::<_, NodeTaskSubmission>(
-            r#"
-            SELECT * FROM node_task_submissions
-            WHERE task_id = $1 AND lease_id = $2
-            "#,
-        )
-        .bind(task_id)
-        .bind(lease_id)
-        .fetch_optional(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM node_task_submissions WHERE task_id = $1 AND lease_id = $2",
+            [task_id.into(), lease_id.into()],
+        );
+        let submission = NodeTaskSubmission::find_by_statement(stmt).one(db).await?;
 
         Ok(submission)
     }
@@ -83,11 +84,12 @@ impl NodeTaskSubmission {
     /// 检查提交是否未归档（24 小时内且任务未终态）
     /// 注意：需要联合查询 node_tasks 表
     pub async fn is_not_archived(
-        pool: &sqlx::PgPool,
+        db: &impl ConnectionTrait,
         task_id: Uuid,
         lease_id: Uuid,
     ) -> Result<bool, DbError> {
-        let exists = sqlx::query_scalar::<_, bool>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT EXISTS (
                 SELECT 1
@@ -97,14 +99,15 @@ impl NodeTaskSubmission {
                   AND s.lease_id = $2
                   AND t.status NOT IN ('succeeded', 'failed', 'expired')
                   AND s.created_at > NOW() - INTERVAL '24 hours'
-            )
+            ) AS exist
             "#,
-        )
-        .bind(task_id)
-        .bind(lease_id)
-        .fetch_one(pool)
-        .await?;
-
+            [task_id.into(), lease_id.into()],
+        );
+        let result = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("query failed".to_string()))?;
+        let exists: bool = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
         Ok(exists)
     }
 }

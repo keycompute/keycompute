@@ -22,8 +22,9 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-// 使用 sqlx::types::BigDecimal 替代 bigdecimal crate
-type BigDecimal = sqlx::types::BigDecimal;
+use sea_orm::DatabaseConnection;
+
+type BigDecimal = bigdecimal::BigDecimal;
 
 // ==================== 数据结构 ====================
 
@@ -305,7 +306,7 @@ fn string_to_bigdecimal(value: &str) -> Result<BigDecimal> {
 }
 
 /// 检查分销系统是否启用
-async fn check_distribution_enabled(pool: &sqlx::PgPool) -> Result<()> {
+async fn check_distribution_enabled(pool: &DatabaseConnection) -> Result<()> {
     let enabled =
         keycompute_db::SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
             .await
@@ -324,7 +325,7 @@ async fn check_distribution_enabled(pool: &sqlx::PgPool) -> Result<()> {
 }
 
 async fn build_distribution_record_response(
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     record: keycompute_db::DistributionRecord,
 ) -> Result<DistributionRecordResponse> {
     let usage_log = keycompute_db::UsageLog::find_by_id(pool, record.usage_log_id)
@@ -352,7 +353,7 @@ async fn build_distribution_record_response(
 }
 
 async fn build_referral_info(
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     beneficiary_id: Uuid,
     referral: keycompute_db::UserReferral,
 ) -> Result<ReferralInfo> {

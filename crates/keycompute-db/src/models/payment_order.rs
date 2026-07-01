@@ -3,8 +3,8 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 订单状态
@@ -76,7 +76,7 @@ impl PaymentMethod {
 }
 
 /// 支付订单模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct PaymentOrder {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -106,7 +106,7 @@ pub struct PaymentOrder {
     /// 支付URL
     pub pay_url: Option<String>,
     /// 回调通知原始数据
-    pub notify_data: Option<sqlx::types::Json<serde_json::Value>>,
+    pub notify_data: Option<serde_json::Value>,
     /// 备注信息
     pub remarks: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -153,14 +153,14 @@ fn default_expire_minutes() -> i32 {
 impl PaymentOrder {
     /// 创建新订单
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreatePaymentOrderRequest,
         out_trade_no: &str,
         pay_url: &str,
     ) -> Result<PaymentOrder, DbError> {
         let expired_at = Utc::now() + chrono::Duration::minutes(req.expire_minutes as i64);
-
-        let order = sqlx::query_as::<_, PaymentOrder>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO payment_orders (
                 tenant_id, user_id, out_trade_no, amount,
@@ -170,184 +170,157 @@ impl PaymentOrder {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             RETURNING *
             "#,
-        )
-        .bind(req.tenant_id)
-        .bind(req.user_id)
-        .bind(out_trade_no)
-        .bind(req.amount)
-        .bind("CNY")
-        .bind(PaymentOrderStatus::Pending.as_str())
-        .bind(PaymentMethod::Alipay.as_str())
-        .bind(&req.subject)
-        .bind(&req.body)
-        .bind(expired_at)
-        .bind(pay_url)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.tenant_id.into(),
+                req.user_id.into(),
+                out_trade_no.into(),
+                req.amount.into(),
+                "CNY".into(),
+                PaymentOrderStatus::Pending.as_str().into(),
+                PaymentMethod::Alipay.as_str().into(),
+                req.subject.as_str().into(),
+                req.body.clone().into(),
+                expired_at.into(),
+                pay_url.into(),
+            ],
+        );
+        let order = PaymentOrder::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(order)
     }
 
     /// 根据ID查找订单
     pub async fn find_by_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         id: Uuid,
     ) -> Result<Option<PaymentOrder>, DbError> {
-        let order = sqlx::query_as::<_, PaymentOrder>("SELECT * FROM payment_orders WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM payment_orders WHERE id = $1",
+            [id.into()],
+        );
+        let order = PaymentOrder::find_by_statement(stmt).one(db).await?;
         Ok(order)
     }
 
     /// 根据商户订单号查找订单
     pub async fn find_by_out_trade_no(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         out_trade_no: &str,
     ) -> Result<Option<PaymentOrder>, DbError> {
-        let order = sqlx::query_as::<_, PaymentOrder>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM payment_orders WHERE out_trade_no = $1",
-        )
-        .bind(out_trade_no)
-        .fetch_optional(pool)
-        .await?;
+            [out_trade_no.into()],
+        );
+        let order = PaymentOrder::find_by_statement(stmt).one(db).await?;
         Ok(order)
     }
 
     /// 根据支付宝交易号查找订单
     pub async fn find_by_trade_no(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         trade_no: &str,
     ) -> Result<Option<PaymentOrder>, DbError> {
-        let order =
-            sqlx::query_as::<_, PaymentOrder>("SELECT * FROM payment_orders WHERE trade_no = $1")
-                .bind(trade_no)
-                .fetch_optional(pool)
-                .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM payment_orders WHERE trade_no = $1",
+            [trade_no.into()],
+        );
+        let order = PaymentOrder::find_by_statement(stmt).one(db).await?;
         Ok(order)
     }
 
     /// 查找用户的订单列表
     pub async fn find_by_user(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<PaymentOrder>, DbError> {
-        let orders = sqlx::query_as::<_, PaymentOrder>(
-            r#"
-            SELECT * FROM payment_orders
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(user_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM payment_orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            [user_id.into(), limit.into(), offset.into()],
+        );
+        let orders = PaymentOrder::find_by_statement(stmt).all(db).await?;
         Ok(orders)
     }
 
     /// 更新订单为已支付
-    ///
-    /// # 已废弃
-    /// 此方法没有并发保护，可能导致重复处理。
-    /// 请使用 `handle_notify` 或 `sync_order_status` 方法替代，它们在事务中处理。
     #[deprecated(
         since = "0.2.0",
         note = "此方法没有并发保护，请使用 PaymentService 中的 handle_notify 或 sync_order_status"
     )]
     pub async fn mark_as_paid(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         id: Uuid,
         trade_no: &str,
         notify_data: &serde_json::Value,
     ) -> Result<PaymentOrder, DbError> {
-        let order = sqlx::query_as::<_, PaymentOrder>(
-            r#"
-            UPDATE payment_orders
-            SET status = $1,
-                trade_no = $2,
-                notify_data = $3,
-                paid_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $4
-            RETURNING *
-            "#,
-        )
-        .bind(PaymentOrderStatus::Paid.as_str())
-        .bind(trade_no)
-        .bind(sqlx::types::Json(notify_data))
-        .bind(id)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE payment_orders SET status = $1, trade_no = $2, notify_data = $3, paid_at = NOW(), updated_at = NOW() WHERE id = $4 RETURNING *"#,
+            [
+                PaymentOrderStatus::Paid.as_str().into(),
+                trade_no.into(),
+                notify_data.clone().into(),
+                id.into(),
+            ],
+        );
+        let order = PaymentOrder::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("PaymentOrder", id.to_string()))?;
         Ok(order)
     }
 
     /// 更新订单为支付失败
-    ///
-    /// # 注意
-    /// 只有 pending 状态的订单才能标记为失败，避免覆盖已支付状态
-    pub async fn mark_as_failed(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentOrder, DbError> {
-        let order = sqlx::query_as::<_, PaymentOrder>(
-            r#"
-            UPDATE payment_orders
-            SET status = $1,
-                updated_at = NOW()
-            WHERE id = $2 AND status = $3
-            RETURNING *
-            "#,
-        )
-        .bind(PaymentOrderStatus::Failed.as_str())
-        .bind(id)
-        .bind(PaymentOrderStatus::Pending.as_str())
-        .fetch_optional(pool)
-        .await?;
+    pub async fn mark_as_failed(
+        db: &DatabaseConnection,
+        id: Uuid,
+    ) -> Result<PaymentOrder, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE payment_orders SET status = $1, updated_at = NOW() WHERE id = $2 AND status = $3 RETURNING *"#,
+            [
+                PaymentOrderStatus::Failed.as_str().into(),
+                id.into(),
+                PaymentOrderStatus::Pending.as_str().into(),
+            ],
+        );
 
-        // 如果订单已被处理，返回现有订单
-        match order {
+        match PaymentOrder::find_by_statement(stmt).one(db).await? {
             Some(o) => Ok(o),
             None => {
-                // 订单已被其他事务处理，查询当前状态
-                let existing =
-                    sqlx::query_as::<_, PaymentOrder>("SELECT * FROM payment_orders WHERE id = $1")
-                        .bind(id)
-                        .fetch_one(pool)
-                        .await?;
-                Ok(existing)
+                let existing = Self::find_by_id(db, id).await?;
+                match existing {
+                    Some(o) => Ok(o),
+                    None => Err(DbError::not_found("PaymentOrder", id.to_string())),
+                }
             }
         }
     }
 
     /// 关闭订单
-    ///
-    /// # Errors
-    /// - `DbError::NotFound` - 订单不存在
-    /// - `DbError::InvalidOrderStatus` - 订单状态不是 pending
-    pub async fn close(pool: &sqlx::PgPool, id: Uuid) -> Result<PaymentOrder, DbError> {
-        let order = sqlx::query_as::<_, PaymentOrder>(
-            r#"
-            UPDATE payment_orders
-            SET status = $1,
-                closed_at = NOW(),
-                updated_at = NOW()
-            WHERE id = $2 AND status = $3
-            RETURNING *
-            "#,
-        )
-        .bind(PaymentOrderStatus::Closed.as_str())
-        .bind(id)
-        .bind(PaymentOrderStatus::Pending.as_str())
-        .fetch_optional(pool)
-        .await?;
+    pub async fn close(db: &DatabaseConnection, id: Uuid) -> Result<PaymentOrder, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE payment_orders SET status = $1, closed_at = NOW(), updated_at = NOW() WHERE id = $2 AND status = $3 RETURNING *"#,
+            [
+                PaymentOrderStatus::Closed.as_str().into(),
+                id.into(),
+                PaymentOrderStatus::Pending.as_str().into(),
+            ],
+        );
 
-        match order {
+        match PaymentOrder::find_by_statement(stmt).one(db).await? {
             Some(order) => Ok(order),
             None => {
-                // 检查订单是否存在
-                if let Some(existing) = Self::find_by_id(pool, id).await? {
+                if let Some(existing) = Self::find_by_id(db, id).await? {
                     Err(DbError::InvalidOrderStatus {
                         expected: "pending".to_string(),
                         actual: existing.status,
@@ -360,26 +333,22 @@ impl PaymentOrder {
     }
 
     /// 关闭过期订单
-    pub async fn close_expired_orders(pool: &sqlx::PgPool) -> Result<u64, DbError> {
-        let result = sqlx::query(
-            r#"
-            UPDATE payment_orders
-            SET status = $1,
-                closed_at = NOW(),
-                updated_at = NOW()
-            WHERE status = $2 AND expired_at < NOW()
-            "#,
-        )
-        .bind(PaymentOrderStatus::Closed.as_str())
-        .bind(PaymentOrderStatus::Pending.as_str())
-        .execute(pool)
-        .await?;
+    pub async fn close_expired_orders(db: &DatabaseConnection) -> Result<u64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE payment_orders SET status = $1, closed_at = NOW(), updated_at = NOW() WHERE status = $2 AND expired_at < NOW()"#,
+            [
+                PaymentOrderStatus::Closed.as_str().into(),
+                PaymentOrderStatus::Pending.as_str().into(),
+            ],
+        );
+        let result = db.execute(stmt).await?;
         Ok(result.rows_affected())
     }
 }
 
 /// 支付订单统计
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct PaymentOrderStats {
     pub total_orders: i64,
     pub total_amount: Decimal,
@@ -392,10 +361,11 @@ pub struct PaymentOrderStats {
 impl PaymentOrder {
     /// 获取用户订单统计
     pub async fn get_user_stats(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<PaymentOrderStats, DbError> {
-        let stats = sqlx::query_as::<_, PaymentOrderStats>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT
                 COUNT(*) as total_orders,
@@ -407,10 +377,12 @@ impl PaymentOrder {
             FROM payment_orders
             WHERE user_id = $1
             "#,
-        )
-        .bind(user_id)
-        .fetch_one(pool)
-        .await?;
+            [user_id.into()],
+        );
+        let stats = PaymentOrderStats::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("stats query failed".to_string()))?;
         Ok(stats)
     }
 }

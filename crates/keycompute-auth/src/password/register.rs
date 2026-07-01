@@ -16,8 +16,11 @@ use keycompute_db::{
 use keycompute_emailserver::EmailService;
 use keycompute_types::{KeyComputeError, Result, UserRole};
 use rand::Rng;
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
+    Statement, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -71,7 +74,7 @@ pub struct CompleteRegistrationResponse {
 #[derive(Clone)]
 pub struct RegistrationService {
     /// 数据库连接池
-    pool: Arc<PgPool>,
+    pool: Arc<DatabaseConnection>,
     /// 密码哈希器
     password_hasher: PasswordHasher,
     /// 密码验证器
@@ -109,7 +112,7 @@ impl std::fmt::Debug for RegistrationService {
 
 impl RegistrationService {
     /// 创建新的注册服务
-    pub fn new(pool: Arc<PgPool>) -> Self {
+    pub fn new(pool: Arc<DatabaseConnection>) -> Self {
         Self {
             pool,
             password_hasher: PasswordHasher::new(),
@@ -146,11 +149,11 @@ impl RegistrationService {
         let email = self.email_validator.normalize(&req.email);
         self.email_validator.validate(&email)?;
 
-        let mut tx = self.pool.begin().await.map_err(|e| {
+        let tx = self.pool.begin().await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to start transaction: {}", e))
         })?;
 
-        PendingRegistration::lock_email_slot(&mut tx, &email)
+        PendingRegistration::lock_email_slot(&tx, &email)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!(
@@ -159,13 +162,13 @@ impl RegistrationService {
                 ))
             })?;
 
-        if self.user_exists_by_email_in_tx(&mut tx, &email).await? {
+        if self.user_exists_by_email_in_tx(&tx, &email).await? {
             return Err(KeyComputeError::ValidationError(
                 "该邮箱已被注册，请直接登录".to_string(),
             ));
         }
 
-        let existing_pending = PendingRegistration::find_by_email_for_update(&mut tx, &email)
+        let existing_pending = PendingRegistration::find_by_email_for_update(&tx, &email)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!(
@@ -209,7 +212,7 @@ impl RegistrationService {
 
         if let Some(existing_pending) = existing_pending.as_ref() {
             existing_pending
-                .refresh_code_in_tx(&mut tx, &save_req)
+                .refresh_code_in_tx(&tx, &save_req)
                 .await
                 .map_err(|e| {
                     KeyComputeError::DatabaseError(format!(
@@ -218,7 +221,7 @@ impl RegistrationService {
                     ))
                 })?;
         } else {
-            PendingRegistration::create_in_tx(&mut tx, &save_req)
+            PendingRegistration::create_in_tx(&tx, &save_req)
                 .await
                 .map_err(|e| {
                     KeyComputeError::DatabaseError(format!(
@@ -281,11 +284,11 @@ impl RegistrationService {
         self.validate_registration_code(&req.code)?;
         self.password_validator.validate(&req.password)?;
 
-        let mut tx = self.pool.begin().await.map_err(|e| {
+        let tx = self.pool.begin().await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to start transaction: {}", e))
         })?;
 
-        PendingRegistration::lock_email_slot(&mut tx, &email)
+        PendingRegistration::lock_email_slot(&tx, &email)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!(
@@ -294,13 +297,13 @@ impl RegistrationService {
                 ))
             })?;
 
-        if self.user_exists_by_email_in_tx(&mut tx, &email).await? {
+        if self.user_exists_by_email_in_tx(&tx, &email).await? {
             return Err(KeyComputeError::ValidationError(
                 "该邮箱已被注册，请直接登录".to_string(),
             ));
         }
 
-        let pending = PendingRegistration::find_by_email_for_update(&mut tx, &email)
+        let pending = PendingRegistration::find_by_email_for_update(&tx, &email)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!(
@@ -329,7 +332,7 @@ impl RegistrationService {
             .verify(&req.code, &pending.verification_code_hash)?;
 
         if !code_matches {
-            let updated_pending = pending.increment_attempts(&mut tx).await.map_err(|e| {
+            let updated_pending = pending.increment_attempts(&tx).await.map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to record code attempt: {}", e))
             })?;
 
@@ -348,23 +351,23 @@ impl RegistrationService {
             return Err(KeyComputeError::VerificationError("验证码错误".to_string()));
         }
 
-        let tenant = self.get_or_create_default_tenant_in_tx(&mut tx).await?;
+        let tenant = self.get_or_create_default_tenant_in_tx(&tx).await?;
         let password_hash = self.password_hasher.hash(&req.password)?;
         let user = self
-            .create_user_in_tx(&mut tx, tenant.id, &email, req.name.clone())
+            .create_user_in_tx(&tx, tenant.id, &email, req.name.clone())
             .await?;
-        self.create_verified_credential_in_tx(&mut tx, user.id, &password_hash)
+        self.create_verified_credential_in_tx(&tx, user.id, &password_hash)
             .await?;
 
         if default_quota > 0.0 {
-            self.initialize_user_balance_in_tx(&mut tx, user.id, tenant.id, default_quota)
+            self.initialize_user_balance_in_tx(&tx, user.id, tenant.id, default_quota)
                 .await?;
         }
 
-        self.create_referral_in_tx(&mut tx, user.id, pending.referral_code)
+        self.create_referral_in_tx(&tx, user.id, pending.referral_code)
             .await?;
 
-        PendingRegistration::delete_in_tx(&mut tx, pending.id)
+        PendingRegistration::delete_in_tx(&tx, pending.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!(
@@ -406,28 +409,28 @@ impl RegistrationService {
     }
 
     /// 获取或创建默认租户
-    async fn get_or_create_default_tenant_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-    ) -> Result<Tenant> {
+    async fn get_or_create_default_tenant_in_tx(&self, tx: &DatabaseTransaction) -> Result<Tenant> {
         let default_slug = "default";
-        let tenant = sqlx::query_as::<_, Tenant>(
-            r#"
-            INSERT INTO tenants (name, slug, description)
-            VALUES ($1, $2, $3)
-            ON CONFLICT (slug) DO UPDATE
-            SET slug = EXCLUDED.slug
-            RETURNING *
-            "#,
-        )
-        .bind("Default Tenant")
-        .bind(default_slug)
-        .bind(Some("Default tenant for new users"))
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to create default tenant: {}", e))
-        })?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO tenants (name, slug, description) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING *"#,
+            [
+                "Default Tenant".into(),
+                default_slug.into(),
+                Some("Default tenant for new users").into(),
+            ],
+        );
+        let tenant = Tenant::find_by_statement(stmt)
+            .one(tx)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to create default tenant: {}", e))
+            })?
+            .ok_or_else(|| {
+                KeyComputeError::DatabaseError(
+                    "Failed to create default tenant: no row returned".to_string(),
+                )
+            })?;
 
         Ok(tenant)
     }
@@ -449,69 +452,82 @@ impl RegistrationService {
 
     async fn user_exists_by_email_in_tx(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         email: &str,
     ) -> Result<bool> {
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
-            .bind(email)
-            .fetch_one(&mut **tx)
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)",
+            [email.into()],
+        );
+        let result = tx
+            .query_one(stmt)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to check email existence: {}", e))
-            })
+            })?
+            .ok_or_else(|| KeyComputeError::DatabaseError("Query returned no rows".to_string()))?;
+        let exists: bool = result.try_get_by_index(0).map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to parse result: {}", e))
+        })?;
+        Ok(exists)
     }
 
     async fn create_user_in_tx(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         tenant_id: Uuid,
         email: &str,
         name: Option<String>,
     ) -> Result<User> {
-        sqlx::query_as::<_, User>(
-            r#"
-            INSERT INTO users (tenant_id, email, name, role)
-            VALUES ($1, $2, $3, $4)
-            RETURNING *
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(email)
-        .bind(name)
-        .bind(UserRole::User.as_str())
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to create user: {}", e)))
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO users (tenant_id, email, name, role) VALUES ($1, $2, $3, $4) RETURNING *"#,
+            [
+                tenant_id.into(),
+                email.into(),
+                name.clone().into(),
+                UserRole::User.as_str().into(),
+            ],
+        );
+        let user = User::find_by_statement(stmt)
+            .one(tx)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to create user: {}", e)))?
+            .ok_or_else(|| {
+                KeyComputeError::DatabaseError("Failed to create user: no row returned".to_string())
+            })?;
+        Ok(user)
     }
 
     async fn create_verified_credential_in_tx(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         user_id: Uuid,
         password_hash: &str,
     ) -> Result<UserCredential> {
-        sqlx::query_as::<_, UserCredential>(
-            r#"
-            INSERT INTO user_credentials (
-                user_id,
-                password_hash,
-                email_verified,
-                email_verified_at
-            )
-            VALUES ($1, $2, TRUE, NOW())
-            RETURNING *
-            "#,
-        )
-        .bind(user_id)
-        .bind(password_hash)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to create credential: {}", e)))
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_credentials (user_id, password_hash, email_verified, email_verified_at) VALUES ($1, $2, TRUE, NOW()) RETURNING *"#,
+            [user_id.into(), password_hash.into()],
+        );
+        let credential = UserCredential::find_by_statement(stmt)
+            .one(tx)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to create credential: {}", e))
+            })?
+            .ok_or_else(|| {
+                KeyComputeError::DatabaseError(
+                    "Failed to create credential: no row returned".to_string(),
+                )
+            })?;
+        Ok(credential)
     }
 
     async fn initialize_user_balance_in_tx(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         user_id: Uuid,
         tenant_id: Uuid,
         initial_balance: f64,
@@ -520,45 +536,21 @@ impl RegistrationService {
 
         let amount = Decimal::from_f64_retain(initial_balance).unwrap_or(Decimal::ZERO);
 
-        sqlx::query(
-            r#"
-            INSERT INTO user_balances (tenant_id, user_id, available_balance, total_recharged)
-            VALUES ($1, $2, $3, $3)
-            ON CONFLICT (user_id) DO UPDATE SET
-                available_balance = user_balances.available_balance + $3,
-                total_recharged = user_balances.total_recharged + $3,
-                updated_at = NOW()
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(user_id)
-        .bind(amount)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| {
+        let stmt1 = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_balances (tenant_id, user_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW()"#,
+            [tenant_id.into(), user_id.into(), amount.into()],
+        );
+        tx.execute(stmt1).await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to initialize balance: {}", e))
         })?;
 
-        sqlx::query(
-            r#"
-            INSERT INTO balance_transactions (
-                tenant_id,
-                user_id,
-                transaction_type,
-                amount,
-                balance_before,
-                balance_after,
-                description
-            )
-            VALUES ($1, $2, 'recharge', $3, 0, $3, 'Initial quota from system')
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(user_id)
-        .bind(amount)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| {
+        let stmt2 = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO balance_transactions (tenant_id, user_id, transaction_type, amount, balance_before, balance_after, description) VALUES ($1, $2, 'recharge', $3, 0, $3, 'Initial quota from system')"#,
+            [tenant_id.into(), user_id.into(), amount.into()],
+        );
+        tx.execute(stmt2).await.map_err(|e| {
             KeyComputeError::DatabaseError(format!(
                 "Failed to record initial balance transaction: {}",
                 e
@@ -570,7 +562,7 @@ impl RegistrationService {
 
     async fn create_referral_in_tx(
         &self,
-        tx: &mut Transaction<'_, Postgres>,
+        tx: &DatabaseTransaction,
         user_id: Uuid,
         referral_code: Option<Uuid>,
     ) -> Result<()> {
@@ -584,51 +576,51 @@ impl RegistrationService {
             ));
         }
 
-        let referrer_exists =
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)")
-                .bind(level1_referrer_id)
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(|e| {
-                    KeyComputeError::DatabaseError(format!(
-                        "Failed to validate referral code: {}",
-                        e
-                    ))
-                })?;
+        let referrer_exists_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)",
+            [level1_referrer_id.into()],
+        );
+        let referrer_result = tx
+            .query_one(referrer_exists_stmt)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to validate referral code: {}", e))
+            })?
+            .ok_or_else(|| KeyComputeError::DatabaseError("Query returned no rows".to_string()))?;
+        let referrer_exists: bool = referrer_result.try_get_by_index(0).map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to parse result: {}", e))
+        })?;
 
         if !referrer_exists {
             return Err(KeyComputeError::ValidationError("推荐码无效".to_string()));
         }
 
-        let level2_referrer_id = sqlx::query_scalar::<_, Option<Uuid>>(
+        let l2_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT level1_referrer_id FROM user_referrals WHERE user_id = $1",
-        )
-        .bind(level1_referrer_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to load referral chain: {}", e))
-        })?
-        .flatten();
+            [level1_referrer_id.into()],
+        );
+        let level2_referrer_id: Option<Uuid> = tx
+            .query_one(l2_stmt)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to load referral chain: {}", e))
+            })?
+            .and_then(|r| r.try_get_by_index::<Option<Uuid>>(0).ok())
+            .flatten();
 
-        sqlx::query(
-            r#"
-            INSERT INTO user_referrals (
-                user_id,
-                level1_referrer_id,
-                level2_referrer_id,
-                source
-            )
-            VALUES ($1, $2, $3, $4)
-            "#,
-        )
-        .bind(user_id)
-        .bind(level1_referrer_id)
-        .bind(level2_referrer_id)
-        .bind("referral_code")
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| {
+        let insert_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_referrals (user_id, level1_referrer_id, level2_referrer_id, source) VALUES ($1, $2, $3, $4)"#,
+            [
+                user_id.into(),
+                level1_referrer_id.into(),
+                level2_referrer_id.into(),
+                "referral_code".into(),
+            ],
+        );
+        tx.execute(insert_stmt).await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to create referral relationship: {}", e))
         })?;
 
@@ -663,7 +655,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_generate_registration_code() {
-        let pool = PgPool::connect_lazy("postgres://localhost/test").expect("lazy pool");
+        let pool = DatabaseConnection::Disconnected;
         let service = RegistrationService::new(Arc::new(pool));
         let code = service.generate_registration_code();
 
@@ -673,7 +665,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_registration_code() {
-        let pool = PgPool::connect_lazy("postgres://localhost/test").expect("lazy pool");
+        let pool = DatabaseConnection::Disconnected;
         let service = RegistrationService::new(Arc::new(pool));
 
         assert!(service.validate_registration_code("123456").is_ok());

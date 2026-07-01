@@ -20,12 +20,12 @@ use keycompute_db::models::user::User;
 use keycompute_db::models::user_node_gateway_token::{
     PendingTokenWithUser, UserNodeGatewayToken, UserNodeGatewayTokenResponse,
 };
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
 use uuid::Uuid;
 
 /// 已注册节点信息（用户端查看令牌时展示）
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct RegisteredNodeInfo {
     pub id: Uuid,
     pub display_name: String,
@@ -49,7 +49,7 @@ pub struct NodeGatewayTokenDetailResponse {
 
 /// 构建单个 token 的响应（从 UserNodeGatewayToken 到 NodeGatewayTokenDetailResponse）
 async fn build_token_response(
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     state: &AppState,
     t: UserNodeGatewayToken,
 ) -> Result<NodeGatewayTokenDetailResponse> {
@@ -102,12 +102,12 @@ async fn build_token_response(
         || (t.status == "approved" && t.consumed_node_id.is_some())
     {
         if let Some(node_id) = t.consumed_node_id {
-            sqlx::query(
+            let stmt = Statement::from_sql_and_values(
+                DbBackend::Postgres,
                 r#"
                     SELECT
                         id,
                         display_name,
-                        -- 心跳超时检测：与 admin 节点列表保持一致
                         CASE
                             WHEN status = 'online'
                                  AND last_heartbeat_at IS NOT NULL
@@ -119,18 +119,13 @@ async fn build_token_response(
                     FROM nodes
                     WHERE id = $1
                     "#,
-            )
-            .bind(node_id)
-            .fetch_optional(pool)
-            .await
-            .ok()
-            .flatten()
-            .map(|row| RegisteredNodeInfo {
-                id: row.get("id"),
-                display_name: row.get("display_name"),
-                status: row.get("status"),
-                last_heartbeat_at: row.get("last_heartbeat_at"),
-            })
+                [node_id.into()],
+            );
+            RegisteredNodeInfo::find_by_statement(stmt)
+                .one(pool)
+                .await
+                .ok()
+                .flatten()
         } else {
             None
         }
@@ -438,7 +433,7 @@ pub async fn admin_approve_token(
 /// 邮件发送失败不阻塞审批流程，仅记录警告日志。
 async fn send_token_approved_email(
     state: &AppState,
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     token_id: uuid::Uuid,
     user_id: uuid::Uuid,
     token_preview: &str,

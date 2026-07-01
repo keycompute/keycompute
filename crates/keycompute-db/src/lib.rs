@@ -5,7 +5,10 @@
 pub mod models;
 pub mod schema;
 
-use sqlx::{PgPool, Postgres, migrate::Migrator, postgres::PgPoolOptions};
+use sea_orm::{
+    ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection,
+    DatabaseTransaction, DbBackend, Statement, TransactionTrait,
+};
 use std::time::Duration;
 
 pub use models::*;
@@ -48,7 +51,7 @@ pub enum DbError {
 
     /// 数据库原生错误
     #[error("database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
+    DatabaseError(#[from] sea_orm::DbErr),
 
     /// 其他错误
     #[error("{0}")]
@@ -98,22 +101,28 @@ impl DbError {
     /// 检查是否为唯一约束冲突
     pub fn is_duplicate(&self) -> bool {
         matches!(self, Self::DuplicateKey { .. })
-            || matches!(self, Self::DatabaseError(sqlx::Error::Database(e)) if e.constraint().is_some())
+            || matches!(self, Self::DatabaseError(sea_orm::DbErr::Query(e))
+                if e.to_string().contains("duplicate key") || e.to_string().contains("unique constraint"))
     }
 
-    /// 从 sqlx::Error 转换，保留语义
-    pub fn from_sqlx(err: sqlx::Error, entity: &str, id: &str) -> Self {
-        match err {
-            sqlx::Error::RowNotFound => Self::NotFound {
+    /// 从 sea_orm::DbErr 转换，保留语义
+    pub fn from_db_err(err: sea_orm::DbErr, entity: &str, id: &str) -> Self {
+        match &err {
+            sea_orm::DbErr::RecordNotFound(_) => Self::NotFound {
                 entity: entity.to_string(),
                 id: id.to_string(),
             },
-            sqlx::Error::Database(ref e) if e.constraint().is_some() => Self::DuplicateKey {
-                entity: e.table().unwrap_or(entity).to_string(),
-                field: e.constraint().unwrap_or("unknown").to_string(),
-                value: id.to_string(),
-            },
-            other => Self::DatabaseError(other),
+            sea_orm::DbErr::Query(e)
+                if e.to_string().contains("duplicate key")
+                    || e.to_string().contains("unique constraint") =>
+            {
+                Self::DuplicateKey {
+                    entity: entity.to_string(),
+                    field: "constraint".to_string(),
+                    value: id.to_string(),
+                }
+            }
+            _ => Self::DatabaseError(err),
         }
     }
 }
@@ -157,7 +166,7 @@ impl Default for DatabaseConfig {
 // 连接池管理
 // ============================================================================
 
-/// 初始化数据库连接池
+/// 初始化数据库连接
 ///
 /// # Examples
 ///
@@ -167,37 +176,95 @@ impl Default for DatabaseConfig {
 /// #[tokio::main]
 /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ///     let config = DatabaseConfig::default();
-///     let pool = init_pool(&config).await?;
+///     let db = init_pool(&config).await?;
 ///     Ok(())
 /// }
 /// ```
-pub async fn init_pool(config: &DatabaseConfig) -> Result<PgPool, DbError> {
-    let pool = PgPoolOptions::new()
-        .max_connections(config.max_connections)
+pub async fn init_pool(config: &DatabaseConfig) -> Result<DatabaseConnection, DbError> {
+    let mut opt = ConnectOptions::new(&config.url);
+    opt.max_connections(config.max_connections)
         .min_connections(config.min_connections)
         .acquire_timeout(Duration::from_secs(config.connect_timeout))
         .idle_timeout(Duration::from_secs(config.idle_timeout))
-        .max_lifetime(Duration::from_secs(config.max_lifetime))
-        .connect(&config.url)
+        .max_lifetime(Duration::from_secs(config.max_lifetime));
+
+    let db = SeaDatabase::connect(opt)
         .await
         .map_err(|e| DbError::ConnectionError(e.to_string()))?;
 
     tracing::info!("Database pool initialized successfully");
 
-    Ok(pool)
+    Ok(db)
+}
+
+/// 将 SQL 按顶层分号切分为独立语句
+///
+/// 正确处理以下场景：
+/// - `$$ ... $$` 美元引号块（PL/pgSQL 函数体等）
+/// - `'...'` 单引号字符串常量
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_dollar_block = false;
+    let mut prev_char: Option<char> = None;
+
+    for ch in sql.chars() {
+        current.push(ch);
+
+        match ch {
+            '\'' if prev_char != Some('\\') && !in_dollar_block => {
+                in_single_quote = !in_single_quote;
+            }
+            '$' if prev_char == Some('$') && !in_single_quote && !in_dollar_block => {
+                // 完整匹配 $$，跳过已推入的 current
+                in_dollar_block = true;
+            }
+            '$' if prev_char == Some('$') && !in_single_quote && in_dollar_block => {
+                // 完整匹配关闭 $$
+                in_dollar_block = false;
+            }
+            ';' if !in_single_quote && !in_dollar_block => {
+                // 移除已推入的 ';'，它只是分隔符不属于语句内容
+                current.pop();
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    statements.push(trimmed.to_string());
+                }
+                current.clear();
+            }
+            _ => {}
+        }
+
+        prev_char = Some(ch);
+    }
+
+    // 处理最后一个语句
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+
+    statements
 }
 
 /// 运行数据库迁移
 ///
-/// 使用 sqlx 的嵌入式迁移
-pub async fn run_migrations(pool: &PgPool) -> Result<(), DbError> {
-    // 嵌入式迁移文件
-    static MIGRATOR: Migrator = sqlx::migrate!("src/migrations");
+/// 使用纯 SQL 执行嵌入式迁移文件
+pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbError> {
+    let sql = include_str!("migrations/001_init.sql");
+    let backend = db.get_database_backend();
 
-    MIGRATOR
-        .run(pool)
-        .await
-        .map_err(|e| DbError::MigrationError(e.to_string()))?;
+    for statement in split_sql_statements(sql) {
+        let trimmed = statement.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let stmt = Statement::from_string(backend, statement);
+        db.execute(stmt)
+            .await
+            .map_err(|e| DbError::MigrationError(e.to_string()))?;
+    }
 
     tracing::info!("Database migrations completed successfully");
 
@@ -208,26 +275,24 @@ pub async fn run_migrations(pool: &PgPool) -> Result<(), DbError> {
 // 数据库管理器
 // ============================================================================
 
-use sqlx::{PgConnection, Transaction};
-
 /// 数据库管理器
 ///
 /// 封装数据库连接池，提供统一的数据库访问入口
 #[derive(Clone)]
 pub struct Database {
-    pool: PgPool,
+    db: DatabaseConnection,
 }
 
 impl Database {
     /// 创建新的数据库实例
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DbError> {
-        let pool = init_pool(config).await?;
-        Ok(Self { pool })
+        let db = init_pool(config).await?;
+        Ok(Self { db })
     }
 
-    /// 从现有连接池创建
-    pub fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+    /// 从现有连接创建
+    pub fn from_connection(db: DatabaseConnection) -> Self {
+        Self { db }
     }
 
     /// 从环境变量创建
@@ -236,64 +301,37 @@ impl Database {
         Self::new(&config).await
     }
 
-    /// 获取连接池引用
-    pub fn pool(&self) -> &PgPool {
-        &self.pool
+    /// 获取连接引用
+    pub fn connection(&self) -> &DatabaseConnection {
+        &self.db
     }
 
-    /// 获取连接池（消费）
-    pub fn into_pool(self) -> PgPool {
-        self.pool
+    /// 获取连接（消费）
+    pub fn into_connection(self) -> DatabaseConnection {
+        self.db
     }
 
     /// 开始一个事务
-    pub async fn begin(&self) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
-        self.pool.begin().await
-    }
-
-    /// 获取一个连接
-    pub async fn acquire(&self) -> Result<PgConnection, sqlx::Error> {
-        self.pool.acquire().await.map(|c| c.detach())
+    pub async fn begin(&self) -> Result<DatabaseTransaction, sea_orm::DbErr> {
+        self.db.begin().await
     }
 
     /// 运行迁移
     pub async fn migrate(&self) -> Result<(), DbError> {
-        run_migrations(&self.pool).await
+        run_migrations(&self.db).await
     }
 
     /// 测试连接
     pub async fn test_connection(&self) -> Result<(), DbError> {
-        sqlx::query("SELECT 1").fetch_one(&self.pool).await?;
+        let stmt = Statement::from_string(DbBackend::Postgres, "SELECT 1".to_string());
+        self.db.execute(stmt).await?;
         Ok(())
     }
-
-    /// 获取连接池状态信息
-    pub fn pool_status(&self) -> PoolStatus {
-        PoolStatus {
-            size: self.pool.size(),
-            idle: self.pool.num_idle() as u32,
-            is_closed: self.pool.is_closed(),
-        }
-    }
-}
-
-/// 连接池状态
-#[derive(Debug, Clone)]
-pub struct PoolStatus {
-    /// 连接池大小
-    pub size: u32,
-    /// 空闲连接数
-    pub idle: u32,
-    /// 是否已关闭
-    pub is_closed: bool,
 }
 
 /// 数据库连接管理器（已弃用，使用 Database）
 #[deprecated(since = "0.2.0", note = "Use `Database` instead")]
 pub type DatabaseManager = Database;
-
-/// 重新导出 sqlx 类型
-pub use sqlx::{PgConnection as SqlxPgConnection, PgPool as SqlxPgPool, Row};
 
 #[cfg(test)]
 mod tests {
@@ -321,8 +359,79 @@ mod tests {
     }
 
     #[test]
-    fn test_db_error_from_sqlx() {
-        let err = DbError::from_sqlx(sqlx::Error::RowNotFound, "User", "123");
+    fn test_db_error_from_db_err() {
+        let err = DbError::from_db_err(
+            sea_orm::DbErr::RecordNotFound("not found".to_string()),
+            "User",
+            "123",
+        );
         assert!(err.is_not_found());
+    }
+
+    #[test]
+    fn test_split_sql_statements_simple() {
+        let sql = "SELECT 1; SELECT 2;";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].trim_start().starts_with("SELECT 1"));
+        assert!(stmts[1].trim_start().starts_with("SELECT 2"));
+    }
+
+    #[test]
+    fn test_split_sql_statements_no_semicolon() {
+        let sql = "SELECT 1";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].trim_start().starts_with("SELECT 1"));
+    }
+
+    #[test]
+    fn test_split_sql_statements_preserves_dollar_block() {
+        let sql = "CREATE FUNCTION foo() RETURNS TRIGGER AS $$\nBEGIN\n    IF OLD.role = 'system' THEN\n        RAISE EXCEPTION 'cannot delete'\n    END IF;\n    RETURN OLD;\nEND;\n$$ LANGUAGE plpgsql;\n\nSELECT 1;";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2, "should produce exactly 2 statements");
+        assert!(
+            stmts[0].contains("$$"),
+            "first statement should contain $$ block"
+        );
+        assert!(
+            stmts[0].contains("LANGUAGE plpgsql"),
+            "first should be function"
+        );
+        assert!(
+            stmts[1].trim_start().starts_with("SELECT 1"),
+            "second should be SELECT"
+        );
+    }
+
+    #[test]
+    fn test_split_sql_statements_single_quotes() {
+        let sql = r#"INSERT INTO t VALUES ('foo;bar');SELECT 1;"#;
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
+        assert!(
+            stmts[0].contains("'foo;bar'"),
+            "semicolon inside quotes should be preserved"
+        );
+        assert!(stmts[1].trim_start().starts_with("SELECT 1"));
+    }
+
+    #[test]
+    fn test_split_sql_statements_empty_result() {
+        let stmts = split_sql_statements("");
+        assert!(stmts.is_empty());
+    }
+
+    #[test]
+    fn test_split_sql_statements_whitespace_only() {
+        let stmts = split_sql_statements("   ;   ;   ");
+        assert!(stmts.is_empty());
+    }
+
+    #[test]
+    fn test_split_sql_statements_mixed_newlines() {
+        let sql = "-- comment\nSELECT 1;\n\n-- another comment\nSELECT 2;";
+        let stmts = split_sql_statements(sql);
+        assert_eq!(stmts.len(), 2);
     }
 }

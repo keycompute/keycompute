@@ -5,11 +5,11 @@ use crate::{
     state::AppState,
 };
 use axum::{Json, extract::State};
+use sea_orm::{DbBackend, FromQueryResult, Statement};
 use serde::Serialize;
-use sqlx::FromRow;
 use uuid::Uuid;
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct MonitoringSummary {
     pub total_usage_logs: i64,
     pub total_node_tasks: i64,
@@ -20,7 +20,7 @@ pub struct MonitoringSummary {
     pub avg_node_latency_ms: Option<i64>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct MonitoringTraceEntry {
     pub request_id: Uuid,
     pub task_id: Uuid,
@@ -41,7 +41,7 @@ pub struct MonitoringTraceEntry {
     pub last_submission_action: Option<String>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromQueryResult)]
 pub struct MonitoringNodeHealth {
     pub id: Uuid,
     pub display_name: String,
@@ -68,7 +68,8 @@ pub async fn get_monitoring_overview(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let summary = sqlx::query_as::<_, MonitoringSummary>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
             (SELECT COUNT(*) FROM usage_logs)::BIGINT AS total_usage_logs,
@@ -87,12 +88,17 @@ pub async fn get_monitoring_overview(
                 WHERE finished_at IS NOT NULL
             ) AS avg_node_latency_ms
         "#,
-    )
-    .fetch_one(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to load monitoring summary: {}", e)))?;
+        [],
+    );
+    let summary = MonitoringSummary::find_by_statement(stmt)
+        .one(pool.as_ref())
+        .await?
+        .ok_or_else(|| {
+            ApiError::Internal("Failed to load monitoring summary: no data".to_string())
+        })?;
 
-    let traces = sqlx::query_as::<_, MonitoringTraceEntry>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
             nt.request_id,
@@ -128,17 +134,18 @@ pub async fn get_monitoring_overview(
         ORDER BY nt.created_at DESC
         LIMIT 50
         "#,
-    )
-    .fetch_all(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to load monitoring traces: {}", e)))?;
+        [],
+    );
+    let traces = MonitoringTraceEntry::find_by_statement(stmt)
+        .all(pool.as_ref())
+        .await?;
 
-    let nodes = sqlx::query_as::<_, MonitoringNodeHealth>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         r#"
         SELECT
             n.id,
             n.display_name,
-            -- 心跳超时检测：与 admin 节点网关列表保持一致
             CASE
                 WHEN n.status = 'online'
                      AND n.last_heartbeat_at IS NOT NULL
@@ -164,10 +171,11 @@ pub async fn get_monitoring_overview(
         ORDER BY n.last_heartbeat_at DESC NULLS LAST, n.updated_at DESC
         LIMIT 20
         "#,
-    )
-    .fetch_all(pool.as_ref())
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to load monitoring nodes: {}", e)))?;
+        [],
+    );
+    let nodes = MonitoringNodeHealth::find_by_statement(stmt)
+        .all(pool.as_ref())
+        .await?;
 
     Ok(Json(MonitoringOverviewResponse {
         summary,

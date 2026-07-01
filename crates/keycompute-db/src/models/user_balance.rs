@@ -3,8 +3,11 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
+use sea_orm::{
+    DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult, Statement,
+    TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
 /// 交易类型
@@ -47,7 +50,7 @@ impl TransactionType {
 }
 
 /// 用户余额模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct UserBalance {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -78,71 +81,79 @@ impl UserBalance {
 
 impl UserBalance {
     /// 获取或创建用户余额记录
-    ///
-    /// 使用 ON CONFLICT DO NOTHING 保证原子性，避免竞态条件
-    /// 如果记录已存在，直接返回；否则创建新记录
     pub async fn get_or_create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<UserBalance, DbError> {
-        // 使用单个 upsert 查询，避免 TOCTOU 竞态条件
-        let balance = sqlx::query_as::<_, UserBalance>(
-            r#"
-            INSERT INTO user_balances (tenant_id, user_id)
-            VALUES ($1, $2)
-            ON CONFLICT (user_id) DO UPDATE SET
-                updated_at = NOW()
-            RETURNING *
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(user_id)
-        .fetch_one(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_balances (tenant_id, user_id) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET updated_at = NOW() RETURNING *"#,
+            [tenant_id.into(), user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("get_or_create failed".to_string()))?;
 
         Ok(balance)
     }
 
     /// 根据用户ID查找余额
     pub async fn find_by_user(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
     ) -> Result<Option<UserBalance>, DbError> {
-        let balance =
-            sqlx::query_as::<_, UserBalance>("SELECT * FROM user_balances WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_optional(pool)
-                .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1",
+            [user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(stmt).one(db).await?;
         Ok(balance)
     }
 
     /// 批量根据用户ID查找余额
-    ///
-    /// 返回 HashMap<user_id, UserBalance>，用于避免 N+1 查询
     pub async fn find_by_users(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalance>, DbError> {
         if user_ids.is_empty() {
             return Ok(std::collections::HashMap::new());
         }
-
-        let balances =
-            sqlx::query_as::<_, UserBalance>("SELECT * FROM user_balances WHERE user_id = ANY($1)")
-                .bind(user_ids)
-                .fetch_all(pool)
-                .await?;
-
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = ANY($1)",
+            [user_ids.to_vec().into()],
+        );
+        let balances = UserBalance::find_by_statement(stmt).all(db).await?;
         Ok(balances.into_iter().map(|b| (b.user_id, b)).collect())
     }
 
-    /// 充值（事务内执行）
-    ///
-    /// # 注意
-    /// 如果用户余额记录不存在，会使用传入的 tenant_id 创建新记录
+    /// 充值（自身创建事务执行）
     pub async fn recharge(
-        pool: &mut sqlx::PgConnection,
+        db: &DatabaseConnection,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        amount: Decimal,
+        order_id: Option<Uuid>,
+        description: Option<&str>,
+    ) -> Result<(UserBalance, BalanceTransaction), DbError> {
+        let tx = db.begin().await?;
+
+        let result =
+            Self::recharge_in_tx(&tx, user_id, tenant_id, amount, order_id, description).await?;
+
+        tx.commit().await?;
+        Ok(result)
+    }
+
+    /// 充值（在已有事务内执行）
+    ///
+    /// 与 [`recharge`] 功能相同，但不自行创建事务，接受外部传入的事务引用。
+    /// 用于需要将充值操作与其它 DB 操作（如订单更新）放在同一事务中的场景。
+    pub async fn recharge_in_tx(
+        tx: &DatabaseTransaction,
         user_id: Uuid,
         tenant_id: Uuid,
         amount: Decimal,
@@ -150,12 +161,12 @@ impl UserBalance {
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction), DbError> {
         // 获取当前余额（加锁）
-        let balance = sqlx::query_as::<_, UserBalance>(
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-        )
-        .bind(user_id)
-        .fetch_optional(&mut *pool)
-        .await?;
+            [user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(lock_stmt).one(tx).await?;
 
         let balance_before = balance
             .as_ref()
@@ -163,30 +174,22 @@ impl UserBalance {
             .unwrap_or(Decimal::ZERO);
         let balance_after = balance_before + amount;
 
-        // 使用已有记录的 tenant_id 或传入的 tenant_id
         let effective_tenant_id = balance.as_ref().map(|b| b.tenant_id).unwrap_or(tenant_id);
 
         // 更新或创建余额
-        let updated_balance = sqlx::query_as::<_, UserBalance>(
-            r#"
-            INSERT INTO user_balances (user_id, tenant_id, available_balance, total_recharged)
-            VALUES ($1, $2, $3, $3)
-            ON CONFLICT (user_id) DO UPDATE SET
-                available_balance = user_balances.available_balance + $3,
-                total_recharged = user_balances.total_recharged + $3,
-                updated_at = NOW()
-            RETURNING *
-            "#,
-        )
-        .bind(user_id)
-        .bind(effective_tenant_id)
-        .bind(amount)
-        .fetch_one(&mut *pool)
-        .await?;
+        let upsert_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_balances (user_id, tenant_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW() RETURNING *"#,
+            [user_id.into(), effective_tenant_id.into(), amount.into()],
+        );
+        let updated_balance = UserBalance::find_by_statement(upsert_stmt)
+            .one(tx)
+            .await?
+            .ok_or_else(|| DbError::Other("recharge upsert failed".to_string()))?;
 
         // 记录交易
         let transaction = BalanceTransaction::create_internal(
-            &mut *pool,
+            tx,
             updated_balance.tenant_id,
             user_id,
             order_id,
@@ -203,32 +206,27 @@ impl UserBalance {
     }
 
     /// 消费（事务内执行）
-    ///
-    /// # Errors
-    /// - `DbError::NotFound` - 用户余额记录不存在
-    /// - `DbError::InsufficientBalance` - 余额不足
     pub async fn consume(
-        pool: &mut sqlx::PgConnection,
+        db: &DatabaseConnection,
         user_id: Uuid,
         amount: Decimal,
         usage_log_id: Option<Uuid>,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction), DbError> {
-        // 获取当前余额（加锁）
-        let balance = sqlx::query_as::<_, UserBalance>(
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-        )
-        .bind(user_id)
-        .fetch_optional(&mut *pool)
-        .await?;
+        let tx = db.begin().await?;
 
-        // 检查余额是否存在
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+            [user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(lock_stmt).one(&tx).await?;
+
         let balance = match balance {
             Some(b) => b,
             None => return Err(DbError::not_found("UserBalance", user_id.to_string())),
         };
 
-        // 检查余额是否足够
         if balance.available_balance < amount {
             return Err(DbError::insufficient_balance(
                 amount.to_string(),
@@ -239,25 +237,18 @@ impl UserBalance {
         let balance_before = balance.available_balance;
         let balance_after = balance_before - amount;
 
-        // 更新余额
-        let updated_balance = sqlx::query_as::<_, UserBalance>(
-            r#"
-            UPDATE user_balances
-            SET available_balance = available_balance - $1,
-                total_consumed = total_consumed + $1,
-                updated_at = NOW()
-            WHERE user_id = $2
-            RETURNING *
-            "#,
-        )
-        .bind(amount)
-        .bind(user_id)
-        .fetch_one(&mut *pool)
-        .await?;
+        let update_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_balances SET available_balance = available_balance - $1, total_consumed = total_consumed + $1, updated_at = NOW() WHERE user_id = $2 RETURNING *"#,
+            [amount.into(), user_id.into()],
+        );
+        let updated_balance = UserBalance::find_by_statement(update_stmt)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserBalance", user_id.to_string()))?;
 
-        // 记录交易
         let transaction = BalanceTransaction::create_internal(
-            &mut *pool,
+            &tx,
             balance.tenant_id,
             user_id,
             None,
@@ -270,34 +261,32 @@ impl UserBalance {
         )
         .await?;
 
+        tx.commit().await?;
+
         Ok((updated_balance, transaction))
     }
 
     /// 冻结余额
-    ///
-    /// # Errors
-    /// - `DbError::NotFound` - 用户余额记录不存在
-    /// - `DbError::InsufficientBalance` - 可用余额不足
     pub async fn freeze(
-        pool: &mut sqlx::PgConnection,
+        db: &DatabaseConnection,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction), DbError> {
-        let balance = sqlx::query_as::<_, UserBalance>(
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-        )
-        .bind(user_id)
-        .fetch_optional(&mut *pool)
-        .await?;
+        let tx = db.begin().await?;
 
-        // 检查余额是否存在
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+            [user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(lock_stmt).one(&tx).await?;
+
         let balance = match balance {
             Some(b) => b,
             None => return Err(DbError::not_found("UserBalance", user_id.to_string())),
         };
 
-        // 检查可用余额是否足够
         if balance.available_balance < amount {
             return Err(DbError::insufficient_balance(
                 amount.to_string(),
@@ -308,23 +297,18 @@ impl UserBalance {
         let balance_before = balance.available_balance;
         let balance_after = balance_before - amount;
 
-        let updated_balance = sqlx::query_as::<_, UserBalance>(
-            r#"
-            UPDATE user_balances
-            SET available_balance = available_balance - $1,
-                frozen_balance = frozen_balance + $1,
-                updated_at = NOW()
-            WHERE user_id = $2
-            RETURNING *
-            "#,
-        )
-        .bind(amount)
-        .bind(user_id)
-        .fetch_one(&mut *pool)
-        .await?;
+        let update_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_balances SET available_balance = available_balance - $1, frozen_balance = frozen_balance + $1, updated_at = NOW() WHERE user_id = $2 RETURNING *"#,
+            [amount.into(), user_id.into()],
+        );
+        let updated_balance = UserBalance::find_by_statement(update_stmt)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserBalance", user_id.to_string()))?;
 
         let transaction = BalanceTransaction::create_internal(
-            &mut *pool,
+            &tx,
             balance.tenant_id,
             user_id,
             None,
@@ -337,58 +321,50 @@ impl UserBalance {
         )
         .await?;
 
+        tx.commit().await?;
+
         Ok((updated_balance, transaction))
     }
 
     /// 小费入账（tips 转为可用余额）
     ///
-    /// 将 tips 金额转入用户可用余额，同时更新 total_recharged。
+    /// 注意：调用方**必须**已在外部开启数据库事务（`db.begin()`），
+    /// 此方法依赖事务内的 `SELECT ... FOR UPDATE` 行锁保证并发安全。
+    /// 当前唯一调用方 node_tips.rs 已满足此前提。
     ///
-    /// 接受 `&mut PgConnection`（通过 `DerefMut` 自动兼容 `&mut Transaction`），
-    /// 与 `recharge`/`consume` 等方法保持一致。如需泛型 `Executor` 支持，
-    /// 可参照 `UserNodeGatewayToken::consume` 模式重构。
-    ///
-    /// # 注意
-    /// 如果用户余额记录不存在，会使用传入的 tenant_id 创建新记录
+    /// 签名限定 `&DatabaseTransaction` 而非 `&impl ConnectionTrait`，
+    /// 以在编译期强制事务上下文约束。
     pub async fn credit_tips(
-        pool: &mut sqlx::PgConnection,
+        db: &DatabaseTransaction,
         user_id: Uuid,
         tenant_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction), DbError> {
-        let balance = sqlx::query_as::<_, UserBalance>(
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-        )
-        .bind(user_id)
-        .fetch_optional(&mut *pool)
-        .await?;
+            [user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(lock_stmt).one(db).await?;
 
         let effective_tenant_id = balance.as_ref().map(|b| b.tenant_id).unwrap_or(tenant_id);
 
-        let updated_balance = sqlx::query_as::<_, UserBalance>(
-            r#"
-            INSERT INTO user_balances (user_id, tenant_id, available_balance, total_recharged)
-            VALUES ($1, $2, $3, $3)
-            ON CONFLICT (user_id) DO UPDATE SET
-                available_balance = user_balances.available_balance + $3,
-                total_recharged = user_balances.total_recharged + $3,
-                updated_at = NOW()
-            RETURNING *
-            "#,
-        )
-        .bind(user_id)
-        .bind(effective_tenant_id)
-        .bind(amount)
-        .fetch_one(&mut *pool)
-        .await?;
+        let upsert_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO user_balances (user_id, tenant_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW() RETURNING *"#,
+            [user_id.into(), effective_tenant_id.into(), amount.into()],
+        );
+        let updated_balance = UserBalance::find_by_statement(upsert_stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("credit_tips upsert failed".to_string()))?;
 
-        // 从 RETURNING 的最终值反推 balance_before，确保并发场景下准确
         let balance_after = updated_balance.available_balance;
         let balance_before = balance_after - amount;
 
         let transaction = BalanceTransaction::create_internal(
-            &mut *pool,
+            db,
             updated_balance.tenant_id,
             user_id,
             None,
@@ -405,32 +381,26 @@ impl UserBalance {
     }
 
     /// 解冻余额
-    ///
-    /// 将冻结余额转回可用余额
-    ///
-    /// # Errors
-    /// - `DbError::NotFound` - 用户余额记录不存在
-    /// - `DbError::InsufficientBalance` - 冻结余额不足
     pub async fn unfreeze(
-        pool: &mut sqlx::PgConnection,
+        db: &DatabaseConnection,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction), DbError> {
-        let balance = sqlx::query_as::<_, UserBalance>(
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-        )
-        .bind(user_id)
-        .fetch_optional(&mut *pool)
-        .await?;
+        let tx = db.begin().await?;
 
-        // 检查余额是否存在
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+            [user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(lock_stmt).one(&tx).await?;
+
         let balance = match balance {
             Some(b) => b,
             None => return Err(DbError::not_found("UserBalance", user_id.to_string())),
         };
 
-        // 检查冻结余额是否足够
         if balance.frozen_balance < amount {
             return Err(DbError::insufficient_balance(
                 amount.to_string(),
@@ -441,23 +411,18 @@ impl UserBalance {
         let balance_before = balance.available_balance;
         let balance_after = balance_before + amount;
 
-        let updated_balance = sqlx::query_as::<_, UserBalance>(
-            r#"
-            UPDATE user_balances
-            SET available_balance = available_balance + $1,
-                frozen_balance = frozen_balance - $1,
-                updated_at = NOW()
-            WHERE user_id = $2
-            RETURNING *
-            "#,
-        )
-        .bind(amount)
-        .bind(user_id)
-        .fetch_one(&mut *pool)
-        .await?;
+        let update_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2 RETURNING *"#,
+            [amount.into(), user_id.into()],
+        );
+        let updated_balance = UserBalance::find_by_statement(update_stmt)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserBalance", user_id.to_string()))?;
 
         let transaction = BalanceTransaction::create_internal(
-            &mut *pool,
+            &tx,
             balance.tenant_id,
             user_id,
             None,
@@ -470,12 +435,14 @@ impl UserBalance {
         )
         .await?;
 
+        tx.commit().await?;
+
         Ok((updated_balance, transaction))
     }
 }
 
 /// 余额变动记录模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct BalanceTransaction {
     pub id: Uuid,
     pub tenant_id: Uuid,
@@ -495,7 +462,7 @@ impl BalanceTransaction {
     /// 内部创建交易记录
     #[allow(clippy::too_many_arguments)]
     async fn create_internal(
-        pool: &mut sqlx::PgConnection,
+        db: &impl sea_orm::ConnectionTrait,
         tenant_id: Uuid,
         user_id: Uuid,
         order_id: Option<Uuid>,
@@ -506,51 +473,42 @@ impl BalanceTransaction {
         balance_after: Decimal,
         description: Option<&str>,
     ) -> Result<BalanceTransaction, DbError> {
-        let transaction = sqlx::query_as::<_, BalanceTransaction>(
-            r#"
-            INSERT INTO balance_transactions (
-                tenant_id, user_id, order_id, usage_log_id,
-                transaction_type, amount, balance_before, balance_after, description
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            RETURNING *
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(user_id)
-        .bind(order_id)
-        .bind(usage_log_id)
-        .bind(transaction_type.as_str())
-        .bind(amount)
-        .bind(balance_before)
-        .bind(balance_after)
-        .bind(description)
-        .fetch_one(&mut *pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO balance_transactions (tenant_id, user_id, order_id, usage_log_id, transaction_type, amount, balance_before, balance_after, description) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
+            [
+                tenant_id.into(),
+                user_id.into(),
+                order_id.into(),
+                usage_log_id.into(),
+                transaction_type.as_str().into(),
+                amount.into(),
+                balance_before.into(),
+                balance_after.into(),
+                description.map(String::from).into(),
+            ],
+        );
+        let transaction = BalanceTransaction::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create transaction failed".to_string()))?;
 
         Ok(transaction)
     }
 
     /// 查找用户的交易记录
     pub async fn find_by_user(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         user_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<BalanceTransaction>, DbError> {
-        let transactions = sqlx::query_as::<_, BalanceTransaction>(
-            r#"
-            SELECT * FROM balance_transactions
-            WHERE user_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(user_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM balance_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            [user_id.into(), limit.into(), offset.into()],
+        );
+        let transactions = BalanceTransaction::find_by_statement(stmt).all(db).await?;
         Ok(transactions)
     }
 

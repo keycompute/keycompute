@@ -1,12 +1,18 @@
 use crate::DbError;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
+use sea_orm::{
+    TransactionTrait,
+    {
+        ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
+        Statement,
+    },
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Postgres, Transaction};
 use uuid::Uuid;
 
 /// 分销记录模型
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct DistributionRecord {
     pub id: Uuid,
     pub usage_log_id: Uuid,
@@ -34,7 +40,7 @@ pub struct CreateDistributionRecordRequest {
 }
 
 /// 分销统计
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromQueryResult)]
 pub struct DistributionStats {
     pub total_records: i64,
     pub total_amount: BigDecimal,
@@ -43,7 +49,7 @@ pub struct DistributionStats {
 }
 
 /// 分销层级统计
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromQueryResult)]
 pub struct DistributionLevelStats {
     /// 一级分销收益
     pub level1_amount: BigDecimal,
@@ -58,10 +64,11 @@ pub struct DistributionLevelStats {
 impl DistributionRecord {
     /// 创建分销记录
     pub async fn create(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         req: &CreateDistributionRecordRequest,
     ) -> Result<DistributionRecord, DbError> {
-        let record = sqlx::query_as::<_, DistributionRecord>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             INSERT INTO distribution_records (
                 usage_log_id, tenant_id, beneficiary_id,
@@ -70,15 +77,19 @@ impl DistributionRecord {
             VALUES ($1, $2, $3, $4, $5, $6, 'pending')
             RETURNING *
             "#,
-        )
-        .bind(req.usage_log_id)
-        .bind(req.tenant_id)
-        .bind(req.beneficiary_id)
-        .bind(&req.share_amount)
-        .bind(&req.share_ratio)
-        .bind(&req.level)
-        .fetch_one(pool)
-        .await?;
+            [
+                req.usage_log_id.into(),
+                req.tenant_id.into(),
+                req.beneficiary_id.into(),
+                req.share_amount.clone().into(),
+                req.share_ratio.clone().into(),
+                req.level.as_str().into(),
+            ],
+        );
+        let record = DistributionRecord::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
 
         Ok(record)
     }
@@ -88,12 +99,12 @@ impl DistributionRecord {
     /// 所有记录在同一事务中创建，保证原子性。
     /// 如果记录已存在（基于唯一约束），则跳过插入。
     pub async fn create_many(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         requests: &[CreateDistributionRecordRequest],
     ) -> Result<Vec<DistributionRecord>, DbError> {
-        let mut tx = pool.begin().await?;
-        let records = Self::create_many_tx(&mut tx, requests).await?;
-        tx.commit().await?;
+        let txn = db.begin().await?;
+        let records = Self::create_many_tx(&txn, requests).await?;
+        txn.commit().await?;
         Ok(records)
     }
 
@@ -102,7 +113,7 @@ impl DistributionRecord {
     /// 用于在调用者已有事务中执行批量插入。
     /// 使用 ON CONFLICT DO NOTHING 实现幂等性，已存在的记录将被跳过。
     pub async fn create_many_tx(
-        tx: &mut Transaction<'_, Postgres>,
+        txn: &DatabaseTransaction,
         requests: &[CreateDistributionRecordRequest],
     ) -> Result<Vec<DistributionRecord>, DbError> {
         let mut records = Vec::with_capacity(requests.len());
@@ -110,8 +121,10 @@ impl DistributionRecord {
         for req in requests {
             // 使用 ON CONFLICT DO NOTHING 实现幂等性
             // 如果记录已存在（基于 uk_distribution_records_unique 约束），则跳过
-            let record_result = sqlx::query_as::<_, DistributionRecord>(
-                r#"
+            let record_result =
+                DistributionRecord::find_by_statement(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    r#"
                 INSERT INTO distribution_records (
                     usage_log_id, tenant_id, beneficiary_id,
                     share_amount, share_ratio, level, status
@@ -120,15 +133,17 @@ impl DistributionRecord {
                 ON CONFLICT (usage_log_id, beneficiary_id, level) DO NOTHING
                 RETURNING *
                 "#,
-            )
-            .bind(req.usage_log_id)
-            .bind(req.tenant_id)
-            .bind(req.beneficiary_id)
-            .bind(&req.share_amount)
-            .bind(&req.share_ratio)
-            .bind(&req.level)
-            .fetch_optional(&mut **tx)
-            .await?;
+                    [
+                        req.usage_log_id.into(),
+                        req.tenant_id.into(),
+                        req.beneficiary_id.into(),
+                        req.share_amount.clone().into(),
+                        req.share_ratio.clone().into(),
+                        req.level.as_str().into(),
+                    ],
+                ))
+                .one(txn)
+                .await?;
 
             // 如果记录已存在，查询现有记录
             if let Some(record) = record_result {
@@ -141,16 +156,14 @@ impl DistributionRecord {
                     "Distribution record already exists, skipping"
                 );
                 // 查询已存在的记录（使用 fetch_optional 避免并发删除导致错误）
-                match sqlx::query_as::<_, DistributionRecord>(
-                    r#"
-                    SELECT * FROM distribution_records
-                    WHERE usage_log_id = $1 AND beneficiary_id = $2 AND level = $3
-                    "#,
+                match DistributionRecord::find_by_statement(
+                    Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "SELECT * FROM distribution_records WHERE usage_log_id = $1 AND beneficiary_id = $2 AND level = $3",
+                        [req.usage_log_id.into(), req.beneficiary_id.into(), req.level.as_str().into()],
+                    ),
                 )
-                .bind(req.usage_log_id)
-                .bind(req.beneficiary_id)
-                .bind(&req.level)
-                .fetch_optional(&mut **tx)
+                .one(txn)
                 .await
                 {
                     Ok(Some(existing)) => records.push(existing),
@@ -182,106 +195,90 @@ impl DistributionRecord {
 
     /// 根据 ID 查找分销记录
     pub async fn find_by_id(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         id: Uuid,
     ) -> Result<Option<DistributionRecord>, DbError> {
-        let record = sqlx::query_as::<_, DistributionRecord>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM distribution_records WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
+            [id.into()],
+        );
+        let record = DistributionRecord::find_by_statement(stmt).one(db).await?;
 
         Ok(record)
     }
 
     /// 查找用量日志的所有分销记录
     pub async fn find_by_usage_log(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         usage_log_id: Uuid,
     ) -> Result<Vec<DistributionRecord>, DbError> {
-        let records = sqlx::query_as::<_, DistributionRecord>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT * FROM distribution_records WHERE usage_log_id = $1",
-        )
-        .bind(usage_log_id)
-        .fetch_all(pool)
-        .await?;
+            [usage_log_id.into()],
+        );
+        let records = DistributionRecord::find_by_statement(stmt).all(db).await?;
 
         Ok(records)
     }
 
     /// 查找租户的分销记录
     pub async fn find_by_tenant(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         tenant_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<DistributionRecord>, DbError> {
-        let records = sqlx::query_as::<_, DistributionRecord>(
-            r#"
-            SELECT * FROM distribution_records
-            WHERE tenant_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(tenant_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM distribution_records WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            [tenant_id.into(), limit.into(), offset.into()],
+        );
+        let records = DistributionRecord::find_by_statement(stmt).all(db).await?;
 
         Ok(records)
     }
 
     /// 查找受益人的分销记录
     pub async fn find_by_beneficiary(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         beneficiary_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<DistributionRecord>, DbError> {
-        let records = sqlx::query_as::<_, DistributionRecord>(
-            r#"
-            SELECT * FROM distribution_records
-            WHERE beneficiary_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2 OFFSET $3
-            "#,
-        )
-        .bind(beneficiary_id)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(pool)
-        .await?;
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM distribution_records WHERE beneficiary_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            [beneficiary_id.into(), limit.into(), offset.into()],
+        );
+        let records = DistributionRecord::find_by_statement(stmt).all(db).await?;
 
         Ok(records)
     }
 
     /// 结算分销记录
-    pub async fn settle(&self, pool: &sqlx::PgPool) -> Result<DistributionRecord, DbError> {
-        let record = sqlx::query_as::<_, DistributionRecord>(
-            r#"
-            UPDATE distribution_records
-            SET status = 'settled',
-                settled_at = NOW()
-            WHERE id = $1
-            RETURNING *
-            "#,
-        )
-        .bind(self.id)
-        .fetch_one(pool)
-        .await?;
+    pub async fn settle(&self, db: &DatabaseConnection) -> Result<DistributionRecord, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE distribution_records SET status = 'settled', settled_at = NOW() WHERE id = $1 RETURNING *",
+            [self.id.into()],
+        );
+        let record = DistributionRecord::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("DistributionRecord", self.id.to_string()))?;
 
         Ok(record)
     }
 
     /// 获取受益人统计
     pub async fn get_stats_by_beneficiary(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         beneficiary_id: Uuid,
     ) -> Result<DistributionStats, DbError> {
-        let stats = sqlx::query_as::<_, DistributionStats>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT
                 COUNT(*) as total_records,
@@ -291,20 +288,23 @@ impl DistributionRecord {
             FROM distribution_records
             WHERE beneficiary_id = $1
             "#,
-        )
-        .bind(beneficiary_id)
-        .fetch_one(pool)
-        .await?;
+            [beneficiary_id.into()],
+        );
+        let stats = DistributionStats::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("stats query failed".to_string()))?;
 
         Ok(stats)
     }
 
     /// 获取受益人按层级的统计
     pub async fn get_level_stats_by_beneficiary(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         beneficiary_id: Uuid,
     ) -> Result<DistributionLevelStats, DbError> {
-        let stats = sqlx::query_as::<_, DistributionLevelStats>(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT
                 COALESCE(SUM(CASE WHEN level = 'level1' THEN share_amount ELSE 0 END), 0) as level1_amount,
@@ -314,34 +314,39 @@ impl DistributionRecord {
             FROM distribution_records
             WHERE beneficiary_id = $1
             "#,
-        )
-        .bind(beneficiary_id)
-        .fetch_one(pool)
-        .await?;
+            [beneficiary_id.into()],
+        );
+        let stats = DistributionLevelStats::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("stats query failed".to_string()))?;
 
         Ok(stats)
     }
 
     /// 获取受益人在某个 usage_log 下的总收益（用于推荐人收益显示）
     pub async fn get_earnings_for_referral(
-        pool: &sqlx::PgPool,
+        db: &DatabaseConnection,
         beneficiary_id: Uuid,
         referred_user_id: Uuid,
     ) -> Result<BigDecimal, DbError> {
         // 查询该推荐用户产生的所有分销收益
-        let result: Option<(BigDecimal,)> = sqlx::query_as(
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT COALESCE(SUM(dr.share_amount), 0)
             FROM distribution_records dr
             JOIN usage_logs ul ON dr.usage_log_id = ul.id
             WHERE dr.beneficiary_id = $1 AND ul.user_id = $2
             "#,
-        )
-        .bind(beneficiary_id)
-        .bind(referred_user_id)
-        .fetch_optional(pool)
-        .await?;
+            [beneficiary_id.into(), referred_user_id.into()],
+        );
+        let result = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("earnings query failed".to_string()))?;
+        let amount: BigDecimal = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
 
-        Ok(result.map(|r| r.0).unwrap_or(BigDecimal::from(0)))
+        Ok(amount)
     }
 }

@@ -28,14 +28,16 @@ use node_gateway::config::NodeGatewayAppConfig;
 use node_gateway::redis::NodeGatewayRedis;
 use node_gateway::service::NodeGatewayService;
 use node_gateway::store::NodeGatewayStore;
-use sqlx::PgPool;
+use sea_orm::{
+    ConnectionTrait, Database, DatabaseConnection, DbBackend, FromQueryResult, Statement,
+};
 use std::sync::Arc;
 use uuid::Uuid;
 
 /// 测试环境
 #[allow(dead_code)]
 struct NodeTestEnv {
-    pool: PgPool,
+    pool: DatabaseConnection,
     redis: NodeGatewayRedis,
     service: NodeGatewayService,
     config: NodeGatewayAppConfig,
@@ -45,7 +47,7 @@ struct NodeTestEnv {
 ///
 /// 需要创建真实用户以满足 user_node_gateway_tokens 表的 FK 约束
 /// (`user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`)。
-async fn create_test_user(pool: &PgPool, suffix: &str) -> Uuid {
+async fn create_test_user(pool: &DatabaseConnection, suffix: &str) -> Uuid {
     let tenant = Tenant::create(
         pool,
         &CreateTenantRequest {
@@ -75,7 +77,7 @@ async fn create_test_user(pool: &PgPool, suffix: &str) -> Uuid {
 }
 
 /// 用于生成测试用的 HMAC 签名 token
-async fn create_test_hmac_token(pool: &PgPool, user_id: Uuid, secret: &str) -> String {
+async fn create_test_hmac_token(pool: &DatabaseConnection, user_id: Uuid, secret: &str) -> String {
     let (token_id, token_plaintext, token_hash, token_preview) =
         UserNodeGatewayToken::generate_hmac_token(secret.as_bytes());
 
@@ -104,13 +106,14 @@ impl NodeTestEnv {
             "postgres://postgres:password@localhost:5432/keycompute".to_string()
         });
 
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(20)
+        use sea_orm::ConnectOptions;
+        let mut opt = ConnectOptions::new(&database_url);
+        opt.max_connections(20)
             .min_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(30))
             .idle_timeout(std::time::Duration::from_secs(300))
-            .max_lifetime(std::time::Duration::from_secs(900))
-            .connect(&database_url)
+            .max_lifetime(std::time::Duration::from_secs(900));
+        let pool = Database::connect(opt)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to connect to database: {}", e))?;
 
@@ -119,34 +122,60 @@ impl NodeTestEnv {
             .map_err(|e| anyhow::anyhow!("Failed to run database migrations: {}", e))?;
 
         // 清理历史测试数据（按 FK 依赖逆序删除，使用 E2E 专用的 email/slug 前缀模式匹配）
-        sqlx::query("DELETE FROM node_task_submissions")
-            .execute(&pool)
-            .await?;
-        sqlx::query("DELETE FROM node_tasks").execute(&pool).await?;
-        sqlx::query("DELETE FROM node_sessions")
-            .execute(&pool)
-            .await?;
-        sqlx::query("DELETE FROM nodes").execute(&pool).await?;
-        sqlx::query("DELETE FROM user_node_gateway_tokens")
-            .execute(&pool)
-            .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM node_task_submissions",
+            [],
+        ))
+        .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM node_tasks",
+            [],
+        ))
+        .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM node_sessions",
+            [],
+        ))
+        .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM nodes",
+            [],
+        ))
+        .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM user_node_gateway_tokens",
+            [],
+        ))
+        .await?;
         // node_tips 和 node_tip_withdrawals 通过 FK ON DELETE CASCADE 跟随 users/nodes 删除，
         // 此处显式清理以处理 CASCADE 未覆盖的孤立记录
-        sqlx::query("DELETE FROM node_tip_withdrawals WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'ng-e2e-%')")
-            .execute(&pool).await?;
-        sqlx::query("DELETE FROM node_tips WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'ng-e2e-%')")
-            .execute(&pool).await?;
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tip_withdrawals WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'ng-e2e-%')", [])).await?;
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tips WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'ng-e2e-%')", [])).await?;
         // 清理 E2E 测试创建的租户和用户
-        sqlx::query("DELETE FROM users WHERE email LIKE 'ng-e2e-%'")
-            .execute(&pool)
-            .await?;
-        sqlx::query("DELETE FROM tenants WHERE slug LIKE 'ng-e2e-%'")
-            .execute(&pool)
-            .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM users WHERE email LIKE 'ng-e2e-%'",
+            [],
+        ))
+        .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM tenants WHERE slug LIKE 'ng-e2e-%'",
+            [],
+        ))
+        .await?;
         // node_tips 通过 consumer_user_id FK 可能仍有残留（清理 users 后的孤儿记录）
-        sqlx::query("DELETE FROM node_tips WHERE consumer_user_id IS NULL")
-            .execute(&pool)
-            .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM node_tips WHERE consumer_user_id IS NULL",
+            [],
+        ))
+        .await?;
 
         // HMAC secret
         let registration_token_secret =
@@ -389,12 +418,13 @@ async fn test_excluded_node_reject_registration() -> anyhow::Result<()> {
     let req = env.create_register_request(client_id, &token);
     let resp = env.service.register_node(&req).await?;
 
-    sqlx::query(
-        "UPDATE nodes SET status = 'excluded', consecutive_failure_count = 3 WHERE id = $1",
-    )
-    .bind(resp.node_id)
-    .execute(&env.pool)
-    .await?;
+    env.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE nodes SET status = 'excluded', consecutive_failure_count = 3 WHERE id = $1",
+            [resp.node_id.into()],
+        ))
+        .await?;
 
     // 需要新 token 因为旧 token 已被消费
     let token2 = create_test_hmac_token(
@@ -467,10 +497,12 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
         true,
     );
 
-    let tasks =
-        sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks ORDER BY created_at DESC LIMIT 1")
-            .fetch_all(&env.pool)
-            .await?;
+    let tasks = NodeTask::find_by_statement(Statement::from_string(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks ORDER BY created_at DESC LIMIT 1".to_owned(),
+    ))
+    .all(&env.pool)
+    .await?;
 
     chain.add_step(
         "node-gateway",
@@ -504,22 +536,28 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
 
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                Uuid::new_v4().into(),
+                "deepseek-chat".into(),
+                serde_json::json!({}).into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(Uuid::new_v4())
-    .bind("deepseek-chat")
-    .bind(serde_json::json!({}))
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 3. 第一次 complete
     let result1 = env
@@ -586,11 +624,12 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
     );
 
     // 5. 验证只有一个 submission
-    let submissions = sqlx::query_as::<_, NodeTaskSubmission>(
+    let submissions = NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT * FROM node_task_submissions WHERE task_id = $1",
-    )
-    .bind(task.id)
-    .fetch_all(&env.pool)
+        [task.id.into()],
+    ))
+    .all(&env.pool)
     .await?;
 
     chain.add_step(
@@ -626,22 +665,28 @@ async fn test_client_error_does_not_exclude_node() -> anyhow::Result<()> {
 
     for i in 1..=3 {
         let lease_id = Uuid::new_v4();
-        let task = sqlx::query_as::<_, NodeTask>(
-            r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-            RETURNING *
-            "#
+        let task = NodeTask::find_by_statement(
+            Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"
+                INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+                VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+                RETURNING *
+                "#,
+                [
+                    Uuid::new_v4().into(),
+                    Uuid::new_v4().into(),
+                    "deepseek-chat".into(),
+                    serde_json::json!({}).into(),
+                    register_resp.node_id.into(),
+                    register_resp.session_id.into(),
+                    lease_id.into(),
+                ],
+            )
         )
-        .bind(Uuid::new_v4())
-        .bind(Uuid::new_v4())
-        .bind("deepseek-chat")
-        .bind(serde_json::json!({}))
-        .bind(register_resp.node_id)
-        .bind(register_resp.session_id)
-        .bind(lease_id)
-        .fetch_one(&env.pool)
-        .await?;
+        .one(&env.pool)
+        .await?
+        .unwrap();
 
         let resp = env
             .service
@@ -700,22 +745,28 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
 
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                Uuid::new_v4().into(),
+                "deepseek-chat".into(),
+                serde_json::json!({}).into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(Uuid::new_v4())
-    .bind("deepseek-chat")
-    .bind(serde_json::json!({}))
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     chain.add_step(
         "node-gateway",
@@ -779,11 +830,12 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
     );
 
     // 5. 验证只有一个 submission
-    let submissions = sqlx::query_as::<_, NodeTaskSubmission>(
+    let submissions = NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT * FROM node_task_submissions WHERE task_id = $1",
-    )
-    .bind(task.id)
-    .fetch_all(&env.pool)
+        [task.id.into()],
+    ))
+    .all(&env.pool)
     .await?;
 
     chain.add_step(
@@ -823,22 +875,28 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
 
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                Uuid::new_v4().into(),
+                "stable-diffusion".into(),
+                serde_json::json!({}).into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(Uuid::new_v4())
-    .bind("stable-diffusion")
-    .bind(serde_json::json!({}))
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 3. 构造 ImageGenerationResponse 并提交 ImageSucceeded
     let image_response = ImageGenerationResponse {
@@ -871,11 +929,12 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
     );
 
     // 4. 验证 submission 的 result_kind 为 "image_succeeded"
-    let submissions = sqlx::query_as::<_, NodeTaskSubmission>(
+    let submissions = NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT * FROM node_task_submissions WHERE task_id = $1",
-    )
-    .bind(task.id)
-    .fetch_all(&env.pool)
+        [task.id.into()],
+    ))
+    .all(&env.pool)
     .await?;
 
     chain.add_step(
@@ -891,10 +950,14 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
     );
 
     // 5. 验证 node_tasks.result_json 存储了正确的 ImageGenerationResponse
-    let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-        .bind(task.id)
-        .fetch_one(&env.pool)
-        .await?;
+    let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks WHERE id = $1",
+        [task.id.into()],
+    ))
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     let stored_json = updated_task
         .result_json
@@ -936,11 +999,12 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
     );
 
     // 验证 submission 仍为 1 条
-    let submissions_after = sqlx::query_as::<_, NodeTaskSubmission>(
+    let submissions_after = NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT * FROM node_task_submissions WHERE task_id = $1",
-    )
-    .bind(task.id)
-    .fetch_all(&env.pool)
+        [task.id.into()],
+    ))
+    .all(&env.pool)
     .await?;
 
     chain.add_step(
@@ -1025,10 +1089,12 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
     );
 
     // 4. 验证任务已创建到 DB
-    let tasks =
-        sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks ORDER BY created_at DESC LIMIT 1")
-            .fetch_all(&env.pool)
-            .await?;
+    let tasks = NodeTask::find_by_statement(Statement::from_string(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks ORDER BY created_at DESC LIMIT 1".to_owned(),
+    ))
+    .all(&env.pool)
+    .await?;
 
     chain.add_step(
         "node-gateway",
@@ -1039,22 +1105,28 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
 
     // 5. 手动构造 leased 任务并模拟节点提交结果
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#,
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                test_user_id.into(),
+                "stable-diffusion".into(),
+                serde_json::to_value(&payload)?.into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(test_user_id)
-    .bind("stable-diffusion")
-    .bind(serde_json::to_value(&payload)?)
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 6. 节点提交图片生成结果
     let image_response = ImageGenerationResponse {
@@ -1090,10 +1162,14 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
     );
 
     // 7. 验证结果正确存储
-    let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-        .bind(task.id)
-        .fetch_one(&env.pool)
-        .await?;
+    let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks WHERE id = $1",
+        [task.id.into()],
+    ))
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     let stored_json = updated_task
         .result_json
@@ -1174,22 +1250,28 @@ async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
 
     // 3. 手动构造 leased 任务并模拟节点提交结果
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#,
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                test_user_id.into(),
+                "stable-diffusion".into(),
+                serde_json::to_value(&payload)?.into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(test_user_id)
-    .bind("stable-diffusion")
-    .bind(serde_json::to_value(&payload)?)
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 4. 节点提交图片编辑结果
     let image_response = ImageGenerationResponse {
@@ -1222,10 +1304,14 @@ async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
     );
 
     // 5. 验证结果正确存储
-    let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-        .bind(task.id)
-        .fetch_one(&env.pool)
-        .await?;
+    let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks WHERE id = $1",
+        [task.id.into()],
+    ))
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     let stored_json = updated_task
         .result_json
@@ -1320,22 +1406,28 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
 
     // 4. 创建 leased 任务并模拟节点返回客户端错误
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#,
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                test_user_id.into(),
+                "stable-diffusion".into(),
+                serde_json::to_value(&payload_empty)?.into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(test_user_id)
-    .bind("stable-diffusion")
-    .bind(serde_json::to_value(&payload_empty)?)
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 5. 节点返回客户端错误（invalid prompt）
     let complete_result = env
@@ -1361,10 +1453,14 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
     );
 
     // 6. 验证任务状态为 failed
-    let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-        .bind(task.id)
-        .fetch_one(&env.pool)
-        .await?;
+    let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks WHERE id = $1",
+        [task.id.into()],
+    ))
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     chain.add_step(
         "node-gateway",
@@ -1412,22 +1508,28 @@ async fn test_image_url_inaccessible() -> anyhow::Result<()> {
 
     // 3. 手动构造 leased 任务
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#,
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                test_user_id.into(),
+                "stable-diffusion".into(),
+                serde_json::to_value(&payload)?.into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(test_user_id)
-    .bind("stable-diffusion")
-    .bind(serde_json::to_value(&payload)?)
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 4. 节点返回无效 URL（但仍然成功提交）
     let image_response = ImageGenerationResponse {
@@ -1461,10 +1563,14 @@ async fn test_image_url_inaccessible() -> anyhow::Result<()> {
     );
 
     // 5. 验证结果已存储
-    let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-        .bind(task.id)
-        .fetch_one(&env.pool)
-        .await?;
+    let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks WHERE id = $1",
+        [task.id.into()],
+    ))
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     chain.add_step(
         "node-gateway",
@@ -1512,22 +1618,28 @@ async fn test_node_task_timeout() -> anyhow::Result<()> {
 
     // 3. 创建已超时的任务（deadline_at 设为过去时间）
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() - INTERVAL '10 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#,
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() - INTERVAL '10 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                test_user_id.into(),
+                "stable-diffusion".into(),
+                serde_json::to_value(&payload)?.into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(test_user_id)
-    .bind("stable-diffusion")
-    .bind(serde_json::to_value(&payload)?)
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     chain.add_step(
         "node-gateway",
@@ -1611,22 +1723,28 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
 
     // 3. 手动构造 leased 任务
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#,
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                test_user_id.into(),
+                "stable-diffusion".into(),
+                serde_json::to_value(&payload)?.into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(test_user_id)
-    .bind("stable-diffusion")
-    .bind(serde_json::to_value(&payload)?)
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 4. 节点返回不支持的格式错误（第一次失败，应该 requeue）
     let complete_result = env
@@ -1654,10 +1772,14 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
     );
 
     // 5. 验证任务状态为 queued（等待重试）
-    let updated_task = sqlx::query_as::<_, NodeTask>("SELECT * FROM node_tasks WHERE id = $1")
-        .bind(task.id)
-        .fetch_one(&env.pool)
-        .await?;
+    let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM node_tasks WHERE id = $1",
+        [task.id.into()],
+    ))
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     chain.add_step(
         "node-gateway",
@@ -1708,22 +1830,28 @@ async fn test_image_generation_idempotency() -> anyhow::Result<()> {
 
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
-    let task = sqlx::query_as::<_, NodeTask>(
-        r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-        VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-        RETURNING *
-        "#,
+    let task = NodeTask::find_by_statement(
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            RETURNING *
+            "#,
+            [
+                Uuid::new_v4().into(),
+                test_user_id.into(),
+                "stable-diffusion".into(),
+                serde_json::json!({}).into(),
+                register_resp.node_id.into(),
+                register_resp.session_id.into(),
+                lease_id.into(),
+            ],
+        )
     )
-    .bind(Uuid::new_v4())
-    .bind(test_user_id)
-    .bind("stable-diffusion")
-    .bind(serde_json::json!({}))
-    .bind(register_resp.node_id)
-    .bind(register_resp.session_id)
-    .bind(lease_id)
-    .fetch_one(&env.pool)
-    .await?;
+    .one(&env.pool)
+    .await?
+    .unwrap();
 
     // 3. 第一次提交图片生成结果
     let image_response = ImageGenerationResponse {
@@ -1775,11 +1903,12 @@ async fn test_image_generation_idempotency() -> anyhow::Result<()> {
     );
 
     // 5. 验证只有一个 submission
-    let submissions = sqlx::query_as::<_, NodeTaskSubmission>(
+    let submissions = NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT * FROM node_task_submissions WHERE task_id = $1",
-    )
-    .bind(task.id)
-    .fetch_all(&env.pool)
+        [task.id.into()],
+    ))
+    .all(&env.pool)
     .await?;
 
     chain.add_step(

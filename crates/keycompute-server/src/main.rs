@@ -18,6 +18,7 @@ use keycompute_db::{
 use keycompute_observability::{init_dev_observability, init_observability};
 use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run};
 use keycompute_types::UserRole;
+use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
@@ -98,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("数据库迁移完成");
 
-    let pool = Arc::new(db_manager.pool().clone());
+    let pool = Arc::new(db_manager.into_connection());
 
     // ==================== 阶段 5: 初始化默认系统管理员 ====================
     let _system_tenant = match initialize_default_admin(&pool).await {
@@ -220,7 +221,7 @@ fn env_var_or_default(key: &str, default: &str) -> String {
     non_empty_or_default(std::env::var(key).ok(), default)
 }
 
-async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<Tenant> {
+async fn initialize_default_admin(pool: &DatabaseConnection) -> anyhow::Result<Tenant> {
     // 从环境变量读取配置
     let admin_email = env_var_or_default("KC__DEFAULT_ADMIN_EMAIL", "admin@keycompute.local");
     let admin_password = env_var_or_default("KC__DEFAULT_ADMIN_PASSWORD", "12345");
@@ -228,11 +229,12 @@ async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<Tenant>
     info!(email = %admin_email, "检查默认管理员账户");
 
     // 只要已经存在 system 用户，就视为默认系统管理员已完成初始化。
-    let existing_system_user = sqlx::query_as::<_, User>(
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT * FROM users WHERE role = 'system' ORDER BY created_at ASC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
+        [],
+    );
+    let existing_system_user = User::find_by_statement(stmt).one(pool).await?;
 
     if let Some(user) = existing_system_user {
         if user.email == admin_email {
@@ -343,7 +345,7 @@ async fn initialize_default_admin(pool: &sqlx::PgPool) -> anyhow::Result<Tenant>
 }
 
 async fn validate_distribution_public_base_url(
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     config: &AppConfig,
 ) -> anyhow::Result<()> {
     let distribution_enabled = SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
@@ -362,7 +364,7 @@ async fn validate_distribution_public_base_url(
 ///
 /// 基于 system_settings 中的配置创建一级和二级分销规则
 async fn initialize_default_distribution_rules(
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     tenant_id: uuid::Uuid,
     admin_user_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
@@ -438,7 +440,7 @@ async fn initialize_default_distribution_rules(
 /// 为默认系统管理员充值 100 元初始余额
 /// 系统管理员不需要审计，直接设置余额
 async fn initialize_admin_balance(
-    pool: &sqlx::PgPool,
+    pool: &DatabaseConnection,
     tenant_id: uuid::Uuid,
     user_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
@@ -458,12 +460,10 @@ async fn initialize_admin_balance(
         }
     }
 
-    // 使用事务进行充值
-    let mut tx = pool.begin().await?;
-
+    // recharge 内部已管理事务
     let initial_amount = Decimal::new(100, 0); // 100 元
     let (updated_balance, transaction) = UserBalance::recharge(
-        &mut tx,
+        pool,
         user_id,
         tenant_id,
         initial_amount,
@@ -471,8 +471,6 @@ async fn initialize_admin_balance(
         Some("系统管理员初始余额"),
     )
     .await?;
-
-    tx.commit().await?;
 
     info!(
         user_id = %user_id,

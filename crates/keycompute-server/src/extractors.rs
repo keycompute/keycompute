@@ -11,6 +11,7 @@ use axum::{
     http::{HeaderMap, request::Parts},
 };
 use keycompute_auth::{AuthContext, Permission};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::future::Future;
@@ -191,18 +192,25 @@ impl FromRequestParts<AppState> for NodeSessionAuth {
             .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
 
         // 4. 查询 node_sessions, 匹配 session_token_hash
-        let session = sqlx::query_as::<_, (Uuid, Uuid)>(
+        let row = pool.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             "SELECT node_id, id FROM node_sessions WHERE session_token_hash = $1 AND revoked_at IS NULL",
-        )
-        .bind(token_hash)
-        .fetch_optional(pool.as_ref())
+            [token_hash.as_str().into()],
+        ))
         .await
         .map_err(|e| ApiError::Internal(format!("Database query failed: {}", e)))?
         .ok_or_else(|| ApiError::Auth("Invalid session token".to_string()))?;
 
+        let node_id: Uuid = row
+            .try_get_by_index(0)
+            .map_err(|e| ApiError::Internal(format!("Failed to parse node_id: {}", e)))?;
+        let session_id: Uuid = row
+            .try_get_by_index(1)
+            .map_err(|e| ApiError::Internal(format!("Failed to parse session_id: {}", e)))?;
+
         Ok(NodeSessionAuth {
-            node_id: session.0,
-            session_id: session.1,
+            node_id,
+            session_id,
         })
     }
 }
