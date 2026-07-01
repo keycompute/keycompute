@@ -231,7 +231,7 @@ set -a && source .env && set +a
 cargo run -p keycompute-server --features redis
 
 # 啟動前端開發伺服器（另一個終端）
-API_BASE_URL=http://localhost:3000 dx serve --package web --platform web --addr 0.0.0.0
+dx serve --package web --platform web --hot-reload true --addr 0.0.0.0
 ```
 
 ---

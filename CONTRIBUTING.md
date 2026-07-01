@@ -81,7 +81,7 @@ cargo run -p keycompute-server --features redis
 4. Start the web frontend in another terminal:
 
 ```bash
-API_BASE_URL=http://localhost:3000 dx serve --package web --platform web --addr 0.0.0.0
+dx serve --package web --platform web --hot-reload true --addr 0.0.0.0
 ```
 
 Notes:

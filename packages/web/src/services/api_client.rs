@@ -13,7 +13,7 @@ static CLIENT: LazyLock<ApiClient> = LazyLock::new(|| {
         .unwrap_or({
             #[cfg(debug_assertions)]
             {
-                "http://localhost:3001"
+                "http://localhost:3000"
             }
             #[cfg(not(debug_assertions))]
             {
