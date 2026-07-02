@@ -267,11 +267,13 @@ impl RateLimiter for MemoryRateLimiter {
 
     async fn get_count(&self, key: &RateLimitKey) -> Result<u64> {
         let entry = self.get_or_create_entry(key);
+        entry.reset_if_expired();
         Ok(entry.request_count())
     }
 
     async fn get_token_count(&self, key: &RateLimitKey) -> Result<u64> {
         let entry = self.get_or_create_entry(key);
+        entry.reset_if_expired();
         Ok(entry.token_count())
     }
 
@@ -431,22 +433,52 @@ impl RateLimitService {
 
 #[cfg(feature = "redis")]
 impl RateLimitService {
-    /// 创建 Redis 限流服务
+    /// 通过 URL 创建 Redis 限流服务（内部创建连接池）
     pub fn new_redis(redis_url: &str) -> Result<Self> {
-        let limiter = RedisRateLimiter::new(redis_url)?;
+        let cfg = deadpool_redis::Config::from_url(redis_url);
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .map_err(|e| {
+                KeyComputeError::Internal(format!("Failed to create Redis pool: {}", e))
+            })?;
+        let limiter = RedisRateLimiter::new(pool);
         Ok(Self::new(
             std::sync::Arc::new(limiter),
             RateLimitBackend::Redis,
         ))
     }
 
-    /// 创建带前缀的 Redis 限流服务
+    /// 通过 URL 创建带前缀的 Redis 限流服务（内部创建连接池）
     pub fn new_redis_with_prefix(redis_url: &str, prefix: impl Into<String>) -> Result<Self> {
-        let limiter = RedisRateLimiter::with_prefix(redis_url, prefix)?;
+        let cfg = deadpool_redis::Config::from_url(redis_url);
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .map_err(|e| {
+                KeyComputeError::Internal(format!("Failed to create Redis pool: {}", e))
+            })?;
+        let limiter = RedisRateLimiter::with_prefix(pool, prefix);
         Ok(Self::new(
             std::sync::Arc::new(limiter),
             RateLimitBackend::Redis,
         ))
+    }
+
+    /// 使用已有连接池创建 Redis 限流服务
+    ///
+    /// 与 `new_redis` 的区别在于接受外部创建的连接池，
+    /// 用于与其他 Redis 消费者共享同一连接池。
+    pub fn with_redis_pool(pool: deadpool_redis::Pool) -> Self {
+        let limiter = RedisRateLimiter::new(pool);
+        Self::new(std::sync::Arc::new(limiter), RateLimitBackend::Redis)
+    }
+
+    /// 使用已有连接池 + 前缀创建 Redis 限流服务
+    pub fn with_redis_pool_and_prefix(
+        pool: deadpool_redis::Pool,
+        prefix: impl Into<String>,
+    ) -> Self {
+        let limiter = RedisRateLimiter::with_prefix(pool, prefix);
+        Self::new(std::sync::Arc::new(limiter), RateLimitBackend::Redis)
     }
 }
 

@@ -116,6 +116,34 @@ impl RedisRuntimeStore {
         Ok(())
     }
 
+    /// 从 URL 创建共享连接池（静态工厂）
+    ///
+    /// 供 `state.rs` 等调用方获取 Pool 后传递给多个消费者，
+    /// 避免外部模块直接依赖 `deadpool_redis::Config`。
+    pub fn create_pool(redis_url: &str) -> Result<Pool, RedisStoreError> {
+        let cfg = Config::from_url(redis_url);
+        cfg.create_pool(Some(Runtime::Tokio1))
+            .map_err(|e| RedisStoreError::CreatePoolError(e.to_string()))
+    }
+
+    /// 使用已有连接池创建存储
+    pub fn with_pool(pool: Pool) -> Self {
+        Self {
+            pool,
+            key_prefix: "keycompute:runtime".to_string(),
+            default_ttl: Duration::from_secs(300),
+        }
+    }
+
+    /// 使用已有连接池 + 自定义前缀
+    pub fn with_pool_and_prefix(pool: Pool, prefix: impl Into<String>) -> Self {
+        Self {
+            pool,
+            key_prefix: prefix.into(),
+            default_ttl: Duration::from_secs(300),
+        }
+    }
+
     /// 获取连接池状态
     pub fn pool_status(&self) -> deadpool_redis::Status {
         self.pool.status()

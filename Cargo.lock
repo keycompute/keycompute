@@ -3888,6 +3888,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "dashmap",
+ "deadpool-redis",
  "keycompute-types",
  "redis",
  "serde",
@@ -3944,6 +3945,7 @@ dependencies = [
  "bigdecimal",
  "bytes",
  "chrono",
+ "deadpool-redis",
  "futures",
  "hex",
  "keycompute-alipay",

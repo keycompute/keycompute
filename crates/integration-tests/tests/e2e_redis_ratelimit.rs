@@ -439,3 +439,108 @@ async fn test_concurrent_distributed_ratelimit() {
     chain.print_report();
     assert!(chain.all_passed());
 }
+
+/// 测试 Redis TPM Token 记录功能
+#[tokio::test]
+async fn test_redis_tpm_token_recording() {
+    let mut chain = VerificationChain::new();
+    let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+
+    // 创建带测试隔离前缀的 Redis 限流服务
+    let service =
+        match RateLimitService::new_redis_with_prefix(&redis_url, format!("test-{}", test_id)) {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Warning: Redis not available, skipping test");
+                return;
+            }
+        };
+
+    let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+
+    // 初始 token 计数应为 0
+    let count = service.get_tpm_count(&key).await.unwrap();
+    chain.add_step(
+        "keycompute-ratelimit",
+        "get_tpm_count",
+        format!("Initial TPM count: {}", count),
+        count == 0,
+    );
+
+    // 记录 100 tokens
+    service.record_token_usage(&key, 100).await.unwrap();
+    let count = service.get_tpm_count(&key).await.unwrap();
+    chain.add_step(
+        "keycompute-ratelimit",
+        "record_token_usage",
+        format!("After 100 tokens: {}", count),
+        count == 100,
+    );
+
+    // 再记录 50 tokens
+    service.record_token_usage(&key, 50).await.unwrap();
+    let count = service.get_tpm_count(&key).await.unwrap();
+    chain.add_step(
+        "keycompute-ratelimit",
+        "record_token_usage",
+        format!("After 150 tokens: {}", count),
+        count == 150,
+    );
+
+    chain.print_report();
+    assert!(chain.all_passed());
+}
+
+/// 测试 Redis TPM 限流检查
+#[tokio::test]
+async fn test_redis_tpm_check() {
+    let mut chain = VerificationChain::new();
+    let redis_url = get_redis_url();
+    let test_id = generate_test_id();
+
+    // 创建带测试隔离前缀的 Redis 限流服务
+    let service =
+        match RateLimitService::new_redis_with_prefix(&redis_url, format!("test-{}", test_id)) {
+            Ok(s) => s,
+            Err(_) => {
+                println!("Warning: Redis not available, skipping test");
+                return;
+            }
+        };
+
+    let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let config = RateLimitConfig::new(1000, 200);
+
+    // 初始 TPM 检查应通过
+    let allowed = service.check_tpm(&key, &config).await.unwrap();
+    chain.add_step(
+        "keycompute-ratelimit",
+        "check_tpm",
+        "Initial TPM check allowed",
+        allowed,
+    );
+
+    // 记录 150 tokens（未超过 TPM 限制 200）
+    service.record_token_usage(&key, 150).await.unwrap();
+    let allowed = service.check_tpm(&key, &config).await.unwrap();
+    chain.add_step(
+        "keycompute-ratelimit",
+        "check_tpm",
+        "TPM check allowed after 150 tokens",
+        allowed,
+    );
+
+    // 再记录 100 tokens（超过 TPM 限制 200）
+    service.record_token_usage(&key, 100).await.unwrap();
+    let allowed = service.check_tpm(&key, &config).await.unwrap();
+    chain.add_step(
+        "keycompute-ratelimit",
+        "check_tpm",
+        "TPM check rejected after 250 tokens",
+        !allowed,
+    );
+
+    chain.print_report();
+    assert!(chain.all_passed());
+}

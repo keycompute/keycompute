@@ -268,6 +268,7 @@ impl AppState {
     ///
     /// 如果 Redis 后端创建失败，会优雅降级到内存后端，
     /// 确保应用不会因为 Redis 不可用而无法启动。
+    /// Redis 后端内部使用 `deadpool_redis` 连接池管理连接。
     fn create_rate_limiter(
         config: &RateLimitBackendConfig,
     ) -> keycompute_ratelimit::RateLimitService {
@@ -340,16 +341,20 @@ impl AppState {
     }
 
     /// 创建 Node Gateway 服务
-    fn create_node_gateway(
+    ///
+    /// 使用已有 Redis 连接池创建，与限流服务共享同一连接池。
+    /// 仅在启用 `redis` feature 时可用。
+    #[cfg(feature = "redis")]
+    fn create_node_gateway_with_pool(
         router: &Arc<DbRouter>,
-        redis_url: &str,
+        redis_pool: deadpool_redis::Pool,
         node_config: Option<keycompute_config::NodeGatewayConfig>,
     ) -> Result<NodeGatewayService, anyhow::Error> {
         use keycompute_runtime::redis_store::RedisRuntimeStore;
         use node_gateway::{NodeGatewayAppConfig, NodeGatewayRedis, NodeGatewayStore};
 
-        // 创建 Redis 运行时存储
-        let redis_store = Arc::new(RedisRuntimeStore::new(redis_url)?);
+        // 使用已有连接池创建 Redis 存储（与限流服务共享连接池）
+        let redis_store = Arc::new(RedisRuntimeStore::with_pool(redis_pool));
 
         // 创建节点网关配置
         let config = if let Some(node_config) = node_config {
@@ -420,25 +425,75 @@ impl AppState {
         // 创建带数据库连接的计费服务
         let billing = Arc::new(BillingService::with_pool(Arc::clone(&pool)));
 
-        // 根据配置创建限流服务
-        let rate_limiter = Self::create_rate_limiter(&config.rate_limit);
-
-        // 尝试初始化节点网关服务（需要 Redis）
-        let node_gateway = if let RateLimitBackendConfig::Redis { url } = &config.rate_limit {
-            let node_config = config.node_gateway.clone();
-            match Self::create_node_gateway(&pool, url, node_config) {
-                Ok(service) => {
-                    tracing::info!("Node gateway service initialized successfully");
-                    Some(Arc::new(service))
+        // 创建共享 Redis 连接池 + 构建限流服务 + 节点网关
+        // 当 `redis` feature 启用时使用共享连接池,否则回退到内存后端
+        #[cfg(feature = "redis")]
+        let (rate_limiter, node_gateway) = {
+            let shared_redis_pool = match &config.rate_limit {
+                RateLimitBackendConfig::Redis { url } => {
+                    match keycompute_runtime::redis_store::RedisRuntimeStore::create_pool(url) {
+                        Ok(pool) => {
+                            tracing::info!(redis_url = %url, "Shared Redis connection pool created");
+                            Some(pool)
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                redis_url = %url,
+                                error = %e,
+                                "Failed to create Redis pool, falling back to memory backend"
+                            );
+                            None
+                        }
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize node gateway service: {}", e);
+                _ => None,
+            };
+
+            let rate_limiter = match &shared_redis_pool {
+                Some(pool) => {
+                    tracing::info!("Rate limiter using shared Redis backend");
+                    keycompute_ratelimit::RateLimitService::with_redis_pool(pool.clone())
+                }
+                None => {
+                    tracing::info!("Rate limiter using memory backend (Redis pool unavailable)");
+                    keycompute_ratelimit::RateLimitService::default_memory()
+                }
+            };
+
+            let node_gateway = match &shared_redis_pool {
+                Some(redis_pool) => {
+                    let node_config = config.node_gateway.clone();
+                    match Self::create_node_gateway_with_pool(
+                        &pool,
+                        redis_pool.clone(),
+                        node_config,
+                    ) {
+                        Ok(service) => {
+                            tracing::info!("Node gateway service initialized successfully");
+                            Some(Arc::new(service))
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to initialize node gateway service: {}", e);
+                            None
+                        }
+                    }
+                }
+                None => {
+                    tracing::info!("Node gateway requires Redis backend, skipping initialization");
                     None
                 }
-            }
-        } else {
-            tracing::info!("Node gateway requires Redis backend, skipping initialization");
-            None
+            };
+
+            (rate_limiter, node_gateway)
+        };
+
+        #[cfg(not(feature = "redis"))]
+        let (rate_limiter, node_gateway) = {
+            tracing::info!("Redis feature disabled, using memory rate limiter");
+            (
+                keycompute_ratelimit::RateLimitService::default_memory(),
+                None,
+            )
         };
 
         // 创建邮件服务

@@ -89,6 +89,24 @@ pub async fn trace_id_middleware(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// 构造服务不可用响应（503 Service Unavailable）
+///
+/// 用于限流检查出错时（如 Redis 不可用），遵循 fail-closed 安全原则。
+fn service_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        serde_json::json!({
+            "error": {
+                "message": "Rate limit check failed. Please try again later.",
+                "type": "service_unavailable",
+                "code": "rate_limit_check_failed"
+            }
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
 /// 限流中间件
 ///
 /// 基于用户/租户/API Key 进行请求限流
@@ -158,18 +176,50 @@ pub async fn rate_limit_middleware(
         RateLimitConfig::default()
     };
 
-    // 检查限流（使用租户特定配置）
+    // 先检查 TPM（预检：读取当前窗口已积累的 token 计数，不消耗配额）
+    //
+    // NOTE: 此方法不是纯读操作——`get_token_count` 会在 Redis 端附带清理过期 ZSET 条目
+    // 和刷新 TTL 的副作用，确保活跃 key 不会被提前驱逐。
+    //
+    // TPM 的记录（record_token_usage）发生在 handler/billing 层（LLM 响应后才知道 token 用量）。
+    // 这里的 check_tpm 是一个前置预检，仅读取之前请求累计的 token 数。
+    // 这意味着 TPM 限制的实时性受限于 billing 层是否及时调用 record_token_usage。
+    match state
+        .rate_limiter
+        .check_tpm(&rate_key, &rate_limit_config)
+        .await
+    {
+        Ok(false) => {
+            // TPM 超限，拒绝请求
+            info!(
+                tenant_id = %rate_key.tenant_id,
+                tpm_limit = rate_limit_config.tpm_limit,
+                "TPM limit exceeded"
+            );
+            return rate_limit_exceeded_response();
+        }
+        Err(e) => {
+            // TPM 检查出错（如 Redis 不可用），按 fail-closed 原则拒绝请求
+            error!("TPM check failed, denying request: {}", e);
+            return service_unavailable_response();
+        }
+        Ok(true) => {
+            // TPM 通过，继续检查 RPM
+        }
+    }
+
+    // 执行 RPM 原子检查并记录
     match state
         .rate_limiter
         .check_and_record_with_config(&rate_key, &rate_limit_config)
         .await
     {
         Ok(()) => {
-            // 限流检查通过，继续处理请求
+            // 限流检查全部通过，继续处理请求
             next.run(req).await
         }
         Err(keycompute_types::KeyComputeError::RateLimitExceeded(ref msg)) => {
-            // 触发限流
+            // 触发 RPM 限流
             info!(
                 tenant_id = %rate_key.tenant_id,
                 user_id = %rate_key.user_id,
@@ -177,23 +227,12 @@ pub async fn rate_limit_middleware(
                 "Rate limit exceeded: {}",
                 msg
             );
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                serde_json::json!({
-                    "error": {
-                        "message": "Rate limit exceeded. Please try again later.",
-                        "type": "rate_limit_exceeded",
-                        "code": "rate_limit_exceeded"
-                    }
-                })
-                .to_string(),
-            )
-                .into_response()
+            rate_limit_exceeded_response()
         }
         Err(e) => {
-            // 限流检查出错，记录错误但放行（避免阻塞正常请求）
-            error!("Rate limit check error: {}", e);
-            next.run(req).await
+            // RPM 检查出错（如 Redis 不可用），按 fail-closed 原则拒绝请求
+            error!("Rate limit check failed, denying request: {}", e);
+            service_unavailable_response()
         }
     }
 }
@@ -201,6 +240,9 @@ pub async fn rate_limit_middleware(
 /// 公共认证限流中间件
 ///
 /// 适用于无需登录的注册入口，按可信代理注入的 IP 和服务端签发 cookie 两个维度限流。
+///
+/// 注意：此路径仅执行 RPM 限流，不执行 TPM 预检。
+/// 公共注册入口不处理 LLM 请求、不消耗 token，TPM 维度对此路径不适用。
 pub async fn public_auth_rate_limit_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -367,13 +409,14 @@ async fn enforce_public_rate_limit(
             Err(rate_limit_exceeded_response())
         }
         Err(e) => {
+            // 限流检查出错（如 Redis 不可用），按 fail-closed 原则拒绝请求
             error!(
                 scope = %scope,
                 dimension = %dimension,
                 error = %e,
-                "Public auth rate limit check error"
+                "Public auth rate limit check failed, denying request"
             );
-            Ok(())
+            Err(service_unavailable_response())
         }
     }
 }
