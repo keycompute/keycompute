@@ -5,10 +5,12 @@
 use crate::client::{AlipayClient, QueryResponse};
 use crate::config::AlipayConfig;
 use chrono::{DateTime, Utc};
+use keycompute_db::DbRouter;
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, FromQueryResult, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use uuid::Uuid;
 
 mod urlencoding {
@@ -22,21 +24,18 @@ mod urlencoding {
 /// 支付服务
 pub struct PaymentService {
     client: AlipayClient,
-    pool: sea_orm::DatabaseConnection,
+    pool: Arc<DbRouter>,
 }
 
 impl PaymentService {
     /// 创建新的支付服务
-    pub fn new(
-        config: AlipayConfig,
-        pool: sea_orm::DatabaseConnection,
-    ) -> Result<Self, PaymentError> {
+    pub fn new(config: AlipayConfig, pool: Arc<DbRouter>) -> Result<Self, PaymentError> {
         let client = AlipayClient::new(config)?;
         Ok(Self { client, pool })
     }
 
     /// 从环境变量创建支付服务
-    pub async fn from_env(pool: sea_orm::DatabaseConnection) -> Result<Self, PaymentError> {
+    pub async fn from_env(pool: Arc<DbRouter>) -> Result<Self, PaymentError> {
         let config = AlipayConfig::from_env()?;
         Self::new(config, pool)
     }
@@ -72,10 +71,14 @@ impl PaymentService {
             expire_minutes: self.client.config().timeout_minutes,
         };
 
-        let order =
-            keycompute_db::PaymentOrder::create(&self.pool, &db_req, &out_trade_no, &pay_url)
-                .await
-                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+        let order = keycompute_db::PaymentOrder::create(
+            self.pool.as_ref(),
+            &db_req,
+            &out_trade_no,
+            &pay_url,
+        )
+        .await
+        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
         Ok(CreateOrderResult {
             order_id: order.id,
@@ -109,10 +112,14 @@ impl PaymentService {
             expire_minutes: self.client.config().timeout_minutes,
         };
 
-        let order =
-            keycompute_db::PaymentOrder::create(&self.pool, &db_req, &out_trade_no, &pay_url)
-                .await
-                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+        let order = keycompute_db::PaymentOrder::create(
+            self.pool.as_ref(),
+            &db_req,
+            &out_trade_no,
+            &pay_url,
+        )
+        .await
+        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
         Ok(CreateOrderResult {
             order_id: order.id,
@@ -154,9 +161,10 @@ impl PaymentService {
         };
 
         // 临时使用空字符串作为 pay_url，后续更新
-        let order = keycompute_db::PaymentOrder::create(&self.pool, &db_req, &out_trade_no, "")
-            .await
-            .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+        let order =
+            keycompute_db::PaymentOrder::create(self.pool.as_ref(), &db_req, &out_trade_no, "")
+                .await
+                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
         // 调用支付宝 precreate 接口
         let precreate_result = self
@@ -174,7 +182,7 @@ impl PaymentService {
             Err(e) => {
                 // precreate 调用失败，标记订单为失败状态
                 if let Err(mark_err) =
-                    keycompute_db::PaymentOrder::mark_as_failed(&self.pool, order.id).await
+                    keycompute_db::PaymentOrder::mark_as_failed(self.pool.as_ref(), order.id).await
                 {
                     tracing::error!("Failed to mark order {} as failed: {}", order.id, mark_err);
                 }
@@ -185,7 +193,7 @@ impl PaymentService {
         if !precreate_response.is_success() {
             // precreate 返回失败，标记订单为失败状态
             if let Err(mark_err) =
-                keycompute_db::PaymentOrder::mark_as_failed(&self.pool, order.id).await
+                keycompute_db::PaymentOrder::mark_as_failed(self.pool.as_ref(), order.id).await
             {
                 tracing::error!("Failed to mark order {} as failed: {}", order.id, mark_err);
             }
@@ -260,10 +268,11 @@ impl PaymentService {
             .map_err(|_| PaymentError::InvalidAmount)?;
 
         // 查询订单
-        let order = keycompute_db::PaymentOrder::find_by_out_trade_no(&self.pool, &out_trade_no)
-            .await
-            .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
-            .ok_or(PaymentError::OrderNotFound)?;
+        let order =
+            keycompute_db::PaymentOrder::find_by_out_trade_no(self.pool.as_ref(), &out_trade_no)
+                .await
+                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
+                .ok_or(PaymentError::OrderNotFound)?;
 
         // 检查订单状态
         if order.status != "pending" {
@@ -295,7 +304,7 @@ impl PaymentService {
             // 交易成功，继续处理
         } else if trade_status == "TRADE_CLOSED" {
             // 交易关闭，使用 close 方法设置 closed_at
-            keycompute_db::PaymentOrder::close(&self.pool, order.id)
+            keycompute_db::PaymentOrder::close(self.pool.as_ref(), order.id)
                 .await
                 .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
@@ -398,10 +407,11 @@ impl PaymentService {
     /// 从支付宝查询订单状态并更新本地订单
     pub async fn sync_order_status(&self, out_trade_no: &str) -> Result<SyncResult, PaymentError> {
         // 查询本地订单
-        let order = keycompute_db::PaymentOrder::find_by_out_trade_no(&self.pool, out_trade_no)
-            .await
-            .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
-            .ok_or(PaymentError::OrderNotFound)?;
+        let order =
+            keycompute_db::PaymentOrder::find_by_out_trade_no(self.pool.as_ref(), out_trade_no)
+                .await
+                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
+                .ok_or(PaymentError::OrderNotFound)?;
 
         // 如果订单已处理，直接返回
         if order.status != "pending" {
@@ -507,7 +517,7 @@ impl PaymentService {
             })
         } else if trade_status == "TRADE_CLOSED" {
             // 交易关闭，使用 close 方法设置 closed_at
-            keycompute_db::PaymentOrder::close(&self.pool, order.id)
+            keycompute_db::PaymentOrder::close(self.pool.as_ref(), order.id)
                 .await
                 .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
@@ -533,10 +543,11 @@ impl PaymentService {
     /// 如果支付宝关闭成功但本地更新失败，本地状态可能不一致。
     pub async fn close_order(&self, out_trade_no: &str) -> Result<(), PaymentError> {
         // 先查询本地订单
-        let order = keycompute_db::PaymentOrder::find_by_out_trade_no(&self.pool, out_trade_no)
-            .await
-            .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
-            .ok_or(PaymentError::OrderNotFound)?;
+        let order =
+            keycompute_db::PaymentOrder::find_by_out_trade_no(self.pool.as_ref(), out_trade_no)
+                .await
+                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
+                .ok_or(PaymentError::OrderNotFound)?;
 
         // 检查订单状态，已处理的订单不需要关闭
         if order.status != "pending" {
@@ -557,7 +568,7 @@ impl PaymentService {
         }
 
         // 更新本地订单状态（使用条件更新，避免并发问题）
-        keycompute_db::PaymentOrder::close(&self.pool, order.id)
+        keycompute_db::PaymentOrder::close(self.pool.as_ref(), order.id)
             .await
             .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
@@ -566,7 +577,7 @@ impl PaymentService {
 
     /// 获取用户余额
     pub async fn get_user_balance(&self, user_id: Uuid) -> Result<UserBalanceInfo, PaymentError> {
-        let balance = keycompute_db::UserBalance::find_by_user(&self.pool, user_id)
+        let balance = keycompute_db::UserBalance::find_by_user(self.pool.as_ref(), user_id)
             .await
             .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
             .unwrap_or_else(|| keycompute_db::UserBalance {

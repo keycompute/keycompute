@@ -4,8 +4,7 @@ use crate::DbError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{
-    DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult, Statement,
-    TransactionTrait,
+    ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -82,7 +81,7 @@ impl UserBalance {
 impl UserBalance {
     /// 获取或创建用户余额记录
     pub async fn get_or_create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<UserBalance, DbError> {
@@ -101,7 +100,7 @@ impl UserBalance {
 
     /// 根据用户ID查找余额
     pub async fn find_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Option<UserBalance>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -115,7 +114,7 @@ impl UserBalance {
 
     /// 批量根据用户ID查找余额
     pub async fn find_by_users(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalance>, DbError> {
         if user_ids.is_empty() {
@@ -132,7 +131,7 @@ impl UserBalance {
 
     /// 充值（自身创建事务执行）
     pub async fn recharge(
-        db: &DatabaseConnection,
+        db: &(impl ConnectionTrait + TransactionTrait),
         user_id: Uuid,
         tenant_id: Uuid,
         amount: Decimal,
@@ -207,7 +206,7 @@ impl UserBalance {
 
     /// 消费（事务内执行）
     pub async fn consume(
-        db: &DatabaseConnection,
+        db: &(impl ConnectionTrait + TransactionTrait),
         user_id: Uuid,
         amount: Decimal,
         usage_log_id: Option<Uuid>,
@@ -268,7 +267,7 @@ impl UserBalance {
 
     /// 冻结余额
     pub async fn freeze(
-        db: &DatabaseConnection,
+        db: &(impl ConnectionTrait + TransactionTrait),
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
@@ -382,7 +381,7 @@ impl UserBalance {
 
     /// 解冻余额
     pub async fn unfreeze(
-        db: &DatabaseConnection,
+        db: &(impl ConnectionTrait + TransactionTrait),
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
@@ -498,7 +497,7 @@ impl BalanceTransaction {
 
     /// 查找用户的交易记录
     pub async fn find_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
         limit: i64,
         offset: i64,

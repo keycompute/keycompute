@@ -4,7 +4,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -54,7 +54,7 @@ pub struct CreateNodeTaskRequest {
 impl NodeTask {
     /// 创建新任务
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateNodeTaskRequest,
     ) -> Result<NodeTask, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -84,7 +84,7 @@ impl NodeTask {
 
     /// 根据 ID 查询任务
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<NodeTask>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -99,7 +99,7 @@ impl NodeTask {
 
     /// 根据 request_id 查询任务
     pub async fn find_by_request_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         request_id: Uuid,
     ) -> Result<Option<NodeTask>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -114,7 +114,7 @@ impl NodeTask {
 
     /// 原子领取任务（claim）
     pub async fn claim(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         task_id: Uuid,
         node_id: Uuid,
         session_id: Uuid,
@@ -151,7 +151,7 @@ impl NodeTask {
 
     /// 标记任务成功
     pub async fn mark_succeeded(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         task_id: Uuid,
         result_json: &serde_json::Value,
     ) -> Result<NodeTask, DbError> {
@@ -182,7 +182,7 @@ impl NodeTask {
 
     /// 标记任务失败
     pub async fn mark_failed(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         task_id: Uuid,
         error_json: &serde_json::Value,
     ) -> Result<NodeTask, DbError> {
@@ -212,7 +212,10 @@ impl NodeTask {
     }
 
     /// 标记任务过期
-    pub async fn mark_expired(db: &DatabaseConnection, task_id: Uuid) -> Result<NodeTask, DbError> {
+    pub async fn mark_expired(
+        db: &impl ConnectionTrait,
+        task_id: Uuid,
+    ) -> Result<NodeTask, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -234,7 +237,7 @@ impl NodeTask {
     }
 
     /// 恢复任务为 queued（重新入队）
-    pub async fn requeue(db: &DatabaseConnection, task_id: Uuid) -> Result<NodeTask, DbError> {
+    pub async fn requeue(db: &impl ConnectionTrait, task_id: Uuid) -> Result<NodeTask, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -260,7 +263,7 @@ impl NodeTask {
     }
 
     /// 批量标记过期任务
-    pub async fn expire_overdue_tasks(db: &DatabaseConnection) -> Result<Vec<NodeTask>, DbError> {
+    pub async fn expire_overdue_tasks(db: &impl ConnectionTrait) -> Result<Vec<NodeTask>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"

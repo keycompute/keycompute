@@ -31,7 +31,7 @@ pub async fn make_pricing_default(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找目标定价
@@ -70,7 +70,7 @@ pub async fn make_pricing_default(
         ],
     );
     let all_pricing: Vec<PricingModel> = PricingModel::find_by_statement(stmt)
-        .all(pool.as_ref())
+        .all(pool)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
 
@@ -95,8 +95,7 @@ pub async fn make_pricing_default(
                     "UPDATE pricing_models SET is_default = $1, updated_at = NOW() WHERE id = $2",
                     [new_is_default.into(), pricing.id.into()],
                 );
-                pool.as_ref()
-                    .execute(stmt)
+                pool.execute(stmt)
                     .await
                     .map_err(|e| ApiError::Internal(format!("Failed to update pricing: {}", e)))?;
                 updated_count += 1;
@@ -194,7 +193,7 @@ pub async fn list_pricing(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // Admin 查看所有定价（包括所有租户和全局默认）
@@ -207,7 +206,7 @@ pub async fn list_pricing(
         [],
     );
     let pricing_models = PricingModel::find_by_statement(stmt)
-        .all(pool.as_ref())
+        .all(pool)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
 
@@ -249,7 +248,7 @@ pub async fn create_pricing(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 校验计费维度必须是合法值
@@ -338,7 +337,7 @@ pub async fn update_pricing(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找现有定价
@@ -402,7 +401,7 @@ pub async fn delete_pricing(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找并删除定价
@@ -455,7 +454,7 @@ pub async fn set_default_pricing(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
     tracing::info!(tenant_id = %auth.tenant_id, "Setting up default pricing");
     // 默认定价数据（仅保留一个示例模型）

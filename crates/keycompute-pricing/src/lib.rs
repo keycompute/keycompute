@@ -3,11 +3,11 @@
 //! 定价模块，只读，生成 PricingSnapshot。
 //! 架构约束：不写任何状态，不参与路由或执行。
 
-use keycompute_db::PricingModel;
+use keycompute_db::{DbRouter, PricingModel};
 use keycompute_types::{KeyComputeError, PricingSnapshot, Result};
 use lru::LruCache;
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use sea_orm::ConnectionTrait;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -103,7 +103,7 @@ impl CacheEntry {
 #[derive(Clone)]
 pub struct PricingService {
     /// 数据库连接池（可选，用于测试时可以不提供）
-    pool: Option<DatabaseConnection>,
+    pool: Option<Arc<DbRouter>>,
     /// 价格缓存：key = "tenant_id:model_name:provider"，使用 LRU 淘汰策略
     cache: Arc<RwLock<LruCache<String, CacheEntry>>>,
     /// 缓存 TTL（秒）
@@ -143,7 +143,7 @@ impl PricingService {
     }
 
     /// 创建带数据库连接的定价服务
-    pub fn with_pool(pool: DatabaseConnection) -> Self {
+    pub fn with_pool(pool: Arc<DbRouter>) -> Self {
         Self {
             pool: Some(pool),
             cache: Arc::new(RwLock::new(LruCache::new(
@@ -229,7 +229,7 @@ impl PricingService {
 
         // 尝试从数据库加载
         let snapshot_with_source = if let Some(pool) = &self.pool {
-            self.load_from_database_with_source(pool, model_name, tenant_id, provider)
+            self.load_from_database_with_source(pool.as_ref(), model_name, tenant_id, provider)
                 .await?
         } else {
             // 无数据库连接时使用默认价格
@@ -348,7 +348,7 @@ impl PricingService {
     /// 定价仅按计费维度（"node" / "provideraccount"）区分，不按真实 provider 区分
     async fn load_from_database_with_source(
         &self,
-        pool: &DatabaseConnection,
+        pool: &impl ConnectionTrait,
         model_name: &str,
         tenant_id: &Uuid,
         provider: &str,
@@ -483,9 +483,11 @@ impl PricingService {
             return Ok(());
         };
 
-        let defaults = PricingModel::find_defaults(pool).await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
-        })?;
+        let defaults = PricingModel::find_defaults(pool.as_ref())
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
+            })?;
 
         let nil_tenant = Uuid::nil();
         let mut cache = self.cache.write().await;

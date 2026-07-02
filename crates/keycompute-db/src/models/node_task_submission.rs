@@ -4,7 +4,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -37,7 +37,7 @@ pub struct CreateNodeTaskSubmissionRequest {
 impl NodeTaskSubmission {
     /// 创建新提交记录
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateNodeTaskSubmissionRequest,
     ) -> Result<NodeTaskSubmission, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -67,7 +67,7 @@ impl NodeTaskSubmission {
 
     /// 根据 task_id 和 lease_id 查询提交记录
     pub async fn find_by_task_and_lease(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         task_id: Uuid,
         lease_id: Uuid,
     ) -> Result<Option<NodeTaskSubmission>, DbError> {

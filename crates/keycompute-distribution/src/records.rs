@@ -5,8 +5,9 @@
 use crate::{DistributionContext, DistributionLevel, calculator::DistributionShare};
 use chrono::{DateTime, Utc};
 use keycompute_db::CreateDistributionRecordRequest;
+use keycompute_db::DbRouter;
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 分销模块错误类型
@@ -82,7 +83,7 @@ impl DistributionRecord {
 #[derive(Clone, Default)]
 pub struct DistributionService {
     /// 数据库连接（可选）
-    pool: Option<DatabaseConnection>,
+    pool: Option<Arc<DbRouter>>,
 }
 
 impl std::fmt::Debug for DistributionService {
@@ -100,7 +101,7 @@ impl DistributionService {
     }
 
     /// 创建带数据库连接的分销服务
-    pub fn with_pool(pool: DatabaseConnection) -> Self {
+    pub fn with_pool(pool: Arc<DbRouter>) -> Self {
         Self { pool: Some(pool) }
     }
 
@@ -169,7 +170,7 @@ impl DistributionService {
         }
 
         // 使用批量插入保存所有记录（原子性）
-        match keycompute_db::DistributionRecord::create_many(pool, &requests).await {
+        match keycompute_db::DistributionRecord::create_many(pool.as_ref(), &requests).await {
             Ok(saved_records) => {
                 tracing::info!(
                     usage_log_id = %ctx.usage_log_id,

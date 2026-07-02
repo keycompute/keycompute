@@ -3,7 +3,7 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -140,7 +140,7 @@ impl NodeTipWithdrawal {
 
     /// 根据 ID 查询提现记录
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<NodeTipWithdrawal>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -154,7 +154,7 @@ impl NodeTipWithdrawal {
 
     /// 获取用户的提现记录列表（分页）
     pub async fn list_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
         limit: i64,
         offset: i64,
@@ -171,7 +171,7 @@ impl NodeTipWithdrawal {
 
     /// 获取所有待审批提现记录（管理员用，JOIN 用户邮箱）
     pub async fn list_pending_with_users(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<NodeTipWithdrawalWithUser>, DbError> {

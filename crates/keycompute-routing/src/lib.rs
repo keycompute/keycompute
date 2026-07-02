@@ -8,13 +8,13 @@ pub mod account_state;
 pub mod provider_health;
 
 pub use account_state::{AccountState, AccountStateStore};
-use keycompute_db::Account;
+use keycompute_db::{Account, DbRouter};
 use keycompute_runtime::{EncryptedApiKey, decrypt_api_key};
 use keycompute_types::{
     ExecutionPlan, ExecutionTarget, KeyComputeError, PricingSnapshot, RequestContext, Result,
 };
 pub use provider_health::{ProviderHealth, ProviderHealthStore};
-use sea_orm::DatabaseConnection;
+use sea_orm::ConnectionTrait;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -59,7 +59,7 @@ pub struct RoutingEngine {
     /// Provider 健康状态存储（只读）
     provider_health: Arc<ProviderHealthStore>,
     /// 数据库连接池（可选）
-    pool: Option<DatabaseConnection>,
+    pool: Option<Arc<DbRouter>>,
     /// 可用 Provider 列表
     providers: Vec<String>,
     /// Node 能力索引（可选）
@@ -112,7 +112,7 @@ impl RoutingEngine {
     pub fn with_pool(
         account_states: Arc<AccountStateStore>,
         provider_health: Arc<ProviderHealthStore>,
-        pool: DatabaseConnection,
+        pool: Arc<DbRouter>,
         providers: Vec<String>,
     ) -> Self {
         Self {
@@ -135,7 +135,7 @@ impl RoutingEngine {
     pub fn with_node_index(
         account_states: Arc<AccountStateStore>,
         provider_health: Arc<ProviderHealthStore>,
-        pool: DatabaseConnection,
+        pool: Arc<DbRouter>,
         providers: Vec<String>,
         node_index: Arc<dyn NodeCapabilityIndex>,
     ) -> Self {
@@ -439,10 +439,10 @@ impl RoutingEngine {
         let accounts = if let Some(pool) = &self.pool {
             // 根据是否指定模型选择不同的加载方式
             let result = if model.is_empty() {
-                self.load_accounts_from_database(pool, provider, tenant_id)
+                self.load_accounts_from_database(pool.as_ref(), provider, tenant_id)
                     .await
             } else {
-                self.load_accounts_for_model(pool, provider, tenant_id, model)
+                self.load_accounts_for_model(pool.as_ref(), provider, tenant_id, model)
                     .await
             };
 
@@ -479,7 +479,7 @@ impl RoutingEngine {
     /// 返回该租户专属的 + 全局可见的、支持指定 provider 的启用账号列表
     async fn load_accounts_from_database(
         &self,
-        pool: &DatabaseConnection,
+        pool: &impl ConnectionTrait,
         provider: &str,
         tenant_id: Uuid,
     ) -> Result<Vec<Account>> {
@@ -518,7 +518,7 @@ impl RoutingEngine {
     /// 返回该租户可见的、支持指定模型和 provider 的启用账号列表
     async fn load_accounts_for_model(
         &self,
-        pool: &DatabaseConnection,
+        pool: &impl ConnectionTrait,
         provider: &str,
         tenant_id: Uuid,
         model: &str,
@@ -724,6 +724,7 @@ mod tests {
     use super::*;
     use keycompute_types::PricingSnapshot;
     use rust_decimal::Decimal;
+    use sea_orm::DatabaseConnection;
 
     /// Mock Node 能力索引,用于测试
     struct MockNodeIndex {
@@ -958,7 +959,7 @@ mod tests {
         // 创建带有 ready node 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = DatabaseConnection::Disconnected;
+        let pool = DbRouter::single(DatabaseConnection::Disconnected);
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec!["deepseek-chat".to_string()],
@@ -1000,7 +1001,7 @@ mod tests {
         // 创建没有 ready node 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = DatabaseConnection::Disconnected;
+        let pool = DbRouter::single(DatabaseConnection::Disconnected);
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec![], // 没有 ready 模型
@@ -1036,7 +1037,7 @@ mod tests {
         // 创建带有 ready node 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = DatabaseConnection::Disconnected;
+        let pool = DbRouter::single(DatabaseConnection::Disconnected);
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec!["deepseek-chat".to_string()],
@@ -1098,7 +1099,7 @@ mod tests {
         // 创建带有 node_index 的引擎
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
-        let pool = DatabaseConnection::Disconnected;
+        let pool = DbRouter::single(DatabaseConnection::Disconnected);
         let providers = vec!["openai".to_string()];
         let node_index = Arc::new(MockNodeIndex {
             ready_models: vec!["deepseek-chat".to_string()],

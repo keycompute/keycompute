@@ -1,6 +1,6 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -37,7 +37,7 @@ pub struct ReferralStats {
 impl UserReferral {
     /// 创建推荐关系
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateUserReferralRequest,
     ) -> Result<UserReferral, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -60,7 +60,7 @@ impl UserReferral {
 
     /// 根据用户 ID 查找推荐关系
     pub async fn find_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Option<UserReferral>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -75,7 +75,7 @@ impl UserReferral {
 
     /// 查找一级推荐人推荐的所有用户
     pub async fn find_by_level1_referrer(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         referrer_id: Uuid,
     ) -> Result<Vec<UserReferral>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -90,7 +90,7 @@ impl UserReferral {
 
     /// 查找二级推荐人推荐的所有用户
     pub async fn find_by_level2_referrer(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         referrer_id: Uuid,
     ) -> Result<Vec<UserReferral>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -105,7 +105,7 @@ impl UserReferral {
 
     /// 获取用户的推荐统计
     pub async fn get_stats_by_referrer(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         referrer_id: Uuid,
     ) -> Result<ReferralStats, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -124,7 +124,7 @@ impl UserReferral {
     /// 更新推荐关系状态
     pub async fn update_status(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         status: &str,
     ) -> Result<UserReferral, DbError> {
         let stmt = Statement::from_sql_and_values(

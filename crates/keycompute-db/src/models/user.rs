@@ -1,7 +1,7 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use keycompute_types::{AssignableUserRole, UserRole};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -97,7 +97,10 @@ impl UserFilter {
 
 impl User {
     /// 创建新用户
-    pub async fn create(db: &DatabaseConnection, req: &CreateUserRequest) -> Result<User, DbError> {
+    pub async fn create(
+        db: &impl ConnectionTrait,
+        req: &CreateUserRequest,
+    ) -> Result<User, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO users (tenant_id, email, name, role) VALUES ($1, $2, $3, COALESCE($4, 'user')) RETURNING *"#,
@@ -117,7 +120,7 @@ impl User {
     }
 
     /// 根据 ID 查找用户
-    pub async fn find_by_id(db: &DatabaseConnection, id: Uuid) -> Result<Option<User>, DbError> {
+    pub async fn find_by_id(db: &impl ConnectionTrait, id: Uuid) -> Result<Option<User>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM users WHERE id = $1",
@@ -130,7 +133,7 @@ impl User {
 
     /// 根据邮箱查找用户
     pub async fn find_by_email(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         email: &str,
     ) -> Result<Option<User>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -145,7 +148,7 @@ impl User {
 
     /// 查找租户下的所有用户
     pub async fn find_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<User>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -160,7 +163,7 @@ impl User {
 
     /// 查找所有用户（Admin 全局查询）
     pub async fn find_all(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<User>, DbError> {
@@ -176,7 +179,7 @@ impl User {
 
     /// 查找所有用户（Admin 带过滤 + 分页）
     pub async fn find_all_filtered(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Option<Uuid>,
         role: Option<&str>,
         search: Option<&str>,
@@ -201,7 +204,7 @@ impl User {
 
     /// 统计过滤后的用户总数
     pub async fn count_all_filtered(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Option<Uuid>,
         role: Option<&str>,
         search: Option<&str>,
@@ -220,7 +223,7 @@ impl User {
     }
 
     /// 统计用户总数
-    pub async fn count_all(db: &DatabaseConnection) -> Result<i64, DbError> {
+    pub async fn count_all(db: &impl ConnectionTrait) -> Result<i64, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             "SELECT COUNT(*) FROM users".to_string(),
@@ -236,7 +239,7 @@ impl User {
 
     /// 批量统计租户用户数量
     pub async fn count_by_tenants(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, i64>, DbError> {
         #[derive(FromQueryResult)]
@@ -258,7 +261,7 @@ impl User {
     /// 更新用户
     pub async fn update(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &UpdateUserRequest,
     ) -> Result<User, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -279,7 +282,7 @@ impl User {
     }
 
     /// 删除用户
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM users WHERE id = $1",

@@ -3,7 +3,7 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -146,7 +146,7 @@ impl UserNodeGatewayToken {
 
     /// 创建新的令牌记录
     pub async fn create_with_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         token_id: Uuid,
         user_id: Uuid,
         token_hash: &str,
@@ -172,7 +172,7 @@ impl UserNodeGatewayToken {
 
     /// 根据 token_id 查找（主键查询）
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<UserNodeGatewayToken>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -189,7 +189,7 @@ impl UserNodeGatewayToken {
 
     /// 查找用户最近一次申请的 token（任意状态）
     pub async fn find_latest_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Option<UserNodeGatewayToken>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -206,7 +206,7 @@ impl UserNodeGatewayToken {
 
     /// 检查用户是否已有阻止新申请的令牌
     pub async fn find_blocking_token(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Option<UserNodeGatewayToken>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -223,7 +223,7 @@ impl UserNodeGatewayToken {
 
     /// 查找用户所有历史 token
     pub async fn find_all_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Vec<UserNodeGatewayToken>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -240,7 +240,7 @@ impl UserNodeGatewayToken {
 
     /// 列出待审批 token 并附带用户邮箱
     pub async fn list_pending_with_users(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
     ) -> Result<Vec<PendingTokenWithUser>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
@@ -256,7 +256,7 @@ impl UserNodeGatewayToken {
     /// 审批通过 token
     pub async fn approve(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         approved_by: Uuid,
     ) -> Result<bool, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -272,7 +272,7 @@ impl UserNodeGatewayToken {
     /// 拒绝 token 申请
     pub async fn reject(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         approved_by: Uuid,
     ) -> Result<bool, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -286,7 +286,7 @@ impl UserNodeGatewayToken {
     }
 
     /// 吊销 token（用户主动删除，仅限未消费的 token）
-    pub async fn revoke(&self, db: &DatabaseConnection) -> Result<bool, DbError> {
+    pub async fn revoke(&self, db: &impl ConnectionTrait) -> Result<bool, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"UPDATE user_node_gateway_tokens SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND status != 'consumed'"#,
@@ -298,7 +298,7 @@ impl UserNodeGatewayToken {
     }
 
     /// 标记 token 已被用户查看
-    pub async fn mark_revealed(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn mark_revealed(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"UPDATE user_node_gateway_tokens SET is_revealed = TRUE, updated_at = NOW() WHERE id = $1"#,
@@ -311,7 +311,7 @@ impl UserNodeGatewayToken {
 
     /// 消费 token（节点注册时调用，一次性使用）
     pub async fn consume(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         token_id: Uuid,
         node_id: Uuid,
     ) -> Result<bool, DbError> {
@@ -332,7 +332,7 @@ impl UserNodeGatewayToken {
 
     /// Admin 吊销令牌并记录原因
     pub async fn revoke_with_reason(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         token_id: Uuid,
         reason: &str,
     ) -> Result<bool, DbError> {
@@ -348,7 +348,7 @@ impl UserNodeGatewayToken {
 
     /// Admin 恢复节点时同步恢复被吊销的令牌
     pub async fn restore_from_revoked(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         token_id: Uuid,
     ) -> Result<bool, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -379,7 +379,7 @@ impl UserNodeGatewayToken {
     }
 
     /// 硬删除 token 记录
-    pub async fn delete_by_id(db: &DatabaseConnection, id: Uuid) -> Result<bool, DbError> {
+    pub async fn delete_by_id(db: &impl ConnectionTrait, id: Uuid) -> Result<bool, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM user_node_gateway_tokens WHERE id = $1",
@@ -392,7 +392,7 @@ impl UserNodeGatewayToken {
 
     /// 用户删除自己被管理员拒绝的令牌记录
     pub async fn delete_if_rejected_no_reason(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         token_id: Uuid,
         user_id: Uuid,
     ) -> Result<bool, DbError> {

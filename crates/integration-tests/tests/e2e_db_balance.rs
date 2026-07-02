@@ -5,6 +5,7 @@ use integration_tests::db::{
     cleanup_test_data, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_billing::balance::BalanceService;
+use keycompute_db::DbRouter;
 use rust_decimal::Decimal;
 
 #[cfg(test)]
@@ -23,7 +24,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "bf-suc", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "bf-suc", &test_id).await;
 
-        let balance_service = BalanceService::new(pool.clone());
+        let balance_service = BalanceService::new(DbRouter::single(pool.clone()));
 
         // 确保余额记录存在，然后充值
         let _ = balance_service
@@ -78,7 +79,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "bf-cum", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "bf-cum", &test_id).await;
 
-        let balance_service = BalanceService::new(pool.clone());
+        let balance_service = BalanceService::new(DbRouter::single(pool.clone()));
         let _ = balance_service
             .get_or_create(tenant.id, user.id)
             .await
@@ -124,7 +125,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "bf-insuf", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "bf-insuf", &test_id).await;
 
-        let balance_service = BalanceService::new(pool.clone());
+        let balance_service = BalanceService::new(DbRouter::single(pool.clone()));
         let _ = balance_service
             .get_or_create(tenant.id, user.id)
             .await
@@ -161,7 +162,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "bf-zero", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "bf-zero", &test_id).await;
 
-        let balance_service = BalanceService::new(pool.clone());
+        let balance_service = BalanceService::new(DbRouter::single(pool.clone()));
         let _ = balance_service
             .get_or_create(tenant.id, user.id)
             .await
@@ -194,7 +195,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "uf-suc", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "uf-suc", &test_id).await;
 
-        let balance_service = BalanceService::new(pool.clone());
+        let balance_service = BalanceService::new(DbRouter::single(pool.clone()));
         let _ = balance_service
             .get_or_create(tenant.id, user.id)
             .await
@@ -247,7 +248,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "uf-insuf", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "uf-insuf", &test_id).await;
 
-        let balance_service = BalanceService::new(pool.clone());
+        let balance_service = BalanceService::new(DbRouter::single(pool.clone()));
         let _ = balance_service
             .get_or_create(tenant.id, user.id)
             .await
@@ -290,7 +291,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "bf-rt", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "bf-rt", &test_id).await;
 
-        let balance_service = BalanceService::new(pool.clone());
+        let balance_service = BalanceService::new(DbRouter::single(pool.clone()));
         let _ = balance_service
             .get_or_create(tenant.id, user.id)
             .await

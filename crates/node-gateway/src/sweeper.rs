@@ -5,24 +5,22 @@
 use crate::config::NodeGatewayAppConfig;
 use crate::redis::NodeGatewayRedis;
 use keycompute_db::DbError;
+use keycompute_db::DbRouter;
 use keycompute_db::models::node_task::*;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
+use std::sync::Arc;
 use tracing;
 
 /// Node Gateway Sweeper
 pub struct NodeGatewaySweeper {
-    pool: DatabaseConnection,
+    pool: Arc<DbRouter>,
     redis: NodeGatewayRedis,
     config: NodeGatewayAppConfig,
 }
 
 impl NodeGatewaySweeper {
     /// 创建新的 Sweeper
-    pub fn new(
-        pool: DatabaseConnection,
-        redis: NodeGatewayRedis,
-        config: NodeGatewayAppConfig,
-    ) -> Self {
+    pub fn new(pool: Arc<DbRouter>, redis: NodeGatewayRedis, config: NodeGatewayAppConfig) -> Self {
         Self {
             pool,
             redis,
@@ -86,7 +84,7 @@ impl NodeGatewaySweeper {
 
     /// 将过期任务标记为 expired
     async fn expire_overdue_tasks(&self) -> Result<Vec<NodeTask>, DbError> {
-        let expired_tasks = NodeTask::expire_overdue_tasks(&self.pool).await?;
+        let expired_tasks = NodeTask::expire_overdue_tasks(self.pool.as_ref()).await?;
 
         if !expired_tasks.is_empty() {
             tracing::info!("Marked {} tasks as expired", expired_tasks.len());
@@ -110,8 +108,9 @@ impl NodeGatewaySweeper {
             "#,
             [repush_interval.into()],
         );
-        let tasks_to_repush: Vec<NodeTask> =
-            NodeTask::find_by_statement(stmt).all(&self.pool).await?;
+        let tasks_to_repush: Vec<NodeTask> = NodeTask::find_by_statement(stmt)
+            .all(self.pool.as_ref())
+            .await?;
 
         for task in &tasks_to_repush {
             if let Err(e) = self.redis.repush_queued_task(&task.model, task.id).await {

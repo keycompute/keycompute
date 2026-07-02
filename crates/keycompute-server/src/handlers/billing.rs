@@ -73,7 +73,7 @@ pub async fn list_billing_records(
     Query(query): Query<ListBillingQuery>,
 ) -> Result<Json<BillingListResponse>> {
     // 检查数据库是否配置
-    let Some(pool) = &state.pool else {
+    let Some(pool) = state.pool.as_deref() else {
         return Err(crate::error::ApiError::Internal(
             "Database not configured".to_string(),
         ));
@@ -176,7 +176,7 @@ pub async fn get_billing_stats(
     Query(query): Query<BillingStatsQuery>,
 ) -> Result<Json<BillingStatsResponse>> {
     // 检查数据库是否配置
-    let Some(pool) = &state.pool else {
+    let Some(pool) = state.pool.as_deref() else {
         return Err(crate::error::ApiError::Internal(
             "Database not configured".to_string(),
         ));

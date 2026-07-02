@@ -133,7 +133,7 @@ pub async fn rate_limit_middleware(
     };
 
     // 从数据库加载租户特定的限流配置
-    let rate_limit_config = if let Some(pool) = &state.pool {
+    let rate_limit_config = if let Some(pool) = state.pool.as_deref() {
         match keycompute_db::Tenant::find_by_id(pool, tenant_id).await {
             Ok(Some(tenant)) => {
                 RateLimitConfig::from_tenant(tenant.default_rpm_limit, tenant.default_tpm_limit)
@@ -638,7 +638,7 @@ pub async fn maintenance_mode_middleware(
     }
 
     // 检查维护模式状态
-    let is_maintenance = if let Some(pool) = state.pool.as_ref() {
+    let is_maintenance = if let Some(pool) = state.pool.as_deref() {
         keycompute_db::SystemSetting::get_bool(pool, setting_keys::MAINTENANCE_MODE, false).await
     } else {
         false // 无数据库连接时不启用维护模式
@@ -667,7 +667,7 @@ pub async fn maintenance_mode_middleware(
     }
 
     // 获取维护消息
-    let maintenance_message = if let Some(pool) = state.pool.as_ref() {
+    let maintenance_message = if let Some(pool) = state.pool.as_deref() {
         keycompute_db::SystemSetting::get_string(
             pool,
             setting_keys::MAINTENANCE_MESSAGE,

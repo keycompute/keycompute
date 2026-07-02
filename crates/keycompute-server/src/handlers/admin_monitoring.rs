@@ -65,7 +65,7 @@ pub async fn get_monitoring_overview(
 ) -> Result<Json<MonitoringOverviewResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let stmt = Statement::from_sql_and_values(
@@ -91,7 +91,7 @@ pub async fn get_monitoring_overview(
         [],
     );
     let summary = MonitoringSummary::find_by_statement(stmt)
-        .one(pool.as_ref())
+        .one(pool)
         .await?
         .ok_or_else(|| {
             ApiError::Internal("Failed to load monitoring summary: no data".to_string())
@@ -137,7 +137,7 @@ pub async fn get_monitoring_overview(
         [],
     );
     let traces = MonitoringTraceEntry::find_by_statement(stmt)
-        .all(pool.as_ref())
+        .all(pool)
         .await?;
 
     let stmt = Statement::from_sql_and_values(
@@ -174,7 +174,7 @@ pub async fn get_monitoring_overview(
         [],
     );
     let nodes = MonitoringNodeHealth::find_by_statement(stmt)
-        .all(pool.as_ref())
+        .all(pool)
         .await?;
 
     Ok(Json(MonitoringOverviewResponse {

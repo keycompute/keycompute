@@ -4,9 +4,8 @@
 
 use crate::jwt::JwtValidator;
 use crate::password::{EmailValidator, PasswordHasher};
-use keycompute_db::{User, UserCredential};
+use keycompute_db::{DbRouter, User, UserCredential};
 use keycompute_types::{KeyComputeError, Result};
-use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -43,7 +42,7 @@ pub struct LoginResponse {
 #[derive(Clone)]
 pub struct LoginService {
     /// 数据库连接池
-    pool: Arc<DatabaseConnection>,
+    pool: Arc<DbRouter>,
     /// 密码哈希器
     password_hasher: PasswordHasher,
     /// 邮箱验证器
@@ -67,7 +66,7 @@ impl std::fmt::Debug for LoginService {
 
 impl LoginService {
     /// 创建新的登录服务
-    pub fn new(pool: Arc<DatabaseConnection>, jwt_validator: JwtValidator) -> Self {
+    pub fn new(pool: Arc<DbRouter>, jwt_validator: JwtValidator) -> Self {
         Self {
             pool,
             password_hasher: PasswordHasher::new(),
@@ -106,7 +105,7 @@ impl LoginService {
         self.email_validator.validate(&email)?;
 
         // 2. 查找用户
-        let user = User::find_by_email(&self.pool, &email)
+        let user = User::find_by_email(self.pool.as_ref(), &email)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find user: {}", e)))?
             .ok_or_else(|| {
@@ -115,7 +114,7 @@ impl LoginService {
             })?;
 
         // 3. 获取凭证
-        let credential = UserCredential::find_by_user_id(&self.pool, user.id)
+        let credential = UserCredential::find_by_user_id(self.pool.as_ref(), user.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find credential: {}", e))
@@ -167,7 +166,7 @@ impl LoginService {
 
         // 7. 重置失败计数并更新登录信息
         let _updated_credential = credential
-            .record_successful_login(&self.pool, req.client_ip.clone())
+            .record_successful_login(self.pool.as_ref(), req.client_ip.clone())
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to update login info: {}", e))
@@ -200,7 +199,7 @@ impl LoginService {
     /// 超过最大失败次数后锁定账户
     async fn record_failed_login(&self, credential: &UserCredential) -> Result<()> {
         let updated = credential
-            .increment_failed_attempts(&self.pool)
+            .increment_failed_attempts(self.pool.as_ref())
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!(
@@ -212,7 +211,7 @@ impl LoginService {
         // 检查是否需要锁定
         if updated.failed_login_attempts >= self.max_failed_attempts {
             updated
-                .lock(&self.pool, self.lock_duration_minutes)
+                .lock(self.pool.as_ref(), self.lock_duration_minutes)
                 .await
                 .map_err(|e| {
                     KeyComputeError::DatabaseError(format!("Failed to lock account: {}", e))
@@ -237,13 +236,13 @@ impl LoginService {
         let claims = self.jwt_validator.validate(token)?;
 
         // 获取用户信息
-        let user = User::find_by_id(&self.pool, claims.user_id)
+        let user = User::find_by_id(self.pool.as_ref(), claims.user_id)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find user: {}", e)))?
             .ok_or_else(|| KeyComputeError::AuthError("User does not exist".to_string()))?;
 
         // 检查凭证状态
-        let credential = UserCredential::find_by_user_id(&self.pool, user.id)
+        let credential = UserCredential::find_by_user_id(self.pool.as_ref(), user.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find credential: {}", e))

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 use uuid::Uuid;
 
-use sea_orm::DatabaseConnection;
+use sea_orm::ConnectionTrait;
 
 type BigDecimal = bigdecimal::BigDecimal;
 
@@ -219,7 +219,7 @@ pub async fn get_my_referral_code(
 ) -> Result<Json<ReferralCodeResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用
@@ -254,7 +254,7 @@ pub async fn generate_invite_link(
 ) -> Result<Json<InviteLinkResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用
@@ -306,7 +306,7 @@ fn string_to_bigdecimal(value: &str) -> Result<BigDecimal> {
 }
 
 /// 检查分销系统是否启用
-async fn check_distribution_enabled(pool: &DatabaseConnection) -> Result<()> {
+async fn check_distribution_enabled(pool: &impl ConnectionTrait) -> Result<()> {
     let enabled =
         keycompute_db::SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
             .await
@@ -325,7 +325,7 @@ async fn check_distribution_enabled(pool: &DatabaseConnection) -> Result<()> {
 }
 
 async fn build_distribution_record_response(
-    pool: &DatabaseConnection,
+    pool: &impl ConnectionTrait,
     record: keycompute_db::DistributionRecord,
 ) -> Result<DistributionRecordResponse> {
     let usage_log = keycompute_db::UsageLog::find_by_id(pool, record.usage_log_id)
@@ -353,7 +353,7 @@ async fn build_distribution_record_response(
 }
 
 async fn build_referral_info(
-    pool: &DatabaseConnection,
+    pool: &impl ConnectionTrait,
     beneficiary_id: Uuid,
     referral: keycompute_db::UserReferral,
 ) -> Result<ReferralInfo> {
@@ -403,7 +403,7 @@ pub async fn list_distribution_records(
 ) -> Result<Json<Vec<DistributionRecordResponse>>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     let limit = query.limit.unwrap_or(20);
@@ -467,7 +467,7 @@ pub async fn get_distribution_stats(
 ) -> Result<Json<DistributionStatsResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用（普通用户）
@@ -516,7 +516,7 @@ pub async fn list_distribution_rules(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 查询租户的所有规则
@@ -562,7 +562,7 @@ pub async fn create_distribution_rule(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 创建规则 - 使用当前用户作为受益人（简化处理）
@@ -617,7 +617,7 @@ pub async fn update_distribution_rule(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 查找规则
@@ -673,7 +673,7 @@ pub async fn delete_distribution_rule(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 查找并删除规则
@@ -703,7 +703,7 @@ pub async fn get_my_distribution_earnings(
 ) -> Result<Json<UserDistributionEarningsResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用
@@ -739,7 +739,7 @@ pub async fn get_my_referrals(
 ) -> Result<Json<Vec<ReferralInfo>>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用

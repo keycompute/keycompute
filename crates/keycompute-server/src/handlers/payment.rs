@@ -151,7 +151,7 @@ pub async fn create_payment_order(
     // 获取数据库连接池
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or(ApiError::Internal("数据库未配置".to_string()))?;
 
     // 检查支付功能是否启用（目前只支持支付宝）
@@ -269,7 +269,7 @@ pub async fn list_my_payment_orders(
 ) -> Result<Json<PaymentOrderListResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or(ApiError::Internal("数据库未配置".to_string()))?;
 
     let offset = (params.page - 1) * params.page_size;
@@ -321,7 +321,7 @@ pub async fn get_payment_order(
 ) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or(ApiError::Internal("数据库未配置".to_string()))?;
 
     let order = keycompute_db::PaymentOrder::find_by_id(pool, order_id)
@@ -465,7 +465,7 @@ pub async fn admin_list_payment_orders(
 ) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or(ApiError::Internal("数据库未配置".to_string()))?;
 
     // 管理员可以查看所有订单
@@ -490,7 +490,7 @@ pub async fn admin_list_payment_orders(
         ],
     );
     let orders = keycompute_db::PaymentOrder::find_by_statement(stmt)
-        .all(pool.as_ref())
+        .all(pool)
         .await
         .map_err(|e| ApiError::Internal(format!("查询订单失败: {}", e)))?;
 

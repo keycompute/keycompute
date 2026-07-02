@@ -6,20 +6,20 @@ use crate::balance::BalanceService;
 use crate::calculator::calculate_amount;
 use crate::usage_source::UsageSource;
 use chrono::{DateTime, Utc};
-use keycompute_db::{CreateUsageLogRequest, UsageLog, models::node_tip::NodeTip};
+use keycompute_db::{CreateUsageLogRequest, DbRouter, UsageLog, models::node_tip::NodeTip};
 use keycompute_distribution::{
     DistributionContext, DistributionService, calculator::calculate_shares,
 };
 use keycompute_types::{KeyComputeError, RequestContext, Result};
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 计费服务
 #[derive(Clone)]
 pub struct BillingService {
     /// 数据库连接（可选）
-    pool: Option<DatabaseConnection>,
+    pool: Option<Arc<DbRouter>>,
     /// 分销服务（可选）
     distribution: Option<DistributionService>,
     /// 余额服务（可选）
@@ -50,21 +50,21 @@ impl BillingService {
     }
 
     /// 创建带数据库连接的计费服务
-    pub fn with_pool(pool: DatabaseConnection) -> Self {
+    pub fn with_pool(pool: Arc<DbRouter>) -> Self {
         Self {
-            pool: Some(pool.clone()),
-            distribution: Some(DistributionService::with_pool(pool.clone())),
+            pool: Some(Arc::clone(&pool)),
+            distribution: Some(DistributionService::with_pool(Arc::clone(&pool))),
             balance: Some(BalanceService::new(pool)),
         }
     }
 
     /// 创建带数据库连接和自定义分销服务的计费服务
     pub fn with_pool_and_distribution(
-        pool: DatabaseConnection,
+        pool: Arc<DbRouter>,
         distribution: DistributionService,
     ) -> Self {
         Self {
-            pool: Some(pool.clone()),
+            pool: Some(Arc::clone(&pool)),
             distribution: Some(distribution),
             balance: Some(BalanceService::new(pool)),
         }
@@ -200,9 +200,11 @@ impl BillingService {
             finished_at: new_log.finished_at,
         };
 
-        let saved_log = UsageLog::create(pool, &create_req).await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to save usage log: {}", e))
-        })?;
+        let saved_log = UsageLog::create(pool.as_ref(), &create_req)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to save usage log: {}", e))
+            })?;
 
         tracing::info!(
             request_id = %ctx.request_id,
@@ -341,7 +343,7 @@ impl BillingService {
 
         // 查询用户的推荐关系
         let (level1_beneficiary, level2_beneficiary) =
-            match keycompute_db::UserReferral::find_by_user(pool, user_id).await {
+            match keycompute_db::UserReferral::find_by_user(pool.as_ref(), user_id).await {
                 Ok(Some(referral)) => (referral.level1_referrer_id, referral.level2_referrer_id),
                 Ok(None) => (None, None),
                 Err(e) => {
@@ -364,8 +366,11 @@ impl BillingService {
         };
 
         // 查询租户的分销规则
-        let rules = match keycompute_db::TenantDistributionRule::find_by_tenant(pool, ctx.tenant_id)
-            .await
+        let rules = match keycompute_db::TenantDistributionRule::find_by_tenant(
+            pool.as_ref(),
+            ctx.tenant_id,
+        )
+        .await
         {
             Ok(rules) => rules,
             Err(e) => {
@@ -444,7 +449,7 @@ impl BillingService {
             return;
         };
 
-        match NodeTip::create_from_usage_log(pool, usage_log_id).await {
+        match NodeTip::create_from_usage_log(pool.as_ref(), usage_log_id).await {
             Ok(Some(tip)) => {
                 tracing::info!(
                     %usage_log_id,

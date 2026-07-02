@@ -4,7 +4,7 @@ use crate::DbError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{
-    TransactionTrait, {ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement},
+    TransactionTrait, {ConnectionTrait, DbBackend, FromQueryResult, Statement},
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -47,7 +47,7 @@ struct TipSummaryRow {
 impl NodeTip {
     /// 获取用户的小费汇总
     pub async fn get_summary(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<NodeTipSummary, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -97,7 +97,7 @@ impl NodeTip {
 
     /// 获取用户的小费历史记录（分页）
     pub async fn list_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
         limit: i64,
         offset: i64,
@@ -113,7 +113,7 @@ impl NodeTip {
     }
 
     /// 获取用户小费记录总数
-    pub async fn count_by_user(db: &DatabaseConnection, user_id: Uuid) -> Result<i64, DbError> {
+    pub async fn count_by_user(db: &impl ConnectionTrait, user_id: Uuid) -> Result<i64, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT COUNT(*) FROM node_tips WHERE owner_user_id = $1",
@@ -130,7 +130,7 @@ impl NodeTip {
 
     /// 根据 usage_log 自动创建小费记录（计费完成后调用）
     pub async fn create_from_usage_log(
-        db: &DatabaseConnection,
+        db: &(impl ConnectionTrait + TransactionTrait),
         usage_log_id: Uuid,
     ) -> Result<Option<NodeTip>, DbError> {
         let txn = db.begin().await?;

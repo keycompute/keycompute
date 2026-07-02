@@ -1,6 +1,6 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -47,7 +47,7 @@ pub struct UpdateTenantRequest {
 impl Tenant {
     /// 创建新租户
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateTenantRequest,
     ) -> Result<Tenant, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -74,7 +74,10 @@ impl Tenant {
     }
 
     /// 根据 ID 查找租户
-    pub async fn find_by_id(db: &DatabaseConnection, id: Uuid) -> Result<Option<Tenant>, DbError> {
+    pub async fn find_by_id(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Tenant>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM tenants WHERE id = $1",
@@ -87,7 +90,7 @@ impl Tenant {
 
     /// 根据 slug 查找租户
     pub async fn find_by_slug(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         slug: &str,
     ) -> Result<Option<Tenant>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -101,7 +104,7 @@ impl Tenant {
     }
 
     /// 查找所有租户
-    pub async fn find_all(db: &DatabaseConnection) -> Result<Vec<Tenant>, DbError> {
+    pub async fn find_all(db: &impl ConnectionTrait) -> Result<Vec<Tenant>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             "SELECT * FROM tenants ORDER BY created_at DESC".to_string(),
@@ -112,7 +115,7 @@ impl Tenant {
     }
 
     /// 查找激活的租户
-    pub async fn find_active(db: &DatabaseConnection) -> Result<Vec<Tenant>, DbError> {
+    pub async fn find_active(db: &impl ConnectionTrait) -> Result<Vec<Tenant>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             "SELECT * FROM tenants WHERE status = 'active' ORDER BY created_at DESC".to_string(),
@@ -125,7 +128,7 @@ impl Tenant {
     /// 更新租户
     pub async fn update(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &UpdateTenantRequest,
     ) -> Result<Tenant, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -159,7 +162,7 @@ impl Tenant {
     }
 
     /// 删除租户
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM tenants WHERE id = $1",

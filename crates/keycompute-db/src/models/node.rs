@@ -4,7 +4,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -40,7 +40,10 @@ pub struct CreateNodeRequest {
 
 impl Node {
     /// 创建新节点
-    pub async fn create(db: &DatabaseConnection, req: &CreateNodeRequest) -> Result<Node, DbError> {
+    pub async fn create(
+        db: &impl ConnectionTrait,
+        req: &CreateNodeRequest,
+    ) -> Result<Node, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -66,7 +69,7 @@ impl Node {
 
     /// 根据 owner_user_id 和 client_instance_id 查询节点
     pub async fn find_by_owner_and_client(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         owner_user_id: Uuid,
         client_instance_id: &str,
     ) -> Result<Option<Node>, DbError> {
@@ -81,7 +84,7 @@ impl Node {
     }
 
     /// 根据 ID 查询节点
-    pub async fn find_by_id(db: &DatabaseConnection, id: Uuid) -> Result<Option<Node>, DbError> {
+    pub async fn find_by_id(db: &impl ConnectionTrait, id: Uuid) -> Result<Option<Node>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM nodes WHERE id = $1",
@@ -94,7 +97,7 @@ impl Node {
 
     /// 更新节点状态
     pub async fn update_status(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
         status: &str,
     ) -> Result<Node, DbError> {
@@ -112,7 +115,7 @@ impl Node {
     }
 
     /// 更新最后心跳时间
-    pub async fn update_heartbeat(db: &DatabaseConnection, id: Uuid) -> Result<Node, DbError> {
+    pub async fn update_heartbeat(db: &impl ConnectionTrait, id: Uuid) -> Result<Node, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE nodes SET last_heartbeat_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *",
@@ -128,7 +131,7 @@ impl Node {
 
     /// 增加连续失败计数
     pub async fn increment_failure_count(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Node, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -145,7 +148,7 @@ impl Node {
     }
 
     /// 重置失败计数
-    pub async fn reset_failure_count(db: &DatabaseConnection, id: Uuid) -> Result<Node, DbError> {
+    pub async fn reset_failure_count(db: &impl ConnectionTrait, id: Uuid) -> Result<Node, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE nodes SET consecutive_failure_count = 0, updated_at = NOW() WHERE id = $1 RETURNING *",
@@ -170,7 +173,7 @@ impl Node {
     }
 
     /// 删除节点（CASCADE 自动清理 sessions/submissions，tasks 的 assigned_node_id 设为 NULL）
-    pub async fn delete(db: &DatabaseConnection, node_id: Uuid) -> Result<bool, DbError> {
+    pub async fn delete(db: &impl ConnectionTrait, node_id: Uuid) -> Result<bool, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM nodes WHERE id = $1",

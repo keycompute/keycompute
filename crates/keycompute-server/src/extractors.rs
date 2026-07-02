@@ -188,7 +188,7 @@ impl FromRequestParts<AppState> for NodeSessionAuth {
         // 3. 从 state 获取 pool
         let pool = state
             .pool
-            .as_ref()
+            .as_deref()
             .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
 
         // 4. 查询 node_sessions, 匹配 session_token_hash

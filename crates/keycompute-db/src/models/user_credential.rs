@@ -4,7 +4,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -46,7 +46,7 @@ pub struct UpdateUserCredentialRequest {
 impl UserCredential {
     /// 创建新凭证
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateUserCredentialRequest,
     ) -> Result<UserCredential, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -64,7 +64,7 @@ impl UserCredential {
 
     /// 根据 ID 查找凭证
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<UserCredential>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -79,7 +79,7 @@ impl UserCredential {
 
     /// 根据用户 ID 查找凭证
     pub async fn find_by_user_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Option<UserCredential>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -95,7 +95,7 @@ impl UserCredential {
     /// 更新凭证
     pub async fn update(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &UpdateUserCredentialRequest,
     ) -> Result<UserCredential, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -133,7 +133,7 @@ impl UserCredential {
     }
 
     /// 删除凭证
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM user_credentials WHERE id = $1",
@@ -146,7 +146,7 @@ impl UserCredential {
 
     /// 批量根据用户 ID 列表查找凭证，返回以 user_id 为 key 的 HashMap
     pub async fn find_by_user_ids(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserCredential>, DbError> {
         if user_ids.is_empty() {
@@ -164,7 +164,7 @@ impl UserCredential {
     /// 增加失败登录次数
     pub async fn increment_failed_attempts(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
     ) -> Result<UserCredential, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -182,7 +182,7 @@ impl UserCredential {
     /// 重置失败登录次数并更新登录信息
     pub async fn record_successful_login(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         ip: Option<String>,
     ) -> Result<UserCredential, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -201,7 +201,7 @@ impl UserCredential {
     /// 锁定账户
     pub async fn lock(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         duration_minutes: i64,
     ) -> Result<UserCredential, DbError> {
         let locked_until = Utc::now() + chrono::Duration::minutes(duration_minutes);

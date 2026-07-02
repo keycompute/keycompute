@@ -135,7 +135,7 @@ pub async fn debug_routing(
     // 4. 查询每个 provider 的账号数量
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 获取所有启用的账号

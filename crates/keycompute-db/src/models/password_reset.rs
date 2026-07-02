@@ -4,7 +4,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ pub struct CreatePasswordResetRequest {
 impl PasswordReset {
     /// 创建新重置记录
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreatePasswordResetRequest,
     ) -> Result<PasswordReset, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -68,7 +68,7 @@ impl PasswordReset {
 
     /// 根据 ID 查找
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<PasswordReset>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -83,7 +83,7 @@ impl PasswordReset {
 
     /// 根据令牌查找
     pub async fn find_by_token(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         token: &str,
     ) -> Result<Option<PasswordReset>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -98,7 +98,7 @@ impl PasswordReset {
 
     /// 查找用户的有效重置记录
     pub async fn find_valid_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Option<PasswordReset>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -128,7 +128,7 @@ impl PasswordReset {
     }
 
     /// 标记为已使用
-    pub async fn mark_used(&self, db: &DatabaseConnection) -> Result<PasswordReset, DbError> {
+    pub async fn mark_used(&self, db: &impl ConnectionTrait) -> Result<PasswordReset, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -157,7 +157,7 @@ impl PasswordReset {
     }
 
     /// 删除重置记录
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM password_resets WHERE id = $1",
@@ -170,7 +170,7 @@ impl PasswordReset {
 
     /// 删除用户的所有重置记录
     pub async fn delete_all_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<u64, DbError> {
         let stmt = Statement::from_sql_and_values(

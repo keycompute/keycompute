@@ -6,10 +6,10 @@
 //! - 业务层：负责余额相关业务规则
 //! - 数据层（keycompute-db）：负责数据库持久化
 
-use keycompute_db::{BalanceTransaction, UserBalance};
+use keycompute_db::{BalanceTransaction, DbRouter, UserBalance};
 use keycompute_types::{KeyComputeError, Result};
 use rust_decimal::Decimal;
-use sea_orm::DatabaseConnection;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 余额不足阈值（元）
@@ -27,7 +27,7 @@ pub fn min_balance_threshold() -> Decimal {
 /// - 冻结/解冻
 #[derive(Clone)]
 pub struct BalanceService {
-    pool: DatabaseConnection,
+    pool: Arc<DbRouter>,
 }
 
 impl std::fmt::Debug for BalanceService {
@@ -40,7 +40,7 @@ impl std::fmt::Debug for BalanceService {
 
 impl BalanceService {
     /// 创建新的余额服务
-    pub fn new(pool: DatabaseConnection) -> Self {
+    pub fn new(pool: Arc<DbRouter>) -> Self {
         Self { pool }
     }
 
@@ -48,7 +48,7 @@ impl BalanceService {
     ///
     /// 如果记录不存在，会自动创建
     pub async fn get_or_create(&self, tenant_id: Uuid, user_id: Uuid) -> Result<UserBalance> {
-        UserBalance::get_or_create(&self.pool, tenant_id, user_id)
+        UserBalance::get_or_create(self.pool.as_ref(), tenant_id, user_id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to get or create balance: {}", e))
@@ -59,7 +59,7 @@ impl BalanceService {
     ///
     /// 返回 `None` 表示用户没有余额记录
     pub async fn find_by_user(&self, user_id: Uuid) -> Result<Option<UserBalance>> {
-        UserBalance::find_by_user(&self.pool, user_id)
+        UserBalance::find_by_user(self.pool.as_ref(), user_id)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find balance: {}", e)))
     }
@@ -71,7 +71,7 @@ impl BalanceService {
         &self,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalance>> {
-        UserBalance::find_by_users(&self.pool, user_ids)
+        UserBalance::find_by_users(self.pool.as_ref(), user_ids)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find balances: {}", e)))
     }
@@ -148,7 +148,7 @@ impl BalanceService {
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
         let result = UserBalance::recharge(
-            &self.pool,
+            self.pool.as_ref(),
             user_id,
             tenant_id,
             amount,
@@ -195,8 +195,14 @@ impl BalanceService {
         usage_log_id: Option<Uuid>,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
-        let result =
-            UserBalance::consume(&self.pool, user_id, amount, usage_log_id, description).await;
+        let result = UserBalance::consume(
+            self.pool.as_ref(),
+            user_id,
+            amount,
+            usage_log_id,
+            description,
+        )
+        .await;
 
         match result {
             Ok((balance, transaction)) => {
@@ -234,7 +240,7 @@ impl BalanceService {
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
-        let result = UserBalance::freeze(&self.pool, user_id, amount, description).await;
+        let result = UserBalance::freeze(self.pool.as_ref(), user_id, amount, description).await;
 
         match result {
             Ok((balance, transaction)) => {
@@ -284,7 +290,7 @@ impl BalanceService {
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction)> {
-        let result = UserBalance::unfreeze(&self.pool, user_id, amount, description).await;
+        let result = UserBalance::unfreeze(self.pool.as_ref(), user_id, amount, description).await;
 
         match result {
             Ok((balance, transaction)) => {
@@ -325,7 +331,7 @@ impl BalanceService {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<BalanceTransaction>> {
-        BalanceTransaction::find_by_user(&self.pool, user_id, limit, offset)
+        BalanceTransaction::find_by_user(self.pool.as_ref(), user_id, limit, offset)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to list transactions: {}", e))

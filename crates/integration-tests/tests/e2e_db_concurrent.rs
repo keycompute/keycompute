@@ -3,7 +3,7 @@
 use integration_tests::common::VerificationChain;
 use integration_tests::common::generate_test_id;
 use integration_tests::db::{cleanup_test_data, create_test_pool, create_test_tenant};
-use keycompute_db::{CreateUserRequest, User};
+use keycompute_db::{CreateUserRequest, DbRouter, User};
 use keycompute_types::UserRole;
 use std::sync::Arc;
 use tokio::sync::Barrier;
@@ -25,7 +25,7 @@ mod tests {
 
         // 1. 创建租户
         let tenant = create_test_tenant(&pool, "concurrent", &test_id).await;
-        let pool = Arc::new(pool);
+        let pool = DbRouter::single(pool);
         let tenant_id = tenant.id;
 
         // 2. 并发创建用户
@@ -41,7 +41,7 @@ mod tests {
 
                 let email = format!("concurrent-{}-{}@example.com", i, Uuid::new_v4().simple());
                 User::create(
-                    &pool_clone,
+                    pool_clone.as_ref(),
                     &CreateUserRequest {
                         tenant_id,
                         email,
@@ -84,7 +84,7 @@ mod tests {
         );
 
         // 4. 验证所有用户存在
-        let all_users = User::find_by_tenant(&pool, tenant_id).await;
+        let all_users = User::find_by_tenant(pool.as_ref(), tenant_id).await;
         chain.add_step(
             "keycompute-db",
             "verify_concurrent_users",

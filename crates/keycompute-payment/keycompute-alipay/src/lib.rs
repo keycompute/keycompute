@@ -32,6 +32,7 @@
 //!
 //! ```rust,no_run
 //! use keycompute_alipay::{PaymentService, AlipayConfig, CreateOrderRequest};
+//! use keycompute_db::DbRouter;
 //! use sea_orm::Database;
 //! use uuid::Uuid;
 //! use rust_decimal::Decimal;
@@ -45,7 +46,7 @@
 //!     let db = Database::connect("postgres://localhost/keycompute").await?;
 //!     
 //!     // 创建支付服务
-//!     let service = PaymentService::new(config, db)?;
+//!     let service = PaymentService::new(config, DbRouter::single(db))?;
 //!     
 //!     // 创建支付订单
 //!     let result = service.create_order(CreateOrderRequest {

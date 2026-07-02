@@ -56,7 +56,7 @@ pub async fn list_accounts(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // Admin 管理面加载所有租户的账号
@@ -134,7 +134,7 @@ pub async fn create_account(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 加密 API Key（如果配置了加密密钥）
@@ -227,7 +227,7 @@ pub async fn update_account(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找现有账号
@@ -310,7 +310,7 @@ pub async fn delete_account(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找并删除账号
@@ -348,7 +348,7 @@ pub async fn test_account(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找账号
@@ -473,7 +473,7 @@ pub async fn refresh_account(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找账号

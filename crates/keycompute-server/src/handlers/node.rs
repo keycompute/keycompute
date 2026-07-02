@@ -94,16 +94,14 @@ pub async fn node_poll(
     // 从数据库读取 session 的 accepted_models
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
 
-    let session = keycompute_db::models::node_session::NodeSession::find_by_id(
-        pool.as_ref(),
-        auth.session_id,
-    )
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to query session: {}", e)))?
-    .ok_or_else(|| ApiError::NotFound(format!("Session {} not found", auth.session_id)))?;
+    let session =
+        keycompute_db::models::node_session::NodeSession::find_by_id(pool, auth.session_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to query session: {}", e)))?
+            .ok_or_else(|| ApiError::NotFound(format!("Session {} not found", auth.session_id)))?;
 
     let accepted_models: Vec<String> =
         serde_json::from_value(session.accepted_models_json).unwrap_or_default();

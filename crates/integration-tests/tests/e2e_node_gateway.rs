@@ -10,6 +10,7 @@
 //! - 失败恢复和节点排除
 
 use integration_tests::common::VerificationChain;
+use keycompute_db::DbRouter;
 use keycompute_db::models::{
     node::*,
     node_session::*,
@@ -103,7 +104,7 @@ impl NodeTestEnv {
     /// 清理策略：按 FK 依赖逆序删除，确保 CASCADE 不会意外传播。
     async fn new() -> anyhow::Result<Self> {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://postgres:password@localhost:5432/keycompute".to_string()
+            "postgres://keycompute:change-me-strong-password@localhost:5432/keycompute".to_string()
         });
 
         use sea_orm::ConnectOptions;
@@ -186,10 +187,10 @@ impl NodeTestEnv {
             registration_token_secret,
             ..Default::default()
         };
-        let store = NodeGatewayStore::new(pool.clone(), config.clone());
+        let store = NodeGatewayStore::new(DbRouter::single(pool.clone()), config.clone());
 
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_url = std::env::var("REDIS_URL")
+            .unwrap_or_else(|_| "redis://:change-me-redis-password@127.0.0.1:6379".to_string());
         let redis_store = keycompute_runtime::redis_store::RedisRuntimeStore::new(&redis_url)
             .map_err(|e| anyhow::anyhow!("Redis connection failed: {}", e))?;
         let redis = NodeGatewayRedis::new(Arc::new(redis_store));

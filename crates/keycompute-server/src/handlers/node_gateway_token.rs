@@ -20,7 +20,7 @@ use keycompute_db::models::user::User;
 use keycompute_db::models::user_node_gateway_token::{
     PendingTokenWithUser, UserNodeGatewayToken, UserNodeGatewayTokenResponse,
 };
-use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -49,7 +49,7 @@ pub struct NodeGatewayTokenDetailResponse {
 
 /// 构建单个 token 的响应（从 UserNodeGatewayToken 到 NodeGatewayTokenDetailResponse）
 async fn build_token_response(
-    pool: &DatabaseConnection,
+    pool: &impl ConnectionTrait,
     state: &AppState,
     t: UserNodeGatewayToken,
 ) -> Result<NodeGatewayTokenDetailResponse> {
@@ -154,7 +154,7 @@ pub async fn get_my_node_gateway_token(
 ) -> Result<Json<NodeGatewayTokenDetailResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let token = UserNodeGatewayToken::find_latest_by_user(pool, auth.user_id)
@@ -180,7 +180,7 @@ pub async fn list_my_node_gateway_tokens(
 ) -> Result<Json<Vec<NodeGatewayTokenDetailResponse>>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let tokens = UserNodeGatewayToken::find_all_by_user(pool, auth.user_id)
@@ -209,7 +209,7 @@ pub async fn create_my_node_gateway_token(
 ) -> Result<Json<NodeGatewayTokenDetailResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let secret = state.node_gateway_secret().ok_or_else(|| {
@@ -291,7 +291,7 @@ pub async fn delete_my_node_gateway_token(
 ) -> Result<(StatusCode, Json<serde_json::Value>)> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let deleted = UserNodeGatewayToken::delete_if_rejected_no_reason(pool, token_id, auth.user_id)
@@ -323,7 +323,7 @@ pub async fn admin_list_pending_tokens(
 ) -> Result<Json<Vec<PendingTokenWithUser>>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let tokens = UserNodeGatewayToken::list_pending_with_users(pool)
@@ -348,7 +348,7 @@ pub async fn admin_approve_token(
 ) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let token = UserNodeGatewayToken::find_by_id(pool, token_id)
@@ -433,7 +433,7 @@ pub async fn admin_approve_token(
 /// 邮件发送失败不阻塞审批流程，仅记录警告日志。
 async fn send_token_approved_email(
     state: &AppState,
-    pool: &DatabaseConnection,
+    pool: &impl ConnectionTrait,
     token_id: uuid::Uuid,
     user_id: uuid::Uuid,
     token_preview: &str,

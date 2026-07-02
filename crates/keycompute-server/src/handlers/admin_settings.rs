@@ -310,7 +310,7 @@ pub async fn get_system_settings(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let settings = keycompute_db::SystemSetting::find_all(pool)
@@ -358,7 +358,7 @@ pub async fn update_system_settings(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let settings_map = normalize_settings_map(payload_to_settings_map(payload)?)?;
@@ -397,7 +397,7 @@ pub async fn get_system_setting_by_key(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     if is_hidden_setting(&key) || is_removed_setting(&key) {
@@ -427,7 +427,7 @@ pub async fn update_system_setting_by_key(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     if is_hidden_setting(&key) || is_removed_setting(&key) {
@@ -465,7 +465,7 @@ pub async fn get_public_settings(
     State(state): State<AppState>,
 ) -> Result<Json<keycompute_db::PublicSettings>> {
     // 如果数据库未配置，返回默认设置
-    let settings = if let Some(pool) = state.pool.as_ref() {
+    let settings = if let Some(pool) = state.pool.as_deref() {
         keycompute_db::SystemSetting::get_public_settings(pool).await
     } else {
         keycompute_db::PublicSettings::default()

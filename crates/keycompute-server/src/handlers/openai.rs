@@ -1442,7 +1442,7 @@ pub async fn list_models(State(state): State<AppState>) -> Result<Json<ListModel
     let mut provider_map = std::collections::HashMap::new();
 
     // 尝试从数据库获取模型列表
-    if let Some(pool) = state.pool.as_ref() {
+    if let Some(pool) = state.pool.as_deref() {
         // 查询所有启用的账号（不限制 tenant_id，使用系统级查询）
         if let Ok(accounts) = Account::find_enabled_all(pool).await {
             for account in accounts {
@@ -1492,7 +1492,7 @@ pub async fn retrieve_model(
 ) -> Result<Json<Model>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查询所有启用的账号，找到支持该模型的 Provider

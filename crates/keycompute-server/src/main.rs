@@ -18,8 +18,8 @@ use keycompute_db::{
 use keycompute_observability::{init_dev_observability, init_observability};
 use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run};
 use keycompute_types::UserRole;
-use sea_orm::{DatabaseConnection, DbBackend, FromQueryResult, Statement};
-use std::sync::Arc;
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 #[tokio::main]
@@ -74,7 +74,14 @@ async fn main() -> anyhow::Result<()> {
         max_lifetime: config.database.max_lifetime_secs,
     };
 
-    let db_manager = match Database::new(&db_config).await {
+    let db_manager = match Database::new(
+        &db_config,
+        &config.database_read_urls,
+        &config.database_read,
+        &config.database_routing,
+    )
+    .await
+    {
         Ok(manager) => {
             info!("数据库连接成功");
             manager
@@ -99,10 +106,21 @@ async fn main() -> anyhow::Result<()> {
     }
     info!("数据库迁移完成");
 
-    let pool = Arc::new(db_manager.into_connection());
+    let pool = db_manager.into_router();
+
+    // 启动读库健康检查（如配置了健康检查间隔）
+    if config.database_routing.health_check_interval_secs > 0 {
+        let health_interval =
+            Duration::from_secs(config.database_routing.health_check_interval_secs);
+        pool.clone().start_health_check(health_interval);
+        info!(
+            "Read replica health check started (interval: {}s)",
+            config.database_routing.health_check_interval_secs
+        );
+    }
 
     // ==================== 阶段 5: 初始化默认系统管理员 ====================
-    let _system_tenant = match initialize_default_admin(&pool).await {
+    let _system_tenant = match initialize_default_admin(pool.as_ref()).await {
         Ok(tenant) => {
             info!(tenant_id = %tenant.id, "系统租户初始化成功");
             Some(tenant)
@@ -115,19 +133,21 @@ async fn main() -> anyhow::Result<()> {
 
     // ==================== 阶段 5.5: 初始化系统默认设置 ====================
     info!("正在初始化系统默认设置...");
-    match SystemSetting::init_default_settings(&pool).await {
+    match SystemSetting::init_default_settings(pool.as_ref()).await {
         Ok(_) => info!("系统默认设置初始化完成"),
         Err(e) => warn!("系统默认设置初始化失败（非致命错误）: {}", e),
     }
 
     // ==================== 阶段 5.6: 初始化系统默认定价 ====================
     info!("正在初始化系统默认定价...");
-    match keycompute_db::models::pricing_model::PricingModel::init_default_pricing(&pool).await {
+    match keycompute_db::models::pricing_model::PricingModel::init_default_pricing(pool.as_ref())
+        .await
+    {
         Ok(_) => info!("系统默认定价初始化完成"),
         Err(e) => warn!("系统默认定价初始化失败（非致命错误）: {}", e),
     }
 
-    if let Err(e) = validate_distribution_public_base_url(&pool, &config).await {
+    if let Err(e) = validate_distribution_public_base_url(pool.as_ref(), &config).await {
         warn!("运行时配置校验警告: {}", e);
     }
 
@@ -221,7 +241,9 @@ fn env_var_or_default(key: &str, default: &str) -> String {
     non_empty_or_default(std::env::var(key).ok(), default)
 }
 
-async fn initialize_default_admin(pool: &DatabaseConnection) -> anyhow::Result<Tenant> {
+async fn initialize_default_admin(
+    pool: &(impl ConnectionTrait + TransactionTrait),
+) -> anyhow::Result<Tenant> {
     // 从环境变量读取配置
     let admin_email = env_var_or_default("KC__DEFAULT_ADMIN_EMAIL", "admin@keycompute.local");
     let admin_password = env_var_or_default("KC__DEFAULT_ADMIN_PASSWORD", "12345");
@@ -345,7 +367,7 @@ async fn initialize_default_admin(pool: &DatabaseConnection) -> anyhow::Result<T
 }
 
 async fn validate_distribution_public_base_url(
-    pool: &DatabaseConnection,
+    pool: &impl ConnectionTrait,
     config: &AppConfig,
 ) -> anyhow::Result<()> {
     let distribution_enabled = SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
@@ -364,7 +386,7 @@ async fn validate_distribution_public_base_url(
 ///
 /// 基于 system_settings 中的配置创建一级和二级分销规则
 async fn initialize_default_distribution_rules(
-    pool: &DatabaseConnection,
+    pool: &impl ConnectionTrait,
     tenant_id: uuid::Uuid,
     admin_user_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
@@ -440,7 +462,7 @@ async fn initialize_default_distribution_rules(
 /// 为默认系统管理员充值 100 元初始余额
 /// 系统管理员不需要审计，直接设置余额
 async fn initialize_admin_balance(
-    pool: &DatabaseConnection,
+    pool: &(impl ConnectionTrait + TransactionTrait),
     tenant_id: uuid::Uuid,
     user_id: uuid::Uuid,
 ) -> anyhow::Result<()> {

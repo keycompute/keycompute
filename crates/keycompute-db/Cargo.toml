@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 keycompute-types.workspace = true
+keycompute-config.workspace = true
 sea-orm = { workspace = true }
 tokio = { version = "1.44", features = ["full"] }
 uuid = { version = "1.16", features = ["v4", "serde"] }
@@ -19,3 +20,6 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 subtle = "2.6"
+async-trait = "0.1"
+parking_lot = "0.12"
+rand = "0.8"

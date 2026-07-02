@@ -1,0 +1,493 @@
+# =============================================================================
+# docker-compose.replicas.yml — KeyCompute 一主多从读写分离部署编排
+#
+# 纯 docker-compose.yml 实现，零外部依赖（无需 Patroni / repmgr / pgpool-II）。
+# 主库（postgres-primary）通过 docker-entrypoint-initdb.d 机制自动创建复制角色
+# 并配置 pg_hba，从库通过 pg_basebackup 全量同步后以 hot_standby 模式启动，
+# 通过流式复制实时接收 WAL 变更。
+#
+# 服务拓扑：
+#   postgres-primary      — PostgreSQL 写主库（WAL 复制源）
+#   postgres-replica1     — PostgreSQL 读从库 1（hot_standby）
+#   postgres-replica2     — PostgreSQL 读从库 2（hot_standby）
+#   redis                 — Redis 缓存（限流、会话存储）
+#   keycompute-server     — Axum 后端 API 服务（读写分离）
+#   keycompute-web        — Nginx + Dioxus WASM 前端
+#   ollama                — Ollama 本地模型服务
+#   ollama-model-init     — 启动后自动拉取并预热指定模型
+#
+# 使用方法：
+#   cp .env.example .env          # 编辑填入生产密钥
+#   docker compose -f docker-compose.replicas.yml up -d
+#
+# 查看复制状态：
+#   docker exec keycompute-postgres-primary psql -U keycompute -d keycompute -c \
+#     "SELECT application_name, state, sync_state FROM pg_stat_replication;"
+#
+# 环境变量（需在 .env 或 shell 中设置）：
+#   POSTGRES_PASSWORD             — PostgreSQL 主库密码
+#   REDIS_PASSWORD                — Redis 密码
+#   KC__AUTH__JWT_SECRET          — JWT 密钥
+#   POSTGRES_REPLICA_PASSWORD     — 复制角色密码（可选，默认同 POSTGRES_PASSWORD）
+#   KC__DEFAULT_ADMIN_EMAIL       — 系统管理员邮箱（可选，默认 admin@keycompute.local）
+#   KC__DEFAULT_ADMIN_PASSWORD    — 系统管理员密码（可选，默认 change-me-admin-password）
+# =============================================================================
+
+name: keycompute-replicas
+
+x-replica-base: &replica-base
+  image: postgres:16-alpine
+  pull_policy: missing
+  entrypoint: ["/bin/bash", "-c"]
+  depends_on:
+    postgres-primary:
+      condition: service_healthy
+  networks:
+    - keycompute-internal
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U keycompute"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 60s
+  deploy:
+    resources:
+      limits:
+        memory: 512m
+        cpus: "1.0"
+
+services:
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PostgreSQL Primary (Write)
+  #
+  # 覆盖 entrypoint 为 bash -c，在启动前将复制角色创建脚本和 pg_hba 配置
+  # 脚本写入 docker-entrypoint-initdb.d，然后由原始 entrypoint 执行。
+  # 配置了流式复制所需的 WAL 参数：
+  #   wal_level=replica       — 输出足够 WAL 信息供从库复制
+  #   max_wal_senders=10      — 最大 WAL 发送进程数
+  #   max_replication_slots=10— 最大复制槽数
+  #   wal_keep_size=512       — 保留的 WAL 大小 (MB)
+  # ─────────────────────────────────────────────────────────────────────────
+  postgres-primary:
+    image: postgres:16-alpine
+    pull_policy: missing
+    container_name: keycompute-postgres-primary
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |-
+        set -eo pipefail
+
+        # 1. 写入 SQL init：创建 replicator 复制角色
+        #    注意：$${REPLICATION_PASSWORD} 在 bash 运行时展开为容器环境变量值
+        cat > /docker-entrypoint-initdb.d/01-create-replicator-role.sql <<- SQL_EOF
+        CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD '$${REPLICATION_PASSWORD}';
+        SQL_EOF
+
+        # 2. 写入 Shell init：允许从库以 replicator 身份做流式复制连接
+        cat > /docker-entrypoint-initdb.d/02-configure-pg_hba.sh <<- 'SH_EOF'
+        #!/bin/bash
+        set -e
+        echo "host replication replicator all md5" >> /var/lib/postgresql/data/pg_hba.conf
+        SH_EOF
+        chmod +x /docker-entrypoint-initdb.d/02-configure-pg_hba.sh
+
+        # 3. 执行原始 entrypoint，传递 PostgreSQL 配置参数
+        exec /usr/local/bin/docker-entrypoint.sh postgres \
+          -c wal_level=replica \
+          -c max_wal_senders=10 \
+          -c max_replication_slots=10 \
+          -c wal_keep_size=512
+    environment:
+      POSTGRES_USER: keycompute
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-strong-password}
+      POSTGRES_DB: ${POSTGRES_DB:-keycompute}
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: ${POSTGRES_REPLICA_PASSWORD:-${POSTGRES_PASSWORD:-change-me-strong-password}}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-primary-data:/var/lib/postgresql/data
+    networks:
+      - keycompute-internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycompute"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PostgreSQL Replica 1 (Read)
+  #
+  # 覆盖 entrypoint 为 bash -c，首次启动时：
+  #   1. 等待主库就绪
+  #   2. pg_basebackup 全量同步
+  #   3. 配置 standby.signal + primary_conninfo + hot_standby
+  #   4. exec 原始 entrypoint 启动 hot_standby
+  # 后续重启时 PGDATA 已有数据，跳过 pg_basebackup 直接启动。
+  # ─────────────────────────────────────────────────────────────────────────
+  postgres-replica1:
+    <<: *replica-base
+    container_name: keycompute-postgres-replica1
+    command:
+      - |-
+        set -eo pipefail
+        PGDATA="$${PGDATA:-/var/lib/postgresql/data}"
+
+        # 等待主库就绪（最多 60s）
+        echo "Waiting for primary (postgres-primary:5432) to be ready..."
+        for i in $(seq 1 30); do
+          if PGPASSWORD="$${POSTGRES_PASSWORD}" pg_isready \
+            -h postgres-primary -U keycompute -q 2>/dev/null; then
+            echo "Primary ready after $${i}s"
+            break
+          fi
+          echo "  Waiting... ($${i}/30)"
+          sleep 2
+        done
+
+        # 首次运行：从主库全量同步
+        if [ ! -f "$${PGDATA}/PG_VERSION" ]; then
+          echo "=== PGDATA empty -- running pg_basebackup from primary ==="
+
+          if ! PGPASSWORD="$${POSTGRES_PASSWORD}" pg_isready \
+            -h postgres-primary -U keycompute -q 2>/dev/null; then
+            echo "ERROR: Primary unreachable after 60s, cannot bootstrap replica"
+            exit 1
+          fi
+
+          PGPASSWORD="$${REPLICATION_PASSWORD}" pg_basebackup \
+            -h postgres-primary \
+            -U replicator \
+            -D "$${PGDATA}" \
+            -Fp -Xs -P -v
+          echo "pg_basebackup completed"
+
+          # pg_basebackup 以 root 运行，产生的文件归属 root:root。
+          # docker-entrypoint.sh 以 postgres 用户启动 PostgreSQL，
+          # 必须递归变更所有权，否则 Permission denied。
+
+          # 配置 hot_standby 模式
+          touch "$${PGDATA}/standby.signal"
+          echo "primary_conninfo = 'host=postgres-primary port=5432 user=replicator password=$${REPLICATION_PASSWORD} application_name=$${REPLICA_APP_NAME}'" >> "$${PGDATA}/postgresql.auto.conf"
+          echo "hot_standby = on" >> "$${PGDATA}/postgresql.conf"
+          echo "hot_standby_feedback = on" >> "$${PGDATA}/postgresql.conf"
+
+          chown -R postgres:postgres "$${PGDATA}"
+          echo "=== Replica bootstrap complete ==="
+        else
+          echo "=== PGDATA exists -- starting as hot standby ==="
+        fi
+
+        exec /usr/local/bin/docker-entrypoint.sh postgres
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-strong-password}
+      PRIMARY_HOST: postgres-primary
+      PRIMARY_PORT: 5432
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: ${POSTGRES_REPLICA_PASSWORD:-${POSTGRES_PASSWORD:-change-me-strong-password}}
+      REPLICA_APP_NAME: keycompute-postgres-replica1
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres-replica1-data:/var/lib/postgresql/data
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # PostgreSQL Replica 2 (Read)
+  # ─────────────────────────────────────────────────────────────────────────
+  postgres-replica2:
+    <<: *replica-base
+    container_name: keycompute-postgres-replica2
+    command:
+      - |-
+        set -eo pipefail
+        PGDATA="$${PGDATA:-/var/lib/postgresql/data}"
+
+        echo "Waiting for primary (postgres-primary:5432) to be ready..."
+        for i in $(seq 1 30); do
+          if PGPASSWORD="$${POSTGRES_PASSWORD}" pg_isready \
+            -h postgres-primary -U keycompute -q 2>/dev/null; then
+            echo "Primary ready after $${i}s"
+            break
+          fi
+          echo "  Waiting... ($${i}/30)"
+          sleep 2
+        done
+
+        if [ ! -f "$${PGDATA}/PG_VERSION" ]; then
+          echo "=== PGDATA empty -- running pg_basebackup from primary ==="
+
+          if ! PGPASSWORD="$${POSTGRES_PASSWORD}" pg_isready \
+            -h postgres-primary -U keycompute -q 2>/dev/null; then
+            echo "ERROR: Primary unreachable after 60s, cannot bootstrap replica"
+            exit 1
+          fi
+
+          PGPASSWORD="$${REPLICATION_PASSWORD}" pg_basebackup \
+            -h postgres-primary \
+            -U replicator \
+            -D "$${PGDATA}" \
+            -Fp -Xs -P -v
+          echo "pg_basebackup completed"
+
+          touch "$${PGDATA}/standby.signal"
+          echo "primary_conninfo = 'host=postgres-primary port=5432 user=replicator password=$${REPLICATION_PASSWORD} application_name=$${REPLICA_APP_NAME}'" >> "$${PGDATA}/postgresql.auto.conf"
+          echo "hot_standby = on" >> "$${PGDATA}/postgresql.conf"
+          echo "hot_standby_feedback = on" >> "$${PGDATA}/postgresql.conf"
+
+          chown -R postgres:postgres "$${PGDATA}"
+          echo "=== Replica bootstrap complete ==="
+        else
+          echo "=== PGDATA exists -- starting as hot standby ==="
+        fi
+
+        exec /usr/local/bin/docker-entrypoint.sh postgres
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-strong-password}
+      PRIMARY_HOST: postgres-primary
+      PRIMARY_PORT: 5432
+      REPLICATION_USER: replicator
+      REPLICATION_PASSWORD: ${POSTGRES_REPLICA_PASSWORD:-${POSTGRES_PASSWORD:-change-me-strong-password}}
+      REPLICA_APP_NAME: keycompute-postgres-replica2
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - postgres-replica2-data:/var/lib/postgresql/data
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Redis — 缓存与限流存储
+  # ─────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: keycompute-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD:-change-me-redis-password}
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - keycompute-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change-me-redis-password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # keycompute-server — Axum 后端 API 服务（读写分离）
+  #
+  # 通过 KC__DATABASE_READ_URLS 将 SELECT 查询路由到两个从库，
+  # 写操作（INSERT/UPDATE/DELETE）自动走主库。
+  # ─────────────────────────────────────────────────────────────────────────
+  keycompute-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    pull_policy: build
+    image: keycompute-server:latest
+    container_name: keycompute-server
+    restart: unless-stopped
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      postgres-replica1:
+        condition: service_started
+      postgres-replica2:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      ollama-model-init:
+        condition: service_completed_successfully
+    environment:
+      # 运行环境
+      KC__ENV: production
+
+      # 数据库配置（写库 -> postgres-primary）
+      KC__DATABASE__URL: "postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-primary:5432/${POSTGRES_DB:-keycompute}"
+      KC__DATABASE__MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
+      KC__DATABASE__MIN_CONNECTIONS: ${DB_MIN_CONNECTIONS:-2}
+
+      # 读写分离：读库连接 URL（由 compose 内联构建，逗号分隔）
+      KC__DATABASE_READ_URLS: "postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-replica1:5432/${POSTGRES_DB:-keycompute},postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-replica2:5432/${POSTGRES_DB:-keycompute}"
+
+      # 读写分离路由配置
+      KC__DATABASE_ROUTING__STRATEGY: ${KC__DATABASE_ROUTING__STRATEGY:-round_robin}
+      KC__DATABASE_ROUTING__RETRY_ATTEMPTS: ${KC__DATABASE_ROUTING__RETRY_ATTEMPTS:-2}
+      KC__DATABASE_ROUTING__CIRCUIT_BREAK_MS: ${KC__DATABASE_ROUTING__CIRCUIT_BREAK_MS:-30000}
+      KC__DATABASE_ROUTING__FALLBACK_TO_WRITE: ${KC__DATABASE_ROUTING__FALLBACK_TO_WRITE:-false}
+      KC__DATABASE_ROUTING__HEALTH_CHECK_INTERVAL_SECS: ${KC__DATABASE_ROUTING__HEALTH_CHECK_INTERVAL_SECS:-15}
+
+      # 读库连接池配置（独立于写库）
+      KC__DATABASE_READ__MAX_CONNECTIONS: ${DB_READ_MAX_CONNECTIONS:-10}
+      KC__DATABASE_READ__MIN_CONNECTIONS: ${DB_READ_MIN_CONNECTIONS:-1}
+      KC__DATABASE_READ__CONNECT_TIMEOUT_SECS: ${DB_READ_CONNECT_TIMEOUT_SECS:-5}
+      KC__DATABASE_READ__IDLE_TIMEOUT_SECS: ${DB_READ_IDLE_TIMEOUT_SECS:-600}
+      KC__DATABASE_READ__ACQUIRE_TIMEOUT_SECS: ${DB_READ_ACQUIRE_TIMEOUT_SECS:-10}
+
+      # Redis 配置
+      KC__REDIS__URL: "redis://:${REDIS_PASSWORD:-change-me-redis-password}@redis:6379"
+      KC__REDIS__POOL_SIZE: ${REDIS_POOL_SIZE:-10}
+      KC__REDIS__CONNECT_TIMEOUT_SECS: ${KC__REDIS__CONNECT_TIMEOUT_SECS:-5}
+
+      # 认证配置（生产环境必须修改！）
+      KC__AUTH__JWT_SECRET: ${KC__AUTH__JWT_SECRET:-change-me-jwt-secret-key}
+      KC__AUTH__JWT_ISSUER: ${KC__AUTH__JWT_ISSUER:-keycompute}
+      KC__AUTH__JWT_EXPIRY_SECS: ${KC__AUTH__JWT_EXPIRY_SECS:-3600}
+
+      # 加密配置（API Key 加密存储，生产环境必须配置！）
+      KC__CRYPTO__SECRET_KEY: ${KC__CRYPTO__SECRET_KEY:-change-me-base64-encoded-32-byte-key}
+
+      # 邮件服务配置
+      KC__EMAIL__SMTP_HOST: ${KC__EMAIL__SMTP_HOST:-smtp.example.com}
+      KC__EMAIL__SMTP_PORT: ${KC__EMAIL__SMTP_PORT:-465}
+      KC__EMAIL__SMTP_USERNAME: ${KC__EMAIL__SMTP_USERNAME:-noreply@example.com}
+      KC__EMAIL__SMTP_PASSWORD: ${KC__EMAIL__SMTP_PASSWORD:-change-me-smtp-password}
+      KC__EMAIL__FROM_ADDRESS: ${KC__EMAIL__FROM_ADDRESS:-noreply@example.com}
+      KC__EMAIL__FROM_NAME: ${KC__EMAIL__FROM_NAME:-KeyCompute}
+      KC__EMAIL__REQUIREMENT_RECIPIENT: ${KC__EMAIL__REQUIREMENT_RECIPIENT:-}
+      APP_BASE_URL: ${APP_BASE_URL:-http://127.0.0.1}
+
+      # 服务器配置
+      KC__SERVER__BIND_ADDR: "0.0.0.0"
+      KC__SERVER__PORT: "3000"
+
+      # 默认系统管理员配置（首次启动时自动创建）
+      KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
+      KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-change-me-admin-password}
+
+      # 节点网关配置（Node Gateway）
+      KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET: ${KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET:-change-me-node-registration-token-secret}
+    networks:
+      - keycompute-public
+      - keycompute-internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+          cpus: "2.0"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # keycompute-web — Nginx + Dioxus WASM 前端
+  # ─────────────────────────────────────────────────────────────────────────
+  keycompute-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    pull_policy: build
+    image: keycompute-web:latest
+    container_name: keycompute-web
+    restart: unless-stopped
+    depends_on:
+      keycompute-server:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-80}:80"
+    networks:
+      - keycompute-public
+      - keycompute-internal
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.5"
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Ollama — 本地模型服务
+  # ─────────────────────────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: keycompute-ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_HOST: "0.0.0.0:11434"
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - keycompute-public
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # ollama-model-init — 自动拉取并预热指定模型
+  # ─────────────────────────────────────────────────────────────────────────
+  ollama-model-init:
+    image: ollama/ollama:latest
+    container_name: keycompute-ollama-model-init
+    restart: on-failure
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:270m}
+      OLLAMA_WARMUP_PROMPT: ${OLLAMA_WARMUP_PROMPT:-ready}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - ollama pull "$$OLLAMA_MODEL" && ollama run "$$OLLAMA_MODEL" "$$OLLAMA_WARMUP_PROMPT" >/dev/null
+    networks:
+      - keycompute-public
+
+# =============================================================================
+# 持久化卷
+# =============================================================================
+volumes:
+  postgres-primary-data:
+    driver: local
+  postgres-replica1-data:
+    driver: local
+  postgres-replica2-data:
+    driver: local
+  redis_data:
+    driver: local
+  ollama_data:
+    driver: local
+
+# =============================================================================
+# 网络定义
+# =============================================================================
+networks:
+  keycompute-internal:
+    driver: bridge
+    internal: true
+
+  keycompute-public:
+    driver: bridge

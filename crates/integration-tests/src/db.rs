@@ -14,8 +14,9 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub async fn create_test_pool() -> DatabaseConnection {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://postgres:password@localhost:5432/keycompute".to_string());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://keycompute:change-me-strong-password@localhost:5432/keycompute".to_string()
+    });
 
     use sea_orm::ConnectOptions;
     let mut opt = ConnectOptions::new(&database_url);
@@ -33,6 +34,27 @@ pub async fn create_test_pool() -> DatabaseConnection {
     run_migrations(&db)
         .await
         .expect("Failed to run database migrations");
+
+    // 清理已存在的 system 用户（`uq_users_single_system_role` 全局唯一索引要求）
+    // main.rs 的 initialize_default_admin 或历史测试可能遗留了 system 用户，
+    // 导致后续测试无法创建自己的 system 用户
+    // 因 `trg_prevent_system_user_delete` + `trg_prevent_system_role_change`
+    // 两个触发器保护了 system 用户不可删除/不可改角色，需临时禁用后清理
+    db.execute_unprepared("ALTER TABLE users DISABLE TRIGGER trg_prevent_system_user_delete")
+        .await
+        .ok();
+    db.execute_unprepared("ALTER TABLE users DISABLE TRIGGER trg_prevent_system_role_change")
+        .await
+        .ok();
+    db.execute_unprepared("DELETE FROM users WHERE role = 'system'")
+        .await
+        .ok();
+    db.execute_unprepared("ALTER TABLE users ENABLE TRIGGER trg_prevent_system_user_delete")
+        .await
+        .ok();
+    db.execute_unprepared("ALTER TABLE users ENABLE TRIGGER trg_prevent_system_role_change")
+        .await
+        .ok();
 
     db
 }

@@ -34,7 +34,7 @@ async fn configured_jwt_validator(state: &AppState) -> Result<JwtValidator> {
 
     if let Some(pool) = state.pool.as_ref()
         && let Some(setting) =
-            keycompute_db::SystemSetting::find_by_key(pool, setting_keys::JWT_EXPIRE_HOURS)
+            keycompute_db::SystemSetting::find_by_key(pool.as_ref(), setting_keys::JWT_EXPIRE_HOURS)
                 .await
                 .map_err(|e| {
                     ApiError::Internal(format!("Failed to query JWT expiry setting: {}", e))
@@ -175,7 +175,7 @@ pub async fn complete_registration_handler(
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
     let default_quota_setting =
-        keycompute_db::SystemSetting::find_by_key(pool, setting_keys::DEFAULT_USER_QUOTA)
+        keycompute_db::SystemSetting::find_by_key(pool.as_ref(), setting_keys::DEFAULT_USER_QUOTA)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to query default user quota: {}", e)))?
             .ok_or_else(|| {

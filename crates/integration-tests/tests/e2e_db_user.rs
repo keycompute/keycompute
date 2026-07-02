@@ -6,8 +6,19 @@ use integration_tests::db::{
 };
 use keycompute_db::User;
 use keycompute_types::AssignableUserRole;
+use once_cell::sync::Lazy;
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use tokio::sync::Mutex;
 use uuid::Uuid;
+
+/// 全局互斥锁，序列化 `role = 'system'` 用户的相关测试。
+///
+/// `uq_users_single_system_role` 部分唯一索引确保整个数据库至多存在
+/// 一个 system 用户。多个测试并发插入 role='system' 的记录时会发生冲突
+///（PostgreSQL 唯一索引锁竞争导致 `duplicate key` 错误）。
+///
+/// 持有此锁的测试独占 system 用户创建/修改权限，完成后释放。
+static SYSTEM_USER_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[cfg(test)]
 mod tests {
@@ -162,8 +173,11 @@ mod tests {
     }
 
     /// 测试 system 角色全局唯一约束
+    ///
+    /// 通过 `SYSTEM_USER_MUTEX` 序列化，避免并发测试同时插入 role='system'。
     #[tokio::test]
     async fn test_system_role_unique_index_rejects_duplicate_system_user() {
+        let _guard = SYSTEM_USER_MUTEX.lock().await;
         let pool = create_test_pool().await;
         let run_id = generate_test_id();
         let tx = pool.begin().await.expect("transaction should start");
@@ -232,8 +246,11 @@ mod tests {
     }
 
     /// 测试禁止将 system 用户降级
+    ///
+    /// 通过 `SYSTEM_USER_MUTEX` 序列化，避免并发测试同时插入 role='system'。
     #[tokio::test]
     async fn test_system_role_change_trigger_rejects_downgrade() {
+        let _guard = SYSTEM_USER_MUTEX.lock().await;
         let pool = create_test_pool().await;
         let run_id = generate_test_id();
         let tx = pool.begin().await.expect("transaction should start");
@@ -344,8 +361,11 @@ mod tests {
     }
 
     /// 测试 system 用户删除触发器
+    ///
+    /// 通过 `SYSTEM_USER_MUTEX` 序列化，避免并发测试同时插入 role='system'。
     #[tokio::test]
     async fn test_system_user_delete_trigger_rejects_direct_delete() {
+        let _guard = SYSTEM_USER_MUTEX.lock().await;
         let pool = create_test_pool().await;
         let run_id = generate_test_id();
         let tx = pool.begin().await.expect("transaction should start");

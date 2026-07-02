@@ -2,6 +2,7 @@
 //!
 //! 提供 PostgreSQL 数据库连接池、ORM 模型和迁移支持
 
+pub mod db_router;
 pub mod models;
 pub mod schema;
 
@@ -9,8 +10,10 @@ use sea_orm::{
     ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection,
     DatabaseTransaction, DbBackend, Statement, TransactionTrait,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
+pub use db_router::DbRouter;
 pub use models::*;
 pub use schema::*;
 
@@ -162,6 +165,18 @@ impl Default for DatabaseConfig {
     }
 }
 
+impl From<&DatabaseConfig> for db_router::DatabaseConfig {
+    fn from(c: &DatabaseConfig) -> Self {
+        Self {
+            max_connections: c.max_connections,
+            min_connections: c.min_connections,
+            connect_timeout_secs: c.connect_timeout,
+            idle_timeout_secs: c.idle_timeout,
+            max_lifetime_secs: c.max_lifetime,
+        }
+    }
+}
+
 // ============================================================================
 // 连接池管理
 // ============================================================================
@@ -248,22 +263,121 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
     statements
 }
 
+/// Check if a database error is an expected "already exists" error for
+/// idempotent migration statements (CREATE TABLE IF NOT EXISTS, CREATE INDEX IF NOT EXISTS).
+///
+/// This function ONLY matches DDL-level "already exists" errors:
+/// - PostgreSQL 42P07 (duplicate_table): table already exists
+/// - PostgreSQL 42710 (duplicate_object): index/function/type already exists
+///
+/// It does NOT match data-level errors like UniqueConstraintViolation (23505)
+/// because those indicate real data conflicts, not idempotent DDL re-execution.
+fn is_duplicate_table_or_index_error(err: &sea_orm::DbErr) -> bool {
+    // SqlErr only covers data-level constraint violations (23505, 23503, etc.),
+    // not DDL "already exists" errors (42P07, 42710). So we skip sql_err() matching
+    // entirely and rely on string-based detection for DDL-specific error codes.
+
+    let msg = err.to_string().to_lowercase();
+
+    // Match PostgreSQL error codes for DDL "already exists" scenarios:
+    // - 42P07: duplicate_table (CREATE TABLE IF NOT EXISTS on existing table without IF NOT EXISTS)
+    // - 42710: duplicate_object (CREATE INDEX IF NOT EXISTS on existing index)
+    if msg.contains("42p07") || msg.contains("42710") {
+        return true;
+    }
+
+    // Fallback: match the generic "already exists" message, but only for DDL objects
+    if msg.contains("already exists") {
+        return msg.contains("relation")
+            || msg.contains("type")
+            || msg.contains("index")
+            || msg.contains("table");
+    }
+
+    false
+}
+
 /// 运行数据库迁移
 ///
-/// 使用纯 SQL 执行嵌入式迁移文件
-pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbError> {
+/// 使用纯 SQL 执行嵌入式迁移文件。
+/// 每个语句在独立的 savepoint 中执行，避免单条失败导致整个迁移中断。
+/// 通过 idempotent 检查（`IF NOT EXISTS` + 错误容忍）支持重复执行。
+///
+/// # 并发安全
+///
+/// 使用 PostgreSQL session-level advisory lock 防止多个连接并行执行迁移。
+/// 这在并行集成测试场景下是必要的——多个测试线程同时创建连接池并运行迁移时，
+/// `INSERT INTO system_settings` 等语句会产生 `tuple concurrently updated` 冲突。
+pub async fn run_migrations(db: &(impl ConnectionTrait + TransactionTrait)) -> Result<(), DbError> {
+    // 获取 session-level advisory lock，防止并发迁移
+    // 使用双 key 版本：pg_advisory_lock(key1 int, key2 int)
+    // key1 = hashtext('keycompute'), key2 = hashtext('db_migration')
+    // 锁在连接关闭时自动释放
+    db.execute_unprepared(
+        "SELECT pg_advisory_lock(hashtext('keycompute'), hashtext('db_migration'))",
+    )
+    .await
+    .map_err(|e| {
+        DbError::MigrationError(format!(
+            "Failed to acquire migration advisory lock (concurrent migration prevention): {}",
+            e
+        ))
+    })?;
+
+    let result = run_migrations_internal(db).await;
+
+    // 释放 advisory lock（最佳努力，连接关闭时也会自动释放）
+    db.execute_unprepared(
+        "SELECT pg_advisory_unlock(hashtext('keycompute'), hashtext('db_migration'))",
+    )
+    .await
+    .ok();
+
+    result
+}
+
+/// 迁移内部实现（被 `run_migrations` 的 advisory lock 保护）
+async fn run_migrations_internal(
+    db: &(impl ConnectionTrait + TransactionTrait),
+) -> Result<(), DbError> {
     let sql = include_str!("migrations/001_init.sql");
-    let backend = db.get_database_backend();
 
     for statement in split_sql_statements(sql) {
         let trimmed = statement.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let stmt = Statement::from_string(backend, statement);
-        db.execute(stmt)
+
+        // 使用 savepoint 隔离每个语句，失败时不影响其他语句
+        let sp = db
+            .begin()
             .await
             .map_err(|e| DbError::MigrationError(e.to_string()))?;
+
+        match sp
+            .execute(Statement::from_string(
+                sp.get_database_backend(),
+                trimmed.to_string(),
+            ))
+            .await
+        {
+            Ok(_) => {
+                sp.commit()
+                    .await
+                    .map_err(|e| DbError::MigrationError(e.to_string()))?;
+            }
+            Err(e) => {
+                sp.rollback()
+                    .await
+                    .map_err(|e| DbError::MigrationError(e.to_string()))?;
+
+                if is_duplicate_table_or_index_error(&e) {
+                    tracing::warn!("Migration statement skipped (already exists): {}", trimmed);
+                } else {
+                    return Err(DbError::MigrationError(e.to_string()));
+                }
+            }
+        }
     }
 
     tracing::info!("Database migrations completed successfully");
@@ -277,55 +391,90 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<(), DbError> {
 
 /// 数据库管理器
 ///
-/// 封装数据库连接池，提供统一的数据库访问入口
+/// 封装数据库路由器，提供统一的数据库访问入口
 #[derive(Clone)]
 pub struct Database {
-    db: DatabaseConnection,
+    router: Arc<DbRouter>,
 }
 
 impl Database {
     /// 创建新的数据库实例
-    pub async fn new(config: &DatabaseConfig) -> Result<Self, DbError> {
-        let db = init_pool(config).await?;
-        Ok(Self { db })
+    ///
+    /// # 参数
+    /// * `write_config` — 写库连接池配置
+    /// * `read_urls` — 读库连接 URL 列表（空列表 = 无读写分离）
+    /// * `read_config` — 读库连接池配置
+    /// * `routing_config` — 读写分离路由配置
+    pub async fn new(
+        write_config: &DatabaseConfig,
+        read_urls: &[String],
+        read_config: &keycompute_config::DatabaseReadConfig,
+        routing_config: &keycompute_config::DatabaseRoutingConfig,
+    ) -> Result<Self, DbError> {
+        use db_router::{
+            DatabaseConfig as RouterDbConfig, DatabaseReadConfig as RouterReadConfig,
+            DatabaseRoutingConfig as RouterRoutingConfig,
+        };
+        let router = DbRouter::new(
+            &write_config.url,
+            read_urls,
+            &RouterDbConfig::from(write_config),
+            &RouterReadConfig::from(read_config),
+            &RouterRoutingConfig::from(routing_config),
+        )
+        .await
+        .map_err(|e| DbError::ConnectionError(e.to_string()))?;
+        Ok(Self { router })
     }
 
-    /// 从现有连接创建
+    /// 从 DbRouter 创建
+    pub fn from_router(router: Arc<DbRouter>) -> Self {
+        Self { router }
+    }
+
+    /// 从现有连接创建（包装为单库模式）
     pub fn from_connection(db: DatabaseConnection) -> Self {
-        Self { db }
+        Self {
+            router: DbRouter::single(db),
+        }
     }
 
-    /// 从环境变量创建
-    pub async fn from_env() -> Result<Self, DbError> {
-        let config = DatabaseConfig::default();
-        Self::new(&config).await
-    }
-
-    /// 获取连接引用
+    /// 获取连接引用（返回写库连接）
     pub fn connection(&self) -> &DatabaseConnection {
-        &self.db
+        self.router.write_conn()
     }
 
-    /// 获取连接（消费）
-    pub fn into_connection(self) -> DatabaseConnection {
-        self.db
+    /// 获取路由引用
+    pub fn router(&self) -> Arc<DbRouter> {
+        Arc::clone(&self.router)
     }
 
     /// 开始一个事务
     pub async fn begin(&self) -> Result<DatabaseTransaction, sea_orm::DbErr> {
-        self.db.begin().await
+        self.router.write_conn().begin().await
     }
 
     /// 运行迁移
     pub async fn migrate(&self) -> Result<(), DbError> {
-        run_migrations(&self.db).await
+        run_migrations(self.router.write_conn()).await
     }
 
     /// 测试连接
     pub async fn test_connection(&self) -> Result<(), DbError> {
         let stmt = Statement::from_string(DbBackend::Postgres, "SELECT 1".to_string());
-        self.db.execute(stmt).await?;
+        self.router.write_conn().execute(stmt).await?;
         Ok(())
+    }
+
+    /// 获取写库连接（消费自身）
+    #[deprecated(since = "0.3.0", note = "Use `router()` or `connection()` instead")]
+    pub fn into_connection(self) -> DatabaseConnection {
+        self.router.write_conn().clone()
+    }
+
+    /// 获取路由器（消费自身）
+    pub fn into_router(self) -> Arc<DbRouter> {
+        self.router
     }
 }
 

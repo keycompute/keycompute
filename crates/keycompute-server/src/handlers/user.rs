@@ -44,7 +44,7 @@ pub async fn get_current_user(
 ) -> Result<Json<CurrentUserResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let user = User::find_by_id(pool, auth.user_id)
@@ -79,7 +79,7 @@ pub async fn update_profile(
 ) -> Result<Json<CurrentUserResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let user = User::find_by_id(pool, auth.user_id)
@@ -124,7 +124,7 @@ pub async fn change_password(
 ) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 1. 验证新密码格式
@@ -218,7 +218,7 @@ pub async fn list_my_api_keys(
 ) -> Result<Json<Vec<ApiKeyInfo>>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let keys = if params.include_revoked {
@@ -279,7 +279,7 @@ pub async fn create_api_key(
 ) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 使用统一的 API Key 生成方法（格式：sk- + 48字符 = 51字符）
@@ -329,7 +329,7 @@ pub async fn delete_api_key(
 ) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找 API Key 并验证所有权
@@ -400,7 +400,7 @@ pub async fn get_my_usage(
 ) -> Result<Json<Vec<UsageRecord>>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let logs = UsageLog::find_by_user(pool, auth.user_id, 100, 0)
@@ -445,7 +445,7 @@ pub async fn get_my_usage_stats(
 ) -> Result<Json<UsageStatsResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let stats = UsageLog::get_user_stats(pool, auth.user_id)

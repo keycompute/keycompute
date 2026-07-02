@@ -6,9 +6,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult, Statement,
-};
+use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -131,7 +129,7 @@ impl PendingRegistration {
 
     /// 根据邮箱查找待完成注册记录。
     pub async fn find_by_email(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         email: &str,
     ) -> Result<Option<PendingRegistration>, DbError> {
         let stmt = Statement::from_sql_and_values(

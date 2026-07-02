@@ -1,6 +1,6 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -67,7 +67,7 @@ impl From<ProduceAiKey> for ProduceAiKeyResponse {
 impl ProduceAiKey {
     /// 创建新 Produce AI Key
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateProduceAiKeyRequest,
     ) -> Result<ProduceAiKey, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -96,7 +96,7 @@ impl ProduceAiKey {
 
     /// 根据 ID 查找 Produce AI Key
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<ProduceAiKey>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -111,7 +111,7 @@ impl ProduceAiKey {
 
     /// 根据 produce_ai_key_hash 查找 Produce AI Key
     pub async fn find_by_hash(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         produce_ai_key_hash: &str,
     ) -> Result<Option<ProduceAiKey>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -126,7 +126,7 @@ impl ProduceAiKey {
 
     /// 查找用户的所有 Produce AI Key
     pub async fn find_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Vec<ProduceAiKey>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -141,7 +141,7 @@ impl ProduceAiKey {
 
     /// 查找用户的活跃 Produce AI Key（未撤销的）
     pub async fn find_active_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<Vec<ProduceAiKey>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -156,7 +156,7 @@ impl ProduceAiKey {
 
     /// 查找租户的所有 Produce AI Key
     pub async fn find_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<ProduceAiKey>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -170,7 +170,7 @@ impl ProduceAiKey {
     }
 
     /// 撤销 Produce AI Key
-    pub async fn revoke(&self, db: &DatabaseConnection) -> Result<ProduceAiKey, DbError> {
+    pub async fn revoke(&self, db: &impl ConnectionTrait) -> Result<ProduceAiKey, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -192,7 +192,7 @@ impl ProduceAiKey {
     }
 
     /// 物理删除 Produce AI Key
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM produce_ai_keys WHERE id = $1",
@@ -204,7 +204,7 @@ impl ProduceAiKey {
     }
 
     /// 更新最后使用时间
-    pub async fn update_last_used(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn update_last_used(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE produce_ai_keys SET last_used_at = NOW(), updated_at = NOW() WHERE id = $1",

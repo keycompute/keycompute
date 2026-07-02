@@ -1,7 +1,7 @@
 use crate::DbError;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -105,7 +105,7 @@ pub struct UpdatePricingRequest {
 impl PricingModel {
     /// 创建新定价
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreatePricingRequest,
     ) -> Result<PricingModel, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -141,7 +141,7 @@ impl PricingModel {
 
     /// 根据 ID 查找定价
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<PricingModel>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -156,7 +156,7 @@ impl PricingModel {
 
     /// 查找租户的所有定价
     pub async fn find_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<PricingModel>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -176,7 +176,7 @@ impl PricingModel {
 
     /// 查找特定模型的定价（优先租户定价，其次默认定价）
     pub async fn find_by_model(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
         model_name: &str,
         billing_dimension: &str,
@@ -211,7 +211,7 @@ impl PricingModel {
     }
 
     /// 查找所有默认定价
-    pub async fn find_defaults(db: &DatabaseConnection) -> Result<Vec<PricingModel>, DbError> {
+    pub async fn find_defaults(db: &impl ConnectionTrait) -> Result<Vec<PricingModel>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             r#"
@@ -231,7 +231,7 @@ impl PricingModel {
     /// 更新定价
     pub async fn update(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &UpdatePricingRequest,
     ) -> Result<PricingModel, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -261,7 +261,7 @@ impl PricingModel {
     }
 
     /// 删除定价
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM pricing_models WHERE id = $1",
@@ -293,7 +293,7 @@ impl PricingModel {
     ///
     /// 系统启动时调用，如果 model-empty 模型的全局默认定价不存在则创建。
     /// 全局默认定价使用 tenant_id = NULL，表示全局级别。
-    pub async fn init_default_pricing(db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn init_default_pricing(db: &impl ConnectionTrait) -> Result<(), DbError> {
         // 查询全局默认定价是否已存在（tenant_id = GLOBAL_DEFAULT_TENANT_ID）
         let existing_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,

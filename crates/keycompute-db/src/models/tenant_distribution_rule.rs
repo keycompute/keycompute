@@ -1,7 +1,7 @@
 use crate::DbError;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -49,7 +49,7 @@ pub struct UpdateDistributionRuleRequest {
 impl TenantDistributionRule {
     /// 创建新分销规则
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateDistributionRuleRequest,
     ) -> Result<TenantDistributionRule, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -83,7 +83,7 @@ impl TenantDistributionRule {
 
     /// 根据 ID 查找规则
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<TenantDistributionRule>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -100,7 +100,7 @@ impl TenantDistributionRule {
 
     /// 查找租户的所有有效规则
     pub async fn find_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<TenantDistributionRule>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -124,7 +124,7 @@ impl TenantDistributionRule {
 
     /// 查找租户的所有规则（包括已禁用）
     pub async fn find_all_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<TenantDistributionRule>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -142,7 +142,7 @@ impl TenantDistributionRule {
     /// 更新规则
     pub async fn update(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &UpdateDistributionRuleRequest,
     ) -> Result<TenantDistributionRule, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -178,7 +178,7 @@ impl TenantDistributionRule {
     }
 
     /// 删除规则
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM tenant_distribution_rules WHERE id = $1",

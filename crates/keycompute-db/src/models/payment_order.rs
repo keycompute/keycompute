@@ -3,7 +3,7 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -153,7 +153,7 @@ fn default_expire_minutes() -> i32 {
 impl PaymentOrder {
     /// 创建新订单
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreatePaymentOrderRequest,
         out_trade_no: &str,
         pay_url: &str,
@@ -194,7 +194,7 @@ impl PaymentOrder {
 
     /// 根据ID查找订单
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<PaymentOrder>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -208,7 +208,7 @@ impl PaymentOrder {
 
     /// 根据商户订单号查找订单
     pub async fn find_by_out_trade_no(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         out_trade_no: &str,
     ) -> Result<Option<PaymentOrder>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -222,7 +222,7 @@ impl PaymentOrder {
 
     /// 根据支付宝交易号查找订单
     pub async fn find_by_trade_no(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         trade_no: &str,
     ) -> Result<Option<PaymentOrder>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -236,7 +236,7 @@ impl PaymentOrder {
 
     /// 查找用户的订单列表
     pub async fn find_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
         limit: i64,
         offset: i64,
@@ -256,7 +256,7 @@ impl PaymentOrder {
         note = "此方法没有并发保护，请使用 PaymentService 中的 handle_notify 或 sync_order_status"
     )]
     pub async fn mark_as_paid(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
         trade_no: &str,
         notify_data: &serde_json::Value,
@@ -280,7 +280,7 @@ impl PaymentOrder {
 
     /// 更新订单为支付失败
     pub async fn mark_as_failed(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<PaymentOrder, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -306,7 +306,7 @@ impl PaymentOrder {
     }
 
     /// 关闭订单
-    pub async fn close(db: &DatabaseConnection, id: Uuid) -> Result<PaymentOrder, DbError> {
+    pub async fn close(db: &impl ConnectionTrait, id: Uuid) -> Result<PaymentOrder, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"UPDATE payment_orders SET status = $1, closed_at = NOW(), updated_at = NOW() WHERE id = $2 AND status = $3 RETURNING *"#,
@@ -333,7 +333,7 @@ impl PaymentOrder {
     }
 
     /// 关闭过期订单
-    pub async fn close_expired_orders(db: &DatabaseConnection) -> Result<u64, DbError> {
+    pub async fn close_expired_orders(db: &impl ConnectionTrait) -> Result<u64, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"UPDATE payment_orders SET status = $1, closed_at = NOW(), updated_at = NOW() WHERE status = $2 AND expired_at < NOW()"#,
@@ -361,7 +361,7 @@ pub struct PaymentOrderStats {
 impl PaymentOrder {
     /// 获取用户订单统计
     pub async fn get_user_stats(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<PaymentOrderStats, DbError> {
         let stmt = Statement::from_sql_and_values(

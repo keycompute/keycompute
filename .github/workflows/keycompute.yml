@@ -1,0 +1,331 @@
+# KeyCompute CI
+#
+# Continuous integration for the KeyCompute project.
+# Features:
+# - PostgreSQL streaming replication for DbRouter read-write separation testing
+# - Redis-backed rate limiting and runtime tests
+# - WASM cross-compilation checks for client-api and web frontend
+#
+# Reference:
+#   webshelf CI — https://github.com/aiqubits/webshelf/blob/main/.github/workflows/webshelf.yml
+
+name: keycompute-ci
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "**.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/keycompute.yml"
+      - "config.example.toml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "**.rs"
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - ".github/workflows/keycompute.yml"
+      - "config.example.toml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+  # ── Database ──────────────────────────────────────────────────────────────
+  DATABASE_URL: postgres://postgres:devpassword@127.0.0.1:5432/keycompute
+  KC__DATABASE__URL: postgres://postgres:devpassword@127.0.0.1:5432/keycompute
+
+  # ── Redis (CI runs without password auth) ─────────────────────────────────
+  KC__REDIS__URL: redis://127.0.0.1:6379
+  REDIS_URL: redis://127.0.0.1:6379
+
+  # ── Auth ──────────────────────────────────────────────────────────────────
+  KC__AUTH__JWT_SECRET: ci-test-jwt-secret-key-at-least-32-chars-long
+  KC__AUTH__JWT_ISSUER: keycompute-ci
+
+  # ── Crypto ────────────────────────────────────────────────────────────────
+  KC__CRYPTO__SECRET_KEY: LXmXUgcaoZePsWayXJN2E5Wa9/zpkl/vOTwnLNy/oLc=
+
+  # ── Email (required by config validation) ─────────────────────────────────
+  KC__EMAIL__SMTP_HOST: localhost
+  KC__EMAIL__SMTP_USERNAME: ci@test.local
+  KC__EMAIL__SMTP_PASSWORD: ci-test-password
+  KC__EMAIL__FROM_ADDRESS: ci@test.local
+
+  # ── Application URL ───────────────────────────────────────────────────────
+  APP_BASE_URL: http://127.0.0.1
+
+jobs:
+  # ============================================================================
+  # Backend — Server & Integration Tests
+  # ============================================================================
+  server:
+    runs-on: ubuntu-latest
+
+    services:
+      # Primary PostgreSQL (configured for streaming replication in setup step)
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: keycompute
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      # CI Redis runs without password auth — all CI tests must use
+      # a non-auth connection URL (redis://127.0.0.1:6379).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "server"
+
+      # ── Step: Setup Configuration ──────────────────────────────────────────
+      - name: Setup Configuration
+        run: |
+          set -euo pipefail
+
+          # Copy example config as base
+          cp config.example.toml config.toml
+
+          # Ensure database_read_urls is empty to avoid conflict with
+          # the indexed env vars (KC__DATABASE_READ_URLS__0 / __1)
+          # that will be set during the streaming replication step below.
+          sed -i '/^database_read_urls/d' config.toml
+
+      # ── Step: PostgreSQL Streaming Replication Setup ──────────────────────
+      # This step configures the primary (postgres service) for streaming
+      # replication, then creates two standby replicas via pg_basebackup.
+      # The replicas have the FULL data (same tables as primary) and are
+      # kept in sync via WAL streaming.
+      - name: Setup PostgreSQL Streaming Replication
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== Step 1: Configure primary for streaming replication ==="
+          PRIMARY=$(docker ps --filter "ancestor=postgres:16-alpine" --format "{{.Names}}" | head -1)
+          echo "Primary container: $PRIMARY"
+
+          docker exec "$PRIMARY" bash -c '
+            echo "wal_level = replica"              >> /var/lib/postgresql/data/postgresql.conf
+            echo "max_wal_senders = 10"             >> /var/lib/postgresql/data/postgresql.conf
+            echo "max_replication_slots = 10"       >> /var/lib/postgresql/data/postgresql.conf
+            echo "wal_keep_size = 512"              >> /var/lib/postgresql/data/postgresql.conf
+          '
+
+          docker exec "$PRIMARY" psql -U postgres -c \
+            "CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'devpassword';" 2>/dev/null || true
+
+          docker exec "$PRIMARY" bash -c \
+            'echo "host replication replicator all md5" >> /var/lib/postgresql/data/pg_hba.conf'
+
+          docker restart "$PRIMARY"
+
+          echo "=== Step 2: Wait for primary recovery ==="
+          for i in $(seq 1 30); do
+            if docker exec "$PRIMARY" pg_isready -U postgres 2>/dev/null; then
+              echo "Primary recovered after ${i}s"
+              break
+            fi
+            sleep 3
+          done
+
+          echo "=== Step 3: Create streaming replicas ==="
+          NETWORK=$(docker inspect "$PRIMARY" \
+            -f '{{range $net,$v := .NetworkSettings.Networks}}{{$net}}{{"\n"}}{{end}}' | head -1)
+          echo "Docker network: $NETWORK"
+
+          for REPLICA in pg-replica1 pg-replica2; do
+            REPLICA_PORT="$([ "$REPLICA" = pg-replica1 ] && echo 5433 || echo 5434)"
+            echo "Creating $REPLICA on port $REPLICA_PORT..."
+
+            docker volume create "${REPLICA}_data"
+
+            docker run --rm \
+              --network "$NETWORK" \
+              -v "${REPLICA}_data":/var/lib/postgresql/data \
+              -e PGPASSWORD=devpassword \
+              postgres:16-alpine \
+              pg_basebackup -h postgres -U replicator -D /var/lib/postgresql/data -Fp -Xs -v
+
+            docker run --rm \
+              -v "${REPLICA}_data":/var/lib/postgresql/data \
+              postgres:16-alpine \
+              bash -c "
+                touch /var/lib/postgresql/data/standby.signal
+                echo \"primary_conninfo = 'host=postgres port=5432 user=replicator password=devpassword'\" \
+                  >> /var/lib/postgresql/data/postgresql.auto.conf
+              "
+
+            docker run -d --name "$REPLICA" \
+              --network "$NETWORK" \
+              -p "$REPLICA_PORT":5432 \
+              -v "${REPLICA}_data":/var/lib/postgresql/data:rw \
+              postgres:16-alpine
+
+            echo "$REPLICA started"
+          done
+
+          echo "=== Step 4: Wait for streaming replication ==="
+          for i in $(seq 1 30); do
+            COUNT=$(docker exec "$PRIMARY" psql -U postgres -t -A \
+              -c "SELECT count(*) FROM pg_stat_replication WHERE state = 'streaming';" 2>/dev/null || echo "0")
+            if [ "$COUNT" -ge 2 ] 2>/dev/null; then
+              echo "Both replicas streaming after ${i}s"
+              break
+            fi
+            sleep 3
+          done
+
+          echo "=== Replication status ==="
+          docker exec "$PRIMARY" psql -U postgres -c \
+            "SELECT application_name, state, sync_state FROM pg_stat_replication;"
+
+          # Print replication lag for diagnostics
+          docker exec "$PRIMARY" psql -U postgres -c \
+            "SELECT application_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag FROM pg_stat_replication;"
+
+          echo "=== Step 5: Set env vars for DbRouter ==="
+          # config-rs 0.14 maps indexed env vars (__0 / __1) to Vec<String> elements
+          echo "KC__DATABASE_READ_URLS__0=postgres://postgres:devpassword@127.0.0.1:5433/keycompute" >> "$GITHUB_ENV"
+          echo "KC__DATABASE_READ_URLS__1=postgres://postgres:devpassword@127.0.0.1:5434/keycompute" >> "$GITHUB_ENV"
+
+          echo "=== Streaming replication setup complete ==="
+          echo "Primary : postgres://postgres:devpassword@127.0.0.1:5432/keycompute"
+          echo "Replica1: postgres://postgres:devpassword@127.0.0.1:5433/keycompute"
+          echo "Replica2: postgres://postgres:devpassword@127.0.0.1:5434/keycompute"
+
+          # Create root role if it doesn't exist (avoids FATAL role-not-found errors)
+          docker exec "$PRIMARY" psql -U postgres -c \
+            "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='root') THEN CREATE ROLE root WITH LOGIN; END IF; END \$\$;"
+
+      # ── Step: Format Check (whole workspace, once) ────────────────────────
+      - name: Format Check
+        run: cargo fmt --check
+
+      # ── Step: Lint (Clippy) ────────────────────────────────────────────────
+      # Exclude WASM/mobile targets that need special toolchains.
+      # packages/ui builds fine on native and is included.
+      - name: Lint (Clippy)
+        run: cargo clippy --workspace --exclude packages/web --exclude packages/desktop --exclude packages/mobile -- -D warnings
+
+      # ── Step: Build Server (with redis feature) ────────────────────────────
+      - name: Build Server
+        run: cargo build --package keycompute-server --features redis --verbose
+
+      # ── Step: Run Server Unit Tests (with redis feature) ───────────────────
+      - name: Run Server Unit Tests
+        run: cargo test --package keycompute-server --features redis --verbose
+
+      # ── Step: Run Other Workspace Unit Tests ───────────────────────────────
+      # These crates don't have a "redis" feature, so run without it.
+      # Exclude WASM/mobile/DB-dependent integration tests.
+      - name: Run Other Unit Tests
+        run: cargo test --workspace --exclude packages/web --exclude packages/desktop --exclude packages/mobile --exclude keycompute-server --exclude integration-tests --verbose
+
+      # ── Step: Run Integration Tests ─────────────────────────────────────────
+      # Integration-tests already has features=["redis"] hardcoded in its deps.
+      # These tests exercise the full data pipeline across all crates and verify
+      # the DbRouter read-write separation against streaming replicas.
+      - name: Run Integration Tests
+        run: cargo test --package integration-tests --verbose
+
+      # ── Step: Cleanup Docker volumes ─────────────────────────────────────────
+      # Prevent volume accumulation on self-hosted runners.
+      - name: Cleanup Docker volumes
+        if: always()
+        run: |
+          docker volume rm pg-replica1_data pg-replica2_data 2>/dev/null || true
+
+  # ============================================================================
+  # Client API Library
+  # ============================================================================
+  client-api:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "client-api"
+
+      # Format checking already done once in the server job across the full
+      # workspace. No need to repeat here.
+
+      - name: Lint (Clippy)
+        run: cargo clippy --package client-api --all-targets -- -D warnings
+
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Check WASM (Clippy)
+        run: cargo clippy --package client-api --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Check WASM compilation
+        run: cargo check --package client-api --target wasm32-unknown-unknown
+
+      - name: Build Client API
+        run: cargo build --package client-api --verbose
+
+      - name: Run Client API Tests
+        run: cargo test --package client-api --verbose
+
+  # ============================================================================
+  # Web — Dioxus WASM Frontend
+  # ============================================================================
+  web:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "web"
+
+      - name: Install wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install cargo-binstall
+        uses: cargo-bins/cargo-binstall@main
+
+      - name: Install dioxus-cli
+        run: cargo binstall dioxus-cli --version 0.7.9 -y --force
+
+      - name: Verify dx installation
+        run: |
+          echo "Cargo bin directory: $HOME/.cargo/bin"
+          ls -la $HOME/.cargo/bin/ | grep dx || echo "dx not found in cargo/bin"
+          which dx || echo "dx not in PATH"
+          if [ -f "$HOME/.cargo/bin/dx" ]; then
+            echo "dx found at: $HOME/.cargo/bin/dx"
+            $HOME/.cargo/bin/dx --version
+          else
+            echo "ERROR: dx binary not found, installing via cargo install as fallback"
+            cargo install dioxus-cli --version 0.7.9
+          fi
+
+      - name: Build Web WASM
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cargo build --release -p web --target wasm32-unknown-unknown

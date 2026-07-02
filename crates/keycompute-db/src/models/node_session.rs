@@ -4,7 +4,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -33,7 +33,7 @@ pub struct CreateNodeSessionRequest {
 impl NodeSession {
     /// 创建新会话
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateNodeSessionRequest,
     ) -> Result<NodeSession, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -60,7 +60,7 @@ impl NodeSession {
 
     /// 根据 token hash 查询会话
     pub async fn find_by_token_hash(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         session_token_hash: &str,
     ) -> Result<Option<NodeSession>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -90,7 +90,7 @@ impl NodeSession {
 
     /// 更新会话的最后看到时间和过期时间
     pub async fn update_seen_and_expiry(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
         expires_at: DateTime<Utc>,
     ) -> Result<NodeSession, DbError> {
@@ -109,7 +109,7 @@ impl NodeSession {
 
     /// 更新接受的模型列表
     pub async fn update_accepted_models(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
         accepted_models_json: &serde_json::Value,
     ) -> Result<NodeSession, DbError> {
@@ -127,7 +127,7 @@ impl NodeSession {
     }
 
     /// 撤销会话
-    pub async fn revoke(db: &DatabaseConnection, id: Uuid) -> Result<NodeSession, DbError> {
+    pub async fn revoke(db: &impl ConnectionTrait, id: Uuid) -> Result<NodeSession, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE node_sessions SET revoked_at = NOW() WHERE id = $1 RETURNING *",

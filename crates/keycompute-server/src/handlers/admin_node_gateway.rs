@@ -74,7 +74,7 @@ pub async fn get_node_gateway_overview(
 ) -> Result<Json<NodeGatewayOverviewResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let stmt = Statement::from_sql_and_values(
@@ -90,7 +90,7 @@ pub async fn get_node_gateway_overview(
         [],
     );
     let node_stats = NodeGatewayNodeStats::find_by_statement(stmt)
-        .one(pool.as_ref())
+        .one(pool)
         .await?
         .ok_or_else(|| ApiError::Internal("Failed to load node stats: no data".to_string()))?;
 
@@ -109,7 +109,7 @@ pub async fn get_node_gateway_overview(
         [],
     );
     let task_stats = NodeGatewayTaskStats::find_by_statement(stmt)
-        .one(pool.as_ref())
+        .one(pool)
         .await?
         .ok_or_else(|| ApiError::Internal("Failed to load task stats: no data".to_string()))?;
 
@@ -148,7 +148,7 @@ pub async fn get_node_gateway_overview(
         [],
     );
     let nodes = NodeGatewayNodeInfo::find_by_statement(stmt)
-        .all(pool.as_ref())
+        .all(pool)
         .await?;
 
     let stmt = Statement::from_sql_and_values(
@@ -171,7 +171,7 @@ pub async fn get_node_gateway_overview(
         [],
     );
     let recent_tasks = NodeGatewayTaskInfo::find_by_statement(stmt)
-        .all(pool.as_ref())
+        .all(pool)
         .await?;
 
     Ok(Json(NodeGatewayOverviewResponse {
@@ -226,7 +226,7 @@ pub async fn recover_node(
                 token_status = %token_status,
                 "Recovering node: found associated token, attempting restore"
             );
-            match keycompute_db::models::user_node_gateway_token::UserNodeGatewayToken::restore_from_revoked(&pool, token_id).await
+            match keycompute_db::models::user_node_gateway_token::UserNodeGatewayToken::restore_from_revoked(pool.as_ref(), token_id).await
             {
                 Ok(true) => {
                     tracing::info!(
@@ -297,7 +297,7 @@ pub async fn exclude_node(
 ) -> Result<Json<ExcludeNodeResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let node = keycompute_db::models::node::Node::update_status(pool, node_id, "excluded")
@@ -333,7 +333,7 @@ pub async fn revoke_node_token(
 ) -> Result<Json<RevokeNodeTokenResponse>> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 校验原因不能为空
@@ -351,7 +351,7 @@ pub async fn revoke_node_token(
 
     // 2. 查找关联 token 并吊销
     let token = keycompute_db::models::user_node_gateway_token::UserNodeGatewayToken::find_by_consumed_node_id(
-        &**pool, node_id,
+        pool, node_id,
     )
     .await
     .map_err(|e| ApiError::Internal(format!("Failed to find token: {}", e)))?;
@@ -395,7 +395,7 @@ pub async fn delete_node(
 ) -> Result<(StatusCode, Json<DeleteNodeResponse>)> {
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 使用事务确保原子性

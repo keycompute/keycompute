@@ -5,12 +5,13 @@
 use crate::password::{EmailValidator, PasswordHasher, PasswordValidator};
 use chrono::{Duration, Utc};
 use keycompute_db::{
-    CreatePasswordResetRequest, PasswordReset, UpdateUserCredentialRequest, User, UserCredential,
+    CreatePasswordResetRequest, DbRouter, PasswordReset, UpdateUserCredentialRequest, User,
+    UserCredential,
 };
 use keycompute_emailserver::EmailService;
 use keycompute_types::{KeyComputeError, Result};
 use rand::Rng;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -41,7 +42,7 @@ pub struct RequestPasswordResetRequest {
 #[derive(Clone)]
 pub struct PasswordResetService {
     /// 数据库连接池
-    pool: Arc<DatabaseConnection>,
+    pool: Arc<DbRouter>,
     /// 密码哈希器
     password_hasher: PasswordHasher,
     /// 密码验证器
@@ -64,7 +65,7 @@ impl std::fmt::Debug for PasswordResetService {
 
 impl PasswordResetService {
     /// 创建新的密码重置服务
-    pub fn new(pool: Arc<DatabaseConnection>) -> Self {
+    pub fn new(pool: Arc<DbRouter>) -> Self {
         Self {
             pool,
             password_hasher: PasswordHasher::new(),
@@ -116,7 +117,7 @@ impl PasswordResetService {
         }
 
         // 2. 查找用户
-        let user = match User::find_by_email(&self.pool, &email).await {
+        let user = match User::find_by_email(self.pool.as_ref(), &email).await {
             Ok(Some(user)) => user,
             Ok(None) => {
                 // 用户不存在时返回成功但不发送邮件
@@ -154,7 +155,7 @@ impl PasswordResetService {
 
         // 4. 保存令牌
         let reset = PasswordReset::create(
-            &self.pool,
+            self.pool.as_ref(),
             &CreatePasswordResetRequest {
                 user_id: user.id,
                 token: token.clone(),
@@ -179,12 +180,15 @@ impl PasswordResetService {
                 "Failed to send password reset email"
             );
 
-            reset.delete(&self.pool).await.map_err(|delete_err| {
-                KeyComputeError::DatabaseError(format!(
-                    "Failed to cleanup password reset after email send failure: {}",
-                    delete_err
-                ))
-            })?;
+            reset
+                .delete(self.pool.as_ref())
+                .await
+                .map_err(|delete_err| {
+                    KeyComputeError::DatabaseError(format!(
+                        "Failed to cleanup password reset after email send failure: {}",
+                        delete_err
+                    ))
+                })?;
 
             return Err(KeyComputeError::ServiceUnavailable(
                 "发送重置邮件失败，请稍后重试".to_string(),
@@ -216,7 +220,7 @@ impl PasswordResetService {
         self.password_validator.validate(&req.new_password)?;
 
         // 2. 查找重置令牌
-        let reset = PasswordReset::find_by_token(&self.pool, &req.token)
+        let reset = PasswordReset::find_by_token(self.pool.as_ref(), &req.token)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find reset token: {}", e))
@@ -237,7 +241,7 @@ impl PasswordResetService {
         let new_hash = self.password_hasher.hash(&req.new_password)?;
 
         // 5. 更新密码
-        let credential = UserCredential::find_by_user_id(&self.pool, reset.user_id)
+        let credential = UserCredential::find_by_user_id(self.pool.as_ref(), reset.user_id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find credential: {}", e))
@@ -246,7 +250,7 @@ impl PasswordResetService {
 
         credential
             .update(
-                &self.pool,
+                self.pool.as_ref(),
                 &UpdateUserCredentialRequest {
                     password_hash: Some(new_hash),
                     failed_login_attempts: Some(0),
@@ -260,12 +264,12 @@ impl PasswordResetService {
             })?;
 
         // 6. 标记令牌已使用
-        reset.mark_used(&self.pool).await.map_err(|e| {
+        reset.mark_used(self.pool.as_ref()).await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to mark reset token as used: {}", e))
         })?;
 
         // 7. 清除该用户的其他重置令牌
-        PasswordReset::delete_all_by_user(&self.pool, reset.user_id)
+        PasswordReset::delete_all_by_user(self.pool.as_ref(), reset.user_id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to cleanup reset tokens: {}", e))
@@ -283,7 +287,7 @@ impl PasswordResetService {
     ///
     /// 检查令牌是否有效，用于前端验证
     pub async fn validate_token(&self, token: &str) -> Result<bool> {
-        let reset = PasswordReset::find_by_token(&self.pool, token)
+        let reset = PasswordReset::find_by_token(self.pool.as_ref(), token)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find reset token: {}", e))

@@ -5,34 +5,35 @@
 use crate::config::NodeGatewayAppConfig;
 use chrono::Utc;
 use keycompute_db::DbError;
+use keycompute_db::DbRouter;
 use keycompute_db::models::{
     node::*, node_session::*, node_task::*, node_task_submission::*, user_node_gateway_token::*,
 };
 use keycompute_types::node::*;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
-    Statement, TransactionTrait,
+    ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
 };
 use serde_json;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Node Gateway Store
 #[derive(Clone)]
 pub struct NodeGatewayStore {
-    pool: DatabaseConnection,
+    pool: Arc<DbRouter>,
     config: NodeGatewayAppConfig,
 }
 
 impl NodeGatewayStore {
     /// 创建新的 Store 实例
-    pub fn new(pool: DatabaseConnection, config: NodeGatewayAppConfig) -> Self {
+    pub fn new(pool: Arc<DbRouter>, config: NodeGatewayAppConfig) -> Self {
         Self { pool, config }
     }
 
     /// 获取 pool 引用
-    pub fn pool(&self) -> &DatabaseConnection {
-        &self.pool
+    pub fn pool(&self) -> &DbRouter {
+        self.pool.as_ref()
     }
 
     /// 计算 request_hash (canonical JSON hash)
@@ -263,7 +264,7 @@ impl NodeGatewayStore {
     ) -> Result<(Node, NodeSession), DbError> {
         let token_hash = UserNodeGatewayToken::hash_token(session_token);
 
-        let session = NodeSession::find_by_token_hash(&self.pool, &token_hash).await?;
+        let session = NodeSession::find_by_token_hash(self.pool.as_ref(), &token_hash).await?;
 
         match session {
             Some(s) => {
@@ -272,7 +273,7 @@ impl NodeGatewayStore {
                     return Err(DbError::Other("Session revoked".to_string()));
                 }
 
-                let node = Node::find_by_id(&self.pool, s.node_id)
+                let node = Node::find_by_id(self.pool.as_ref(), s.node_id)
                     .await?
                     .ok_or_else(|| DbError::not_found("Node", s.node_id.to_string()))?;
 
@@ -297,7 +298,7 @@ impl NodeGatewayStore {
             "#,
             [node_id.into()],
         ))
-        .one(&self.pool)
+        .one(self.pool.as_ref())
         .await?
         .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))
     }
@@ -417,20 +418,27 @@ impl NodeGatewayStore {
             .await?;
         }
 
+        // 提交前确定最终节点状态——避免事务提交后通过读库查询可能因复制延迟读到过期数据
+        let (final_status, final_failure_count) = if node.is_excluded() {
+            // excluded 分支：不改变节点状态和失败计数
+            (node.status.clone(), node.consecutive_failure_count)
+        } else {
+            // 非 excluded 分支：节点状态被设为 online（覆盖原值），失败计数不变
+            (
+                NODE_STATUS_ONLINE.to_string(),
+                node.consecutive_failure_count,
+            )
+        };
+
         // 提交事务
         tx.commit().await?;
-
-        // 查询最新节点状态用于返回
-        let updated_node = Node::find_by_id(&self.pool, node_id)
-            .await?
-            .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
 
         Ok(NodeHeartbeatResponse {
             protocol_version: "node.v1".to_string(),
             accepted: true,
-            node_status: updated_node.status,
-            server_failure_count: updated_node.consecutive_failure_count as u32,
-            failure_threshold: updated_node.failure_threshold as u32,
+            node_status: final_status,
+            server_failure_count: final_failure_count as u32,
+            failure_threshold: node.failure_threshold as u32,
         })
     }
 
@@ -455,7 +463,7 @@ impl NodeGatewayStore {
             complete_grace_until,
         };
 
-        let task = NodeTask::create(&self.pool, &create_req).await?;
+        let task = NodeTask::create(self.pool.as_ref(), &create_req).await?;
 
         // 注意：Redis 推送由上层调用方负责
         Ok(task)
@@ -470,7 +478,8 @@ impl NodeGatewayStore {
     ) -> Result<Option<(NodeTask, NodeTaskEnvelope)>, DbError> {
         let lease_id = Uuid::new_v4();
 
-        let task = NodeTask::claim(&self.pool, task_id, node_id, session_id, lease_id).await?;
+        let task =
+            NodeTask::claim(self.pool.as_ref(), task_id, node_id, session_id, lease_id).await?;
 
         match task {
             Some(t) => {

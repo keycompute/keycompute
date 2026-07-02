@@ -5,11 +5,7 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    TransactionTrait,
-    {
-        ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
-        Statement,
-    },
+    TransactionTrait, {ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -217,7 +213,7 @@ impl SystemSetting {
 
     /// 根据键名查找设置
     pub async fn find_by_key(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         key: &str,
     ) -> Result<Option<SystemSetting>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -231,7 +227,7 @@ impl SystemSetting {
     }
 
     /// 获取所有设置
-    pub async fn find_all(db: &DatabaseConnection) -> Result<Vec<SystemSetting>, DbError> {
+    pub async fn find_all(db: &impl ConnectionTrait) -> Result<Vec<SystemSetting>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             "SELECT * FROM system_settings ORDER BY key ASC".to_string(),
@@ -243,7 +239,7 @@ impl SystemSetting {
 
     /// 获取所有非敏感设置
     pub async fn find_non_sensitive(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
     ) -> Result<Vec<SystemSetting>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
@@ -256,7 +252,7 @@ impl SystemSetting {
 
     /// 更新设置值（如果不存在则创建）
     pub async fn update_value(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         key: &str,
         value: &str,
     ) -> Result<SystemSetting, DbError> {
@@ -284,7 +280,7 @@ impl SystemSetting {
     ///
     /// 所有更新在同一事务中执行，保证原子性
     pub async fn batch_update(
-        db: &DatabaseConnection,
+        db: &(impl ConnectionTrait + TransactionTrait),
         settings: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<SystemSetting>, DbError> {
         let txn = db.begin().await?;
@@ -329,7 +325,7 @@ impl SystemSetting {
     /// 初始化默认设置
     ///
     /// 如果设置不存在，则使用默认值创建
-    pub async fn init_default_settings(db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn init_default_settings(db: &impl ConnectionTrait) -> Result<(), DbError> {
         let defaults = vec![
             (setting_keys::SITE_NAME, "KeyCompute", "string"),
             (setting_keys::SITE_DESCRIPTION, "AI 模型聚合平台", "string"),
@@ -380,7 +376,7 @@ impl SystemSetting {
     }
 
     /// 获取设置的字符串值，不存在则返回默认值
-    pub async fn get_string(db: &DatabaseConnection, key: &str, default: &str) -> String {
+    pub async fn get_string(db: &impl ConnectionTrait, key: &str, default: &str) -> String {
         match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.value,
             _ => default.to_string(),
@@ -388,7 +384,7 @@ impl SystemSetting {
     }
 
     /// 获取设置的布尔值，不存在则返回默认值
-    pub async fn get_bool(db: &DatabaseConnection, key: &str, default: bool) -> bool {
+    pub async fn get_bool(db: &impl ConnectionTrait, key: &str, default: bool) -> bool {
         match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.parse_bool(),
             _ => default,
@@ -396,7 +392,7 @@ impl SystemSetting {
     }
 
     /// 获取设置的整数值，不存在则返回默认值
-    pub async fn get_int(db: &DatabaseConnection, key: &str, default: i32) -> i32 {
+    pub async fn get_int(db: &impl ConnectionTrait, key: &str, default: i32) -> i32 {
         match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.parse_int().unwrap_or(default),
             _ => default,
@@ -404,7 +400,7 @@ impl SystemSetting {
     }
 
     /// 获取设置的浮点数值，不存在则返回默认值
-    pub async fn get_decimal(db: &DatabaseConnection, key: &str, default: f64) -> f64 {
+    pub async fn get_decimal(db: &impl ConnectionTrait, key: &str, default: f64) -> f64 {
         match Self::find_by_key(db, key).await {
             Ok(Some(setting)) => setting.parse_decimal().unwrap_or(default),
             _ => default,
@@ -412,7 +408,7 @@ impl SystemSetting {
     }
 
     /// 获取公开设置
-    pub async fn get_public_settings(db: &DatabaseConnection) -> PublicSettings {
+    pub async fn get_public_settings(db: &impl ConnectionTrait) -> PublicSettings {
         let settings = Self::find_non_sensitive(db).await.unwrap_or_default();
 
         let get_value = |key: &str| -> Option<String> {

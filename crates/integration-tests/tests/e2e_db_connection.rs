@@ -65,7 +65,7 @@ mod tests {
         // 直接使用 sea_orm ConnectOptions 创建连接池
         use sea_orm::ConnectOptions;
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://postgres:password@localhost:5432/keycompute".to_string()
+            "postgres://keycompute:change-me-strong-password@localhost:5432/keycompute".to_string()
         });
         let mut opt = ConnectOptions::new(&database_url);
         opt.max_connections(5);

@@ -11,14 +11,13 @@
 use crate::password::{EmailValidator, PasswordHasher, PasswordValidator};
 use chrono::{Duration, Utc};
 use keycompute_db::{
-    PendingRegistration, Tenant, UpsertPendingRegistrationRequest, User, UserCredential,
+    DbRouter, PendingRegistration, Tenant, UpsertPendingRegistrationRequest, User, UserCredential,
 };
 use keycompute_emailserver::EmailService;
 use keycompute_types::{KeyComputeError, Result, UserRole};
 use rand::Rng;
 use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
-    Statement, TransactionTrait,
+    ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -74,7 +73,7 @@ pub struct CompleteRegistrationResponse {
 #[derive(Clone)]
 pub struct RegistrationService {
     /// 数据库连接池
-    pool: Arc<DatabaseConnection>,
+    pool: Arc<DbRouter>,
     /// 密码哈希器
     password_hasher: PasswordHasher,
     /// 密码验证器
@@ -112,7 +111,7 @@ impl std::fmt::Debug for RegistrationService {
 
 impl RegistrationService {
     /// 创建新的注册服务
-    pub fn new(pool: Arc<DatabaseConnection>) -> Self {
+    pub fn new(pool: Arc<DbRouter>) -> Self {
         Self {
             pool,
             password_hasher: PasswordHasher::new(),
@@ -635,7 +634,7 @@ impl RegistrationService {
         let referrer_id = Uuid::parse_str(referral_code)
             .map_err(|_| KeyComputeError::ValidationError("推荐码无效".to_string()))?;
 
-        let referrer = User::find_by_id(&self.pool, referrer_id)
+        let referrer = User::find_by_id(self.pool.as_ref(), referrer_id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to validate referral code: {}", e))
@@ -652,11 +651,11 @@ impl RegistrationService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sea_orm::DatabaseConnection;
 
     #[tokio::test]
     async fn test_generate_registration_code() {
-        let pool = DatabaseConnection::Disconnected;
-        let service = RegistrationService::new(Arc::new(pool));
+        let service = RegistrationService::new(DbRouter::single(DatabaseConnection::Disconnected));
         let code = service.generate_registration_code();
 
         assert_eq!(code.len(), 6);
@@ -665,8 +664,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_registration_code() {
-        let pool = DatabaseConnection::Disconnected;
-        let service = RegistrationService::new(Arc::new(pool));
+        let service = RegistrationService::new(DbRouter::single(DatabaseConnection::Disconnected));
 
         assert!(service.validate_registration_code("123456").is_ok());
         assert!(service.validate_registration_code("12345").is_err());

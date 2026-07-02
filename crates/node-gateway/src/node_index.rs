@@ -3,18 +3,19 @@
 //! 基于 PostgreSQL 实现 NodeCapabilityIndex trait，用于路由决策时检查是否存在 ready 节点。
 
 use async_trait::async_trait;
+use keycompute_db::DbRouter;
 use keycompute_routing::NodeCapabilityIndex;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use std::sync::Arc;
 
 /// 基于 PostgreSQL 的 Node 能力索引
 pub struct PostgresNodeIndex {
-    pool: Arc<DatabaseConnection>,
+    pool: Arc<DbRouter>,
 }
 
 impl PostgresNodeIndex {
     /// 创建新的 PostgresNodeIndex 实例
-    pub fn new(pool: Arc<DatabaseConnection>) -> Self {
+    pub fn new(pool: Arc<DbRouter>) -> Self {
         Self { pool }
     }
 }

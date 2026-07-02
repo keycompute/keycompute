@@ -1,7 +1,7 @@
 use crate::DbError;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -75,7 +75,7 @@ pub struct UserUsageStats {
 impl UsageLog {
     /// 创建用量日志
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateUsageLogRequest,
     ) -> Result<UsageLog, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -125,7 +125,7 @@ impl UsageLog {
 
     /// 根据 ID 查找用量日志
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<UsageLog>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -140,7 +140,7 @@ impl UsageLog {
 
     /// 根据请求 ID 查找用量日志
     pub async fn find_by_request_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         request_id: Uuid,
     ) -> Result<Option<UsageLog>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -155,7 +155,7 @@ impl UsageLog {
 
     /// 查找租户的用量日志
     pub async fn find_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
         limit: i64,
         offset: i64,
@@ -171,7 +171,10 @@ impl UsageLog {
     }
 
     /// 获取租户的用量日志总数
-    pub async fn count_by_tenant(db: &DatabaseConnection, tenant_id: Uuid) -> Result<i64, DbError> {
+    pub async fn count_by_tenant(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+    ) -> Result<i64, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT COUNT(*) FROM usage_logs WHERE tenant_id = $1",
@@ -187,7 +190,7 @@ impl UsageLog {
 
     /// 查找用户的用量日志
     pub async fn find_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
         limit: i64,
         offset: i64,
@@ -204,7 +207,7 @@ impl UsageLog {
 
     /// 获取租户用量统计
     pub async fn get_stats_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
@@ -235,7 +238,7 @@ impl UsageLog {
 
     /// 获取用户用量统计
     pub async fn get_stats_by_user(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
@@ -266,7 +269,7 @@ impl UsageLog {
 
     /// 获取用户全部用量统计（不限时间范围）
     pub async fn get_user_stats(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         user_id: Uuid,
     ) -> Result<UserUsageStats, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -293,7 +296,7 @@ impl UsageLog {
 
     /// 获取租户按模型分组的统计
     pub async fn get_stats_by_tenant_grouped_by_model(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
         from: DateTime<Utc>,
         to: DateTime<Utc>,

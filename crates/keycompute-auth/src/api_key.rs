@@ -2,9 +2,9 @@
 //!
 //! 处理 Produce AI Key（用户访问系统的 API Key）的验证和解析。
 
-use keycompute_db::{ProduceAiKey, User};
+use keycompute_db::{DbRouter, ProduceAiKey, User};
 use keycompute_types::{KeyComputeError, Result};
-use sea_orm::DatabaseConnection;
+use sea_orm::ConnectionTrait;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -16,7 +16,7 @@ use crate::permission::{AuthType, build_permissions};
 #[derive(Clone)]
 pub struct ProduceAiKeyValidator {
     /// 数据库连接池（可选）
-    pool: Option<Arc<DatabaseConnection>>,
+    pool: Option<Arc<DbRouter>>,
 }
 
 impl std::fmt::Debug for ProduceAiKeyValidator {
@@ -34,7 +34,7 @@ impl ProduceAiKeyValidator {
     }
 
     /// 创建带数据库连接的验证器
-    pub fn with_pool(pool: Arc<DatabaseConnection>) -> Self {
+    pub fn with_pool(pool: Arc<DbRouter>) -> Self {
         Self { pool: Some(pool) }
     }
 
@@ -60,7 +60,7 @@ impl ProduceAiKeyValidator {
 
         // 从数据库验证
         match &self.pool {
-            Some(pool) => self.validate_from_database(pool, &key_hash).await,
+            Some(pool) => self.validate_from_database(pool.as_ref(), &key_hash).await,
             None => {
                 // 无数据库连接时返回错误，不使用不安全的 fallback
                 tracing::error!(
@@ -106,7 +106,7 @@ impl ProduceAiKeyValidator {
     /// 从数据库验证 Produce AI Key
     async fn validate_from_database(
         &self,
-        pool: &DatabaseConnection,
+        pool: &impl ConnectionTrait,
         key_hash: &str,
     ) -> Result<AuthContext> {
         // 查询 Produce AI Key

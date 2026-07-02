@@ -182,7 +182,7 @@ pub async fn list_all_users(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 计算分页偏移量
@@ -288,7 +288,7 @@ pub async fn get_user_by_id(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let user = User::find_by_id(pool, user_id)
@@ -360,7 +360,7 @@ pub async fn update_user(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let user = User::find_by_id(pool, user_id)
@@ -406,7 +406,7 @@ pub async fn delete_user(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let user = User::find_by_id(pool, user_id)
@@ -457,7 +457,7 @@ async fn validate_balance_request(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 禁止非 system 角色修改 system 用户的余额
@@ -630,7 +630,7 @@ pub async fn list_all_api_keys(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let keys = ProduceAiKey::find_by_user(pool, user_id)
@@ -683,7 +683,7 @@ pub async fn list_tenants(
 
     let pool = state
         .pool
-        .as_ref()
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let tenants = Tenant::find_all(pool)

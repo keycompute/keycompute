@@ -21,6 +21,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
 };
+use keycompute_db::DbRouter;
 use keycompute_db::models::{
     node_tip::{NodeTip, NodeTipSummary},
     node_tip_withdrawal::{
@@ -33,7 +34,7 @@ use keycompute_db::models::{
 };
 use keycompute_runtime::crypto::{self};
 use rust_decimal::Decimal;
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -740,10 +741,9 @@ pub async fn admin_get_tip_ratio(
 // 工具函数
 // ============================================================================
 
-fn get_pool(state: &AppState) -> Result<&DatabaseConnection> {
+fn get_pool(state: &AppState) -> Result<&DbRouter> {
     state
         .pool
-        .as_ref()
-        .map(|p| p.as_ref())
+        .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))
 }

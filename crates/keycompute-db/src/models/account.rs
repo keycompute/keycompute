@@ -1,6 +1,6 @@
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -60,7 +60,7 @@ pub struct UpdateAccountRequest {
 impl Account {
     /// 创建新账号
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateAccountRequest,
     ) -> Result<Account, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -97,7 +97,10 @@ impl Account {
     }
 
     /// 根据 ID 查找账号
-    pub async fn find_by_id(db: &DatabaseConnection, id: Uuid) -> Result<Option<Account>, DbError> {
+    pub async fn find_by_id(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Account>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM accounts WHERE id = $1",
@@ -110,7 +113,7 @@ impl Account {
 
     /// 查找租户的所有账号（仅本租户，管理面使用）
     pub async fn find_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -124,7 +127,7 @@ impl Account {
     }
 
     /// 查找所有账号（不限租户，Admin 管理面使用）
-    pub async fn find_all(db: &DatabaseConnection) -> Result<Vec<Account>, DbError> {
+    pub async fn find_all(db: &impl ConnectionTrait) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             "SELECT * FROM accounts ORDER BY priority DESC, created_at ASC".to_string(),
@@ -136,7 +139,7 @@ impl Account {
 
     /// 查找租户启用的账号（含本租户 + 全局可见）
     pub async fn find_enabled_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -150,7 +153,7 @@ impl Account {
     }
 
     /// 查找所有启用的账号（系统级，不限租户）
-    pub async fn find_enabled_all(db: &DatabaseConnection) -> Result<Vec<Account>, DbError> {
+    pub async fn find_enabled_all(db: &impl ConnectionTrait) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
             "SELECT * FROM accounts WHERE enabled = TRUE ORDER BY priority DESC".to_string(),
@@ -162,7 +165,7 @@ impl Account {
 
     /// 查找支持指定模型的账号（含本租户 + 全局可见）
     pub async fn find_by_model(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
         model: &str,
     ) -> Result<Vec<Account>, DbError> {
@@ -185,7 +188,7 @@ impl Account {
     /// 更新账号
     pub async fn update(
         &self,
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &UpdateAccountRequest,
     ) -> Result<Account, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -231,7 +234,7 @@ impl Account {
     }
 
     /// 删除账号
-    pub async fn delete(&self, db: &DatabaseConnection) -> Result<(), DbError> {
+    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM accounts WHERE id = $1",

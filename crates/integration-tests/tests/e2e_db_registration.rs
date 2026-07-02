@@ -9,7 +9,7 @@ use integration_tests::db::{
 use keycompute_auth::password::{
     PasswordHasher, RegistrationService, RequestRegistrationCodeRequest,
 };
-use keycompute_db::{PendingRegistration, UpsertPendingRegistrationRequest};
+use keycompute_db::{DbRouter, PendingRegistration, UpsertPendingRegistrationRequest};
 use keycompute_types::KeyComputeError;
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use std::sync::Arc;
@@ -30,7 +30,7 @@ mod tests {
             .expect("registration failure cleanup should succeed");
 
         let email = format!("registration-placeholder-{}@example.com", test_id);
-        let service = RegistrationService::new(Arc::new(pool.clone()));
+        let service = RegistrationService::new(DbRouter::single(pool.clone()));
 
         let err = service
             .request_registration_code(
@@ -99,7 +99,7 @@ mod tests {
         )
         .await;
 
-        let service = RegistrationService::new(Arc::new(pool.clone()));
+        let service = RegistrationService::new(DbRouter::single(pool.clone()));
         let err = service
             .request_registration_code(
                 &RequestRegistrationCodeRequest {
@@ -162,7 +162,7 @@ mod tests {
         )
         .await;
 
-        let service = RegistrationService::new(Arc::new(pool.clone()));
+        let service = RegistrationService::new(DbRouter::single(pool.clone()));
         let response = service
             .complete_registration(
                 &keycompute_auth::CompleteRegistrationRequest {
@@ -275,7 +275,7 @@ mod tests {
         )
         .await;
 
-        let service = RegistrationService::new(Arc::new(pool.clone()));
+        let service = RegistrationService::new(DbRouter::single(pool.clone()));
         let err = service
             .request_registration_code(
                 &RequestRegistrationCodeRequest {

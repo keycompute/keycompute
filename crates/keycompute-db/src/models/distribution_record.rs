@@ -2,11 +2,7 @@ use crate::DbError;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use sea_orm::{
-    TransactionTrait,
-    {
-        ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
-        Statement,
-    },
+    TransactionTrait, {ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement},
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -64,7 +60,7 @@ pub struct DistributionLevelStats {
 impl DistributionRecord {
     /// 创建分销记录
     pub async fn create(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         req: &CreateDistributionRecordRequest,
     ) -> Result<DistributionRecord, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -99,7 +95,7 @@ impl DistributionRecord {
     /// 所有记录在同一事务中创建，保证原子性。
     /// 如果记录已存在（基于唯一约束），则跳过插入。
     pub async fn create_many(
-        db: &DatabaseConnection,
+        db: &(impl ConnectionTrait + TransactionTrait),
         requests: &[CreateDistributionRecordRequest],
     ) -> Result<Vec<DistributionRecord>, DbError> {
         let txn = db.begin().await?;
@@ -195,7 +191,7 @@ impl DistributionRecord {
 
     /// 根据 ID 查找分销记录
     pub async fn find_by_id(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         id: Uuid,
     ) -> Result<Option<DistributionRecord>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -210,7 +206,7 @@ impl DistributionRecord {
 
     /// 查找用量日志的所有分销记录
     pub async fn find_by_usage_log(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         usage_log_id: Uuid,
     ) -> Result<Vec<DistributionRecord>, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -225,7 +221,7 @@ impl DistributionRecord {
 
     /// 查找租户的分销记录
     pub async fn find_by_tenant(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         tenant_id: Uuid,
         limit: i64,
         offset: i64,
@@ -242,7 +238,7 @@ impl DistributionRecord {
 
     /// 查找受益人的分销记录
     pub async fn find_by_beneficiary(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         beneficiary_id: Uuid,
         limit: i64,
         offset: i64,
@@ -258,7 +254,7 @@ impl DistributionRecord {
     }
 
     /// 结算分销记录
-    pub async fn settle(&self, db: &DatabaseConnection) -> Result<DistributionRecord, DbError> {
+    pub async fn settle(&self, db: &impl ConnectionTrait) -> Result<DistributionRecord, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE distribution_records SET status = 'settled', settled_at = NOW() WHERE id = $1 RETURNING *",
@@ -274,7 +270,7 @@ impl DistributionRecord {
 
     /// 获取受益人统计
     pub async fn get_stats_by_beneficiary(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         beneficiary_id: Uuid,
     ) -> Result<DistributionStats, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -300,7 +296,7 @@ impl DistributionRecord {
 
     /// 获取受益人按层级的统计
     pub async fn get_level_stats_by_beneficiary(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         beneficiary_id: Uuid,
     ) -> Result<DistributionLevelStats, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -326,7 +322,7 @@ impl DistributionRecord {
 
     /// 获取受益人在某个 usage_log 下的总收益（用于推荐人收益显示）
     pub async fn get_earnings_for_referral(
-        db: &DatabaseConnection,
+        db: &impl ConnectionTrait,
         beneficiary_id: Uuid,
         referred_user_id: Uuid,
     ) -> Result<BigDecimal, DbError> {

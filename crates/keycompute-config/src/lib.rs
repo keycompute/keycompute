@@ -25,7 +25,7 @@ pub mod server;
 pub use auth::AuthConfig;
 pub use auth::DEFAULT_JWT_SECRET;
 pub use crypto::CryptoConfig;
-pub use database::DatabaseConfig;
+pub use database::{DatabaseConfig, DatabaseReadConfig, DatabaseRoutingConfig};
 pub use distribution::DistributionConfig;
 pub use email::EmailConfig;
 pub use gateway::{GatewayConfig, ProxyConfig};
@@ -42,6 +42,15 @@ pub struct AppConfig {
     pub server: ServerConfig,
     /// 数据库配置
     pub database: DatabaseConfig,
+    /// 读库连接 URL 列表（空 = 无读写分离）
+    #[serde(default)]
+    pub database_read_urls: Vec<String>,
+    /// 读写分离路由配置
+    #[serde(default)]
+    pub database_routing: DatabaseRoutingConfig,
+    /// 读库连接池配置
+    #[serde(default)]
+    pub database_read: DatabaseReadConfig,
     /// Redis 配置（可选）
     pub redis: Option<RedisConfig>,
     /// 认证配置
@@ -64,6 +73,9 @@ impl Default for AppConfig {
             app_base_url: Some(Self::default_app_base_url()),
             server: ServerConfig::default(),
             database: DatabaseConfig::default(),
+            database_read_urls: Vec::new(),
+            database_routing: DatabaseRoutingConfig::default(),
+            database_read: DatabaseReadConfig::default(),
             redis: None,
             auth: AuthConfig::default(),
             gateway: GatewayConfig::default(),
@@ -348,6 +360,51 @@ impl AppConfig {
 
         if self.database.max_lifetime_secs == 0 {
             tracing::warn!("⚠️  数据库连接最大生命周期设置为 0，连接将永不过期");
+        }
+
+        // 读库配置验证（如有配置读库）
+        if !self.database_read_urls.is_empty() {
+            // 验证路由策略
+            match self.database_routing.strategy.to_lowercase().as_str() {
+                "round_robin" | "random" | "weighted" => {}
+                _ => {
+                    return Err(ConfigLoadError::ValidationError(format!(
+                        "读写分离路由策略无效: '{}'，可选值: round_robin, random, weighted",
+                        self.database_routing.strategy
+                    )));
+                }
+            }
+
+            // 验证 weights 长度匹配
+            if !self.database_routing.read_weights.is_empty()
+                && self.database_routing.read_weights.len() != self.database_read_urls.len()
+            {
+                return Err(ConfigLoadError::ValidationError(format!(
+                    "读库权重数量 ({}) 与读库 URL 数量 ({}) 不匹配",
+                    self.database_routing.read_weights.len(),
+                    self.database_read_urls.len(),
+                )));
+            }
+
+            // 验证熔断时间
+            if self.database_routing.circuit_break_ms == 0 {
+                return Err(ConfigLoadError::ValidationError(
+                    "读库熔断时间不能为 0".to_string(),
+                ));
+            }
+
+            // 读库连接池配置检查
+            if self.database_read.max_connections == 0 {
+                return Err(ConfigLoadError::ValidationError(
+                    "读库最大连接数不能为 0".to_string(),
+                ));
+            }
+
+            if self.database_read.connect_timeout_secs == 0 {
+                return Err(ConfigLoadError::ValidationError(
+                    "读库连接超时不能为 0".to_string(),
+                ));
+            }
         }
 
         // JWT 密钥安全检查

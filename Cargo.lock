@@ -3717,11 +3717,15 @@ dependencies = [
 name = "keycompute-db"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "bigdecimal",
  "chrono",
  "hex",
  "hmac",
+ "keycompute-config",
  "keycompute-types",
+ "parking_lot",
+ "rand 0.8.5",
  "rust_decimal",
  "sea-orm",
  "serde",
