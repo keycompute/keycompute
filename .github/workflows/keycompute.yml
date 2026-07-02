@@ -226,7 +226,7 @@ jobs:
       # Exclude WASM/mobile targets that need special toolchains.
       # packages/ui builds fine on native and is included.
       - name: Lint (Clippy)
-        run: cargo clippy --workspace --exclude packages/web --exclude packages/desktop --exclude packages/mobile -- -D warnings
+        run: cargo clippy --workspace --exclude desktop --exclude mobile --all-targets --all-features --future-incompat-report -- -D warnings
 
       # ── Step: Build Server (with redis feature) ────────────────────────────
       - name: Build Server
@@ -240,7 +240,7 @@ jobs:
       # These crates don't have a "redis" feature, so run without it.
       # Exclude WASM/mobile/DB-dependent integration tests.
       - name: Run Other Unit Tests
-        run: cargo test --workspace --exclude packages/web --exclude packages/desktop --exclude packages/mobile --exclude keycompute-server --exclude integration-tests --verbose
+        run: cargo test --workspace --exclude web --exclude desktop --exclude mobile --exclude keycompute-server --exclude integration-tests --verbose
 
       # ── Step: Run Integration Tests ─────────────────────────────────────────
       # Integration-tests already has features=["redis"] hardcoded in its deps.
