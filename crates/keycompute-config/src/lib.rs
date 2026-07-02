@@ -679,7 +679,12 @@ mod tests {
     fn test_config_from_env() {
         // 注意：这个测试会读取实际的环境变量
         // 使用 unsafe 因为 set_var/remove_var 在 Rust 2024 中是 unsafe
+        // 先清理可能由 CI 环境设置的干扰 env vars（如 KC__DATABASE_READ_URLS__0/__1），
+        // config-rs 0.14.1 对带数字索引的 env var map → Vec 转换存在缺陷
         unsafe {
+            std::env::remove_var("KC__DATABASE_READ_URLS__0");
+            std::env::remove_var("KC__DATABASE_READ_URLS__1");
+
             std::env::set_var("KC__SERVER__PORT", "8080");
             std::env::set_var("APP_BASE_URL", "http://localhost");
             std::env::set_var("KC__EMAIL__SMTP_HOST", "localhost");
@@ -707,7 +712,12 @@ mod tests {
     #[serial]
     fn test_crypto_config_from_env() {
         // 设置 crypto 和 email 环境变量
+        // 先清理可能由 CI 环境设置的干扰 env vars（如 KC__DATABASE_READ_URLS__0/__1），
+        // config-rs 0.14.1 对带数字索引的 env var map → Vec 转换存在缺陷
         unsafe {
+            std::env::remove_var("KC__DATABASE_READ_URLS__0");
+            std::env::remove_var("KC__DATABASE_READ_URLS__1");
+
             std::env::set_var("KC__CRYPTO__SECRET_KEY", "dGVzdC1rZXktZnJvbS1lbnY=");
             std::env::set_var("APP_BASE_URL", "http://localhost");
             std::env::set_var("KC__EMAIL__SMTP_HOST", "localhost");
