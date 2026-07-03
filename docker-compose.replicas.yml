@@ -320,6 +320,8 @@ services:
     environment:
       # 运行环境
       KC__ENV: production
+      # 日志格式（Docker 容器日志由采集系统收集，使用 JSON 格式）
+      KC__LOG_FORMAT: json
 
       # 数据库配置（写库 -> postgres-primary）
       KC__DATABASE__URL: "postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-primary:5432/${POSTGRES_DB:-keycompute}"
