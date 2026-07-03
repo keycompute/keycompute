@@ -306,7 +306,10 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
     {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("NOTE: Cannot read L2 nil_tenant key (Redis error: {}), skipping L2 verification", e);
+            eprintln!(
+                "NOTE: Cannot read L2 nil_tenant key (Redis error: {}), skipping L2 verification",
+                e
+            );
             None
         }
     };

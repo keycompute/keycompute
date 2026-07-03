@@ -278,13 +278,22 @@ impl PricingService {
             let tid = *tenant_id;
             let prov = provider.to_owned();
 
-            // 快速路径：检查 nil_tenant 默认定价是否已在 L2 中（来自其他租户的查询）
-            // 无需加锁，单纯的 GET 查询
+            // nil_tenant 快速路径：检查 nil 默认定价是否已在 L2 中
+            // 必须先确认租户特定 key 不存在（防止自定义定价被覆盖）
             if dist_key != nil_dist_key
+                && let Ok(Some(cached)) = dist_cache
+                    .get::<(PricingSnapshot, PricingSource)>(&dist_key)
+                    .await
+            {
+                // 租户特定 key 已存在于 L2 → 直接读取并填充 L1，无需回源 DB
+                let mut cache = self.cache.write().await;
+                cache.put(cache_keys[0].clone(), CacheEntry::new(cached.0.clone()));
+                return Ok(cached.0);
+            } else if dist_key != nil_dist_key
                 && let Ok(Some(nil_snapshot)) =
                     dist_cache.get::<PricingSnapshot>(&nil_dist_key).await
             {
-
+                // nil key 存在且租户特定 key 不存在 → 安全使用默认定价
                 let mut cache = self.cache.write().await;
                 cache.put(cache_keys[0].clone(), CacheEntry::new(nil_snapshot.clone()));
                 cache.put(cache_keys[1].clone(), CacheEntry::new(nil_snapshot.clone()));
@@ -314,7 +323,6 @@ impl PricingService {
 
             match result {
                 Ok((snapshot, source)) => {
-
                     // 填充本地 L1 缓存
                     {
                         let mut cache = self.cache.write().await;
@@ -497,7 +505,7 @@ impl PricingService {
         if let Some(p) = pricing {
             // 判断结果是租户特定定价还是全局默认定价
             // find_by_model 可能通过 (tenant_id = nil AND is_default = TRUE) 子句返回默认记录
-            let is_global_default = p.tenant_id.map_or(true, |id| id == Uuid::nil());
+            let is_global_default = p.tenant_id.is_none_or(|id| id == Uuid::nil());
             let source = if is_global_default {
                 PricingSource::DatabaseDefault
             } else {
