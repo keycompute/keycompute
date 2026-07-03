@@ -4,6 +4,7 @@
 
 use keycompute_auth::{AuthService, EmailService, JwtValidator, ProduceAiKeyValidator};
 use keycompute_billing::BillingService;
+use keycompute_cache::CacheService;
 use keycompute_db::DbRouter;
 use keycompute_emailserver::EmailConfig;
 use keycompute_provider_trait::ProviderAdapter;
@@ -154,6 +155,8 @@ pub struct AppState {
     pub payment: Option<Arc<keycompute_alipay::PaymentService>>,
     /// 节点网关服务（可选）
     pub node_gateway: Option<Arc<NodeGatewayService>>,
+    /// 统一缓存服务（Redis 不可用时自动降级为 no-op）
+    pub cache: Arc<CacheService>,
     /// Gateway 配置
     pub gateway_config: keycompute_config::GatewayConfig,
 }
@@ -182,6 +185,7 @@ impl std::fmt::Debug for AppState {
                 "node_gateway",
                 &self.node_gateway.as_ref().map(|_| "<NodeGatewayService>"),
             )
+            .field("cache", &"<CacheService>")
             .field("gateway_config", &self.gateway_config)
             .finish()
     }
@@ -239,6 +243,12 @@ impl AppState {
         // 根据配置创建限流服务
         let rate_limiter = Self::create_rate_limiter(&config.rate_limit);
 
+        // 创建缓存服务（降级为 no-op，因为无 Redis 连接池）
+        let cache = Self::create_disabled_cache();
+
+        // 将 PricingService 接入分布式缓存（确保代码路径覆盖）
+        let pricing_service = pricing_service.with_dist_cache(Arc::clone(&cache));
+
         // 创建邮件服务
         let email_service = Arc::new(EmailService::new(config.email));
         let public_auth_cookie_secret =
@@ -260,7 +270,29 @@ impl AppState {
             public_auth_cookie_secret,
             payment: None,      // 支付服务需要数据库连接
             node_gateway: None, // 节点网关需要数据库连接和 Redis
+            cache,
             gateway_config: config.gateway,
+        }
+    }
+
+    /// 创建 disabled 缓存服务（总是 no-op 降级，无需 Redis 连接池）
+    fn create_disabled_cache() -> Arc<CacheService> {
+        tracing::info!("Cache service disabled");
+        Arc::new(CacheService::disabled())
+    }
+
+    /// 创建缓存服务（Redis pool available 时使用共享连接池，否则 no-op 降级）
+    #[cfg(feature = "redis")]
+    fn create_cache_service(pool: Option<deadpool_redis::Pool>) -> Arc<CacheService> {
+        match pool {
+            Some(pool) => {
+                tracing::info!("Cache service using shared Redis backend");
+                Arc::new(CacheService::with_pool(pool))
+            }
+            None => {
+                tracing::info!("Cache service disabled (Redis pool unavailable)");
+                Arc::new(CacheService::disabled())
+            }
         }
     }
 
@@ -425,10 +457,8 @@ impl AppState {
         // 创建带数据库连接的计费服务
         let billing = Arc::new(BillingService::with_pool(Arc::clone(&pool)));
 
-        // 创建共享 Redis 连接池 + 构建限流服务 + 节点网关
-        // 当 `redis` feature 启用时使用共享连接池,否则回退到内存后端
         #[cfg(feature = "redis")]
-        let (rate_limiter, node_gateway) = {
+        let (rate_limiter, node_gateway, cache) = {
             let shared_redis_pool = match &config.rate_limit {
                 RateLimitBackendConfig::Redis { url } => {
                     match keycompute_runtime::redis_store::RedisRuntimeStore::create_pool(url) {
@@ -484,17 +514,23 @@ impl AppState {
                 }
             };
 
-            (rate_limiter, node_gateway)
+            let cache = Self::create_cache_service(shared_redis_pool);
+
+            (rate_limiter, node_gateway, cache)
         };
 
         #[cfg(not(feature = "redis"))]
-        let (rate_limiter, node_gateway) = {
+        let (rate_limiter, node_gateway, cache) = {
             tracing::info!("Redis feature disabled, using memory rate limiter");
             (
                 keycompute_ratelimit::RateLimitService::default_memory(),
                 None,
+                Self::create_disabled_cache(),
             )
         };
+
+        // 将 PricingService 接入分布式缓存（L2 防击穿）
+        let pricing_service = pricing_service.with_dist_cache(Arc::clone(&cache));
 
         // 创建邮件服务
         let email_service = Arc::new(EmailService::new(config.email));
@@ -537,6 +573,7 @@ impl AppState {
             public_auth_cookie_secret,
             payment,
             node_gateway,
+            cache,
             gateway_config: config.gateway,
         }
     }
@@ -595,6 +632,12 @@ impl AppState {
         // 根据配置创建限流服务
         let rate_limiter = Self::create_rate_limiter(&config.rate_limit);
 
+        // 创建缓存服务（降级为 no-op，因为无 Redis 连接池）
+        let cache = Self::create_disabled_cache();
+
+        // 将 PricingService 接入分布式缓存（确保代码路径覆盖）
+        let pricing_service = pricing_service.with_dist_cache(Arc::clone(&cache));
+
         // 创建邮件服务
         let email_service = Arc::new(EmailService::new(config.email));
         let public_auth_cookie_secret =
@@ -616,6 +659,7 @@ impl AppState {
             public_auth_cookie_secret,
             payment: None,      // 测试环境不需要支付服务
             node_gateway: None, // 测试环境不需要节点网关
+            cache,
             gateway_config: config.gateway,
         }
     }

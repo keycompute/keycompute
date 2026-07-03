@@ -16,6 +16,7 @@ keycompute-billing = { workspace = true }
 keycompute-distribution = { workspace = true }
 keycompute-observability = { workspace = true }
 keycompute-server = { workspace = true }
+keycompute-cache = { workspace = true }
 keycompute-emailserver = { workspace = true }
 keycompute-provider-trait = { workspace = true }
 keycompute-openai = { workspace = true }

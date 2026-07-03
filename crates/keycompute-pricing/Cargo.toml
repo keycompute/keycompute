@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 keycompute-types = { workspace = true }
 keycompute-db = { workspace = true }
+keycompute-cache = { workspace = true }
+serde = { version = "1.0", features = ["derive"] }
 async-trait = "0.1"
 bigdecimal = { version = "0.4", features = ["serde"] }
 lru = "0.12"

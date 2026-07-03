@@ -3373,6 +3373,7 @@ dependencies = [
  "hex",
  "keycompute-auth",
  "keycompute-billing",
+ "keycompute-cache",
  "keycompute-claude",
  "keycompute-db",
  "keycompute-distribution",
@@ -3685,6 +3686,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "keycompute-cache"
+version = "0.1.0"
+dependencies = [
+ "deadpool-redis",
+ "redis",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "keycompute-claude"
 version = "0.1.0"
 dependencies = [
@@ -3859,11 +3874,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bigdecimal",
+ "keycompute-cache",
  "keycompute-db",
  "keycompute-types",
  "lru",
  "rust_decimal",
  "sea-orm",
+ "serde",
  "tokio",
  "tracing",
  "uuid",
@@ -3951,6 +3968,7 @@ dependencies = [
  "keycompute-alipay",
  "keycompute-auth",
  "keycompute-billing",
+ "keycompute-cache",
  "keycompute-claude",
  "keycompute-config",
  "keycompute-db",

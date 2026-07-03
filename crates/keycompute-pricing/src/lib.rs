@@ -3,6 +3,7 @@
 //! 定价模块，只读，生成 PricingSnapshot。
 //! 架构约束：不写任何状态，不参与路由或执行。
 
+use keycompute_cache::CacheService;
 use keycompute_db::{DbRouter, PricingModel};
 use keycompute_types::{KeyComputeError, PricingSnapshot, Result};
 use lru::LruCache;
@@ -10,7 +11,7 @@ use rust_decimal::Decimal;
 use sea_orm::ConnectionTrait;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -47,7 +48,7 @@ pub fn resolve_pricing_provider(model_name: &str) -> &'static str {
 }
 
 /// 标记价格来源，用于优化缓存策略
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 enum PricingSource {
     /// 租户特定定价
     TenantSpecific,
@@ -97,15 +98,29 @@ impl CacheEntry {
     }
 }
 
+/// 默认分布式锁 TTL（秒）——缓存防击穿时锁持有时间
+/// 考虑到 pricing DB 查询可能涉及多次 SeaORM 查询（租户特定 + 默认扫描），
+/// 5 秒为多副本场景提供安全窗口。
+const DEFAULT_LOCK_TTL_SECS: u64 = 5;
+/// 默认锁重试间隔（毫秒）
+const DEFAULT_LOCK_RETRY_MS: u64 = 50;
+/// 默认锁最大重试次数
+const DEFAULT_LOCK_MAX_RETRIES: u32 = 5;
+
 /// 定价服务
 ///
 /// 负责从数据库加载模型价格，生成 PricingSnapshot
+/// 使用两级缓存架构：
+/// - L1: 本地 LRU 缓存（纳秒级读取）
+/// - L2: Redis 分布式缓存（带 get_or_insert_with_lock 防击穿）
 #[derive(Clone)]
 pub struct PricingService {
     /// 数据库连接池（可选，用于测试时可以不提供）
     pool: Option<Arc<DbRouter>>,
-    /// 价格缓存：key = "tenant_id:model_name:provider"，使用 LRU 淘汰策略
+    /// L1: 本地价格缓存：key = "tenant_id:model_name:provider"，使用 LRU 淘汰
     cache: Arc<RwLock<LruCache<String, CacheEntry>>>,
+    /// L2: Redis 分布式缓存（带防击穿保护）
+    dist_cache: Option<Arc<CacheService>>,
     /// 缓存 TTL（秒）
     cache_ttl_secs: u64,
     /// 缓存容量
@@ -117,6 +132,10 @@ impl std::fmt::Debug for PricingService {
         f.debug_struct("PricingService")
             .field("pool", &"DatabaseConnection")
             .field("cache", &"LruCache")
+            .field(
+                "dist_cache",
+                &self.dist_cache.as_ref().map(|_| "<CacheService>"),
+            )
             .field("cache_ttl_secs", &self.cache_ttl_secs)
             .field("cache_capacity", &self.cache_capacity)
             .finish()
@@ -137,6 +156,7 @@ impl PricingService {
             cache: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap(),
             ))),
+            dist_cache: None,
             cache_ttl_secs: DEFAULT_CACHE_TTL_SECS,
             cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
@@ -149,6 +169,23 @@ impl PricingService {
             cache: Arc::new(RwLock::new(LruCache::new(
                 NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap(),
             ))),
+            dist_cache: None,
+            cache_ttl_secs: DEFAULT_CACHE_TTL_SECS,
+            cache_capacity: DEFAULT_CACHE_CAPACITY,
+        }
+    }
+
+    /// 创建带数据库连接和 Redis 分布式缓存的定价服务
+    ///
+    /// L2 分布式缓存提供跨实例防击穿保护：
+    /// 缓存过期时仅一个实例回源查 DB，其他实例等待后从缓存读取。
+    pub fn with_pool_and_cache(pool: Arc<DbRouter>, dist_cache: Arc<CacheService>) -> Self {
+        Self {
+            pool: Some(pool),
+            cache: Arc::new(RwLock::new(LruCache::new(
+                NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap(),
+            ))),
+            dist_cache: Some(dist_cache),
             cache_ttl_secs: DEFAULT_CACHE_TTL_SECS,
             cache_capacity: DEFAULT_CACHE_CAPACITY,
         }
@@ -168,6 +205,12 @@ impl PricingService {
                 NonZeroUsize::new(capacity).unwrap(),
             )));
         }
+        self
+    }
+
+    /// 设置 Redis 分布式缓存（L2），提供跨实例防击穿保护
+    pub fn with_dist_cache(mut self, dist_cache: Arc<CacheService>) -> Self {
+        self.dist_cache = Some(dist_cache);
         self
     }
 
@@ -227,7 +270,100 @@ impl PricingService {
             }
         }
 
-        // 尝试从数据库加载
+        // 尝试从 L2 分布式缓存加载（带防击穿保护）
+        if let Some(dist_cache) = &self.dist_cache {
+            let dist_key = format!("pricing:{}", cache_keys[0]);
+            let nil_dist_key = format!("pricing:{}", cache_keys[1]);
+            let model = model_name.to_owned();
+            let tid = *tenant_id;
+            let prov = provider.to_owned();
+
+            // 快速路径：检查 nil_tenant 默认定价是否已在 L2 中（来自其他租户的查询）
+            // 无需加锁，单纯的 GET 查询
+            if dist_key != nil_dist_key
+                && let Ok(Some(nil_snapshot)) =
+                    dist_cache.get::<PricingSnapshot>(&nil_dist_key).await
+            {
+
+                let mut cache = self.cache.write().await;
+                cache.put(cache_keys[0].clone(), CacheEntry::new(nil_snapshot.clone()));
+                cache.put(cache_keys[1].clone(), CacheEntry::new(nil_snapshot.clone()));
+                return Ok(nil_snapshot);
+            }
+
+            let result: std::result::Result<
+                (PricingSnapshot, PricingSource),
+                keycompute_cache::CacheError,
+            > = dist_cache
+                .get_or_insert_with_lock::<(PricingSnapshot, PricingSource), _, String>(
+                    &dist_key,
+                    Duration::from_secs(self.cache_ttl_secs),
+                    DEFAULT_LOCK_TTL_SECS,
+                    Duration::from_millis(DEFAULT_LOCK_RETRY_MS),
+                    DEFAULT_LOCK_MAX_RETRIES,
+                    async {
+                        let pool = self.pool.as_ref().ok_or_else(|| "No DB pool".to_string())?;
+                        let s = self
+                            .load_from_database_with_source(pool.as_ref(), &model, &tid, &prov)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                        Ok((s.snapshot, s.source))
+                    },
+                )
+                .await;
+
+            match result {
+                Ok((snapshot, source)) => {
+
+                    // 填充本地 L1 缓存
+                    {
+                        let mut cache = self.cache.write().await;
+                        cache.put(cache_keys[0].clone(), CacheEntry::new(snapshot.clone()));
+                    }
+                    //  仅当定价来源是默认（非租户特定）时，写入 nil_tenant key
+                    //  避免租户自定义定价泄露给其他租户
+                    if dist_key != nil_dist_key && source != PricingSource::TenantSpecific {
+                        let _ = dist_cache
+                            .set(
+                                &nil_dist_key,
+                                &snapshot,
+                                Duration::from_secs(self.cache_ttl_secs),
+                            )
+                            .await
+                            .inspect_err(|e| {
+                                tracing::warn!("Failed to cache nil_tenant pricing in L2: {}", e);
+                            });
+                    }
+                    return Ok(snapshot);
+                }
+                Err(e) if matches!(&e, keycompute_cache::CacheError::FallbackFailed(_)) => {
+                    // DB 查询失败（如无定价记录），使用硬编码默认值
+                    tracing::warn!(
+                        model = %model_name,
+                        tenant_id = %tenant_id,
+                        error = %e,
+                        "Distributed cache fallback failed, using hardcoded default"
+                    );
+                    let snapshot = self.get_default_pricing(model_name);
+                    {
+                        let mut cache = self.cache.write().await;
+                        // 同时填充租户特定 key 和 nil key，避免下次同一租户再次查 L2
+                        cache.put(cache_keys[0].clone(), CacheEntry::new(snapshot.clone()));
+                        cache.put(cache_keys[1].clone(), CacheEntry::new(snapshot.clone()));
+                    }
+                    return Ok(snapshot);
+                }
+                Err(e) => {
+                    // Redis 错误或不可用，降级到直接 DB 查询
+                    tracing::warn!(
+                        "Distributed cache error, falling back to direct DB query: {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        // 降级路径：直接 DB 查询（分布式缓存不可用或出错时）
         let snapshot_with_source = if let Some(pool) = &self.pool {
             self.load_from_database_with_source(pool.as_ref(), model_name, tenant_id, provider)
                 .await?
@@ -246,12 +382,10 @@ impl PricingService {
 
             match snapshot_with_source.source {
                 PricingSource::TenantSpecific => {
-                    // 租户特定定价：缓存到租户 key
+                    // 租户特定定价：仅缓存到租户 key
+                    // 绝不写入 nil_tenant key，避免租户自定义定价泄漏给其他租户
                     let primary_key = cache_keys[0].clone();
-                    cache.put(primary_key, CacheEntry::new(snapshot.clone()));
-                    // 同时缓存到默认 key，避免重复查询
-                    let default_key = cache_keys[1].clone();
-                    cache.put(default_key, CacheEntry::new(snapshot));
+                    cache.put(primary_key, CacheEntry::new(snapshot));
                 }
                 PricingSource::DatabaseDefault => {
                     // 数据库默认定价：缓存到 nil tenant key
@@ -272,7 +406,7 @@ impl PricingService {
             provider = %provider,
             source = ?snapshot_with_source.source,
             price = ?snapshot_with_source.snapshot,
-            "Created pricing snapshot"
+            "Created pricing snapshot (direct DB)"
         );
         Ok(snapshot_with_source.snapshot)
     }
@@ -361,6 +495,15 @@ impl PricingService {
             })?;
 
         if let Some(p) = pricing {
+            // 判断结果是租户特定定价还是全局默认定价
+            // find_by_model 可能通过 (tenant_id = nil AND is_default = TRUE) 子句返回默认记录
+            let is_global_default = p.tenant_id.map_or(true, |id| id == Uuid::nil());
+            let source = if is_global_default {
+                PricingSource::DatabaseDefault
+            } else {
+                PricingSource::TenantSpecific
+            };
+
             return Ok(SnapshotWithSource {
                 snapshot: PricingSnapshot {
                     model_name: p.model_name,
@@ -368,7 +511,7 @@ impl PricingService {
                     input_price_per_1k: bigdecimal_to_decimal(&p.input_price_per_1k)?,
                     output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
                 },
-                source: PricingSource::TenantSpecific,
+                source,
             });
         }
 

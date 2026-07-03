@@ -17,6 +17,7 @@ keycompute-observability = { workspace = true }
 keycompute-config = { workspace = true }
 keycompute-emailserver = { path = "../keycompute-emailserver" }
 keycompute-alipay = { path = "../keycompute-payment/keycompute-alipay" }
+keycompute-cache = { workspace = true }
 node-gateway = { path = "../node-gateway" }
 llm-gateway = { workspace = true }
 keycompute-provider-trait = { workspace = true }
