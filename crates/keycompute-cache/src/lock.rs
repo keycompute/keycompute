@@ -446,11 +446,13 @@ mod tests {
             .unwrap();
         assert!(matches!(result, Some(AcquireResult::Contended)));
 
-        // Drop first guard → lock released
+        // Drop first guard → lock released (async via fire-and-forget spawn)
         drop(guard);
 
-        // Now third acquire should succeed
-        let result = LockGuard::acquire(Some(&pool), &key, 5, 1, Duration::ZERO)
+        // Now third acquire should succeed.
+        // Use multiple retries with a small delay to give the Drop handler
+        // a chance to run and release the lock.
+        let result = LockGuard::acquire(Some(&pool), &key, 5, 10, Duration::from_millis(50))
             .await
             .unwrap();
         assert!(matches!(result, Some(AcquireResult::Acquired(_))));

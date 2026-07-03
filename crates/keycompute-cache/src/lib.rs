@@ -198,6 +198,22 @@ impl CacheService {
         format!("{}{}{}", self.key_prefix, key, NULL_MARKER_SUFFIX)
     }
 
+    /// Check directly in Redis whether a negative-cache marker exists.
+    ///
+    /// This uses the raw null key (not `exists()`) to avoid double-prefixing.
+    async fn has_null_marker(&self, key: &str) -> CacheResult<bool> {
+        let mut conn = match self.get_conn().await {
+            Some(c) => c,
+            None => return Ok(false),
+        };
+        let null_key = self.build_null_key(key);
+        let count: i32 = deadpool_redis::redis::cmd("EXISTS")
+            .arg(&null_key)
+            .query_async(&mut conn)
+            .await?;
+        Ok(count > 0)
+    }
+
     // ── Core Operations ─────────────────────────────────────────────────
 
     /// Retrieve and deserialize a cached value.
@@ -319,7 +335,7 @@ impl CacheService {
                 return Ok(val);
             }
             // 2. Check negative-cache marker (entity does not exist)
-            if self.exists(&self.build_null_key(key)).await? {
+            if self.has_null_marker(key).await? {
                 return Err(CacheError::FallbackFailed(
                     "Entity does not exist (negative cache)".to_string(),
                 ));
@@ -388,7 +404,7 @@ impl CacheService {
 
         // 1b. Check negative-cache marker (entity does not exist)
         //     Prevents repeated lock acquisition for non-existent keys.
-        if self.is_available() && self.exists(&self.build_null_key(key)).await? {
+        if self.is_available() && self.has_null_marker(key).await? {
             return Err(CacheError::FallbackFailed(
                 "Entity does not exist (negative cache)".to_string(),
             ));

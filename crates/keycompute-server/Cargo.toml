@@ -53,7 +53,7 @@ url = "2"
 deadpool-redis = { version = "0.18", optional = true }
 
 [features]
-default = []
+default = ["redis"]
 redis = ["keycompute-ratelimit/redis", "keycompute-runtime/redis", "dep:deadpool-redis"]
 
 [dev-dependencies]

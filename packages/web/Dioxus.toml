@@ -21,3 +21,13 @@ reload_html = true
 # 开发服务器监听所有网卡（Docker/局域网访问需要）
 [web.dev]
 addr = "0.0.0.0"
+
+# 开发服务器代理 — 将 API 请求转发到后端（默认 3000 端口）
+[[web.proxy]]
+backend = "http://127.0.0.1:3000/api/"
+
+[[web.proxy]]
+backend = "http://127.0.0.1:3000/v1/"
+
+[[web.proxy]]
+backend = "http://127.0.0.1:3000/health"
