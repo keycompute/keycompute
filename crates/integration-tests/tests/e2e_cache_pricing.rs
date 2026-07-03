@@ -7,7 +7,7 @@
 //! - 跨租户定价隔离（租户特定定价永不泄漏到 nil_tenant 共享 key）
 
 use keycompute_cache::CacheService;
-use keycompute_db::{CreatePricingRequest, PricingModel, models::pricing_model::BillingDimension};
+use keycompute_db::{run_migrations, CreatePricingRequest, PricingModel, models::pricing_model::BillingDimension};
 use keycompute_pricing::PricingService;
 use keycompute_types::PricingSnapshot;
 use std::str::FromStr;
@@ -217,7 +217,12 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
     use bigdecimal::BigDecimal;
     use chrono::Utc;
 
-    // 2. 种子数据：默认定价 ¥0.10 input / ¥0.30 output（nil tenant）
+    // 2. 运行数据库迁移，确保表结构存在
+    run_migrations(&db)
+        .await
+        .expect("Migrations should succeed");
+
+    // 3. 种子数据：默认定价 ¥0.10 input / ¥0.30 output（nil tenant）
     let default_pricing = PricingModel::create(
         &db,
         &CreatePricingRequest {
@@ -235,7 +240,7 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
     .await
     .expect("Default pricing should be created");
 
-    // 3. 种子数据：Tenant A 自定义定价 ¥0.20 input / ¥0.50 output
+    // 4. 种子数据：Tenant A 自定义定价 ¥0.20 input / ¥0.50 output
     let tenant_a_pricing = PricingModel::create(
         &db,
         &CreatePricingRequest {
@@ -253,11 +258,11 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
     .await
     .expect("Tenant A pricing should be created");
 
-    // 4. 创建带 DB + L2 缓存的 PricingService
+    // 5. 创建带 DB + L2 缓存的 PricingService
     let pool = keycompute_db::DbRouter::single(db);
     let pricing = PricingService::with_pool(Arc::clone(&pool)).with_dist_cache(Arc::clone(&cache));
 
-    // 5. Tenant A 查询 → 应返回 ¥0.20 input / ¥0.50 output
+    // 6. Tenant A 查询 → 应返回 ¥0.20 input / ¥0.50 output
     let snap_a = pricing
         .create_snapshot(&model_name, &tenant_a, Some(provider))
         .await
@@ -273,7 +278,7 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
         "Tenant A should get custom pricing (0.50 output)"
     );
 
-    // 6. Tenant B 查询 → 应返回 ¥0.10 input / ¥0.30 output（默认定价）
+    // 7. Tenant B 查询 → 应返回 ¥0.10 input / ¥0.30 output（默认定价）
     //    如果修复失效，Tenant B 会错误地得到 Tenant A 的 ¥0.20/¥0.50
     let snap_b = pricing
         .create_snapshot(&model_name, &tenant_b, Some(provider))
@@ -290,7 +295,7 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
         "Tenant B should get DEFAULT pricing (0.30 output), NOT tenant A's custom 0.50"
     );
 
-    // 7. 验证 L2 nil_tenant key 存储的是默认定价，而非 Tenant A 的定价
+    // 8. 验证 L2 nil_tenant key 存储的是默认定价，而非 Tenant A 的定价
     //    nil_dist_key = "pricing:{nil_uuid}:{model}:{provider}"
     //
     //    注意：此检查依赖顺序执行（Tenant A 先查询 → Tenant B 后查询）。
@@ -333,7 +338,7 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
         eprintln!("NOTE: L2 nil_tenant key not found - Tenant B may need to query first");
     }
 
-    // 8. 清理：删除种子数据
+    // 9. 清理：删除种子数据
     let conn = pool.write_conn();
     tenant_a_pricing.delete(conn).await.ok();
     default_pricing.delete(conn).await.ok();

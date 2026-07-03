@@ -228,7 +228,7 @@ cp .env.example .env
 set -a && source .env && set +a
 
 # 启动后端
-cargo run -p keycompute-server --features redis
+cargo run -p keycompute-server
 
 # 启动前端（另一个终端）
 dx serve --package web --platform web --hot-reload true --addr 0.0.0.0
@@ -291,7 +291,7 @@ keycompute/
 | `KC__AUTH__JWT_SECRET` | JWT 签名密钥 | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | API Key AES-256-GCM 加密密钥（写入后不可更改） | ✅ |
 | `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | HMAC 签名密钥；签发一次性节点注册 token | ✅ |
-| `KC__REDIS__URL` | Redis 连接串（可选，通过 `--features redis` 启用） | ⚪ |
+| `KC__REDIS__URL` | Redis 连接串（可选；不配置时限流降级为内存、缓存变为 no-op、节点网关不可用） | ⚪ |
 | `KC__EMAIL__SMTP_HOST` | SMTP 服务器地址（可选） | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | SMTP 服务器端口（可选） | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | SMTP 用户名（可选） | ⚪ |
@@ -371,8 +371,8 @@ cargo clippy --workspace --exclude desktop --exclude mobile --all-targets --all-
 # 代码格式化检查
 cargo fmt --all --check
 
-# 启用 Redis 后端构建
-cargo build -p keycompute-server --features redis
+# 构建发布版本
+cargo build -p keycompute-server --release
 ```
 
 ---

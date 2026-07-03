@@ -228,7 +228,7 @@ cp .env.example .env
 set -a && source .env && set +a
 
 # Iniciar el backend
-cargo run -p keycompute-server --features redis
+cargo run -p keycompute-server
 
 # Iniciar el servidor de desarrollo frontend (en otra terminal)
 dx serve --package web --platform web --hot-reload true --addr 0.0.0.0
@@ -291,7 +291,7 @@ keycompute/
 | `KC__AUTH__JWT_SECRET` | Secreto de firma JWT | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | Clave de cifrado AES-256-GCM para API keys (no se puede cambiar después de escribir) | ✅ |
 | `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | Secreto de firma HMAC; utilizado para emitir tokens de registro únicos | ✅ |
-| `KC__REDIS__URL` | Cadena de conexión de Redis (opcional, habilitado mediante `--features redis`) | ⚪ |
+| `KC__REDIS__URL` | Cadena de conexión de Redis (opcional; sin ella: limitador de tasa cae a memoria, caché pasa a no-op, puerta de enlace de nodos no disponible) | ⚪ |
 | `KC__EMAIL__SMTP_HOST` | Host SMTP (opcional) | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | Puerto SMTP (opcional) | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | Usuario SMTP (opcional) | ⚪ |
@@ -371,8 +371,8 @@ cargo clippy --workspace --exclude desktop --exclude mobile --all-targets --all-
 # Verificación de formato de código
 cargo fmt --all --check
 
-# Habilitar backend Redis
-cargo build -p keycompute-server --features redis
+# Compilación de lanzamiento
+cargo build -p keycompute-server --release
 ```
 
 ---

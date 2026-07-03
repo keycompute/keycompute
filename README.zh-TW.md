@@ -228,7 +228,7 @@ cp .env.example .env
 set -a && source .env && set +a
 
 # 啟動後端
-cargo run -p keycompute-server --features redis
+cargo run -p keycompute-server
 
 # 啟動前端開發伺服器（另一個終端）
 dx serve --package web --platform web --hot-reload true --addr 0.0.0.0
@@ -291,7 +291,7 @@ keycompute/
 | `KC__AUTH__JWT_SECRET` | JWT 簽名金鑰 | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | API Key AES-256-GCM 加密金鑰（寫入後不可更改） | ✅ |
 | `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | HMAC 簽名金鑰；用於簽發一次性節點註冊 token | ✅ |
-| `KC__REDIS__URL` | Redis 連線字串（選用，透過 `--features redis` 啟用） | ⚪ |
+| `KC__REDIS__URL` | Redis 連線字串（選用；不設定時限流降級為記憶體、緩存變為 no-op、節點閘道不可用） | ⚪ |
 | `KC__EMAIL__SMTP_HOST` | SMTP 伺服器位址（選用） | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | SMTP 伺服器連接埠（選用） | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | SMTP 使用者名稱（選用） | ⚪ |
@@ -371,8 +371,8 @@ cargo clippy --workspace --exclude desktop --exclude mobile --all-targets --all-
 # 程式碼格式化檢查
 cargo fmt --all --check
 
-# 啟用 Redis 後端構建
-cargo build -p keycompute-server --features redis
+# 構建發行版本
+cargo build -p keycompute-server --release
 ```
 
 ---

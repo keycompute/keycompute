@@ -75,7 +75,7 @@ docker compose up -d postgres redis
 3. Start the backend:
 
 ```bash
-cargo run -p keycompute-server --features redis
+cargo run -p keycompute-server
 ```
 
 4. Start the web frontend in another terminal:

@@ -228,7 +228,7 @@ cp .env.example .env
 set -a && source .env && set +a
 
 # تشغيل الخلفية
-cargo run -p keycompute-server --features redis
+cargo run -p keycompute-server
 
 # تشغيل خادم تطوير الواجهة الأمامية (في طرفية أخرى)
 dx serve --package web --platform web --hot-reload true --addr 0.0.0.0
@@ -291,7 +291,7 @@ keycompute/
 | `KC__AUTH__JWT_SECRET` | سر توقيع JWT | ✅ |
 | `KC__CRYPTO__SECRET_KEY` | مفتاح تشفير AES-256-GCM لمفاتيح API (لا يمكن تغييره بعد الكتابة) | ✅ |
 | `KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET` | سر توقيع HMAC؛ لإصدار رموز تسجيل العقدة لمرة واحدة | ✅ |
-| `KC__REDIS__URL` | سلسلة اتصال Redis (اختياري، يتم التفعيل عبر `--features redis`) | ⚪ |
+| `KC__REDIS__URL` | سلسلة اتصال Redis (اختياري؛ بدونه: يتحول محدد المعدل إلى الذاكرة، التخزين المؤقت يصبح no-op، بوابة العقدة غير متوفرة) | ⚪ |
 | `KC__EMAIL__SMTP_HOST` | مضيف SMTP (اختياري) | ⚪ |
 | `KC__EMAIL__SMTP_PORT` | منفذ SMTP (اختياري) | ⚪ |
 | `KC__EMAIL__SMTP_USERNAME` | اسم مستخدم SMTP (اختياري) | ⚪ |
@@ -371,8 +371,8 @@ cargo clippy --workspace --exclude desktop --exclude mobile --all-targets --all-
 # التحقق من تنسيق الكود
 cargo fmt --all --check
 
-# تفعيل خلفية Redis
-cargo build -p keycompute-server --features redis
+# بناء الإصدار
+cargo build -p keycompute-server --release
 ```
 
 ---
