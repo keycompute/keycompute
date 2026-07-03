@@ -7,7 +7,9 @@
 //! - 跨租户定价隔离（租户特定定价永不泄漏到 nil_tenant 共享 key）
 
 use keycompute_cache::CacheService;
-use keycompute_db::{run_migrations, CreatePricingRequest, PricingModel, models::pricing_model::BillingDimension};
+use keycompute_db::{
+    CreatePricingRequest, PricingModel, models::pricing_model::BillingDimension, run_migrations,
+};
 use keycompute_pricing::PricingService;
 use keycompute_types::PricingSnapshot;
 use std::str::FromStr;

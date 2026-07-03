@@ -43,6 +43,9 @@ pub fn Home() -> Element {
     let i18n = I18n::new(Lang::from_str(&current_lang));
     let is_zh = current_lang == "zh";
 
+    // 获取 App() 提供的语言上下文信号，用于同步到模态框
+    let mut ctx_lang = use_context::<Signal<String>>();
+
     // 检查是否已登录（使用 memo 响应 auth_store.state 的变化）
     let auth_store = use_context::<AuthStore>();
     let is_authenticated = use_memo(move || auth_store.is_authenticated());
@@ -92,79 +95,83 @@ pub fn Home() -> Element {
     rsx! {
         document::Title { "{site_name}" }
 
-        div {
-            class: "kc-home-page",
+        div { class: "kc-home-page",
             // 背景动画效果 - 根据主题显示不同背景
             if is_dark {
                 // 黑暗主题：星空背景
                 div { class: "kc-home-stars-container",
                     // 生成星星（减少到50个，增大尺寸，增强缩放效果）
-                    {(0..50).map(|i| {
-                        let style = format!(
-                            "--star-left: {}%; --star-top: {}%; --star-size: {}; --star-delay: {}s; --star-duration: {}s;",
-                            (i * 37 % 100),
-                            (i * 53 % 100),
-                            if i % 5 == 0 { "4px" } else if i % 5 == 1 { "5px" } else if i % 5 == 2 { "3px" } else { "2px" },
-                            (i % 10) as f64 * 0.5,
-                            (2 + (i % 4)) as f64
-                        );
-                        rsx! {
-                            div {
-                                class: "kc-home-star",
-                                style: "{style}",
-                            }
-                        }
-                    })}
+                    {
+                        (0..50)
+                            .map(|i| {
+                                let style = format!(
+                                    "--star-left: {}%; --star-top: {}%; --star-size: {}; --star-delay: {}s; --star-duration: {}s;",
+                                    (i * 37 % 100),
+                                    (i * 53 % 100),
+                                    if i % 5 == 0 {
+                                        "4px"
+                                    } else if i % 5 == 1 {
+                                        "5px"
+                                    } else if i % 5 == 2 {
+                                        "3px"
+                                    } else {
+                                        "2px"
+                                    },
+                                    (i % 10) as f64 * 0.5,
+                                    (2 + (i % 4)) as f64,
+                                );
+                                rsx! {
+                                    div { class: "kc-home-star", style: "{style}" }
+                                }
+                            })
+                    }
                 }
                 div { class: "kc-home-shooting-stars",
-                    {(0..5).map(|i| {
-                        let style = format!(
-                            "--shooting-delay: {}s; --shooting-duration: {}s; --shooting-top: {}%;",
-                            (i * 3) as f64 * 1.5,
-                            1.5 + (i % 3) as f64 * 0.5,
-                            10 + (i * 20) % 70
-                        );
-                        rsx! {
-                            div {
-                                class: "kc-home-shooting-star",
-                                style: "{style}",
-                            }
-                        }
-                    })}
+                    {
+                        (0..5)
+                            .map(|i| {
+                                let style = format!(
+                                    "--shooting-delay: {}s; --shooting-duration: {}s; --shooting-top: {}%;",
+                                    (i * 3) as f64 * 1.5,
+                                    1.5 + (i % 3) as f64 * 0.5,
+                                    10 + (i * 20) % 70,
+                                );
+                                rsx! {
+                                    div { class: "kc-home-shooting-star", style: "{style}" }
+                                }
+                            })
+                    }
                 }
             } else {
                 // 明亮主题：晴空白云
                 div { class: "kc-home-sky" }
                 div { class: "kc-home-clouds-container",
-                    {(0..8).map(|i| {
-                        let style = format!(
-                            "--cloud-left: {}%; --cloud-top: {}%; --cloud-scale: {}; --cloud-delay: {}s; --cloud-duration: {}s; --cloud-opacity: {};",
-                            (i * 47 % 100),
-                            5 + (i * 23 % 60),
-                            0.4 + (i % 5) as f64 * 0.2,
-                            (i % 8) as f64 * 2.0,
-                            30.0 + (i % 5) as f64 * 10.0,
-                            0.6 + (i % 4) as f64 * 0.1
-                        );
-                        rsx! {
-                            div {
-                                class: "kc-home-cloud",
-                                style: "{style}",
-                            }
-                        }
-                    })}
+                    {
+                        (0..8)
+                            .map(|i| {
+                                let style = format!(
+                                    "--cloud-left: {}%; --cloud-top: {}%; --cloud-scale: {}; --cloud-delay: {}s; --cloud-duration: {}s; --cloud-opacity: {};",
+                                    (i * 47 % 100),
+                                    5 + (i * 23 % 60),
+                                    0.4 + (i % 5) as f64 * 0.2,
+                                    (i % 8) as f64 * 2.0,
+                                    30.0 + (i % 5) as f64 * 10.0,
+                                    0.6 + (i % 4) as f64 * 0.1,
+                                );
+                                rsx! {
+                                    div { class: "kc-home-cloud", style: "{style}" }
+                                }
+                            })
+                    }
                 }
             }
             div { class: "kc-home-grid-overlay" }
 
             // 导航栏
-            header {
-                class: "kc-home-header",
-                div {
-                    class: "kc-home-nav container",
+            header { class: "kc-home-header",
+                div { class: "kc-home-nav container",
                     // Logo + 标题区域
-                    div {
-                        class: "kc-home-logo",
+                    div { class: "kc-home-logo",
                         img {
                             src: asset!("/assets/logo.jpg"),
                             alt: "KeyCompute",
@@ -187,8 +194,18 @@ pub fn Home() -> Element {
                                 stroke: "currentColor",
                                 stroke_width: "2",
                                 stroke_linecap: "round",
-                                line { x1: "18", y1: "6", x2: "6", y2: "18" }
-                                line { x1: "6", y1: "6", x2: "18", y2: "18" }
+                                line {
+                                    x1: "18",
+                                    y1: "6",
+                                    x2: "6",
+                                    y2: "18",
+                                }
+                                line {
+                                    x1: "6",
+                                    y1: "6",
+                                    x2: "18",
+                                    y2: "18",
+                                }
                             }
                         } else {
                             svg {
@@ -199,16 +216,30 @@ pub fn Home() -> Element {
                                 stroke: "currentColor",
                                 stroke_width: "2",
                                 stroke_linecap: "round",
-                                line { x1: "3", y1: "6", x2: "21", y2: "6" }
-                                line { x1: "3", y1: "12", x2: "21", y2: "12" }
-                                line { x1: "3", y1: "18", x2: "21", y2: "18" }
+                                line {
+                                    x1: "3",
+                                    y1: "6",
+                                    x2: "21",
+                                    y2: "6",
+                                }
+                                line {
+                                    x1: "3",
+                                    y1: "12",
+                                    x2: "21",
+                                    y2: "12",
+                                }
+                                line {
+                                    x1: "3",
+                                    y1: "18",
+                                    x2: "21",
+                                    y2: "18",
+                                }
                             }
                         }
                     }
 
                     // 导航功能区（移动端可折叠）
-                    div {
-                        class: if nav_menu_open() { "kc-home-nav-actions kc-home-nav-actions-open" } else { "kc-home-nav-actions" },
+                    div { class: if nav_menu_open() { "kc-home-nav-actions kc-home-nav-actions-open" } else { "kc-home-nav-actions" },
                         // GitHub 仓库链接
                         a {
                             class: "kc-home-github-link",
@@ -222,9 +253,7 @@ pub fn Home() -> Element {
                                 height: "20",
                                 view_box: "0 0 24 24",
                                 fill: "currentColor",
-                                path {
-                                    d: "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
-                                }
+                                path { d: "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" }
                             }
                         }
                         // 主题切换
@@ -265,14 +294,54 @@ pub fn Home() -> Element {
                                     stroke: "currentColor",
                                     stroke_width: "2",
                                     circle { cx: "12", cy: "12", r: "5" }
-                                    line { x1: "12", y1: "1", x2: "12", y2: "3" }
-                                    line { x1: "12", y1: "21", x2: "12", y2: "23" }
-                                    line { x1: "4.22", y1: "4.22", x2: "5.64", y2: "5.64" }
-                                    line { x1: "18.36", y1: "18.36", x2: "19.78", y2: "19.78" }
-                                    line { x1: "1", y1: "12", x2: "3", y2: "12" }
-                                    line { x1: "21", y1: "12", x2: "23", y2: "12" }
-                                    line { x1: "4.22", y1: "19.78", x2: "5.64", y2: "18.36" }
-                                    line { x1: "18.36", y1: "5.64", x2: "19.78", y2: "4.22" }
+                                    line {
+                                        x1: "12",
+                                        y1: "1",
+                                        x2: "12",
+                                        y2: "3",
+                                    }
+                                    line {
+                                        x1: "12",
+                                        y1: "21",
+                                        x2: "12",
+                                        y2: "23",
+                                    }
+                                    line {
+                                        x1: "4.22",
+                                        y1: "4.22",
+                                        x2: "5.64",
+                                        y2: "5.64",
+                                    }
+                                    line {
+                                        x1: "18.36",
+                                        y1: "18.36",
+                                        x2: "19.78",
+                                        y2: "19.78",
+                                    }
+                                    line {
+                                        x1: "1",
+                                        y1: "12",
+                                        x2: "3",
+                                        y2: "12",
+                                    }
+                                    line {
+                                        x1: "21",
+                                        y1: "12",
+                                        x2: "23",
+                                        y2: "12",
+                                    }
+                                    line {
+                                        x1: "4.22",
+                                        y1: "19.78",
+                                        x2: "5.64",
+                                        y2: "18.36",
+                                    }
+                                    line {
+                                        x1: "18.36",
+                                        y1: "5.64",
+                                        x2: "19.78",
+                                        y2: "4.22",
+                                    }
                                 }
                             }
                         }
@@ -289,13 +358,18 @@ pub fn Home() -> Element {
                                     "zh".to_string()
                                 };
                                 *lang.write() = new_lang.clone();
+                                *ctx_lang.write() = new_lang.clone();
                                 #[cfg(target_arch = "wasm32")]
                                 {
                                     save_lang_to_storage(&new_lang);
                                 }
                             },
                             span { class: "kc-home-lang-toggle-text",
-                                if is_zh { "EN" } else { "中" }
+                                if is_zh {
+                                    "EN"
+                                } else {
+                                    "中"
+                                }
                             }
                         }
 
@@ -310,8 +384,7 @@ pub fn Home() -> Element {
                                 "{i18n.t(\"home.console\")}"
                             }
                         } else {
-                            div {
-                                class: "kc-home-auth-buttons",
+                            div { class: "kc-home-auth-buttons",
                                 button {
                                     class: "kc-home-btn-login",
                                     r#type: "button",
@@ -331,30 +404,23 @@ pub fn Home() -> Element {
             }
 
             // 主要内容区域
-            main {
-                class: "kc-home-main",
+            main { class: "kc-home-main",
                 // Hero 区域
-                section {
-                    class: "kc-home-hero",
-                    div {
-                        class: "container",
-                        div {
-                            class: "kc-home-hero-content",
-                            h1 {
-                                class: "kc-home-hero-title",
-                                span { class: "kc-home-hero-highlight", "{t_tagline_1} {t_tagline_highlight}" }
+                section { class: "kc-home-hero",
+                    div { class: "container",
+                        div { class: "kc-home-hero-content",
+                            h1 { class: "kc-home-hero-title",
+                                span { class: "kc-home-hero-highlight",
+                                    "{t_tagline_1} {t_tagline_highlight}"
+                                }
                             }
                             if !t_tagline_2.is_empty() {
                                 p { class: "kc-home-hero-slogan", "{t_tagline_2}" }
                             }
-                            p {
-                                class: "kc-home-hero-description",
-                                "{t_description}"
-                            }
+                            p { class: "kc-home-hero-description", "{t_description}" }
 
                             // 功能特性标签
-                            div {
-                                class: "kc-home-features-tags",
+                            div { class: "kc-home-features-tags",
                                 span { class: "kc-home-feature-tag", "{t_feature_routing}" }
                                 span { class: "kc-home-feature-tag", "{t_feature_billing}" }
                                 span { class: "kc-home-feature-tag", "{t_feature_ha}" }
@@ -367,18 +433,13 @@ pub fn Home() -> Element {
                 }
 
                 // 核心功能区域
-                section {
-                    class: "kc-home-features",
-                    div {
-                        class: "container",
+                section { class: "kc-home-features",
+                    div { class: "container",
                         h2 { class: "kc-home-section-title", "{t_features_title}" }
-                        div {
-                            class: "kc-home-features-grid",
+                        div { class: "kc-home-features-grid",
                             // 智能路由卡片
-                            div {
-                                class: "kc-home-feature-card",
-                                div {
-                                    class: "kc-home-feature-icon",
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
                                     svg {
                                         width: "32",
                                         height: "32",
@@ -394,10 +455,8 @@ pub fn Home() -> Element {
                             }
 
                             // 实时计费卡片
-                            div {
-                                class: "kc-home-feature-card",
-                                div {
-                                    class: "kc-home-feature-icon",
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
                                     svg {
                                         width: "32",
                                         height: "32",
@@ -405,7 +464,12 @@ pub fn Home() -> Element {
                                         fill: "none",
                                         stroke: "currentColor",
                                         stroke_width: "2",
-                                        line { x1: "12", y1: "1", x2: "12", y2: "23" }
+                                        line {
+                                            x1: "12",
+                                            y1: "1",
+                                            x2: "12",
+                                            y2: "23",
+                                        }
                                         path { d: "M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" }
                                     }
                                 }
@@ -414,10 +478,8 @@ pub fn Home() -> Element {
                             }
 
                             // 分布式集群卡片
-                            div {
-                                class: "kc-home-feature-card",
-                                div {
-                                    class: "kc-home-feature-icon",
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
                                     svg {
                                         width: "32",
                                         height: "32",
@@ -427,12 +489,48 @@ pub fn Home() -> Element {
                                         stroke_width: "2",
                                         stroke_linecap: "round",
                                         stroke_linejoin: "round",
-                                        rect { x: "2", y: "3", width: "20", height: "5", rx: "1", ry: "1" }
-                                        rect { x: "2", y: "10", width: "20", height: "5", rx: "1", ry: "1" }
-                                        rect { x: "2", y: "17", width: "20", height: "5", rx: "1", ry: "1" }
-                                        line { x1: "6", y1: "5.5", x2: "6.01", y2: "5.5" }
-                                        line { x1: "6", y1: "12.5", x2: "6.01", y2: "12.5" }
-                                        line { x1: "6", y1: "19.5", x2: "6.01", y2: "19.5" }
+                                        rect {
+                                            x: "2",
+                                            y: "3",
+                                            width: "20",
+                                            height: "5",
+                                            rx: "1",
+                                            ry: "1",
+                                        }
+                                        rect {
+                                            x: "2",
+                                            y: "10",
+                                            width: "20",
+                                            height: "5",
+                                            rx: "1",
+                                            ry: "1",
+                                        }
+                                        rect {
+                                            x: "2",
+                                            y: "17",
+                                            width: "20",
+                                            height: "5",
+                                            rx: "1",
+                                            ry: "1",
+                                        }
+                                        line {
+                                            x1: "6",
+                                            y1: "5.5",
+                                            x2: "6.01",
+                                            y2: "5.5",
+                                        }
+                                        line {
+                                            x1: "6",
+                                            y1: "12.5",
+                                            x2: "6.01",
+                                            y2: "12.5",
+                                        }
+                                        line {
+                                            x1: "6",
+                                            y1: "19.5",
+                                            x2: "6.01",
+                                            y2: "19.5",
+                                        }
                                     }
                                 }
                                 h3 { "{t_cluster_title}" }
@@ -440,10 +538,8 @@ pub fn Home() -> Element {
                             }
 
                             // 节点租赁卡片
-                            div {
-                                class: "kc-home-feature-card",
-                                div {
-                                    class: "kc-home-feature-icon",
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
                                     svg {
                                         width: "32",
                                         height: "32",
@@ -451,10 +547,32 @@ pub fn Home() -> Element {
                                         fill: "none",
                                         stroke: "currentColor",
                                         stroke_width: "2",
-                                        rect { x: "2", y: "4", width: "20", height: "12", rx: "2", ry: "2" }
-                                        line { x1: "6", y1: "20", x2: "18", y2: "20" }
-                                        line { x1: "12", y1: "16", x2: "12", y2: "20" }
-                                        line { x1: "6", y1: "10", x2: "10", y2: "10" }
+                                        rect {
+                                            x: "2",
+                                            y: "4",
+                                            width: "20",
+                                            height: "12",
+                                            rx: "2",
+                                            ry: "2",
+                                        }
+                                        line {
+                                            x1: "6",
+                                            y1: "20",
+                                            x2: "18",
+                                            y2: "20",
+                                        }
+                                        line {
+                                            x1: "12",
+                                            y1: "16",
+                                            x2: "12",
+                                            y2: "20",
+                                        }
+                                        line {
+                                            x1: "6",
+                                            y1: "10",
+                                            x2: "10",
+                                            y2: "10",
+                                        }
                                     }
                                 }
                                 h3 { "{t_node_rental_title}" }
@@ -462,10 +580,8 @@ pub fn Home() -> Element {
                             }
 
                             // 传播裂变卡片（二级分销）
-                            div {
-                                class: "kc-home-feature-card",
-                                div {
-                                    class: "kc-home-feature-icon",
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
                                     svg {
                                         width: "32",
                                         height: "32",
@@ -476,8 +592,18 @@ pub fn Home() -> Element {
                                         circle { cx: "18", cy: "5", r: "3" }
                                         circle { cx: "6", cy: "12", r: "3" }
                                         circle { cx: "18", cy: "19", r: "3" }
-                                        line { x1: "8.59", y1: "13.51", x2: "15.42", y2: "17.49" }
-                                        line { x1: "15.41", y1: "6.51", x2: "8.59", y2: "10.49" }
+                                        line {
+                                            x1: "8.59",
+                                            y1: "13.51",
+                                            x2: "15.42",
+                                            y2: "17.49",
+                                        }
+                                        line {
+                                            x1: "15.41",
+                                            y1: "6.51",
+                                            x2: "8.59",
+                                            y2: "10.49",
+                                        }
                                     }
                                 }
                                 h3 { "{t_distribution_title}" }
@@ -485,10 +611,8 @@ pub fn Home() -> Element {
                             }
 
                             // 定制服务卡片
-                            div {
-                                class: "kc-home-feature-card",
-                                div {
-                                    class: "kc-home-feature-icon",
+                            div { class: "kc-home-feature-card",
+                                div { class: "kc-home-feature-icon",
                                     svg {
                                         width: "32",
                                         height: "32",
@@ -509,43 +633,54 @@ pub fn Home() -> Element {
             }
 
             // 赞赏码区域
-            section {
-                class: "kc-home-tip-section",
-                div {
-                    class: "container",
+            section { class: "kc-home-tip-section",
+                div { class: "container",
                     h2 { class: "kc-home-tip-title",
                         span { "☕ " }
-                        if is_zh { "赞赏支持" } else { "Support Us" }
+                        if is_zh {
+                            "赞赏支持"
+                        } else {
+                            "Support Us"
+                        }
                     }
                     p { class: "kc-home-tip-subtitle",
                         if is_zh {
-                            "如果您喜欢 " {site_name} "，欢迎请我们喝杯咖啡 ☕"
+                            "如果您喜欢 "
+                            {site_name}
+                            "，欢迎请我们喝杯咖啡 ☕"
                         } else {
-                            "If you like " {site_name} ", feel free to buy us a coffee ☕"
+                            "If you like "
+                            {site_name}
+                            ", feel free to buy us a coffee ☕"
                         }
                     }
-                    div {
-                        class: "kc-home-tip-cards",
-                        div {
-                            class: "kc-home-tip-card",
+                    div { class: "kc-home-tip-cards",
+                        div { class: "kc-home-tip-card",
                             img {
                                 class: "kc-home-tip-qr",
                                 src: asset!("/assets/wechat_tip.jpg"),
                                 alt: if is_zh { "微信赞赏码" } else { "WeChat Tip QR" },
                             }
                             span { class: "kc-home-tip-label",
-                                if is_zh { "微信赞赏" } else { "WeChat Pay" }
+                                if is_zh {
+                                    "微信赞赏"
+                                } else {
+                                    "WeChat Pay"
+                                }
                             }
                         }
-                        div {
-                            class: "kc-home-tip-card",
+                        div { class: "kc-home-tip-card",
                             img {
                                 class: "kc-home-tip-qr",
                                 src: asset!("/assets/alipay_tip.png"),
                                 alt: if is_zh { "支付宝赞赏码" } else { "Alipay Tip QR" },
                             }
                             span { class: "kc-home-tip-label",
-                                if is_zh { "支付宝赞赏" } else { "Alipay" }
+                                if is_zh {
+                                    "支付宝赞赏"
+                                } else {
+                                    "Alipay"
+                                }
                             }
                         }
                     }
@@ -695,19 +830,15 @@ fn LoginModal(
             title: t_title.to_string(),
             onclose,
             max_width: "420px".to_string(),
-            div {
-                class: "kc-auth-modal",
+            div { class: "kc-auth-modal",
                 p { class: "kc-auth-modal-subtitle", "{t_subtitle}" }
 
                 if let Some(err) = error_msg() {
                     div { class: "kc-auth-status kc-auth-status-error", "{err}" }
                 }
 
-                form {
-                    autocomplete: "on",
-                    onsubmit: on_submit,
-                    div {
-                        class: "kc-auth-form-group",
+                form { autocomplete: "on", onsubmit: on_submit,
+                    div { class: "kc-auth-form-group",
                         label { class: "kc-auth-form-label", "{t_email}" }
                         input {
                             class: "kc-auth-form-input",
@@ -719,11 +850,9 @@ fn LoginModal(
                         }
                     }
 
-                    div {
-                        class: "kc-auth-form-group",
+                    div { class: "kc-auth-form-group",
                         label { class: "kc-auth-form-label", "{t_password}" }
-                        div {
-                            class: "kc-auth-password-wrapper",
+                        div { class: "kc-auth-password-wrapper",
                             input {
                                 class: "kc-auth-form-input",
                                 r#type: "{password_type}",
@@ -745,7 +874,12 @@ fn LoginModal(
                                         stroke: "currentColor",
                                         stroke_width: "2",
                                         path { d: "M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" }
-                                        line { x1: "1", y1: "1", x2: "23", y2: "23" }
+                                        line {
+                                            x1: "1",
+                                            y1: "1",
+                                            x2: "23",
+                                            y2: "23",
+                                        }
                                     }
                                 } else {
                                     svg {
@@ -763,12 +897,9 @@ fn LoginModal(
                         }
                     }
 
-                    div {
-                        class: "kc-auth-form-options",
-                        div {
-                            class: "kc-auth-remember-group",
-                            label {
-                                class: "kc-auth-checkbox-label",
+                    div { class: "kc-auth-form-options",
+                        div { class: "kc-auth-remember-group",
+                            label { class: "kc-auth-checkbox-label",
                                 input {
                                     r#type: "checkbox",
                                     checked: remember_me(),
@@ -802,8 +933,7 @@ fn LoginModal(
                     }
                 }
 
-                div {
-                    class: "kc-auth-footer",
+                div { class: "kc-auth-footer",
                     "{t_no_account} "
                     button {
                         class: "kc-auth-link-btn kc-auth-link-btn-primary",
@@ -961,8 +1091,7 @@ fn RegisterModal(
             title: t_register.to_string(),
             onclose,
             max_width: "420px".to_string(),
-            div {
-                class: "kc-auth-modal",
+            div { class: "kc-auth-modal",
                 p { class: "kc-auth-modal-subtitle", "{t_register_subtitle}" }
 
                 if let Some(msg) = success_msg() {
@@ -974,8 +1103,7 @@ fn RegisterModal(
                 }
 
                 if completed() {
-                    div {
-                        class: "kc-auth-success-block",
+                    div { class: "kc-auth-success-block",
                         button {
                             class: "kc-auth-submit-btn",
                             r#type: "button",
@@ -1017,10 +1145,8 @@ fn RegisterModal(
                         }
                     }
                 } else {
-                    form {
-                        onsubmit: on_submit,
-                        div {
-                            class: "kc-auth-form-group",
+                    form { onsubmit: on_submit,
+                        div { class: "kc-auth-form-group",
                             label { class: "kc-auth-form-label", "{t_name}" }
                             input {
                                 class: "kc-auth-form-input",
@@ -1031,8 +1157,7 @@ fn RegisterModal(
                             }
                         }
 
-                        div {
-                            class: "kc-auth-form-group",
+                        div { class: "kc-auth-form-group",
                             label { class: "kc-auth-form-label", "{t_email}" }
                             input {
                                 class: "kc-auth-form-input",
@@ -1044,8 +1169,7 @@ fn RegisterModal(
                             }
                         }
 
-                        div {
-                            class: "kc-auth-form-group",
+                        div { class: "kc-auth-form-group",
                             label { class: "kc-auth-form-label", "{t_password}" }
                             input {
                                 class: "kc-auth-form-input",
@@ -1056,8 +1180,7 @@ fn RegisterModal(
                             }
                         }
 
-                        div {
-                            class: "kc-auth-form-group",
+                        div { class: "kc-auth-form-group",
                             label { class: "kc-auth-form-label", "{t_confirm_password}" }
                             input {
                                 class: "kc-auth-form-input",
@@ -1069,8 +1192,7 @@ fn RegisterModal(
                         }
 
                         if code_requested() {
-                            div {
-                                class: "kc-auth-form-group",
+                            div { class: "kc-auth-form-group",
                                 label { class: "kc-auth-form-label", "{t_verification_code}" }
                                 input {
                                     class: "kc-auth-form-input",
@@ -1081,10 +1203,7 @@ fn RegisterModal(
                                     oninput: move |e| verification_code.set(e.value()),
                                 }
                             }
-                            p {
-                                class: "kc-auth-hint",
-                                "{t_code_sent_hint}"
-                            }
+                            p { class: "kc-auth-hint", "{t_code_sent_hint}" }
                         }
 
                         button {
@@ -1106,8 +1225,7 @@ fn RegisterModal(
                     }
                 }
 
-                div {
-                    class: "kc-auth-footer",
+                div { class: "kc-auth-footer",
                     "{t_has_account} "
                     button {
                         class: "kc-auth-link-btn kc-auth-link-btn-primary",
@@ -1342,11 +1460,9 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
             title: t_title.to_string(),
             onclose,
             max_width: "620px".to_string(),
-            div {
-                class: "kc-req-modal",
+            div { class: "kc-req-modal",
                 if success() {
-                    div {
-                        class: "kc-req-success",
+                    div { class: "kc-req-success",
                         svg {
                             width: "48",
                             height: "48",
@@ -1364,8 +1480,7 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
                 } else {
                     p { class: "kc-req-subtitle", "{t_subtitle}" }
 
-                    form {
-                        onsubmit: on_submit,
+                    form { onsubmit: on_submit,
 
                         // 1. 需求类型
                         div { class: "kc-req-group",
@@ -1374,19 +1489,23 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
                                 span { class: "kc-req-hint", "({t_single})" }
                             }
                             div { class: "kc-req-chips",
-                                {type_options.into_iter().map(|label| {
-                                    let active = requirement_type() == label;
-                                    rsx! {
-                                        button {
-                                            key: "{label}",
-                                            r#type: "button",
-                                            class: if active { "kc-req-chip kc-req-chip-active" } else { "kc-req-chip" },
-                                            onclick: move |_| requirement_type.set(label),
-                                            span { class: "kc-req-choice-dot" }
-                                            "{label}"
-                                        }
-                                    }
-                                })}
+                                {
+                                    type_options
+                                        .into_iter()
+                                        .map(|label| {
+                                            let active = requirement_type() == label;
+                                            rsx! {
+                                                button {
+                                                    key: "{label}",
+                                                    r#type: "button",
+                                                    class: if active { "kc-req-chip kc-req-chip-active" } else { "kc-req-chip" },
+                                                    onclick: move |_| requirement_type.set(label),
+                                                    span { class: "kc-req-choice-dot" }
+                                                    "{label}"
+                                                }
+                                            }
+                                        })
+                                }
                             }
                         }
 
@@ -1408,19 +1527,23 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
                                 span { class: "kc-req-hint", "({t_single})" }
                             }
                             div { class: "kc-req-chips",
-                                {scale_options.into_iter().map(|label| {
-                                    let active = usage_scale() == label;
-                                    rsx! {
-                                        button {
-                                            key: "{label}",
-                                            r#type: "button",
-                                            class: if active { "kc-req-chip kc-req-chip-active" } else { "kc-req-chip" },
-                                            onclick: move |_| usage_scale.set(label),
-                                            span { class: "kc-req-choice-dot" }
-                                            "{label}"
-                                        }
-                                    }
-                                })}
+                                {
+                                    scale_options
+                                        .into_iter()
+                                        .map(|label| {
+                                            let active = usage_scale() == label;
+                                            rsx! {
+                                                button {
+                                                    key: "{label}",
+                                                    r#type: "button",
+                                                    class: if active { "kc-req-chip kc-req-chip-active" } else { "kc-req-chip" },
+                                                    onclick: move |_| usage_scale.set(label),
+                                                    span { class: "kc-req-choice-dot" }
+                                                    "{label}"
+                                                }
+                                            }
+                                        })
+                                }
                             }
                         }
 
@@ -1498,19 +1621,23 @@ fn RequirementModal(open: ReadSignal<bool>, onclose: EventHandler<()>) -> Elemen
                         div { class: "kc-req-group",
                             label { class: "kc-req-label", "5. {t_contact_label}" }
                             div { class: "kc-req-tabs",
-                                {contact_tabs.into_iter().map(|(key, label, _)| {
-                                    let active = contact_method() == key;
-                                    rsx! {
-                                        button {
-                                            key: "{key}",
-                                            r#type: "button",
-                                            class: if active { "kc-req-tab kc-req-tab-active" } else { "kc-req-tab" },
-                                            onclick: move |_| contact_method.set(key),
-                                            span { class: "kc-req-tab-icon" }
-                                            "{label}"
-                                        }
-                                    }
-                                })}
+                                {
+                                    contact_tabs
+                                        .into_iter()
+                                        .map(|(key, label, _)| {
+                                            let active = contact_method() == key;
+                                            rsx! {
+                                                button {
+                                                    key: "{key}",
+                                                    r#type: "button",
+                                                    class: if active { "kc-req-tab kc-req-tab-active" } else { "kc-req-tab" },
+                                                    onclick: move |_| contact_method.set(key),
+                                                    span { class: "kc-req-tab-icon" }
+                                                    "{label}"
+                                                }
+                                            }
+                                        })
+                                }
                             }
                             input {
                                 class: "kc-auth-form-input kc-req-input",
