@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use client_api::api::payment::CreatePaymentOrderRequest;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::payment_service;
 use crate::stores::auth_store::AuthStore;
@@ -18,10 +19,10 @@ enum PayMethod {
 }
 
 impl PayMethod {
-    fn label(&self) -> &'static str {
+    fn label_key(&self) -> &'static str {
         match self {
-            PayMethod::Alipay => "支付宝",
-            PayMethod::WechatPay => "微信支付",
+            PayMethod::Alipay => "recharge.alipay",
+            PayMethod::WechatPay => "recharge.wechat_pay",
         }
     }
 
@@ -54,6 +55,7 @@ enum OrderState {
 
 #[component]
 pub fn Recharge() -> Element {
+    let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut ui_store = use_context::<UiStore>();
     let public_settings_store = use_context::<PublicSettingsStore>();
@@ -95,11 +97,12 @@ pub fn Recharge() -> Element {
                     order_state.set(OrderState::Paid {
                         out_trade_no: no.clone(),
                     });
-                    ui_store.show_success("支付成功！余额将尽快入账");
+                    ui_store.show_success(i18n.t("recharge.pay_success"));
                 }
                 "failed" | "cancelled" => {
                     order_state.set(OrderState::Failed {
-                        reason: format!("订单状态：{}", order.status),
+                        reason: i18n
+                            .t_with_args("recharge.order_status", &[("status", &order.status)]),
                     });
                 }
                 _ => {} // 仍在处理中
@@ -131,13 +134,17 @@ pub fn Recharge() -> Element {
                                 match order.status.as_str() {
                                     "paid" | "success" => {
                                         order_state.set(OrderState::Paid { out_trade_no: no });
-                                        ui_store.show_success("支付成功！余额已入账");
+                                        ui_store
+                                            .show_success(i18n.t("recharge.pay_success_credited"));
                                         auto_poll_active.set(false);
                                         break;
                                     }
                                     "failed" | "cancelled" => {
                                         order_state.set(OrderState::Failed {
-                                            reason: format!("订单已失效：{}", order.status),
+                                            reason: i18n.t_with_args(
+                                                "recharge.order_expired",
+                                                &[("status", &order.status)],
+                                            ),
                                         });
                                         auto_poll_active.set(false);
                                         break;
@@ -157,13 +164,13 @@ pub fn Recharge() -> Element {
         evt.prevent_default();
         let amount_str = amount();
         if amount_str.is_empty() {
-            ui_store.show_error("请输入充値金额");
+            ui_store.show_error(i18n.t("recharge.enter_amount"));
             return;
         }
         let amount_val: f64 = match amount_str.parse() {
             Ok(v) if v > 0.0 => v,
             _ => {
-                ui_store.show_error("请输入有效金额（大于 0）");
+                ui_store.show_error(i18n.t("recharge.invalid_amount"));
                 return;
             }
         };
@@ -176,8 +183,18 @@ pub fn Recharge() -> Element {
         spawn(async move {
             let token = auth_store.token().unwrap_or_default();
             let body_name = site_name();
-            let req = CreatePaymentOrderRequest::new(amount_val, "账户充值", payment_type)
-                .with_body(format!("{} 账户充值 {} 元", body_name, amount_val));
+            let req = CreatePaymentOrderRequest::new(
+                amount_val,
+                i18n.t("recharge.account_recharge_subject"),
+                payment_type,
+            )
+            .with_body(i18n.t_with_args(
+                "recharge.recharge_amount_format",
+                &[
+                    ("site_name", &body_name),
+                    ("amount", &amount_val.to_string()),
+                ],
+            ));
             match payment_service::create_order(req, &token).await {
                 Ok(order) => {
                     loading.set(false);
@@ -196,7 +213,8 @@ pub fn Recharge() -> Element {
                 Err(e) => {
                     loading.set(false);
                     order_state.set(OrderState::Failed {
-                        reason: format!("创建订单失败：{e}"),
+                        reason: i18n
+                            .t_with_args("recharge.create_failed", &[("error", &e.to_string())]),
                     });
                 }
             }
@@ -204,17 +222,17 @@ pub fn Recharge() -> Element {
     };
 
     rsx! {
-        div {
-            class: "page-container",
-            div {
-                class: "page-header",
+        div { class: "page-container",
+            div { class: "page-header",
                 button {
                     class: "btn btn-ghost btn-sm",
                     r#type: "button",
-                    onclick: move |_| { nav.push(Route::PaymentsOverview {}); },
-                    "← 返回"
+                    onclick: move |_| {
+                        nav.push(Route::PaymentsOverview {});
+                    },
+                    {format!("← {}", i18n.t("common.back"))}
                 }
-                h1 { class: "page-title", "账户充値" }
+                h1 { class: "page-title", {i18n.t("recharge.title")} }
             }
 
             // 充値表单区
@@ -222,7 +240,7 @@ pub fn Recharge() -> Element {
                 OrderState::Idle | OrderState::Failed { .. } => rsx! {
                     div { class: "card",
                         div { class: "card-header",
-                            h3 { class: "card-title", "选择充値方式" }
+                            h3 { class: "card-title", {i18n.t("recharge.select_method")} }
                         }
                         div { class: "card-body",
                             // 失败提示
@@ -237,7 +255,7 @@ pub fn Recharge() -> Element {
 
                             // 支付方式选择
                             div { class: "form-group",
-                                label { class: "form-label", "支付方式" }
+                                label { class: "form-label", {i18n.t("recharge.payment_method")} }
                                 div { class: "pay-method-grid",
                                     for method in [PayMethod::Alipay, PayMethod::WechatPay] {
                                         {
@@ -249,7 +267,7 @@ pub fn Recharge() -> Element {
                                                     r#type: "button",
                                                     onclick: move |_| pay_method.set(m.clone()),
                                                     span { class: "pay-method-icon", "{method.icon()}" }
-                                                    span { class: "pay-method-label", "{method.label()}" }
+                                                    span { class: "pay-method-label", "{i18n.t(method.label_key())}" }
                                                 }
                                             }
                                         }
@@ -259,7 +277,7 @@ pub fn Recharge() -> Element {
 
                             // 就常金额选择
                             div { class: "form-group",
-                                label { class: "form-label", "充値金额（元）" }
+                                label { class: "form-label", {i18n.t("recharge.amount_label")} }
                                 div { class: "amount-presets",
                                     for preset in ["10", "30", "50", "100", "200", "500"] {
                                         button {
@@ -276,27 +294,33 @@ pub fn Recharge() -> Element {
                                     r#type: "number",
                                     min: "1",
                                     step: "1",
-                                    placeholder: "或输入自定义金额",
+                                    placeholder: i18n.t("recharge.custom_amount"),
                                     value: "{amount}",
                                     oninput: move |e| amount.set(e.value()),
                                 }
                             }
 
                             // 提交按钮
-                            form {
-                                onsubmit: on_submit,
+                            form { onsubmit: on_submit,
                                 button {
                                     class: "btn btn-primary btn-full",
                                     r#type: "submit",
                                     disabled: loading(),
-                                    if loading() { "订单创建中…" } else {
+                                    if loading() {
+                                        {i18n.t("recharge.creating_order")}
+                                    } else {
                                         {
                                             let amt_label = if amount().is_empty() {
                                                 String::new()
                                             } else {
                                                 format!(" CNY {}", amount())
                                             };
-                                            format!("{} 确认充值{}", pay_method().icon(), amt_label)
+                                            format!(
+                                                "{} {}{}",
+                                                pay_method().icon(),
+                                                i18n.t("recharge.confirm_recharge"),
+                                                amt_label,
+                                            )
                                         }
                                     }
                                 }
@@ -306,27 +330,32 @@ pub fn Recharge() -> Element {
                             div { class: "alert alert-info", style: "margin-top: 16px",
                                 span { class: "alert-icon", "ℹ" }
                                 div { class: "alert-content",
-                                    p { class: "alert-body",
-                                        "充値完成后余额通常几秒内到账。若长时间未到账请联系客服。"
-                                    }
+                                    p { class: "alert-body", {i18n.t("recharge.hint")} }
                                 }
                             }
                         }
                     }
                 },
-
-                // 订单已创建，等待支付
-                OrderState::Pending { ref out_trade_no, ref pay_url, ref payment_type, ref qr_code, ref qr_code_image_url } => rsx! {
+                OrderState::Pending {
+                    ref out_trade_no,
+                    ref pay_url,
+                    ref payment_type,
+                    ref qr_code,
+                    ref qr_code_image_url,
+                } => rsx! {
                     div { class: "card",
                         div { class: "card-header",
-                            h3 { class: "card-title", "请完成支付" }
+                            h3 { class: "card-title", {i18n.t("recharge.pay_title")} }
                         }
                         div { class: "card-body",
                             div { class: "alert alert-warning",
                                 span { class: "alert-icon", "⏳" }
                                 div { class: "alert-content",
-                                    p { class: "alert-title", "订单已创建，等待支付" }
-                                    p { class: "alert-body", "订单号：" code { "{out_trade_no}" } }
+                                    p { class: "alert-title", {i18n.t("recharge.order_created")} }
+                                    p { class: "alert-body",
+                                        {i18n.t("recharge.order_no_label")}
+                                        code { "{out_trade_no}" }
+                                    }
                                 }
                             }
 
@@ -334,9 +363,13 @@ pub fn Recharge() -> Element {
                             if let Some(url) = pay_url {
                                 div { class: "pay-qr-area",
                                     p { class: "pay-qr-tip",
-                                        if payment_type == "page" { "💳 请打开支付宝支付页面完成付款" }
-                                        else if payment_type == "wap" { "📱 请在手机端打开支付链接完成付款" }
-                                        else { "请点击下方按钮完成支付" }
+                                        if payment_type == "page" {
+                                            {i18n.t("recharge.pay_alipay_page")}
+                                        } else if payment_type == "wap" {
+                                            {i18n.t("recharge.pay_wap")}
+                                        } else {
+                                            {i18n.t("recharge.pay_other")}
+                                        }
                                     }
                                     a {
                                         href: "{url}",
@@ -344,27 +377,26 @@ pub fn Recharge() -> Element {
                                         rel: "noopener noreferrer",
                                         class: "btn btn-primary btn-full",
                                         style: "text-decoration:none;display:block;text-align:center",
-                                        "打开支付页面"
+                                        {i18n.t("recharge.open_payment")}
                                     }
-                                    p {
-                                        style: "font-size:12px;color:var(--text-secondary);margin-top:8px;text-align:center",
-                                        "支付完成后点击【已完成支付】按钮刷新状态"
+                                    p { style: "font-size:12px;color:var(--text-secondary);margin-top:8px;text-align:center",
+                                        {i18n.t("recharge.refresh_hint")}
                                     }
                                 }
                             }
 
                             if let Some(image_url) = qr_code_image_url {
                                 div { class: "pay-qr-area",
-                                    p { class: "pay-qr-tip", "请使用支付宝或其他扫码工具完成支付" }
+                                    p { class: "pay-qr-tip", {i18n.t("recharge.scan_pay")} }
                                     img {
                                         src: "{image_url}",
-                                        alt: "支付二维码",
-                                        style: "width:220px;height:220px;display:block;margin:0 auto;border-radius:16px;border:1px solid var(--border-color);background:white;padding:12px"
+                                        alt: i18n.t("recharge.qr_code_alt"),
+                                        style: "width:220px;height:220px;display:block;margin:0 auto;border-radius:16px;border:1px solid var(--border-color);background:white;padding:12px",
                                     }
                                     if let Some(code) = qr_code {
-                                        p {
-                                            style: "font-size:12px;color:var(--text-secondary);margin-top:8px;text-align:center;word-break:break-all",
-                                            "二维码内容：{code}"
+                                        p { style: "font-size:12px;color:var(--text-secondary);margin-top:8px;text-align:center;word-break:break-all",
+                                            {i18n.t("recharge.qr_code_content")}
+                                            "{code}"
                                         }
                                     }
                                 }
@@ -376,7 +408,7 @@ pub fn Recharge() -> Element {
                                     class: "btn btn-primary",
                                     r#type: "button",
                                     onclick: move |_| *poll_tick.write() += 1,
-                                    "已完成支付，点此确认"
+                                    {i18n.t("recharge.confirm_paid")}
                                 }
                                 button {
                                     class: "btn btn-ghost",
@@ -385,30 +417,33 @@ pub fn Recharge() -> Element {
                                         auto_poll_active.set(false);
                                         order_state.set(OrderState::Idle);
                                     },
-                                    "取消订单"
+                                    {i18n.t("recharge.cancel_order")}
                                 }
                             }
                         }
                     }
                 },
-
-                // 支付完成
                 OrderState::Paid { ref out_trade_no } => rsx! {
                     div { class: "card",
                         div { class: "card-body",
                             div { class: "pay-success",
                                 div { class: "pay-success-icon", "✅" }
-                                h3 { class: "pay-success-title", "充値成功！" }
-                                p { class: "pay-success-no", "订单号：" code { "{out_trade_no}" } }
+                                h3 { class: "pay-success-title", {i18n.t("recharge.success_title")} }
+                                p { class: "pay-success-no",
+                                    {i18n.t("recharge.order_no_label")}
+                                    code { "{out_trade_no}" }
+                                }
                                 p { style: "color:var(--text-secondary);margin-bottom:24px",
-                                    "余额已入账，可立即使用 API"
+                                    {i18n.t("recharge.success_desc")}
                                 }
                                 div { class: "pay-success-actions",
                                     button {
                                         class: "btn btn-primary",
                                         r#type: "button",
-                                        onclick: move |_| { nav.push(Route::PaymentsOverview {}); },
-                                        "查看余额"
+                                        onclick: move |_| {
+                                            nav.push(Route::PaymentsOverview {});
+                                        },
+                                        {i18n.t("recharge.view_balance")}
                                     }
                                     button {
                                         class: "btn btn-ghost",
@@ -417,7 +452,7 @@ pub fn Recharge() -> Element {
                                             order_state.set(OrderState::Idle);
                                             amount.set(String::new());
                                         },
-                                        "继续充値"
+                                        {i18n.t("recharge.continue_recharge")}
                                     }
                                 }
                             }

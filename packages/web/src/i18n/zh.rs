@@ -495,6 +495,70 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("payments.usage_details", "用量明细");
     m.insert("payments.no_usage_records", "暂无用量记录");
 
+    // ── Payment Orders ──────────────────────────
+    m.insert(
+        "payment_orders.subtitle_admin",
+        "查看和管理平台所有支付订单",
+    );
+    m.insert("payment_orders.subtitle_user", "查看您的充值和支付记录");
+    m.insert("payment_orders.empty", "暂无订单记录");
+    m.insert("payment_orders.col_user", "用户");
+    m.insert("payment_orders.pagination", "共 {total} 条");
+    m.insert("payment_orders.filter_all", "全部");
+    m.insert("payment_orders.filter_pending", "待支付");
+    m.insert("payment_orders.filter_paid", "已支付");
+    m.insert("payment_orders.filter_failed", "已失败");
+
+    // ── Recharge ──────────────────────────────
+    m.insert("recharge.title", "账户充值");
+    m.insert("recharge.select_method", "选择充值方式");
+    m.insert("recharge.payment_method", "支付方式");
+    m.insert("recharge.alipay", "支付宝");
+    m.insert("recharge.wechat_pay", "微信支付");
+    m.insert("recharge.amount_label", "充值金额（元）");
+    m.insert("recharge.custom_amount", "或输入自定义金额");
+    m.insert("recharge.creating_order", "订单创建中…");
+    m.insert("recharge.confirm_recharge", "确认充值");
+    m.insert(
+        "recharge.hint",
+        "充值完成后余额通常几秒内到账。若长时间未到账请联系客服。",
+    );
+    m.insert("recharge.pay_title", "请完成支付");
+    m.insert("recharge.order_created", "订单已创建，等待支付");
+    m.insert("recharge.order_no_label", "订单号：");
+    m.insert("recharge.open_payment", "打开支付页面");
+    m.insert(
+        "recharge.refresh_hint",
+        "支付完成后点击【已完成支付】按钮刷新状态",
+    );
+    m.insert(
+        "recharge.pay_alipay_page",
+        "💳 请打开支付宝支付页面完成付款",
+    );
+    m.insert("recharge.pay_wap", "📱 请在手机端打开支付链接完成付款");
+    m.insert("recharge.pay_other", "请点击下方按钮完成支付");
+    m.insert("recharge.scan_pay", "请使用支付宝或其他扫码工具完成支付");
+    m.insert("recharge.qr_code_alt", "支付二维码");
+    m.insert("recharge.qr_code_content", "二维码内容：");
+    m.insert("recharge.confirm_paid", "已完成支付，点此确认");
+    m.insert("recharge.cancel_order", "取消订单");
+    m.insert("recharge.success_title", "充值成功！");
+    m.insert("recharge.success_desc", "余额已入账，可立即使用 API");
+    m.insert("recharge.view_balance", "查看余额");
+    m.insert("recharge.continue_recharge", "继续充值");
+    m.insert("recharge.enter_amount", "请输入充值金额");
+    m.insert("recharge.invalid_amount", "请输入有效金额（大于 0）");
+    m.insert("recharge.pay_success", "支付成功！余额将尽快入账");
+    m.insert("recharge.pay_success_credited", "支付成功！余额已入账");
+    m.insert("recharge.order_status", "订单状态：{status}");
+    m.insert("recharge.order_expired", "订单已失效：{status}");
+    m.insert("recharge.create_failed", "创建订单失败：{error}");
+    m.insert("recharge.account_recharge_subject", "账户充值");
+    m.insert(
+        "recharge.recharge_amount_format",
+        "{site_name} 账户充值 {amount} 元",
+    );
+
     // ── Distribution ────────────────────────────
     m.insert("distribution.title", "分销管理");
     m.insert("distribution.subtitle", "查看您的分销收益和推荐记录");

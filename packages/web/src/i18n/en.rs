@@ -564,6 +564,91 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("payments.usage_details", "Usage Details");
     m.insert("payments.no_usage_records", "No usage records yet");
 
+    // ── Payment Orders ──────────────────────────
+    m.insert(
+        "payment_orders.subtitle_admin",
+        "View and manage all payment orders on the platform",
+    );
+    m.insert(
+        "payment_orders.subtitle_user",
+        "View your recharge and payment records",
+    );
+    m.insert("payment_orders.empty", "No payment orders yet");
+    m.insert("payment_orders.col_user", "User");
+    m.insert("payment_orders.pagination", "{total} items");
+    m.insert("payment_orders.filter_all", "All");
+    m.insert("payment_orders.filter_pending", "Pending");
+    m.insert("payment_orders.filter_paid", "Paid");
+    m.insert("payment_orders.filter_failed", "Failed");
+
+    // ── Recharge ──────────────────────────────
+    m.insert("recharge.title", "Account Recharge");
+    m.insert("recharge.select_method", "Select Payment Method");
+    m.insert("recharge.payment_method", "Payment Method");
+    m.insert("recharge.alipay", "Alipay");
+    m.insert("recharge.wechat_pay", "WeChat Pay");
+    m.insert("recharge.amount_label", "Amount (CNY)");
+    m.insert("recharge.custom_amount", "Or enter a custom amount");
+    m.insert("recharge.creating_order", "Creating order...");
+    m.insert("recharge.confirm_recharge", "Confirm & Pay");
+    m.insert(
+        "recharge.hint",
+        "Balance is usually credited within seconds. Contact support if not received in time.",
+    );
+    m.insert("recharge.pay_title", "Complete Payment");
+    m.insert("recharge.order_created", "Order created, awaiting payment");
+    m.insert("recharge.order_no_label", "Order No.");
+    m.insert("recharge.open_payment", "Open Payment Page");
+    m.insert(
+        "recharge.refresh_hint",
+        "Click \"Confirm Paid\" after payment to refresh the status",
+    );
+    m.insert(
+        "recharge.pay_alipay_page",
+        "\u{1f4b3} Please open Alipay to complete payment",
+    );
+    m.insert(
+        "recharge.pay_wap",
+        "\u{1f4f1} Please complete payment on your mobile device",
+    );
+    m.insert("recharge.pay_other", "Please click the button below to pay");
+    m.insert(
+        "recharge.scan_pay",
+        "Please use Alipay or other scanner to complete payment",
+    );
+    m.insert("recharge.qr_code_alt", "Payment QR Code");
+    m.insert("recharge.qr_code_content", "QR Code content:");
+    m.insert("recharge.confirm_paid", "Confirm Paid");
+    m.insert("recharge.cancel_order", "Cancel Order");
+    m.insert("recharge.success_title", "Recharge Successful!");
+    m.insert(
+        "recharge.success_desc",
+        "Balance credited, ready to use API",
+    );
+    m.insert("recharge.view_balance", "View Balance");
+    m.insert("recharge.continue_recharge", "Continue Recharge");
+    m.insert("recharge.enter_amount", "Please enter a recharge amount");
+    m.insert(
+        "recharge.invalid_amount",
+        "Please enter a valid amount (greater than 0)",
+    );
+    m.insert(
+        "recharge.pay_success",
+        "Payment successful! Balance will be credited shortly",
+    );
+    m.insert(
+        "recharge.pay_success_credited",
+        "Payment successful! Balance credited",
+    );
+    m.insert("recharge.order_status", "Order status: {status}");
+    m.insert("recharge.order_expired", "Order expired: {status}");
+    m.insert("recharge.create_failed", "Failed to create order: {error}");
+    m.insert("recharge.account_recharge_subject", "Account Recharge");
+    m.insert(
+        "recharge.recharge_amount_format",
+        "{site_name} account recharge {amount} CNY",
+    );
+
     // ── Distribution ────────────────────────────
     m.insert("distribution.title", "Distribution");
     m.insert(

@@ -4,6 +4,7 @@ use ui::{Badge, BadgeVariant, Pagination, Table, TableHead};
 
 const PAGE_SIZE: usize = 20;
 
+use crate::hooks::use_i18n::use_i18n;
 use crate::services::{
     api_client::{get_client, with_auto_refresh},
     payment_service,
@@ -18,6 +19,7 @@ use crate::utils::time::format_time;
 /// - Admin：查看所有订单
 #[component]
 pub fn PaymentOrders() -> Element {
+    let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
     let is_admin = user_store
@@ -72,12 +74,22 @@ pub fn PaymentOrders() -> Element {
         .await
     });
 
+    let filter_labels = [
+        ("all", i18n.t("payment_orders.filter_all")),
+        ("pending", i18n.t("payment_orders.filter_pending")),
+        ("paid", i18n.t("payment_orders.filter_paid")),
+        ("failed", i18n.t("payment_orders.filter_failed")),
+    ];
+
     rsx! {
         div { class: "page-header",
-            h1 { class: "page-title", "支付订单" }
+            h1 { class: "page-title", {i18n.t("page.payment_orders")} }
             p { class: "page-description",
-                if is_admin { "查看和管理平台所有支付订单" }
-                else { "查看您的充値和支付记录" }
+                if is_admin {
+                    {i18n.t("payment_orders.subtitle_admin")}
+                } else {
+                    {i18n.t("payment_orders.subtitle_user")}
+                }
             }
         }
 
@@ -85,16 +97,16 @@ pub fn PaymentOrders() -> Element {
         div { class: "toolbar",
             div { class: "toolbar-left",
                 div { class: "filter-tabs",
-                    for (val, label) in [("all", "全部"), ("pending", "待支付"), ("paid", "已支付"), ("failed", "已失败")] {
+                    for (val , label) in filter_labels {
                         button {
                             class: if status_filter() == val { "filter-tab active" } else { "filter-tab" },
                             r#type: "button",
                             onclick: {
                                 let val = val.to_string();
                                 move |_| {
-                                        *status_filter.write() = val.clone();
-                                        page.set(1);
-                                    }
+                                    *status_filter.write() = val.clone();
+                                    page.set(1);
+                                }
                             },
                             "{label}"
                         }
@@ -107,31 +119,30 @@ pub fn PaymentOrders() -> Element {
             if is_admin {
                 {
                     let (is_empty, empty_text) = match admin_orders() {
-                        None => (true, "加载中..."),
-                        Some(Err(_)) => (true, "加载失败"),
-                        Some(Ok(ref l)) if l.is_empty() => (true, "暂无订单记录"),
+                        None => (true, i18n.t("table.loading")),
+                        Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                        Some(Ok(ref l)) if l.is_empty() => (true, i18n.t("payment_orders.empty")),
                         _ => (false, ""),
                     };
                     let admin_start = (page() as usize - 1) * PAGE_SIZE;
                     rsx! {
-                        Table {
-                            empty: is_empty,
-                            empty_text: empty_text.to_string(),
-                            col_count: 5,
+                        Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 5,
                             thead {
                                 tr {
-                                    TableHead { "订单号" }
-                                    TableHead { "用户" }
-                                    TableHead { "金额" }
-                                    TableHead { "状态" }
-                                    TableHead { "创建时间" }
+                                    TableHead { {i18n.t("payments.order_no")} }
+                                    TableHead { {i18n.t("payment_orders.col_user")} }
+                                    TableHead { {i18n.t("common.amount")} }
+                                    TableHead { {i18n.t("table.status")} }
+                                    TableHead { {i18n.t("table.created_at")} }
                                 }
                             }
                             tbody {
                                 if let Some(Ok(ref list)) = admin_orders() {
                                     for o in list.iter().skip(admin_start).take(PAGE_SIZE) {
                                         tr {
-                                            td { code { "{o.out_trade_no}" } }
+                                            td {
+                                                code { "{o.out_trade_no}" }
+                                            }
                                             td {
                                                 {
                                                     let uid = o.user_id.clone();
@@ -147,12 +158,9 @@ pub fn PaymentOrders() -> Element {
                                             }
                                             td { "¥{o.amount}" }
                                             td {
-                                                Badge {
-                                                    variant: status_to_variant(&o.status),
-                                                    "{o.status}"
-                                                }
+                                                Badge { variant: status_to_variant(&o.status), "{o.status}" }
                                             }
-                                            td { { format_time(&o.created_at) } }
+                                            td { {format_time(&o.created_at)} }
                                         }
                                     }
                                 }
@@ -163,40 +171,36 @@ pub fn PaymentOrders() -> Element {
             } else {
                 {
                     let (is_empty, empty_text) = match my_orders() {
-                        None => (true, "加载中..."),
-                        Some(Err(_)) => (true, "加载失败"),
-                        Some(Ok(ref l)) if l.is_empty() => (true, "暂无订单记录"),
+                        None => (true, i18n.t("table.loading")),
+                        Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                        Some(Ok(ref l)) if l.is_empty() => (true, i18n.t("payment_orders.empty")),
                         _ => (false, ""),
                     };
                     let my_start = (page() as usize - 1) * PAGE_SIZE;
                     rsx! {
-                        Table {
-                            empty: is_empty,
-                            empty_text: empty_text.to_string(),
-                            col_count: 5,
+                        Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 5,
                             thead {
                                 tr {
-                                    TableHead { "订单号" }
-                                    TableHead { "金额" }
-                                    TableHead { "主题" }
-                                    TableHead { "状态" }
-                                    TableHead { "创建时间" }
+                                    TableHead { {i18n.t("payments.order_no")} }
+                                    TableHead { {i18n.t("common.amount")} }
+                                    TableHead { {i18n.t("payments.subject")} }
+                                    TableHead { {i18n.t("table.status")} }
+                                    TableHead { {i18n.t("table.created_at")} }
                                 }
                             }
                             tbody {
                                 if let Some(Ok(ref list)) = my_orders() {
                                     for o in list.iter().skip(my_start).take(PAGE_SIZE) {
                                         tr {
-                                            td { code { "{o.out_trade_no}" } }
+                                            td {
+                                                code { "{o.out_trade_no}" }
+                                            }
                                             td { "¥{o.amount}" }
                                             td { "{o.subject}" }
                                             td {
-                                                Badge {
-                                                    variant: status_to_variant(&o.status),
-                                                    "{o.status}"
-                                                }
+                                                Badge { variant: status_to_variant(&o.status), "{o.status}" }
                                             }
-                                            td { { format_time(&o.created_at) } }
+                                            td { {format_time(&o.created_at)} }
                                         }
                                     }
                                 }
@@ -216,7 +220,9 @@ pub fn PaymentOrders() -> Element {
             let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
             rsx! {
                 div { class: "pagination",
-                    span { class: "pagination-info", "共 {total} 条" }
+                    span { class: "pagination-info",
+                        {i18n.t_with_args("payment_orders.pagination", &[("total", &total.to_string())])}
+                    }
                     Pagination {
                         current: page(),
                         total_pages,
