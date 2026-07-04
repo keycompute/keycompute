@@ -328,9 +328,8 @@ services:
       KC__DATABASE__MAX_CONNECTIONS: ${DB_MAX_CONNECTIONS:-10}
       KC__DATABASE__MIN_CONNECTIONS: ${DB_MIN_CONNECTIONS:-2}
 
-      # 读写分离：读库连接 URL（config-rs 索引转 Vec，__0 / __1 分别对应数组元素）
-      KC__DATABASE_READ_URLS__0: "postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-replica1:5432/${POSTGRES_DB:-keycompute}"
-      KC__DATABASE_READ_URLS__1: "postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-replica2:5432/${POSTGRES_DB:-keycompute}"
+      # 读写分离：读库连接 URL（逗号分隔，由 config-rs list_separator 解析为 Vec）
+      KC__DATABASE_READ_URLS: "postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-replica1:5432/${POSTGRES_DB:-keycompute},postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD:-change-me-strong-password}@postgres-replica2:5432/${POSTGRES_DB:-keycompute}"
 
       # 读写分离路由配置
       KC__DATABASE_ROUTING__STRATEGY: ${KC__DATABASE_ROUTING__STRATEGY:-round_robin}
