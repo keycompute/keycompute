@@ -586,7 +586,7 @@ pub fn get_default_endpoint(provider: &str) -> String {
         "anthropic" | "claude" => "https://api.anthropic.com/v1".to_string(),
         "deepseek" => "https://api.deepseek.com/v1".to_string(),
         "gemini" | "google" => "https://generativelanguage.googleapis.com/v1".to_string(),
-        "ollama" => "http://localhost:11434/v1".to_string(),
+        "ollama" => "http://ollama:11434/v1".to_string(),
         _ => format!("https://api.{}.com/v1", provider),
     }
 }

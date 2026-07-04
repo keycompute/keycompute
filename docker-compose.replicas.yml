@@ -434,8 +434,10 @@ services:
     environment:
       OLLAMA_HOST: "0.0.0.0:11434"
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
+    # 端口不暴露到宿主机，keycompute-server 通过 Docker 内部 DNS (ollama:11434) 访问
+    # 如需从宿主机直接调试，可取消下行注释：
+    # ports:
+    #   - "${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama_data:/root/.ollama
     networks:
