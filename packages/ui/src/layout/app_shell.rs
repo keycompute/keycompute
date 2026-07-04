@@ -10,6 +10,10 @@ const COMPONENTS_CSS: Asset = asset!("/assets/styling/components.css");
 const DARK_CSS: Asset = asset!("/assets/styling/dark.css");
 const RESPONSIVE_CSS: Asset = asset!("/assets/styling/responsive.css");
 
+/// 主题 Signal 的 Context 包装，与 web 层共享，避免与 lang 的 Signal<String> 类型冲突
+#[derive(Clone, Copy)]
+pub struct ThemeCtx(pub Signal<String>);
+
 /// 全局 UI 状态，通过 Context API 向下传递
 #[derive(Clone, Copy)]
 pub struct UiState {
@@ -17,7 +21,7 @@ pub struct UiState {
     pub sidebar_collapsed: Signal<bool>,
     /// 移动端侧边栏是否打开
     pub sidebar_mobile_open: Signal<bool>,
-    /// 主题：light / dark / system
+    /// 主题：light / dark — 与 ThemeCtx 共享同一信号源
     pub theme: Signal<String>,
     /// 语言：zh / en
     pub lang: Signal<String>,
@@ -57,15 +61,19 @@ pub fn AppShell(
     let sidebar_collapsed = use_signal(|| false);
     let mut sidebar_mobile_open = use_signal(|| false);
 
-    let theme = use_signal(|| {
-        #[cfg(target_arch = "wasm32")]
-        {
-            read_local_storage("theme").unwrap_or_else(|| "dark".to_string())
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            "dark".to_string()
-        }
+    // 从 App 根组件的 ThemeCtx context 获取主题信号，避免多源同步问题
+    // 使用 try_use_context 并带 fallback，确保在独立使用 ui 库时不 panic
+    let ThemeCtx(theme) = try_use_context::<ThemeCtx>().unwrap_or_else(|| {
+        ThemeCtx(use_signal(|| {
+            #[cfg(target_arch = "wasm32")]
+            {
+                read_local_storage("theme").unwrap_or_else(|| "dark".to_string())
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                "dark".to_string()
+            }
+        }))
     });
 
     let fallback_lang = use_signal(|| {
@@ -87,7 +95,11 @@ pub fn AppShell(
         lang,
     });
 
-    // 每次 theme 变化时将主题写入 html[data-theme]
+    // 重新提供 ThemeCtx，确保子组件也能通过 ThemeCtx 访问主题信号
+    use_context_provider(|| ThemeCtx(theme));
+
+    // 将主题同步到 HTML data-theme 属性，确保 CSS 变量生效
+    // 当 App 根组件已提供同步时此 effect 冗余但无害，在独立使用 ui 库时则必不可少
     use_effect(move || {
         let val = theme();
         #[cfg(target_arch = "wasm32")]
@@ -167,14 +179,10 @@ pub fn AppShell(
                 }
 
                 main { class: "content-area",
-                    div { class: "content-inner",
-                        {children}
-                    }
+                    div { class: "content-inner", {children} }
                 }
 
-                Footer {
-                    site_name: site_name.clone(),
-                }
+                Footer { site_name: site_name.clone() }
             }
         }
     }

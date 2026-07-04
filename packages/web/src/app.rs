@@ -11,7 +11,7 @@ use crate::stores::{
 };
 use crate::views::shared::Toast;
 use ui::layout::sidebar::NavIcon;
-use ui::{AppShell, NavItem, NavSection, UserMenuAction};
+use ui::{AppShell, NavItem, NavSection, ThemeCtx, UserMenuAction};
 
 /// 根组件：提供所有全局 context，挂载路由
 #[component]
@@ -49,7 +49,7 @@ pub fn App() -> Element {
         use_context_provider(|| PublicSettingsStore::new(public_settings_state));
     let _ui_store = use_context_provider(|| UiStore::new(toast_signal));
     let _lang = use_context_provider(|| lang_signal);
-    let _theme = use_context_provider(|| theme_signal);
+    let _theme = use_context_provider(|| ThemeCtx(theme_signal));
 
     // 应用启动时同步主题到 HTML data-theme 属性
     use_effect(move || {
@@ -169,16 +169,14 @@ pub fn AppLayout() -> Element {
             div {
                 class: "auth-redirect-loading",
                 style: "display:flex;align-items:center;justify-content:center;height:100vh;background:var(--bg-primary,#f8fafc)",
-                div {
-                    style: "display:flex;flex-direction:column;align-items:center;gap:12px",
+                div { style: "display:flex;flex-direction:column;align-items:center;gap:12px",
                     div {
                         class: "spinner",
                         style: "width:32px;height:32px",
                         role: "status",
                         "aria-label": "{i18n.t(\"common.redirecting\")}",
                     }
-                    span {
-                        style: "color:var(--text-secondary,#64748b);font-size:14px",
+                    span { style: "color:var(--text-secondary,#64748b);font-size:14px",
                         {i18n.t("common.redirect_to_login")}
                     }
                 }
@@ -346,8 +344,12 @@ pub fn AppLayout() -> Element {
             expand_label: i18n.t("common.expand"),
             collapse_label: i18n.t("common.collapse"),
             on_user_menu: move |action: UserMenuAction| match action {
-                UserMenuAction::Profile => { nav.push(Route::UserProfile {}); }
-                UserMenuAction::Settings => { nav.push(Route::UserSettings {}); }
+                UserMenuAction::Profile => {
+                    nav.push(Route::UserProfile {});
+                }
+                UserMenuAction::Settings => {
+                    nav.push(Route::UserSettings {});
+                }
                 UserMenuAction::Logout => {
                     auth_store.logout();
                     // 清除 API 客户端 token

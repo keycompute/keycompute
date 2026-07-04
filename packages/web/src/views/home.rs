@@ -9,6 +9,7 @@ use crate::services::requirement_service::{RequirementSubmission, submit_require
 use crate::stores::auth_store::AuthStore;
 use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::user_store::{UserInfo, UserStore};
+use ui::ThemeCtx;
 use ui::components::modal::Modal;
 
 /// 首页组件 - 现代化自适应设计
@@ -24,8 +25,10 @@ pub fn Home() -> Element {
     // 移动端菜单折叠状态
     let mut nav_menu_open = use_signal(|| false);
 
-    // 主题状态
-    let mut theme = use_context::<Signal<String>>();
+    // 主题状态（通过 ThemeCtx 包装，避免与 lang 的 Signal<String> 类型冲突）
+    // 使用 try_use_context + fallback，确保脱离 App 根组件时不会 panic
+    let ThemeCtx(mut theme) = try_use_context::<ThemeCtx>()
+        .unwrap_or_else(|| ThemeCtx(use_signal(|| "dark".to_string())));
     let is_dark = theme().as_str() == "dark";
 
     // 语言状态：首页本地维护，从 localStorage 读取初值
