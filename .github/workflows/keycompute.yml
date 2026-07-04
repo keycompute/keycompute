@@ -205,9 +205,8 @@ jobs:
             "SELECT application_name, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn)) AS lag FROM pg_stat_replication;"
 
           echo "=== Step 5: Set env vars for DbRouter ==="
-          # config-rs 0.15 maps indexed env vars (__0 / __1) to Vec<String> elements
-          echo "KC__DATABASE_READ_URLS__0=postgres://postgres:devpassword@127.0.0.1:5433/keycompute" >> "$GITHUB_ENV"
-          echo "KC__DATABASE_READ_URLS__1=postgres://postgres:devpassword@127.0.0.1:5434/keycompute" >> "$GITHUB_ENV"
+          # config-rs uses list_separator to parse comma-separated values into Vec<String>
+          echo "KC__DATABASE_READ_URLS=postgres://postgres:devpassword@127.0.0.1:5433/keycompute,postgres://postgres:devpassword@127.0.0.1:5434/keycompute" >> "$GITHUB_ENV"
 
           echo "=== Streaming replication setup complete ==="
           echo "Primary : postgres://postgres:devpassword@127.0.0.1:5432/keycompute"
