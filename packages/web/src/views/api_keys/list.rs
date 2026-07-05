@@ -22,13 +22,15 @@ fn model_display_rank(model: &str) -> usize {
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, api_key_service, model_service};
 use crate::stores::auth_store::AuthStore;
-use crate::utils::copy_to_clipboard;
+use crate::stores::ui_store::UiStore;
+use crate::utils::on_copy;
 use crate::utils::time::format_time;
 
 #[component]
 pub fn ApiKeyList() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
+    let ui_store = use_context::<UiStore>();
     let mut show_create = use_signal(|| false);
     let mut new_key_name = use_signal(String::new);
     let mut creating = use_signal(|| false);
@@ -235,10 +237,10 @@ console.log(response.choices[0].message.content);"#,
                         "curl" => curl_text,
                         _ => env_text,
                     };
-                    let example_text_for_click = example_text.clone();
 
                     let copied_label = i18n.t("api_keys.copied");
                     let copy_hint = i18n.t("api_keys.copy_hint");
+                    let copy_manual_hint = i18n.t("common.copy_manual_hint");
                     rsx! {
                         div {
                             class: "kc-api-success-panel",
@@ -305,35 +307,17 @@ console.log(response.choices[0].message.content);"#,
                                             pre {
                                                 class: if copied() { "kc-api-example copied" } else { "kc-api-example" },
                                                 title: if copied() { copied_label } else { copy_hint },
-                                                onclick: {
-                                                    let text = example_text_for_click.clone();
-                                                    move |_| {
-                                                        copy_to_clipboard(&text);
-                                                        copied.set(true);
-                                                        let mut copied_clone = copied.clone();
-                                                        spawn(async move {
-                                                            gloo_timers::future::TimeoutFuture::new(2000).await;
-                                                            copied_clone.set(false);
-                                                        });
-                                                    }
-                                                },
                                                 "{example_text}"
                                             }
                                             button {
                                                 class: "kc-api-copy-button",
                                                 r#type: "button",
-                                                onclick: {
-                                                    let text = example_text.clone();
-                                                    move |_| {
-                                                        copy_to_clipboard(&text);
-                                                        copied.set(true);
-                                                        let mut copied_clone = copied.clone();
-                                                        spawn(async move {
-                                                            gloo_timers::future::TimeoutFuture::new(2000).await;
-                                                            copied_clone.set(false);
-                                                        });
-                                                    }
-                                                },
+                                                onclick: on_copy(
+                                                    example_text.clone(),
+                                                    copy_manual_hint.to_string(),
+                                                    ui_store,
+                                                    copied,
+                                                ),
                                                 IconCopy { size: 15 }
                                                 if copied() {
                                                     {copied_label}

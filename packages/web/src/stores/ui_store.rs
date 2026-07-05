@@ -17,6 +17,19 @@ impl UiStore {
         Self { toast }
     }
 
+    pub fn show_info(&mut self, title: impl Into<String>) {
+        let mut toast = self.toast;
+        *toast.write() = Some(ToastMsg {
+            kind: ToastKind::Info,
+            title: title.into(),
+            message: None,
+        });
+        spawn(async move {
+            gloo_timers::future::TimeoutFuture::new(4_000).await;
+            *toast.write() = None;
+        });
+    }
+
     pub fn show_success(&mut self, title: impl Into<String>) {
         let mut toast = self.toast;
         *toast.write() = Some(ToastMsg {

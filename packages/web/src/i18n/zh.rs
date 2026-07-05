@@ -160,6 +160,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.confirm_delete", "确定要删除吗？此操作不可撤销。");
     m.insert("common.copied", "已复制到剪贴板");
     m.insert("common.copy", "复制");
+    m.insert(
+        "common.copy_manual_hint",
+        "当前页面为非安全上下文（HTTP），请选中文本后右键复制",
+    );
     m.insert("common.refresh", "刷新");
     m.insert("common.back", "返回");
     m.insert("common.time", "时间");

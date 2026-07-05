@@ -8,7 +8,7 @@ use ui::{
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::node_gateway_token_service;
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore};
-use crate::utils::copy_to_clipboard;
+use crate::utils::on_copy;
 
 type TokenDetail = client_api::api::node_gateway_token::NodeGatewayTokenDetail;
 
@@ -134,10 +134,7 @@ pub fn NodeToken() -> Element {
             }
 
             if let Some(Err(ref e)) = tokens_resource().as_ref().map(|r| r.as_ref()) {
-                Alert {
-                    variant: AlertVariant::Error,
-                    "{i18n.t(\"common.load_failed\")}: {e}"
-                }
+                Alert { variant: AlertVariant::Error, "{i18n.t(\"common.load_failed\")}: {e}" }
             }
 
             // ── 主操作卡片 ──
@@ -217,9 +214,7 @@ pub fn NodeToken() -> Element {
                                         }
                                     }
                                     if !can_apply() {
-                                        span { class: "node-token-approved-hint",
-                                            {i18n.t("node_token.cannot_apply")}
-                                        }
+                                        span { class: "node-token-approved-hint", {i18n.t("node_token.cannot_apply")} }
                                     }
                                 }
                                 div { class: "card-body node-token-list-body",
@@ -229,7 +224,7 @@ pub fn NodeToken() -> Element {
                                 }
                             }
                         }
-                    },
+                    }
                     Some(Err(_)) => rsx! {},
                 }
             }
@@ -351,7 +346,9 @@ fn TokenListItem(detail: TokenDetail) -> Element {
                             code { class: "node-token-card-meta-value", "{detail.token.token_preview}" }
                         }
                         div { class: "node-token-card-meta-row",
-                            span { class: "node-token-card-meta-label", {i18n.t("node_token.issued_at")} }
+                            span { class: "node-token-card-meta-label",
+                                {i18n.t("node_token.issued_at")}
+                            }
                             span { class: "node-token-card-meta-value", "{detail.token.issued_at}" }
                         }
                     }
@@ -391,15 +388,22 @@ fn TokenListItem(detail: TokenDetail) -> Element {
                             async move {
                                 let token = match auth.token() {
                                     Some(t) => t,
-                                    None => { ui.show_error(i18n.t("common.error")); return; }
+                                    None => {
+                                        ui.show_error(i18n.t("common.error"));
+                                        return;
+                                    }
                                 };
-                                match node_gateway_token_service::delete_my_token(&token_id, &token).await {
+                                match node_gateway_token_service::delete_my_token(&token_id, &token)
+                                    .await
+                                {
                                     Ok(_) => {
                                         ui.show_success(i18n.t("node_token.delete_success"));
                                         list_key.with_mut(|v| *v += 1);
                                     }
                                     Err(e) => {
-                                        ui.show_error(format!("{}: {}", i18n.t("node_token.delete_failed"), e));
+                                        ui.show_error(
+                                            format!("{}: {}", i18n.t("node_token.delete_failed"), e),
+                                        );
                                     }
                                 }
                             }
@@ -446,12 +450,13 @@ fn TokenPendingDetail(message: Option<String>) -> Element {
 #[component]
 fn TokenApprovedDetail(plaintext: String, is_revealed: bool) -> Element {
     let i18n = use_i18n();
-    let mut copied = use_signal(|| false);
+    let ui_store = use_context::<UiStore>();
+    let copied = use_signal(|| false);
 
     let copied_label = i18n.t("node_token.copied");
     let copy_text = i18n.t("node_token.copy");
     let copy_hint = i18n.t("node_token.copy_hint");
-
+    let copy_manual_hint = i18n.t("common.copy_manual_hint");
     let plaintext_clone = plaintext.clone();
     let plaintext_for_button = plaintext.clone();
 
@@ -467,37 +472,23 @@ fn TokenApprovedDetail(plaintext: String, is_revealed: bool) -> Element {
                 pre {
                     class: if copied() { "kc-api-example copied" } else { "kc-api-example" },
                     title: if copied() { copied_label } else { copy_hint },
-                    onclick: {
-                        let pt = plaintext_clone.clone();
-                        move |_| {
-                            copy_to_clipboard(&pt);
-                            copied.set(true);
-                            let mut copied_clone = copied.clone();
-                            spawn(async move {
-                                gloo_timers::future::TimeoutFuture::new(2000).await;
-                                copied_clone.set(false);
-                            });
-                        }
-                    },
                     "{plaintext_clone}"
                 }
                 button {
                     class: "kc-api-copy-button",
                     r#type: "button",
-                    onclick: {
-                        let pt = plaintext_for_button.clone();
-                        move |_| {
-                            copy_to_clipboard(&pt);
-                            copied.set(true);
-                            let mut copied_clone = copied.clone();
-                            spawn(async move {
-                                gloo_timers::future::TimeoutFuture::new(2000).await;
-                                copied_clone.set(false);
-                            });
-                        }
-                    },
+                    onclick: on_copy(
+                        plaintext_for_button.clone(),
+                        copy_manual_hint.to_string(),
+                        ui_store,
+                        copied,
+                    ),
                     IconCopy { size: 15 }
-                    if copied() { {copied_label} } else { {copy_text} }
+                    if copied() {
+                        {copied_label}
+                    } else {
+                        {copy_text}
+                    }
                 }
             }
         }
@@ -516,8 +507,18 @@ fn TokenApprovedDetail(plaintext: String, is_revealed: bool) -> Element {
                     stroke_linecap: "round",
                     stroke_linejoin: "round",
                     circle { cx: "12", cy: "12", r: "10" }
-                    line { x1: "12", y1: "16", x2: "12", y2: "12" }
-                    line { x1: "12", y1: "8", x2: "12.01", y2: "8" }
+                    line {
+                        x1: "12",
+                        y1: "16",
+                        x2: "12",
+                        y2: "12",
+                    }
+                    line {
+                        x1: "12",
+                        y1: "8",
+                        x2: "12.01",
+                        y2: "8",
+                    }
                 }
             }
             div { class: "node-token-card-status-text",
@@ -572,7 +573,9 @@ fn TokenConsumedDetail(
                 }
                 if let Some(ref hb) = n.last_heartbeat_at {
                     div { class: "node-token-registered-node-row",
-                        span { class: "node-token-card-meta-label", {i18n.t("node_token.last_heartbeat")} }
+                        span { class: "node-token-card-meta-label",
+                            {i18n.t("node_token.last_heartbeat")}
+                        }
                         span { class: "node-token-card-meta-value", "{hb}" }
                     }
                 }
@@ -606,7 +609,12 @@ fn TokenRejectedDetail(
                         stroke_linecap: "round",
                         stroke_linejoin: "round",
                         circle { cx: "12", cy: "12", r: "10" }
-                        line { x1: "4.93", y1: "4.93", x2: "19.07", y2: "19.07" }
+                        line {
+                            x1: "4.93",
+                            y1: "4.93",
+                            x2: "19.07",
+                            y2: "19.07",
+                        }
                     }
                 }
                 div { class: "node-token-card-status-text",
@@ -633,7 +641,9 @@ fn TokenRejectedDetail(
                 }
                 if let Some(ref hb) = n.last_heartbeat_at {
                     div { class: "node-token-registered-node-row",
-                        span { class: "node-token-card-meta-label", {i18n.t("node_token.last_heartbeat")} }
+                        span { class: "node-token-card-meta-label",
+                            {i18n.t("node_token.last_heartbeat")}
+                        }
                         span { class: "node-token-card-meta-value", "{hb}" }
                     }
                 }
@@ -680,8 +690,18 @@ fn TokenRejectedDetail(
                         stroke_linecap: "round",
                         stroke_linejoin: "round",
                         circle { cx: "12", cy: "12", r: "10" }
-                        line { x1: "15", y1: "9", x2: "9", y2: "15" }
-                        line { x1: "9", y1: "9", x2: "15", y2: "15" }
+                        line {
+                            x1: "15",
+                            y1: "9",
+                            x2: "9",
+                            y2: "15",
+                        }
+                        line {
+                            x1: "9",
+                            y1: "9",
+                            x2: "15",
+                            y2: "15",
+                        }
                     }
                 }
                 div { class: "node-token-card-status-text",

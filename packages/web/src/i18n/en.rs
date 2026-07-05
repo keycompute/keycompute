@@ -181,6 +181,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("common.copied", "Copied to clipboard");
     m.insert("common.copy", "Copy");
+    m.insert(
+        "common.copy_manual_hint",
+        "Non-HTTPS context, please select text and right-click to copy",
+    );
     m.insert("common.refresh", "Refresh");
     m.insert("common.back", "Back");
     m.insert("common.time", "Time");

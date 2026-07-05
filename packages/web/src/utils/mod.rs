@@ -1,17 +1,31 @@
+pub mod copy;
 pub mod time;
 
+pub use copy::{on_copy, on_copy_toast};
+
 /// 复制文本到剪贴板（WASM 环境）
-pub fn copy_to_clipboard(text: &str) {
+/// 返回 `true` 表示复制成功，`false` 表示不可用（非 HTTPS 上下文等）。
+pub fn copy_to_clipboard(text: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = web_sys::window().map(|w| {
-            let clipboard = w.navigator().clipboard();
-            clipboard.write_text(text)
-        });
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return false,
+        };
+        let clipboard = window.navigator().clipboard();
+        // navigator.clipboard 在非 HTTPS 下为 null/undefined
+        let clipboard_ref: &wasm_bindgen::JsValue = clipboard.as_ref();
+        if clipboard_ref.is_null() || clipboard_ref.is_undefined() {
+            return false;
+        }
+        // write_text 返回 Promise，fire-and-forget 即可
+        let _ = clipboard.write_text(text);
+        true
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         let _ = text;
+        false
     }
 }
 

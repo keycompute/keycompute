@@ -10,7 +10,7 @@ use crate::services::{
 use crate::stores::{
     auth_store::AuthStore, public_settings_store::PublicSettingsStore, ui_store::UiStore,
 };
-use crate::utils::copy_to_clipboard;
+use crate::utils::on_copy_toast;
 use crate::utils::time::format_time;
 
 fn is_distribution_disabled_error<T>(result: &Option<Result<T, ClientError>>) -> bool {
@@ -38,13 +38,11 @@ pub fn DistributionOverview() -> Element {
 
     if !public_settings_store.loaded() {
         return rsx! {
-            div {
-                class: "page-container",
+            div { class: "page-container",
                 div {
                     class: "distribution-loading",
                     style: "display:flex;align-items:center;justify-content:center;padding:64px",
-                    div {
-                        style: "display:flex;align-items:center;gap:12px;color:var(--text-secondary,#64748b)",
+                    div { style: "display:flex;align-items:center;gap:12px;color:var(--text-secondary,#64748b)",
                         div { class: "spinner", style: "width:24px;height:24px" }
                         span { {i18n.t("table.loading")} }
                     }
@@ -57,15 +55,17 @@ pub fn DistributionOverview() -> Element {
         return rsx! {};
     }
 
-    rsx! { DistributionOverviewContent {} }
+    rsx! {
+        DistributionOverviewContent {}
+
+    }
 }
 
 #[component]
 fn DistributionOverviewContent() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
-    let mut ui_store = use_context::<UiStore>();
-
+    let ui_store = use_context::<UiStore>();
     // 收益数据
     let earnings = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
@@ -117,16 +117,15 @@ fn DistributionOverviewContent() -> Element {
         _ => String::new(),
     };
     let invite_link_text = invite_link.clone();
-    let copied_text = i18n.t("common.copied").to_string();
+    let copied_text = i18n.t("common.copied");
+    let copy_manual_hint = i18n.t("common.copy_manual_hint");
     let distribution_disabled = is_distribution_disabled_error(&earnings())
         || is_distribution_disabled_error(&referral_code())
         || is_distribution_disabled_error(&referrals());
 
     rsx! {
-        div {
-            class: "page-container",
-            div {
-                class: "page-header",
+        div { class: "page-container",
+            div { class: "page-header",
                 h1 { class: "page-title", {i18n.t("distribution.title")} }
                 p { class: "page-subtitle", {i18n.t("distribution.subtitle")} }
             }
@@ -143,8 +142,7 @@ fn DistributionOverviewContent() -> Element {
                 }
             } else {
                 // 收益统计
-                div {
-                    class: "stats-grid",
+                div { class: "stats-grid",
                     div { class: "stat-card card",
                         div { class: "card-body",
                             p { class: "stat-label", {i18n.t("distribution.total_earnings")} }
@@ -192,14 +190,7 @@ fn DistributionOverviewContent() -> Element {
                                             class: "distribution-copy-value",
                                             r#type: "button",
                                             title: "{copied_text}",
-                                            onclick: {
-                                                let invite_link = invite_link_text.clone();
-                                                let copied_text = copied_text.clone();
-                                                move |_| {
-                                                    copy_to_clipboard(&invite_link);
-                                                    ui_store.show_success(copied_text.clone());
-                                                }
-                                            },
+                                            onclick: on_copy_toast(invite_link_text.clone(), copied_text, copy_manual_hint, ui_store),
                                             "{invite_link_text}"
                                         }
                                     }
@@ -231,23 +222,25 @@ fn DistributionOverviewContent() -> Element {
                                             tr {
                                                 td {
                                                     div { class: "user-cell",
-                                                        span { class: "user-name",
-                                                            { r.name.clone().unwrap_or_else(|| r.email.clone()) }
-                                                        }
+                                                        span { class: "user-name", {r.name.clone().unwrap_or_else(|| r.email.clone())} }
                                                         span { class: "user-email", "{r.email}" }
                                                     }
                                                 }
-                                                td { { format_time(&r.joined_at) } }
+                                                td { {format_time(&r.joined_at)} }
                                                 td { "¥{r.total_spent}" }
                                                 td { "¥{r.earnings_from_referral}" }
                                             }
                                         }
                                     },
                                     Some(Err(_)) => rsx! {
-                                        tr { td { colspan: "4", class: "table-empty", {i18n.t("common.load_failed")} } }
+                                        tr {
+                                            td { colspan: "4", class: "table-empty", {i18n.t("common.load_failed")} }
+                                        }
                                     },
                                     _ => rsx! {
-                                        tr { td { colspan: "4", class: "table-empty", {i18n.t("distribution.no_referrals")} } }
+                                        tr {
+                                            td { colspan: "4", class: "table-empty", {i18n.t("distribution.no_referrals")} }
+                                        }
                                     },
                                 }
                             }
