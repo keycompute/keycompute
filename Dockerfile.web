@@ -31,8 +31,8 @@ RUN rustup target add wasm32-unknown-unknown
 # 安装 dioxus-cli（dioxus-cli 在 crates.io 的版本号独立于框架版本，不能指定 --version 0.7.x）
 # --locked 保证 dioxus-cli 自身依赖锁定
 # 安装 dioxus-cli（版本必须与项目 dioxus 版本严格匹配）
-# 项目 dioxus 版本为 0.7.3（见 Cargo.lock）
-RUN cargo install dioxus-cli@0.7.3 --locked
+# 项目 dioxus 版本为 0.7.9（见 Cargo.toml workspace.dependencies）
+RUN cargo install dioxus-cli@0.7.9 --locked
 
 # 预安装 wasm-bindgen-cli（版本必须与项目 wasm-bindgen 版本匹配）
 # 项目 wasm-bindgen 版本为 0.2.114（见 Cargo.lock）
