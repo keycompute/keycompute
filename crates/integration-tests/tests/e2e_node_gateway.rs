@@ -33,6 +33,7 @@ use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, FromQueryResult, Statement,
 };
 use std::sync::Arc;
+use serial_test::serial;
 use uuid::Uuid;
 
 /// 测试环境
@@ -229,6 +230,7 @@ impl NodeTestEnv {
 
 /// 测试 1: 节点注册流程（使用 HMAC 签名 token）
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_node_registration() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -280,6 +282,7 @@ async fn test_node_registration() -> anyhow::Result<()> {
 
 /// 测试 2: Token 一次性消费
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_token_one_time_use() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
 
@@ -336,6 +339,7 @@ async fn test_token_one_time_use() -> anyhow::Result<()> {
 
 /// 测试 3: 无效 token 被拒绝
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_invalid_token_rejected() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
 
@@ -352,6 +356,7 @@ async fn test_invalid_token_rejected() -> anyhow::Result<()> {
 
 /// 测试 4: 重复注册 (同一 client_instance_id)
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_node_reregistration() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -403,6 +408,7 @@ async fn test_node_reregistration() -> anyhow::Result<()> {
 
 /// 测试 5: Excluded 节点拒绝注册
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_excluded_node_reject_registration() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -451,6 +457,7 @@ async fn test_excluded_node_reject_registration() -> anyhow::Result<()> {
 
 /// 测试 6: 任务创建和入队
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -519,6 +526,7 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
 
 /// 测试 7: Complete 幂等性 — 相同 task 重复 complete 应返回相同结果且只写一条 submission
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_complete_idempotency() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -650,6 +658,7 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
 /// 提交 3 次 is_client_error=true 的失败, 节点应仍 online,
 /// consecutive_failure_count 应保持 0, 任务直接 terminal failed(不 requeue)。
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_client_error_does_not_exclude_node() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
 
@@ -728,6 +737,7 @@ async fn test_client_error_does_not_exclude_node() -> anyhow::Result<()> {
 
 /// 测试 8: 并发 Complete 安全 — 5 并发 complete 应只产生一条 submission
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -858,6 +868,7 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
 /// 2. `node_tasks.result_json` 正确存储 `ImageGenerationResponse`
 /// 3. 幂等提交：同一 {task_id, lease_id, result} 重复提交只产生一条 submission
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_image_succeeded_submission() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -1030,6 +1041,7 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
 /// 2. 节点领取并返回 ImageSucceeded 结果
 /// 3. 验证结果 URL 和数据正确存储
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -1206,6 +1218,7 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
 /// 2. 节点领取并返回 ImageSucceeded 结果
 /// 3. 验证编辑结果正确存储
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -1345,6 +1358,7 @@ async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
 ///
 /// 验证空 prompt 或过短 prompt 的边界情况处理
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -1479,6 +1493,7 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
 ///
 /// 验证节点返回无效或不可访问的图片 URL 时的处理
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_image_url_inaccessible() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -1589,6 +1604,7 @@ async fn test_image_url_inaccessible() -> anyhow::Result<()> {
 ///
 /// 验证节点未在规定时间内完成任务时的超时处理
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_node_task_timeout() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -1694,6 +1710,7 @@ async fn test_node_task_timeout() -> anyhow::Result<()> {
 ///
 /// 验证节点返回不支持的图片格式时的错误处理
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_unsupported_image_format() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
@@ -1813,6 +1830,7 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
 ///
 /// 验证相同图片生成任务的重复提交幂等性
 #[tokio::test]
+#[serial(node_gateway)]
 async fn test_image_generation_idempotency() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
