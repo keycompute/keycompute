@@ -1269,7 +1269,7 @@ fn apply_theme_with_animation(theme: &str) {
 
     // 保存到 localStorage
     if let Ok(Some(storage)) = window.local_storage() {
-        let _ = storage.set_item("theme", theme);
+        let _ = storage.set_item("keyc_theme", theme);
     }
 }
 
@@ -1278,7 +1278,7 @@ fn read_lang_from_storage() -> Option<String> {
     web_sys::window()?
         .local_storage()
         .ok()??
-        .get_item("lang")
+        .get_item("keyc_lang")
         .ok()?
 }
 
@@ -1286,7 +1286,7 @@ fn read_lang_from_storage() -> Option<String> {
 fn save_lang_to_storage(lang: &str) {
     if let Some(window) = web_sys::window() {
         if let Ok(Some(storage)) = window.local_storage() {
-            let _ = storage.set_item("lang", lang);
+            let _ = storage.set_item("keyc_lang", lang);
         }
     }
 }

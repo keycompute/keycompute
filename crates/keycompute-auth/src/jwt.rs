@@ -26,6 +26,11 @@ pub struct JwtClaims {
     pub iat: i64,
     /// 签发者
     pub iss: String,
+    /// Token 版本号，用于使已签发的 JWT 失效（密码重置/登出时递增）
+    ///
+    /// 使用 `serde(default)` 兼容历史签发的、不含该字段的 token（视为版本 0）。
+    #[serde(default)]
+    pub token_version: i32,
 }
 
 impl JwtClaims {
@@ -36,6 +41,7 @@ impl JwtClaims {
         role: impl Into<String>,
         expires_in_seconds: i64,
         issuer: &str,
+        token_version: i32,
     ) -> Self {
         let now = Utc::now().timestamp();
         Self {
@@ -45,6 +51,7 @@ impl JwtClaims {
             exp: now + expires_in_seconds,
             iat: now,
             iss: issuer.to_string(),
+            token_version,
         }
     }
 
@@ -170,6 +177,7 @@ impl JwtValidator {
             produce_ai_key_id: Uuid::nil(), // JWT 认证没有 Produce AI Key ID
             role: claims.role,
             permissions,
+            token_version: claims.token_version,
             user_info: None,
             tenant_info: None,
         })
@@ -193,7 +201,52 @@ impl JwtValidator {
         role: impl Into<String>,
         expires_in_seconds: i64,
     ) -> Result<String> {
-        let claims = JwtClaims::new(user_id, tenant_id, role, expires_in_seconds, &self.issuer);
+        self.generate_token_with_expiration_and_version(
+            user_id,
+            tenant_id,
+            role,
+            expires_in_seconds,
+            0,
+        )
+    }
+
+    /// 生成带 token_version 的 JWT Token（默认过期时间）
+    ///
+    /// 登录/刷新时应使用该方法，将用户当前的 token_version 写入 token，
+    /// 以便服务端在密码重置等安全事件后使旧 token 失效。
+    pub fn generate_token_with_version(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        role: impl Into<String>,
+        token_version: i32,
+    ) -> Result<String> {
+        self.generate_token_with_expiration_and_version(
+            user_id,
+            tenant_id,
+            role,
+            self.default_expiration,
+            token_version,
+        )
+    }
+
+    /// 生成带自定义过期时间与 token_version 的 JWT Token
+    pub fn generate_token_with_expiration_and_version(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+        role: impl Into<String>,
+        expires_in_seconds: i64,
+        token_version: i32,
+    ) -> Result<String> {
+        let claims = JwtClaims::new(
+            user_id,
+            tenant_id,
+            role,
+            expires_in_seconds,
+            &self.issuer,
+            token_version,
+        );
 
         let token = encode(&Header::default(), &claims, &self.encoding_key)
             .map_err(|e| KeyComputeError::Internal(format!("Failed to generate token: {}", e)))?;
@@ -211,10 +264,11 @@ impl JwtValidator {
     /// 刷新 Token（生成新的 token，保持相同的 claims）
     pub fn refresh_token(&self, token: &str) -> Result<String> {
         let auth_context = self.validate(token)?;
-        self.generate_token(
+        self.generate_token_with_version(
             auth_context.user_id,
             auth_context.tenant_id,
             auth_context.role,
+            auth_context.token_version,
         )
     }
 }
@@ -234,7 +288,7 @@ mod tests {
     fn test_jwt_claims_new() {
         let user_id = Uuid::new_v4();
         let tenant_id = Uuid::new_v4();
-        let claims = JwtClaims::new(user_id, tenant_id, "user", 3600, "keycompute");
+        let claims = JwtClaims::new(user_id, tenant_id, "user", 3600, "keycompute", 0);
 
         assert_eq!(claims.user_id().unwrap(), user_id);
         assert_eq!(claims.tenant_id().unwrap(), tenant_id);
@@ -247,7 +301,7 @@ mod tests {
         let user_id = Uuid::new_v4();
         let tenant_id = Uuid::new_v4();
         // 过期时间设为过去
-        let claims = JwtClaims::new(user_id, tenant_id, "user", -1, "keycompute");
+        let claims = JwtClaims::new(user_id, tenant_id, "user", -1, "keycompute", 0);
 
         assert!(claims.is_expired());
     }
@@ -333,6 +387,86 @@ mod tests {
         assert_eq!(ctx.user_id, user_id);
         assert_eq!(ctx.tenant_id, tenant_id);
         assert_eq!(ctx.role, "admin");
+    }
+
+    #[test]
+    fn test_jwt_token_version_roundtrip() {
+        // token_version 写入 token 后应在验证时原样还原
+        let validator = JwtValidator::new("test-secret", "keycompute");
+        let user_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+
+        let token = validator
+            .generate_token_with_version(user_id, tenant_id, "user", 7)
+            .unwrap();
+        let ctx = validator.validate(&token).unwrap();
+        assert_eq!(ctx.token_version, 7);
+    }
+
+    #[test]
+    fn test_jwt_default_generate_token_version_zero() {
+        // 兼容方法 generate_token 默认 token_version 为 0
+        let validator = JwtValidator::new("test-secret", "keycompute");
+        let user_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+
+        let token = validator
+            .generate_token(user_id, tenant_id, "user")
+            .unwrap();
+        let ctx = validator.validate(&token).unwrap();
+        assert_eq!(ctx.token_version, 0);
+    }
+
+    #[test]
+    fn test_jwt_refresh_preserves_token_version() {
+        // 刷新 token 应保留原 token_version
+        let validator = JwtValidator::new("test-secret", "keycompute");
+        let user_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+
+        let token = validator
+            .generate_token_with_version(user_id, tenant_id, "admin", 3)
+            .unwrap();
+        let refreshed = validator.refresh_token(&token).unwrap();
+        let ctx = validator.validate(&refreshed).unwrap();
+        assert_eq!(ctx.token_version, 3);
+    }
+
+    #[test]
+    fn test_jwt_claims_deserialize_without_token_version() {
+        // 历史签发的 token（不含 token_version 字段）应能正常验证，且默认为 0
+        #[derive(Serialize)]
+        struct LegacyClaims {
+            sub: String,
+            tenant_id: String,
+            role: String,
+            exp: i64,
+            iat: i64,
+            iss: String,
+        }
+
+        let user_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let now = Utc::now().timestamp();
+        let legacy = LegacyClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            role: "user".to_string(),
+            exp: now + 3600,
+            iat: now,
+            iss: "keycompute".to_string(),
+        };
+        let token = encode(
+            &Header::default(),
+            &legacy,
+            &EncodingKey::from_secret(b"test-secret"),
+        )
+        .unwrap();
+
+        let validator = JwtValidator::new("test-secret", "keycompute");
+        let ctx = validator.validate(&token).unwrap();
+        assert_eq!(ctx.token_version, 0);
+        assert_eq!(ctx.user_id, user_id);
     }
 
     #[test]

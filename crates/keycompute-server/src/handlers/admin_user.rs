@@ -749,6 +749,7 @@ mod tests {
             email: "target@example.com".to_string(),
             name: Some("Target".to_string()),
             role: role.to_string(),
+            token_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

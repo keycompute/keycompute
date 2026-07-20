@@ -127,9 +127,7 @@ pub fn Header(
                         height: "18",
                         view_box: "0 0 24 24",
                         fill: "currentColor",
-                        path {
-                            d: "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
-                        }
+                        path { d: "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" }
                     }
                 }
 
@@ -144,7 +142,7 @@ pub fn Header(
                         // 持久化到 localStorage 并触发与首页一致的切换动画
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let _ = write_local_storage("theme", next);
+                            let _ = write_local_storage("keyc_theme", next);
                             trigger_theme_switching_animation();
                         }
                     },
@@ -167,14 +165,54 @@ pub fn Header(
                             stroke: "currentColor",
                             stroke_width: "2",
                             circle { cx: "12", cy: "12", r: "5" }
-                            line { x1: "12", y1: "1", x2: "12", y2: "3" }
-                            line { x1: "12", y1: "21", x2: "12", y2: "23" }
-                            line { x1: "4.22", y1: "4.22", x2: "5.64", y2: "5.64" }
-                            line { x1: "18.36", y1: "18.36", x2: "19.78", y2: "19.78" }
-                            line { x1: "1", y1: "12", x2: "3", y2: "12" }
-                            line { x1: "21", y1: "12", x2: "23", y2: "12" }
-                            line { x1: "4.22", y1: "19.78", x2: "5.64", y2: "18.36" }
-                            line { x1: "18.36", y1: "5.64", x2: "19.78", y2: "4.22" }
+                            line {
+                                x1: "12",
+                                y1: "1",
+                                x2: "12",
+                                y2: "3",
+                            }
+                            line {
+                                x1: "12",
+                                y1: "21",
+                                x2: "12",
+                                y2: "23",
+                            }
+                            line {
+                                x1: "4.22",
+                                y1: "4.22",
+                                x2: "5.64",
+                                y2: "5.64",
+                            }
+                            line {
+                                x1: "18.36",
+                                y1: "18.36",
+                                x2: "19.78",
+                                y2: "19.78",
+                            }
+                            line {
+                                x1: "1",
+                                y1: "12",
+                                x2: "3",
+                                y2: "12",
+                            }
+                            line {
+                                x1: "21",
+                                y1: "12",
+                                x2: "23",
+                                y2: "12",
+                            }
+                            line {
+                                x1: "4.22",
+                                y1: "19.78",
+                                x2: "5.64",
+                                y2: "18.36",
+                            }
+                            line {
+                                x1: "18.36",
+                                y1: "5.64",
+                                x2: "19.78",
+                                y2: "4.22",
+                            }
                         }
                     }
                 }
@@ -189,7 +227,7 @@ pub fn Header(
                         *lang.write() = next.to_string();
                         #[cfg(target_arch = "wasm32")]
                         {
-                            let _ = write_local_storage("lang", next);
+                            let _ = write_local_storage("keyc_lang", next);
                         }
                     },
                     span { class: "header-lang-btn-text", "{lang_label}" }
@@ -203,10 +241,7 @@ pub fn Header(
                 // }
 
                 // 用户头像
-                div { class: "header-avatar",
-                    title: "{user_name}",
-                    "{avatar_char}"
-                }
+                div { class: "header-avatar", title: "{user_name}", "{avatar_char}" }
 
                 // 用户名 + 下拉箭头（桌面端）- 带下拉菜单
                 div {
@@ -219,13 +254,10 @@ pub fn Header(
                             let cur = dropdown_open();
                             *dropdown_open.write() = !cur;
                         },
-                        span {
-                            style: "font-size: 13px; font-weight: 500; color: var(--text-primary); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                        span { style: "font-size: 13px; font-weight: 500; color: var(--text-primary); max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                             "{user_name}"
                         }
-                        IconChevronDown {
-                            size: 16,
-                        }
+                        IconChevronDown { size: 16 }
                     }
 
                     // 下拉菜单
@@ -238,8 +270,12 @@ pub fn Header(
                             button {
                                 class: "dropdown-item",
                                 style: "display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; border: none; background: none; cursor: pointer; font-size: 14px; color: var(--text-primary); text-align: left; transition: background 0.15s;",
-                                onmouseenter: move |e| { let _ = e; },
-                                onmouseleave: move |e| { let _ = e; },
+                                onmouseenter: move |e| {
+                                    let _ = e;
+                                },
+                                onmouseleave: move |e| {
+                                    let _ = e;
+                                },
                                 onclick: move |_| {
                                     *dropdown_open.write() = false;
                                     on_user_menu.call(UserMenuAction::Profile);
@@ -252,8 +288,12 @@ pub fn Header(
                             button {
                                 class: "dropdown-item",
                                 style: "display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; border: none; background: none; cursor: pointer; font-size: 14px; color: var(--text-primary); text-align: left; transition: background 0.15s;",
-                                onmouseenter: move |e| { let _ = e; },
-                                onmouseleave: move |e| { let _ = e; },
+                                onmouseenter: move |e| {
+                                    let _ = e;
+                                },
+                                onmouseleave: move |e| {
+                                    let _ = e;
+                                },
                                 onclick: move |_| {
                                     *dropdown_open.write() = false;
                                     on_user_menu.call(UserMenuAction::Settings);
@@ -263,16 +303,18 @@ pub fn Header(
                             }
 
                             // 分隔线
-                            div {
-                                style: "height: 1px; background: var(--border-color, #e2e8f0); margin: 4px 0;"
-                            }
+                            div { style: "height: 1px; background: var(--border-color, #e2e8f0); margin: 4px 0;" }
 
                             // 退出登录
                             button {
                                 class: "dropdown-item",
                                 style: "display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 14px; border: none; background: none; cursor: pointer; font-size: 14px; color: var(--danger, #dc2626); text-align: left; transition: background 0.15s;",
-                                onmouseenter: move |e| { let _ = e; },
-                                onmouseleave: move |e| { let _ = e; },
+                                onmouseenter: move |e| {
+                                    let _ = e;
+                                },
+                                onmouseleave: move |e| {
+                                    let _ = e;
+                                },
                                 onclick: move |_| {
                                     *dropdown_open.write() = false;
                                     on_user_menu.call(UserMenuAction::Logout);

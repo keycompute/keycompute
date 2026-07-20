@@ -181,6 +181,28 @@ impl UserService {
         ))
     }
 
+    /// 加载用户当前的 token_version
+    ///
+    /// 用于 JWT 失效校验。无数据库连接时返回 `None`（跳过校验，保持结构性验证行为）。
+    ///
+    /// 该读取强制走主库（`write_conn`）：这是安全敏感校验，若走读副本，
+    /// 复制延迟会形成一个窗口，使密码重置/登出后本应失效的旧 token 仍被放行。
+    pub async fn load_token_version(&self, user_id: Uuid) -> Result<Option<i32>> {
+        if let Some(pool) = self.pool.as_deref() {
+            let version = User::find_token_version(pool.write_conn(), user_id)
+                .await
+                .map_err(|e| {
+                    KeyComputeError::DatabaseError(format!("Failed to load token version: {}", e))
+                })?
+                .ok_or_else(|| {
+                    KeyComputeError::AuthError(format!("User not found: {}", user_id))
+                })?;
+            return Ok(Some(version));
+        }
+
+        Ok(None)
+    }
+
     /// 根据 ID 加载租户
     pub async fn load_tenant(&self, tenant_id: Uuid) -> Result<TenantInfo> {
         tracing::debug!(tenant_id = %tenant_id, "Loading tenant");
@@ -370,5 +392,14 @@ mod tests {
         assert!(result.is_ok());
         let (user, _tenant) = result.unwrap();
         assert_eq!(user.id, user_id);
+    }
+
+    #[tokio::test]
+    async fn test_user_service_load_token_version_no_db() {
+        // 无数据库连接时返回 None（跳过 token_version 校验）
+        let service = UserService::new();
+        let result = service.load_token_version(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), None);
     }
 }

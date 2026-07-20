@@ -67,7 +67,7 @@ pub fn AppShell(
         ThemeCtx(use_signal(|| {
             #[cfg(target_arch = "wasm32")]
             {
-                read_local_storage("theme").unwrap_or_else(|| "dark".to_string())
+                read_local_storage("keyc_theme").unwrap_or_else(|| "dark".to_string())
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -79,7 +79,7 @@ pub fn AppShell(
     let fallback_lang = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
-            read_local_storage("lang").unwrap_or_else(|| "zh".to_string())
+            read_local_storage("keyc_lang").unwrap_or_else(|| "zh".to_string())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {

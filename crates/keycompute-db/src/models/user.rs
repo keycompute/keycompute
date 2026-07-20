@@ -13,6 +13,9 @@ pub struct User {
     pub email: String,
     pub name: Option<String>,
     pub role: String,
+    /// Token 版本号，用于使已签发的 JWT 失效（密码重置/登出时递增）
+    #[serde(default)]
+    pub token_version: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -279,6 +282,48 @@ impl User {
             .ok_or_else(|| DbError::not_found("User", self.id.to_string()))?;
 
         Ok(user)
+    }
+
+    /// 递增用户的 token_version，使该用户已签发的所有 JWT 失效
+    ///
+    /// 用于密码重置、强制登出等安全场景。返回递增后的新版本号。
+    pub async fn increment_token_version(
+        db: &impl ConnectionTrait,
+        user_id: Uuid,
+    ) -> Result<i32, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE users SET token_version = token_version + 1, updated_at = NOW() WHERE id = $1 RETURNING token_version"#,
+            [user_id.into()],
+        );
+        let result = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::not_found("User", user_id.to_string()))?;
+        let version: i32 = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
+        Ok(version)
+    }
+
+    /// 轻量查询用户当前的 token_version（仅 SELECT 单列）
+    ///
+    /// 用于 JWT 失效校验的热路径，避免拉取整行用户数据。
+    /// 用户不存在时返回 `None`。
+    pub async fn find_token_version(
+        db: &impl ConnectionTrait,
+        user_id: Uuid,
+    ) -> Result<Option<i32>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT token_version FROM users WHERE id = $1",
+            [user_id.into()],
+        );
+        match db.query_one(stmt).await? {
+            Some(row) => {
+                let version: i32 = row.try_get_by_index(0).map_err(DbError::DatabaseError)?;
+                Ok(Some(version))
+            }
+            None => Ok(None),
+        }
     }
 
     /// 删除用户

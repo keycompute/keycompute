@@ -241,12 +241,54 @@ fn env_var_or_default(key: &str, default: &str) -> String {
     non_empty_or_default(std::env::var(key).ok(), default)
 }
 
+/// 内置的弱默认管理员密码，仅允许在开发环境使用。
+const WEAK_DEFAULT_ADMIN_PASSWORD: &str = "12345";
+
+/// 当前是否为非开发（生产）环境。
+fn is_production_env() -> bool {
+    !matches!(
+        std::env::var("KC__ENV").unwrap_or_default().as_str(),
+        "development" | "dev"
+    )
+}
+
+/// 解析用于创建默认管理员的密码。
+///
+/// 生产环境必须显式配置 `KC__DEFAULT_ADMIN_PASSWORD` 且不能等于内置弱默认值；
+/// 开发环境允许回退到弱默认值以方便本地调试。
+fn resolve_default_admin_password(configured: Option<String>) -> anyhow::Result<String> {
+    resolve_default_admin_password_for_env(configured, is_production_env())
+}
+
+fn resolve_default_admin_password_for_env(
+    configured: Option<String>,
+    is_production: bool,
+) -> anyhow::Result<String> {
+    if !is_production {
+        return Ok(configured.unwrap_or_else(|| WEAK_DEFAULT_ADMIN_PASSWORD.to_string()));
+    }
+
+    match configured {
+        Some(password) if password != WEAK_DEFAULT_ADMIN_PASSWORD => Ok(password),
+        Some(_) => anyhow::bail!(
+            "refusing to create the default admin with the weak built-in password in production; \
+             set KC__DEFAULT_ADMIN_PASSWORD to a strong, unique value"
+        ),
+        None => anyhow::bail!(
+            "KC__DEFAULT_ADMIN_PASSWORD must be set to create the default admin in production"
+        ),
+    }
+}
+
 async fn initialize_default_admin(
     pool: &(impl ConnectionTrait + TransactionTrait),
 ) -> anyhow::Result<Tenant> {
     // 从环境变量读取配置
     let admin_email = env_var_or_default("KC__DEFAULT_ADMIN_EMAIL", "admin@keycompute.local");
-    let admin_password = env_var_or_default("KC__DEFAULT_ADMIN_PASSWORD", "12345");
+    // 显式提供的密码（区分“未配置”与“配置为空”）
+    let configured_password = std::env::var("KC__DEFAULT_ADMIN_PASSWORD")
+        .ok()
+        .filter(|value| !value.is_empty());
 
     info!(email = %admin_email, "检查默认管理员账户");
 
@@ -287,6 +329,10 @@ async fn initialize_default_admin(
     }
 
     info!(email = %admin_email, "创建默认系统管理员");
+
+    // 安全守卫：生产环境禁止使用缺省/弱默认管理员密码创建新管理员。
+    // 仅在“确实需要创建新管理员”时校验，避免影响已初始化的部署。
+    let admin_password = resolve_default_admin_password(configured_password)?;
 
     // 复用或创建默认 system 租户
     let tenant = if let Some(existing_tenant) = Tenant::find_by_slug(pool, "system").await? {
@@ -508,7 +554,7 @@ async fn initialize_admin_balance(
 
 #[cfg(test)]
 mod tests {
-    use super::non_empty_or_default;
+    use super::{non_empty_or_default, resolve_default_admin_password_for_env};
 
     #[test]
     fn test_non_empty_or_default_uses_non_empty_value() {
@@ -532,5 +578,46 @@ mod tests {
         let resolved = non_empty_or_default(None, "fallback");
 
         assert_eq!(resolved, "fallback");
+    }
+
+    #[test]
+    fn test_resolve_admin_password_dev_allows_weak_default() {
+        // 开发环境未配置时回退到弱默认值
+        let resolved = resolve_default_admin_password_for_env(None, false).unwrap();
+        assert_eq!(resolved, "12345");
+    }
+
+    #[test]
+    fn test_resolve_admin_password_dev_uses_configured() {
+        let resolved =
+            resolve_default_admin_password_for_env(Some("custom-dev-pass".to_string()), false)
+                .unwrap();
+        assert_eq!(resolved, "custom-dev-pass");
+    }
+
+    #[test]
+    fn test_resolve_admin_password_production_requires_configured() {
+        // 生产环境未配置密码——必须拒绝
+        let err = resolve_default_admin_password_for_env(None, true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("KC__DEFAULT_ADMIN_PASSWORD must be set")
+        );
+    }
+
+    #[test]
+    fn test_resolve_admin_password_production_rejects_weak_default() {
+        // 生产环境显式使用弱默认值——必须拒绝
+        let err =
+            resolve_default_admin_password_for_env(Some("12345".to_string()), true).unwrap_err();
+        assert!(err.to_string().contains("weak built-in password"));
+    }
+
+    #[test]
+    fn test_resolve_admin_password_production_accepts_strong() {
+        let resolved =
+            resolve_default_admin_password_for_env(Some("S7r0ng-Pass!word".to_string()), true)
+                .unwrap();
+        assert_eq!(resolved, "S7r0ng-Pass!word");
     }
 }

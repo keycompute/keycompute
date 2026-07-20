@@ -264,18 +264,19 @@ impl ApiKeyCrypto {
     /// 创建明文 API Key 的预览
     ///
     /// 用于数据库存储和日志显示，格式如 `sk-****abc`
+    ///
+    /// 注意：按 Unicode 字符（而非字节）切片，避免对包含多字节字符的输入
+    /// 在非字符边界切片时 panic。
     pub fn create_preview(plaintext: &str) -> String {
-        let len = plaintext.len();
+        let chars: Vec<char> = plaintext.chars().collect();
+        let len = chars.len();
         if len <= 7 {
             // 长度 <= 7 时，显示全部用 * 替代
             return "*".repeat(len);
         }
 
-        let prefix_len = 3;
-        let suffix_len = 3;
-
-        let prefix = &plaintext[..prefix_len];
-        let suffix = &plaintext[len - suffix_len..];
+        let prefix: String = chars[..3].iter().collect();
+        let suffix: String = chars[len - 3..].iter().collect();
 
         format!("{}****{}", prefix, suffix)
     }
@@ -384,6 +385,20 @@ mod tests {
         assert_eq!(ApiKeyCrypto::create_preview("sk-abc"), "******");
         assert_eq!(ApiKeyCrypto::create_preview("short"), "*****");
         assert_eq!(ApiKeyCrypto::create_preview("abc"), "***");
+    }
+
+    #[test]
+    fn test_create_preview_multibyte_no_panic() {
+        // 含多字节字符：必须按字符（而非字节）切片，绝不能在非字符边界 panic。
+        // "🔑" 占 4 字节，若按字节切片 [..3] 会 panic。
+        assert_eq!(ApiKeyCrypto::create_preview("🔑sk1234567"), "🔑sk****567");
+        // 全中文，字符数 > 7（共 8 个字符）。
+        assert_eq!(
+            ApiKeyCrypto::create_preview("你好世界密钥请求"),
+            "你好世****钥请求"
+        );
+        // 字符数 <= 7：全部用 * 替代（按字符计数，而非字节）。
+        assert_eq!(ApiKeyCrypto::create_preview("🔑🔑🔑"), "***");
     }
 
     #[test]

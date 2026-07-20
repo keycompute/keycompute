@@ -114,16 +114,10 @@ impl AuthStore {
     fn clear_storage() {
         #[cfg(target_arch = "wasm32")]
         {
-            if let Some(window) = web_sys::window() {
-                if let Ok(Some(storage)) = window.local_storage() {
-                    let _ = storage.remove_item("access_token");
-                    let _ = storage.remove_item("refresh_token");
-                }
-                if let Ok(Some(storage)) = window.session_storage() {
-                    let _ = storage.remove_item("access_token");
-                    let _ = storage.remove_item("refresh_token");
-                }
-            }
+            let _ = remove_local_storage("access_token");
+            let _ = remove_local_storage("refresh_token");
+            let _ = remove_session_storage("access_token");
+            let _ = remove_session_storage("refresh_token");
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -132,12 +126,18 @@ impl AuthStore {
     }
 }
 
+/// 存储键命名空间前缀：隔离不同应用/子系统的浏览器存储键，避免同源部署下键名冲突
+#[cfg(target_arch = "wasm32")]
+fn storage_key(key: &str) -> String {
+    format!("keyc_{key}")
+}
+
 #[cfg(target_arch = "wasm32")]
 fn read_local_storage(key: &str) -> Option<String> {
     web_sys::window()?
         .local_storage()
         .ok()??
-        .get_item(key)
+        .get_item(&storage_key(key))
         .ok()?
 }
 
@@ -146,7 +146,7 @@ fn write_local_storage(key: &str, value: &str) -> Option<()> {
     web_sys::window()?
         .local_storage()
         .ok()??
-        .set_item(key, value)
+        .set_item(&storage_key(key), value)
         .ok()
 }
 
@@ -155,7 +155,7 @@ fn remove_local_storage(key: &str) -> Option<()> {
     web_sys::window()?
         .local_storage()
         .ok()??
-        .remove_item(key)
+        .remove_item(&storage_key(key))
         .ok()
 }
 
@@ -164,7 +164,7 @@ fn read_session_storage(key: &str) -> Option<String> {
     web_sys::window()?
         .session_storage()
         .ok()??
-        .get_item(key)
+        .get_item(&storage_key(key))
         .ok()?
 }
 
@@ -173,7 +173,7 @@ fn write_session_storage(key: &str, value: &str) -> Option<()> {
     web_sys::window()?
         .session_storage()
         .ok()??
-        .set_item(key, value)
+        .set_item(&storage_key(key), value)
         .ok()
 }
 
@@ -182,7 +182,7 @@ fn remove_session_storage(key: &str) -> Option<()> {
     web_sys::window()?
         .session_storage()
         .ok()??
-        .remove_item(key)
+        .remove_item(&storage_key(key))
         .ok()
 }
 

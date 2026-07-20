@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- token_version: 用于使已签发的 JWT 失效。
+-- 密码重置或登出等安全事件时递增，使旧 token（携带旧 token_version）在服务端校验时被拒绝。
+ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_users_single_system_role ON users (role) WHERE role = 'system';

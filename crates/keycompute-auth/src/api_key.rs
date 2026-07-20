@@ -202,6 +202,7 @@ impl ProduceAiKeyValidator {
             produce_ai_key_id: produce_ai_key.id,
             role: user.role,
             permissions,
+            token_version: 0,
             user_info: None,
             tenant_info: None,
         })

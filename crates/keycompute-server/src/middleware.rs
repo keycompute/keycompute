@@ -20,7 +20,7 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-const PUBLIC_AUTH_COOKIE_NAME: &str = "kc_reg_sid";
+const PUBLIC_AUTH_COOKIE_NAME: &str = "keyc_reg_sid";
 const PUBLIC_AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24 * 30;
 
 /// 权限中间件的返回类型
@@ -80,13 +80,37 @@ pub fn cors_layer() -> tower_http::cors::CorsLayer {
 
 /// 追踪 ID 注入中间件
 pub async fn trace_id_middleware(mut req: Request, next: Next) -> Response {
-    // 如果没有 X-Request-ID，生成一个
-    if !req.headers().contains_key("X-Request-ID") {
-        let request_id = uuid::Uuid::new_v4().to_string();
-        req.headers_mut()
-            .insert("X-Request-ID", request_id.parse().unwrap());
+    // 复用上游传入的请求 ID；缺失时生成一个带服务命名空间前缀的新 ID
+    let request_id = match req
+        .headers()
+        .get("X-Request-ID")
+        .and_then(|h| h.to_str().ok())
+    {
+        Some(existing) => existing.to_owned(),
+        None => {
+            let id = new_request_id();
+            if let Ok(value) = id.parse() {
+                req.headers_mut().insert("X-Request-ID", value);
+            }
+            id
+        }
+    };
+
+    let mut response = next.run(req).await;
+    // 回写请求 ID 到响应头，便于客户端与服务端日志对账
+    if let Ok(value) = request_id.parse() {
+        response.headers_mut().insert("X-Request-ID", value);
     }
-    next.run(req).await
+    response
+}
+
+/// 生成请求 ID
+///
+/// 以包名前缀作为服务命名空间（如 keycompute-* → keyc），
+/// 便于多服务日志聚合时快速识别来源服务。
+fn new_request_id() -> String {
+    let ns = env!("CARGO_PKG_NAME").get(..4).unwrap_or("app");
+    format!("{ns}-{}", uuid::Uuid::new_v4())
 }
 
 /// 构造服务不可用响应（503 Service Unavailable）
@@ -576,12 +600,13 @@ pub async fn admin_auth_middleware(
     let auth_context = match state.auth.verify_token(token).await {
         Ok(ctx) => ctx,
         Err(e) => {
+            // 内部错误细节只记录日志，不回传客户端（避免信息泄露）
             warn!(error = %e, "Authentication failed for admin route");
             return (
                 StatusCode::UNAUTHORIZED,
                 serde_json::json!({
                     "error": {
-                        "message": format!("Authentication failed: {}", e),
+                        "message": "Authentication failed",
                         "type": "auth_failed",
                         "code": "unauthorized"
                     }
@@ -592,12 +617,17 @@ pub async fn admin_auth_middleware(
         }
     };
 
-    // 4. 检查 Admin 角色（支持 "admin" 和 "system"）
-    if auth_context.role != "admin" && auth_context.role != "system" {
+    // 4. 基于权限（而非角色字符串）进行管理访问控制。
+    //
+    // 关键：API Key 认证即使归属 admin/system 用户，也仅拥有 UseApi 权限
+    // （见 build_api_key_permissions）。若这里按 role 字符串判断，admin 用户的
+    // API Key 就能越权访问管理接口。改为检查 SystemAdmin 权限即可正确区分：
+    // 只有 JWT 后台登录的 admin/system 才具备 SystemAdmin 权限。
+    if !auth_context.has_permission(&Permission::SystemAdmin) {
         warn!(
             user_id = %auth_context.user_id,
             role = %auth_context.role,
-            "Non-admin user attempted to access admin route"
+            "Request without admin permission attempted to access admin route"
         );
         return (
             StatusCode::FORBIDDEN,
@@ -699,9 +729,9 @@ pub async fn maintenance_mode_middleware(
         .and_then(|h| h.to_str().ok())
         && let Some(token) = auth_header.strip_prefix("Bearer ")
         && let Ok(auth_context) = state.auth.verify_token(token).await
-        && auth_context.role == "admin"
+        && auth_context.has_permission(&Permission::SystemAdmin)
     {
-        // 管理员绕过维护模式
+        // 管理员绕过维护模式（基于权限判断，API Key 无 SystemAdmin 权限，无法绕过）
         info!(
             user_id = %auth_context.user_id,
             "Admin bypassing maintenance mode"

@@ -15,7 +15,8 @@ use uuid::Uuid;
 /// 余额不足阈值（元）
 /// 当用户余额低于此值时，拒绝请求
 pub fn min_balance_threshold() -> Decimal {
-    Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ONE / Decimal::from(10))
+    // 使用精确构造 0.1（1 × 10^-1），避免 f64 中间表示引入精度误差
+    Decimal::new(1, 1)
 }
 
 /// 余额服务

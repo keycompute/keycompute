@@ -80,7 +80,7 @@ fn test_auth_jwt_flow() {
     // 2. 创建 Claims（需要 role 和 issuer 参数）
     let user_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
-    let claims = keycompute_auth::JwtClaims::new(user_id, tenant_id, "user", 3600, "keycompute");
+    let claims = keycompute_auth::JwtClaims::new(user_id, tenant_id, "user", 3600, "keycompute", 0);
 
     chain.add_step(
         "keycompute-auth",
@@ -208,6 +208,36 @@ fn test_auth_permission_flow() {
 
     chain.print_report();
     assert!(chain.all_passed());
+}
+
+/// 测试管理路由的权限判定（对应 admin_auth_middleware 的 has_permission(SystemAdmin) 门禁）
+///
+/// 关键安全不变量：即使某用户角色为 admin，其 **API Key** 认证也只能获得 UseApi 权限，
+/// 不得拥有 SystemAdmin，从而无法访问管理路由；只有 JWT 登录的 admin/system 才具备 SystemAdmin。
+#[test]
+fn test_admin_route_permission_gate() {
+    use keycompute_auth::{AuthType, build_permissions};
+
+    // JWT admin / system → 必须拥有 SystemAdmin
+    for role in ["admin", "system"] {
+        let perms = build_permissions(AuthType::Jwt, role);
+        assert!(
+            perms.contains(&Permission::SystemAdmin),
+            "JWT {role} 应拥有 SystemAdmin 权限"
+        );
+    }
+
+    // API Key（即便角色为 admin）→ 不得拥有 SystemAdmin，仅有 UseApi
+    let api_admin = build_permissions(AuthType::ApiKey, "admin");
+    assert!(
+        !api_admin.contains(&Permission::SystemAdmin),
+        "API Key 认证不得拥有 SystemAdmin 权限（防止越权访问管理路由）"
+    );
+    assert_eq!(api_admin, vec![Permission::UseApi]);
+
+    // 普通 JWT 用户 → 无 SystemAdmin
+    let jwt_user = build_permissions(AuthType::Jwt, "user");
+    assert!(!jwt_user.contains(&Permission::SystemAdmin));
 }
 
 /// 测试用户信息

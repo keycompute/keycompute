@@ -2,7 +2,9 @@
 //!
 //! AppState 定义（DB Pool, Redis, 各模块 Handle）
 
-use keycompute_auth::{AuthService, EmailService, JwtValidator, ProduceAiKeyValidator};
+use keycompute_auth::{
+    AuthService, EmailService, JwtValidator, ProduceAiKeyValidator, UserService,
+};
 use keycompute_billing::BillingService;
 use keycompute_cache::CacheService;
 use keycompute_db::DbRouter;
@@ -416,8 +418,13 @@ impl AppState {
         // 创建 JWT 验证器
         let jwt_validator = JwtValidator::new(&config.jwt.secret, &config.jwt.issuer)
             .with_expiration(config.jwt.expiry_secs);
-        // 创建 AuthService，同时支持 API Key 和 JWT 认证
-        let auth_service = AuthService::new(api_key_validator).with_jwt(jwt_validator);
+        // 创建 AuthService，同时支持 API Key 和 JWT 认证。
+        // 关键：注入带数据库连接的 UserService，使 verify_token 能对 JWT 的
+        // token_version 做数据库比对——否则密码重置/登出后的旧 access token
+        // 仍能通过认证，token_version 失效机制形同虚设。
+        let auth_service = AuthService::new(api_key_validator)
+            .with_jwt(jwt_validator)
+            .with_user_service(UserService::with_pool(Arc::clone(&pool)));
 
         // 创建带数据库连接的定价服务
         let pricing_service = keycompute_pricing::PricingService::with_pool(Arc::clone(&pool));

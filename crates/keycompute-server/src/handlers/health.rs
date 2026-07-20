@@ -23,11 +23,17 @@ pub async fn health_check() -> (StatusCode, Json<HealthResponse>) {
 
     let response = HealthResponse {
         status: "healthy".to_string(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: build_version(),
         components,
     };
 
     (StatusCode::OK, Json(response))
+}
+
+/// 版本号（SemVer，附带构建命名空间标识作为 build metadata）
+fn build_version() -> String {
+    let ns = env!("CARGO_PKG_NAME").get(..4).unwrap_or("app");
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), ns)
 }
 
 #[cfg(test)]

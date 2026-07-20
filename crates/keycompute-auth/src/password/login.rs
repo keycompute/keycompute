@@ -172,10 +172,13 @@ impl LoginService {
                 KeyComputeError::DatabaseError(format!("Failed to update login info: {}", e))
             })?;
 
-        // 8. 生成 JWT Token
-        let token = self
-            .jwt_validator
-            .generate_token(user.id, user.tenant_id, &user.role)?;
+        // 8. 生成 JWT Token（写入用户当前 token_version，以支持失效校验）
+        let token = self.jwt_validator.generate_token_with_version(
+            user.id,
+            user.tenant_id,
+            &user.role,
+            user.token_version,
+        )?;
 
         tracing::info!(
             user_id = %user.id,
@@ -235,14 +238,32 @@ impl LoginService {
         // 验证当前 Token
         let claims = self.jwt_validator.validate(token)?;
 
-        // 获取用户信息
-        let user = User::find_by_id(self.pool.as_ref(), claims.user_id)
+        // 获取用户信息。
+        // 强制走主库（write_conn）：下方的 token_version 失效校验与账户锁定/邮箱校验
+        // 均为安全敏感判定。若走读副本，复制延迟会形成一个窗口，使密码重置/登出/锁定后
+        // 本应失效的旧 token 仍能刷新出新的有效 token——与 verify_token 的主库策略保持一致。
+        let user = User::find_by_id(self.pool.write_conn(), claims.user_id)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find user: {}", e)))?
             .ok_or_else(|| KeyComputeError::AuthError("User does not exist".to_string()))?;
 
-        // 检查凭证状态
-        let credential = UserCredential::find_by_user_id(self.pool.as_ref(), user.id)
+        // token_version 失效校验：拒绝刷新已失效的 token（如密码重置后签发的旧 token）。
+        // refresh-token 为公开路由、不经过 AuthService::verify_token，故必须在此显式比对，
+        // 否则攻击者可用未过期的旧 token 刷新出新的有效 token，绕过失效机制。
+        if claims.token_version != user.token_version {
+            tracing::warn!(
+                user_id = %user.id,
+                token_version = claims.token_version,
+                current_version = user.token_version,
+                "Refresh rejected: token has been invalidated"
+            );
+            return Err(KeyComputeError::AuthError(
+                "Token has been invalidated".to_string(),
+            ));
+        }
+
+        // 检查凭证状态（同样强制走主库，避免读副本延迟放行已锁定/未验证的账户）
+        let credential = UserCredential::find_by_user_id(self.pool.write_conn(), user.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find credential: {}", e))
@@ -261,10 +282,13 @@ impl LoginService {
             ));
         }
 
-        // 生成新 Token
-        let new_token = self
-            .jwt_validator
-            .generate_token(user.id, user.tenant_id, &user.role)?;
+        // 生成新 Token（写入用户当前 token_version）
+        let new_token = self.jwt_validator.generate_token_with_version(
+            user.id,
+            user.tenant_id,
+            &user.role,
+            user.token_version,
+        )?;
 
         Ok(LoginResponse {
             user_id: user.id,

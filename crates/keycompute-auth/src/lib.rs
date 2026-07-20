@@ -40,6 +40,8 @@ pub struct AuthContext {
     pub role: String,
     /// 权限列表
     pub permissions: Vec<Permission>,
+    /// Token 版本号（仅 JWT 认证有意义，用于失效校验；API Key 认证恒为 0）
+    pub token_version: i32,
     /// 用户信息（可选，延迟加载）
     pub user_info: Option<UserInfo>,
     /// 租户信息（可选，延迟加载）
@@ -60,6 +62,7 @@ impl AuthContext {
             produce_ai_key_id,
             role: role.into(),
             permissions: Vec::new(),
+            token_version: 0,
             user_info: None,
             tenant_info: None,
         }
@@ -197,8 +200,28 @@ impl AuthService {
             return self.verify_api_key(token).await;
         }
 
-        // 尝试 JWT 验证
-        self.verify_jwt(token)
+        // JWT 结构性校验（签名、过期、issuer）
+        let ctx = self.verify_jwt(token)?;
+
+        // token_version 失效校验：
+        // 与数据库中用户当前的 token_version 比对，密码重置/登出后旧 token 将被拒绝。
+        // 仅在配置了 UserService（含数据库连接）时执行；无连接时保持结构性校验行为。
+        if let Some(user_service) = &self.user_service
+            && let Some(current_version) = user_service.load_token_version(ctx.user_id).await?
+            && current_version != ctx.token_version
+        {
+            tracing::warn!(
+                user_id = %ctx.user_id,
+                token_version = ctx.token_version,
+                current_version,
+                "JWT token_version mismatch; token has been invalidated"
+            );
+            return Err(KeyComputeError::AuthError(
+                "Token has been invalidated".into(),
+            ));
+        }
+
+        Ok(ctx)
     }
 
     /// 加载用户详细信息

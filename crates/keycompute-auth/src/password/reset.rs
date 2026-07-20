@@ -275,6 +275,13 @@ impl PasswordResetService {
                 KeyComputeError::DatabaseError(format!("Failed to cleanup reset tokens: {}", e))
             })?;
 
+        // 8. 递增 token_version，使该用户已签发的所有 JWT 立即失效
+        User::increment_token_version(self.pool.as_ref(), reset.user_id)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to increment token version: {}", e))
+            })?;
+
         tracing::info!(
             user_id = %reset.user_id,
             "Password reset successfully"
@@ -450,6 +457,7 @@ mod tests {
             email: "test@example.com".to_string(),
             name: Some("Test User".to_string()),
             role: "user".to_string(),
+            token_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -465,6 +473,7 @@ mod tests {
             email: "test@example.com".to_string(),
             name: None,
             role: "user".to_string(),
+            token_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

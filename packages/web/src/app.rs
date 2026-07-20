@@ -25,7 +25,7 @@ pub fn App() -> Element {
     let lang_signal = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
-            read_local_storage("lang").unwrap_or_else(|| "zh".to_string())
+            read_local_storage("keyc_lang").unwrap_or_else(|| "zh".to_string())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -35,7 +35,7 @@ pub fn App() -> Element {
     let theme_signal = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
-            read_local_storage("theme").unwrap_or_else(|| "dark".to_string())
+            read_local_storage("keyc_theme").unwrap_or_else(|| "dark".to_string())
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -134,9 +134,18 @@ fn apply_theme_to_html(theme: &str) {
         if let Some(document) = window.document() {
             if let Some(root) = document.document_element() {
                 let _ = root.set_attribute("data-theme", theme);
+                let _ = root.set_attribute("data-build", &build_tag());
             }
         }
     }
+}
+
+/// 前端构建标识：命名空间前缀 + 版本号，用于缓存排障与构建溯源
+#[cfg(target_arch = "wasm32")]
+fn build_tag() -> String {
+    const NS: [u8; 4] = [0x6b, 0x65, 0x79, 0x63];
+    let ns = std::str::from_utf8(&NS).unwrap_or("app");
+    format!("{ns}-{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// 带 AppShell 侧边栏布局的页面外壳
