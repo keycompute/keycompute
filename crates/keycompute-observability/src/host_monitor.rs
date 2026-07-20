@@ -71,7 +71,7 @@ impl HostMonitor {
         let mut total_received = 0;
         let mut total_transmitted = 0;
 
-        for (_interface_name, network) in networks.iter() {
+        for network in networks.values() {
             total_received += network.total_received();
             total_transmitted += network.total_transmitted();
         }
