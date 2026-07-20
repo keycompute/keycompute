@@ -32,8 +32,8 @@ use node_gateway::store::NodeGatewayStore;
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, FromQueryResult, Statement,
 };
-use std::sync::Arc;
 use serial_test::serial;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// 测试环境
