@@ -5059,7 +5059,69 @@ select.form-input:focus {
   .kc-home-tip-card {
     padding: 16px;
   }
+  .kc-home-contributors-img {
+    width: 280px;
+  }
+  .kc-home-sponsors-grid {
+    gap: 8px;
+  }
+  .kc-home-sponsor-card {
+    padding: 8px 14px;
+    font-size: 0.8rem;
+  }
 }
+
+/* ── Contributors Section ──────────────────── */
+.kc-home-contributors-wrap {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
+  transition: opacity 0.3s ease;
+}
+.kc-home-contributors-wrap:hover {
+  opacity: 0.9;
+}
+.kc-home-contributors-img {
+  width: 340px;
+  max-width: 100%;
+  height: auto;
+  border-radius: 12px;
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+}
+.kc-home-contributors-img:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* ── Sponsors Section ────────────────────────── */
+.kc-home-sponsors-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  max-width: 700px;
+  margin: 0 auto;
+}
+.kc-home-sponsor-card {
+  padding: 10px 20px;
+  background: var(--kc-home-surface);
+  border: 1px solid var(--kc-home-border);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--kc-home-text-secondary);
+  transition: all 0.3s ease;
+  cursor: default;
+  user-select: none;
+}
+.kc-home-sponsor-card:hover {
+  border-color: var(--kc-home-accent);
+  color: var(--kc-home-text-primary);
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px var(--kc-home-accent-glow);
+}
+
 
 .kc-home-footer {
   position: relative;

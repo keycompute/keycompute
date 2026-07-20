@@ -12,6 +12,42 @@ use crate::stores::user_store::{UserInfo, UserStore};
 use ui::ThemeCtx;
 use ui::components::modal::Modal;
 
+// ── 赞助者数据 ───────────────────────────────────
+const SPONSOR_DATA: &str = include_str!("sponsors.txt");
+
+/// 从单行解析赞助者名字，仅当金额 >= 10 且名字有效时返回
+fn extract_sponsor_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    // 跳过 "序号. " 前缀
+    let content = line.split_once(". ")?.1;
+    let parts: Vec<&str> = content.split_whitespace().collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    // 最后一个 token 为金额
+    let amount: f64 = parts.last()?.parse().ok()?;
+    if amount < 10.0 {
+        return None;
+    }
+    // 剩余部分为名字
+    let name = parts[..parts.len() - 1].join(" ");
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    // 过滤无意义的纯标点符号/空格名字（如 "."、"~"）
+    if !name
+        .chars()
+        .any(|c| c.is_alphabetic() || c.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(name.to_string())
+}
+
 /// 首页组件 - 现代化自适应设计
 #[component]
 pub fn Home() -> Element {
@@ -59,6 +95,14 @@ pub fn Home() -> Element {
         public_settings_store
             .site_name()
             .unwrap_or_else(|| "KeyCompute".to_string())
+    });
+
+    // 赞助者列表（编译时从 sponsors.txt 解析）
+    let sponsors = use_memo(|| {
+        SPONSOR_DATA
+            .lines()
+            .filter_map(extract_sponsor_name)
+            .collect::<Vec<_>>()
     });
 
     // 提前提取所有 i18n 文本
@@ -685,6 +729,64 @@ pub fn Home() -> Element {
                                     "Alipay"
                                 }
                             }
+                        }
+                    }
+                }
+            }
+
+            // 社区贡献者区域
+            section { class: "kc-home-tip-section",
+                a {
+                    href: "https://github.com/keycompute/keycompute/graphs/contributors?all=1",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    class: "kc-home-contributors-wrap",
+                    div { class: "container",
+                        h2 { class: "kc-home-tip-title",
+                            span { "👥 " }
+                            if is_zh {
+                                "社区贡献者"
+                            } else {
+                                "Community Contributors"
+                            }
+                        }
+                        p { class: "kc-home-tip-subtitle",
+                            if is_zh {
+                                "感谢所有为 KeyCompute 做出贡献的开发者 ❤️"
+                            } else {
+                                "Thanks to all contributors who make KeyCompute better ❤️"
+                            }
+                        }
+                        img {
+                            src: "https://contrib.rocks/image?repo=keycompute/keycompute",
+                            alt: "KeyCompute Contributors",
+                            class: "kc-home-contributors-img",
+                        }
+                    }
+                }
+            }
+
+            // 社区赞助者区域
+            section { class: "kc-home-tip-section",
+                div { class: "container",
+                    h2 { class: "kc-home-tip-title",
+                        span { "🌟 " }
+                        if is_zh {
+                            "社区赞助者"
+                        } else {
+                            "Community Sponsors"
+                        }
+                    }
+                    p { class: "kc-home-tip-subtitle",
+                        if is_zh {
+                            "感谢以下赞助者对 KeyCompute 的大力支持 🙏"
+                        } else {
+                            "Special thanks to our sponsors for their generous support 🙏"
+                        }
+                    }
+                    div { class: "kc-home-sponsors-grid",
+                        for name in sponsors() {
+                            div { class: "kc-home-sponsor-card", "{name}" }
                         }
                     }
                 }
