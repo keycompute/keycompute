@@ -63,7 +63,7 @@ pub fn parse_openai_stream(
                             eprintln!(
                                 "[DEBUG] parse_openai_stream: line len={} preview={:?}",
                                 line.len(),
-                                &line.chars().take(100).collect::<String>()
+                                line.chars().take(100).collect::<String>()
                             );
                         }
 
