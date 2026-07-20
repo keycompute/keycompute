@@ -102,7 +102,7 @@ services:
       # 运行环境
       KC__ENV: production
       # 日志格式（Docker 容器日志由采集系统收集，使用 JSON 格式）
-      KC__LOG_FORMAT: json
+      #KC__LOG_FORMAT: json
 
       # 数据库配置（使用 Docker 网络内服务名解析）
       KC__DATABASE__URL: "postgres://${POSTGRES_USER:-keycompute}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-keycompute}"
@@ -163,7 +163,7 @@ services:
     # ports:
     #   - "3000:3000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -194,7 +194,7 @@ services:
       - keycompute-public
       - keycompute-internal  # Nginx 需要访问 keycompute-server，必须加入内部网络
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
       interval: 30s
       timeout: 5s
       retries: 3
