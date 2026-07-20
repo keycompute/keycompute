@@ -79,8 +79,11 @@ pub fn Pricing() -> Element {
             div { class: "page-header",
                 h1 { class: "page-title", {i18n.t("page.pricing")} }
                 p { class: "page-description",
-                    if is_admin { {i18n.t("pricing.admin_desc")} }
-                    else { {i18n.t("pricing.user_desc")} }
+                    if is_admin {
+                        {i18n.t("pricing.admin_desc")}
+                    } else {
+                        {i18n.t("pricing.user_desc")}
+                    }
                 }
                 if is_admin {
                     button {
@@ -120,7 +123,9 @@ pub fn Pricing() -> Element {
                                 h2 { class: "pricing-table-title", {i18n.t("pricing.table_title")} }
                                 p { class: "pricing-table-subtitle", {i18n.t("pricing.table_subtitle")} }
                             }
-                            div { class: "pricing-table-meta", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
+                            div { class: "pricing-table-meta",
+                                "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}"
+                            }
                         }
                         Table {
                             class: "pricing-table".to_string(),
@@ -140,20 +145,20 @@ pub fn Pricing() -> Element {
                                     }
                                 }
                             }
-                            tbody {
+                            tbody { // 显示租户 ID：nil UUID 表示全局默认
                                 if pricing_list().and_then(|r| r.ok()).is_some() {
                                     for p in paged_list.iter() {
-                                        tr {
-                                            key: "{p.id}",
+                                        tr { key: "{p.id}",
                                             td {
                                                 div { class: "pricing-model-cell",
                                                     div { class: "pricing-model-row",
                                                         span { class: "pricing-model-name", "{p.model_name}" }
-                                                        span { class: "pricing-model-id", "#{p.id.chars().take(8).collect::<String>()}" }
+                                                        span { class: "pricing-model-id",
+                                                            "#{p.id.chars().take(8).collect::<String>()}"
+                                                        }
                                                     }
                                                     div { class: "pricing-provider-row",
-                                                        span {
-                                                            class: "pricing-provider-badge {pricing_provider_class(&p.billing_dimension)}",
+                                                        span { class: "pricing-provider-badge {pricing_provider_class(&p.billing_dimension)}",
                                                             "{pricing_provider_label(&p.billing_dimension)}"
                                                         }
                                                         span { class: "pricing-provider-code", "{p.billing_dimension}" }
@@ -166,7 +171,9 @@ pub fn Pricing() -> Element {
                                                     if is_global_default(&p.tenant_id) {
                                                         span { class: "pricing-tenant-global", {i18n.t("pricing.global")} }
                                                     } else {
-                                                        span { class: "pricing-tenant-code", "{tenant_id.chars().take(8).collect::<String>()}" }
+                                                        span { class: "pricing-tenant-code",
+                                                            "{tenant_id.chars().take(8).collect::<String>()}"
+                                                        }
                                                     }
                                                 } else {
                                                     span { class: "pricing-tenant-code", "-" }
@@ -175,21 +182,27 @@ pub fn Pricing() -> Element {
                                             td {
                                                 div { class: "pricing-amount-cell",
                                                     div { class: "pricing-amount-value", "{p.input_price_per_1k}" }
-                                                    div { class: "pricing-amount-meta", "{p.currency} / 1K {i18n.t(\"pricing.input_tokens\")}" }
+                                                    div { class: "pricing-amount-meta",
+                                                        "{p.currency} / 1K {i18n.t(\"pricing.input_tokens\")}"
+                                                    }
                                                 }
                                             }
                                             td {
                                                 div { class: "pricing-amount-cell",
                                                     div { class: "pricing-amount-value", "{p.output_price_per_1k}" }
-                                                    div { class: "pricing-amount-meta", "{p.currency} / 1K {i18n.t(\"pricing.output_tokens\")}" }
+                                                    div { class: "pricing-amount-meta",
+                                                        "{p.currency} / 1K {i18n.t(\"pricing.output_tokens\")}"
+                                                    }
                                                 }
                                             }
                                             td {
-                                                div { class: "pricing-status-cell",
+                                                div { class: "pricing-status-cell", // 全局默认定价不允许删除，仅保留编辑按钮
                                                     if p.is_default {
                                                         Badge { variant: BadgeVariant::Success, {i18n.t("pricing.default")} }
                                                     } else {
-                                                        Badge { variant: BadgeVariant::Neutral, {i18n.t("pricing.alternative")} }
+                                                        Badge { variant: BadgeVariant::Neutral,
+                                                            {i18n.t("pricing.alternative")}
+                                                        }
                                                     }
                                                     p { class: "pricing-status-note",
                                                         if p.is_default {
@@ -202,8 +215,10 @@ pub fn Pricing() -> Element {
                                             }
                                             td {
                                                 div { class: "pricing-time-cell",
-                                                    span { class: "pricing-time-label", {i18n.t("common.created_at_label")} }
-                                                    span { class: "pricing-time-value", { format_time(&p.created_at) } }
+                                                    span { class: "pricing-time-label",
+                                                        {i18n.t("common.created_at_label")}
+                                                    }
+                                                    span { class: "pricing-time-value", {format_time(&p.created_at)} }
                                                 }
                                             }
                                             if is_admin {
@@ -230,7 +245,8 @@ pub fn Pricing() -> Element {
                                                                                         });
                                                                                     }
                                                                                     Err(e) => {
-                                                                                        op_err.set(format!("{}：{e}", i18n.t("pricing.set_default_failed")));
+                                                                                        op_err
+                                                                                            .set(format!("{}：{e}", i18n.t("pricing.set_default_failed")));
                                                                                         spawn(async move {
                                                                                             gloo_timers::future::TimeoutFuture::new(3_000).await;
                                                                                             op_err.set(String::new());
@@ -301,7 +317,9 @@ pub fn Pricing() -> Element {
                         }
                     }
                     div { class: "pagination",
-                        span { class: "pagination-info", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
+                        span { class: "pagination-info",
+                            "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}"
+                        }
                         Pagination {
                             current: page(),
                             total_pages,
@@ -398,7 +416,7 @@ fn CreatePricingModal(
         }
         // tenant_id 保持原样（None 表示未选择，Some(id) 表示选择了具体租户）
         // 注意：由于已移除“全局默认”选项，用户无法创建全局默认定价
-        let tid = tid.and_then(|id| if id.is_empty() { None } else { Some(id) });
+        let tid = tid.filter(|id| !id.is_empty());
         if ip_str.parse::<f64>().is_err() {
             form_err.set(i18n.t("pricing.invalid_input_price").to_string());
             return;
@@ -444,11 +462,8 @@ fn CreatePricingModal(
     };
 
     rsx! {
-        div { class: "modal-backdrop",
-            onclick: move |_| on_close.call(()),
-            div {
-                class: "modal",
-                onclick: move |e| e.stop_propagation(),
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div { class: "modal", onclick: move |e| e.stop_propagation(),
                 div { class: "modal-header",
                     h2 { class: "modal-title", {i18n.t("pricing.create_title")} }
                     button {
@@ -499,8 +514,11 @@ fn CreatePricingModal(
                             for t in match tenant_list() {
                                 Some(Ok(list)) => list,
                                 _ => vec![],
-                            } {
-                                option { value: "{t.id}", "{t.name} ({t.id.chars().take(8).collect::<String>()})" }
+                            }
+                            {
+                                option { value: "{t.id}",
+                                    "{t.name} ({t.id.chars().take(8).collect::<String>()})"
+                                }
                             }
                         }
                     }
@@ -549,7 +567,11 @@ fn CreatePricingModal(
                         r#type: "button",
                         disabled: saving(),
                         onclick: on_submit,
-                        if saving() { {i18n.t("pricing.creating")} } else { {i18n.t("form.create")} }
+                        if saving() {
+                            {i18n.t("pricing.creating")}
+                        } else {
+                            {i18n.t("form.create")}
+                        }
                     }
                 }
             }
@@ -622,11 +644,8 @@ fn EditPricingModal(
     };
 
     rsx! {
-        div { class: "modal-backdrop",
-            onclick: move |_| on_close.call(()),
-            div {
-                class: "modal",
-                onclick: move |e| e.stop_propagation(),
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div { class: "modal", onclick: move |e| e.stop_propagation(),
                 div { class: "modal-header",
                     h2 { class: "modal-title", {i18n.t("pricing.edit_title")} }
                     button {
@@ -700,7 +719,11 @@ fn EditPricingModal(
                         r#type: "button",
                         disabled: saving(),
                         onclick: on_submit,
-                        if saving() { {i18n.t("form.saving")} } else { {i18n.t("form.save_changes")} }
+                        if saving() {
+                            {i18n.t("form.saving")}
+                        } else {
+                            {i18n.t("form.save_changes")}
+                        }
                     }
                 }
             }
