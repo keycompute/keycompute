@@ -102,7 +102,7 @@ pub enum ConfigLoadError {
 
 impl AppConfig {
     fn default_app_base_url() -> String {
-        "http://localhost:80".to_string()
+        "https://keycompute.cn".to_string()
     }
 
     pub fn resolved_app_base_url(&self) -> String {
@@ -870,11 +870,11 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_ok());
-        assert_eq!(config.resolved_app_base_url(), "http://localhost:80");
+        assert_eq!(config.resolved_app_base_url(), "https://keycompute.cn");
     }
 
     #[test]
-    fn test_resolved_app_base_url_falls_back_to_fixed_localhost_80() {
+    fn test_resolved_app_base_url_falls_back_to_official_site() {
         let config = AppConfig {
             app_base_url: None,
             server: ServerConfig {
@@ -884,7 +884,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(config.resolved_app_base_url(), "http://localhost:80");
+        assert_eq!(config.resolved_app_base_url(), "https://keycompute.cn");
     }
 
     #[test]

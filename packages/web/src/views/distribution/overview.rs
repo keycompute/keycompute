@@ -117,6 +117,7 @@ fn DistributionOverviewContent() -> Element {
         _ => String::new(),
     };
     let invite_link_text = invite_link.clone();
+    let copy_text = i18n.t("common.copy");
     let copied_text = i18n.t("common.copied");
     let copy_manual_hint = i18n.t("common.copy_manual_hint");
     let distribution_disabled = is_distribution_disabled_error(&earnings())
@@ -189,7 +190,7 @@ fn DistributionOverviewContent() -> Element {
                                         button {
                                             class: "distribution-copy-value",
                                             r#type: "button",
-                                            title: "{copied_text}",
+                                            title: "{copy_text}",
                                             onclick: on_copy_toast(invite_link_text.clone(), copied_text, copy_manual_hint, ui_store),
                                             "{invite_link_text}"
                                         }
