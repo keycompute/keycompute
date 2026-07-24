@@ -9,7 +9,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// 创建 OpenAI 测试客户端
 async fn create_openai_test_client() -> (OpenAiClient, MockServer) {
     let mock_server = MockServer::start().await;
-    let config = ClientConfig::new(mock_server.uri());
+    // 绕过系统代理，确保请求直连本地 Mock 服务器
+    let config = ClientConfig::new(mock_server.uri()).with_no_proxy(true);
     let client = OpenAiClient::new(config).expect("Failed to create OpenAI client");
     (client, mock_server)
 }

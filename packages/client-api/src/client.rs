@@ -31,12 +31,15 @@ impl ApiClient {
         let client = {
             #[cfg(not(target_arch = "wasm32"))]
             {
-                Client::builder()
-                    .timeout(Duration::from_secs(config.timeout_secs))
-                    .build()
-                    .map_err(|e| {
-                        ClientError::Config(format!("Failed to create HTTP client: {}", e))
-                    })?
+                let mut builder =
+                    Client::builder().timeout(Duration::from_secs(config.timeout_secs));
+                // 绕过系统代理，避免连接本地服务（如测试 Mock 服务器）时被代理拦截
+                if config.no_proxy {
+                    builder = builder.no_proxy();
+                }
+                builder.build().map_err(|e| {
+                    ClientError::Config(format!("Failed to create HTTP client: {}", e))
+                })?
             }
             #[cfg(target_arch = "wasm32")]
             {

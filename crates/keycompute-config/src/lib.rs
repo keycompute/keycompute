@@ -686,7 +686,10 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.server.port, 3000);
         assert_eq!(config.server.bind_addr, "0.0.0.0");
-        assert_eq!(config.app_base_url.as_deref(), Some("http://localhost:80"));
+        assert_eq!(
+            config.app_base_url.as_deref(),
+            Some("https://keycompute.cn")
+        );
     }
 
     #[test]

@@ -15,6 +15,12 @@ pub struct ClientConfig {
     pub retry_enabled: bool,
     /// 最大重试次数
     pub max_retries: u32,
+    /// 是否绕过系统代理（native 构建生效）
+    ///
+    /// 默认值为 `cfg!(test)`：业务构建为 `false`（遵循 `HTTP_PROXY`/`HTTPS_PROXY` 等环境变量），
+    /// 测试构建为 `true`（绕过系统代理）。集成测试（tests/ 目录）以非 test 模式编译库，
+    /// 因此需经由共享测试辅助函数显式调用 `with_no_proxy(true)` 来绕过代理。
+    pub no_proxy: bool,
 }
 
 impl ClientConfig {
@@ -22,10 +28,14 @@ impl ClientConfig {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            timeout_secs: 30,
-            retry_enabled: true,
-            max_retries: 3,
+            ..Default::default()
         }
+    }
+
+    /// 设置是否绕过系统代理
+    pub fn with_no_proxy(mut self, no_proxy: bool) -> Self {
+        self.no_proxy = no_proxy;
+        self
     }
 
     /// 设置超时时间
@@ -97,6 +107,8 @@ impl Default for ClientConfig {
             timeout_secs: 30,
             retry_enabled: true,
             max_retries: 3,
+            // 测试构建默认绕过系统代理，业务构建默认遵循系统代理
+            no_proxy: cfg!(test),
         }
     }
 }
@@ -118,6 +130,17 @@ mod tests {
         // 无效配置：错误协议
         let config = ClientConfig::new("ftp://localhost");
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_no_proxy_default_in_test_build() {
+        // cfg!(test) 在测试构建中为 true
+        let config = ClientConfig::new("http://localhost:8080");
+        assert!(config.no_proxy);
+
+        // with_no_proxy builder 方法可覆盖默认值
+        let config = config.with_no_proxy(false);
+        assert!(!config.no_proxy);
     }
 
     #[test]
