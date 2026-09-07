@@ -15,6 +15,8 @@ pub mod password_reset;
 pub mod payment_order;
 pub mod pending_registration;
 pub mod pricing_model;
+pub mod response_affinity;
+pub mod responses_idempotency_claim;
 pub mod system_setting;
 pub mod tenant;
 pub mod tenant_distribution_rule;
@@ -54,6 +56,8 @@ pub use payment_order::{
 };
 pub use pending_registration::{PendingRegistration, UpsertPendingRegistrationRequest};
 pub use pricing_model::{CreatePricingRequest, PricingModel, UpdatePricingRequest};
+pub use response_affinity::ResponseAffinity;
+pub use responses_idempotency_claim::ResponsesIdempotencyClaim;
 pub use system_setting::{
     BatchUpdateSettingsRequest, PublicSettings, SettingValueType, SystemSetting,
     SystemSettingResponse, UpdateSystemSettingRequest,

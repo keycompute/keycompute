@@ -273,7 +273,7 @@ POST /api/v1/payments/notify/wechatpay
 
 ### 6.1 数据库
 
-建议新增迁移，不直接修改 `001_init.sql`：
+当前仅支持全新部署，以下结构调整直接合并进 `crates/keycompute-db/migrations/001_init.sql`，不新增增量或兼容迁移：
 
 - 将语义为支付宝的 `trade_no` 演进为 `provider_trade_no`；兼容期可先新增列并回填。
 - `payment_method` 改为创建订单时必填，不再由模型默认支付宝。

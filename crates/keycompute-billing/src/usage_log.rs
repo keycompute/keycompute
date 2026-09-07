@@ -183,6 +183,8 @@ impl BillingService {
             return Ok(UsageLog {
                 id: Uuid::new_v4(),
                 request_id: new_log.request_id,
+                idempotency_id: (ctx.billing_request_id != ctx.request_id)
+                    .then_some(ctx.billing_request_id),
                 tenant_id: new_log.tenant_id,
                 user_id: new_log.user_id,
                 produce_ai_key_id: new_log.produce_ai_key_id,
@@ -238,17 +240,28 @@ impl BillingService {
                 )));
             }
         };
-        let saved_log = match UsageLog::create(&tx, &create_req).await {
-            Ok(log) => log,
-            Err(error) => {
-                keycompute_observability::metrics::BILLING_WRITE_FAILURE_TOTAL.inc();
-                let _ = tx.rollback().await;
-                mark_billing_failed_best_effort(pool.as_ref(), ctx.request_id).await;
-                return Err(KeyComputeError::DatabaseError(format!(
-                    "Failed to save usage log: {error}"
-                )));
-            }
-        };
+        let idempotency_id =
+            (ctx.billing_request_id != ctx.request_id).then_some(ctx.billing_request_id);
+        let saved_log =
+            match UsageLog::create_with_idempotency(&tx, &create_req, idempotency_id).await {
+                Ok(log) => log,
+                Err(error) => {
+                    keycompute_observability::metrics::BILLING_WRITE_FAILURE_TOTAL.inc();
+                    let _ = tx.rollback().await;
+                    mark_billing_failed_best_effort(pool.as_ref(), ctx.request_id).await;
+                    return Err(KeyComputeError::DatabaseError(format!(
+                        "Failed to save usage log: {error}"
+                    )));
+                }
+            };
+        if !usage_log_matches_request(&saved_log, &create_req, idempotency_id) {
+            let _ = tx.rollback().await;
+            mark_billing_failed_best_effort(pool.as_ref(), ctx.request_id).await;
+            return Err(KeyComputeError::DatabaseError(
+                "Billing identity is already bound to a different tenant, credential, model, or account"
+                    .to_string(),
+            ));
+        }
         if let Err(error) = tx.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE gateway_requests SET billing_status='succeeded',updated_at=NOW() WHERE request_id=$1",
@@ -269,6 +282,7 @@ impl BillingService {
 
         tracing::info!(
             request_id = %ctx.request_id,
+            billing_request_id = %ctx.billing_request_id,
             usage_log_id = %saved_log.id,
             user_amount = %saved_log.user_amount,
             "Usage log saved to database"
@@ -284,12 +298,14 @@ impl BillingService {
     ///
     /// 计费流程：
     /// 1. 计算费用并写入 usage_logs 表
-    /// 2. 扣除用户余额（记录欠费但不影响执行结果）
+    /// 2. 扣除用户余额
     /// 3. 查询用户的推荐关系（user_referrals 表）
     /// 4. 查询租户的分销规则（tenant_distribution_rules 表）
     /// 5. 计算分成并保存
     ///
-    /// 架构约束：Billing 不反向影响执行结果，余额扣除失败仅记录错误
+    /// 可重试的后置副作用失败会返回给调用方。请求处理方仍可保持 Billing
+    /// 不反向影响客户端结果，但必须保留 durable settlement 以便重试，不能把
+    /// 仅写入 usage ledger 误判为完整结算成功。
     pub async fn finalize_and_trigger_distribution(
         &self,
         ctx: &RequestContext,
@@ -303,31 +319,53 @@ impl BillingService {
             .finalize_and_save(ctx, provider_name, account_id, status)
             .await?;
 
-        let user_amount = bigdecimal_to_decimal(&usage_log.user_amount)?;
-
-        // 扣除用户余额（失败不影响主流程）
-        self.deduct_balance_if_configured(
-            ctx.request_id,
-            user_id,
-            user_amount,
-            usage_log.id,
-            &ctx.model,
-        )
-        .await;
-
-        // 触发分销处理（失败不影响主流程）
-        self.process_distribution_if_configured(ctx, &usage_log, user_id, user_amount)
-            .await;
-
-        // 触发节点租赁小费（失败不影响主流程）
-        self.process_tips_if_configured(usage_log.id).await;
+        self.replay_saved_usage_effects(ctx, &usage_log, user_id)
+            .await?;
 
         Ok(usage_log)
     }
 
+    /// Replay the side effects that follow the immutable usage ledger write.
+    ///
+    /// Balance consumption, distribution records and node tips are all keyed
+    /// by `usage_log.id`, so a durable settlement worker may call this after a
+    /// crash without applying any monetary effect twice.
+    pub async fn replay_saved_usage_effects(
+        &self,
+        ctx: &RequestContext,
+        usage_log: &UsageLog,
+        user_id: Uuid,
+    ) -> Result<()> {
+        let user_amount = bigdecimal_to_decimal(&usage_log.user_amount)?;
+
+        // 扣除用户余额。瞬时错误返回给 durable settlement 重试。
+        let balance_result = self
+            .deduct_balance_if_configured(
+                ctx.request_id,
+                user_id,
+                user_amount,
+                usage_log.id,
+                &ctx.model,
+            )
+            .await;
+
+        // 触发分销处理。瞬时错误返回给 durable settlement 重试。
+        let distribution_result = self
+            .process_distribution_if_configured(ctx, usage_log, user_id, user_amount)
+            .await;
+
+        // 触发节点租赁小费。瞬时错误返回给 durable settlement 重试。
+        let tips_result = self.process_tips_if_configured(usage_log.id).await;
+
+        balance_result?;
+        distribution_result?;
+        tips_result?;
+        Ok(())
+    }
+
     /// 扣除用户余额（如果已配置余额服务）
     ///
-    /// 架构约束：失败不影响主流程，仅记录错误
+    /// 永久业务状态只记录欠费；瞬时基础设施错误返回给调用方以便持久化重试。
     async fn deduct_balance_if_configured(
         &self,
         request_id: Uuid,
@@ -335,13 +373,13 @@ impl BillingService {
         user_amount: Decimal,
         usage_log_id: Uuid,
         model_name: &str,
-    ) {
+    ) -> Result<()> {
         let Some(balance) = &self.balance else {
             tracing::debug!(
                 request_id = %request_id,
                 "No balance service configured, skipping balance deduction"
             );
-            return;
+            return Ok(());
         };
 
         match balance
@@ -361,52 +399,77 @@ impl BillingService {
                     new_balance = %updated_balance.available_balance,
                     "User balance deducted successfully"
                 );
+                Ok(())
+            }
+            Err(KeyComputeError::ValidationError(message)) => {
+                // A missing balance row (for example after user removal) is a
+                // permanent business-state outcome, not a transient database
+                // outage. The immutable usage ledger already records the
+                // receivable, so acknowledge this side effect instead of
+                // retaining a hot durable retry forever.
+                tracing::error!(
+                    request_id = %request_id,
+                    user_id = %user_id,
+                    amount = %user_amount,
+                    error = %message,
+                    "Balance debt remains recorded only in the immutable usage ledger"
+                );
+                Ok(())
             }
             Err(e) => {
                 // 根据架构约束，Billing 不反向影响执行结果
-                // 扣除失败时仅记录错误，不抛出异常
+                // 瞬时基础设施错误由 durable worker 重放。
                 tracing::error!(
                     request_id = %request_id,
                     user_id = %user_id,
                     amount = %user_amount,
                     error = %e,
-                    "Failed to deduct user balance (recorded as debt)"
+                    "Failed to deduct user balance; durable settlement will retry"
                 );
+                Err(e)
             }
         }
     }
 
     /// 处理分销（如果已配置分销服务）
     ///
-    /// 架构约束：分销失败不影响主流程，仅记录错误
+    /// 分销失败返回给调用方；请求结果不受影响，由 durable settlement 重试。
     async fn process_distribution_if_configured(
         &self,
         ctx: &RequestContext,
         usage_log: &UsageLog,
         user_id: Uuid,
         user_amount: Decimal,
-    ) {
+    ) -> Result<()> {
         let (Some(distribution), Some(pool)) = (&self.distribution, &self.pool) else {
             tracing::debug!(
                 request_id = %ctx.request_id,
                 "No distribution service configured, skipping distribution"
             );
-            return;
+            return Ok(());
         };
 
         // 检查分销系统是否启用（开关关闭时彻底停止分销计算）
-        let distribution_enabled = keycompute_db::SystemSetting::get_bool(
+        let distribution_enabled = match keycompute_db::SystemSetting::find_by_key(
             pool.as_ref(),
             keycompute_db::models::system_setting::setting_keys::DISTRIBUTION_ENABLED,
-            false,
         )
-        .await;
+        .await
+        {
+            Ok(Some(setting)) => setting.parse_bool(),
+            Ok(None) => false,
+            Err(error) => {
+                return Err(KeyComputeError::DatabaseError(format!(
+                    "Failed to load distribution setting: {error}"
+                )));
+            }
+        };
         if !distribution_enabled {
             tracing::debug!(
                 request_id = %ctx.request_id,
                 "Distribution is disabled via system settings, skipping"
             );
-            return;
+            return Ok(());
         }
 
         // 创建分销上下文
@@ -423,12 +486,9 @@ impl BillingService {
                 Ok(Some(referral)) => (referral.level1_referrer_id, referral.level2_referrer_id),
                 Ok(None) => (None, None),
                 Err(e) => {
-                    tracing::warn!(
-                        user_id = %user_id,
-                        error = %e,
-                        "Failed to find user referral, proceeding without distribution"
-                    );
-                    (None, None)
+                    return Err(KeyComputeError::DatabaseError(format!(
+                        "Failed to find user referral: {e}"
+                    )));
                 }
             };
 
@@ -438,7 +498,7 @@ impl BillingService {
                 user_id = %user_id,
                 "No referral relationship found, skipping distribution"
             );
-            return;
+            return Ok(());
         };
 
         // 查询租户的分销规则
@@ -450,12 +510,9 @@ impl BillingService {
         {
             Ok(rules) => rules,
             Err(e) => {
-                tracing::warn!(
-                    tenant_id = %ctx.tenant_id,
-                    error = %e,
-                    "Failed to find distribution rules, using default ratios"
-                );
-                vec![]
+                return Err(KeyComputeError::DatabaseError(format!(
+                    "Failed to find distribution rules: {e}"
+                )));
             }
         };
 
@@ -534,15 +591,18 @@ impl BillingService {
                     level2_ratio = %level2_ratio,
                     "Distribution processed successfully"
                 );
+                Ok(())
             }
             Err(e) => {
-                // 分销失败不影响主计费流程，只记录错误
                 tracing::error!(
                     request_id = %ctx.request_id,
                     usage_log_id = %usage_log.id,
                     error = %e,
                     "Distribution processing failed"
                 );
+                Err(KeyComputeError::DatabaseError(format!(
+                    "Failed to save distribution records: {e}"
+                )))
             }
         }
     }
@@ -550,14 +610,14 @@ impl BillingService {
     /// 触发节点租赁小费（如果已配置数据库连接）
     ///
     /// 根据 usage_log 查询对应的 node_task，为节点所有者创建小费记录。
-    /// 架构约束：小费创建失败不影响主计费流程，仅记录错误。
-    async fn process_tips_if_configured(&self, usage_log_id: Uuid) {
+    /// 小费创建失败返回给调用方；请求结果不受影响，由 durable settlement 重试。
+    async fn process_tips_if_configured(&self, usage_log_id: Uuid) -> Result<()> {
         let Some(pool) = &self.pool else {
             tracing::debug!(
                 %usage_log_id,
                 "No database pool configured, skipping tips processing"
             );
-            return;
+            return Ok(());
         };
 
         match NodeTip::create_from_usage_log(pool.as_ref(), usage_log_id).await {
@@ -569,20 +629,24 @@ impl BillingService {
                     tip_amount = %tip.tip_amount,
                     "Node tip created successfully"
                 );
+                Ok(())
             }
             Ok(None) => {
                 tracing::debug!(
                     %usage_log_id,
                     "No tip created (not a node gateway request or ratio is zero)"
                 );
+                Ok(())
             }
             Err(e) => {
-                // 架构约束：小费创建失败不影响主计费流程
                 tracing::error!(
                     %usage_log_id,
                     error = %e,
                     "Failed to create node tip"
                 );
+                Err(KeyComputeError::DatabaseError(format!(
+                    "Failed to create node tip: {e}"
+                )))
             }
         }
     }
@@ -593,6 +657,31 @@ impl BillingService {
     pub fn has_pool(&self) -> bool {
         self.pool.is_some()
     }
+}
+
+fn usage_log_matches_request(
+    existing: &UsageLog,
+    requested: &CreateUsageLogRequest,
+    idempotency_id: Option<Uuid>,
+) -> bool {
+    let same_identity = (match idempotency_id {
+        Some(idempotency_id) => existing.idempotency_id == Some(idempotency_id),
+        None => existing.request_id == requested.request_id && existing.idempotency_id.is_none(),
+    }) && existing.tenant_id == requested.tenant_id
+        && existing.user_id == requested.user_id
+        && existing.produce_ai_key_id == requested.produce_ai_key_id
+        && existing.model_name == requested.model_name
+        && existing.provider_name == requested.provider_name
+        && existing.account_id == requested.account_id;
+    same_identity
+        && (idempotency_id.is_some()
+            || (existing.input_tokens == requested.input_tokens
+                && existing.output_tokens == requested.output_tokens
+                && existing.input_unit_price_snapshot == requested.input_unit_price_snapshot
+                && existing.output_unit_price_snapshot == requested.output_unit_price_snapshot
+                && existing.user_amount == requested.user_amount
+                && existing.currency == requested.currency
+                && existing.usage_source == requested.usage_source))
 }
 
 impl Default for BillingService {
@@ -867,13 +956,220 @@ fn bigdecimal_to_decimal(value: &bigdecimal::BigDecimal) -> Result<Decimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use keycompute_types::PricingSnapshot;
     use rust_decimal::Decimal;
+    use sea_orm::{Database, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow, Value};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct PostLedgerFailureProxy {
+        usage_log: UsageLog,
+        ledger_writes: Arc<AtomicUsize>,
+        post_ledger_queries: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProxyDatabaseTrait for PostLedgerFailureProxy {
+        async fn query(&self, statement: Statement) -> std::result::Result<Vec<ProxyRow>, DbErr> {
+            if statement
+                .sql
+                .to_ascii_lowercase()
+                .contains("insert into usage_logs")
+            {
+                self.ledger_writes.fetch_add(1, Ordering::Relaxed);
+                return Ok(vec![usage_log_proxy_row(&self.usage_log)]);
+            }
+
+            self.post_ledger_queries.fetch_add(1, Ordering::Relaxed);
+            Err(DbErr::Custom(
+                "injected post-ledger database failure".to_string(),
+            ))
+        }
+
+        async fn execute(
+            &self,
+            _statement: Statement,
+        ) -> std::result::Result<ProxyExecResult, DbErr> {
+            Ok(ProxyExecResult::default())
+        }
+    }
+
+    fn usage_log_proxy_row(log: &UsageLog) -> ProxyRow {
+        ProxyRow::new(BTreeMap::<String, Value>::from([
+            ("id".to_string(), log.id.into()),
+            ("request_id".to_string(), log.request_id.into()),
+            ("idempotency_id".to_string(), log.idempotency_id.into()),
+            ("tenant_id".to_string(), log.tenant_id.into()),
+            ("user_id".to_string(), log.user_id.into()),
+            (
+                "produce_ai_key_id".to_string(),
+                log.produce_ai_key_id.into(),
+            ),
+            ("model_name".to_string(), log.model_name.clone().into()),
+            (
+                "provider_name".to_string(),
+                log.provider_name.clone().into(),
+            ),
+            ("account_id".to_string(), log.account_id.into()),
+            ("input_tokens".to_string(), log.input_tokens.into()),
+            ("output_tokens".to_string(), log.output_tokens.into()),
+            ("total_tokens".to_string(), log.total_tokens.into()),
+            (
+                "input_unit_price_snapshot".to_string(),
+                log.input_unit_price_snapshot.clone().into(),
+            ),
+            (
+                "output_unit_price_snapshot".to_string(),
+                log.output_unit_price_snapshot.clone().into(),
+            ),
+            ("user_amount".to_string(), log.user_amount.clone().into()),
+            ("currency".to_string(), log.currency.clone().into()),
+            ("usage_source".to_string(), log.usage_source.clone().into()),
+            ("status".to_string(), log.status.clone().into()),
+            ("started_at".to_string(), log.started_at.into()),
+            ("finished_at".to_string(), log.finished_at.into()),
+            ("created_at".to_string(), log.created_at.into()),
+        ]))
+    }
+
+    fn saved_usage_log(draft: NewUsageLog) -> UsageLog {
+        UsageLog {
+            id: Uuid::new_v4(),
+            request_id: draft.request_id,
+            idempotency_id: None,
+            tenant_id: draft.tenant_id,
+            user_id: draft.user_id,
+            produce_ai_key_id: draft.produce_ai_key_id,
+            model_name: draft.model_name,
+            provider_name: draft.provider_name,
+            account_id: draft.account_id,
+            input_tokens: draft.input_tokens,
+            output_tokens: draft.output_tokens,
+            total_tokens: draft.total_tokens,
+            input_unit_price_snapshot: decimal_to_bigdecimal(&draft.input_unit_price_snapshot)
+                .unwrap(),
+            output_unit_price_snapshot: decimal_to_bigdecimal(&draft.output_unit_price_snapshot)
+                .unwrap(),
+            user_amount: decimal_to_bigdecimal(&draft.user_amount).unwrap(),
+            currency: draft.currency,
+            usage_source: draft.usage_source,
+            status: draft.status,
+            started_at: draft.started_at,
+            finished_at: draft.finished_at,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_ledger_failure_is_returned_for_durable_retry() {
+        let ctx = RequestContext::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            false,
+            PricingSnapshot::default(),
+        );
+        ctx.set_input_tokens(13);
+        ctx.set_output_tokens(8);
+        let account_id = Uuid::new_v4();
+        let draft = BillingService::new()
+            .finalize(&ctx, "openai", account_id, "success")
+            .await
+            .unwrap();
+        let ledger_writes = Arc::new(AtomicUsize::new(0));
+        let post_ledger_queries = Arc::new(AtomicUsize::new(0));
+        let connection = Database::connect_proxy(
+            DbBackend::Postgres,
+            Arc::new(Box::new(PostLedgerFailureProxy {
+                usage_log: saved_usage_log(draft),
+                ledger_writes: Arc::clone(&ledger_writes),
+                post_ledger_queries: Arc::clone(&post_ledger_queries),
+            })),
+        )
+        .await
+        .unwrap();
+        let billing = BillingService::with_pool(DbRouter::single(connection));
+
+        let error = billing
+            .finalize_and_trigger_distribution(&ctx, "openai", account_id, "success", ctx.user_id)
+            .await
+            .expect_err("post-ledger failures must retain the durable settlement");
+
+        assert!(error.to_string().contains("injected post-ledger"));
+        assert_eq!(ledger_writes.load(Ordering::Relaxed), 1);
+        assert!(post_ledger_queries.load(Ordering::Relaxed) >= 1);
+    }
 
     #[test]
     fn billing_failure_transition_never_overwrites_a_committed_status() {
         assert!(MARK_BILLING_FAILED_SQL.contains("billing_status='failed'"));
         assert!(MARK_BILLING_FAILED_SQL.contains("billing_status='pending'"));
+    }
+
+    #[test]
+    fn idempotent_ledger_replay_reuses_authoritative_usage_but_not_a_different_account() {
+        let now = Utc::now();
+        let idempotency_id = Uuid::new_v4();
+        let requested = CreateUsageLogRequest {
+            request_id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            produce_ai_key_id: Uuid::new_v4(),
+            model_name: "gpt-test".to_string(),
+            provider_name: "openai".to_string(),
+            account_id: Uuid::new_v4(),
+            input_tokens: 10,
+            output_tokens: 5,
+            input_unit_price_snapshot: bigdecimal::BigDecimal::from(1),
+            output_unit_price_snapshot: bigdecimal::BigDecimal::from(2),
+            user_amount: bigdecimal::BigDecimal::from(3),
+            currency: "CNY".to_string(),
+            usage_source: "provider_reported".to_string(),
+            status: "success".to_string(),
+            started_at: now,
+            finished_at: now,
+        };
+        let existing = UsageLog {
+            id: Uuid::new_v4(),
+            request_id: Uuid::new_v4(),
+            idempotency_id: Some(idempotency_id),
+            tenant_id: requested.tenant_id,
+            user_id: requested.user_id,
+            produce_ai_key_id: requested.produce_ai_key_id,
+            model_name: requested.model_name.clone(),
+            provider_name: requested.provider_name.clone(),
+            account_id: requested.account_id,
+            input_tokens: 12,
+            output_tokens: 7,
+            total_tokens: 19,
+            input_unit_price_snapshot: bigdecimal::BigDecimal::from(4),
+            output_unit_price_snapshot: bigdecimal::BigDecimal::from(5),
+            user_amount: bigdecimal::BigDecimal::from(6),
+            currency: "CNY".to_string(),
+            usage_source: "provider_reported".to_string(),
+            status: "success".to_string(),
+            started_at: now,
+            finished_at: now,
+            created_at: now,
+        };
+
+        assert!(usage_log_matches_request(
+            &existing,
+            &requested,
+            Some(idempotency_id)
+        ));
+        let mut wrong_account = requested;
+        wrong_account.account_id = Uuid::new_v4();
+        assert!(!usage_log_matches_request(
+            &existing,
+            &wrong_account,
+            Some(idempotency_id)
+        ));
     }
 
     #[tokio::test]

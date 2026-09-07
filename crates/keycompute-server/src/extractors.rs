@@ -147,11 +147,17 @@ impl FromRequestParts<AppState> for AuthExtractor {
         parts: &mut Parts,
         state: &AppState,
     ) -> impl Future<Output = std::result::Result<Self, Self::Rejection>> + Send {
+        let cached_auth = parts.extensions.get::<Self>().cloned();
         let auth_service = Arc::clone(&state.auth);
         let headers = parts.headers.clone();
         let path = parts.uri.path().to_string();
 
-        async move { Self::from_header_with_auth_for_path(&headers, &auth_service, Some(&path)).await }
+        async move {
+            if let Some(auth) = cached_auth {
+                return Ok(auth);
+            }
+            Self::from_header_with_auth_for_path(&headers, &auth_service, Some(&path)).await
+        }
     }
 }
 
@@ -383,6 +389,28 @@ mod tests {
             keycompute_auth::AuthService::new(keycompute_auth::ProduceAiKeyValidator::default());
         let result = AuthExtractor::from_header_with_auth(&headers, &auth_service).await;
         assert!(matches!(result, Err(ApiError::Auth(_))));
+    }
+
+    #[tokio::test]
+    async fn auth_extractor_reuses_server_validated_extension() {
+        let expected = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user")
+            .with_permissions(vec![Permission::UseApi]);
+        let request = axum::http::Request::builder()
+            .uri("/v1/responses")
+            .extension(expected.clone())
+            .body(())
+            .unwrap();
+        let (mut parts, _) = request.into_parts();
+
+        let actual = AuthExtractor::from_request_parts(&mut parts, &AppState::new())
+            .await
+            .unwrap();
+
+        assert_eq!(actual.user_id, expected.user_id);
+        assert_eq!(actual.tenant_id, expected.tenant_id);
+        assert_eq!(actual.produce_ai_key_id, expected.produce_ai_key_id);
+        assert_eq!(actual.role, expected.role);
+        assert_eq!(actual.permissions, expected.permissions);
     }
 
     #[test]

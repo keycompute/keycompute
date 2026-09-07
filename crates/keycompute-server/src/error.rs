@@ -13,6 +13,12 @@ use std::fmt;
 const UPSTREAM_REQUEST_FAILED_MESSAGE: &str = "Upstream request failed";
 const UPSTREAM_REQUEST_TIMEOUT_MESSAGE: &str = "Upstream request timed out";
 
+/// Marks responses whose client-facing message was produced by this service.
+/// Middleware must use this out-of-band marker instead of trusting a JSON
+/// shape that an upstream response can imitate.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TrustedLocalApiError;
+
 /// API 错误类型
 #[derive(Debug)]
 pub enum ApiError {
@@ -111,7 +117,9 @@ impl IntoResponse for ApiError {
             }
         }));
 
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+        response.extensions_mut().insert(TrustedLocalApiError);
+        response
     }
 }
 

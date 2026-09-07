@@ -196,7 +196,7 @@ If your change touches `desktop` or `mobile`, run the relevant package commands 
 
 ### Database changes
 
-- Update `crates/keycompute-db/migrations/V0001__baseline.sql`; it is the complete
+- Update `crates/keycompute-db/migrations/001_init.sql`; it is the complete
   schema and the only SQL source of truth for fresh deployments.
 - Update the relevant data models and query code in `crates/keycompute-db/src/models/`.
 - Recreate the database after changing the baseline; incremental upgrades,

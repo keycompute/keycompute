@@ -16,9 +16,12 @@ pub mod proxy;
 pub mod retry;
 pub mod streaming;
 
-pub use executor::GatewayExecutor;
+pub use executor::{GatewayExecutor, estimate_responses_output_tokens};
 pub use failover::FailoverManager;
-pub use proxy::{HttpClient, HttpProxy, ProxyConfig, ProxyRequest, ProxySelector};
+pub use proxy::{
+    HttpClient, HttpProxy, JsonRequestMethod, PassthroughBody, ProxyConfig, ProxyRequest,
+    ProxySelector,
+};
 pub use retry::RetryPolicy;
 pub use streaming::{StreamPipeline, StreamingContext};
 
@@ -33,6 +36,8 @@ pub struct GatewayConfig {
     pub max_retries: u32,
     /// 请求超时时间（秒）
     pub timeout_secs: u64,
+    /// 原生 Responses 流式请求的总执行超时时间（秒）
+    pub stream_timeout_secs: u64,
     /// 是否启用 fallback
     pub enable_fallback: bool,
 }
@@ -42,6 +47,7 @@ impl Default for GatewayConfig {
         Self {
             max_retries: 3,
             timeout_secs: 120,
+            stream_timeout_secs: 600,
             enable_fallback: true,
         }
     }

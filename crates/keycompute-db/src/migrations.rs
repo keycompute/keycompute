@@ -6,7 +6,7 @@ use sea_orm::{
 };
 use sha2::{Digest, Sha256};
 
-const V0001: &str = include_str!("../migrations/V0001__baseline.sql");
+const V0001: &str = include_str!("../migrations/001_init.sql");
 const MIGRATION_LOCK_KEY: i64 = 0x4b_43_4d_49_47_52; // "KCMIGR"
 
 struct Migration {
@@ -191,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_directory_contains_only_the_baseline() {
+    fn migration_directory_contains_only_the_initial_schema() {
         let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
         let mut sql_files = std::fs::read_dir(directory)
             .expect("migration directory should exist")
@@ -206,25 +206,66 @@ mod tests {
             .collect::<Vec<_>>();
         sql_files.sort();
 
-        assert_eq!(sql_files, ["V0001__baseline.sql"]);
+        assert_eq!(sql_files, ["001_init.sql"]);
     }
 
     #[test]
-    fn baseline_contains_the_complete_fresh_deployment_schema() {
+    fn initial_schema_contains_the_complete_fresh_deployment_schema() {
         for expected in [
             "CREATE TABLE IF NOT EXISTS gateway_requests",
+            "responses_idempotency_claim_count BIGINT NOT NULL DEFAULT 0",
+            "CONSTRAINT ck_tenants_responses_idempotency_claim_count",
             "CREATE TABLE IF NOT EXISTS gateway_request_attempts",
             "last_probe_at TIMESTAMPTZ",
             "last_probe_latency_ms BIGINT",
             "last_probe_status VARCHAR(32)",
             "last_probe_error_code VARCHAR(128)",
+            "api_capabilities TEXT[] NOT NULL",
+            "CONSTRAINT ck_accounts_api_capabilities",
             "CONSTRAINT ck_accounts_probe_status",
             "CONSTRAINT uk_gateway_request_attempt_no",
             "CREATE UNIQUE INDEX IF NOT EXISTS uk_gateway_request_final_attempt",
             "CREATE INDEX IF NOT EXISTS idx_gateway_requests_pending_billing_finished",
+            "CREATE TABLE IF NOT EXISTS responses_idempotency_claims",
+            "PRIMARY KEY (tenant_id, binding_id)",
+            "CONSTRAINT uk_responses_idempotency_claims_billing UNIQUE",
+            "execution_state VARCHAR(32) NOT NULL DEFAULT 'in_progress'",
+            "execution_token UUID NOT NULL DEFAULT gen_random_uuid()",
+            "lease_expires_at TIMESTAMPTZ NOT NULL",
+            "upstream_dispatched_at TIMESTAMPTZ",
+            "response_status SMALLINT",
+            "response_headers JSONB",
+            "response_body TEXT",
+            "response_body_bytes BIGINT",
+            "response_expires_at TIMESTAMPTZ",
+            "CONSTRAINT ck_responses_idempotency_claims_state",
+            "CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_response_expiry",
+            "CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_tenant_replay",
+            "CREATE TABLE IF NOT EXISTS response_affinities",
+            "response_id VARCHAR(2048) NOT NULL",
+            "idempotency_id UUID UNIQUE",
+            "PRIMARY KEY (tenant_id, response_id)",
+            "account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT",
+            "model TEXT",
+            "is_reservation BOOLEAN NOT NULL DEFAULT FALSE",
+            "expires_at TIMESTAMPTZ NOT NULL",
+            "local_context JSONB",
+            "local_context_bytes BIGINT",
+            "CONSTRAINT ck_response_affinities_local_context_size",
+            "CONSTRAINT ck_response_affinities_account_owner",
+            "settlement->>'account_id' = '00000000-0000-0000-0000-000000000000'",
+            "settlement JSONB",
+            "deleted_at TIMESTAMPTZ",
+            "CREATE INDEX IF NOT EXISTS idx_response_affinities_local_warmups",
+            "CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_due",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log",
         ] {
             assert!(V0001.contains(expected), "V0001 is missing {expected}");
         }
+        assert!(V0001.contains(&format!(
+            "responses_idempotency_claim_count BETWEEN 0 AND {}",
+            crate::models::responses_idempotency_claim::RESPONSES_IDEMPOTENCY_MAX_IDENTITIES_PER_TENANT
+        )));
         assert!(!V0001.contains("ALTER TABLE"));
         assert!(!V0001.contains("\nUPDATE "));
         assert!(!V0001.contains("\nDELETE FROM "));

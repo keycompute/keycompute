@@ -314,6 +314,10 @@ curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer sk-xxx"
 ```
 
+Responses API 同時支援 `POST /v1/responses`，以及透過 `GET /v1/responses`
+發起 WebSocket 升級。KeyCompute 的 WebSocket 模式目前僅接受 `response.create`
+事件；暫不支援 `response.steer`、`response.inject` 等連線控制事件。
+
 ### 管理 API 概覽
 
 | 分類 | 介面 | 說明 |

@@ -23,6 +23,8 @@ pub mod openai;
 pub mod payment;
 pub mod pricing;
 pub mod requirement;
+pub mod responses;
+pub mod responses_websocket;
 pub mod routing;
 pub mod user;
 
@@ -40,6 +42,13 @@ pub use openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ListModelsResponse, Model,
     chat_completions, list_models, retrieve_model,
 };
+
+// OpenAI Responses 兼容入口
+pub use responses::{
+    cancel_response, compact_response, count_response_input_tokens, delete_response,
+    list_response_input_items, responses, retrieve_response,
+};
+pub use responses_websocket::responses_websocket;
 
 // Anthropic Messages 兼容入口
 pub use anthropic::messages;
@@ -128,6 +137,170 @@ pub use payment::{
     list_payment_methods, sync_payment_order, wechatpay_notify,
 };
 
+/// Services used together when an immediate generation request reaches its
+/// terminal point. Its billing and TPM effects share the durable settlement
+/// outbox and worker used by Responses.
+#[derive(Clone)]
+pub(crate) struct ImmediateSettlementServices {
+    pub(crate) billing: std::sync::Arc<keycompute_billing::BillingService>,
+    pub(crate) rate_limiter: std::sync::Arc<keycompute_ratelimit::RateLimitService>,
+    /// State needed to persist and acknowledge the shared terminal-settlement
+    /// outbox. Tests and database-less development settle synchronously.
+    pub(crate) durable_state: Option<crate::state::AppState>,
+}
+
+impl ImmediateSettlementServices {
+    pub(crate) fn from_state(state: &crate::state::AppState) -> Self {
+        Self {
+            billing: std::sync::Arc::clone(&state.billing),
+            rate_limiter: std::sync::Arc::clone(&state.rate_limiter),
+            durable_state: Some(state.clone()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(billing: std::sync::Arc<keycompute_billing::BillingService>) -> Self {
+        Self {
+            billing,
+            rate_limiter: std::sync::Arc::new(
+                keycompute_ratelimit::RateLimitService::default_memory(),
+            ),
+            durable_state: None,
+        }
+    }
+}
+
+/// Idempotently add one request's terminal usage to the shared TPM window.
+///
+/// Every generation protocol uses the same tenant/user/API-key key. Keeping
+/// the write primitive here prevents one protocol from checking a shared TPM
+/// budget without contributing its own completed usage. Callers with durable
+/// or delayed settlement must pass the original terminal time so late retries
+/// cannot extend the request's quota window.
+pub(crate) async fn record_terminal_token_usage_at(
+    rate_limiter: &keycompute_ratelimit::RateLimitService,
+    ctx: &keycompute_types::RequestContext,
+    total_tokens: u32,
+    occurred_at: std::time::SystemTime,
+) -> keycompute_types::Result<()> {
+    if total_tokens == 0 {
+        return Ok(());
+    }
+    let rate_key =
+        keycompute_ratelimit::RateLimitKey::new(ctx.tenant_id, ctx.user_id, ctx.produce_ai_key_id);
+    rate_limiter
+        .record_token_usage_once_at(&rate_key, ctx.billing_request_id, total_tokens, occurred_at)
+        .await
+}
+
+/// Record the current usage snapshot at the terminal point of an immediate
+/// request lifecycle such as Chat Completions or Messages.
+#[cfg(test)]
+pub(crate) async fn record_terminal_token_usage(
+    rate_limiter: &keycompute_ratelimit::RateLimitService,
+    ctx: &keycompute_types::RequestContext,
+) -> keycompute_types::Result<()> {
+    let (input_tokens, output_tokens) = ctx.usage_snapshot();
+    record_terminal_token_usage_at(
+        rate_limiter,
+        ctx,
+        input_tokens.saturating_add(output_tokens),
+        std::time::SystemTime::now(),
+    )
+    .await
+}
+
+/// Finalize a non-Responses generation through the same durable replay path
+/// used by Responses. The outbox is installed before either side effect so a
+/// crash or backend outage cannot permanently lose billing or TPM accounting.
+///
+/// Returns `true` when every effect completed inline or unfinished work was
+/// durably deferred. A `false` result is logged as an operator-visible failure;
+/// this can only occur without a database or when the outbox write also fails.
+pub(crate) async fn finalize_immediate_settlement_logged(
+    settlement: &ImmediateSettlementServices,
+    ctx: &keycompute_types::RequestContext,
+    primary_provider: &str,
+    primary_account_id: uuid::Uuid,
+    status: &str,
+    protocol: &'static str,
+) -> bool {
+    let terminal_at = chrono::Utc::now();
+    let durable = if let Some(state) = settlement.durable_state.as_ref() {
+        responses::persist_immediate_terminal_settlement_outbox(
+            state,
+            ctx,
+            primary_provider,
+            primary_account_id,
+            status,
+            terminal_at,
+        )
+        .await
+    } else {
+        false
+    };
+    let (provider, account_id) = ctx.billing_target(primary_provider, primary_account_id);
+    let (input_tokens, output_tokens) = ctx.usage_snapshot();
+    let occurred_at = std::time::SystemTime::from(terminal_at);
+    let (billing_result, tpm_result) = tokio::join!(
+        settlement.billing.finalize_and_trigger_distribution(
+            ctx,
+            &provider,
+            account_id,
+            status,
+            ctx.user_id,
+        ),
+        record_terminal_token_usage_at(
+            settlement.rate_limiter.as_ref(),
+            ctx,
+            input_tokens.saturating_add(output_tokens),
+            occurred_at,
+        ),
+    );
+
+    let billing_complete = match billing_result {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!(
+                request_id = %ctx.request_id,
+                %protocol,
+                %error,
+                durable,
+                "failed to finalize immediate billing"
+            );
+            false
+        }
+    };
+    let tpm_complete = match tpm_result {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(
+                request_id = %ctx.request_id,
+                %protocol,
+                %error,
+                durable,
+                "failed to record immediate token usage for TPM limiting"
+            );
+            false
+        }
+    };
+
+    if billing_complete && tpm_complete {
+        if let Some(state) = settlement.durable_state.as_ref() {
+            responses::acknowledge_terminal_settlement_outbox(state, ctx).await;
+        }
+        return true;
+    }
+    if !durable {
+        tracing::error!(
+            request_id = %ctx.request_id,
+            %protocol,
+            "immediate settlement failed and could not be durably deferred"
+        );
+    }
+    durable
+}
+
 /// Persist the first client-facing outcome selected by the handler.
 ///
 /// Billing and protocol delivery happen before successful callers reach this
@@ -215,6 +388,27 @@ impl PreExecutionTraceGuard {
                 request_id = %self.request_id,
                 %error,
                 "failed to finish pre-execution trace"
+            );
+        }
+        self.disarm();
+    }
+
+    /// Finish a request served entirely from durable idempotency state.
+    pub(crate) async fn finish_replayed(
+        &mut self,
+        outcome: keycompute_types::ClientResponseOutcome,
+    ) {
+        let mut finish = keycompute_types::client_response_trace_finish_with_failure(
+            self.request_id,
+            outcome,
+            None,
+        );
+        finish.billing_status = keycompute_types::BillingStatus::NotApplicable;
+        if let Err(error) = self.lifecycle.finish_request_without_attempt(finish).await {
+            tracing::warn!(
+                request_id = %self.request_id,
+                %error,
+                "failed to finish replayed request trace"
             );
         }
         self.disarm();
@@ -352,6 +546,61 @@ pub(crate) fn configured_public_base_url(configured_base_url: Option<&str>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn generation_protocols_share_one_idempotent_tpm_window() {
+        let tenant_id = uuid::Uuid::new_v4();
+        let user_id = uuid::Uuid::new_v4();
+        let api_key_id = uuid::Uuid::new_v4();
+        let rate_limiter = keycompute_ratelimit::RateLimitService::default_memory();
+
+        let chat = keycompute_types::RequestContext::new(
+            uuid::Uuid::new_v4(),
+            user_id,
+            tenant_id,
+            api_key_id,
+            "gpt-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        chat.set_input_tokens(7);
+        chat.set_output_tokens(5);
+        record_terminal_token_usage(&rate_limiter, &chat)
+            .await
+            .unwrap();
+        // A repeated terminalization of the same logical request must not
+        // consume the shared quota twice.
+        record_terminal_token_usage(&rate_limiter, &chat)
+            .await
+            .unwrap();
+
+        let messages = keycompute_types::RequestContext::new(
+            uuid::Uuid::new_v4(),
+            user_id,
+            tenant_id,
+            api_key_id,
+            "claude-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        messages.set_input_tokens(11);
+        messages.set_output_tokens(7);
+        record_terminal_token_usage(&rate_limiter, &messages)
+            .await
+            .unwrap();
+
+        let key = keycompute_ratelimit::RateLimitKey::new(tenant_id, user_id, api_key_id);
+        assert_eq!(rate_limiter.get_tpm_count(&key).await.unwrap(), 30);
+        assert!(
+            !rate_limiter
+                .check_tpm(&key, &keycompute_ratelimit::RateLimitConfig::new(100, 30))
+                .await
+                .unwrap(),
+            "usage produced through either generation protocol must close the shared TPM budget"
+        );
+    }
 
     fn response_guard_context() -> std::sync::Arc<keycompute_types::RequestContext> {
         std::sync::Arc::new(keycompute_types::RequestContext::new(

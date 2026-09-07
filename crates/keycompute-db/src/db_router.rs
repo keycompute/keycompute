@@ -202,6 +202,29 @@ impl DbRouter {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_read_connections_for_test(
+        write: DatabaseConnection,
+        reads: Vec<DatabaseConnection>,
+    ) -> Arc<Self> {
+        let read_count = reads.len();
+        Arc::new(Self {
+            write,
+            reads: reads
+                .into_iter()
+                .map(|conn| ReadReplica { conn, weight: 1 })
+                .collect(),
+            strategy: ReadStrategy::RoundRobin,
+            rr_counter: AtomicUsize::new(0),
+            health: Mutex::new(HealthState {
+                down_until: vec![None; read_count],
+            }),
+            circuit_break: Duration::from_secs(30),
+            retry_attempts: 0,
+            fallback_to_write: false,
+        })
+    }
+
     fn new_internal(
         write: DatabaseConnection,
         reads: Vec<ReadReplica>,

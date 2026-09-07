@@ -3,6 +3,40 @@
 //! 定义从 Provider 返回的流事件标准化格式
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::LargeBodyPermit;
+
+/// Native Responses events may each be close to the protocol's 96 MiB hard
+/// limit. Keep every internal hand-off single-slot so slow clients apply
+/// backpressure instead of allowing count-based queues to retain gigabytes.
+pub const LARGE_NATIVE_EVENT_CHANNEL_CAPACITY: usize = 1;
+
+/// Typed provider-native events that must cross the gateway without being
+/// projected onto the common chat event schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum NativeStreamEvent {
+    /// Complete non-streaming OpenAI Responses body.
+    OpenAiResponsesJson {
+        body: Value,
+        #[serde(skip)]
+        admission: Option<LargeBodyPermit>,
+    },
+    /// One typed OpenAI Responses SSE event.
+    OpenAiResponsesSse {
+        event: String,
+        data: Value,
+        #[serde(skip)]
+        admission: Option<LargeBodyPermit>,
+    },
+    /// Non-success OpenAI Responses HTTP result, preserved for the client.
+    OpenAiResponsesHttpError {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: String,
+    },
+}
 
 /// 流事件枚举
 ///
@@ -44,6 +78,12 @@ pub enum StreamEvent {
     Raw {
         /// 原始事件数据
         data: String,
+    },
+    /// Structured protocol-native event. Unlike `Raw`, large JSON bodies stay
+    /// owned values and do not need an internal serialize/parse round trip.
+    Native {
+        /// Provider-native event payload.
+        event: NativeStreamEvent,
     },
 }
 
@@ -92,6 +132,11 @@ impl StreamEvent {
     /// 创建 Raw 事件
     pub fn raw(data: impl Into<String>) -> Self {
         Self::Raw { data: data.into() }
+    }
+
+    /// Create a structured provider-native event.
+    pub fn native(event: NativeStreamEvent) -> Self {
+        Self::Native { event }
     }
 
     /// 检查是否是 Done 事件

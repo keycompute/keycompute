@@ -3,6 +3,8 @@
 //! 提供与 OpenAI API 完全兼容的接口
 //! 参考: https://platform.openai.com/docs/api-reference
 
+#[cfg(test)]
+use super::ImmediateSettlementServices;
 use crate::{
     error::{ApiError, Result},
     extractors::{AuthExtractor, ClientRequestId, RequestId, RequestReceivedAt},
@@ -20,9 +22,9 @@ use futures::{StreamExt, stream::Stream};
 use keycompute_auth::Permission;
 use keycompute_db::models::account::Account;
 use keycompute_types::{
-    ClientResponseOutcome, ContentPart, ErrorOrigin, ExecutionTarget, Message, MessageContent,
-    MessageRole, NoopRequestLifecycleRecorder, RequestContext, RequestLifecycleRecorder,
-    RequestStatus, RequestTraceStart, RouteType, TraceErrorCategory,
+    AccountApiCapability, ClientResponseOutcome, ContentPart, ErrorOrigin, ExecutionTarget,
+    Message, MessageContent, MessageRole, NoopRequestLifecycleRecorder, RequestContext,
+    RequestLifecycleRecorder, RequestStatus, RequestTraceStart, RouteType, TraceErrorCategory,
 };
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -573,6 +575,7 @@ pub async fn chat_completions(
             let mut client_response_guard =
                 super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
             pre_execution_guard.disarm();
+            let settlement = super::ImmediateSettlementServices::from_state(&state);
 
             if request.stream {
                 // 流式路径：获取完整响应后模拟流式输出
@@ -596,7 +599,7 @@ pub async fn chat_completions(
                 // Node 返回在这里已经完整可用，计费必须在创建 HTTP body 前完成；
                 // 否则客户端在 [DONE] 前后断开都会 drop body 并跳过结算。
                 finalize_openai_billing(
-                    &state.billing,
+                    &settlement,
                     &ctx,
                     keycompute_pricing::NODE_PRICING_PROVIDER,
                     uuid::Uuid::nil(),
@@ -676,7 +679,7 @@ pub async fn chat_completions(
 
                 // 触发计费（使用 NODE_PRICING_PROVIDER 常量，与路由层定价维度一致）
                 finalize_openai_billing(
-                    &state.billing,
+                    &settlement,
                     &ctx,
                     keycompute_pricing::NODE_PRICING_PROVIDER,
                     uuid::Uuid::nil(),
@@ -779,7 +782,7 @@ pub async fn chat_completions(
             );
 
             // 7. 根据 stream 参数返回不同类型的响应
-            let billing = Arc::clone(&state.billing);
+            let settlement = super::ImmediateSettlementServices::from_state(&state);
             let is_stream = request.stream;
             let model = request.model;
             let stream_options = request.stream_options;
@@ -795,7 +798,7 @@ pub async fn chat_completions(
                             model,
                             provider_name: primary_provider,
                             account_id: primary_account_id,
-                            billing,
+                            settlement,
                             stream_options,
                             lifecycle: Arc::clone(&lifecycle),
                         },
@@ -812,7 +815,7 @@ pub async fn chat_completions(
                             model,
                             provider_name: primary_provider,
                             account_id: primary_account_id,
-                            billing,
+                            settlement,
                             stream_options,
                             lifecycle: Arc::clone(&lifecycle),
                         },
@@ -831,7 +834,7 @@ pub async fn chat_completions(
                             model,
                             provider_name: primary_provider,
                             account_id: primary_account_id,
-                            billing,
+                            settlement,
                             lifecycle: Arc::clone(&lifecycle),
                             response_timeout: timeout_duration,
                         },
@@ -850,7 +853,7 @@ pub async fn chat_completions(
                         model,
                         primary_provider,
                         primary_account_id,
-                        billing,
+                        settlement,
                         Arc::clone(&lifecycle),
                     )
                     .await?;
@@ -879,7 +882,7 @@ async fn create_openai_response_with_lifecycle(
     model: String,
     provider_name: String,
     account_id: uuid::Uuid,
-    billing: Arc<keycompute_billing::BillingService>,
+    settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
 ) -> Result<ChatCompletionResponse> {
     let mut client_response_guard =
@@ -933,7 +936,7 @@ async fn create_openai_response_with_lifecycle(
         }
 
         finalize_openai_billing(
-            &billing,
+            &settlement,
             &worker_ctx,
             &provider_name,
             account_id,
@@ -1104,7 +1107,8 @@ impl StreamCollector {
             }
             llm_protocol_provider::StreamEvent::Usage { .. }
             | llm_protocol_provider::StreamEvent::InputUsage { .. }
-            | llm_protocol_provider::StreamEvent::Raw { .. } => Ok(true),
+            | llm_protocol_provider::StreamEvent::Raw { .. }
+            | llm_protocol_provider::StreamEvent::Native { .. } => Ok(true),
         }
     }
 
@@ -1123,23 +1127,21 @@ impl StreamCollector {
 /// Finalize an OpenAI-compatible request without attributing a successful
 /// fallback to the primary provider account.
 async fn finalize_openai_billing(
-    billing: &keycompute_billing::BillingService,
+    settlement: &super::ImmediateSettlementServices,
     ctx: &RequestContext,
     primary_provider: &str,
     primary_account_id: uuid::Uuid,
     status: &str,
 ) {
-    let (provider, account_id) = ctx.billing_target(primary_provider, primary_account_id);
-    if let Err(error) = billing
-        .finalize_and_trigger_distribution(ctx, &provider, account_id, status, ctx.user_id)
-        .await
-    {
-        tracing::error!(
-            request_id = %ctx.request_id,
-            error = %error,
-            "Failed to finalize OpenAI billing"
-        );
-    }
+    super::finalize_immediate_settlement_logged(
+        settlement,
+        ctx,
+        primary_provider,
+        primary_account_id,
+        status,
+        "openai",
+    )
+    .await;
 }
 
 /// 生成 OpenAI 格式的 completion ID
@@ -1158,7 +1160,7 @@ struct OpenAiNonStreamingResponseContext {
     model: String,
     provider_name: String,
     account_id: uuid::Uuid,
-    billing: Arc<keycompute_billing::BillingService>,
+    settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
     response_timeout: Duration,
 }
@@ -1215,7 +1217,7 @@ fn create_non_streaming_json_with_keepalive_and_lifecycle(
         model,
         provider_name,
         account_id,
-        billing,
+        settlement,
         lifecycle,
         response_timeout,
     } = response_context;
@@ -1254,7 +1256,7 @@ fn create_non_streaming_json_with_keepalive_and_lifecycle(
                         "Non-streaming keepalive response deadline exceeded"
                     );
                     finalize_openai_billing(
-                        &billing,
+                        &settlement,
                         &ctx,
                         &provider_name,
                         account_id,
@@ -1303,7 +1305,7 @@ fn create_non_streaming_json_with_keepalive_and_lifecycle(
                                     "Stream error during non-streaming keepalive response"
                                 );
                                 finalize_openai_billing(
-                                    &billing,
+                                    &settlement,
                                     &ctx,
                                     &provider_name,
                                     account_id,
@@ -1347,7 +1349,7 @@ fn create_non_streaming_json_with_keepalive_and_lifecycle(
         // 流意外结束：先执行计费，再返回 error JSON 而非空 content 的 200 响应
         if collector.status == "incomplete" {
             finalize_openai_billing(
-                &billing,
+                &settlement,
                 &ctx,
                 &provider_name,
                 account_id,
@@ -1376,7 +1378,7 @@ fn create_non_streaming_json_with_keepalive_and_lifecycle(
 
         // 执行计费
         finalize_openai_billing(
-            &billing,
+            &settlement,
             &ctx,
             &provider_name,
             account_id,
@@ -1589,7 +1591,7 @@ struct OpenAiStreamContext {
     model: String,
     provider_name: String,
     account_id: uuid::Uuid,
-    billing: Arc<keycompute_billing::BillingService>,
+    settlement: super::ImmediateSettlementServices,
     stream_options: Option<StreamOptions>,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
 }
@@ -1632,7 +1634,7 @@ fn create_openai_stream(
             model,
             provider_name,
             account_id,
-            billing,
+            settlement: super::ImmediateSettlementServices::for_test(billing),
             stream_options,
             lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
         },
@@ -1649,7 +1651,7 @@ fn create_openai_stream_with_lifecycle(
         model,
         provider_name,
         account_id,
-        billing,
+        settlement,
         stream_options,
         lifecycle,
     } = stream_context;
@@ -1700,7 +1702,11 @@ fn create_openai_stream_with_lifecycle(
                         llm_protocol_provider::StreamEvent::Done => {
                             completed = true;
                             finalize_openai_billing(
-                                &billing, &ctx, &provider_name, account_id, status,
+                                &settlement,
+                                &ctx,
+                                &provider_name,
+                                account_id,
+                                status,
                             )
                             .await;
                             if stream_options.as_ref().is_some_and(|o| o.include_usage) {
@@ -1732,7 +1738,11 @@ fn create_openai_stream_with_lifecycle(
                             completed = true;
                             status = "error";
                             finalize_openai_billing(
-                                &billing, &ctx, &provider_name, account_id, status,
+                                &settlement,
+                                &ctx,
+                                &provider_name,
+                                account_id,
+                                status,
                             )
                             .await;
                             tracing::warn!(
@@ -1762,7 +1772,8 @@ fn create_openai_stream_with_lifecycle(
                         }
                         llm_protocol_provider::StreamEvent::Usage { .. }
                         | llm_protocol_provider::StreamEvent::InputUsage { .. }
-                        | llm_protocol_provider::StreamEvent::Raw { .. } => {}
+                        | llm_protocol_provider::StreamEvent::Raw { .. }
+                        | llm_protocol_provider::StreamEvent::Native { .. } => {}
                     }
                 }
             }
@@ -1774,7 +1785,7 @@ fn create_openai_stream_with_lifecycle(
                 "Stream ended without Done or Error event"
             );
             status = "incomplete";
-            finalize_openai_billing(&billing, &ctx, &provider_name, account_id, status).await;
+            finalize_openai_billing(&settlement, &ctx, &provider_name, account_id, status).await;
             let _ = forward_openai_sse_event(
                 &sse_tx,
                 &ctx,
@@ -1824,7 +1835,7 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
         model,
         provider_name,
         account_id,
-        billing,
+        settlement,
         stream_options,
         lifecycle,
     } = stream_context;
@@ -1856,7 +1867,11 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                         "SSE stream keepalive response deadline exceeded"
                     );
                     finalize_openai_billing(
-                        &billing, &ctx, &provider_name, account_id, status,
+                        &settlement,
+                        &ctx,
+                        &provider_name,
+                        account_id,
+                        status,
                     )
                     .await;
                     let _ = forward_openai_sse_event(
@@ -1911,7 +1926,11 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                             }
                             llm_protocol_provider::StreamEvent::Done => {
                                 finalize_openai_billing(
-                                    &billing, &ctx, &provider_name, account_id, status,
+                                    &settlement,
+                                    &ctx,
+                                    &provider_name,
+                                    account_id,
+                                    status,
                                 )
                                 .await;
 
@@ -1944,7 +1963,11 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                             llm_protocol_provider::StreamEvent::Error { message } => {
                                 status = "error";
                                 finalize_openai_billing(
-                                    &billing, &ctx, &provider_name, account_id, status,
+                                    &settlement,
+                                    &ctx,
+                                    &provider_name,
+                                    account_id,
+                                    status,
                                 )
                                 .await;
                                 // 不向客户端暴露上游错误细节：原始消息只记录日志。
@@ -1975,7 +1998,8 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                             }
                             llm_protocol_provider::StreamEvent::Usage { .. }
                             | llm_protocol_provider::StreamEvent::InputUsage { .. }
-                            | llm_protocol_provider::StreamEvent::Raw { .. } => {
+                            | llm_protocol_provider::StreamEvent::Raw { .. }
+                            | llm_protocol_provider::StreamEvent::Native { .. } => {
                                 // Usage 由 executor 层通过 ctx.set_*_tokens() 消费，
                                 // Raw 为 provider 原始事件不需要透传
                             }
@@ -1994,7 +2018,7 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
             "SSE stream keepalive: ended without Done or Error event"
         );
         status = "incomplete";
-        finalize_openai_billing(&billing, &ctx, &provider_name, account_id, status).await;
+        finalize_openai_billing(&settlement, &ctx, &provider_name, account_id, status).await;
         let _ = forward_openai_sse_event(
             &sse_tx,
             &ctx,
@@ -2060,6 +2084,11 @@ pub struct ListModelsQuery {
     /// 消费方使用（如 web 端 Anthropic 示例）。
     #[serde(default)]
     pub protocol: Option<String>,
+    /// Optional API surface capability (`chat_completions`, `responses`, or
+    /// `messages`). This keeps example pickers from advertising a model whose
+    /// accounts cannot serve the selected endpoint.
+    #[serde(default)]
+    pub capability: Option<String>,
 }
 
 /// 按入口协议收集模型清单：仅保留指定协议账号声明的模型。
@@ -2069,19 +2098,56 @@ pub struct ListModelsQuery {
 fn collect_models_by_protocol(
     accounts: impl IntoIterator<Item = Account>,
     protocol: &str,
+    capability: Option<AccountApiCapability>,
 ) -> (
     std::collections::HashSet<String>,
     std::collections::HashMap<String, String>,
 ) {
     let mut model_set = std::collections::HashSet::new();
     let mut provider_map = std::collections::HashMap::new();
-    for account in accounts.into_iter().filter(|a| a.provider == protocol) {
+    for account in accounts.into_iter().filter(|account| {
+        account.provider == protocol
+            && capability.is_none_or(|capability| {
+                account
+                    .api_capabilities
+                    .iter()
+                    .any(|value| value == capability.as_str())
+            })
+    }) {
         for model in account.models_supported {
             model_set.insert(model.clone());
             provider_map.insert(model, account.provider.clone());
         }
     }
     (model_set, provider_map)
+}
+
+fn resolve_list_capability(
+    protocol: &str,
+    capability: Option<&str>,
+) -> Result<Option<AccountApiCapability>> {
+    let Some(value) = capability else {
+        return Ok(None);
+    };
+    let capability = AccountApiCapability::parse(value).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "Unsupported capability '{value}', expected one of: chat_completions, responses, messages"
+        ))
+    })?;
+    let compatible = matches!(
+        (protocol, capability),
+        (
+            "openai",
+            AccountApiCapability::ChatCompletions | AccountApiCapability::Responses
+        ) | ("anthropic", AccountApiCapability::Messages)
+    );
+    if !compatible {
+        return Err(ApiError::BadRequest(format!(
+            "Capability '{}' is not valid for protocol '{protocol}'",
+            capability.as_str()
+        )));
+    }
+    Ok(Some(capability))
 }
 
 /// 解析模型列表的入口协议参数：规范化大小写并校验合法性。
@@ -2109,6 +2175,7 @@ pub async fn list_models(
     Query(query): Query<ListModelsQuery>,
 ) -> Result<Json<ListModelsResponse>> {
     let protocol = resolve_list_protocol(query.protocol.as_deref())?;
+    let capability = resolve_list_capability(protocol, query.capability.as_deref())?;
 
     let (mut model_set, mut provider_map) = (
         std::collections::HashSet::new(),
@@ -2119,7 +2186,7 @@ pub async fn list_models(
     if let Some(pool) = state.pool.as_deref() {
         // 查询所有启用的账号（不限制 tenant_id，使用系统级查询）
         if let Ok(accounts) = Account::find_enabled_all(pool).await {
-            (model_set, provider_map) = collect_models_by_protocol(accounts, protocol);
+            (model_set, provider_map) = collect_models_by_protocol(accounts, protocol, capability);
         }
     }
 
@@ -2354,6 +2421,39 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn chat_terminal_billing_records_tpm_once() {
+        let ctx = RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        ctx.set_input_tokens(9);
+        ctx.set_output_tokens(4);
+        let rate_limiter = Arc::new(keycompute_ratelimit::RateLimitService::default_memory());
+        let settlement = super::ImmediateSettlementServices {
+            billing: Arc::new(keycompute_billing::BillingService::new()),
+            rate_limiter: Arc::clone(&rate_limiter),
+            durable_state: None,
+        };
+        let account_id = uuid::Uuid::new_v4();
+
+        finalize_openai_billing(&settlement, &ctx, "openai", account_id, "success").await;
+        finalize_openai_billing(&settlement, &ctx, "openai", account_id, "success").await;
+
+        let key = keycompute_ratelimit::RateLimitKey::new(
+            ctx.tenant_id,
+            ctx.user_id,
+            ctx.produce_ai_key_id,
+        );
+        assert_eq!(rate_limiter.get_tpm_count(&key).await.unwrap(), 13);
+    }
 
     #[tokio::test]
     async fn chat_completion_trace_preserves_ingress_received_at() {
@@ -2747,7 +2847,9 @@ mod tests {
                 model: "claude-test".to_string(),
                 provider_name: "anthropic".to_string(),
                 account_id: uuid::Uuid::new_v4(),
-                billing: Arc::new(keycompute_billing::BillingService::new()),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
                 stream_options: None,
                 lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
             },
@@ -2789,7 +2891,9 @@ mod tests {
                 model: "claude-test".to_string(),
                 provider_name: "anthropic".to_string(),
                 account_id: uuid::Uuid::new_v4(),
-                billing: Arc::new(keycompute_billing::BillingService::new()),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
                 stream_options: None,
                 lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
             },
@@ -2862,7 +2966,9 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 provider_name: "openai".to_string(),
                 account_id: uuid::Uuid::new_v4(),
-                billing: Arc::new(keycompute_billing::BillingService::new()),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
                 lifecycle: Arc::clone(&recorder) as Arc<dyn RequestLifecycleRecorder>,
                 response_timeout: Duration::from_secs(180),
             },
@@ -2935,7 +3041,9 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 provider_name: "openai".to_string(),
                 account_id: uuid::Uuid::new_v4(),
-                billing: Arc::new(keycompute_billing::BillingService::new()),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
                 lifecycle: Arc::clone(&recorder) as Arc<dyn RequestLifecycleRecorder>,
                 response_timeout: Duration::from_secs(30),
             },
@@ -2988,7 +3096,9 @@ mod tests {
             "gpt-4o".to_string(),
             "openai".to_string(),
             uuid::Uuid::new_v4(),
-            Arc::new(keycompute_billing::BillingService::new()),
+            super::ImmediateSettlementServices::for_test(Arc::new(
+                keycompute_billing::BillingService::new(),
+            )),
             Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
         ));
         tokio::task::yield_now().await;
@@ -3113,7 +3223,9 @@ mod tests {
                 model: "gpt-4o".to_string(),
                 provider_name: "openai".to_string(),
                 account_id: uuid::Uuid::new_v4(),
-                billing: Arc::new(keycompute_billing::BillingService::new()),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
                 stream_options: None,
                 lifecycle: Arc::clone(&recorder) as Arc<dyn RequestLifecycleRecorder>,
             },
@@ -3317,6 +3429,11 @@ mod tests {
             priority: 10,
             enabled: true,
             models_supported: models.iter().map(|m| m.to_string()).collect(),
+            api_capabilities: if provider == "anthropic" {
+                vec!["messages".to_string()]
+            } else {
+                vec!["chat_completions".to_string(), "responses".to_string()]
+            },
             visibility: "tenant".to_string(),
             last_probe_at: None,
             last_probe_latency_ms: None,
@@ -3333,6 +3450,7 @@ mod tests {
         let json = serde_json::json!({});
         let query: ListModelsQuery = serde_json::from_value(json).unwrap();
         assert!(query.protocol.is_none());
+        assert!(query.capability.is_none());
 
         // 显式指定入口协议
         let json = serde_json::json!({ "protocol": "anthropic" });
@@ -3369,7 +3487,7 @@ mod tests {
 
         // openai 入口：不包含 anthropic 账号声明的模型（否则列表与可调用性不一致）
         let (openai_models, openai_providers) =
-            collect_models_by_protocol(accounts.clone(), "openai");
+            collect_models_by_protocol(accounts.clone(), "openai", None);
         assert!(openai_models.contains("gpt-4o"));
         assert!(openai_models.contains("deepseek-chat"));
         assert!(!openai_models.contains("claude-3-5-sonnet-20241022"));
@@ -3380,7 +3498,7 @@ mod tests {
 
         // anthropic 入口：只包含 anthropic 账号声明的模型
         let (anthropic_models, anthropic_providers) =
-            collect_models_by_protocol(accounts, "anthropic");
+            collect_models_by_protocol(accounts, "anthropic", None);
         assert!(anthropic_models.contains("claude-3-5-sonnet-20241022"));
         assert!(!anthropic_models.contains("gpt-4o"));
         assert_eq!(
@@ -3394,7 +3512,7 @@ mod tests {
     #[test]
     fn collect_models_by_protocol_empty_without_matching_accounts() {
         let accounts = vec![test_account("anthropic", &["claude-opus-4"])];
-        let (models, providers) = collect_models_by_protocol(accounts, "openai");
+        let (models, providers) = collect_models_by_protocol(accounts, "openai", None);
         assert!(models.is_empty());
         assert!(providers.is_empty());
     }
@@ -3407,11 +3525,40 @@ mod tests {
             test_account("openai", &["gpt-4o", "deepseek-chat"]),
             test_account("openai", &["gpt-4o"]),
         ];
-        let (models, providers) = collect_models_by_protocol(accounts, "openai");
+        let (models, providers) = collect_models_by_protocol(accounts, "openai", None);
         assert_eq!(models.len(), 2);
         assert!(models.contains("gpt-4o"));
         assert!(models.contains("deepseek-chat"));
         assert_eq!(providers.get("gpt-4o").map(String::as_str), Some("openai"));
         assert_eq!(providers.len(), 2);
+    }
+
+    #[test]
+    fn collect_models_filters_by_api_capability() {
+        let mut chat_only = test_account("openai", &["chat-model"]);
+        chat_only.api_capabilities = vec!["chat_completions".to_string()];
+        let mut responses_only = test_account("openai", &["responses-model"]);
+        responses_only.api_capabilities = vec!["responses".to_string()];
+
+        let (models, _) = collect_models_by_protocol(
+            vec![chat_only, responses_only],
+            "openai",
+            Some(AccountApiCapability::Responses),
+        );
+        assert_eq!(
+            models,
+            std::collections::HashSet::from(["responses-model".to_string()])
+        );
+    }
+
+    #[test]
+    fn list_model_capability_must_match_protocol() {
+        assert_eq!(
+            resolve_list_capability("openai", Some("responses")).unwrap(),
+            Some(AccountApiCapability::Responses)
+        );
+        assert!(resolve_list_capability("anthropic", Some("responses")).is_err());
+        assert!(resolve_list_capability("openai", Some("messages")).is_err());
+        assert!(resolve_list_capability("openai", Some("unknown")).is_err());
     }
 }

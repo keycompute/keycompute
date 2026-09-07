@@ -221,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(pool) = app_state.pool.clone() {
         spawn_stale_trace_reconciler(pool, config.gateway.timeout_secs as i64);
     }
+    keycompute_server::handlers::responses::spawn_responses_maintenance(app_state.clone());
     if let Some(node_gateway) = app_state.node_gateway.as_ref() {
         spawn_node_gateway_sweeper(
             node_gateway.sweeper(),

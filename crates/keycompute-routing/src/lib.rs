@@ -11,7 +11,8 @@ pub use account_state::{AccountState, AccountStateStore};
 use keycompute_db::{Account, DbRouter};
 use keycompute_runtime::{EncryptedApiKey, decrypt_api_key};
 use keycompute_types::{
-    ExecutionPlan, ExecutionTarget, KeyComputeError, PricingSnapshot, RequestContext, Result,
+    AccountApiCapability, ExecutionPlan, ExecutionTarget, KeyComputeError, PricingSnapshot,
+    RequestContext, Result,
 };
 pub use provider_health::{ProviderHealth, ProviderHealthStore};
 use sea_orm::ConnectionTrait;
@@ -51,6 +52,16 @@ const HIGH_LATENCY_THRESHOLD_MS: u64 = 1000;
 /// 协议收敛为两种后，同一协议下可能挂载多个厂商的账号（如 OpenAI 官方 +
 /// DeepSeek + Ollama），选入 top-N 账号作为 fallback 链，保持原多厂商回退能力
 const MAX_ACCOUNTS_PER_PROVIDER: usize = 3;
+
+fn required_api_capability(ctx: &RequestContext) -> AccountApiCapability {
+    if ctx.native_anthropic_request.is_some() {
+        AccountApiCapability::Messages
+    } else if ctx.native_openai_responses_request.is_some() {
+        AccountApiCapability::Responses
+    } else {
+        AccountApiCapability::ChatCompletions
+    }
+}
 
 /// 路由引擎
 ///
@@ -227,6 +238,7 @@ impl RoutingEngine {
         let ranked_providers = self
             .rank_providers(&ctx.model, &ctx.pricing_snapshot, entry_protocol)
             .await?;
+        let required_capability = required_api_capability(ctx);
 
         tracing::info!(
             request_id = %ctx.request_id,
@@ -246,7 +258,7 @@ impl RoutingEngine {
                 "route: selecting accounts"
             );
             let provider_targets = self
-                .select_account_for_model(&provider, ctx.tenant_id, &ctx.model)
+                .select_account_for_model(&provider, ctx.tenant_id, &ctx.model, required_capability)
                 .await?;
             if provider_targets.is_empty() {
                 tracing::info!(
@@ -453,6 +465,7 @@ impl RoutingEngine {
         provider: &str,
         tenant_id: Uuid,
         model: &str,
+        required_capability: AccountApiCapability,
     ) -> Result<Vec<ExecutionTarget>> {
         // 注意：暂时不检查 Provider 健康状态
         // 即使 Provider 不健康，仍然尝试选择其下的账号
@@ -466,8 +479,14 @@ impl RoutingEngine {
                 self.load_accounts_from_database(pool.as_ref(), provider, tenant_id)
                     .await
             } else {
-                self.load_accounts_for_model(pool.as_ref(), provider, tenant_id, model)
-                    .await
+                self.load_accounts_for_model(
+                    pool.as_ref(),
+                    provider,
+                    tenant_id,
+                    model,
+                    required_capability,
+                )
+                .await
             };
 
             match result {
@@ -489,7 +508,8 @@ impl RoutingEngine {
         };
 
         // 从账号列表中选择最优账号（top-N）
-        self.select_best_accounts(provider, accounts).await
+        self.select_best_accounts(provider, accounts, required_capability)
+            .await
     }
 
     /// 从数据库加载租户可见的账号（含本租户 + 全局可见）
@@ -546,9 +566,10 @@ impl RoutingEngine {
         provider: &str,
         tenant_id: Uuid,
         model: &str,
+        required_capability: AccountApiCapability,
     ) -> Result<Vec<Account>> {
         // 直接使用模型查询，更高效
-        let accounts = Account::find_by_model(pool, tenant_id, model)
+        let accounts = Account::find_by_model(pool, tenant_id, model, required_capability.as_str())
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to load accounts: {}", e))
@@ -579,10 +600,21 @@ impl RoutingEngine {
         &self,
         provider: &str,
         accounts: Vec<Account>,
+        required_capability: AccountApiCapability,
     ) -> Result<Vec<ExecutionTarget>> {
+        let accounts = accounts
+            .into_iter()
+            .filter(|account| {
+                account
+                    .api_capabilities
+                    .iter()
+                    .any(|capability| capability == required_capability.as_str())
+            })
+            .collect::<Vec<_>>();
         tracing::info!(
             provider = %provider,
             accounts_count = accounts.len(),
+            required_capability = %required_capability,
             "select_best_accounts: starting"
         );
 
@@ -824,6 +856,27 @@ mod tests {
             "gemini".to_string(),
         ];
         RoutingEngine::new(account_states, provider_health, providers)
+    }
+
+    #[test]
+    fn request_shape_selects_the_required_account_capability() {
+        let mut context = create_test_context();
+        assert_eq!(
+            required_api_capability(&context),
+            AccountApiCapability::ChatCompletions
+        );
+
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({})));
+        assert_eq!(
+            required_api_capability(&context),
+            AccountApiCapability::Responses
+        );
+
+        context.native_anthropic_request = Some(Arc::new(serde_json::json!({})));
+        assert_eq!(
+            required_api_capability(&context),
+            AccountApiCapability::Messages
+        );
     }
 
     #[tokio::test]
@@ -1390,6 +1443,14 @@ mod tests {
             priority,
             enabled: true,
             models_supported: vec!["gpt-4o".to_string()],
+            api_capabilities: if provider == "anthropic" {
+                vec![AccountApiCapability::Messages.as_str().to_string()]
+            } else {
+                vec![
+                    AccountApiCapability::ChatCompletions.as_str().to_string(),
+                    AccountApiCapability::Responses.as_str().to_string(),
+                ]
+            },
             visibility: "tenant".to_string(),
             last_probe_at: None,
             last_probe_latency_ms: None,
@@ -1408,7 +1469,7 @@ mod tests {
         let accounts = vec![create_test_account("openai", "", 10)];
 
         let targets = engine
-            .select_best_accounts("openai", accounts)
+            .select_best_accounts("openai", accounts, AccountApiCapability::ChatCompletions)
             .await
             .unwrap();
 
@@ -1425,6 +1486,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_select_best_accounts_filters_by_api_capability() {
+        let engine = create_test_engine();
+        let chat_endpoint = "https://chat.example.com/v1";
+        let responses_endpoint = "https://responses.example.com/v1";
+        let mut chat = create_test_account("openai", chat_endpoint, 100);
+        chat.api_capabilities = vec![AccountApiCapability::ChatCompletions.as_str().to_string()];
+        let mut responses = create_test_account("openai", responses_endpoint, 1);
+        responses.api_capabilities = vec![AccountApiCapability::Responses.as_str().to_string()];
+
+        let targets = engine
+            .select_best_accounts(
+                "openai",
+                vec![chat, responses],
+                AccountApiCapability::Responses,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(
+            &targets[0],
+            ExecutionTarget::ProviderAccount { endpoint, .. } if endpoint == responses_endpoint
+        ));
+    }
+
+    #[tokio::test]
     async fn test_select_best_accounts_skips_undecryptable_account() {
         // 单个账号密钥损坏不应中止整条路由，其余健康账号仍应入选
         let engine = create_test_engine();
@@ -1435,7 +1522,11 @@ mod tests {
         let healthy_low = create_test_account("openai", "https://low.example.com/v1", 1);
 
         let targets = engine
-            .select_best_accounts("openai", vec![healthy_high, broken, healthy_low])
+            .select_best_accounts(
+                "openai",
+                vec![healthy_high, broken, healthy_low],
+                AccountApiCapability::ChatCompletions,
+            )
             .await
             .unwrap();
 
@@ -1465,7 +1556,7 @@ mod tests {
         ];
 
         let targets = engine
-            .select_best_accounts("openai", accounts)
+            .select_best_accounts("openai", accounts, AccountApiCapability::ChatCompletions)
             .await
             .unwrap();
 
@@ -1508,7 +1599,7 @@ mod tests {
         }
 
         let targets = engine
-            .select_best_accounts("openai", accounts)
+            .select_best_accounts("openai", accounts, AccountApiCapability::ChatCompletions)
             .await
             .unwrap();
         assert!(targets.is_empty());

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProtocolType {
-    /// OpenAI Chat Completions 协议（OpenAI/DeepSeek/Ollama/vLLM/Gemini 兼容层等）
+    /// OpenAI 协议族（Chat Completions / Responses；具体能力由账号声明）
     Openai,
     /// Anthropic Messages 协议（Claude 等）
     Anthropic,
@@ -77,6 +77,7 @@ impl std::str::FromStr for ProtocolType {
 /// - 去除尾部 `/`
 /// - 要求 http(s) scheme（无 scheme 的输入会在运行期以相对 URL 报错，提前拒绝）
 /// - 拒绝以协议路径结尾的输入（endpoint 只存 base URL，路径由协议层拼接）
+/// - 拒绝 query / fragment（直接拼接协议路径时会产生歧义 URL）
 pub fn normalize_base_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -92,8 +93,19 @@ pub fn normalize_base_url(url: &str) -> Result<String, String> {
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("Base URL must not include username or password credentials".to_string());
     }
-    for suffix in ["/chat/completions", "/messages"] {
-        if trimmed.ends_with(suffix) {
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("Base URL must not include a query string or fragment".to_string());
+    }
+    let path = parsed.path().trim_end_matches('/');
+    for suffix in [
+        "/chat/completions",
+        "/responses",
+        "/responses/compact",
+        "/responses/input_tokens",
+        "/messages",
+        "/models",
+    ] {
+        if path.ends_with(suffix) {
             return Err(format!(
                 "Base URL must not include the API path '{}'; \
                  the protocol layer appends it automatically",
@@ -145,8 +157,18 @@ mod tests {
             "https://api.openai.com/v1"
         );
         assert!(normalize_base_url("https://x.com/v1/chat/completions").is_err());
+        assert!(normalize_base_url("https://x.com/v1/responses").is_err());
+        assert!(normalize_base_url("https://x.com/v1/responses/compact").is_err());
+        assert!(normalize_base_url("https://x.com/v1/responses/input_tokens").is_err());
         assert!(normalize_base_url("https://x.com/v1/messages").is_err());
+        assert!(normalize_base_url("https://x.com/v1/models").is_err());
         assert!(normalize_base_url("  ").is_err());
+    }
+
+    #[test]
+    fn test_normalize_base_url_rejects_query_and_fragment() {
+        assert!(normalize_base_url("https://x.com/v1?api-version=1").is_err());
+        assert!(normalize_base_url("https://x.com/v1#responses").is_err());
     }
 
     #[test]

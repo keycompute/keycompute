@@ -1,5 +1,6 @@
 use super::examples::{
-    anthropic_examples, openai_examples, pick_anthropic_model, pick_sample_model,
+    anthropic_examples, openai_examples, pick_anthropic_model, pick_responses_model,
+    pick_sample_model, responses_examples,
 };
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, api_key_service, model_service};
@@ -47,7 +48,7 @@ pub fn ApiKeyList() -> Element {
     // 复制状态
     let mut copied = use_signal(|| false);
     let mut example_tab = use_signal(|| "env".to_string());
-    // 示例协议（openai / anthropic），与后端双协议网关对应
+    // 示例入口（Chat Completions / Responses / Anthropic Messages）
     let mut example_protocol = use_signal(|| "openai".to_string());
     let create_failed = i18n.t("api_keys.create_failed");
 
@@ -55,8 +56,17 @@ pub fn ApiKeyList() -> Element {
     // 与入口协议隔离保持一致（OpenAI 示例只展示 openai 协议模型，
     // Anthropic 示例展示 anthropic 协议模型）。
     let models = use_resource(move || {
-        let protocol = example_protocol();
-        async move { model_service::list_models(&protocol).await.ok() }
+        let selected = example_protocol();
+        let (protocol, capability) = match selected.as_str() {
+            "anthropic" => ("anthropic".to_string(), "messages".to_string()),
+            "responses" => ("openai".to_string(), "responses".to_string()),
+            _ => ("openai".to_string(), "chat_completions".to_string()),
+        };
+        async move {
+            model_service::list_models(&protocol, Some(&capability))
+                .await
+                .ok()
+        }
     });
 
     // 拉取 key 列表
@@ -161,7 +171,7 @@ pub fn ApiKeyList() -> Element {
                     // Anthropic SDK 会在 base_url 后自行追加 /v1/messages，示例需用不含 /v1 的根路径
                     let api_root = crate::services::api_client::public_api_root_url();
 
-                    let mut available_models = models()
+                    let available_models = models()
                         .flatten()
                         .map(|m| {
                             let mut data = m.data;
@@ -174,23 +184,14 @@ pub fn ApiKeyList() -> Element {
                         })
                         .unwrap_or_default();
 
-                    let sample_model = pick_sample_model(&available_models);
                     let selected_tab = example_tab();
                     let is_anthropic = example_protocol() == "anthropic";
-                    // 列表为空时的兜底示例模型：仅 openai 协议注入 deepseek-chat；
-                    // anthropic 协议下不注入 openai 协议模型（示例回落到不可用的
-                    // model-empty 占位，文案已提示用户自行替换），避免在 Anthropic 视图
-                    // 展示 openai 协议模型造成误导。
-                    if available_models.is_empty() && !is_anthropic {
-                        available_models = vec![
-                            client_api::api::openai::ModelInfo {
-                                id: "deepseek-chat".to_string(),
-                                object: "model".to_string(),
-                                created: 0,
-                                owned_by: "deepseek".to_string(),
-                            },
-                        ];
-                    }
+                    let is_responses = example_protocol() == "responses";
+                    let sample_model = if is_responses {
+                        pick_responses_model(&available_models)
+                    } else {
+                        pick_sample_model(&available_models)
+                    };
                     let anthropic_model = pick_anthropic_model(&available_models);
 
                     let examples = if is_anthropic {
@@ -198,6 +199,13 @@ pub fn ApiKeyList() -> Element {
                             &api_root,
                             &key,
                             &anthropic_model,
+                            i18n.t("api_keys.example_env_comment"),
+                        )
+                    } else if is_responses {
+                        responses_examples(
+                            &api_url,
+                            &key,
+                            &sample_model,
                             i18n.t("api_keys.example_env_comment"),
                         )
                     } else {
@@ -268,6 +276,7 @@ pub fn ApiKeyList() -> Element {
                                         div { class: "kc-api-example-protocols",
                                             for (value , label) in [
                                                 ("openai", i18n.t("api_keys.example_protocol_openai")),
+                                                ("responses", i18n.t("api_keys.example_protocol_responses")),
                                                 ("anthropic", i18n.t("api_keys.example_protocol_anthropic")),
                                             ]
                                             {
@@ -276,6 +285,9 @@ pub fn ApiKeyList() -> Element {
                                                     r#type: "button",
                                                     onclick: move |_| {
                                                         example_protocol.set(value.to_string());
+                                                        if value != "responses" && example_tab() == "websocket" {
+                                                            example_tab.set("env".to_string());
+                                                        }
                                                         copied.set(false);
                                                     },
                                                     "{label}"
@@ -302,8 +314,10 @@ pub fn ApiKeyList() -> Element {
                                                     },
                                                 ),
                                                 ("curl", i18n.t("api_keys.example_curl")),
+                                                ("websocket", i18n.t("api_keys.example_websocket")),
                                             ]
                                             {
+                                                if value != "websocket" || is_responses {
                                                 button {
                                                     class: if selected_tab == value { "kc-api-example-tab active" } else { "kc-api-example-tab" },
                                                     r#type: "button",
@@ -312,6 +326,7 @@ pub fn ApiKeyList() -> Element {
                                                         copied.set(false);
                                                     },
                                                     "{label}"
+                                                }
                                                 }
                                             }
                                         }

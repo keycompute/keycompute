@@ -26,7 +26,7 @@ pub struct ProviderDefinition {
 pub const AVAILABLE_PROVIDERS: &[ProviderDefinition] = &[
     ProviderDefinition {
         name: "openai",
-        description: "OpenAI Chat Completions Protocol",
+        description: "OpenAI Chat Completions and Responses Protocols",
         create_adapter: || Arc::new(llm_protocol_openai::OpenAIProvider::new()),
     },
     ProviderDefinition {

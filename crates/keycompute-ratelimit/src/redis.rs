@@ -20,7 +20,7 @@ use crate::{DEFAULT_RPM_LIMIT, RateLimitKey, RateLimiter, WINDOW_SECS};
 use async_trait::async_trait;
 use deadpool_redis::redis::AsyncCommands;
 use keycompute_types::{KeyComputeError, Result};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
 /// Redis 限流器
@@ -72,6 +72,10 @@ impl RedisRateLimiter {
     /// 构建 TPM 的 Redis Key
     fn build_tpm_key(&self, key: &RateLimitKey) -> String {
         self.build_key(key, "tpm")
+    }
+
+    fn build_tpm_dedupe_key(&self, key: &RateLimitKey, request_id: Uuid) -> String {
+        format!("{}:dedupe:{request_id}", self.build_tpm_key(key))
     }
 
     /// 获取 Redis 连接
@@ -160,6 +164,41 @@ impl RedisRateLimiter {
         -- 添加 Token 记录（member 编码了 token 值，无需辅助 key）
         redis.call('ZADD', key, now, member)
         redis.call('EXPIRE', key, expire_secs)
+    "#;
+
+    /// Atomically records terminal usage once per request at its occurrence
+    /// time. The dedupe key lives only until that event leaves the window.
+    const RECORD_TOKENS_ONCE_SCRIPT: &str = r#"
+        local key = KEYS[1]
+        local dedupe_key = KEYS[2]
+        local now = tonumber(ARGV[1])
+        local window_start = tonumber(ARGV[2])
+        local occurred_at = tonumber(ARGV[3])
+        local window_secs = tonumber(ARGV[4])
+        local expire_secs = tonumber(ARGV[5])
+        local member = ARGV[6]
+
+        -- A delayed settlement outside the active horizon must not be moved
+        -- into the current window.
+        if occurred_at <= window_start then
+            redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+            return 0
+        end
+
+        local dedupe_secs = occurred_at + window_secs - now
+        if dedupe_secs < 1 then
+            dedupe_secs = 1
+        end
+
+        local inserted = redis.call('SET', dedupe_key, '1', 'NX', 'EX', dedupe_secs)
+        if not inserted then
+            return 0
+        end
+
+        redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+        redis.call('ZADD', key, occurred_at, member)
+        redis.call('EXPIRE', key, expire_secs)
+        return 1
     "#;
 
     /// Lua 脚本：获取当前窗口 Token 总和
@@ -294,6 +333,45 @@ impl RateLimiter for RedisRateLimiter {
             .arg(self.expire_secs())
             .arg(&unique_member)
             .query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| KeyComputeError::Internal(format!("Redis error: {}", e)))?;
+
+        Ok(())
+    }
+
+    async fn record_tokens_once_at(
+        &self,
+        key: &RateLimitKey,
+        request_id: Uuid,
+        tokens: u32,
+        occurred_at: SystemTime,
+    ) -> Result<()> {
+        let mut conn = self.get_conn().await?;
+        let redis_key = self.build_tpm_key(key);
+        let dedupe_key = self.build_tpm_dedupe_key(key, request_id);
+        let now = Self::now_timestamp();
+        let window_start = now - self.window_size.as_secs() as i64;
+        let occurred_at = occurred_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .try_into()
+            .unwrap_or(i64::MAX)
+            .min(now);
+        let unique_member = format!("{}:{}:{}", occurred_at, request_id.simple(), tokens);
+
+        deadpool_redis::redis::cmd("EVAL")
+            .arg(Self::RECORD_TOKENS_ONCE_SCRIPT)
+            .arg(2)
+            .arg(&redis_key)
+            .arg(&dedupe_key)
+            .arg(now)
+            .arg(window_start)
+            .arg(occurred_at)
+            .arg(self.window_size.as_secs() as i64)
+            .arg(self.expire_secs())
+            .arg(&unique_member)
+            .query_async::<i64>(&mut conn)
             .await
             .map_err(|e| KeyComputeError::Internal(format!("Redis error: {}", e)))?;
 
@@ -442,6 +520,49 @@ mod tests {
             count, 150,
             "After recording 50 more tokens, count should be 150"
         );
+    }
+
+    #[tokio::test]
+    async fn test_redis_tpm_terminal_recording_is_idempotent() {
+        let Some(limiter) = create_test_limiter().await else {
+            return;
+        };
+        let _ = limiter.flush_all().await;
+        let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let request_id = Uuid::new_v4();
+
+        limiter
+            .record_tokens_once(&key, request_id, 100)
+            .await
+            .unwrap();
+        limiter
+            .record_tokens_once(&key, request_id, 100)
+            .await
+            .unwrap();
+
+        assert_eq!(limiter.get_token_count(&key).await.unwrap(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_redis_late_terminal_tokens_keep_original_window_boundary() {
+        let Some(limiter) = create_test_limiter().await else {
+            return;
+        };
+        let _ = limiter.flush_all().await;
+        let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let request_id = Uuid::new_v4();
+        let occurred_at = SystemTime::now()
+            .checked_sub(Duration::from_secs(WINDOW_SECS - 1))
+            .unwrap();
+
+        limiter
+            .record_tokens_once_at(&key, request_id, 100, occurred_at)
+            .await
+            .unwrap();
+        assert_eq!(limiter.get_token_count(&key).await.unwrap(), 100);
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(limiter.get_token_count(&key).await.unwrap(), 0);
     }
 
     #[tokio::test]

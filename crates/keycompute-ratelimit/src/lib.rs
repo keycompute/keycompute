@@ -6,9 +6,11 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 use keycompute_types::{KeyComputeError, Result};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 
 #[cfg(feature = "redis")]
@@ -88,27 +90,73 @@ impl RateLimitKey {
     }
 }
 
-/// 限流计数器（单一 key 的完整状态）
-///
-/// 包含请求计数、Token 计数和共享的窗口时间戳。
-/// 共享窗口确保 RPM 和 TPM 始终同步。
+/// 限流计数器（单一 key 的完整状态）。
 #[derive(Debug)]
 struct RateLimitEntry {
     /// 请求计数
     request_count: AtomicU64,
-    /// Token 计数
-    token_count: AtomicU64,
-    /// 窗口开始时间（共享）
+    /// Sliding TPM events and request IDs whose terminal usage has already been
+    /// recorded in the active horizon.
+    token_records: std::sync::Mutex<TokenRecordCache>,
+    /// RPM 窗口开始时间
     window_start: std::sync::Mutex<Instant>,
     /// 窗口大小
     window_size: Duration,
+}
+
+#[derive(Debug, Default)]
+struct TokenRecordCache {
+    ids: HashSet<Uuid>,
+    expirations: BinaryHeap<Reverse<(Instant, Uuid, u64)>>,
+    total_tokens: u64,
+}
+
+impl TokenRecordCache {
+    fn prune(&mut self, now: Instant) {
+        while self
+            .expirations
+            .peek()
+            .is_some_and(|Reverse((expires_at, _, _))| *expires_at <= now)
+        {
+            if let Some(Reverse((_, expired_id, tokens))) = self.expirations.pop() {
+                self.ids.remove(&expired_id);
+                self.total_tokens = self.total_tokens.saturating_sub(tokens);
+            }
+        }
+    }
+
+    fn insert_once(
+        &mut self,
+        request_id: Uuid,
+        tokens: u64,
+        now: Instant,
+        remaining_horizon: Duration,
+    ) -> bool {
+        self.prune(now);
+        if remaining_horizon.is_zero() {
+            return false;
+        }
+        if !self.ids.insert(request_id) {
+            return false;
+        }
+        let expires_at = now.checked_add(remaining_horizon).unwrap_or(now);
+        self.expirations
+            .push(Reverse((expires_at, request_id, tokens)));
+        self.total_tokens = self.total_tokens.saturating_add(tokens);
+        true
+    }
+
+    fn total(&mut self, now: Instant) -> u64 {
+        self.prune(now);
+        self.total_tokens
+    }
 }
 
 impl RateLimitEntry {
     fn new(window_size: Duration) -> Self {
         Self {
             request_count: AtomicU64::new(0),
-            token_count: AtomicU64::new(0),
+            token_records: std::sync::Mutex::new(TokenRecordCache::default()),
             window_start: std::sync::Mutex::new(Instant::now()),
             window_size,
         }
@@ -116,7 +164,10 @@ impl RateLimitEntry {
 
     fn is_expired(&self) -> bool {
         let start = self.window_start.lock().unwrap();
-        Instant::now().duration_since(*start) > self.window_size
+        let now = Instant::now();
+        let rpm_expired = now.duration_since(*start) > self.window_size;
+        drop(start);
+        rpm_expired && self.token_records.lock().unwrap().total(now) == 0
     }
 
     /// 重置计数器（原子操作）
@@ -126,7 +177,6 @@ impl RateLimitEntry {
         let mut start = self.window_start.lock().unwrap();
         if Instant::now().duration_since(*start) > self.window_size {
             self.request_count.store(0, Ordering::Relaxed);
-            self.token_count.store(0, Ordering::Relaxed);
             *start = Instant::now();
             true
         } else {
@@ -138,8 +188,16 @@ impl RateLimitEntry {
         self.request_count.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    fn add_tokens(&self, tokens: u64) {
-        self.token_count.fetch_add(tokens, Ordering::Relaxed);
+    fn add_tokens_once_at(&self, request_id: Uuid, tokens: u64, occurred_at: SystemTime) {
+        let wall_now = SystemTime::now();
+        let age = wall_now.duration_since(occurred_at).unwrap_or_default();
+        let Some(remaining_horizon) = self.window_size.checked_sub(age) else {
+            self.token_records.lock().unwrap().prune(Instant::now());
+            return;
+        };
+        let now = Instant::now();
+        let mut records = self.token_records.lock().unwrap();
+        records.insert_once(request_id, tokens, now, remaining_horizon);
     }
 
     fn request_count(&self) -> u64 {
@@ -147,7 +205,7 @@ impl RateLimitEntry {
     }
 
     fn token_count(&self) -> u64 {
-        self.token_count.load(Ordering::Relaxed)
+        self.token_records.lock().unwrap().total(Instant::now())
     }
 
     fn decrement_request(&self) {
@@ -188,6 +246,26 @@ pub trait RateLimiter: Send + Sync + std::fmt::Debug {
     /// 记录 Token 使用量
     async fn record_tokens(&self, key: &RateLimitKey, tokens: u32) -> Result<()>;
 
+    /// Idempotently record one request's terminal Token usage.
+    async fn record_tokens_once(
+        &self,
+        key: &RateLimitKey,
+        request_id: Uuid,
+        tokens: u32,
+    ) -> Result<()> {
+        self.record_tokens_once_at(key, request_id, tokens, SystemTime::now())
+            .await
+    }
+
+    /// Idempotently record terminal Token usage at its actual occurrence time.
+    async fn record_tokens_once_at(
+        &self,
+        key: &RateLimitKey,
+        request_id: Uuid,
+        tokens: u32,
+        occurred_at: SystemTime,
+    ) -> Result<()>;
+
     /// 获取当前计数
     async fn get_count(&self, key: &RateLimitKey) -> Result<u64>;
 
@@ -198,7 +276,7 @@ pub trait RateLimiter: Send + Sync + std::fmt::Debug {
 /// 内存限流器
 #[derive(Debug)]
 pub struct MemoryRateLimiter {
-    /// 限流条目（包含请求计数、Token计数和共享窗口）
+    /// 限流条目（包含 RPM 固定窗口和 TPM 滑动窗口）
     entries: DashMap<RateLimitKey, RateLimitEntry>,
     window_size: Duration,
 }
@@ -260,8 +338,19 @@ impl RateLimiter for MemoryRateLimiter {
 
     async fn record_tokens(&self, key: &RateLimitKey, tokens: u32) -> Result<()> {
         let entry = self.get_or_create_entry(key);
-        entry.reset_if_expired();
-        entry.add_tokens(tokens as u64);
+        entry.add_tokens_once_at(Uuid::new_v4(), tokens as u64, SystemTime::now());
+        Ok(())
+    }
+
+    async fn record_tokens_once_at(
+        &self,
+        key: &RateLimitKey,
+        request_id: Uuid,
+        tokens: u32,
+        occurred_at: SystemTime,
+    ) -> Result<()> {
+        let entry = self.get_or_create_entry(key);
+        entry.add_tokens_once_at(request_id, tokens as u64, occurred_at);
         Ok(())
     }
 
@@ -273,7 +362,6 @@ impl RateLimiter for MemoryRateLimiter {
 
     async fn get_token_count(&self, key: &RateLimitKey) -> Result<u64> {
         let entry = self.get_or_create_entry(key);
-        entry.reset_if_expired();
         Ok(entry.token_count())
     }
 
@@ -412,6 +500,31 @@ impl RateLimitService {
     /// 记录 Token 使用量（用于 TPM 限制）
     pub async fn record_token_usage(&self, key: &RateLimitKey, tokens: u32) -> Result<()> {
         self.limiter.record_tokens(key, tokens).await
+    }
+
+    /// Idempotently record terminal usage for one request.
+    pub async fn record_token_usage_once(
+        &self,
+        key: &RateLimitKey,
+        request_id: Uuid,
+        tokens: u32,
+    ) -> Result<()> {
+        self.limiter
+            .record_tokens_once(key, request_id, tokens)
+            .await
+    }
+
+    /// Idempotently record terminal usage at its actual occurrence time.
+    pub async fn record_token_usage_once_at(
+        &self,
+        key: &RateLimitKey,
+        request_id: Uuid,
+        tokens: u32,
+        occurred_at: SystemTime,
+    ) -> Result<()> {
+        self.limiter
+            .record_tokens_once_at(key, request_id, tokens, occurred_at)
+            .await
     }
 
     /// 检查 TPM 限制
@@ -589,6 +702,72 @@ mod tests {
         // 检查 Token 计数
         let count = service.get_tpm_count(&key).await.unwrap();
         assert_eq!(count, 150);
+    }
+
+    #[tokio::test]
+    async fn terminal_token_tracking_is_idempotent_by_request() {
+        let service = RateLimitService::default_memory();
+        let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let request_id = Uuid::new_v4();
+
+        service
+            .record_token_usage_once(&key, request_id, 100)
+            .await
+            .unwrap();
+        service
+            .record_token_usage_once(&key, request_id, 100)
+            .await
+            .unwrap();
+        service
+            .record_token_usage_once(&key, Uuid::new_v4(), 50)
+            .await
+            .unwrap();
+
+        assert_eq!(service.get_tpm_count(&key).await.unwrap(), 150);
+    }
+
+    #[tokio::test]
+    async fn late_terminal_tokens_expire_at_the_original_window_boundary() {
+        let service = RateLimitService::default_memory();
+        let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let occurred_at = SystemTime::now()
+            .checked_sub(Duration::from_millis(WINDOW_SECS * 1_000 - 250))
+            .unwrap();
+
+        service
+            .record_token_usage_once_at(&key, Uuid::new_v4(), 100, occurred_at)
+            .await
+            .unwrap();
+        assert_eq!(service.get_tpm_count(&key).await.unwrap(), 100);
+
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert_eq!(service.get_tpm_count(&key).await.unwrap(), 0);
+    }
+
+    #[test]
+    fn terminal_token_cache_expires_by_occurrence_horizon() {
+        let mut cache = TokenRecordCache::default();
+        let started_at = Instant::now();
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+
+        assert!(cache.insert_once(first, 10, started_at, Duration::from_secs(60)));
+        assert!(!cache.insert_once(first, 10, started_at, Duration::from_secs(60)));
+        assert!(cache.insert_once(second, 20, started_at, Duration::from_secs(10)));
+        assert_eq!(cache.total(started_at), 30);
+        assert_eq!(cache.total(started_at + Duration::from_secs(11)), 10);
+        assert_eq!(cache.total(started_at + Duration::from_secs(61)), 0);
+        assert!(cache.insert_once(
+            first,
+            30,
+            started_at + Duration::from_secs(61),
+            Duration::from_secs(60),
+        ));
+
+        assert_eq!(cache.ids.len(), 1);
+        assert_eq!(cache.expirations.len(), 1);
+        assert_eq!(cache.total_tokens, 30);
+        assert!(cache.ids.contains(&first));
     }
 
     /// 测试并发场景下的原子限流

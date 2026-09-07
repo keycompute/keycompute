@@ -13,6 +13,31 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+/// 原生 OpenAI Responses 协议请求。
+///
+/// 它与通用的 Chat Completions `UpstreamRequest` 分开传递，避免将
+/// Responses 专属路径、头部和原始 JSON 扩散到其它协议适配器。
+#[derive(Clone)]
+pub struct NativeResponsesRequest {
+    /// 经入口校验后的完整请求体；适配器只覆盖路由层拥有的字段。
+    pub body: Arc<serde_json::Value>,
+    /// 上游资源路径（当前支持 `/responses` 与 `/responses/compact`）。
+    pub path: String,
+    /// 允许透传给上游的 Responses 协议头。
+    pub headers: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for NativeResponsesRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeResponsesRequest")
+            .field("body", &"<redacted>")
+            .field("path", &self.path)
+            .field("headers", &self.headers.keys().collect::<Vec<_>>())
+            .finish()
+    }
+}
+
 /// 上游请求结构
 ///
 /// 标准化的请求格式，各 Provider Adapter 负责转换为各自协议
@@ -251,5 +276,25 @@ mod tests {
 
         let serialized = serde_json::to_string(&request).unwrap();
         assert!(!serialized.contains("secret-base64"));
+    }
+
+    #[test]
+    fn native_responses_request_debug_redacts_body_and_header_values() {
+        let request = NativeResponsesRequest {
+            body: Arc::new(serde_json::json!({
+                "input": [{"type": "input_image", "image_url": "secret-image"}]
+            })),
+            path: "/responses".to_string(),
+            headers: BTreeMap::from([(
+                "idempotency-key".to_string(),
+                "secret-idempotency-value".to_string(),
+            )]),
+        };
+
+        let debug = format!("{request:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(debug.contains("idempotency-key"));
+        assert!(!debug.contains("secret-image"));
+        assert!(!debug.contains("secret-idempotency-value"));
     }
 }

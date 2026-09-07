@@ -3,6 +3,8 @@
 //! 此模块保留已验证的原始请求体，并仅将其发送给 Anthropic 协议上游。通用
 //! `Message` 副本只用于路由、观测和用量估算，绝不作为原生请求的重建来源。
 
+#[cfg(test)]
+use super::ImmediateSettlementServices;
 use crate::{
     error::{ApiError, Result},
     extractors::{AuthExtractor, ClientRequestId, RequestId, RequestReceivedAt},
@@ -398,14 +400,14 @@ pub async fn messages(
         "Anthropic Messages request"
     );
 
-    let billing = Arc::clone(&state.billing);
+    let settlement = super::ImmediateSettlementServices::from_state(&state);
     if stream {
         let stream = create_anthropic_stream_with_lifecycle(
             rx,
             ctx,
             primary_provider,
             primary_account_id,
-            billing,
+            settlement,
             Arc::clone(&lifecycle),
         );
         client_response_guard.disarm();
@@ -419,7 +421,7 @@ pub async fn messages(
             ctx,
             primary_provider,
             primary_account_id,
-            billing,
+            settlement,
             Arc::clone(&lifecycle),
         )
         .await?;
@@ -453,7 +455,7 @@ async fn create_anthropic_response(
         ctx,
         provider_name,
         account_id,
-        billing,
+        super::ImmediateSettlementServices::for_test(billing),
         Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
     )
     .await
@@ -464,7 +466,7 @@ async fn create_anthropic_response_with_lifecycle(
     ctx: Arc<RequestContext>,
     provider_name: String,
     account_id: uuid::Uuid,
-    billing: Arc<keycompute_billing::BillingService>,
+    settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
 ) -> Result<Value> {
     let mut client_response_guard =
@@ -509,7 +511,8 @@ async fn create_anthropic_response_with_lifecycle(
                         // Delta；Usage/InputUsage 已由 executor 写入 ctx 用于计费。
                         llm_protocol_provider::StreamEvent::Delta { .. }
                         | llm_protocol_provider::StreamEvent::Usage { .. }
-                        | llm_protocol_provider::StreamEvent::InputUsage { .. } => {}
+                        | llm_protocol_provider::StreamEvent::InputUsage { .. }
+                        | llm_protocol_provider::StreamEvent::Native { .. } => {}
                     }
                 }
             }
@@ -533,7 +536,7 @@ async fn create_anthropic_response_with_lifecycle(
         }
 
         finalize_anthropic_billing_logged(
-            &billing,
+            &settlement,
             &worker_ctx,
             &provider_name,
             account_id,
@@ -638,7 +641,7 @@ fn create_anthropic_stream(
         ctx,
         provider_name,
         account_id,
-        billing,
+        super::ImmediateSettlementServices::for_test(billing),
         Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
     )
 }
@@ -648,7 +651,7 @@ fn create_anthropic_stream_with_lifecycle(
     ctx: Arc<RequestContext>,
     provider_name: String,
     account_id: uuid::Uuid,
-    billing: Arc<keycompute_billing::BillingService>,
+    settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
     let (sse_tx, sse_rx) = mpsc::channel(100);
@@ -722,7 +725,7 @@ fn create_anthropic_stream_with_lifecycle(
                         llm_protocol_provider::StreamEvent::Done => {
                             completed = true;
                             finalize_anthropic_billing_logged(
-                                &billing,
+                                &settlement,
                                 &ctx,
                                 &provider_name,
                                 account_id,
@@ -741,7 +744,7 @@ fn create_anthropic_stream_with_lifecycle(
                             completed = true;
                             status = "error";
                             finalize_anthropic_billing_logged(
-                                &billing,
+                                &settlement,
                                 &ctx,
                                 &provider_name,
                                 account_id,
@@ -768,7 +771,8 @@ fn create_anthropic_stream_with_lifecycle(
                         // 此处只输出 Raw，避免重复或把 tool/thinking 降级成 text。
                         llm_protocol_provider::StreamEvent::Delta { .. }
                         | llm_protocol_provider::StreamEvent::Usage { .. }
-                        | llm_protocol_provider::StreamEvent::InputUsage { .. } => {}
+                        | llm_protocol_provider::StreamEvent::InputUsage { .. }
+                        | llm_protocol_provider::StreamEvent::Native { .. } => {}
                     }
                 }
             }
@@ -776,8 +780,14 @@ fn create_anthropic_stream_with_lifecycle(
 
         if !completed {
             status = "incomplete";
-            finalize_anthropic_billing_logged(&billing, &ctx, &provider_name, account_id, status)
-                .await;
+            finalize_anthropic_billing_logged(
+                &settlement,
+                &ctx,
+                &provider_name,
+                account_id,
+                status,
+            )
+            .await;
             let _ = forward_sse_event(
                 &sse_tx,
                 &ctx,
@@ -797,6 +807,7 @@ fn create_anthropic_stream_with_lifecycle(
     ReceiverStream::new(sse_rx).map(Ok)
 }
 
+#[cfg(test)]
 async fn finalize_anthropic_billing(
     billing: &keycompute_billing::BillingService,
     ctx: &RequestContext,
@@ -813,21 +824,21 @@ async fn finalize_anthropic_billing(
 
 /// 结算并记录失败。billing 错误不影响请求结果（架构约束），仅记录日志。
 async fn finalize_anthropic_billing_logged(
-    billing: &keycompute_billing::BillingService,
+    settlement: &super::ImmediateSettlementServices,
     ctx: &RequestContext,
     primary_provider: &str,
     primary_account_id: uuid::Uuid,
     status: &str,
 ) {
-    if let Err(error) =
-        finalize_anthropic_billing(billing, ctx, primary_provider, primary_account_id, status).await
-    {
-        tracing::error!(
-            request_id = %ctx.request_id,
-            error = %error,
-            "Failed to finalize Anthropic billing"
-        );
-    }
+    super::finalize_immediate_settlement_logged(
+        settlement,
+        ctx,
+        primary_provider,
+        primary_account_id,
+        status,
+        "anthropic",
+    )
+    .await;
 }
 
 fn raw_message_body(data: &str) -> Option<Value> {
@@ -945,6 +956,41 @@ fn validate_anthropic_headers(headers: &HeaderMap) -> Result<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn messages_terminal_billing_records_tpm_once() {
+        let ctx = RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "claude-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        ctx.set_input_tokens(8);
+        ctx.set_output_tokens(6);
+        let rate_limiter = Arc::new(keycompute_ratelimit::RateLimitService::default_memory());
+        let settlement = super::ImmediateSettlementServices {
+            billing: Arc::new(keycompute_billing::BillingService::new()),
+            rate_limiter: Arc::clone(&rate_limiter),
+            durable_state: None,
+        };
+        let account_id = uuid::Uuid::new_v4();
+
+        finalize_anthropic_billing_logged(&settlement, &ctx, "anthropic", account_id, "success")
+            .await;
+        finalize_anthropic_billing_logged(&settlement, &ctx, "anthropic", account_id, "success")
+            .await;
+
+        let key = keycompute_ratelimit::RateLimitKey::new(
+            ctx.tenant_id,
+            ctx.user_id,
+            ctx.produce_ai_key_id,
+        );
+        assert_eq!(rate_limiter.get_tpm_count(&key).await.unwrap(), 14);
+    }
 
     #[tokio::test]
     async fn messages_trace_preserves_ingress_received_at() {
@@ -1335,7 +1381,9 @@ mod tests {
             Arc::clone(&ctx),
             "anthropic".to_string(),
             uuid::Uuid::new_v4(),
-            Arc::new(keycompute_billing::BillingService::new()),
+            super::ImmediateSettlementServices::for_test(Arc::new(
+                keycompute_billing::BillingService::new(),
+            )),
             Arc::clone(&recorder) as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
         );
         drop(stream);
@@ -1394,7 +1442,9 @@ mod tests {
             Arc::clone(&ctx),
             "anthropic".to_string(),
             uuid::Uuid::new_v4(),
-            Arc::new(keycompute_billing::BillingService::new()),
+            super::ImmediateSettlementServices::for_test(Arc::new(
+                keycompute_billing::BillingService::new(),
+            )),
             Arc::clone(&recorder) as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
         ));
 
@@ -1707,7 +1757,9 @@ mod tests {
             Arc::clone(&ctx),
             "anthropic".to_string(),
             uuid::Uuid::new_v4(),
-            Arc::new(keycompute_billing::BillingService::new()),
+            super::ImmediateSettlementServices::for_test(Arc::new(
+                keycompute_billing::BillingService::new(),
+            )),
             Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
         ));
         tokio::task::yield_now().await;
@@ -1811,7 +1863,9 @@ mod tests {
             Arc::clone(&ctx),
             "anthropic".to_string(),
             uuid::Uuid::new_v4(),
-            Arc::new(keycompute_billing::BillingService::new()),
+            super::ImmediateSettlementServices::for_test(Arc::new(
+                keycompute_billing::BillingService::new(),
+            )),
             recorder as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
         )
         .await

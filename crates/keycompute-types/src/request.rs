@@ -7,7 +7,37 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{PricingSnapshot, RequestExecutionFailure, UsageAccumulator};
+use crate::{ExecutionTarget, PricingSnapshot, RequestExecutionFailure, UsageAccumulator};
+
+/// Client-visible HTTP failure returned by a native upstream protocol.
+///
+/// The body is intentionally kept out of `Debug` output: provider error
+/// payloads can echo request fragments. Responses handlers use this value only
+/// to reproduce the final upstream HTTP status, allowlisted headers and body.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ClientUpstreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: String,
+}
+
+impl fmt::Debug for ClientUpstreamResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientUpstreamResponse")
+            .field("status", &self.status)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("body", &"<redacted>")
+            .finish()
+    }
+}
 
 /// 请求上下文：贯穿全链路的唯一状态载体
 ///
@@ -19,6 +49,11 @@ use crate::{PricingSnapshot, RequestExecutionFailure, UsageAccumulator};
 #[derive(Clone)]
 pub struct RequestContext {
     pub request_id: Uuid,
+    /// Stable identity used by the immutable billing ledger and TPM
+    /// deduplication. It normally equals `request_id`; an ingress that offers
+    /// end-to-end idempotency may bind retries to the first request's value
+    /// while retaining a fresh trace `request_id` for every HTTP attempt.
+    pub billing_request_id: Uuid,
     pub user_id: Uuid,
     pub tenant_id: Uuid,
     pub produce_ai_key_id: Uuid,
@@ -43,6 +78,17 @@ pub struct RequestContext {
     pub native_anthropic_request: Option<Arc<serde_json::Value>>,
     /// 经白名单筛选、可安全透传给 Anthropic 上游的协议头。
     pub native_anthropic_headers: BTreeMap<String, String>,
+    /// 原生 OpenAI Responses 请求。
+    ///
+    /// 该字段只在 `/v1/responses` 入站时设置。Responses API 的输入、工具、
+    /// 推理、结构化输出等字段比通用 `Message` 丰富，必须保留完整 JSON，避免
+    /// 协议转换静默丢失字段。大型多模态 payload 通过 `Arc` 在执行链中共享。
+    pub native_openai_responses_request: Option<Arc<serde_json::Value>>,
+    /// Upstream Responses resource path for the native request. The public
+    /// create endpoint uses `/responses`; compaction uses `/responses/compact`.
+    pub native_openai_responses_path: Option<String>,
+    /// 经白名单筛选、可安全透传给 OpenAI Responses 上游的协议头。
+    pub native_openai_responses_headers: BTreeMap<String, String>,
     /// 实际完成请求的 Provider 账号。
     ///
     /// 网关在向 handler 发出终止事件前写入该值。这样当 primary 在尚未
@@ -55,6 +101,13 @@ pub struct RequestContext {
     /// 产生部分用量后断流，也必须把该部分账单归属到 fallback 账号，但不能
     /// 被误标记为“成功完成请求”。
     usage_provider_account: Arc<RwLock<Option<ExecutedProviderAccount>>>,
+    /// Provider target whose HTTP response was accepted for the current attempt.
+    ///
+    /// Unlike `executed_provider_account`, this is recorded before the response
+    /// stream reaches `Done`. Background Responses can therefore retain the exact
+    /// endpoint and credential that created a queued resource. `ExecutionTarget`
+    /// redacts its credential in every diagnostic representation.
+    accepted_execution_target: Arc<RwLock<Option<ExecutionTarget>>>,
     /// 客户端是否已断开（仅流式路径使用）。
     ///
     /// OpenAI 与 Anthropic 的后台结算任务会继续持有 executor receiver，确保
@@ -70,6 +123,12 @@ pub struct RequestContext {
     /// Final execution failure waiting for the response handler to decide the
     /// client-visible request outcome.
     execution_failure: Arc<RwLock<Option<RequestExecutionFailure>>>,
+    /// Last native-protocol HTTP error. Each fallback attempt replaces this
+    /// value; a successful attempt clears it before producing client content.
+    client_upstream_response: Arc<RwLock<Option<ClientUpstreamResponse>>>,
+    /// Headers from the accepted native-protocol HTTP response. The protocol
+    /// handler applies its own allowlist before exposing these to the client.
+    client_upstream_response_headers: Arc<RwLock<Vec<(String, String)>>>,
     pub pricing_snapshot: PricingSnapshot, // 请求开始时固化
     usage: Arc<UsageAccumulator>,          // streaming 中累积（共享状态）
     pub started_at: DateTime<Utc>,
@@ -80,6 +139,7 @@ impl fmt::Debug for RequestContext {
         formatter
             .debug_struct("RequestContext")
             .field("request_id", &self.request_id)
+            .field("billing_request_id", &self.billing_request_id)
             .field("user_id", &self.user_id)
             .field("tenant_id", &self.tenant_id)
             .field("produce_ai_key_id", &self.produce_ai_key_id)
@@ -97,8 +157,33 @@ impl fmt::Debug for RequestContext {
                 &self.native_anthropic_request.as_ref().map(|_| "<redacted>"),
             )
             .field("native_anthropic_headers", &self.native_anthropic_headers)
+            .field(
+                "native_openai_responses_request",
+                &self
+                    .native_openai_responses_request
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .field(
+                "native_openai_responses_path",
+                &self.native_openai_responses_path,
+            )
+            .field(
+                "native_openai_responses_headers",
+                &self
+                    .native_openai_responses_headers
+                    .keys()
+                    .collect::<Vec<_>>(),
+            )
             .field("executed_provider_account", &self.executed_provider_account)
             .field("usage_provider_account", &self.usage_provider_account)
+            .field(
+                "accepted_execution_target",
+                &self
+                    .accepted_execution_target()
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
             .field("client_disconnected", &self.is_client_disconnected())
             .field("client_response_outcome", &self.client_response_outcome())
             .field(
@@ -132,6 +217,7 @@ impl RequestContext {
         let (client_response_outcome, _) = watch::channel(None);
         Self {
             request_id,
+            billing_request_id: request_id,
             user_id,
             tenant_id,
             produce_ai_key_id,
@@ -144,15 +230,64 @@ impl RequestContext {
             top_p: None,
             native_anthropic_request: None,
             native_anthropic_headers: BTreeMap::new(),
+            native_openai_responses_request: None,
+            native_openai_responses_path: None,
+            native_openai_responses_headers: BTreeMap::new(),
             executed_provider_account: Arc::new(RwLock::new(None)),
             usage_provider_account: Arc::new(RwLock::new(None)),
+            accepted_execution_target: Arc::new(RwLock::new(None)),
             client_disconnect: CancellationToken::new(),
             client_response_outcome,
             execution_failure: Arc::new(RwLock::new(None)),
+            client_upstream_response: Arc::new(RwLock::new(None)),
+            client_upstream_response_headers: Arc::new(RwLock::new(Vec::new())),
             pricing_snapshot,
             usage: Arc::new(UsageAccumulator::new()),
             started_at: Utc::now(),
         }
+    }
+
+    /// Clone the shared execution and billing state without retaining request
+    /// messages or native protocol bodies. Long-lived settlement workers only
+    /// need identity, usage, pricing, accepted-target and protocol-header state;
+    /// copying projected messages can otherwise duplicate a large request for
+    /// the lifetime of the worker.
+    pub fn clone_without_request_payloads(&self) -> Self {
+        Self {
+            request_id: self.request_id,
+            billing_request_id: self.billing_request_id,
+            user_id: self.user_id,
+            tenant_id: self.tenant_id,
+            produce_ai_key_id: self.produce_ai_key_id,
+            model: self.model.clone(),
+            provider: self.provider.clone(),
+            messages: Vec::new(),
+            stream: self.stream,
+            max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            top_p: self.top_p,
+            native_anthropic_request: None,
+            native_anthropic_headers: self.native_anthropic_headers.clone(),
+            native_openai_responses_request: None,
+            native_openai_responses_path: self.native_openai_responses_path.clone(),
+            native_openai_responses_headers: self.native_openai_responses_headers.clone(),
+            executed_provider_account: Arc::clone(&self.executed_provider_account),
+            usage_provider_account: Arc::clone(&self.usage_provider_account),
+            accepted_execution_target: Arc::clone(&self.accepted_execution_target),
+            client_disconnect: self.client_disconnect.clone(),
+            client_response_outcome: self.client_response_outcome.clone(),
+            execution_failure: Arc::clone(&self.execution_failure),
+            client_upstream_response: Arc::clone(&self.client_upstream_response),
+            client_upstream_response_headers: Arc::clone(&self.client_upstream_response_headers),
+            pricing_snapshot: self.pricing_snapshot.clone(),
+            usage: Arc::clone(&self.usage),
+            started_at: self.started_at,
+        }
+    }
+
+    /// Bind billing and terminal token accounting to a stable logical request.
+    pub fn set_billing_request_id(&mut self, billing_request_id: Uuid) {
+        self.billing_request_id = billing_request_id;
     }
 
     /// 设置 Provider（路由确定后调用）
@@ -275,6 +410,21 @@ impl RequestContext {
             .and_then(|target| target.clone())
     }
 
+    /// Retain the exact target whose upstream HTTP response was accepted.
+    pub fn set_accepted_execution_target(&self, target: ExecutionTarget) {
+        if let Ok(mut accepted) = self.accepted_execution_target.write() {
+            *accepted = Some(target);
+        }
+    }
+
+    /// Return the exact accepted target, including its redacted credential.
+    pub fn accepted_execution_target(&self) -> Option<ExecutionTarget> {
+        self.accepted_execution_target
+            .read()
+            .ok()
+            .and_then(|target| target.clone())
+    }
+
     /// Return the target that should be used for billing.
     ///
     /// A fallback that produced the retained usage snapshot must be attributed
@@ -354,6 +504,44 @@ impl RequestContext {
             .read()
             .ok()
             .and_then(|failure| failure.clone())
+    }
+
+    pub fn set_client_upstream_response(&self, response: ClientUpstreamResponse) {
+        if let Ok(mut current) = self.client_upstream_response.write() {
+            *current = Some(response);
+        }
+    }
+
+    pub fn client_upstream_response(&self) -> Option<ClientUpstreamResponse> {
+        self.client_upstream_response
+            .read()
+            .ok()
+            .and_then(|response| response.clone())
+    }
+
+    pub fn clear_client_upstream_response(&self) {
+        if let Ok(mut current) = self.client_upstream_response.write() {
+            *current = None;
+        }
+    }
+
+    pub fn set_client_upstream_response_headers(&self, headers: Vec<(String, String)>) {
+        if let Ok(mut current) = self.client_upstream_response_headers.write() {
+            *current = headers;
+        }
+    }
+
+    pub fn client_upstream_response_headers(&self) -> Vec<(String, String)> {
+        self.client_upstream_response_headers
+            .read()
+            .map(|headers| headers.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn clear_client_upstream_response_headers(&self) {
+        if let Ok(mut current) = self.client_upstream_response_headers.write() {
+            current.clear();
+        }
     }
 
     fn set_client_response_outcome(&self, outcome: ClientResponseOutcome) -> ClientResponseOutcome {
@@ -907,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn request_context_debug_redacts_native_anthropic_body() {
+    fn request_context_debug_redacts_native_protocol_payloads() {
         let mut ctx = RequestContext::new(
             Uuid::new_v4(),
             Uuid::new_v4(),
@@ -921,10 +1109,19 @@ mod tests {
         ctx.native_anthropic_request = Some(Arc::new(serde_json::json!({
             "messages": [{"content": [{"type": "image", "source": {"data": "secret-base64"}}] }]
         })));
+        ctx.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "input": [{"type": "input_image", "image_url": "secret-image"}]
+        })));
+        ctx.native_openai_responses_headers.insert(
+            "idempotency-key".to_string(),
+            "secret-idempotency-value".to_string(),
+        );
 
         let debug = format!("{ctx:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-base64"));
+        assert!(!debug.contains("secret-image"));
+        assert!(!debug.contains("secret-idempotency-value"));
     }
 
     #[test]

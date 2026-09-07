@@ -16,6 +16,9 @@ pub struct Tenant {
     pub default_rpm_limit: i32,
     /// 默认 TPM 限制
     pub default_tpm_limit: i32,
+    /// Internal safety counter for permanent Responses idempotency identities.
+    #[serde(skip)]
+    pub responses_idempotency_claim_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

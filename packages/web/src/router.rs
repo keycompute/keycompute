@@ -185,4 +185,18 @@ mod tests {
         assert!(nginx.contains("location /node/v1/ {"));
         assert!(!nginx.contains("location /node/ {"));
     }
+
+    #[test]
+    fn nginx_responses_rule_streams_admitted_inline_skill_payloads() {
+        let nginx = include_str!("../../../nginx/nginx.conf");
+        let responses_location = nginx
+            .split_once("location ^~ /v1/responses {")
+            .expect("Responses location must exist")
+            .1
+            .split_once("\n        }")
+            .expect("Responses location must be closed")
+            .0;
+        assert!(responses_location.contains("client_max_body_size 80m;"));
+        assert!(responses_location.contains("proxy_request_buffering off;"));
+    }
 }

@@ -87,6 +87,11 @@ async fn create_test_account(
             tpm_limit: Some(100_000),
             priority: Some(100),
             models_supported: models.iter().map(|m| m.to_string()).collect(),
+            api_capabilities: if provider == "anthropic" {
+                vec!["messages".to_string()]
+            } else {
+                vec!["chat_completions".to_string(), "responses".to_string()]
+            },
             visibility: Some("tenant".to_string()),
         },
     )

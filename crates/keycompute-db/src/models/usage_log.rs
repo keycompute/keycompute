@@ -1,4 +1,4 @@
-use crate::DbError;
+use crate::{DbError, DbRouter};
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub struct UsageLog {
     pub id: Uuid,
     pub request_id: Uuid,
+    #[serde(default, skip_serializing)]
+    pub idempotency_id: Option<Uuid>,
     pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub produce_ai_key_id: Uuid,
@@ -78,11 +80,21 @@ impl UsageLog {
         db: &impl ConnectionTrait,
         req: &CreateUsageLogRequest,
     ) -> Result<UsageLog, DbError> {
+        Self::create_with_idempotency(db, req, None).await
+    }
+
+    /// Insert one immutable ledger row, or return the authoritative row for a
+    /// stable idempotency identity when a retry races or replays it.
+    pub async fn create_with_idempotency(
+        db: &impl ConnectionTrait,
+        req: &CreateUsageLogRequest,
+        idempotency_id: Option<Uuid>,
+    ) -> Result<UsageLog, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
             INSERT INTO usage_logs (
-                request_id, tenant_id, user_id, produce_ai_key_id,
+                request_id, idempotency_id, tenant_id, user_id, produce_ai_key_id,
                 model_name, provider_name, account_id,
                 input_tokens, output_tokens, total_tokens,
                 input_unit_price_snapshot, output_unit_price_snapshot,
@@ -90,13 +102,15 @@ impl UsageLog {
                 started_at, finished_at
             )
             VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $8 + $9,
-                $10, $11, $12, $13, $14, $15, $16, $17
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $9 + $10,
+                $11, $12, $13, $14, $15, $16, $17, $18
             )
+            ON CONFLICT DO NOTHING
             RETURNING *
             "#,
             [
                 req.request_id.into(),
+                idempotency_id.into(),
                 req.tenant_id.into(),
                 req.user_id.into(),
                 req.produce_ai_key_id.into(),
@@ -115,10 +129,20 @@ impl UsageLog {
                 req.finished_at.into(),
             ],
         );
-        let log = UsageLog::find_by_statement(stmt)
-            .one(db)
-            .await?
-            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
+        let log = match UsageLog::find_by_statement(stmt).one(db).await? {
+            Some(log) => log,
+            None => match idempotency_id {
+                Some(idempotency_id) => {
+                    UsageLog::find_by_idempotency_id(db, idempotency_id).await?
+                }
+                None => UsageLog::find_by_request_id(db, req.request_id).await?,
+            }
+            .ok_or_else(|| {
+                DbError::Other(
+                    "usage log conflict did not expose the authoritative row".to_string(),
+                )
+            })?,
+        };
 
         Ok(log)
     }
@@ -151,6 +175,78 @@ impl UsageLog {
         let log = UsageLog::find_by_statement(stmt).one(db).await?;
 
         Ok(log)
+    }
+
+    /// Find the ledger row for either an ordinary request ID or the stable
+    /// identity assigned to an idempotent Responses request.
+    pub async fn find_by_billing_request_id(
+        db: &impl ConnectionTrait,
+        billing_request_id: Uuid,
+    ) -> Result<Option<UsageLog>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM usage_logs WHERE request_id = $1 OR idempotency_id = $1 LIMIT 1",
+            [billing_request_id.into()],
+        );
+        Ok(UsageLog::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// Read the authoritative ledger row for settlement recovery.
+    ///
+    /// A successful but stale replica read must not hide a committed usage log:
+    /// callers use the returned row to replay post-ledger effects and TPM usage.
+    pub async fn find_by_billing_request_id_on_writer(
+        db: &DbRouter,
+        billing_request_id: Uuid,
+    ) -> Result<Option<UsageLog>, DbError> {
+        Self::find_by_billing_request_id(db.write_conn(), billing_request_id).await
+    }
+
+    /// Check the writer for a completed logical billing identity.
+    ///
+    /// This is a correctness boundary for idempotent upstream dispatch: a
+    /// lagging read replica must never hide an already committed ledger row
+    /// and authorize the same logical request to execute again.
+    pub async fn exists_by_billing_request_id_on_writer(
+        db: &DbRouter,
+        billing_request_id: Uuid,
+    ) -> Result<bool, DbError> {
+        Self::exists_by_billing_request_id(db.write_conn(), billing_request_id).await
+    }
+
+    /// Check one concrete connection or transaction for a completed logical
+    /// billing identity. Callers that are also creating an idempotency claim
+    /// use this form so the claim and the pre-dispatch ledger check commit (or
+    /// roll back) together.
+    pub async fn exists_by_billing_request_id(
+        db: &impl ConnectionTrait,
+        billing_request_id: Uuid,
+    ) -> Result<bool, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"SELECT EXISTS (
+                SELECT 1 FROM usage_logs
+                WHERE request_id = $1 OR idempotency_id = $1
+            ) AS exists"#,
+            [billing_request_id.into()],
+        );
+        let result = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("usage ledger existence query returned no row".into()))?;
+        result.try_get_by_index(0).map_err(DbError::DatabaseError)
+    }
+
+    pub async fn find_by_idempotency_id(
+        db: &impl ConnectionTrait,
+        idempotency_id: Uuid,
+    ) -> Result<Option<UsageLog>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM usage_logs WHERE idempotency_id = $1",
+            [idempotency_id.into()],
+        );
+        Ok(UsageLog::find_by_statement(stmt).one(db).await?)
     }
 
     /// 查找租户的用量日志
@@ -333,4 +429,112 @@ pub struct ModelStatsRow {
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub amount: BigDecimal,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use sea_orm::{
+        Database, DatabaseConnection, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow, Value,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct ExistsProxy {
+        exists: bool,
+        query_count: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct EmptyProxy {
+        query_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProxyDatabaseTrait for ExistsProxy {
+        async fn query(&self, _statement: Statement) -> Result<Vec<ProxyRow>, DbErr> {
+            self.query_count.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![ProxyRow::new(BTreeMap::from([(
+                "exists".to_string(),
+                Value::Bool(Some(self.exists)),
+            )]))])
+        }
+
+        async fn execute(&self, _statement: Statement) -> Result<ProxyExecResult, DbErr> {
+            Ok(ProxyExecResult::default())
+        }
+    }
+
+    #[async_trait]
+    impl ProxyDatabaseTrait for EmptyProxy {
+        async fn query(&self, _statement: Statement) -> Result<Vec<ProxyRow>, DbErr> {
+            self.query_count.fetch_add(1, Ordering::Relaxed);
+            Ok(Vec::new())
+        }
+
+        async fn execute(&self, _statement: Statement) -> Result<ProxyExecResult, DbErr> {
+            Ok(ProxyExecResult::default())
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_ledger_existence_check_bypasses_stale_read_replica() {
+        async fn exists_connection(exists: bool) -> (DatabaseConnection, Arc<AtomicUsize>) {
+            let query_count = Arc::new(AtomicUsize::new(0));
+            let connection = Database::connect_proxy(
+                DbBackend::Postgres,
+                Arc::new(Box::new(ExistsProxy {
+                    exists,
+                    query_count: Arc::clone(&query_count),
+                })),
+            )
+            .await
+            .unwrap();
+            (connection, query_count)
+        }
+
+        let (writer, writer_queries) = exists_connection(true).await;
+        let (stale_reader, reader_queries) = exists_connection(false).await;
+        let router = DbRouter::with_read_connections_for_test(writer, vec![stale_reader]);
+
+        assert!(
+            UsageLog::exists_by_billing_request_id_on_writer(&router, Uuid::new_v4())
+                .await
+                .unwrap()
+        );
+        assert_eq!(writer_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(reader_queries.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_ledger_lookup_bypasses_read_replica() {
+        async fn empty_connection() -> (DatabaseConnection, Arc<AtomicUsize>) {
+            let query_count = Arc::new(AtomicUsize::new(0));
+            let connection = Database::connect_proxy(
+                DbBackend::Postgres,
+                Arc::new(Box::new(EmptyProxy {
+                    query_count: Arc::clone(&query_count),
+                })),
+            )
+            .await
+            .unwrap();
+            (connection, query_count)
+        }
+
+        let (writer, writer_queries) = empty_connection().await;
+        let (stale_reader, reader_queries) = empty_connection().await;
+        let router = DbRouter::with_read_connections_for_test(writer, vec![stale_reader]);
+
+        assert!(
+            UsageLog::find_by_billing_request_id_on_writer(&router, Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(writer_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(reader_queries.load(Ordering::Relaxed), 0);
+    }
 }

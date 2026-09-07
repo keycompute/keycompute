@@ -19,6 +19,7 @@ pub struct Account {
     pub priority: i32,
     pub enabled: bool,
     pub models_supported: Vec<String>,
+    pub api_capabilities: Vec<String>,
     /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
     pub visibility: String,
     pub last_probe_at: Option<DateTime<Utc>>,
@@ -42,6 +43,7 @@ pub struct CreateAccountRequest {
     pub tpm_limit: Option<i32>,
     pub priority: Option<i32>,
     pub models_supported: Vec<String>,
+    pub api_capabilities: Vec<String>,
     pub visibility: Option<String>,
 }
 
@@ -58,6 +60,7 @@ pub struct UpdateAccountRequest {
     pub priority: Option<i32>,
     pub enabled: Option<bool>,
     pub models_supported: Option<Vec<String>>,
+    pub api_capabilities: Option<Vec<String>>,
     pub visibility: Option<String>,
 }
 
@@ -73,9 +76,9 @@ impl Account {
             INSERT INTO accounts (
                 tenant_id, provider, name, endpoint,
                 upstream_api_key_encrypted, upstream_api_key_preview,
-                rpm_limit, tpm_limit, priority, models_supported, visibility
+                rpm_limit, tpm_limit, priority, models_supported, api_capabilities, visibility
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             RETURNING *
             "#,
             [
@@ -89,6 +92,7 @@ impl Account {
                 req.tpm_limit.unwrap_or(100000).into(),
                 req.priority.unwrap_or(0).into(),
                 req.models_supported.clone().into(),
+                req.api_capabilities.clone().into(),
                 req.visibility.as_deref().unwrap_or("tenant").into(),
             ],
         );
@@ -115,6 +119,35 @@ impl Account {
         Ok(account)
     }
 
+    /// Load and lock an account on the writer for a destructive operation.
+    /// The lock prevents a new Responses affinity from acquiring its foreign-
+    /// key key-share lock while account deletion drains existing routes.
+    pub async fn find_by_id_for_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Account>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM accounts WHERE id = $1 FOR UPDATE",
+            [id.into()],
+        );
+        Ok(Account::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// Load an account from the writer for an authorization- or
+    /// ownership-sensitive operation without taking an exclusive row lock.
+    pub async fn find_by_id_for_key_share(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Account>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM accounts WHERE id = $1 FOR KEY SHARE",
+            [id.into()],
+        );
+        Ok(Account::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 查找租户的所有账号（仅本租户，管理面使用）
     pub async fn find_by_tenant(
         db: &impl ConnectionTrait,
@@ -128,6 +161,43 @@ impl Account {
         let accounts = Account::find_by_statement(stmt).all(db).await?;
 
         Ok(accounts)
+    }
+
+    /// Load a bounded set of tenant-private accounts that can be probed to
+    /// discover the owner of an imported protocol resource.
+    ///
+    /// Shared/global accounts are deliberately excluded: probing them with a
+    /// tenant-supplied resource ID could expose or attach another tenant's
+    /// upstream resource. The caller may request one extra row to determine
+    /// whether its probe budget truncated the eligible set.
+    pub async fn find_tenant_discovery_candidates(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        provider: &str,
+        api_capability: &str,
+        limit: u64,
+    ) -> Result<Vec<Account>, DbError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT * FROM accounts
+            WHERE tenant_id = $1
+              AND visibility = 'tenant'
+              AND enabled = TRUE
+              AND LOWER(provider) = LOWER($2)
+              AND api_capabilities @> ARRAY[$3]::TEXT[]
+            ORDER BY priority DESC, created_at ASC
+            LIMIT $4
+            "#,
+            [
+                tenant_id.into(),
+                provider.into(),
+                api_capability.into(),
+                limit.into(),
+            ],
+        );
+        Ok(Account::find_by_statement(stmt).all(db).await?)
     }
 
     /// 查找所有账号（不限租户，Admin 管理面使用）
@@ -208,6 +278,7 @@ impl Account {
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
         model: &str,
+        api_capability: &str,
     ) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -216,9 +287,10 @@ impl Account {
             WHERE (tenant_id = $1 OR visibility = 'global')
               AND enabled = TRUE
               AND $2 = ANY(models_supported)
+              AND api_capabilities @> ARRAY[$3]::TEXT[]
             ORDER BY priority DESC
             "#,
-            [tenant_id.into(), model.into()],
+            [tenant_id.into(), model.into(), api_capability.into()],
         );
         let accounts = Account::find_by_statement(stmt).all(db).await?;
 
@@ -244,10 +316,11 @@ impl Account {
                 priority = COALESCE($7, priority),
                 enabled = COALESCE($8, enabled),
                 models_supported = COALESCE($9, models_supported),
-                visibility = COALESCE($10, visibility),
-                tenant_id = COALESCE($11, tenant_id),
+                api_capabilities = COALESCE($10, api_capabilities),
+                visibility = COALESCE($11, visibility),
+                tenant_id = COALESCE($12, tenant_id),
                 updated_at = NOW()
-            WHERE id = $12
+            WHERE id = $13
             RETURNING *
             "#,
             [
@@ -260,6 +333,7 @@ impl Account {
                 req.priority.into(),
                 req.enabled.into(),
                 req.models_supported.clone().into(),
+                req.api_capabilities.clone().into(),
                 req.visibility.clone().into(),
                 req.tenant_id.into(),
                 self.id.into(),

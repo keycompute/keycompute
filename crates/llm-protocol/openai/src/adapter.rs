@@ -1,8 +1,8 @@
 //! OpenAI 协议适配器实现
 //!
-//! 实现 ProviderAdapter trait，提供 OpenAI Chat Completions 协议的调用能力，
+//! 实现 ProviderAdapter trait，提供 OpenAI Chat Completions 与 Responses 调用能力，
 //! 适用于所有 OpenAI 兼容上游（OpenAI/DeepSeek/Ollama/vLLM/Gemini 兼容层等）。
-//! 支持 Chat Completions（含 Vision 多模态）、图片生成、图片编辑
+//! 支持 Chat Completions（含 Vision 多模态）、Responses、图片生成和图片编辑。
 //!
 //! 使用统一 HTTP 传输层：
 //! - 通过 HttpTransport 发送请求
@@ -15,11 +15,16 @@
 //! - 管理员可通过前端界面动态配置，无需重启系统
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use keycompute_types::{KeyComputeError, Result};
 use llm_protocol_provider::{
-    ByteStream, HttpTransport, ProviderAdapter, StreamBox, StreamEvent, UpstreamFailure,
-    UpstreamFailureKind, UpstreamRequest, UpstreamResponse, UpstreamResponseMeta,
+    ByteStream, HttpTransport, LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+    MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES, MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES,
+    NativeResponsesRequest, NativeStreamEvent, ProviderAdapter, StreamBox, StreamEvent,
+    UpstreamFailure, UpstreamFailureKind, UpstreamRequest, UpstreamResponse, UpstreamResponseMeta,
+    body_read_failure, estimated_json_parse_working_set_bytes, try_acquire_large_body_permit,
 };
+use serde::{Serialize, Serializer, ser::SerializeMap};
 use serde_json;
 
 use crate::protocol::{
@@ -27,6 +32,7 @@ use crate::protocol::{
     OpenAIMessage, OpenAIRequest, OpenAIResponse, ResponsesRequest, ResponsesResponse,
     StreamOptions, convert_message_content,
 };
+use crate::responses_stream::{parse_responses_stream, response_usage, valid_response_status};
 use crate::stream::parse_openai_stream;
 
 /// OpenAI Chat Completions 默认端点
@@ -43,6 +49,34 @@ pub const OPENAI_IMAGE_VARIATION_ENDPOINT: &str = "https://api.openai.com/v1/ima
 
 /// OpenAI Responses API 默认端点（统一多模态接口）
 pub const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+
+struct RoutedNativeResponsesBody<'a> {
+    source: &'a serde_json::Map<String, serde_json::Value>,
+    model: &'a str,
+    stream: Option<bool>,
+}
+
+impl Serialize for RoutedNativeResponsesBody<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        for (name, value) in self.source {
+            if name == "model" || name == "stream" {
+                continue;
+            }
+            map.serialize_entry(name, value)?;
+        }
+        if !self.model.is_empty() {
+            map.serialize_entry("model", self.model)?;
+        }
+        if let Some(stream) = self.stream {
+            map.serialize_entry("stream", &stream)?;
+        }
+        map.end()
+    }
+}
 
 /// OpenAI Provider 适配器
 #[derive(Debug, Clone)]
@@ -66,6 +100,11 @@ impl OpenAIProvider {
     /// 路径由协议层统一拼接，不做任何“已含路径”兼容检测。
     fn chat_url(endpoint: &str) -> String {
         format!("{}/chat/completions", endpoint.trim_end_matches('/'))
+    }
+
+    /// 拼接 Responses API URL。
+    fn responses_url(endpoint: &str, path: &str) -> String {
+        format!("{}{}", endpoint.trim_end_matches('/'), path)
     }
 
     /// 判断是否为“可能由 stream_options 字段引发”的客户端错误
@@ -109,6 +148,24 @@ impl OpenAIProvider {
         }
     }
 
+    fn validate_native_responses_json_working_set(
+        meta: &UpstreamResponseMeta,
+        body: &str,
+        max_working_set_bytes: usize,
+    ) -> std::result::Result<usize, UpstreamFailure> {
+        let working_set_bytes = estimated_json_parse_working_set_bytes(body.as_bytes());
+        if working_set_bytes > max_working_set_bytes {
+            return Err(body_read_failure(
+                meta,
+                "upstream_json_too_complex",
+                format!(
+                    "Responses upstream JSON exceeds the {max_working_set_bytes}-byte working-set limit"
+                ),
+            ));
+        }
+        Ok(working_set_bytes)
+    }
+
     /// 构建 OpenAI 请求体（支持 Vision 多模态）
     fn build_request_body(&self, request: &UpstreamRequest) -> OpenAIRequest {
         let messages: Vec<OpenAIMessage> = request
@@ -139,6 +196,238 @@ impl OpenAIProvider {
                 None
             },
         }
+    }
+
+    /// Build the final native Responses payload. The public handler retains
+    /// all official and future fields; only routing-owned fields are forced at
+    /// the last possible moment.
+    fn serialize_native_responses_body(
+        request: &UpstreamRequest,
+        native_request: &NativeResponsesRequest,
+    ) -> std::result::Result<String, UpstreamFailure> {
+        let object = native_request.body.as_object().ok_or_else(|| {
+            Self::protocol_failure("Native Responses request must be a JSON object")
+        })?;
+        serde_json::to_string(&RoutedNativeResponsesBody {
+            source: object,
+            model: &request.model,
+            stream: (native_request.path == "/responses").then_some(request.stream),
+        })
+        .map_err(Self::protocol_failure)
+    }
+
+    fn native_responses_headers(
+        request: &UpstreamRequest,
+        native_request: &NativeResponsesRequest,
+    ) -> Vec<(String, String)> {
+        let mut headers = vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {}", request.upstream_api_key.expose()),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        for name in ["idempotency-key", "openai-beta", "x-client-request-id"] {
+            if let Some(value) = native_request.headers.get(name) {
+                headers.push((name.to_string(), value.clone()));
+            }
+        }
+        headers
+    }
+
+    fn validate_native_responses_success(
+        path: &str,
+        value: &serde_json::Value,
+    ) -> std::result::Result<(), &'static str> {
+        let Some(object) = value.as_object() else {
+            return Err("Responses response must be a JSON object");
+        };
+        let expected_object = match path {
+            "/responses" => "response",
+            "/responses/compact" => "response.compaction",
+            _ => return Err("Unsupported native Responses resource path"),
+        };
+        if object.get("object").and_then(serde_json::Value::as_str) != Some(expected_object) {
+            return Err("Responses response has an invalid object type");
+        }
+        if object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_none_or(|id| !crate::responses_stream::valid_openai_resource_id(id))
+        {
+            return Err("Responses response is missing a valid id");
+        }
+        if !object
+            .get("output")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            return Err("Responses response output must be an array");
+        }
+        if path == "/responses"
+            && object
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|status| !valid_response_status(status))
+        {
+            return Err("Responses response is missing a valid status");
+        }
+        Ok(())
+    }
+
+    fn native_responses_error_stream(
+        meta: UpstreamResponseMeta,
+        body: String,
+    ) -> UpstreamResponse<StreamBox> {
+        let headers = meta
+            .headers
+            .iter()
+            .filter(|(name, _)| {
+                let name = name.to_ascii_lowercase();
+                name == "content-type"
+                    || name == "x-request-id"
+                    || name == "request-id"
+                    || name == "openai-version"
+                    || name == "openai-processing-ms"
+                    || name == "retry-after"
+                    || name.starts_with("x-ratelimit-")
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let event = NativeStreamEvent::OpenAiResponsesHttpError {
+            status: meta.status,
+            headers,
+            body,
+        };
+        UpstreamResponse {
+            meta,
+            body: Box::pin(futures::stream::once(async move {
+                Ok(StreamEvent::native(event))
+            })),
+        }
+    }
+
+    async fn collect_native_responses_error_body(
+        mut stream: ByteStream,
+        meta: &UpstreamResponseMeta,
+        max_bytes: usize,
+    ) -> std::result::Result<String, UpstreamFailure> {
+        let mut bytes = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| {
+                body_read_failure(meta, "upstream_body_read", error.to_string())
+            })?;
+            if chunk.len() > max_bytes.saturating_sub(bytes.len()) {
+                return Err(body_read_failure(
+                    meta,
+                    "upstream_body_too_large",
+                    format!("Responses upstream error body exceeds the {max_bytes}-byte limit"),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    async fn native_responses_with_meta(
+        &self,
+        transport: &dyn HttpTransport,
+        request: UpstreamRequest,
+        native_request: NativeResponsesRequest,
+    ) -> std::result::Result<UpstreamResponse<StreamBox>, UpstreamFailure> {
+        let path = native_request.path.as_str();
+        if !matches!(path, "/responses" | "/responses/compact") {
+            return Err(Self::protocol_failure(
+                "Unsupported native Responses resource path",
+            ));
+        }
+        if request.stream && path != "/responses" {
+            return Err(Self::protocol_failure(
+                "Streaming is only supported for /responses",
+            ));
+        }
+        // Serialize directly from the shared request object while overlaying
+        // only routing-owned fields. This avoids deep-cloning requests that
+        // may contain tens of MiB of inline skill data.
+        let body_json = Self::serialize_native_responses_body(&request, &native_request)?;
+        let url = Self::responses_url(&request.endpoint, path);
+        let mut headers = Self::native_responses_headers(&request, &native_request);
+
+        if request.stream {
+            headers.push(("Accept".to_string(), "text/event-stream".to_string()));
+            let response = transport
+                .post_stream_passthrough_response(&url, headers, body_json)
+                .await?;
+            if !(200..300).contains(&response.meta.status) {
+                let meta = response.meta;
+                let body = Self::collect_native_responses_error_body(
+                    response.body,
+                    &meta,
+                    MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES,
+                )
+                .await?;
+                return Ok(Self::native_responses_error_stream(meta, body));
+            }
+            return Ok(response.map_body(parse_responses_stream));
+        }
+
+        let response = transport
+            .post_json_passthrough_response(&url, headers, body_json)
+            .await?;
+        if !(200..300).contains(&response.meta.status) {
+            if response.body.len() > MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES {
+                return Err(body_read_failure(
+                    &response.meta,
+                    "upstream_body_too_large",
+                    format!(
+                        "Responses upstream error body exceeds the {}-byte limit",
+                        MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES
+                    ),
+                ));
+            }
+            return Ok(Self::native_responses_error_stream(
+                response.meta,
+                response.body.into_string(),
+            ));
+        }
+        let (body, mut admission) = response.body.into_parts();
+        let working_set_bytes = Self::validate_native_responses_json_working_set(
+            &response.meta,
+            &body,
+            MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES,
+        )?;
+        if admission.is_none() && working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES {
+            admission = Some(try_acquire_large_body_permit().ok_or_else(|| {
+                body_read_failure(
+                    &response.meta,
+                    "upstream_json_capacity_exhausted",
+                    "Responses upstream JSON working-set capacity is exhausted",
+                )
+            })?);
+        }
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
+        drop(body);
+        Self::validate_native_responses_success(path, &value)
+            .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
+        let usage = response_usage(&value)
+            .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
+        let mut events: Vec<Result<StreamEvent>> = vec![Ok(StreamEvent::native(
+            NativeStreamEvent::OpenAiResponsesJson {
+                body: value,
+                admission,
+            },
+        ))];
+        if let Some((input_tokens, output_tokens)) = usage {
+            events.push(Ok(StreamEvent::Usage {
+                input_tokens,
+                output_tokens,
+            }));
+        }
+        events.push(Ok(StreamEvent::Done));
+        Ok(UpstreamResponse {
+            meta: response.meta,
+            body: Box::pin(futures::stream::iter(events)),
+        })
     }
 
     /// 执行非流式请求
@@ -741,6 +1030,16 @@ impl ProviderAdapter for OpenAIProvider {
         }
     }
 
+    async fn stream_responses_with_meta(
+        &self,
+        transport: &dyn HttpTransport,
+        request: UpstreamRequest,
+        native_request: NativeResponsesRequest,
+    ) -> std::result::Result<UpstreamResponse<StreamBox>, UpstreamFailure> {
+        self.native_responses_with_meta(transport, request, native_request)
+            .await
+    }
+
     async fn chat(
         &self,
         transport: &dyn HttpTransport,
@@ -780,6 +1079,74 @@ mod tests {
     #[derive(Debug)]
     struct MetadataTransport {
         fail_stream: bool,
+    }
+
+    #[derive(Debug)]
+    struct NativeResponsesTransport {
+        url: Mutex<Option<String>>,
+        headers: Mutex<Vec<(String, String)>>,
+        body: Mutex<Option<String>>,
+        response: String,
+        status: u16,
+    }
+
+    #[async_trait]
+    impl HttpTransport for NativeResponsesTransport {
+        async fn post_json_response(
+            &self,
+            url: &str,
+            headers: Vec<(String, String)>,
+            body: String,
+        ) -> std::result::Result<UpstreamResponse<String>, UpstreamFailure> {
+            *self.url.lock().unwrap() = Some(url.to_string());
+            *self.headers.lock().unwrap() = headers;
+            *self.body.lock().unwrap() = Some(body);
+            let mut meta = UpstreamResponseMeta::synthetic_success();
+            meta.status = self.status;
+            meta.headers = vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("set-cookie".to_string(), "secret=hidden".to_string()),
+            ];
+            Ok(UpstreamResponse {
+                meta,
+                body: self.response.clone(),
+            })
+        }
+
+        async fn post_stream_response(
+            &self,
+            _url: &str,
+            _headers: Vec<(String, String)>,
+            _body: String,
+        ) -> std::result::Result<UpstreamResponse<ByteStream>, UpstreamFailure> {
+            unreachable!("non-stream Responses test")
+        }
+
+        async fn post_json(
+            &self,
+            _url: &str,
+            _headers: Vec<(String, String)>,
+            _body: String,
+        ) -> Result<String> {
+            unreachable!("structured method must be used")
+        }
+
+        async fn post_stream(
+            &self,
+            _url: &str,
+            _headers: Vec<(String, String)>,
+            _body: String,
+        ) -> Result<ByteStream> {
+            unreachable!("structured method must be used")
+        }
+
+        fn request_timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
+
+        fn stream_timeout(&self) -> Duration {
+            Duration::from_secs(1)
+        }
     }
 
     #[async_trait]
@@ -921,6 +1288,388 @@ mod tests {
         UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "gpt-4o")
             .with_message("user", "Hello")
             .with_stream(true)
+    }
+
+    #[test]
+    fn native_responses_request_preserves_an_omitted_model() {
+        let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "");
+        let native = NativeResponsesRequest {
+            body: std::sync::Arc::new(serde_json::json!({"input": "hello"})),
+            path: "/responses".to_string(),
+            headers: std::collections::BTreeMap::new(),
+        };
+
+        let body: serde_json::Value = serde_json::from_str(
+            &OpenAIProvider::serialize_native_responses_body(&request, &native).unwrap(),
+        )
+        .unwrap();
+        assert!(body.get("model").is_none());
+        assert_eq!(body["input"], "hello");
+    }
+
+    #[test]
+    fn native_compact_serialization_omits_stream_and_overlays_the_routed_model() {
+        let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "routed-model");
+        let native = NativeResponsesRequest {
+            body: std::sync::Arc::new(serde_json::json!({
+                "model": "client-model",
+                "stream": false,
+                "future_field": {"kept": true}
+            })),
+            path: "/responses/compact".to_string(),
+            headers: std::collections::BTreeMap::new(),
+        };
+
+        let body: serde_json::Value = serde_json::from_str(
+            &OpenAIProvider::serialize_native_responses_body(&request, &native).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(body["model"], "routed-model");
+        assert!(body.get("stream").is_none());
+        assert_eq!(body["future_field"]["kept"], true);
+    }
+
+    #[tokio::test]
+    async fn native_responses_request_preserves_unknown_fields_in_typed_json() {
+        use futures::StreamExt;
+
+        let transport = NativeResponsesTransport {
+            url: Mutex::new(None),
+            headers: Mutex::new(Vec::new()),
+            body: Mutex::new(None),
+            response: serde_json::json!({
+                "id": "resp_1",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "future_response_field": {"kept": true},
+                "usage": {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13}
+            })
+            .to_string(),
+            status: 200,
+        };
+        let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "routed-model");
+        let native_request = NativeResponsesRequest {
+            body: std::sync::Arc::new(serde_json::json!({
+                "model": "client-model",
+                "input": "hello",
+                "tools": [{"type": "function", "name": "lookup", "parameters": {}}],
+                "reasoning": {"effort": "high"},
+                "future_request_field": {"kept": true}
+            })),
+            path: "/responses".to_string(),
+            headers: std::collections::BTreeMap::from([
+                ("openai-beta".to_string(), "responses=v1".to_string()),
+                (
+                    "x-client-request-id".to_string(),
+                    "trace/opaque.123".to_string(),
+                ),
+            ]),
+        };
+
+        let response = OpenAIProvider::new()
+            .stream_responses_with_meta(&transport, request, native_request)
+            .await
+            .unwrap();
+        assert_eq!(
+            transport.url.lock().unwrap().as_deref(),
+            Some("https://api.openai.com/v1/responses")
+        );
+        let sent: serde_json::Value =
+            serde_json::from_str(transport.body.lock().unwrap().as_deref().unwrap()).unwrap();
+        assert_eq!(sent["model"], "routed-model");
+        assert_eq!(sent["stream"], false);
+        assert_eq!(sent["reasoning"]["effort"], "high");
+        assert_eq!(sent["future_request_field"]["kept"], true);
+        assert!(
+            transport
+                .headers
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(name, value)| name == "openai-beta" && value == "responses=v1")
+        );
+        assert!(
+            transport
+                .headers
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(name, value)| {
+                    name == "x-client-request-id" && value == "trace/opaque.123"
+                })
+        );
+
+        let events = response.body.collect::<Vec<_>>().await;
+        let StreamEvent::Native {
+            event: NativeStreamEvent::OpenAiResponsesJson { body, .. },
+        } = events[0].as_ref().unwrap()
+        else {
+            panic!("expected typed response body")
+        };
+        assert_eq!(body["future_response_field"]["kept"], true);
+        assert!(matches!(
+            events[1],
+            Ok(StreamEvent::Usage {
+                input_tokens: 9,
+                output_tokens: 4
+            })
+        ));
+        assert!(matches!(events[2], Ok(StreamEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn native_responses_allows_terminal_json_without_usage_for_gateway_estimation() {
+        use futures::StreamExt;
+
+        let transport = NativeResponsesTransport {
+            url: Mutex::new(None),
+            headers: Mutex::new(Vec::new()),
+            body: Mutex::new(None),
+            response: serde_json::json!({
+                "id": "resp_without_usage",
+                "object": "response",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "hello"}]
+                }],
+                "usage": null
+            })
+            .to_string(),
+            status: 200,
+        };
+        let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "gpt-4o");
+        let native_request = NativeResponsesRequest {
+            body: std::sync::Arc::new(serde_json::json!({"input": "hello"})),
+            path: "/responses".to_string(),
+            headers: std::collections::BTreeMap::new(),
+        };
+
+        let events = OpenAIProvider::new()
+            .stream_responses_with_meta(&transport, request, native_request)
+            .await
+            .unwrap()
+            .body
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(matches!(
+            &events[0],
+            Ok(StreamEvent::Native {
+                event: NativeStreamEvent::OpenAiResponsesJson { body, .. }
+            }) if body["output"][0]["content"][0]["text"] == "hello"
+        ));
+        assert!(matches!(events[1], Ok(StreamEvent::Done)));
+        assert_eq!(events.len(), 2, "missing usage must not be marked exact");
+    }
+
+    #[tokio::test]
+    async fn native_responses_rejects_malformed_success_objects() {
+        for response in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "bad request"
+                }
+            }),
+            serde_json::json!({
+                "id": "",
+                "object": "response",
+                "status": "completed",
+                "output": []
+            }),
+            serde_json::json!({
+                "id": "resp_unknown_status",
+                "object": "response",
+                "status": "future_status",
+                "output": []
+            }),
+        ] {
+            let transport = NativeResponsesTransport {
+                url: Mutex::new(None),
+                headers: Mutex::new(Vec::new()),
+                body: Mutex::new(None),
+                response: response.to_string(),
+                status: 200,
+            };
+            let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "gpt-4o");
+            let native_request = NativeResponsesRequest {
+                body: std::sync::Arc::new(serde_json::json!({"input": "hello"})),
+                path: "/responses".to_string(),
+                headers: std::collections::BTreeMap::new(),
+            };
+
+            let error = match OpenAIProvider::new()
+                .stream_responses_with_meta(&transport, request, native_request)
+                .await
+            {
+                Ok(_) => panic!("malformed 2xx Responses body must be rejected"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind, UpstreamFailureKind::Protocol);
+            assert_eq!(error.status, Some(200));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_compact_accepts_compacted_response_shape() {
+        let transport = NativeResponsesTransport {
+            url: Mutex::new(None),
+            headers: Mutex::new(Vec::new()),
+            body: Mutex::new(None),
+            response: serde_json::json!({
+                "id": "resp_compact_1",
+                "object": "response.compaction",
+                "created_at": 1,
+                "output": [],
+                "usage": {"input_tokens": 9, "output_tokens": 4, "total_tokens": 13}
+            })
+            .to_string(),
+            status: 200,
+        };
+        let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "gpt-4o");
+        let native_request = NativeResponsesRequest {
+            body: std::sync::Arc::new(serde_json::json!({"input": "hello"})),
+            path: "/responses/compact".to_string(),
+            headers: std::collections::BTreeMap::new(),
+        };
+
+        let events = OpenAIProvider::new()
+            .stream_responses_with_meta(&transport, request, native_request)
+            .await
+            .unwrap()
+            .body
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(matches!(
+            &events[0],
+            Ok(StreamEvent::Native {
+                event: NativeStreamEvent::OpenAiResponsesJson { body, .. }
+            }) if body["object"] == "response.compaction"
+        ));
+        assert!(matches!(events[2], Ok(StreamEvent::Done)));
+    }
+
+    #[tokio::test]
+    async fn native_responses_preserves_non_success_status_body_and_safe_headers() {
+        let body = serde_json::json!({
+            "error": {
+                "type": "invalid_request_error",
+                "code": "bad_model",
+                "message": "bad model"
+            }
+        })
+        .to_string();
+        let transport = NativeResponsesTransport {
+            url: Mutex::new(None),
+            headers: Mutex::new(Vec::new()),
+            body: Mutex::new(None),
+            response: body.clone(),
+            status: 429,
+        };
+        let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "model");
+        let native_request = NativeResponsesRequest {
+            body: std::sync::Arc::new(serde_json::json!({"model": "model", "input": "hi"})),
+            path: "/responses".to_string(),
+            headers: std::collections::BTreeMap::new(),
+        };
+
+        let mut response = OpenAIProvider::new()
+            .stream_responses_with_meta(&transport, request, native_request)
+            .await
+            .unwrap();
+        assert_eq!(response.meta.status, 429);
+        let StreamEvent::Native {
+            event:
+                NativeStreamEvent::OpenAiResponsesHttpError {
+                    status,
+                    headers,
+                    body: actual_body,
+                },
+        } = response.body.next().await.unwrap().unwrap()
+        else {
+            panic!("expected typed error event");
+        };
+        assert_eq!(status, 429);
+        assert_eq!(actual_body, body);
+        assert_eq!(headers[0].0, "content-type");
+        assert_eq!(headers.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn streamed_responses_error_body_has_a_hard_size_limit() {
+        let mut meta = UpstreamResponseMeta::synthetic_success();
+        meta.status = 502;
+        meta.upstream_request_id = Some("upstream-request".to_string());
+        let stream: ByteStream = Box::pin(futures::stream::iter([
+            Ok(bytes::Bytes::from_static(b"1234")),
+            Ok(bytes::Bytes::from_static(b"56")),
+        ]));
+
+        let error = OpenAIProvider::collect_native_responses_error_body(stream, &meta, 5)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, UpstreamFailureKind::BodyRead);
+        assert_eq!(error.status, Some(502));
+        assert!(error.retryable);
+        assert_eq!(error.stable_error_code, "upstream_body_too_large");
+        assert_eq!(
+            error.upstream_request_id.as_deref(),
+            Some("upstream-request")
+        );
+        assert!(error.sanitized_summary.contains("5-byte limit"));
+    }
+
+    #[tokio::test]
+    async fn non_streamed_responses_error_body_has_a_hard_size_limit() {
+        let transport = NativeResponsesTransport {
+            url: Mutex::new(None),
+            headers: Mutex::new(Vec::new()),
+            body: Mutex::new(None),
+            response: "x".repeat(MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES + 1),
+            status: 502,
+        };
+        let request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "model");
+        let native_request = NativeResponsesRequest {
+            body: std::sync::Arc::new(serde_json::json!({"model": "model", "input": "hi"})),
+            path: "/responses".to_string(),
+            headers: std::collections::BTreeMap::new(),
+        };
+
+        let error = match OpenAIProvider::new()
+            .stream_responses_with_meta(&transport, request, native_request)
+            .await
+        {
+            Ok(_) => panic!("oversized error response must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, UpstreamFailureKind::BodyRead);
+        assert_eq!(error.status, Some(502));
+        assert!(error.retryable);
+        assert_eq!(error.stable_error_code, "upstream_body_too_large");
+        assert!(error.sanitized_summary.contains("1048576-byte limit"));
+    }
+
+    #[test]
+    fn non_streamed_responses_reject_dense_json_before_tree_allocation() {
+        let meta = UpstreamResponseMeta::synthetic_success();
+        let body = r#"{"object":"response","id":"resp_1","output":[0,0,0,0],"status":"completed"}"#;
+        let estimated = estimated_json_parse_working_set_bytes(body.as_bytes());
+
+        let error =
+            OpenAIProvider::validate_native_responses_json_working_set(&meta, body, estimated - 1)
+                .expect_err(
+                    "a response over the working-set limit must be rejected before parsing",
+                );
+
+        assert_eq!(error.kind, UpstreamFailureKind::BodyRead);
+        assert_eq!(error.stable_error_code, "upstream_json_too_complex");
+        assert!(!error.retryable);
+        assert!(error.sanitized_summary.contains("working-set limit"));
     }
 
     #[tokio::test]

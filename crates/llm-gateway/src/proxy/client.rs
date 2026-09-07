@@ -9,8 +9,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use llm_protocol_provider::{
-    ByteStream, GetBinaryResponse, HttpTransport, UpstreamFailure, UpstreamFailureKind,
-    UpstreamResponse, UpstreamResponseMeta, summarize_http_failure_response,
+    AdmittedResponseText, ByteStream, GetBinaryResponse, HttpTransport, UpstreamFailure,
+    UpstreamFailureKind, UpstreamResponse, UpstreamResponseMeta, collect_bounded_response_text,
+    json_passthrough_body_limit, summarize_http_failure_response,
 };
 use reqwest::{Client, ClientBuilder, Proxy, RequestBuilder, Response};
 use std::time::Duration;
@@ -32,7 +33,30 @@ pub struct HttpClient {
     has_proxy: bool,
 }
 
+/// HTTP verbs used by protocol resource operations that must preserve the
+/// upstream status and JSON body (including official non-2xx error objects).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonRequestMethod {
+    Get,
+    Post,
+    Delete,
+}
+
+/// Body returned by a protocol resource passthrough request.
+pub enum PassthroughBody {
+    Full(AdmittedResponseText),
+    Stream(ByteStream),
+}
+
 impl HttpClient {
+    fn passthrough_timeout(&self, streaming_response: bool) -> Duration {
+        if streaming_response {
+            self.config.stream_timeout
+        } else {
+            self.config.request_timeout
+        }
+    }
+
     /// 创建新的 HTTP 客户端
     pub fn new(config: &ProxyConfig, proxy_url: Option<&str>) -> Self {
         let mut builder = ClientBuilder::new()
@@ -140,6 +164,74 @@ impl HttpClient {
         &self.config
     }
 
+    /// Execute a JSON resource request without converting non-success status
+    /// codes into `UpstreamFailure`. Public compatibility handlers use this to
+    /// return the provider's official status and error schema byte-for-byte.
+    /// Transport and body-read failures remain structured internal errors.
+    pub async fn request_json_passthrough(
+        &self,
+        method: JsonRequestMethod,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: Option<String>,
+        streaming_response: bool,
+    ) -> keycompute_types::Result<UpstreamResponse<PassthroughBody>> {
+        let mut request = match method {
+            JsonRequestMethod::Get => self.client.get(url),
+            JsonRequestMethod::Post => self.client.post(url),
+            JsonRequestMethod::Delete => self.client.delete(url),
+        };
+        for (name, value) in headers {
+            request = request.header(name, value);
+        }
+        if let Some(body) = body {
+            request = request.body(body);
+        }
+        let response = request
+            .timeout(self.passthrough_timeout(streaming_response))
+            .send()
+            .await
+            .map_err(|error| Self::transport_failure(&error).into_keycompute_error())?;
+        let meta = Self::response_meta(&response);
+        let is_event_stream = response.status().is_success()
+            && response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    value
+                        .split(';')
+                        .next()
+                        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("text/event-stream"))
+                });
+        if is_event_stream {
+            let status = meta.status;
+            let stream = response.bytes_stream().map(move |result| {
+                result.map_err(|error| keycompute_types::KeyComputeError::UpstreamFailure {
+                    status: Some(status),
+                    stable_code: "upstream_stream_read".to_string(),
+                    retryable: false,
+                    summary: keycompute_types::sanitize_error_summary(&error.to_string()),
+                })
+            });
+            return Ok(UpstreamResponse {
+                meta,
+                body: PassthroughBody::Stream(Box::pin(stream)),
+            });
+        }
+        let body = collect_bounded_response_text(
+            response,
+            &meta,
+            json_passthrough_body_limit(meta.status),
+        )
+        .await
+        .map_err(UpstreamFailure::into_keycompute_error)?;
+        Ok(UpstreamResponse {
+            meta,
+            body: PassthroughBody::Full(body),
+        })
+    }
+
     fn response_meta(response: &Response) -> UpstreamResponseMeta {
         Self::response_meta_from_parts(response.status().as_u16(), response.headers())
     }
@@ -215,6 +307,64 @@ impl HttpClient {
 
 #[async_trait]
 impl HttpTransport for HttpClient {
+    async fn post_json_passthrough_response(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: String,
+    ) -> std::result::Result<UpstreamResponse<AdmittedResponseText>, UpstreamFailure> {
+        let mut request = self.client.post(url);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        let response = request
+            .body(body)
+            .timeout(self.config.request_timeout)
+            .send()
+            .await
+            .map_err(|error| Self::transport_failure(&error))?;
+        let meta = Self::response_meta(&response);
+        let body = collect_bounded_response_text(
+            response,
+            &meta,
+            json_passthrough_body_limit(meta.status),
+        )
+        .await?;
+        Ok(UpstreamResponse { meta, body })
+    }
+
+    async fn post_stream_passthrough_response(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: String,
+    ) -> std::result::Result<UpstreamResponse<ByteStream>, UpstreamFailure> {
+        let mut request = self.client.post(url);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+        let response = request
+            .body(body)
+            .timeout(self.config.stream_timeout)
+            .send()
+            .await
+            .map_err(|error| Self::transport_failure(&error))?;
+        let meta = Self::response_meta(&response);
+        let status = meta.status;
+        let stream = response.bytes_stream().map(move |result| {
+            result.map_err(|error| keycompute_types::KeyComputeError::UpstreamFailure {
+                status: Some(status),
+                stable_code: "upstream_stream_read".to_string(),
+                retryable: false,
+                summary: keycompute_types::sanitize_error_summary(&error.to_string()),
+            })
+        });
+        Ok(UpstreamResponse {
+            meta,
+            body: Box::pin(stream),
+        })
+    }
+
     async fn post_json_response(
         &self,
         url: &str,
@@ -527,5 +677,16 @@ mod tests {
             metadata.upstream_request_id.as_deref(),
             Some("provider-request-id")
         );
+    }
+
+    #[test]
+    fn passthrough_streams_use_the_stream_timeout() {
+        let config = ProxyConfig::default()
+            .with_request_timeout(Duration::from_secs(3))
+            .with_stream_timeout(Duration::from_secs(30));
+        let client = HttpClient::new(&config, None);
+
+        assert_eq!(client.passthrough_timeout(false), Duration::from_secs(3));
+        assert_eq!(client.passthrough_timeout(true), Duration::from_secs(30));
     }
 }

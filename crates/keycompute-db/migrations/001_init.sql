@@ -1,4 +1,4 @@
--- KeyCompute 新库完整结构。
+-- KeyCompute 001_init：新库完整结构。
 -- 仅用于空数据库初始化，不包含旧版本升级、数据回填或兼容迁移逻辑。
 
 -- tenants: 租户/组织表
@@ -11,8 +11,12 @@ CREATE TABLE IF NOT EXISTS tenants (
     -- 租户配置
     default_rpm_limit INTEGER NOT NULL DEFAULT 60,
     default_tpm_limit INTEGER NOT NULL DEFAULT 100000,
+    responses_idempotency_claim_count BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_tenants_responses_idempotency_claim_count CHECK (
+        responses_idempotency_claim_count BETWEEN 0 AND 100000
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
@@ -109,6 +113,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     priority INTEGER NOT NULL DEFAULT 0,
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     models_supported TEXT[] NOT NULL DEFAULT '{}',
+    api_capabilities TEXT[] NOT NULL,
     visibility VARCHAR(20) NOT NULL DEFAULT 'tenant',
     last_probe_at TIMESTAMPTZ,
     last_probe_latency_ms BIGINT,
@@ -116,6 +121,14 @@ CREATE TABLE IF NOT EXISTS accounts (
     last_probe_error_code VARCHAR(128),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_accounts_api_capabilities CHECK (
+        cardinality(api_capabilities) > 0
+        AND (
+            (provider = 'openai' AND api_capabilities <@ ARRAY['chat_completions', 'responses']::TEXT[])
+            OR
+            (provider = 'anthropic' AND api_capabilities <@ ARRAY['messages']::TEXT[])
+        )
+    ),
     CONSTRAINT ck_accounts_probe_status
         CHECK (last_probe_status IS NULL OR last_probe_status IN ('succeeded', 'failed'))
 );
@@ -124,6 +137,161 @@ CREATE INDEX IF NOT EXISTS idx_accounts_tenant_id ON accounts(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_accounts_provider ON accounts(provider);
 CREATE INDEX IF NOT EXISTS idx_accounts_enabled ON accounts(enabled) WHERE enabled = TRUE;
 CREATE INDEX IF NOT EXISTS idx_accounts_visibility ON accounts(visibility) WHERE visibility = 'global';
+CREATE INDEX IF NOT EXISTS idx_accounts_api_capabilities ON accounts USING GIN(api_capabilities);
+
+-- responses_idempotency_claims: Responses Idempotency-Key 的永久身份绑定及短期结果缓存。
+-- 只保留哈希后的绑定 ID；account_id 是历史执行归属，故意不引用可删除的
+-- accounts 配置行。否则删除账号会重新开放已经使用过的幂等键。结果正文受
+-- 应用层租户配额约束且仅在 replay 窗口内保留；永久身份数量也受应用层
+-- 租户配额约束。过期后仍保留身份绑定，防止同一键被重新用于其他请求。
+CREATE TABLE IF NOT EXISTS responses_idempotency_claims (
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    binding_id VARCHAR(128) NOT NULL,
+    request_fingerprint VARCHAR(64) NOT NULL,
+    billing_request_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    produce_ai_key_id UUID NOT NULL,
+    provider VARCHAR(50) NOT NULL,
+    model TEXT,
+    account_id UUID NOT NULL,
+    execution_state VARCHAR(32) NOT NULL DEFAULT 'in_progress',
+    execution_token UUID NOT NULL DEFAULT gen_random_uuid(),
+    lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '5 minutes'),
+    -- Set immediately before handing the paid POST to the gateway. Once set,
+    -- an expired lease is intentionally not reclaimable because the upstream
+    -- outcome may be ambiguous after a process crash or response-read failure.
+    upstream_dispatched_at TIMESTAMPTZ,
+    response_status SMALLINT,
+    response_headers JSONB,
+    response_body TEXT,
+    response_body_bytes BIGINT,
+    response_expires_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, binding_id),
+    CONSTRAINT uk_responses_idempotency_claims_billing UNIQUE (billing_request_id),
+    CONSTRAINT ck_responses_idempotency_claims_state CHECK (
+        (
+            execution_state = 'in_progress'
+            AND response_status IS NULL
+            AND response_headers IS NULL
+            AND response_body IS NULL
+            AND response_body_bytes IS NULL
+            AND response_expires_at IS NULL
+            AND completed_at IS NULL
+        )
+        OR (
+            execution_state = 'completed'
+            AND response_status BETWEEN 100 AND 599
+            AND response_headers IS NOT NULL
+            AND response_body IS NOT NULL
+            AND response_body_bytes BETWEEN 0 AND 100663296
+            AND response_body_bytes = octet_length(response_body)
+            AND response_expires_at IS NOT NULL
+            AND upstream_dispatched_at IS NOT NULL
+            AND completed_at IS NOT NULL
+        )
+        OR (
+            execution_state = 'expired'
+            AND response_status IS NULL
+            AND response_headers IS NULL
+            AND response_body IS NULL
+            AND response_body_bytes IS NULL
+            AND response_expires_at IS NULL
+            AND upstream_dispatched_at IS NOT NULL
+            AND completed_at IS NOT NULL
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_response_expiry
+    ON responses_idempotency_claims(response_expires_at)
+    WHERE execution_state = 'completed';
+
+CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_tenant_replay
+    ON responses_idempotency_claims(tenant_id, completed_at DESC, binding_id DESC)
+    WHERE execution_state = 'completed';
+
+-- response_affinities: OpenAI resp_*/conv_* 资源到创建账号的租户级绑定。
+-- 后续资源操作及 conversation 请求必须继续命中同一上游账号。
+CREATE TABLE IF NOT EXISTS response_affinities (
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    -- Also stores official conv_* IDs; the namespaces are disjoint.
+    -- OpenAI resource IDs are opaque. The 2048-byte application limit keeps
+    -- this primary-key component below PostgreSQL's B-tree entry limit.
+    response_id VARCHAR(2048) NOT NULL,
+    provider VARCHAR(50) NOT NULL,
+    -- Actual upstream model, used when a continuation omits `model` as the
+    -- official Responses contract permits.
+    model TEXT,
+    -- Upstream resources, chained warmups, reservations and settlements retain
+    -- their owning account. Root local warmups and terminal node-settlement
+    -- outboxes have no upstream account owner and leave this NULL.
+    account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT,
+    -- Short-lived route reservation created before dispatch. It closes the
+    -- interval in which account deletion could otherwise win before the real
+    -- resp_* affinity is known.
+    is_reservation BOOLEAN NOT NULL DEFAULT FALSE,
+    -- KeyCompute-local WebSocket warmups (`generate:false,store:true`).
+    -- They retain chain context without inventing an upstream resource.
+    local_response JSONB,
+    local_context JSONB,
+    -- Conservative application-memory estimate used to admit the row before
+    -- PostgreSQL transfers and serde materializes its JSON values.
+    local_context_bytes BIGINT CHECK (local_context_bytes IS NULL OR local_context_bytes >= 0),
+    CONSTRAINT ck_response_affinities_local_context_size CHECK (
+        local_response IS NULL OR local_context_bytes IS NOT NULL
+    ),
+    -- Durable billing/TPM hand-off. Background Responses resources are polled
+    -- until terminal; already-terminal generation requests are replayed directly.
+    settlement JSONB,
+    settlement_next_poll_at TIMESTAMPTZ,
+    settlement_lease_until TIMESTAMPTZ,
+    -- Defensive tombstone for internal cleanup paths. Public resource deletion
+    -- is rejected while settlement is pending so the worker can keep polling.
+    deleted_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, response_id),
+    CONSTRAINT ck_response_affinities_account_owner CHECK (
+        account_id IS NOT NULL OR (
+            NOT is_reservation
+            AND (
+                (
+                    settlement IS NULL
+                    AND deleted_at IS NULL
+                    AND local_response IS NOT NULL
+                    AND local_context IS NOT NULL
+                    AND local_context ? 'upstream_previous_response_id'
+                    AND local_context->'upstream_previous_response_id' = 'null'::JSONB
+                )
+                OR (
+                    response_id LIKE 'resp_kc_settlement_%'
+                    AND settlement IS NOT NULL
+                    AND settlement->>'terminal_status' IS NOT NULL
+                    AND settlement->>'account_id' = '00000000-0000-0000-0000-000000000000'
+                    AND settlement_next_poll_at IS NOT NULL
+                    AND deleted_at IS NOT NULL
+                    AND local_response IS NULL
+                    AND local_context IS NULL
+                )
+            )
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_response_affinities_account
+    ON response_affinities(account_id);
+CREATE INDEX IF NOT EXISTS idx_response_affinities_expires
+    ON response_affinities(expires_at);
+CREATE INDEX IF NOT EXISTS idx_response_affinities_local_warmups
+    ON response_affinities(tenant_id)
+    WHERE local_response IS NOT NULL AND NOT is_reservation AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_due
+    ON response_affinities(settlement_next_poll_at)
+    WHERE settlement IS NOT NULL;
+
 -- pricing_models: 模型定价表
 CREATE TABLE IF NOT EXISTS pricing_models (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -151,6 +319,9 @@ COMMENT ON COLUMN pricing_models.billing_dimension IS '计费维度: node 或 pr
 CREATE TABLE IF NOT EXISTS usage_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id UUID NOT NULL UNIQUE,
+    -- Stable logical identity for an end-to-end idempotent request. The
+    -- concrete request_id remains the first HTTP attempt's trace identity.
+    idempotency_id UUID UNIQUE,
     tenant_id UUID NOT NULL,
     user_id UUID NOT NULL,
     produce_ai_key_id UUID NOT NULL,
@@ -647,6 +818,10 @@ CREATE INDEX IF NOT EXISTS idx_balance_transactions_created_at ON balance_transa
 CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_recharge_order
     ON balance_transactions(order_id)
     WHERE transaction_type = 'recharge' AND order_id IS NOT NULL;
+-- 同一用量主账本只能产生一笔消费流水，供崩溃恢复安全重放后置结算。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log
+    ON balance_transactions(usage_log_id)
+    WHERE transaction_type = 'consume' AND usage_log_id IS NOT NULL;
 
 -- 添加注释
 COMMENT ON TABLE balance_transactions IS '余额变动记录表';

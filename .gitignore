@@ -26,7 +26,6 @@ node-token/
 
 config.toml
 plan.md
-AGENTS.md
 agent.md
 CLAUDE.md
 .claude
@@ -40,3 +39,4 @@ CLAUDE.md
 config.toml
 sub2/
 new/
+cpa/

@@ -42,6 +42,13 @@ impl RoutingEntry {
             Self::Anthropic => "anthropic",
         }
     }
+
+    fn account_capability(self) -> &'static str {
+        match self {
+            Self::OpenAi => "chat_completions",
+            Self::Anthropic => "messages",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +87,13 @@ fn routing_probes(accounts: &[AccountInfo], tenant_id: &str) -> Vec<RoutingProbe
         let Some(entry) = RoutingEntry::for_provider(&account.provider) else {
             continue;
         };
+        if !account
+            .api_capabilities
+            .iter()
+            .any(|capability| capability == entry.account_capability())
+        {
+            continue;
+        }
 
         for model in &account.models {
             if !model.trim().is_empty() && seen.insert((entry, model.clone())) {
@@ -658,6 +672,11 @@ mod tests {
             api_key_preview: "sk-***".to_string(),
             api_base: None,
             models: models.iter().map(|model| (*model).to_string()).collect(),
+            api_capabilities: if provider == "anthropic" {
+                vec!["messages".to_string()]
+            } else {
+                vec!["chat_completions".to_string()]
+            },
             rpm_limit: 60,
             current_rpm,
             is_active,
@@ -733,6 +752,7 @@ mod tests {
             api_key_preview: "sk-***".to_string(),
             api_base: None,
             models: many_models,
+            api_capabilities: vec!["chat_completions".to_string()],
             rpm_limit: 60,
             current_rpm: 0,
             is_active: true,
@@ -747,6 +767,21 @@ mod tests {
             routing_probes(&accounts, TENANT),
             vec![RoutingProbe {
                 model: "model-0".to_string(),
+                entry: RoutingEntry::OpenAi,
+            }]
+        );
+    }
+
+    #[test]
+    fn chat_routing_diagnostics_skip_responses_only_accounts() {
+        let mut responses_only = account(TENANT, "tenant", "openai", true, 0, &["responses-model"]);
+        responses_only.api_capabilities = vec!["responses".to_string()];
+        let chat = account(TENANT, "tenant", "openai", true, 0, &["chat-model"]);
+
+        assert_eq!(
+            routing_probes(&[responses_only, chat], TENANT),
+            vec![RoutingProbe {
+                model: "chat-model".to_string(),
                 entry: RoutingEntry::OpenAi,
             }]
         );

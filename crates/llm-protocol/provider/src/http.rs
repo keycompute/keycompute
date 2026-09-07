@@ -9,8 +9,11 @@ use chrono::{DateTime, Utc};
 use futures::{Stream, StreamExt};
 use keycompute_types::Result;
 use serde::{Deserialize, Serialize};
+use std::ops::Deref;
 use std::pin::Pin;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamResponseMeta {
@@ -132,6 +135,270 @@ fn response_meta(response: &reqwest::Response) -> UpstreamResponseMeta {
 
 const MAX_HTTP_FAILURE_INSPECTION_BYTES: usize = 8 * 1024;
 
+/// Maximum decoded body retained for JSON passthrough responses. Responses
+/// requests can legitimately contain large inline skill payloads, but an
+/// upstream must not be able to make the gateway buffer an unbounded body.
+pub const MAX_JSON_PASSTHROUGH_BODY_BYTES: usize = 96 * 1024 * 1024;
+/// Maximum estimated live memory while a passthrough JSON body and its parsed
+/// `serde_json::Value` coexist. A mostly-string 96 MiB response remains valid,
+/// while high-cardinality arrays/objects are rejected before tree allocation.
+pub const MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES: usize = 224 * 1024 * 1024;
+/// Parsed JSON whose estimated text-plus-tree working set exceeds this value
+/// must retain a process-wide large-body permit even when its wire body is
+/// small. This closes the many-tiny-values bypass of the raw-byte threshold.
+pub const LARGE_JSON_WORKING_SET_ADMISSION_BYTES: usize = 16 * 1024 * 1024;
+/// Bodies below this threshold use the ordinary fast path. Larger bodies and
+/// responses without a trustworthy decoded length share a process-wide budget.
+pub const LARGE_JSON_BODY_ADMISSION_BYTES: usize = 4 * 1024 * 1024;
+const LARGE_JSON_BODY_CONCURRENCY: usize = 2;
+
+/// Conservatively estimate the bytes simultaneously retained while JSON text
+/// is deserialized into a `serde_json::Value`. Structural bytes are counted
+/// only outside strings so large base64/string payloads retain their documented
+/// allowance, while arrays or maps containing many tiny values pay for their
+/// substantially larger tree representation.
+pub fn estimated_json_parse_working_set_bytes(text: &[u8]) -> usize {
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut structural_overhead = 0usize;
+    for byte in text {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+        } else if *byte == b'"' {
+            in_string = true;
+        } else if matches!(*byte, b'{' | b'[' | b',' | b':') {
+            structural_overhead = structural_overhead.saturating_add(64);
+        }
+    }
+
+    // The input text and parsed strings can coexist during deserialization.
+    text.len()
+        .saturating_mul(2)
+        .saturating_add(structural_overhead)
+}
+
+fn large_json_body_slots() -> Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    Arc::clone(SLOTS.get_or_init(|| Arc::new(Semaphore::new(LARGE_JSON_BODY_CONCURRENCY))))
+}
+
+/// Cloneable ownership of one process-wide large-response slot. Native events
+/// carry this guard until their resident JSON/SSE bytes leave the gateway.
+#[derive(Debug, Clone)]
+pub struct LargeBodyPermit {
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+/// Attempt to reserve a process-wide large-response slot without joining an
+/// unbounded waiter queue. Parsers use this after retaining their small-body
+/// allowance so overload cannot multiply that retained memory by the number of
+/// concurrent requests.
+pub fn try_acquire_large_body_permit() -> Option<LargeBodyPermit> {
+    let permit = large_json_body_slots().try_acquire_owned().ok()?;
+    Some(LargeBodyPermit {
+        _permit: Arc::new(permit),
+    })
+}
+
+/// A collected response body paired with the admission slot protecting its
+/// memory. The permit can be moved into the parsed native event.
+#[derive(Debug)]
+pub struct AdmittedResponseText {
+    text: String,
+    permit: Option<LargeBodyPermit>,
+}
+
+impl AdmittedResponseText {
+    pub fn unadmitted(text: String) -> Self {
+        Self { text, permit: None }
+    }
+
+    pub fn len(&self) -> usize {
+        self.text.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    pub fn into_parts(self) -> (String, Option<LargeBodyPermit>) {
+        (self.text, self.permit)
+    }
+
+    pub fn into_string(self) -> String {
+        self.text
+    }
+}
+
+impl Deref for AdmittedResponseText {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.text
+    }
+}
+
+impl From<String> for AdmittedResponseText {
+    fn from(text: String) -> Self {
+        Self::unadmitted(text)
+    }
+}
+
+/// Maximum decoded body retained for non-success JSON passthrough responses.
+/// Error payloads only need to preserve provider diagnostics and must not be
+/// able to consume the much larger success-response allowance.
+pub const MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES: usize = 1024 * 1024;
+
+pub const fn json_passthrough_body_limit(status: u16) -> usize {
+    if status >= 200 && status < 300 {
+        MAX_JSON_PASSTHROUGH_BODY_BYTES
+    } else {
+        MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES
+    }
+}
+
+pub const fn http_status_is_retryable(status: u16) -> bool {
+    status == 408 || status == 409 || status == 429 || status >= 500
+}
+
+pub fn body_read_failure(
+    meta: &UpstreamResponseMeta,
+    stable_error_code: &str,
+    summary: impl Into<String>,
+) -> UpstreamFailure {
+    UpstreamFailure {
+        kind: UpstreamFailureKind::BodyRead,
+        status: Some(meta.status),
+        headers_received_at: Some(meta.headers_received_at),
+        upstream_request_id: meta.upstream_request_id.clone(),
+        retryable: http_status_is_retryable(meta.status),
+        stable_error_code: stable_error_code.to_string(),
+        sanitized_summary: keycompute_types::sanitize_error_summary(&summary.into()),
+    }
+}
+
+fn append_bounded_body(
+    body: &mut Vec<u8>,
+    chunk: &[u8],
+    max_bytes: usize,
+    meta: &UpstreamResponseMeta,
+) -> std::result::Result<(), UpstreamFailure> {
+    if chunk.len() > max_bytes.saturating_sub(body.len()) {
+        return Err(body_read_failure(
+            meta,
+            "upstream_body_too_large",
+            format!("Upstream response body exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+fn try_admit_growing_large_body<T>(
+    potentially_large: bool,
+    retained_bytes: usize,
+    incoming_bytes: usize,
+    permit: &mut Option<T>,
+    try_acquire: impl FnOnce() -> Option<T>,
+    meta: &UpstreamResponseMeta,
+) -> std::result::Result<(), UpstreamFailure> {
+    if potentially_large
+        && permit.is_none()
+        && incoming_bytes > LARGE_JSON_BODY_ADMISSION_BYTES.saturating_sub(retained_bytes)
+    {
+        *permit = Some(try_acquire().ok_or_else(|| {
+            body_read_failure(
+                meta,
+                "upstream_body_capacity_exhausted",
+                "Upstream response body capacity is exhausted",
+            )
+        })?);
+    }
+    Ok(())
+}
+
+fn try_admit_declared_or_unknown_large_body<T>(
+    potentially_large: bool,
+    content_length: Option<u64>,
+    try_acquire: impl FnOnce() -> Option<T>,
+    meta: &UpstreamResponseMeta,
+) -> std::result::Result<Option<T>, UpstreamFailure> {
+    if potentially_large
+        && content_length.is_none_or(|length| length > LARGE_JSON_BODY_ADMISSION_BYTES as u64)
+    {
+        return try_acquire().map(Some).ok_or_else(|| {
+            body_read_failure(
+                meta,
+                "upstream_body_capacity_exhausted",
+                "Upstream response body capacity is exhausted",
+            )
+        });
+    }
+    Ok(None)
+}
+
+fn finish_bounded_response_text(
+    body: Vec<u8>,
+    permit: Option<LargeBodyPermit>,
+    meta: &UpstreamResponseMeta,
+) -> std::result::Result<AdmittedResponseText, UpstreamFailure> {
+    let text = String::from_utf8(body).map_err(|_| {
+        body_read_failure(
+            meta,
+            "upstream_body_invalid_utf8",
+            "Upstream response body is not valid UTF-8",
+        )
+    })?;
+    Ok(AdmittedResponseText { text, permit })
+}
+
+/// Collect a reqwest response with a decoded-byte limit while preserving the
+/// response metadata already captured by the caller.
+pub async fn collect_bounded_response_text(
+    response: reqwest::Response,
+    meta: &UpstreamResponseMeta,
+    max_bytes: usize,
+) -> std::result::Result<AdmittedResponseText, UpstreamFailure> {
+    let content_length = response.content_length();
+    if content_length.is_some_and(|length| length > max_bytes as u64) {
+        return Err(body_read_failure(
+            meta,
+            "upstream_body_too_large",
+            format!("Upstream response body exceeds the {max_bytes}-byte limit"),
+        ));
+    }
+
+    let potentially_large = max_bytes > LARGE_JSON_BODY_ADMISSION_BYTES;
+    let mut permit = try_admit_declared_or_unknown_large_body(
+        potentially_large,
+        content_length,
+        try_acquire_large_body_permit,
+        meta,
+    )?;
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|error| body_read_failure(meta, "upstream_body_read", error.to_string()))?;
+        try_admit_growing_large_body(
+            potentially_large,
+            body.len(),
+            chunk.len(),
+            &mut permit,
+            try_acquire_large_body_permit,
+            meta,
+        )?;
+        append_bounded_body(&mut body, &chunk, max_bytes, meta)?;
+    }
+    finish_bounded_response_text(body, permit, meta)
+}
+
 fn summarize_http_failure_body(status: u16, body: &[u8]) -> String {
     // The upstream body is untrusted and may contain credentials, request
     // fragments, or provider-internal details. Only retain the one allowlisted
@@ -174,7 +441,7 @@ async fn http_failure(response: reqwest::Response, meta: UpstreamResponseMeta) -
         status: Some(status),
         headers_received_at: Some(meta.headers_received_at),
         upstream_request_id: meta.upstream_request_id,
-        retryable: status == 408 || status == 409 || status == 429 || status >= 500,
+        retryable: http_status_is_retryable(status),
         stable_error_code: format!("upstream_http_{status}"),
         sanitized_summary: keycompute_types::sanitize_error_summary(&summary),
     }
@@ -244,6 +511,30 @@ pub trait HttpTransport: Send + Sync + std::fmt::Debug {
                 stable_error_code: "upstream_transport".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
             })
+    }
+
+    /// Metadata-preserving POST that leaves non-success status handling to a
+    /// native protocol adapter. The default preserves compatibility with test
+    /// and custom transports that only implement the legacy success-only API.
+    async fn post_json_passthrough_response(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: String,
+    ) -> std::result::Result<UpstreamResponse<AdmittedResponseText>, UpstreamFailure> {
+        self.post_json_response(url, headers, body)
+            .await
+            .map(|response| response.map_body(AdmittedResponseText::unadmitted))
+    }
+
+    /// Streaming counterpart of `post_json_passthrough_response`.
+    async fn post_stream_passthrough_response(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: String,
+    ) -> std::result::Result<UpstreamResponse<ByteStream>, UpstreamFailure> {
+        self.post_stream_response(url, headers, body).await
     }
     /// 发送 POST 请求并返回响应体
     async fn post_json(
@@ -402,6 +693,56 @@ impl DefaultHttpTransport {
 
 #[async_trait]
 impl HttpTransport for DefaultHttpTransport {
+    async fn post_json_passthrough_response(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: String,
+    ) -> std::result::Result<UpstreamResponse<AdmittedResponseText>, UpstreamFailure> {
+        let response = self
+            .build_request(reqwest::Method::POST, url, headers, body)
+            .timeout(self.request_timeout)
+            .send()
+            .await
+            .map_err(|error| UpstreamFailure::transport(&error, false))?;
+        let meta = response_meta(&response);
+        let body = collect_bounded_response_text(
+            response,
+            &meta,
+            json_passthrough_body_limit(meta.status),
+        )
+        .await?;
+        Ok(UpstreamResponse { meta, body })
+    }
+
+    async fn post_stream_passthrough_response(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: String,
+    ) -> std::result::Result<UpstreamResponse<ByteStream>, UpstreamFailure> {
+        let response = self
+            .build_request(reqwest::Method::POST, url, headers, body)
+            .timeout(self.stream_timeout)
+            .send()
+            .await
+            .map_err(|error| UpstreamFailure::transport(&error, false))?;
+        let meta = response_meta(&response);
+        let stream_status = meta.status;
+        let stream = response.bytes_stream().map(move |result| {
+            result.map_err(|error| keycompute_types::KeyComputeError::UpstreamFailure {
+                status: Some(stream_status),
+                stable_code: "upstream_stream_read".to_string(),
+                retryable: false,
+                summary: keycompute_types::sanitize_error_summary(&error.to_string()),
+            })
+        });
+        Ok(UpstreamResponse {
+            meta,
+            body: Box::pin(stream),
+        })
+    }
+
     async fn post_json_response(
         &self,
         url: &str,
@@ -611,6 +952,41 @@ mod tests {
     }
 
     #[test]
+    fn json_passthrough_errors_use_the_smaller_body_limit() {
+        assert_eq!(
+            json_passthrough_body_limit(200),
+            MAX_JSON_PASSTHROUGH_BODY_BYTES
+        );
+        assert_eq!(
+            json_passthrough_body_limit(299),
+            MAX_JSON_PASSTHROUGH_BODY_BYTES
+        );
+        assert_eq!(
+            json_passthrough_body_limit(400),
+            MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES
+        );
+        assert_eq!(
+            json_passthrough_body_limit(599),
+            MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES
+        );
+    }
+
+    #[test]
+    fn json_working_set_estimate_counts_structure_only_outside_strings() {
+        let string_heavy = br#"{"payload":"[[[[,,,,::::{{{{"}"#;
+        let array_heavy = br#"{"payload":[[],[],[],[],[]]}"#;
+
+        assert_eq!(
+            estimated_json_parse_working_set_bytes(string_heavy),
+            string_heavy.len() * 2 + 2 * 64
+        );
+        assert!(
+            estimated_json_parse_working_set_bytes(array_heavy)
+                > estimated_json_parse_working_set_bytes(string_heavy)
+        );
+    }
+
+    #[test]
     fn http_failure_summary_never_preserves_raw_body_details() {
         let body = br#"{"error":"client_secret=secret access_token=token prompt=private"}"#;
         let summary = summarize_http_failure_body(401, body);
@@ -633,5 +1009,156 @@ mod tests {
             summarize_http_failure_body(500, body),
             "Upstream returned HTTP 500"
         );
+    }
+
+    #[tokio::test]
+    async fn admitted_response_retains_its_slot_through_json_ownership_transfer() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = LargeBodyPermit {
+            _permit: Arc::new(
+                Arc::clone(&slots)
+                    .acquire_owned()
+                    .await
+                    .expect("test semaphore remains open"),
+            ),
+        };
+        let admitted = AdmittedResponseText {
+            text: "{}".to_string(),
+            permit: Some(permit),
+        };
+        assert!(Arc::clone(&slots).try_acquire_owned().is_err());
+
+        let (text, permit) = admitted.into_parts();
+        drop(text);
+        assert!(Arc::clone(&slots).try_acquire_owned().is_err());
+
+        drop(permit);
+        assert!(Arc::clone(&slots).try_acquire_owned().is_ok());
+    }
+
+    #[test]
+    fn bounded_passthrough_body_accepts_boundary_and_rejects_overflow() {
+        let meta = UpstreamResponseMeta::synthetic_success();
+        let mut body = vec![b'a'; 3];
+
+        append_bounded_body(&mut body, b"b", 4, &meta).unwrap();
+        assert_eq!(body, b"aaab");
+
+        let error = append_bounded_body(&mut body, b"c", 4, &meta).unwrap_err();
+        assert_eq!(error.kind, UpstreamFailureKind::BodyRead);
+        assert_eq!(error.stable_error_code, "upstream_body_too_large");
+        assert!(!error.retryable);
+        assert_eq!(body, b"aaab");
+    }
+
+    #[test]
+    fn late_large_body_admission_load_sheds_without_retaining_a_waiter() {
+        let meta = UpstreamResponseMeta::synthetic_success();
+        let mut permit = None::<()>;
+
+        let error = try_admit_growing_large_body(
+            true,
+            LARGE_JSON_BODY_ADMISSION_BYTES,
+            1,
+            &mut permit,
+            || None,
+            &meta,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind, UpstreamFailureKind::BodyRead);
+        assert_eq!(error.stable_error_code, "upstream_body_capacity_exhausted");
+        assert!(!error.retryable);
+        assert!(permit.is_none());
+    }
+
+    #[test]
+    fn late_large_body_admission_only_reserves_when_crossing_the_threshold() {
+        let meta = UpstreamResponseMeta::synthetic_success();
+        let mut boundary_permit = None::<()>;
+        try_admit_growing_large_body(
+            true,
+            LARGE_JSON_BODY_ADMISSION_BYTES - 1,
+            1,
+            &mut boundary_permit,
+            || panic!("the small-body allowance should include the boundary"),
+            &meta,
+        )
+        .unwrap();
+        assert!(boundary_permit.is_none());
+
+        let mut crossing_permit = None;
+        try_admit_growing_large_body(
+            true,
+            LARGE_JSON_BODY_ADMISSION_BYTES,
+            1,
+            &mut crossing_permit,
+            || Some(()),
+            &meta,
+        )
+        .unwrap();
+        assert_eq!(crossing_permit, Some(()));
+    }
+
+    #[test]
+    fn declared_or_unknown_large_body_admission_load_sheds_without_waiting() {
+        let meta = UpstreamResponseMeta::synthetic_success();
+
+        for content_length in [None, Some(LARGE_JSON_BODY_ADMISSION_BYTES as u64 + 1)] {
+            let error = try_admit_declared_or_unknown_large_body(
+                true,
+                content_length,
+                || None::<()>,
+                &meta,
+            )
+            .unwrap_err();
+
+            assert_eq!(error.kind, UpstreamFailureKind::BodyRead);
+            assert_eq!(error.stable_error_code, "upstream_body_capacity_exhausted");
+            assert!(!error.retryable);
+        }
+    }
+
+    #[test]
+    fn declared_small_body_does_not_consume_large_body_capacity() {
+        let meta = UpstreamResponseMeta::synthetic_success();
+        let permit: Option<()> = try_admit_declared_or_unknown_large_body(
+            true,
+            Some(LARGE_JSON_BODY_ADMISSION_BYTES as u64),
+            || panic!("the declared small-body boundary must not reserve a slot"),
+            &meta,
+        )
+        .unwrap();
+
+        assert!(permit.is_none());
+    }
+
+    #[test]
+    fn bounded_body_failures_follow_http_status_retryability() {
+        for (status, retryable) in [(400, false), (408, true), (429, true), (503, true)] {
+            let mut meta = UpstreamResponseMeta::synthetic_success();
+            meta.status = status;
+
+            assert_eq!(
+                body_read_failure(&meta, "upstream_body_read", "read failed").retryable,
+                retryable,
+                "unexpected retry classification for HTTP {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_response_rejects_invalid_utf8_without_lossy_replacement() {
+        let meta = UpstreamResponseMeta::synthetic_success();
+        let error = finish_bounded_response_text(vec![b'{', 0xff, b'}'], None, &meta)
+            .expect_err("invalid UTF-8 must not be rewritten into response text");
+
+        assert_eq!(error.kind, UpstreamFailureKind::BodyRead);
+        assert_eq!(error.stable_error_code, "upstream_body_invalid_utf8");
+        assert_eq!(
+            error.sanitized_summary,
+            "Upstream response body is not valid UTF-8"
+        );
+        assert!(!error.retryable);
     }
 }

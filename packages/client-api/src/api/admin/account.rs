@@ -68,6 +68,7 @@ pub struct AccountInfo {
     /// 自定义 Base URL（Provider 端点地址）
     pub api_base: Option<String>,
     pub models: Vec<String>,
+    pub api_capabilities: Vec<String>,
     pub rpm_limit: i32,
     pub current_rpm: i32,
     pub is_active: bool,
@@ -87,6 +88,7 @@ pub struct CreateAccountRequest {
     pub api_key: String,
     pub api_base: Option<String>,
     pub models: Vec<String>,
+    pub api_capabilities: Option<Vec<String>>,
 }
 
 impl CreateAccountRequest {
@@ -101,6 +103,7 @@ impl CreateAccountRequest {
             api_key: api_key.into(),
             api_base: None,
             models: Vec::new(),
+            api_capabilities: None,
         }
     }
 
@@ -113,6 +116,11 @@ impl CreateAccountRequest {
         self.models = models;
         self
     }
+
+    pub fn with_api_capabilities(mut self, api_capabilities: Vec<String>) -> Self {
+        self.api_capabilities = Some(api_capabilities);
+        self
+    }
 }
 
 /// 更新账号请求
@@ -122,6 +130,7 @@ pub struct UpdateAccountRequest {
     pub name: Option<String>,
     pub api_key: Option<String>,
     pub api_base: Option<String>,
+    pub api_capabilities: Option<Vec<String>>,
     pub is_active: Option<bool>,
     /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
     pub visibility: Option<String>,
@@ -152,6 +161,11 @@ impl UpdateAccountRequest {
         self
     }
 
+    pub fn with_api_capabilities(mut self, api_capabilities: Vec<String>) -> Self {
+        self.api_capabilities = Some(api_capabilities);
+        self
+    }
+
     pub fn with_visibility(mut self, visibility: impl Into<String>) -> Self {
         self.visibility = Some(visibility.into());
         self
@@ -179,7 +193,7 @@ pub struct AccountRefreshResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountRefreshResponse, AccountTestResponse};
+    use super::{AccountRefreshResponse, AccountTestResponse, CreateAccountRequest};
 
     #[test]
     fn account_test_response_reads_top_level_latency() {
@@ -216,5 +230,21 @@ mod tests {
         assert_eq!(response.refreshed_by, "admin-id");
         assert_eq!(response.previous_models, ["model-a"]);
         assert_eq!(response.updated_models, ["model-b"]);
+    }
+
+    #[test]
+    fn create_account_serializes_explicit_api_capabilities() {
+        let request = CreateAccountRequest::new("OpenAI", "openai", "sk-test")
+            .with_models(vec!["gpt-test".to_string()])
+            .with_api_capabilities(vec![
+                "chat_completions".to_string(),
+                "responses".to_string(),
+            ]);
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            value["api_capabilities"],
+            serde_json::json!(["chat_completions", "responses"])
+        );
     }
 }

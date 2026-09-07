@@ -15,9 +15,122 @@ use keycompute_types::{NoopRequestLifecycleRecorder, RequestLifecycleRecorder};
 use llm_gateway::{GatewayBuilder, GatewayExecutor, HttpProxy, ProxyConfig as HttpProxyConfig};
 use llm_protocol_provider::ProviderAdapter;
 use node_gateway::{NodeGatewayService, PostgresNodeIndex};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+
+// Each connection may retain up to roughly 384 MiB across its request queue,
+// continuation cache, and outbound queue. Keep worst cases bounded;
+// clients can multiplex concurrent response.create events on one connection.
+const RESPONSES_WEBSOCKET_GLOBAL_LIMIT: usize = 4;
+const RESPONSES_WEBSOCKET_PER_TENANT_LIMIT: usize = 2;
+
+/// Affinity between an OpenAI `resp_*`/`conv_*` resource and the provider
+/// account that owns it. The same value is kept in memory and Redis so chained
+/// requests and resource operations work across KeyCompute replicas.
+#[derive(Debug, Clone, Serialize, Deserialize, sea_orm::FromQueryResult, PartialEq, Eq)]
+pub(crate) struct ResponsesAffinity {
+    pub tenant_id: uuid::Uuid,
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub account_id: uuid::Uuid,
+    pub expires_at_unix: i64,
+}
+
+pub(crate) type ResponsesAffinityMap = tokio::sync::RwLock<HashMap<String, ResponsesAffinity>>;
+
+const RESPONSES_LARGE_HTTP_BODY_CONCURRENCY: usize = 2;
+pub(crate) const RESPONSES_LARGE_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Permit inserted before Axum buffers a large Responses HTTP request. The
+/// cloneable wrapper lets an extractor hand ownership to the response worker,
+/// which retains it for as long as the large request body remains resident.
+#[derive(Debug, Clone)]
+pub struct ResponsesHttpBodyPermit {
+    _permit: Arc<OwnedSemaphorePermit>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResponsesHttpBodyAdmission {
+    slots: Arc<Semaphore>,
+}
+
+impl ResponsesHttpBodyAdmission {
+    fn default_limit() -> Self {
+        Self {
+            slots: Arc::new(Semaphore::new(RESPONSES_LARGE_HTTP_BODY_CONCURRENCY)),
+        }
+    }
+
+    pub(crate) fn try_acquire(&self) -> Option<ResponsesHttpBodyPermit> {
+        Arc::clone(&self.slots)
+            .try_acquire_owned()
+            .ok()
+            .map(|permit| ResponsesHttpBodyPermit {
+                _permit: Arc::new(permit),
+            })
+    }
+}
+
+/// Process-wide admission control for long-lived Responses WebSocket
+/// connections. Per-event RPM/TPM checks still happen in the handler; these
+/// permits bound resident connection state and prevent one tenant from
+/// consuming every available socket.
+#[derive(Debug)]
+pub(crate) struct ResponsesWebSocketAdmission {
+    global: Arc<Semaphore>,
+    per_tenant_limit: usize,
+    tenants: Mutex<HashMap<uuid::Uuid, Weak<Semaphore>>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResponsesWebSocketPermit {
+    _global: OwnedSemaphorePermit,
+    _tenant: OwnedSemaphorePermit,
+}
+
+impl ResponsesWebSocketAdmission {
+    fn default_limits() -> Self {
+        Self::with_limits(
+            RESPONSES_WEBSOCKET_GLOBAL_LIMIT,
+            RESPONSES_WEBSOCKET_PER_TENANT_LIMIT,
+        )
+    }
+
+    pub(crate) fn with_limits(global_limit: usize, per_tenant_limit: usize) -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(global_limit)),
+            per_tenant_limit,
+            tenants: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) async fn try_acquire(
+        &self,
+        tenant_id: uuid::Uuid,
+    ) -> Option<ResponsesWebSocketPermit> {
+        let global = Arc::clone(&self.global).try_acquire_owned().ok()?;
+        let tenant = {
+            let mut tenants = self.tenants.lock().await;
+            tenants.retain(|_, semaphore| semaphore.strong_count() > 0);
+            if let Some(semaphore) = tenants.get(&tenant_id).and_then(Weak::upgrade) {
+                semaphore
+            } else {
+                let semaphore = Arc::new(Semaphore::new(self.per_tenant_limit));
+                tenants.insert(tenant_id, Arc::downgrade(&semaphore));
+                semaphore
+            }
+        };
+        let tenant = tenant.try_acquire_owned().ok()?;
+        Some(ResponsesWebSocketPermit {
+            _global: global,
+            _tenant: tenant,
+        })
+    }
+}
 
 /// 限流后端配置
 #[derive(Debug, Clone, Default)]
@@ -179,6 +292,14 @@ pub struct AppState {
     pub node_gateway: Option<Arc<NodeGatewayService>>,
     /// 统一缓存服务（Redis 不可用时自动降级为 no-op）
     pub cache: Arc<CacheService>,
+    /// Process-local fallback for Responses resource affinity. Redis mirrors
+    /// these entries when configured; the local map keeps the API functional
+    /// in installations intentionally running without Redis.
+    pub(crate) responses_affinity: Arc<ResponsesAffinityMap>,
+    /// Admission control for long-lived Responses WebSocket connections.
+    pub(crate) responses_websocket_admission: Arc<ResponsesWebSocketAdmission>,
+    /// Bounds concurrently resident large Responses HTTP request bodies.
+    pub(crate) responses_http_body_admission: Arc<ResponsesHttpBodyAdmission>,
     /// Gateway 配置
     pub gateway_config: keycompute_config::GatewayConfig,
     /// Best-effort lifecycle tracing sink.
@@ -210,6 +331,15 @@ impl std::fmt::Debug for AppState {
                 &self.node_gateway.as_ref().map(|_| "<NodeGatewayService>"),
             )
             .field("cache", &"<CacheService>")
+            .field("responses_affinity", &"<ResponsesAffinityMap>")
+            .field(
+                "responses_websocket_admission",
+                &"<ResponsesWebSocketAdmission>",
+            )
+            .field(
+                "responses_http_body_admission",
+                &"<ResponsesHttpBodyAdmission>",
+            )
             .field("gateway_config", &self.gateway_config)
             .field("lifecycle", &"<RequestLifecycleRecorder>")
             .finish()
@@ -298,6 +428,9 @@ impl AppState {
             payment: None,      // 支付服务需要数据库连接
             node_gateway: None, // 节点网关需要数据库连接和 Redis
             cache,
+            responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
+            responses_http_body_admission: Arc::new(ResponsesHttpBodyAdmission::default_limit()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }
@@ -377,6 +510,7 @@ impl AppState {
         llm_gateway::GatewayConfig {
             max_retries: gateway_config.max_retries,
             timeout_secs: gateway_config.timeout_secs,
+            stream_timeout_secs: gateway_config.stream_timeout_secs,
             enable_fallback: gateway_config.enable_fallback,
         }
     }
@@ -628,6 +762,9 @@ impl AppState {
             payment,
             node_gateway,
             cache,
+            responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
+            responses_http_body_admission: Arc::new(ResponsesHttpBodyAdmission::default_limit()),
             gateway_config: config.gateway,
             lifecycle,
         }
@@ -717,6 +854,9 @@ impl AppState {
             payment: None,      // 测试环境不需要支付服务
             node_gateway: None, // 测试环境不需要节点网关
             cache,
+            responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
+            responses_http_body_admission: Arc::new(ResponsesHttpBodyAdmission::default_limit()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }
@@ -849,6 +989,7 @@ mod tests {
         let gateway_config = keycompute_config::GatewayConfig {
             max_retries: 7,
             timeout_secs: 43,
+            stream_timeout_secs: 987,
             enable_fallback: false,
             ..keycompute_config::GatewayConfig::default()
         };
@@ -856,6 +997,7 @@ mod tests {
         let executor_config = AppState::gateway_executor_config(&gateway_config);
         assert_eq!(executor_config.max_retries, 7);
         assert_eq!(executor_config.timeout_secs, 43);
+        assert_eq!(executor_config.stream_timeout_secs, 987);
         assert!(!executor_config.enable_fallback);
     }
 
@@ -864,5 +1006,33 @@ mod tests {
         let state = AppState::new();
         // 基础测试，确保可以创建
         let _ = state;
+    }
+
+    #[tokio::test]
+    async fn responses_websocket_admission_enforces_global_and_tenant_limits() {
+        let admission = ResponsesWebSocketAdmission::with_limits(2, 1);
+        let first_tenant = uuid::Uuid::new_v4();
+        let second_tenant = uuid::Uuid::new_v4();
+
+        let first = admission.try_acquire(first_tenant).await.unwrap();
+        assert!(admission.try_acquire(first_tenant).await.is_none());
+        let second = admission.try_acquire(second_tenant).await.unwrap();
+        assert!(admission.try_acquire(uuid::Uuid::new_v4()).await.is_none());
+
+        drop(first);
+        assert!(admission.try_acquire(first_tenant).await.is_some());
+        drop(second);
+    }
+
+    #[test]
+    fn responses_http_body_admission_bounds_resident_large_requests() {
+        let admission = ResponsesHttpBodyAdmission::default_limit();
+        let first = admission.try_acquire().unwrap();
+        let second = admission.try_acquire().unwrap();
+        assert!(admission.try_acquire().is_none());
+
+        drop(first);
+        assert!(admission.try_acquire().is_some());
+        drop(second);
     }
 }

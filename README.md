@@ -320,6 +320,11 @@ curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer sk-xxx"
 ```
 
+The Responses API is available through `POST /v1/responses` and a WebSocket
+upgrade on `GET /v1/responses`. KeyCompute's WebSocket mode currently accepts
+`response.create` events only; connection-control events such as
+`response.steer` and `response.inject` are not supported.
+
 ### Admin API Overview
 
 | Category | Endpoint | Description |

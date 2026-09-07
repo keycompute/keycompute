@@ -18,7 +18,7 @@ pub mod config;
 pub mod request;
 mod selector;
 
-pub use client::HttpClient;
+pub use client::{HttpClient, JsonRequestMethod, PassthroughBody};
 pub use config::ProxyConfig;
 pub use request::ProxyRequest;
 pub use selector::ProxySelector;

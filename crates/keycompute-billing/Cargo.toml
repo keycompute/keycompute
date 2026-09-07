@@ -17,3 +17,6 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = "1.35"
 tracing = "0.1"
+
+[dev-dependencies]
+sea-orm = { workspace = true, features = ["proxy"] }

@@ -315,6 +315,11 @@ curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer sk-xxx"
 ```
 
+تتوفر Responses API عبر `POST /v1/responses`، وكذلك عبر ترقية WebSocket على
+`GET /v1/responses`. يقبل وضع WebSocket في KeyCompute حاليًا أحداث
+`response.create` فقط؛ ولا يدعم أحداث التحكم بالاتصال مثل `response.steer`
+و`response.inject`.
+
 ### API الإدارة
 
 | التصنيف | Endpoint | الوصف |

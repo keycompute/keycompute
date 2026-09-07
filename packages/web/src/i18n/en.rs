@@ -277,7 +277,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.example_node", "OpenAI SDK (Node.js)");
     m.insert("api_keys.example_curl", "cURL");
     m.insert("api_keys.example_protocol_openai", "OpenAI");
+    m.insert("api_keys.example_protocol_responses", "Responses");
     m.insert("api_keys.example_protocol_anthropic", "Anthropic");
+    m.insert("api_keys.example_websocket", "WebSocket");
     m.insert(
         "api_keys.example_python_anthropic",
         "Anthropic SDK (Python)",
@@ -1665,6 +1667,18 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "accounts.models_hint",
         "Separate multiple models with commas",
+    );
+    m.insert("accounts.api_mode", "API Capabilities *");
+    m.insert(
+        "accounts.api_mode_chat_completions",
+        "Chat Completions only",
+    );
+    m.insert("accounts.api_mode_responses", "Responses only");
+    m.insert("accounts.api_mode_both", "Chat Completions + Responses");
+    m.insert("accounts.api_mode_messages", "Anthropic Messages");
+    m.insert(
+        "accounts.api_mode_hint",
+        "Routing and connection tests only use the upstream APIs declared here",
     );
     m.insert("accounts.api_key", "API Key *");
     m.insert("accounts.custom_base_url", "Custom Base URL");

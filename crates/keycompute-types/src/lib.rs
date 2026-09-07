@@ -3,6 +3,7 @@
 //! 本 crate 包含所有后端 crate 共享的核心类型，无任何业务逻辑，
 //! 仅用于类型定义和数据结构。
 
+pub mod account;
 pub mod error;
 pub mod execution_plan;
 pub mod monitoring;
@@ -14,6 +15,7 @@ pub mod usage;
 pub mod user;
 
 // 重新导出最常用的类型
+pub use account::AccountApiCapability;
 pub use error::{ErrorCategory, KeyComputeError, Result};
 pub use execution_plan::{ExecutionPlan, ExecutionTarget, SensitiveString};
 pub use monitoring::*;
@@ -26,8 +28,8 @@ pub use node::{
 };
 pub use pricing::PricingSnapshot;
 pub use request::{
-    ChatCompletionRequest, ClientResponseOutcome, ContentPart, ExecutedProviderAccount, ImageUrl,
-    Message, MessageContent, MessageRole, RequestContext,
+    ChatCompletionRequest, ClientResponseOutcome, ClientUpstreamResponse, ContentPart,
+    ExecutedProviderAccount, ImageUrl, Message, MessageContent, MessageRole, RequestContext,
 };
 pub use response::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ErrorResponse, MessageDelta, ModelInfo,

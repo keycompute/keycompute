@@ -242,7 +242,30 @@ impl UserBalance {
             None => return Err(DbError::not_found("UserBalance", user_id.to_string())),
         };
 
-        if balance.available_balance < amount {
+        // A usage log is the idempotency key for billable consumption. The
+        // balance row lock serializes replays for this user; the partial
+        // unique index remains the final guard against inconsistent callers.
+        if let Some(usage_log_id) = usage_log_id {
+            let existing =
+                BalanceTransaction::find_consumption_by_usage_log(&tx, usage_log_id).await?;
+            if let Some(transaction) = existing {
+                if transaction.user_id != user_id || transaction.amount != -amount {
+                    return Err(DbError::Other(format!(
+                        "usage log {usage_log_id} is already bound to a different balance consumption"
+                    )));
+                }
+                tx.commit().await?;
+                return Ok((balance, transaction));
+            }
+        }
+
+        // An admitted API request may legitimately cost more than the small
+        // preflight threshold. Usage-ledger-backed consumption therefore
+        // records the remainder as a negative available balance (auditable
+        // debt) instead of leaving a durable settlement in a permanent retry
+        // loop. Administrative/manual consumption keeps the strict
+        // insufficient-balance check.
+        if balance.available_balance < amount && usage_log_id.is_none() {
             return Err(DbError::insufficient_balance(
                 amount.to_string(),
                 balance.available_balance.to_string(),
@@ -474,6 +497,18 @@ pub struct BalanceTransaction {
 }
 
 impl BalanceTransaction {
+    async fn find_consumption_by_usage_log(
+        db: &impl ConnectionTrait,
+        usage_log_id: Uuid,
+    ) -> Result<Option<BalanceTransaction>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM balance_transactions WHERE usage_log_id = $1 AND transaction_type = 'consume'",
+            [usage_log_id.into()],
+        );
+        Ok(BalanceTransaction::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 内部创建交易记录
     #[allow(clippy::too_many_arguments)]
     async fn create_internal(

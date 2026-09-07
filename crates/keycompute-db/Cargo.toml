@@ -24,3 +24,6 @@ subtle = "2.6"
 async-trait = "0.1"
 parking_lot = "0.12"
 rand = "0.8"
+
+[dev-dependencies]
+sea-orm = { workspace = true, features = ["proxy"] }

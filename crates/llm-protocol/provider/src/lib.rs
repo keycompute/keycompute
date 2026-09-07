@@ -18,12 +18,17 @@ pub mod stream;
 pub mod test_support;
 
 pub use http::{
-    ByteStream, DefaultHttpTransport, GetBinaryResponse, HttpTransport, UpstreamFailure,
-    UpstreamFailureKind, UpstreamResponse, UpstreamResponseMeta, summarize_http_failure_response,
+    AdmittedResponseText, ByteStream, DefaultHttpTransport, GetBinaryResponse, HttpTransport,
+    LARGE_JSON_BODY_ADMISSION_BYTES, LARGE_JSON_WORKING_SET_ADMISSION_BYTES, LargeBodyPermit,
+    MAX_JSON_PASSTHROUGH_BODY_BYTES, MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES,
+    MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, UpstreamFailure, UpstreamFailureKind, UpstreamResponse,
+    UpstreamResponseMeta, body_read_failure, collect_bounded_response_text,
+    estimated_json_parse_working_set_bytes, http_status_is_retryable, json_passthrough_body_limit,
+    summarize_http_failure_response, try_acquire_large_body_permit,
 };
 pub use protocol::{ProtocolType, normalize_base_url};
-pub use request::{UpstreamMessage, UpstreamRequest};
-pub use stream::StreamEvent;
+pub use request::{NativeResponsesRequest, UpstreamMessage, UpstreamRequest};
+pub use stream::{LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, NativeStreamEvent, StreamEvent};
 
 /// Provider 适配器 trait
 ///
@@ -80,6 +85,28 @@ pub trait ProviderAdapter: Send + Sync + std::fmt::Debug {
                 stable_error_code: "upstream_protocol".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
             })
+    }
+
+    /// 发起原生 OpenAI Responses 请求。
+    ///
+    /// Responses 使用独立入口，避免把它的原始 JSON、资源路径与协议头塞入
+    /// 通用 Chat Completions 请求。只有 OpenAI 协议适配器应覆盖此方法。
+    async fn stream_responses_with_meta(
+        &self,
+        _transport: &dyn HttpTransport,
+        _request: UpstreamRequest,
+        _native_request: NativeResponsesRequest,
+    ) -> std::result::Result<UpstreamResponse<StreamBox>, UpstreamFailure> {
+        Err(UpstreamFailure {
+            kind: UpstreamFailureKind::Protocol,
+            status: None,
+            headers_received_at: None,
+            upstream_request_id: None,
+            retryable: false,
+            stable_error_code: "responses_protocol_unsupported".to_string(),
+            sanitized_summary: "selected provider does not support the Responses protocol"
+                .to_string(),
+        })
     }
 
     /// 非流式请求（默认通过 stream 实现）

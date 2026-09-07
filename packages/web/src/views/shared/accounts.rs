@@ -124,6 +124,51 @@ fn base_url_placeholder_for(preset: &str) -> String {
         .unwrap_or_else(|| protocol_default_endpoint("openai").to_string())
 }
 
+fn default_api_mode_for_preset(preset: &str) -> &'static str {
+    match preset {
+        "openai" => "both",
+        "anthropic" => "messages",
+        _ => "chat_completions",
+    }
+}
+
+fn api_capabilities_for_mode(provider: &str, mode: &str) -> Vec<String> {
+    if provider == "anthropic" {
+        return vec!["messages".to_string()];
+    }
+    match mode {
+        "responses" => vec!["responses".to_string()],
+        "both" => vec!["chat_completions".to_string(), "responses".to_string()],
+        _ => vec!["chat_completions".to_string()],
+    }
+}
+
+fn api_mode_for_capabilities(provider: &str, capabilities: &[String]) -> &'static str {
+    if provider == "anthropic" {
+        return "messages";
+    }
+    let chat = capabilities
+        .iter()
+        .any(|capability| capability == "chat_completions");
+    let responses = capabilities
+        .iter()
+        .any(|capability| capability == "responses");
+    match (chat, responses) {
+        (true, true) => "both",
+        (false, true) => "responses",
+        _ => "chat_completions",
+    }
+}
+
+fn api_mode_label_key(mode: &str) -> &'static str {
+    match mode {
+        "responses" => "accounts.api_mode_responses",
+        "both" => "accounts.api_mode_both",
+        "messages" => "accounts.api_mode_messages",
+        _ => "accounts.api_mode_chat_completions",
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum AccountTestOutcome {
     Success,
@@ -180,6 +225,7 @@ fn AdminAccountsView() -> Element {
     let mut create_provider = use_signal(|| "openai".to_string());
     let mut create_api_key = use_signal(String::new);
     let mut create_api_base = use_signal(String::new);
+    let mut create_api_mode = use_signal(|| "both".to_string());
     let mut create_models_input = use_signal(String::new); // 逗号分隔的模型列表
     let mut saving = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
@@ -194,6 +240,7 @@ fn AdminAccountsView() -> Element {
     let mut edit_provider = use_signal(String::new);
     let mut edit_api_key = use_signal(String::new);
     let mut edit_api_base = use_signal(String::new);
+    let mut edit_api_mode = use_signal(|| "chat_completions".to_string());
     let mut edit_reset_api_base = use_signal(|| false);
     let mut edit_is_active = use_signal(|| true);
     let mut edit_visibility = use_signal(|| "tenant".to_string());
@@ -246,6 +293,7 @@ fn AdminAccountsView() -> Element {
         let provider = create_provider();
         let api_key_val = create_api_key();
         let api_base = create_api_base();
+        let api_mode = create_api_mode();
         let models_str = create_models_input();
         // 解析模型列表（逗号分隔，去空格，去空项）
         let models: Vec<String> = models_str
@@ -262,8 +310,9 @@ fn AdminAccountsView() -> Element {
         *error_msg.write() = String::new();
         spawn(async move {
             use client_api::api::admin::CreateAccountRequest;
-            let mut req =
-                CreateAccountRequest::new(name, provider, api_key_val).with_models(models);
+            let mut req = CreateAccountRequest::new(name, provider.clone(), api_key_val)
+                .with_models(models)
+                .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode));
             if !api_base.is_empty() {
                 req = req.with_api_base(api_base);
             }
@@ -275,6 +324,7 @@ fn AdminAccountsView() -> Element {
                     *create_provider.write() = "openai".to_string();
                     create_api_key.write().clear();
                     create_api_base.write().clear();
+                    *create_api_mode.write() = "both".to_string();
                     create_models_input.write().clear();
                     page.set(1);
                     accounts.restart();
@@ -294,6 +344,8 @@ fn AdminAccountsView() -> Element {
         let name_val = edit_name();
         let key_val = edit_api_key();
         let base_val = edit_api_base();
+        let api_mode = edit_api_mode();
+        let provider = edit_provider();
         let reset_base = edit_reset_api_base();
         let active = edit_is_active();
         let visibility = edit_visibility();
@@ -310,7 +362,8 @@ fn AdminAccountsView() -> Element {
             let mut req = UpdateAccountRequest::new()
                 .with_name(name_val)
                 .with_is_active(active)
-                .with_visibility(visibility);
+                .with_visibility(visibility)
+                .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode));
             if !tenant_id.trim().is_empty() {
                 req = req.with_tenant_id(tenant_id);
             }
@@ -459,6 +512,12 @@ fn AdminAccountsView() -> Element {
                                                         "{provider_label(&acc.provider, i18n)}"
                                                     }
                                                     p { class: "account-provider-code", "{acc.provider}" }
+                                                    p { class: "account-provider-code",
+                                                        {i18n.t(api_mode_label_key(api_mode_for_capabilities(
+                                                            &acc.provider,
+                                                            &acc.api_capabilities,
+                                                        )))}
+                                                    }
                                                     div { class: "account-models",
                                                         if acc.models.is_empty() {
                                                             span { class: "account-model-chip account-model-chip-muted",
@@ -558,6 +617,11 @@ fn AdminAccountsView() -> Element {
                                                             let id = acc.id.clone();
                                                             let name = acc.name.clone();
                                                             let provider = acc.provider.clone();
+                                                            let api_mode = api_mode_for_capabilities(
+                                                                &acc.provider,
+                                                                &acc.api_capabilities,
+                                                            )
+                                                            .to_string();
                                                             let active = acc.is_active;
                                                             let visibility = acc.visibility.clone();
                                                             let tenant_id = acc.tenant_id.clone();
@@ -565,6 +629,7 @@ fn AdminAccountsView() -> Element {
                                                                 edit_id.set(id.clone());
                                                                 edit_name.set(name.clone());
                                                                 edit_provider.set(provider.clone());
+                                                                edit_api_mode.set(api_mode.clone());
                                                                 edit_api_key.set(String::new());
                                                                 edit_api_base.set(String::new());
                                                                 edit_reset_api_base.set(false);
@@ -718,6 +783,8 @@ fn AdminAccountsView() -> Element {
                                         if let Some((_, _, protocol, base_url)) = preset_by_id(&preset_id) {
                                             *create_provider.write() = protocol.to_string();
                                             *create_api_base.write() = base_url.to_string();
+                                            *create_api_mode.write() =
+                                                default_api_mode_for_preset(&preset_id).to_string();
                                         }
                                         *create_preset.write() = preset_id;
                                     },
@@ -739,6 +806,20 @@ fn AdminAccountsView() -> Element {
                                     oninput: move |e| *create_models_input.write() = e.value(),
                                 }
                                 small { class: "form-hint", {i18n.t("accounts.models_hint")} }
+                            }
+                            if create_provider() == "openai" {
+                                div { class: "form-group",
+                                    label { class: "form-label", {i18n.t("accounts.api_mode")} }
+                                    select {
+                                        class: "input-field",
+                                        value: "{create_api_mode}",
+                                        onchange: move |e| *create_api_mode.write() = e.value(),
+                                        option { value: "chat_completions", {i18n.t("accounts.api_mode_chat_completions")} }
+                                        option { value: "responses", {i18n.t("accounts.api_mode_responses")} }
+                                        option { value: "both", {i18n.t("accounts.api_mode_both")} }
+                                    }
+                                    small { class: "form-hint", {i18n.t("accounts.api_mode_hint")} }
+                                }
                             }
                             div { class: "form-group",
                                 label { class: "form-label", {i18n.t("accounts.api_key")} }
@@ -819,6 +900,20 @@ fn AdminAccountsView() -> Element {
                                     placeholder: "{i18n.t(\"accounts.new_api_key_placeholder\")}",
                                     value: "{edit_api_key}",
                                     oninput: move |e| *edit_api_key.write() = e.value(),
+                                }
+                            }
+                            if edit_provider() == "openai" {
+                                div { class: "form-group",
+                                    label { class: "form-label", {i18n.t("accounts.api_mode")} }
+                                    select {
+                                        class: "input-field",
+                                        value: "{edit_api_mode}",
+                                        onchange: move |e| edit_api_mode.set(e.value()),
+                                        option { value: "chat_completions", {i18n.t("accounts.api_mode_chat_completions")} }
+                                        option { value: "responses", {i18n.t("accounts.api_mode_responses")} }
+                                        option { value: "both", {i18n.t("accounts.api_mode_both")} }
+                                    }
+                                    small { class: "form-hint", {i18n.t("accounts.api_mode_hint")} }
                                 }
                             }
                             div { class: "form-group",
@@ -1095,6 +1190,40 @@ mod tests {
         assert_eq!(
             protocol_default_endpoint("unknown"),
             "https://api.openai.com/v1"
+        );
+    }
+
+    #[test]
+    fn api_mode_maps_to_protocol_scoped_capabilities() {
+        assert_eq!(
+            api_capabilities_for_mode("openai", "both"),
+            ["chat_completions", "responses"]
+        );
+        assert_eq!(
+            api_capabilities_for_mode("openai", "responses"),
+            ["responses"]
+        );
+        assert_eq!(api_capabilities_for_mode("anthropic", "both"), ["messages"]);
+        assert_eq!(default_api_mode_for_preset("openai"), "both");
+        assert_eq!(default_api_mode_for_preset("deepseek"), "chat_completions");
+    }
+
+    #[test]
+    fn stored_capabilities_restore_the_edit_mode() {
+        assert_eq!(
+            api_mode_for_capabilities(
+                "openai",
+                &["chat_completions".to_string(), "responses".to_string()]
+            ),
+            "both"
+        );
+        assert_eq!(
+            api_mode_for_capabilities("openai", &["responses".to_string()]),
+            "responses"
+        );
+        assert_eq!(
+            api_mode_for_capabilities("anthropic", &["messages".to_string()]),
+            "messages"
         );
     }
 }

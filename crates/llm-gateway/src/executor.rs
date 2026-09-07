@@ -17,13 +17,14 @@ use futures::StreamExt;
 use keycompute_routing::{AccountStateStore, ProviderHealthStore};
 use keycompute_types::{
     AttemptKind, AttemptRef, AttemptResponseMeta, AttemptStatus, AttemptTraceFinish,
-    AttemptTraceStart, BillingStatus, ErrorOrigin, ExecutionPlan, ExecutionTarget, KeyComputeError,
-    NoopRequestLifecycleRecorder, RequestContext, RequestExecutionFailure,
-    RequestLifecycleRecorder, RequestStatus, Result, RouteType, StreamEndReason,
-    TraceErrorCategory, TraceErrorInfo, sanitize_error_summary,
+    AttemptTraceStart, BillingStatus, ClientUpstreamResponse, ErrorOrigin, ExecutionPlan,
+    ExecutionTarget, KeyComputeError, NoopRequestLifecycleRecorder, RequestContext,
+    RequestExecutionFailure, RequestLifecycleRecorder, RequestStatus, Result, RouteType,
+    StreamEndReason, TraceErrorCategory, TraceErrorInfo, sanitize_error_summary,
 };
 use llm_protocol_provider::{
-    DefaultHttpTransport, HttpTransport, ProviderAdapter, StreamEvent, UpstreamMessage,
+    DefaultHttpTransport, HttpTransport, LARGE_NATIVE_EVENT_CHANNEL_CAPACITY,
+    NativeResponsesRequest, NativeStreamEvent, ProviderAdapter, StreamEvent, UpstreamMessage,
     UpstreamRequest,
 };
 use std::collections::{HashMap, HashSet};
@@ -91,6 +92,15 @@ fn normalize_stream_error(error: KeyComputeError) -> KeyComputeError {
         // retryability. Preserve that structure across the parser boundary.
         error => error,
     }
+}
+
+fn execution_timeout(config: &GatewayConfig, ctx: &RequestContext) -> Duration {
+    let timeout_secs = if ctx.stream && ctx.native_openai_responses_request.is_some() {
+        config.stream_timeout_secs
+    } else {
+        config.timeout_secs
+    };
+    Duration::from_secs(timeout_secs)
 }
 
 /// A protocol-level error explicitly declared by the provider is a definite
@@ -176,13 +186,49 @@ fn classify_execution_error(error: &KeyComputeError) -> (TraceErrorCategory, Str
     }
 }
 
-/// Failures after dispatching a paid POST have an ambiguous provider outcome.
-/// They must stop the entire execution chain: `retryable = false` alone only
-/// skips copies of the same account and would still advance to a fallback.
-fn prevents_retry_and_fallback(error: &KeyComputeError) -> bool {
-    matches!(
-        error,
-        KeyComputeError::UpstreamFailure { stable_code, .. }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureContinuation {
+    Stop,
+    SameAccountOnly,
+    RetryOrFallback,
+}
+
+/// Failures after dispatching a paid POST may have an ambiguous provider
+/// outcome. Accepted or statusless ambiguous failures stop the chain. A 5xx
+/// from a native Responses create is also ambiguous because an origin or
+/// intermediary can fail after committing the resource: without idempotency it
+/// must stop, while a forwarded idempotency key permits retries only inside the
+/// same upstream account namespace.
+fn failure_continuation(ctx: &RequestContext, error: &KeyComputeError) -> FailureContinuation {
+    match error {
+        KeyComputeError::UpstreamFailure {
+            status: Some(200..=299),
+            ..
+        } => FailureContinuation::Stop,
+        KeyComputeError::UpstreamFailure {
+            status: Some(status),
+            ..
+        } if *status >= 500 && ctx.native_openai_responses_request.is_some() => {
+            if ctx
+                .native_openai_responses_headers
+                .contains_key("idempotency-key")
+            {
+                FailureContinuation::SameAccountOnly
+            } else {
+                FailureContinuation::Stop
+            }
+        }
+        // Definite rejection statuses can continue through normal policy. In
+        // particular, 408/409/429 are retryable but do not represent a
+        // committed Responses resource.
+        KeyComputeError::UpstreamFailure {
+            status: Some(_), ..
+        } => FailureContinuation::RetryOrFallback,
+        KeyComputeError::UpstreamFailure {
+            status: None,
+            stable_code,
+            ..
+        } => {
             if matches!(
                 stable_code.as_str(),
                 "upstream_ambiguous_timeout"
@@ -190,8 +236,14 @@ fn prevents_retry_and_fallback(error: &KeyComputeError) -> bool {
                     | "upstream_body_read"
                     | "upstream_stream_read"
                     | "upstream_stream_protocol"
-            )
-    )
+            ) {
+                FailureContinuation::Stop
+            } else {
+                FailureContinuation::RetryOrFallback
+            }
+        }
+        _ => FailureContinuation::RetryOrFallback,
+    }
 }
 
 async fn retry_backoff_cancelled(
@@ -251,6 +303,7 @@ struct PlanRunContext {
 struct TargetRunContext<'a> {
     tx: mpsc::Sender<StreamEvent>,
     sent_content: &'a mut bool,
+    deferred_native_error: &'a mut Option<NativeStreamEvent>,
     attempt: Option<AttemptRef>,
     lifecycle: Arc<dyn RequestLifecycleRecorder>,
     execution_completed: Arc<AtomicBool>,
@@ -473,7 +526,12 @@ impl GatewayExecutor {
         provider_health: Option<Arc<ProviderHealthStore>>,
         lifecycle: Arc<dyn RequestLifecycleRecorder>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
-        let (tx, rx) = mpsc::channel(100);
+        let channel_capacity = if ctx.native_openai_responses_request.is_some() {
+            LARGE_NATIVE_EVENT_CHANNEL_CAPACITY
+        } else {
+            100
+        };
+        let (tx, rx) = mpsc::channel(channel_capacity);
 
         // 在后台任务中实际执行上游请求，避免在返回 rx 之前就被有界 channel 背压阻塞。
         // 这对流式场景尤其重要：handler 需要先拿到 rx，才能开始消费事件并向客户端推送。
@@ -487,7 +545,10 @@ impl GatewayExecutor {
         // 执行超时：防止上游 Provider 无限阻塞导致资源泄漏。
         // 与 handler 层 keepalive (120s) 保持同一量级，确保 executor 不会在
         // handler 超时断开客户端后继续消耗资源（图片下载、上游 API 调用等）。
-        let exec_timeout = Duration::from_secs(self.config.timeout_secs);
+        // Native Responses streaming is consumed to its terminal event inside
+        // `run_plan`, unlike the ordinary chat path which hands the stream off
+        // after setup. Keep that work under the configured stream timeout.
+        let exec_timeout = execution_timeout(&self.config, &ctx);
         let active_attempt = Arc::new(Mutex::new(None::<AttemptRef>));
         let execution_completed = Arc::new(AtomicBool::new(false));
 
@@ -645,6 +706,10 @@ impl GatewayExecutor {
         // 流中途失败后不可再 fallback，否则客户端会收到
         // 「前一段部分内容 + 新一遍完整内容」的重复拼接输出
         let mut sent_content = false;
+        // Responses SSE error frames are definite failures and therefore do
+        // not commit a response, but the last attempted account's structured
+        // event must survive until fallback is exhausted.
+        let mut deferred_native_error = None;
 
         let target_count = targets.len();
         let mut attempted_accounts = HashSet::new();
@@ -738,6 +803,7 @@ impl GatewayExecutor {
                     TargetRunContext {
                         tx: tx.clone(),
                         sent_content: &mut sent_content,
+                        deferred_native_error: &mut deferred_native_error,
                         attempt,
                         lifecycle: Arc::clone(&lifecycle),
                         execution_completed: Arc::clone(&execution_completed),
@@ -826,16 +892,24 @@ impl GatewayExecutor {
                     // A non-retryable failure skips the remaining copies of
                     // this account but may still fall back to a different
                     // account. Retryable failures consume the next retry slot.
-                    let next_target = if prevents_retry_and_fallback(&e) {
-                        None
-                    } else {
-                        next_runnable_target_index(
+                    let continuation = failure_continuation(&ctx, &e);
+                    let next_target = match continuation {
+                        FailureContinuation::Stop => None,
+                        FailureContinuation::RetryOrFallback => next_runnable_target_index(
+                            &targets,
+                            target_index,
+                            &target,
+                            retryable,
+                            &compatibility_retry_pending,
+                        ),
+                        FailureContinuation::SameAccountOnly => next_runnable_target_index(
                             &targets,
                             target_index,
                             &target,
                             retryable,
                             &compatibility_retry_pending,
                         )
+                        .filter(|index| same_provider_account(&target, &targets[*index].target)),
                     };
                     let can_continue = !client_gone && !sent_content && next_target.is_some();
                     next_eligible_index = next_target.unwrap_or(target_count);
@@ -929,11 +1003,22 @@ impl GatewayExecutor {
                             provider = %provider_name,
                             "Stream failed after content was sent, skipping fallback to avoid duplicated output"
                         );
+                        if let Some(event) = deferred_native_error.take() {
+                            let _ = tx.send(StreamEvent::Native { event }).await;
+                        }
                         return Err(e);
                     }
                     last_error = Some(e);
                 }
             }
+        }
+
+        // All targets failed. Publish a final native Responses error before
+        // the executor's generic terminal Error so protocol handlers can
+        // forward its code/param/sequence fields and suppress the generic
+        // duplicate. Earlier attempts clear this slot before trying fallback.
+        if let Some(event) = deferred_native_error.take() {
+            let _ = tx.send(StreamEvent::Native { event }).await;
         }
 
         // 所有 target 都失败
@@ -953,6 +1038,7 @@ impl GatewayExecutor {
         let TargetRunContext {
             tx,
             sent_content,
+            deferred_native_error,
             attempt,
             lifecycle,
             execution_completed,
@@ -1023,11 +1109,30 @@ impl GatewayExecutor {
             native_anthropic_request: ctx.native_anthropic_request.clone(),
             native_anthropic_headers: ctx.native_anthropic_headers.clone(),
         };
+        let native_responses_request =
+            ctx.native_openai_responses_request
+                .clone()
+                .map(|body| NativeResponsesRequest {
+                    body,
+                    path: ctx
+                        .native_openai_responses_path
+                        .clone()
+                        .unwrap_or_else(|| "/responses".to_string()),
+                    headers: ctx.native_openai_responses_headers.clone(),
+                });
+        if native_responses_request.is_some() {
+            // A fallback must expose only its own final error. Never leak an
+            // earlier account's payload after a later attempt succeeds.
+            ctx.clear_client_upstream_response();
+            ctx.clear_client_upstream_response_headers();
+            *deferred_native_error = None;
+        }
 
         tracing::info!(
             request_id = %ctx.request_id,
             provider = %provider,
-            "try_execute: calling provider.stream_chat"
+            native_responses = native_responses_request.is_some(),
+            "try_execute: calling provider"
         );
 
         // 执行流式请求（传入 transport）。后台结算任务会继续持有下游
@@ -1041,7 +1146,17 @@ impl GatewayExecutor {
             _ = ctx.wait_for_client_disconnect() => {
                 return Err(KeyComputeError::Internal("client disconnected".to_string()));
             }
-            result = provider_impl.stream_chat_with_meta(transport.as_ref(), request) => result,
+            result = async {
+                if let Some(native_request) = native_responses_request {
+                    provider_impl
+                        .stream_responses_with_meta(transport.as_ref(), request, native_request)
+                        .await
+                } else {
+                    provider_impl
+                        .stream_chat_with_meta(transport.as_ref(), request)
+                        .await
+                }
+            } => result,
         };
         let response = match response_result {
             Ok(response) => response,
@@ -1068,11 +1183,6 @@ impl GatewayExecutor {
             }
         };
 
-        // From this point onward the request-local usage accumulator belongs
-        // to this accepted upstream attempt. Keep its billing attribution
-        // separate from successful completion: a fallback can produce partial
-        // billable usage and then truncate before `Done`.
-        ctx.set_usage_provider_account(provider.clone(), *account_id);
         if let Some(attempt) = attempt {
             let _ = lifecycle
                 .record_attempt_response_meta(
@@ -1086,6 +1196,18 @@ impl GatewayExecutor {
                 )
                 .await;
         }
+        let response_was_accepted = (200..300).contains(&response.meta.status);
+        if response_was_accepted {
+            // From this point onward the request-local usage accumulator belongs
+            // to this accepted upstream attempt. Keep its billing attribution
+            // separate from successful completion: a fallback can produce partial
+            // billable usage and then truncate before `Done`.
+            ctx.set_accepted_execution_target(target.clone());
+            ctx.set_usage_provider_account(provider.clone(), *account_id);
+            if ctx.native_openai_responses_request.is_some() {
+                ctx.set_client_upstream_response_headers(response.meta.headers.clone());
+            }
+        }
         let mut stream = response.body;
 
         tracing::info!(
@@ -1097,22 +1219,23 @@ impl GatewayExecutor {
         // 流处理管道
         let mut pipeline = StreamPipeline::new(ctx.request_id);
 
-        // 流开始前：使用 tiktoken 估算输入 token 数
-        // 注意：这只是估算；若上游先发送 InputUsage，会先覆盖输入侧，最终
-        // StreamEvent::Usage 再覆盖完整输入/输出用量。
-        // 使用 estimate 变体，避免把估算值误标记为 Provider 精确值。
-        let estimated_input_tokens = Self::estimate_input_tokens(&ctx.messages);
-        ctx.set_input_tokens_estimate(estimated_input_tokens);
-        // 每次上游尝试都是独立的新请求：输出侧同样清零估算起点，防止
-        // 上一次失败尝试的精确 output 值（已 finalized）泄漏到本次尝试的
-        // 估算计费中（fallback 若无最终 Usage 事件时会错误沿用残留值）。
-        ctx.set_output_tokens_estimate(0);
+        if response_was_accepted {
+            // 流开始前：使用 tiktoken 估算输入 token 数。HTTP 非 2xx 也由
+            // Responses adapter 作为 typed event 透传，但该类响应没有接受
+            // 推理请求，不能初始化用量或覆盖前一个已接受 attempt 的归属。
+            // 若上游发送 Usage，精确值会覆盖这里的估算。
+            let estimated_input_tokens = Self::estimate_context_input_tokens(ctx);
+            ctx.set_input_tokens_estimate(estimated_input_tokens);
+            // 每次被上游接受的尝试都是独立的新请求：输出侧同样清零估算
+            // 起点，防止 fallback 继承上一次失败尝试的精确 output 值。
+            ctx.set_output_tokens_estimate(0);
 
-        tracing::debug!(
-            request_id = %ctx.request_id,
-            estimated_input_tokens = estimated_input_tokens,
-            "Stream started, input tokens estimated"
-        );
+            tracing::debug!(
+                request_id = %ctx.request_id,
+                estimated_input_tokens = estimated_input_tokens,
+                "Stream started, input tokens estimated"
+            );
+        }
 
         // 只有 Provider 的显式 Done 才表示请求成功。特别是 Anthropic 必须收到
         // message_stop；不能仅凭 message_delta.stop_reason 或 TCP EOF 推断完成。
@@ -1268,6 +1391,79 @@ impl GatewayExecutor {
                         *sent_content = true;
                     }
                 }
+                StreamEvent::Native { event } => {
+                    let event = match extract_native_responses_http_error(event) {
+                        Err(response) => {
+                            let status = response.status;
+                            ctx.set_client_upstream_response(response);
+                            return Err(KeyComputeError::UpstreamFailure {
+                                status: Some(status),
+                                stable_code: format!("upstream_http_{status}"),
+                                retryable: status == 408
+                                    || status == 409
+                                    || status == 429
+                                    || status >= 500,
+                                summary: format!("Upstream returned HTTP {status}"),
+                            });
+                        }
+                        Ok(event) => event,
+                    };
+                    if native_responses_sse_is_error(&event) {
+                        *deferred_native_error = Some(event);
+                        return Err(provider_declared_stream_error());
+                    }
+                    // Native Responses deltas bypass the common `Delta` branch, but
+                    // they still represent billable model output. Keep an estimate
+                    // so a stream that is truncated before its terminal usage event
+                    // does not settle already-delivered output as zero. Exact usage,
+                    // when it arrives, continues to replace this estimate.
+                    if !ctx.is_output_finalized() {
+                        match &event {
+                            NativeStreamEvent::OpenAiResponsesJson { body, .. } => {
+                                let estimated = estimate_responses_output_tokens(body);
+                                if estimated > 0 {
+                                    // The following Usage event, when present, replaces
+                                    // this full-body estimate with Provider exact usage.
+                                    ctx.set_output_tokens_estimate(estimated);
+                                }
+                            }
+                            NativeStreamEvent::OpenAiResponsesSse {
+                                event: event_name,
+                                data,
+                                ..
+                            } if native_responses_sse_is_terminal(event_name, data) => {
+                                let estimated = estimate_responses_output_tokens(data);
+                                if estimated > 0 {
+                                    // A complete terminal body supersedes partial
+                                    // delta estimates. A following Usage event still
+                                    // replaces it with the provider's exact total.
+                                    ctx.set_output_tokens_estimate(estimated);
+                                }
+                            }
+                            _ => {
+                                if let Some(delta) = native_responses_billable_delta(&event) {
+                                    ctx.add_output_tokens(Self::estimate_tokens(delta));
+                                }
+                            }
+                        }
+                    }
+                    if !recorded_first_content {
+                        if let Some(attempt) = attempt {
+                            let _ = lifecycle
+                                .record_attempt_first_content(
+                                    ctx.request_id,
+                                    attempt.id,
+                                    chrono::Utc::now(),
+                                )
+                                .await;
+                        }
+                        recorded_first_content = true;
+                    }
+                    tx.send(StreamEvent::Native { event })
+                        .await
+                        .map_err(|_| KeyComputeError::Internal("Send error".into()))?;
+                    *sent_content = true;
+                }
             }
         }
 
@@ -1329,6 +1525,69 @@ impl GatewayExecutor {
         Self::estimate_tokens(&json_str)
     }
 
+    fn estimate_context_input_tokens(ctx: &RequestContext) -> u32 {
+        let message_tokens = Self::estimate_input_tokens(&ctx.messages);
+        let tool_tokens = ctx
+            .native_openai_responses_request
+            .as_deref()
+            .and_then(|body| body.get("input"))
+            .map(Self::estimate_responses_tool_input_tokens)
+            .unwrap_or_default();
+        message_tokens.saturating_add(tool_tokens)
+    }
+
+    /// Count token-bearing function/custom-tool payloads that the generic
+    /// message projection intentionally represents with a small placeholder.
+    /// Tokenize strings in place so a large tool result is not copied into a
+    /// second long-lived request representation. Nested images and files keep
+    /// their bounded message placeholders instead of treating base64 bytes as
+    /// text tokens.
+    fn estimate_responses_tool_input_tokens(value: &serde_json::Value) -> u32 {
+        match value {
+            serde_json::Value::Array(values) => values.iter().fold(0_u32, |tokens, value| {
+                tokens.saturating_add(Self::estimate_responses_tool_input_tokens(value))
+            }),
+            serde_json::Value::Object(object) => {
+                if matches!(
+                    object.get("type").and_then(serde_json::Value::as_str),
+                    Some(
+                        "function_call"
+                            | "function_call_output"
+                            | "custom_tool_call"
+                            | "custom_tool_call_output"
+                    )
+                ) {
+                    return Self::estimate_tool_item_strings(value);
+                }
+                object.values().fold(0_u32, |tokens, value| {
+                    tokens.saturating_add(Self::estimate_responses_tool_input_tokens(value))
+                })
+            }
+            _ => 0,
+        }
+    }
+
+    fn estimate_tool_item_strings(value: &serde_json::Value) -> u32 {
+        match value {
+            serde_json::Value::String(value) => Self::estimate_tokens(value),
+            serde_json::Value::Array(values) => values.iter().fold(0_u32, |tokens, value| {
+                tokens.saturating_add(Self::estimate_tool_item_strings(value))
+            }),
+            serde_json::Value::Object(object) => {
+                if matches!(
+                    object.get("type").and_then(serde_json::Value::as_str),
+                    Some("input_image" | "computer_screenshot" | "input_file")
+                ) {
+                    return 0;
+                }
+                object.values().fold(0_u32, |tokens, value| {
+                    tokens.saturating_add(Self::estimate_tool_item_strings(value))
+                })
+            }
+            _ => 0,
+        }
+    }
+
     /// 获取所有 Provider 名称列表
     pub fn list_providers(&self) -> Vec<String> {
         self.providers.keys().cloned().collect()
@@ -1380,6 +1639,137 @@ fn raw_event_commits_response(data: &str) -> bool {
         .and_then(serde_json::Value::as_str);
     // 只有显式登记的非提交事件才允许 fallback；未知事件保持保守（已提交）。
     !matches!(event, Some("ping") | Some("error")) && body_type != Some("error")
+}
+
+fn extract_native_responses_http_error(
+    event: NativeStreamEvent,
+) -> std::result::Result<NativeStreamEvent, ClientUpstreamResponse> {
+    match event {
+        NativeStreamEvent::OpenAiResponsesHttpError {
+            status,
+            headers,
+            body,
+        } => Err(ClientUpstreamResponse {
+            status,
+            headers,
+            body,
+        }),
+        event => Ok(event),
+    }
+}
+
+fn native_responses_sse_is_error(event: &NativeStreamEvent) -> bool {
+    matches!(
+        event,
+        NativeStreamEvent::OpenAiResponsesSse { event, data, .. }
+            if event.eq_ignore_ascii_case("error")
+                || data.get("type").and_then(serde_json::Value::as_str) == Some("error")
+    )
+}
+
+fn native_responses_sse_is_terminal(event: &str, data: &serde_json::Value) -> bool {
+    matches!(
+        data.get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(event),
+        "response.completed" | "response.failed" | "response.incomplete"
+    )
+}
+
+fn native_responses_billable_delta(event: &NativeStreamEvent) -> Option<&str> {
+    let NativeStreamEvent::OpenAiResponsesSse { event, data, .. } = event else {
+        return None;
+    };
+    let event_type = data
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(event);
+    matches!(
+        event_type,
+        "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.function_call_arguments.delta"
+            | "response.mcp_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
+            | "response.code_interpreter_call_code.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+    )
+    .then(|| data.get("delta").and_then(serde_json::Value::as_str))
+    .flatten()
+}
+
+/// Estimate generated Responses output when a compatible upstream omits the
+/// terminal `usage` object. Only generated text and tool-call payload fields
+/// are projected; IDs, status metadata, URLs, and binary image data must not
+/// inflate the billable estimate.
+pub fn estimate_responses_output_tokens(body: &serde_json::Value) -> u32 {
+    let body = body.get("response").unwrap_or(body);
+    let Some(output) = body.get("output") else {
+        return 0;
+    };
+    let mut fragments = Vec::new();
+    collect_responses_output_fragments(output, &mut fragments);
+    if fragments.is_empty() {
+        return 0;
+    }
+    GatewayExecutor::estimate_tokens(&fragments.join("\n"))
+}
+
+fn collect_responses_output_fragments<'a>(
+    value: &'a serde_json::Value,
+    fragments: &mut Vec<&'a str>,
+) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                collect_responses_output_fragments(value, fragments);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            // Generated natural-language, reasoning, and tool invocation fields.
+            // Function/tool names are included because they are model-selected.
+            for name in [
+                "text",
+                "refusal",
+                "name",
+                "arguments",
+                "input",
+                "code",
+                "diff",
+                "path",
+                "query",
+            ] {
+                if let Some(value) = object
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    fragments.push(value);
+                }
+            }
+            // Shell commands and computer key sequences are generated arrays
+            // rather than scalar strings.
+            for name in ["commands", "keys"] {
+                if let Some(values) = object.get(name).and_then(serde_json::Value::as_array) {
+                    fragments.extend(
+                        values
+                            .iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .filter(|value| !value.is_empty()),
+                    );
+                }
+            }
+            // Recurse only through known generated-output containers. This
+            // deliberately excludes IDs, metadata, URLs, and base64 fields.
+            for name in ["output", "content", "summary", "action", "operation"] {
+                if let Some(value) = object.get(name) {
+                    collect_responses_output_fragments(value, fragments);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -1792,6 +2182,36 @@ mod tests {
     struct RawEventProvider;
 
     #[derive(Debug)]
+    struct ResponsesOnlyProvider {
+        chat_calls: Arc<AtomicUsize>,
+        responses_calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct AcceptedResponseFailureProvider;
+
+    #[derive(Debug)]
+    struct RejectedResponseBodyReadFailureProvider;
+
+    #[derive(Debug)]
+    struct NativeResponsesSseErrorProvider;
+
+    #[derive(Debug)]
+    struct NativeResponsesDeltaTruncatedProvider;
+
+    #[derive(Debug)]
+    struct NativeResponsesSseWithoutUsageProvider;
+
+    #[derive(Debug)]
+    struct NativeResponsesHttpErrorProvider {
+        status: u16,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
+    struct NativeResponsesJsonWithoutUsageProvider;
+
+    #[derive(Debug)]
     struct ZeroUsageProvider;
 
     #[async_trait]
@@ -1936,6 +2356,414 @@ mod tests {
                 Ok(StreamEvent::raw("native-event")),
                 Ok(StreamEvent::Done),
             ])))
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for ResponsesOnlyProvider {
+        fn name(&self) -> &'static str {
+            "openai"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            self.chat_calls.fetch_add(1, Ordering::SeqCst);
+            unreachable!("native Responses requests must not use the chat entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            request: UpstreamRequest,
+            native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            self.responses_calls.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(request.model, "gpt-4o");
+            assert_eq!(native_request.path, "/responses");
+            assert_eq!(native_request.body["input"], "hello");
+            assert_eq!(
+                native_request
+                    .headers
+                    .get("openai-beta")
+                    .map(String::as_str),
+                Some("responses=v1")
+            );
+            let mut meta = llm_protocol_provider::UpstreamResponseMeta::synthetic_success();
+            meta.headers = vec![
+                ("openai-version".to_string(), "2026-01-01".to_string()),
+                (
+                    "x-ratelimit-remaining-requests".to_string(),
+                    "7".to_string(),
+                ),
+            ];
+            Ok(llm_protocol_provider::UpstreamResponse {
+                meta,
+                body: Box::pin(futures::stream::iter(vec![
+                    Ok(StreamEvent::raw("native-response")),
+                    Ok(StreamEvent::Done),
+                ])),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for AcceptedResponseFailureProvider {
+        fn name(&self) -> &'static str {
+            "openai"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            unreachable!("the test uses the native Responses entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+            _native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            Err(llm_protocol_provider::UpstreamFailure {
+                kind: llm_protocol_provider::UpstreamFailureKind::Protocol,
+                status: Some(200),
+                headers_received_at: Some(chrono::Utc::now()),
+                upstream_request_id: Some("accepted-request".to_string()),
+                retryable: false,
+                stable_error_code: "upstream_protocol".to_string(),
+                sanitized_summary: "invalid successful Responses body".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for RejectedResponseBodyReadFailureProvider {
+        fn name(&self) -> &'static str {
+            "rejected-body-read"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            unreachable!("the test uses the native Responses entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+            _native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            Err(llm_protocol_provider::UpstreamFailure {
+                kind: llm_protocol_provider::UpstreamFailureKind::BodyRead,
+                status: Some(429),
+                headers_received_at: Some(chrono::Utc::now()),
+                upstream_request_id: Some("rejected-request".to_string()),
+                retryable: true,
+                stable_error_code: "upstream_body_read".to_string(),
+                sanitized_summary: "failed to read rejected response body".to_string(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for NativeResponsesSseErrorProvider {
+        fn name(&self) -> &'static str {
+            "responses-sse-error"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            unreachable!("the test uses the native Responses entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+            _native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            Ok(llm_protocol_provider::UpstreamResponse {
+                meta: llm_protocol_provider::UpstreamResponseMeta::synthetic_success(),
+                body: Box::pin(futures::stream::once(async move {
+                    Ok(StreamEvent::native(NativeStreamEvent::OpenAiResponsesSse {
+                        event: "error".to_string(),
+                        data: serde_json::json!({
+                            "type": "error",
+                            "code": "rate_limit_exceeded",
+                            "message": "slow down",
+                            "param": "model",
+                            "sequence_number": 9,
+                        }),
+                        admission: None,
+                    }))
+                })),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for NativeResponsesHttpErrorProvider {
+        fn name(&self) -> &'static str {
+            "responses-http-error"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            unreachable!("the test uses the native Responses entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+            _native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut meta = llm_protocol_provider::UpstreamResponseMeta::synthetic_success();
+            meta.status = self.status;
+            let status = self.status;
+            let code = if status == 429 {
+                "rate_limit_exceeded"
+            } else {
+                "upstream_server_error"
+            };
+            Ok(llm_protocol_provider::UpstreamResponse {
+                meta,
+                body: Box::pin(futures::stream::once(async move {
+                    Ok(StreamEvent::native(
+                        NativeStreamEvent::OpenAiResponsesHttpError {
+                            status,
+                            headers: vec![("retry-after".to_string(), "2".to_string())],
+                            body: format!(r#"{{"error":{{"code":"{code}"}}}}"#),
+                        },
+                    ))
+                })),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for NativeResponsesJsonWithoutUsageProvider {
+        fn name(&self) -> &'static str {
+            "responses-json-without-usage"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            unreachable!("the test uses the native Responses entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+            _native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            Ok(llm_protocol_provider::UpstreamResponse {
+                meta: llm_protocol_provider::UpstreamResponseMeta::synthetic_success(),
+                body: Box::pin(futures::stream::iter(vec![
+                    Ok(StreamEvent::native(
+                        NativeStreamEvent::OpenAiResponsesJson {
+                            body: serde_json::json!({
+                                "id": "resp_without_usage",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "content": [{
+                                            "type": "output_text",
+                                            "text": "estimated response text"
+                                        }]
+                                    },
+                                    {
+                                        "type": "function_call",
+                                        "name": "lookup_weather",
+                                        "arguments": "{\"city\":\"Paris\"}"
+                                    }
+                                ],
+                                "usage": null
+                            }),
+                            admission: None,
+                        },
+                    )),
+                    Ok(StreamEvent::Done),
+                ])),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for NativeResponsesSseWithoutUsageProvider {
+        fn name(&self) -> &'static str {
+            "responses-sse-without-usage"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            unreachable!("the test uses the native Responses entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+            _native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            Ok(llm_protocol_provider::UpstreamResponse {
+                meta: llm_protocol_provider::UpstreamResponseMeta::synthetic_success(),
+                body: Box::pin(futures::stream::iter(vec![
+                    Ok(StreamEvent::native(NativeStreamEvent::OpenAiResponsesSse {
+                        event: "response.output_text.delta".to_string(),
+                        data: serde_json::json!({
+                            "type": "response.output_text.delta",
+                            "delta": "partial"
+                        }),
+                        admission: None,
+                    })),
+                    Ok(StreamEvent::native(NativeStreamEvent::OpenAiResponsesSse {
+                        event: "response.completed".to_string(),
+                        data: serde_json::json!({
+                            "type": "response.completed",
+                            "response": {
+                                "id": "resp_sse_without_usage",
+                                "object": "response",
+                                "status": "completed",
+                                "output": [{
+                                    "type": "message",
+                                    "content": [{
+                                        "type": "output_text",
+                                        "text": "complete terminal response text"
+                                    }]
+                                }],
+                                "usage": null
+                            }
+                        }),
+                        admission: None,
+                    })),
+                    Ok(StreamEvent::Done),
+                ])),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProviderAdapter for NativeResponsesDeltaTruncatedProvider {
+        fn name(&self) -> &'static str {
+            "responses-delta-truncated"
+        }
+
+        fn supported_models(&self) -> Vec<&'static str> {
+            Vec::new()
+        }
+
+        async fn stream_chat(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            unreachable!("the test uses the native Responses entry point")
+        }
+
+        async fn stream_responses_with_meta(
+            &self,
+            _transport: &dyn HttpTransport,
+            _request: UpstreamRequest,
+            _native_request: NativeResponsesRequest,
+        ) -> std::result::Result<
+            llm_protocol_provider::UpstreamResponse<llm_protocol_provider::StreamBox>,
+            llm_protocol_provider::UpstreamFailure,
+        > {
+            Ok(llm_protocol_provider::UpstreamResponse {
+                meta: llm_protocol_provider::UpstreamResponseMeta::synthetic_success(),
+                body: Box::pin(futures::stream::iter(vec![
+                    Ok(StreamEvent::native(NativeStreamEvent::OpenAiResponsesSse {
+                        event: "response.output_text.delta".to_string(),
+                        data: serde_json::json!({
+                            "type": "response.output_text.delta",
+                            "delta": "hello"
+                        }),
+                        admission: None,
+                    })),
+                    Ok(StreamEvent::native(NativeStreamEvent::OpenAiResponsesSse {
+                        event: "response.function_call_arguments.delta".to_string(),
+                        data: serde_json::json!({
+                            "type": "response.function_call_arguments.delta",
+                            "delta": "{\"city\":\"Paris\"}"
+                        }),
+                        admission: None,
+                    })),
+                ])),
+            })
         }
     }
 
@@ -2195,7 +3023,36 @@ mod tests {
     }
 
     #[test]
+    fn native_responses_stream_uses_the_stream_execution_timeout() {
+        let config = GatewayConfig {
+            timeout_secs: 120,
+            stream_timeout_secs: 600,
+            ..GatewayConfig::default()
+        };
+        let chat_stream = create_test_context();
+        assert_eq!(
+            execution_timeout(&config, &chat_stream),
+            Duration::from_secs(120)
+        );
+
+        let mut responses_stream = create_test_context();
+        responses_stream.native_openai_responses_request =
+            Some(Arc::new(serde_json::json!({"model": "gpt-4o"})));
+        assert_eq!(
+            execution_timeout(&config, &responses_stream),
+            Duration::from_secs(600)
+        );
+
+        responses_stream.stream = false;
+        assert_eq!(
+            execution_timeout(&config, &responses_stream),
+            Duration::from_secs(120)
+        );
+    }
+
+    #[test]
     fn parser_stream_errors_become_chain_terminal_protocol_failures() {
+        let ctx = create_test_context();
         let error = normalize_stream_error(KeyComputeError::ProviderError(
             "client_secret=secret prompt=private".to_string(),
         ));
@@ -2226,7 +3083,10 @@ mod tests {
                 false,
             )
         );
-        assert!(prevents_retry_and_fallback(&error));
+        assert_eq!(
+            failure_continuation(&ctx, &error),
+            FailureContinuation::Stop
+        );
 
         let declared = provider_declared_stream_error();
         assert_eq!(
@@ -2237,11 +3097,15 @@ mod tests {
                 false,
             )
         );
-        assert!(!prevents_retry_and_fallback(&declared));
+        assert_eq!(
+            failure_continuation(&ctx, &declared),
+            FailureContinuation::RetryOrFallback
+        );
     }
 
     #[test]
     fn ambiguous_post_dispatch_failures_stop_the_execution_chain() {
+        let mut ctx = create_test_context();
         let error = normalize_stream_error(KeyComputeError::UpstreamFailure {
             status: Some(200),
             stable_code: "upstream_stream_read".to_string(),
@@ -2257,7 +3121,10 @@ mod tests {
                 false,
             )
         );
-        assert!(prevents_retry_and_fallback(&error));
+        assert_eq!(
+            failure_continuation(&ctx, &error),
+            FailureContinuation::Stop
+        );
 
         for stable_code in [
             "upstream_body_read",
@@ -2265,15 +3132,88 @@ mod tests {
             "upstream_ambiguous_transport",
             "upstream_stream_protocol",
         ] {
-            assert!(prevents_retry_and_fallback(
+            assert_eq!(
+                failure_continuation(
+                    &ctx,
+                    &KeyComputeError::UpstreamFailure {
+                        status: None,
+                        stable_code: stable_code.to_string(),
+                        retryable: false,
+                        summary: "ambiguous provider outcome".to_string(),
+                    }
+                ),
+                FailureContinuation::Stop
+            );
+        }
+
+        for stable_code in ["upstream_protocol", "upstream_body_too_large"] {
+            assert_eq!(
+                failure_continuation(
+                    &ctx,
+                    &KeyComputeError::UpstreamFailure {
+                        status: Some(200),
+                        stable_code: stable_code.to_string(),
+                        retryable: false,
+                        summary: "invalid success response".to_string(),
+                    }
+                ),
+                FailureContinuation::Stop
+            );
+        }
+
+        let server_error = KeyComputeError::UpstreamFailure {
+            status: Some(502),
+            stable_code: "upstream_http_status".to_string(),
+            retryable: true,
+            summary: "upstream unavailable".to_string(),
+        };
+        assert_eq!(
+            failure_continuation(&ctx, &server_error),
+            FailureContinuation::RetryOrFallback,
+            "ordinary protocol requests retain their existing 5xx policy"
+        );
+
+        ctx.native_openai_responses_request =
+            Some(Arc::new(serde_json::json!({"model": "gpt-4o"})));
+        assert_eq!(
+            failure_continuation(&ctx, &server_error),
+            FailureContinuation::Stop,
+            "a non-idempotent Responses 5xx has an ambiguous paid outcome"
+        );
+        ctx.native_openai_responses_headers.insert(
+            "idempotency-key".to_string(),
+            "tenant-scoped-upstream-key".to_string(),
+        );
+        assert_eq!(
+            failure_continuation(&ctx, &server_error),
+            FailureContinuation::SameAccountOnly,
+            "idempotency is scoped to one upstream account"
+        );
+
+        assert_eq!(
+            failure_continuation(
+                &ctx,
                 &KeyComputeError::UpstreamFailure {
                     status: None,
-                    stable_code: stable_code.to_string(),
-                    retryable: false,
-                    summary: "ambiguous provider outcome".to_string(),
+                    stable_code: "upstream_protocol".to_string(),
+                    retryable: true,
+                    summary: "provider rejected the request".to_string(),
                 }
-            ));
-        }
+            ),
+            FailureContinuation::RetryOrFallback
+        );
+        assert_eq!(
+            failure_continuation(
+                &ctx,
+                &KeyComputeError::UpstreamFailure {
+                    status: Some(429),
+                    stable_code: "upstream_body_read".to_string(),
+                    retryable: true,
+                    summary: "failed to read rejected response body".to_string(),
+                }
+            ),
+            FailureContinuation::RetryOrFallback
+        );
 
         let ambiguous_timeout = KeyComputeError::UpstreamFailure {
             status: None,
@@ -2326,6 +3266,7 @@ mod tests {
             GatewayConfig {
                 max_retries: 1,
                 timeout_secs: 5,
+                stream_timeout_secs: 5,
                 enable_fallback: true,
             },
             providers,
@@ -2484,6 +3425,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn responses_tool_payloads_contribute_to_the_fallback_input_estimate() {
+        let mut small = create_test_context();
+        small.messages = vec![Message::user("[tool]")];
+        small.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "short",
+            }]
+        })));
+        let mut large = small.clone();
+        large.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "large tool output ".repeat(4096),
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_2",
+                    "name": "shell",
+                    "input": "custom tool input ".repeat(2048),
+                }
+            ]
+        })));
+
+        let small_tokens = GatewayExecutor::estimate_context_input_tokens(&small);
+        let large_tokens = GatewayExecutor::estimate_context_input_tokens(&large);
+
+        assert!(large_tokens > small_tokens.saturating_add(1_000));
+        assert_eq!(
+            GatewayExecutor::estimate_input_tokens(&large.messages),
+            GatewayExecutor::estimate_input_tokens(&small.messages),
+            "large native payloads must not be copied into the message projection"
+        );
+    }
+
     #[tokio::test]
     async fn test_execute_returns_receiver_before_consuming_large_stream() {
         let config = GatewayConfig::default();
@@ -2535,6 +3517,7 @@ mod tests {
             GatewayConfig {
                 max_retries: 0,
                 timeout_secs: 1,
+                stream_timeout_secs: 1,
                 enable_fallback: false,
             },
             providers,
@@ -2707,6 +3690,675 @@ mod tests {
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
     }
 
+    #[tokio::test]
+    async fn native_responses_context_uses_the_provider_responses_entry_point() {
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let responses_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "openai".to_string(),
+            Arc::new(ResponsesOnlyProvider {
+                chat_calls: Arc::clone(&chat_calls),
+                responses_calls: Arc::clone(&responses_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "client-model",
+            "input": "hello"
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        context
+            .native_openai_responses_headers
+            .insert("openai-beta".to_string(), "responses=v1".to_string());
+        let account_id = Uuid::new_v4();
+        let plan = ExecutionPlan {
+            primary: ExecutionTarget::new_provider("openai", account_id, "http://mock", "mock-key"),
+            fallback_chain: Vec::new(),
+        };
+        let context = Arc::new(context);
+
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                plan,
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+        );
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+        assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
+        let Some(ExecutionTarget::ProviderAccount {
+            provider,
+            account_id: accepted_account_id,
+            endpoint,
+            upstream_api_key,
+        }) = context.accepted_execution_target()
+        else {
+            panic!("accepted Responses target must be retained");
+        };
+        assert_eq!(provider, "openai");
+        assert_eq!(accepted_account_id, account_id);
+        assert_eq!(endpoint, "http://mock");
+        assert_eq!(upstream_api_key.expose(), "mock-key");
+        assert_eq!(
+            context.client_upstream_response_headers(),
+            vec![
+                ("openai-version".to_string(), "2026-01-01".to_string()),
+                (
+                    "x-ratelimit-remaining-requests".to_string(),
+                    "7".to_string()
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_responses_parse_failure_never_calls_a_fallback_account() {
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "accepted-failure".to_string(),
+            Arc::new(AcceptedResponseFailureProvider) as Arc<dyn ProviderAdapter>,
+        );
+        providers.insert(
+            "fallback".to_string(),
+            Arc::new(CountingProvider {
+                calls: Arc::clone(&fallback_calls),
+                notified: None,
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello"
+        })));
+        let context = Arc::new(context);
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "accepted-failure",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: vec![ExecutionTarget::new_provider(
+                        "fallback",
+                        Uuid::new_v4(),
+                        "http://fallback",
+                        "mock-key",
+                    )],
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await,
+            Ok(Some(StreamEvent::Error { .. }))
+        ));
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            context
+                .execution_failure()
+                .expect("the terminal post-acceptance failure should be retained")
+                .error
+                .code,
+            "upstream_protocol"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_responses_body_read_failure_allows_fallback() {
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let responses_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "rejected-body-read".to_string(),
+            Arc::new(RejectedResponseBodyReadFailureProvider) as Arc<dyn ProviderAdapter>,
+        );
+        providers.insert(
+            "openai".to_string(),
+            Arc::new(ResponsesOnlyProvider {
+                chat_calls: Arc::clone(&chat_calls),
+                responses_calls: Arc::clone(&responses_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(
+            GatewayConfig {
+                max_retries: 0,
+                ..GatewayConfig::default()
+            },
+            providers,
+        );
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello"
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        context
+            .native_openai_responses_headers
+            .insert("openai-beta".to_string(), "responses=v1".to_string());
+        let context = Arc::new(context);
+        let fallback_account_id = Uuid::new_v4();
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "rejected-body-read",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: vec![ExecutionTarget::new_provider(
+                        "openai",
+                        fallback_account_id,
+                        "http://fallback",
+                        "mock-key",
+                    )],
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+        );
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+        assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
+        let Some(ExecutionTarget::ProviderAccount {
+            account_id: accepted_account_id,
+            ..
+        }) = context.accepted_execution_target()
+        else {
+            panic!("fallback target should be accepted");
+        };
+        assert_eq!(accepted_account_id, fallback_account_id);
+    }
+
+    #[tokio::test]
+    async fn final_native_responses_sse_error_preserves_structured_fields() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-error".to_string(),
+            Arc::new(NativeResponsesSseErrorProvider) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello",
+            "stream": true
+        })));
+        let mut rx = executor
+            .execute(
+                Arc::new(context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-error",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: Vec::new(),
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        let Some(StreamEvent::Native {
+            event: NativeStreamEvent::OpenAiResponsesSse { event, data, .. },
+        }) = rx.recv().await
+        else {
+            panic!("final Responses SSE error must remain a native event");
+        };
+        assert_eq!(event, "error");
+        assert_eq!(data["code"], "rate_limit_exceeded");
+        assert_eq!(data["message"], "slow down");
+        assert_eq!(data["param"], "model");
+        assert_eq!(data["sequence_number"], 9);
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Error { .. })));
+    }
+
+    #[tokio::test]
+    async fn native_responses_sse_error_is_withheld_when_fallback_succeeds() {
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let responses_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-error".to_string(),
+            Arc::new(NativeResponsesSseErrorProvider) as Arc<dyn ProviderAdapter>,
+        );
+        providers.insert(
+            "openai".to_string(),
+            Arc::new(ResponsesOnlyProvider {
+                chat_calls: Arc::clone(&chat_calls),
+                responses_calls: Arc::clone(&responses_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello",
+            "stream": true
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        context
+            .native_openai_responses_headers
+            .insert("openai-beta".to_string(), "responses=v1".to_string());
+        let mut rx = executor
+            .execute(
+                Arc::new(context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-error",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: vec![ExecutionTarget::new_provider(
+                        "openai",
+                        Uuid::new_v4(),
+                        "http://fallback",
+                        "mock-key",
+                    )],
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+        );
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+        assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn native_responses_http_error_is_not_accepted_or_metered() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-http-error".to_string(),
+            Arc::new(NativeResponsesHttpErrorProvider {
+                status: 429,
+                calls: Arc::clone(&primary_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(
+            GatewayConfig {
+                max_retries: 0,
+                ..GatewayConfig::default()
+            },
+            providers,
+        );
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello"
+        })));
+        let context = Arc::new(context);
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-http-error",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: Vec::new(),
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Error { .. })));
+        let upstream = context
+            .client_upstream_response()
+            .expect("the original upstream error must remain available to the handler");
+        assert_eq!(upstream.status, 429);
+        assert!(upstream.body.contains("rate_limit_exceeded"));
+        assert_eq!(context.usage_snapshot(), (0, 0));
+        assert!(context.usage_provider_account().is_none());
+        assert!(context.accepted_execution_target().is_none());
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_responses_http_error_does_not_pollute_successful_fallback_billing() {
+        let chat_calls = Arc::new(AtomicUsize::new(0));
+        let responses_calls = Arc::new(AtomicUsize::new(0));
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-http-error".to_string(),
+            Arc::new(NativeResponsesHttpErrorProvider {
+                status: 429,
+                calls: Arc::clone(&primary_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        providers.insert(
+            "openai".to_string(),
+            Arc::new(ResponsesOnlyProvider {
+                chat_calls: Arc::clone(&chat_calls),
+                responses_calls: Arc::clone(&responses_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(
+            GatewayConfig {
+                max_retries: 0,
+                ..GatewayConfig::default()
+            },
+            providers,
+        );
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello"
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        context
+            .native_openai_responses_headers
+            .insert("openai-beta".to_string(), "responses=v1".to_string());
+        let context = Arc::new(context);
+        let primary_account_id = Uuid::new_v4();
+        let fallback_account_id = Uuid::new_v4();
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-http-error",
+                        primary_account_id,
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: vec![ExecutionTarget::new_provider(
+                        "openai",
+                        fallback_account_id,
+                        "http://fallback",
+                        "mock-key",
+                    )],
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+        );
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+        assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert!(context.client_upstream_response().is_none());
+        assert!(context.usage_snapshot().0 > 0);
+        assert_eq!(
+            context.billing_target("responses-http-error", primary_account_id),
+            ("openai".to_string(), fallback_account_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn non_idempotent_native_responses_5xx_stops_before_retry_or_fallback() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_chat_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-http-error".to_string(),
+            Arc::new(NativeResponsesHttpErrorProvider {
+                status: 502,
+                calls: Arc::clone(&primary_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        providers.insert(
+            "openai".to_string(),
+            Arc::new(ResponsesOnlyProvider {
+                chat_calls: Arc::clone(&fallback_chat_calls),
+                responses_calls: Arc::clone(&fallback_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(
+            GatewayConfig {
+                max_retries: 2,
+                ..GatewayConfig::default()
+            },
+            providers,
+        );
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello"
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        let context = Arc::new(context);
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-http-error",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: vec![ExecutionTarget::new_provider(
+                        "openai",
+                        Uuid::new_v4(),
+                        "http://fallback",
+                        "mock-key",
+                    )],
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Error { .. })));
+        assert_eq!(primary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fallback_chat_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            context
+                .client_upstream_response()
+                .expect("the ambiguous upstream response remains available")
+                .status,
+            502
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_native_responses_5xx_retries_only_the_same_account() {
+        let primary_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let fallback_chat_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-http-error".to_string(),
+            Arc::new(NativeResponsesHttpErrorProvider {
+                status: 502,
+                calls: Arc::clone(&primary_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        providers.insert(
+            "openai".to_string(),
+            Arc::new(ResponsesOnlyProvider {
+                chat_calls: Arc::clone(&fallback_chat_calls),
+                responses_calls: Arc::clone(&fallback_calls),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(
+            GatewayConfig {
+                max_retries: 2,
+                ..GatewayConfig::default()
+            },
+            providers,
+        );
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello"
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        context.native_openai_responses_headers.insert(
+            "idempotency-key".to_string(),
+            "tenant-scoped-upstream-key".to_string(),
+        );
+        let context = Arc::new(context);
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-http-error",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: vec![ExecutionTarget::new_provider(
+                        "openai",
+                        Uuid::new_v4(),
+                        "http://fallback",
+                        "mock-key",
+                    )],
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Error { .. })));
+        assert_eq!(
+            primary_calls.load(Ordering::SeqCst),
+            3,
+            "the initial attempt plus two configured retries stay on the bound account"
+        );
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(fallback_chat_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn native_responses_json_without_usage_estimates_input_and_generated_output() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-json-without-usage".to_string(),
+            Arc::new(NativeResponsesJsonWithoutUsageProvider) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_large",
+                "output": "large tool output ".repeat(4096),
+            }]
+        })));
+        let context = Arc::new(context);
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-json-without-usage",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: Vec::new(),
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Native { .. })));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+        let (input_tokens, output_tokens) = context.usage_snapshot();
+        assert!(input_tokens > 1_000);
+        assert!(output_tokens > 0);
+        assert!(!context.is_input_finalized());
+        assert!(!context.is_output_finalized());
+    }
+
+    #[tokio::test]
+    async fn native_responses_sse_terminal_without_usage_uses_complete_output_estimate() {
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-sse-without-usage".to_string(),
+            Arc::new(NativeResponsesSseWithoutUsageProvider) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello",
+            "stream": true
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        let context = Arc::new(context);
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-sse-without-usage",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: Vec::new(),
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Native { .. })));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Native { .. })));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
+        assert_eq!(
+            context.usage_snapshot().1,
+            GatewayExecutor::estimate_tokens("complete terminal response text"),
+            "the complete terminal body must replace the earlier partial delta estimate"
+        );
+        assert!(!context.is_output_finalized());
+    }
+
     #[test]
     fn raw_anthropic_errors_do_not_commit_a_response() {
         assert!(!raw_event_commits_response(
@@ -2720,6 +4372,90 @@ mod tests {
         assert!(raw_event_commits_response(
             r#"{"kind":"anthropic_sse","event":"message_start","data":{"type":"message_start"}}"#
         ));
+    }
+
+    #[test]
+    fn native_responses_http_errors_do_not_commit_and_preserve_payload() {
+        let event = NativeStreamEvent::OpenAiResponsesHttpError {
+            status: 429,
+            headers: vec![("retry-after".to_string(), "2".to_string())],
+            body: "{\"error\":{\"code\":\"rate_limit_exceeded\"}}".to_string(),
+        };
+        let response = extract_native_responses_http_error(event).unwrap_err();
+        assert_eq!(response.status, 429);
+        assert_eq!(
+            response.headers,
+            vec![("retry-after".to_string(), "2".to_string())]
+        );
+        assert!(response.body.contains("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn responses_output_estimate_projects_text_and_tool_payloads_only() {
+        let compact = serde_json::json!({
+            "response": {
+                "output": [
+                    {
+                        "id": "msg_ignored",
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": "hello"},
+                            {"type": "refusal", "refusal": "cannot comply"}
+                        ]
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "lookup",
+                        "arguments": "{\"city\":\"Paris\"}"
+                    },
+                    {
+                        "type": "image_generation_call",
+                        "image_url": "https://example.test/generated.png",
+                        "b64_json": "a".repeat(10_000)
+                    }
+                ]
+            }
+        });
+        let expected =
+            GatewayExecutor::estimate_tokens("hello\ncannot comply\nlookup\n{\"city\":\"Paris\"}");
+
+        assert_eq!(estimate_responses_output_tokens(&compact), expected);
+    }
+
+    #[test]
+    fn responses_output_estimate_includes_structured_tool_actions() {
+        let compact = serde_json::json!({
+            "output": [
+                {
+                    "id": "shell_ignored",
+                    "type": "shell_call",
+                    "action": {
+                        "commands": ["rg TODO src", "cargo test"],
+                        "timeout_ms": 10_000
+                    }
+                },
+                {
+                    "id": "patch_ignored",
+                    "type": "apply_patch_call",
+                    "operation": {
+                        "type": "update_file",
+                        "path": "src/lib.rs",
+                        "diff": "@@ -1 +1 @@\n-old\n+new"
+                    }
+                },
+                {
+                    "type": "image_generation_call",
+                    "image_url": "https://example.test/generated.png",
+                    "b64_json": "a".repeat(10_000)
+                }
+            ]
+        });
+        let expected = GatewayExecutor::estimate_tokens(
+            "rg TODO src\ncargo test\n@@ -1 +1 @@\n-old\n+new\nsrc/lib.rs",
+        );
+
+        assert_eq!(estimate_responses_output_tokens(&compact), expected);
+        assert!(expected > 0);
     }
 
     #[test]
@@ -3205,6 +4941,7 @@ mod tests {
             GatewayConfig {
                 max_retries: 2,
                 timeout_secs: 5,
+                stream_timeout_secs: 5,
                 enable_fallback: true,
             },
             providers,
@@ -3247,6 +4984,7 @@ mod tests {
             GatewayConfig {
                 max_retries: 0,
                 timeout_secs: 5,
+                stream_timeout_secs: 5,
                 enable_fallback: true,
             },
             providers,
@@ -3319,6 +5057,7 @@ mod tests {
             GatewayConfig {
                 max_retries: 0,
                 timeout_secs: 1,
+                stream_timeout_secs: 1,
                 enable_fallback: false,
             },
             providers,
@@ -3396,6 +5135,7 @@ mod tests {
             GatewayConfig {
                 max_retries: 0,
                 timeout_secs: 5,
+                stream_timeout_secs: 5,
                 enable_fallback: true,
             },
             providers,
@@ -3635,6 +5375,66 @@ mod tests {
                 .code,
             "upstream_stream_protocol"
         );
+    }
+
+    #[tokio::test]
+    async fn truncated_native_responses_stream_estimates_billable_deltas() {
+        let fallback_calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "responses-delta-truncated".to_string(),
+            Arc::new(NativeResponsesDeltaTruncatedProvider) as Arc<dyn ProviderAdapter>,
+        );
+        providers.insert(
+            "fallback".to_string(),
+            Arc::new(CountingProvider {
+                calls: Arc::clone(&fallback_calls),
+                notified: None,
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let mut context = create_test_context();
+        context.native_openai_responses_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "input": "hello",
+            "stream": true
+        })));
+        context.native_openai_responses_path = Some("/responses".to_string());
+        let context = Arc::new(context);
+        let mut rx = executor
+            .execute(
+                Arc::clone(&context),
+                ExecutionPlan {
+                    primary: ExecutionTarget::new_provider(
+                        "responses-delta-truncated",
+                        Uuid::new_v4(),
+                        "http://primary",
+                        "mock-key",
+                    ),
+                    fallback_chain: vec![ExecutionTarget::new_provider(
+                        "fallback",
+                        Uuid::new_v4(),
+                        "http://fallback",
+                        "mock-key",
+                    )],
+                },
+                Arc::new(AccountStateStore::new()),
+                Some(Arc::new(ProviderHealthStore::new())),
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Native { .. })));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Native { .. })));
+        assert!(matches!(rx.recv().await, Some(StreamEvent::Error { .. })));
+        assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            context.usage_snapshot().1,
+            GatewayExecutor::estimate_tokens("hello")
+                + GatewayExecutor::estimate_tokens(r#"{"city":"Paris"}"#),
+            "native output delivered before terminal usage must retain an estimate"
+        );
+        assert!(!context.is_output_finalized());
     }
 
     #[tokio::test]

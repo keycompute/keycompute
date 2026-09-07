@@ -9,6 +9,8 @@ pub mod tables {
     pub const PRODUCE_AI_KEYS: &str = "produce_ai_keys";
     pub const ACCOUNTS: &str = "accounts";
     pub const PRICING_MODELS: &str = "pricing_models";
+    pub const RESPONSES_IDEMPOTENCY_CLAIMS: &str = "responses_idempotency_claims";
+    pub const RESPONSE_AFFINITIES: &str = "response_affinities";
     pub const USAGE_LOGS: &str = "usage_logs";
     pub const DISTRIBUTION_RECORDS: &str = "distribution_records";
     pub const TENANT_DISTRIBUTION_RULES: &str = "tenant_distribution_rules";
@@ -20,6 +22,39 @@ pub mod tables {
     pub const USER_NODE_GATEWAY_TOKENS: &str = "user_node_gateway_tokens";
     pub const NODE_TIPS: &str = "node_tips";
     pub const NODE_TIP_WITHDRAWALS: &str = "node_tip_withdrawals";
+}
+
+pub mod responses_idempotency_claims {
+    pub const TENANT_ID: &str = "tenant_id";
+    pub const BINDING_ID: &str = "binding_id";
+    pub const REQUEST_FINGERPRINT: &str = "request_fingerprint";
+    pub const BILLING_REQUEST_ID: &str = "billing_request_id";
+    pub const USER_ID: &str = "user_id";
+    pub const PRODUCE_AI_KEY_ID: &str = "produce_ai_key_id";
+    pub const PROVIDER: &str = "provider";
+    pub const MODEL: &str = "model";
+    pub const ACCOUNT_ID: &str = "account_id";
+    pub const RESPONSE_BODY_BYTES: &str = "response_body_bytes";
+    pub const CREATED_AT: &str = "created_at";
+}
+
+pub mod response_affinities {
+    pub const TENANT_ID: &str = "tenant_id";
+    pub const RESPONSE_ID: &str = "response_id";
+    pub const PROVIDER: &str = "provider";
+    pub const MODEL: &str = "model";
+    pub const ACCOUNT_ID: &str = "account_id";
+    pub const IS_RESERVATION: &str = "is_reservation";
+    pub const LOCAL_RESPONSE: &str = "local_response";
+    pub const LOCAL_CONTEXT: &str = "local_context";
+    pub const LOCAL_CONTEXT_BYTES: &str = "local_context_bytes";
+    pub const SETTLEMENT: &str = "settlement";
+    pub const SETTLEMENT_NEXT_POLL_AT: &str = "settlement_next_poll_at";
+    pub const SETTLEMENT_LEASE_UNTIL: &str = "settlement_lease_until";
+    pub const DELETED_AT: &str = "deleted_at";
+    pub const EXPIRES_AT: &str = "expires_at";
+    pub const CREATED_AT: &str = "created_at";
+    pub const UPDATED_AT: &str = "updated_at";
 }
 
 /// users 表列名
@@ -40,6 +75,7 @@ pub mod tenants {
     pub const SLUG: &str = "slug";
     pub const DESCRIPTION: &str = "description";
     pub const STATUS: &str = "status";
+    pub const RESPONSES_IDEMPOTENCY_CLAIM_COUNT: &str = "responses_idempotency_claim_count";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
 }
@@ -74,6 +110,7 @@ pub mod accounts {
     pub const PRIORITY: &str = "priority";
     pub const ENABLED: &str = "enabled";
     pub const MODELS_SUPPORTED: &str = "models_supported";
+    pub const API_CAPABILITIES: &str = "api_capabilities";
     pub const VISIBILITY: &str = "visibility";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
@@ -99,6 +136,7 @@ pub mod pricing_models {
 pub mod usage_logs {
     pub const ID: &str = "id";
     pub const REQUEST_ID: &str = "request_id";
+    pub const IDEMPOTENCY_ID: &str = "idempotency_id";
     pub const TENANT_ID: &str = "tenant_id";
     pub const USER_ID: &str = "user_id";
     pub const PRODUCE_AI_KEY_ID: &str = "produce_ai_key_id";

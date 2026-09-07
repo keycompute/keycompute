@@ -7,6 +7,7 @@
 //! - 权限控制通过中间件实现，而非路径前缀
 //! - Admin 和普通用户共用前端，通过权限控制展示不同模块
 
+use crate::handlers::responses::OPENAI_RESPONSES_BODY_LIMIT_BYTES;
 use crate::{
     handlers::{
         admin_approve_token,
@@ -23,11 +24,14 @@ use crate::{
         admin_verify_payment_provider,
         alipay_notify,
         calculate_cost,
+        cancel_response,
         change_password,
         // OpenAI 兼容 API
         chat_completions,
         check_provider_health,
+        compact_response,
         complete_registration_handler,
+        count_response_input_tokens,
         create_account,
         create_api_key,
         create_distribution_rule,
@@ -45,6 +49,7 @@ use crate::{
         delete_my_node_gateway_token,
         delete_node,
         delete_pricing,
+        delete_response,
         delete_user,
         exclude_node,
         // 认证相关
@@ -99,6 +104,7 @@ use crate::{
         list_payment_methods,
         // 定价管理
         list_pricing,
+        list_response_input_items,
         list_tenants,
         login_handler,
         make_pricing_default,
@@ -115,7 +121,10 @@ use crate::{
         register_handler,
         reset_health,
         reset_password_handler,
+        responses,
+        responses_websocket,
         retrieve_model,
+        retrieve_response,
         revoke_node_token,
         set_account_cooldown,
         submit_requirement_handler,
@@ -135,8 +144,9 @@ use crate::{
     },
     middleware::{
         admin_auth_middleware, anthropic_error_response_middleware, cors_layer,
-        maintenance_mode_middleware, payment_notify_rate_limit_middleware,
-        public_auth_rate_limit_middleware, rate_limit_middleware, request_logger,
+        maintenance_mode_middleware, openai_responses_error_response_middleware,
+        payment_notify_rate_limit_middleware, public_auth_rate_limit_middleware,
+        rate_limit_middleware, request_logger, responses_http_body_admission_middleware,
         trace_id_middleware,
     },
     state::AppState,
@@ -195,6 +205,29 @@ pub fn create_router(state: AppState) -> Router {
         // Models
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model}", get(retrieve_model))
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+
+    let responses_routes = Router::new()
+        .route("/v1/responses", post(responses).get(responses_websocket))
+        .route("/v1/responses/compact", post(compact_response))
+        .route(
+            "/v1/responses/input_tokens",
+            post(count_response_input_tokens),
+        )
+        .route(
+            "/v1/responses/{response_id}",
+            get(retrieve_response).delete(delete_response),
+        )
+        .route("/v1/responses/{response_id}/cancel", post(cancel_response))
+        .route(
+            "/v1/responses/{response_id}/input_items",
+            get(list_response_input_items),
+        )
+        .layer(DefaultBodyLimit::max(OPENAI_RESPONSES_BODY_LIMIT_BYTES))
+        .layer(from_fn_with_state(
+            state.clone(),
+            responses_http_body_admission_middleware,
+        ))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
     let anthropic_routes = Router::new()
@@ -495,6 +528,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .merge(auth_routes)
         .merge(openai_routes)
+        .merge(responses_routes)
         .merge(anthropic_routes)
         .merge(user_routes)
         .merge(admin_routes)
@@ -516,6 +550,13 @@ pub fn create_router(state: AppState) -> Router {
         // 放在维护模式之外，以覆盖全局维护拒绝。
         .layer(axum::middleware::from_fn(
             anthropic_error_response_middleware,
+        ))
+        // Responses uses the OpenAI error schema on authentication, JSON,
+        // body-limit, routing and maintenance failures as well as handler
+        // errors. Official upstream codes are preserved while untrusted
+        // free-form messages are redacted.
+        .layer(axum::middleware::from_fn(
+            openai_responses_error_response_middleware,
         ))
         .layer(axum::middleware::from_fn(request_logger))
         .layer(from_fn_with_state(state.clone(), trace_id_middleware))
@@ -627,5 +668,69 @@ mod tests {
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["type"], "error");
         assert_eq!(body["error"]["type"], "authentication_error");
+    }
+
+    #[tokio::test]
+    async fn responses_resource_routes_are_publicly_mounted_behind_api_key_auth() {
+        let cases = [
+            ("POST", "/v1/responses"),
+            ("GET", "/v1/responses"),
+            ("POST", "/v1/responses/compact"),
+            ("POST", "/v1/responses/input_tokens"),
+            ("GET", "/v1/responses/resp_test"),
+            ("DELETE", "/v1/responses/resp_test"),
+            ("POST", "/v1/responses/resp_test/cancel"),
+            ("GET", "/v1/responses/resp_test/input_items?limit=10"),
+        ];
+        for (method, uri) in cases {
+            let response = create_router(AppState::new())
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"model":"gpt-test","input":"hi"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri} must resolve to an authenticated route"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_body_limit_allows_payloads_larger_than_axum_default() {
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                post(|_: Json<Value>| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(DefaultBodyLimit::max(OPENAI_RESPONSES_BODY_LIMIT_BYTES));
+        let payload = format!(r#"{{"input":"{}"}}"#, "x".repeat(2 * 1024 * 1024));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[test]
+    fn responses_body_limit_covers_the_official_inline_skill_maximum() {
+        const OFFICIAL_INLINE_SKILL_BASE64_MAX: usize = 70_254_592;
+        const {
+            assert!(OPENAI_RESPONSES_BODY_LIMIT_BYTES > OFFICIAL_INLINE_SKILL_BASE64_MAX);
+        }
     }
 }

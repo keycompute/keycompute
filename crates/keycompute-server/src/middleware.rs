@@ -3,15 +3,18 @@
 //! 自定义中间件：认证、限流、可观测性等
 
 use crate::{
-    error::{ApiError, Result},
+    error::{ApiError, Result, TrustedLocalApiError},
     extractors::{AuthExtractor, ClientRequestId, RequestId, RequestReceivedAt},
-    state::AppState,
+    handlers::responses::{
+        OPENAI_RESPONSES_BODY_LIMIT_BYTES, OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES,
+    },
+    state::{AppState, RESPONSES_LARGE_HTTP_BODY_BYTES},
 };
 use axum::{
     body::{Body, to_bytes},
-    extract::{Request, State},
+    extract::{FromRequestParts, Request, State},
     http::{
-        HeaderMap, HeaderName, HeaderValue, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
         header::{CONTENT_LENGTH, CONTENT_TYPE, SET_COOKIE},
     },
     middleware::Next,
@@ -19,6 +22,9 @@ use axum::{
 };
 use keycompute_auth::Permission;
 use keycompute_ratelimit::{RateLimitConfig, RateLimitKey};
+use llm_protocol_provider::{
+    LARGE_JSON_WORKING_SET_ADMISSION_BYTES, estimated_json_parse_working_set_bytes,
+};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -26,6 +32,156 @@ use uuid::Uuid;
 
 const PUBLIC_AUTH_COOKIE_NAME: &str = "keyc_reg_sid";
 const PUBLIC_AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24 * 30;
+/// Maximum wall-clock time spent receiving a Responses JSON request body.
+///
+/// The largest supported inline skill payload is roughly 70 MiB, so this is
+/// deliberately longer than the normal upstream request timeout while still
+/// preventing an authenticated slow client from holding a process-wide body
+/// admission permit indefinitely.
+const RESPONSES_HTTP_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResponsesHttpBodyReadError {
+    InvalidOrTooLarge,
+    Timeout,
+}
+
+async fn read_responses_http_body(
+    body: Body,
+    limit: usize,
+    timeout: Duration,
+) -> std::result::Result<bytes::Bytes, ResponsesHttpBodyReadError> {
+    match tokio::time::timeout(timeout, to_bytes(body, limit)).await {
+        Ok(Ok(body)) => Ok(body),
+        Ok(Err(_)) => Err(ResponsesHttpBodyReadError::InvalidOrTooLarge),
+        Err(_) => Err(ResponsesHttpBodyReadError::Timeout),
+    }
+}
+
+/// Marks a maintenance response whose administrator-configured message is
+/// explicitly public. Responses error normalization may preserve this message,
+/// while continuing to redact arbitrary service-unavailable details.
+#[derive(Clone, Copy, Debug)]
+struct TrustedPublicMaintenanceError;
+
+/// Admit potentially large Responses bodies before Axum's JSON extractor
+/// buffers them. Requests without Content-Length are treated conservatively as
+/// large; the normal body limit remains the final per-request bound.
+pub async fn responses_http_body_admission_middleware(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !responses_request_targets_json_body(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
+
+    // Authenticate before reading any body bytes. The rate-limit middleware
+    // deliberately lets invalid credentials reach the normal auth path, so
+    // this middleware must not rely on rate limiting as an auth boundary.
+    let (mut parts, body) = req.into_parts();
+    let auth = match AuthExtractor::from_request_parts(&mut parts, &state).await {
+        Ok(auth) => auth,
+        Err(error) => return error.into_response(),
+    };
+    parts.extensions.insert(auth);
+
+    let content_length = parts
+        .headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if content_length.is_some_and(|bytes| bytes > OPENAI_RESPONSES_BODY_LIMIT_BYTES as u64) {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    }
+
+    let mut permit = if responses_request_needs_body_admission(
+        &parts.method,
+        parts.uri.path(),
+        content_length,
+    ) {
+        let Some(permit) = state.responses_http_body_admission.try_acquire() else {
+            return ApiError::RateLimit(
+                "Too many large Responses request bodies are active".to_string(),
+            )
+            .into_response();
+        };
+        Some(permit)
+    } else {
+        None
+    };
+
+    // Inspect the serialized representation before Axum's JSON extractor
+    // builds a potentially much larger Value tree. Rebuild the body from
+    // Bytes so the extractor retains its normal content-type/error behavior.
+    let body = match read_responses_http_body(
+        body,
+        OPENAI_RESPONSES_BODY_LIMIT_BYTES,
+        RESPONSES_HTTP_BODY_READ_TIMEOUT,
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(ResponsesHttpBodyReadError::InvalidOrTooLarge) => {
+            return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+        }
+        Err(ResponsesHttpBodyReadError::Timeout) => {
+            return StatusCode::REQUEST_TIMEOUT.into_response();
+        }
+    };
+    let needs_working_set_admission = match responses_json_body_needs_working_set_admission(
+        &body,
+        OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES,
+        LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+    ) {
+        Ok(needs_admission) => needs_admission,
+        Err(()) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+    };
+    if permit.is_none() && needs_working_set_admission {
+        let Some(acquired) = state.responses_http_body_admission.try_acquire() else {
+            return ApiError::RateLimit(
+                "Too many large Responses request bodies are active".to_string(),
+            )
+            .into_response();
+        };
+        permit = Some(acquired);
+    }
+
+    let mut req = Request::from_parts(parts, Body::from(body));
+    if let Some(permit) = permit {
+        req.extensions_mut().insert(permit);
+    }
+    next.run(req).await
+}
+
+fn responses_request_targets_json_body(method: &Method, path: &str) -> bool {
+    method == Method::POST
+        && matches!(
+            path,
+            "/v1/responses" | "/v1/responses/compact" | "/v1/responses/input_tokens"
+        )
+}
+
+fn responses_json_body_needs_working_set_admission(
+    body: &[u8],
+    max_working_set_bytes: usize,
+    admission_threshold_bytes: usize,
+) -> std::result::Result<bool, ()> {
+    let working_set_bytes = estimated_json_parse_working_set_bytes(body);
+    if working_set_bytes > max_working_set_bytes {
+        return Err(());
+    }
+    Ok(working_set_bytes > admission_threshold_bytes)
+}
+
+fn responses_request_needs_body_admission(
+    method: &Method,
+    path: &str,
+    content_length: Option<u64>,
+) -> bool {
+    responses_request_targets_json_body(method, path)
+        && content_length.is_none_or(|bytes| bytes > RESPONSES_LARGE_HTTP_BODY_BYTES)
+}
 
 /// 权限中间件的返回类型
 pub type PermissionMiddlewareFn =
@@ -128,6 +284,278 @@ pub async fn anthropic_error_response_middleware(req: Request, next: Next) -> Re
     })
     .to_string();
     Response::from_parts(parts, Body::from(body))
+}
+
+/// Normalize failures on every Responses HTTP resource to the OpenAI error
+/// envelope. Upstream type/code/param fields remain useful to SDKs, but their
+/// free-form message is untrusted and must not cross the public boundary.
+pub async fn openai_responses_error_response_middleware(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let is_responses = path == "/v1/responses" || path.starts_with("/v1/responses/");
+    let response = next.run(req).await;
+    if !is_responses
+        || response.status().is_informational()
+        || response.status().is_success()
+        || response.status().is_redirection()
+    {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body =
+        match tokio::time::timeout(ERROR_BODY_READ_TIMEOUT, to_bytes(body, 1024 * 1024)).await {
+            Ok(Ok(body)) => body,
+            Ok(Err(_)) | Err(_) => bytes::Bytes::new(),
+        };
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let error = parsed.get("error").and_then(serde_json::Value::as_object);
+
+    // ApiError responses and the explicitly public maintenance response carry
+    // out-of-band markers for trustworthy client-facing messages. JSON shape
+    // alone is insufficient: a compatible upstream can imitate either shape.
+    let is_trusted_local_error = parts.extensions.get::<TrustedLocalApiError>().is_some();
+    let is_public_maintenance_error = parts
+        .extensions
+        .get::<TrustedPublicMaintenanceError>()
+        .is_some();
+    if !is_trusted_local_error && !is_public_maintenance_error {
+        parts.headers.remove(CONTENT_LENGTH);
+        parts
+            .headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        let body = normalize_openai_responses_upstream_error(parts.status, &body);
+        return Response::from_parts(parts, Body::from(body));
+    }
+    let official_error = error.filter(|error| {
+        error
+            .get("message")
+            .is_some_and(serde_json::Value::is_string)
+            && error.get("type").is_some_and(serde_json::Value::is_string)
+            && error
+                .get("code")
+                .is_some_and(|code| code.is_string() || code.is_null())
+    });
+    let message = error
+        .filter(|error| {
+            (is_trusted_local_error
+                && parts.status.is_client_error()
+                && error.get("code").and_then(serde_json::Value::as_u64)
+                    == Some(u64::from(parts.status.as_u16())))
+                || (is_public_maintenance_error
+                    && parts.status == StatusCode::SERVICE_UNAVAILABLE
+                    && error.get("type").and_then(serde_json::Value::as_str)
+                        == Some("maintenance_mode")
+                    && error.get("code").and_then(serde_json::Value::as_str)
+                        == Some("service_unavailable"))
+        })
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if official_error.is_some() {
+                "Upstream request failed".to_string()
+            } else {
+                "Request failed".to_string()
+            }
+        });
+    let (error_type, param, code) =
+        normalized_openai_responses_error_fields(official_error, parts.status);
+
+    parts.headers.remove(CONTENT_LENGTH);
+    parts
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": error_type,
+            "param": param,
+            "code": code,
+        }
+    })
+    .to_string();
+    Response::from_parts(parts, Body::from(body))
+}
+
+/// Produce the stable, client-visible form of an untrusted Responses error.
+/// This is also stored by the idempotency cache, so raw provider messages do
+/// not become durable data and a replay matches the middleware's first pass.
+pub(crate) fn normalize_openai_responses_upstream_error(status: StatusCode, body: &[u8]) -> String {
+    let parsed: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    let error = parsed.get("error").and_then(serde_json::Value::as_object);
+    let official_error = error.filter(|error| {
+        error
+            .get("message")
+            .is_some_and(serde_json::Value::is_string)
+            && error.get("type").is_some_and(serde_json::Value::is_string)
+            && error
+                .get("code")
+                .is_some_and(|code| code.is_string() || code.is_null())
+    });
+    let message = if official_error.is_some() {
+        "Upstream request failed"
+    } else {
+        "Request failed"
+    };
+    let (error_type, param, code) =
+        normalized_openai_responses_error_fields(official_error, status);
+    serde_json::json!({
+        "error": {
+            "message": message,
+            "type": error_type,
+            "param": param,
+            "code": code,
+        }
+    })
+    .to_string()
+}
+
+pub(crate) fn openai_responses_error_fields(
+    status: StatusCode,
+) -> (&'static str, serde_json::Value) {
+    match status.as_u16() {
+        401 => ("authentication_error", serde_json::json!("invalid_api_key")),
+        403 => ("permission_error", serde_json::Value::Null),
+        413 => (
+            "invalid_request_error",
+            serde_json::json!("request_too_large"),
+        ),
+        429 => ("rate_limit_error", serde_json::json!("rate_limit_exceeded")),
+        500..=599 => ("server_error", serde_json::json!("server_error")),
+        _ => ("invalid_request_error", serde_json::Value::Null),
+    }
+}
+
+fn normalized_openai_responses_error_fields(
+    error: Option<&serde_json::Map<String, serde_json::Value>>,
+    status: StatusCode,
+) -> (serde_json::Value, serde_json::Value, serde_json::Value) {
+    let (default_error_type, default_code) = openai_responses_error_fields(status);
+    (
+        sanitize_openai_responses_error_type(
+            error.and_then(|error| error.get("type")),
+            default_error_type,
+        ),
+        sanitize_openai_responses_error_param(error.and_then(|error| error.get("param"))),
+        sanitize_openai_responses_error_code(
+            error.and_then(|error| error.get("code")),
+            default_code,
+        ),
+    )
+}
+
+/// Keep only stable, explicitly supported error classifications. These fields
+/// are untrusted provider data just like `message`; accepting arbitrary strings
+/// would give credentials or provider internals another path to the client and
+/// the durable idempotency cache.
+pub(crate) fn sanitize_openai_responses_error_type(
+    value: Option<&serde_json::Value>,
+    fallback: &str,
+) -> serde_json::Value {
+    const ALLOWED: &[&str] = &[
+        "authentication_error",
+        "conflict_error",
+        "invalid_request_error",
+        "maintenance_mode",
+        "not_found_error",
+        "permission_error",
+        "rate_limit_error",
+        "server_error",
+        "unprocessable_entity_error",
+    ];
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| ALLOWED.contains(value))
+        .unwrap_or(fallback)
+        .to_string()
+        .into()
+}
+
+pub(crate) fn sanitize_openai_responses_error_code(
+    value: Option<&serde_json::Value>,
+    fallback: serde_json::Value,
+) -> serde_json::Value {
+    const ALLOWED: &[&str] = &[
+        "context_length_exceeded",
+        "file_not_found",
+        "insufficient_quota",
+        "invalid_api_key",
+        "invalid_base64_image",
+        "invalid_file",
+        "invalid_file_format",
+        "invalid_file_purpose",
+        "invalid_file_size",
+        "invalid_file_type",
+        "invalid_image",
+        "invalid_image_format",
+        "invalid_image_mode",
+        "invalid_image_url",
+        "invalid_prompt",
+        "invalid_request_error",
+        "invalid_tool",
+        "invalid_value",
+        "missing_required_parameter",
+        "model_not_found",
+        "provider_failure",
+        "rate_limit_exceeded",
+        "request_too_large",
+        "server_error",
+        "service_unavailable",
+        "unknown_parameter",
+        "unsupported_image_media_type",
+        "unsupported_parameter",
+        "unsupported_value",
+    ];
+    match value {
+        Some(serde_json::Value::Null) => serde_json::Value::Null,
+        Some(serde_json::Value::String(value)) if ALLOWED.contains(&value.as_str()) => {
+            serde_json::Value::String(value.clone())
+        }
+        _ => fallback,
+    }
+}
+
+pub(crate) fn sanitize_openai_responses_error_param(
+    value: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    const ALLOWED: &[&str] = &[
+        "background",
+        "conversation",
+        "include",
+        "input",
+        "instructions",
+        "max_output_tokens",
+        "max_tool_calls",
+        "metadata",
+        "model",
+        "parallel_tool_calls",
+        "previous_response_id",
+        "prompt",
+        "prompt_cache_key",
+        "prompt_cache_options",
+        "prompt_cache_retention",
+        "reasoning",
+        "safety_identifier",
+        "service_tier",
+        "store",
+        "stream",
+        "stream_options",
+        "temperature",
+        "text",
+        "tool_choice",
+        "tools",
+        "top_logprobs",
+        "top_p",
+        "truncation",
+        "user",
+    ];
+    match value {
+        Some(serde_json::Value::String(value)) if ALLOWED.contains(&value.as_str()) => {
+            serde_json::Value::String(value.clone())
+        }
+        _ => serde_json::Value::Null,
+    }
 }
 
 /// 将本服务的 HTTP 状态映射至 Anthropic 的公开错误类别。保留原始 HTTP
@@ -265,6 +693,43 @@ fn service_unavailable_response() -> Response {
         .into_response()
 }
 
+/// Load the authenticated tenant's limits from the authoritative database.
+/// A configured database is part of the quota decision, so a missing tenant
+/// or a failed lookup must not silently widen the request to global defaults.
+async fn authenticated_rate_limit_config(
+    state: &AppState,
+    tenant_id: Uuid,
+) -> Result<RateLimitConfig> {
+    let Some(pool) = state.pool.as_deref() else {
+        return Ok(RateLimitConfig::default());
+    };
+    match keycompute_db::Tenant::find_by_id(pool.write_conn(), tenant_id).await {
+        Ok(Some(tenant)) => Ok(RateLimitConfig::from_tenant(
+            tenant.default_rpm_limit,
+            tenant.default_tpm_limit,
+        )),
+        Ok(None) => {
+            error!(
+                %tenant_id,
+                "Authenticated tenant not found for rate limiting, denying request"
+            );
+            Err(ApiError::ServiceUnavailable(
+                "Rate limit configuration is unavailable. Please try again later.".to_string(),
+            ))
+        }
+        Err(error) => {
+            error!(
+                %tenant_id,
+                %error,
+                "Failed to load authenticated tenant for rate limiting, denying request"
+            );
+            Err(ApiError::ServiceUnavailable(
+                "Rate limit configuration is unavailable. Please try again later.".to_string(),
+            ))
+        }
+    }
+}
+
 /// 限流中间件
 ///
 /// 基于用户/租户/API Key 进行请求限流
@@ -272,9 +737,23 @@ fn service_unavailable_response() -> Response {
 /// 注意：此中间件应在认证中间件之后运行，以获取真实的认证信息
 pub async fn rate_limit_middleware(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
+    // WebSocket 握手只建立传输连接，不等同于一次 Responses 生成请求。
+    // 每个 `response.create` 会在 WebSocket handler 内独立执行 RPM/TPM
+    // 检查；这里跳过握手，避免首个事件被重复计数。
+    if req.method() == axum::http::Method::GET
+        && req.uri().path() == "/v1/responses"
+        && req
+            .headers()
+            .get(axum::http::header::UPGRADE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+    {
+        return next.run(req).await;
+    }
+
     // 从请求头中提取认证信息
     let headers = req.headers();
     let token = match headers.get("Authorization").and_then(|h| h.to_str().ok()) {
@@ -296,16 +775,19 @@ pub async fn rate_limit_middleware(
     };
 
     // 使用 AuthService 验证 token 获取真实的用户信息
-    let (rate_key, tenant_id) = match state.auth.verify_token(token).await {
+    let (auth, rate_key, tenant_id) = match state.auth.verify_token(token).await {
         Ok(auth_context) => {
             // 使用真实的 user_id, tenant_id, produce_ai_key_id 创建限流键
-            (
-                RateLimitKey::new(
-                    auth_context.tenant_id,
-                    auth_context.user_id,
-                    auth_context.produce_ai_key_id,
-                ),
+            let rate_key = RateLimitKey::new(
                 auth_context.tenant_id,
+                auth_context.user_id,
+                auth_context.produce_ai_key_id,
+            );
+            let tenant_id = auth_context.tenant_id;
+            (
+                AuthExtractor::from_auth_context(auth_context),
+                rate_key,
+                tenant_id,
             )
         }
         Err(_) => {
@@ -315,30 +797,19 @@ pub async fn rate_limit_middleware(
     };
 
     // 从数据库加载租户特定的限流配置
-    let rate_limit_config = if let Some(pool) = state.pool.as_deref() {
-        match keycompute_db::Tenant::find_by_id(pool, tenant_id).await {
-            Ok(Some(tenant)) => {
-                RateLimitConfig::from_tenant(tenant.default_rpm_limit, tenant.default_tpm_limit)
-            }
-            Ok(None) => {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    "Tenant not found for rate limiting, using default config"
-                );
-                RateLimitConfig::default()
-            }
-            Err(e) => {
-                tracing::warn!(
-                    tenant_id = %tenant_id,
-                    error = %e,
-                    "Failed to load tenant for rate limiting, using default config"
-                );
-                RateLimitConfig::default()
-            }
-        }
-    } else {
-        RateLimitConfig::default()
+    let rate_limit_config = match authenticated_rate_limit_config(&state, tenant_id).await {
+        Ok(config) => config,
+        Err(_) => return service_unavailable_response(),
     };
+
+    // 仅生成类端点执行 TPM 预检。资源读取、取消、删除、模型列表和
+    // input_tokens 仍计入 RPM，但不得因为此前的 token 用量而被锁死。
+    let check_tpm = request_uses_tpm(req.method(), req.uri().path())
+        && !request_defers_tpm_for_responses_idempotency(
+            req.method(),
+            req.uri().path(),
+            req.headers(),
+        );
 
     // 先检查 TPM（预检：读取当前窗口已积累的 token 计数，不消耗配额）
     //
@@ -348,27 +819,29 @@ pub async fn rate_limit_middleware(
     // TPM 的记录（record_token_usage）发生在 handler/billing 层（LLM 响应后才知道 token 用量）。
     // 这里的 check_tpm 是一个前置预检，仅读取之前请求累计的 token 数。
     // 这意味着 TPM 限制的实时性受限于 billing 层是否及时调用 record_token_usage。
-    match state
-        .rate_limiter
-        .check_tpm(&rate_key, &rate_limit_config)
-        .await
-    {
-        Ok(false) => {
-            // TPM 超限，拒绝请求
-            info!(
-                tenant_id = %rate_key.tenant_id,
-                tpm_limit = rate_limit_config.tpm_limit,
-                "TPM limit exceeded"
-            );
-            return rate_limit_exceeded_response();
-        }
-        Err(e) => {
-            // TPM 检查出错（如 Redis 不可用），按 fail-closed 原则拒绝请求
-            error!("TPM check failed, denying request: {}", e);
-            return service_unavailable_response();
-        }
-        Ok(true) => {
-            // TPM 通过，继续检查 RPM
+    if check_tpm {
+        match state
+            .rate_limiter
+            .check_tpm(&rate_key, &rate_limit_config)
+            .await
+        {
+            Ok(false) => {
+                // TPM 超限，拒绝请求
+                info!(
+                    tenant_id = %rate_key.tenant_id,
+                    tpm_limit = rate_limit_config.tpm_limit,
+                    "TPM limit exceeded"
+                );
+                return rate_limit_exceeded_response();
+            }
+            Err(e) => {
+                // TPM 检查出错（如 Redis 不可用），按 fail-closed原则拒绝生成请求
+                error!("TPM check failed, denying request: {}", e);
+                return service_unavailable_response();
+            }
+            Ok(true) => {
+                // TPM 通过，继续检查 RPM
+            }
         }
     }
 
@@ -380,6 +853,7 @@ pub async fn rate_limit_middleware(
     {
         Ok(()) => {
             // 限流检查全部通过，继续处理请求
+            req.extensions_mut().insert(auth);
             next.run(req).await
         }
         Err(keycompute_types::KeyComputeError::RateLimitExceeded(ref msg)) => {
@@ -399,6 +873,92 @@ pub async fn rate_limit_middleware(
             service_unavailable_response()
         }
     }
+}
+
+fn request_uses_tpm(method: &Method, path: &str) -> bool {
+    method == Method::POST
+        && matches!(
+            path,
+            "/v1/chat/completions" | "/v1/messages" | "/v1/responses" | "/v1/responses/compact"
+        )
+}
+
+fn request_defers_tpm_for_responses_idempotency(
+    method: &Method,
+    path: &str,
+    headers: &HeaderMap,
+) -> bool {
+    method == Method::POST
+        && matches!(path, "/v1/responses" | "/v1/responses/compact")
+        && headers.contains_key("idempotency-key")
+}
+
+/// Check TPM without consuming RPM. HTTP Responses requests carrying an
+/// idempotency key call this only after durable binding proves that the request
+/// will execute rather than replaying a cached result.
+pub(crate) async fn enforce_authenticated_tpm_limit(
+    state: &AppState,
+    auth: &AuthExtractor,
+) -> Result<()> {
+    let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+    let config = authenticated_rate_limit_config(state, auth.tenant_id).await?;
+    match state.rate_limiter.check_tpm(&rate_key, &config).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(ApiError::RateLimit(
+            "Rate limit exceeded. Please try again later.".to_string(),
+        )),
+        Err(error) => {
+            error!(%error, "deferred Responses TPM check failed, denying request");
+            Err(ApiError::ServiceUnavailable(
+                "Rate limit check failed. Please try again later.".to_string(),
+            ))
+        }
+    }
+}
+
+/// 对已经完成 API Key 认证的长连接子请求执行与 HTTP 入口相同的限流。
+/// WebSocket 握手本身不消耗一次请求额度；每个 `response.create` 都检查并
+/// 记录 RPM，只有 `generate:true` 执行 TPM 预检。
+pub(crate) async fn enforce_authenticated_rate_limit(
+    state: &AppState,
+    auth: &AuthExtractor,
+    check_tpm: bool,
+) -> Result<()> {
+    let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+    let config = authenticated_rate_limit_config(state, auth.tenant_id).await?;
+
+    if check_tpm {
+        match state.rate_limiter.check_tpm(&rate_key, &config).await {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ApiError::RateLimit(
+                    "Rate limit exceeded. Please try again later.".to_string(),
+                ));
+            }
+            Err(error) => {
+                error!(%error, "WebSocket TPM check failed, denying request");
+                return Err(ApiError::ServiceUnavailable(
+                    "Rate limit check failed. Please try again later.".to_string(),
+                ));
+            }
+        }
+    }
+
+    state
+        .rate_limiter
+        .check_and_record_with_config(&rate_key, &config)
+        .await
+        .map_err(|error| match error {
+            keycompute_types::KeyComputeError::RateLimitExceeded(_) => {
+                ApiError::RateLimit("Rate limit exceeded. Please try again later.".to_string())
+            }
+            other => {
+                error!(error = %other, "WebSocket RPM check failed, denying request");
+                ApiError::ServiceUnavailable(
+                    "Rate limit check failed. Please try again later.".to_string(),
+                )
+            }
+        })
 }
 
 /// 公共认证限流中间件
@@ -853,6 +1413,66 @@ pub fn extract_auth_from_extensions(req: &Request) -> Option<AuthExtractor> {
 
 // ==================== 维护模式中间件 ====================
 
+const DEFAULT_MAINTENANCE_MESSAGE: &str = "System is under maintenance. Please try again later.";
+
+async fn maintenance_mode_enabled(state: &AppState) -> bool {
+    use keycompute_db::models::system_setting::setting_keys;
+
+    if let Some(pool) = state.pool.as_deref() {
+        keycompute_db::SystemSetting::get_bool(
+            pool.write_conn(),
+            setting_keys::MAINTENANCE_MODE,
+            false,
+        )
+        .await
+    } else {
+        false
+    }
+}
+
+async fn maintenance_mode_message(state: &AppState) -> String {
+    use keycompute_db::models::system_setting::setting_keys;
+
+    if let Some(pool) = state.pool.as_deref() {
+        keycompute_db::SystemSetting::get_string(
+            pool.write_conn(),
+            setting_keys::MAINTENANCE_MESSAGE,
+            DEFAULT_MAINTENANCE_MESSAGE,
+        )
+        .await
+    } else {
+        DEFAULT_MAINTENANCE_MESSAGE.to_string()
+    }
+}
+
+fn maintenance_mode_allows_request(is_maintenance: bool, is_system_admin: bool) -> bool {
+    !is_maintenance || is_system_admin
+}
+
+/// Recheck maintenance mode for authenticated work that does not traverse the
+/// HTTP middleware on every operation, such as messages on an established
+/// WebSocket connection.
+pub(crate) async fn enforce_authenticated_maintenance_mode(
+    state: &AppState,
+    auth: &AuthExtractor,
+) -> Result<()> {
+    let is_maintenance = maintenance_mode_enabled(state).await;
+    let is_system_admin = auth.has_permission(&Permission::SystemAdmin);
+    if maintenance_mode_allows_request(is_maintenance, is_system_admin) {
+        if is_maintenance {
+            info!(
+                user_id = %auth.user_id,
+                "Admin bypassing maintenance mode"
+            );
+        }
+        return Ok(());
+    }
+
+    Err(ApiError::ServiceUnavailable(
+        maintenance_mode_message(state).await,
+    ))
+}
+
 /// 维护模式中间件
 ///
 /// 检查系统是否处于维护模式：
@@ -878,8 +1498,6 @@ pub async fn maintenance_mode_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    use keycompute_db::models::system_setting::setting_keys;
-
     // 排除不需要维护模式检查的路径
     let path = req.uri().path();
     if is_maintenance_excluded_path(path) {
@@ -887,11 +1505,7 @@ pub async fn maintenance_mode_middleware(
     }
 
     // 检查维护模式状态
-    let is_maintenance = if let Some(pool) = state.pool.as_deref() {
-        keycompute_db::SystemSetting::get_bool(pool, setting_keys::MAINTENANCE_MODE, false).await
-    } else {
-        false // 无数据库连接时不启用维护模式
-    };
+    let is_maintenance = maintenance_mode_enabled(&state).await;
 
     if !is_maintenance {
         return next.run(req).await;
@@ -899,7 +1513,7 @@ pub async fn maintenance_mode_middleware(
 
     // 维护模式已启用，检查是否为管理员
     // 从请求头提取认证信息
-    if let Some(auth_header) = req
+    let is_system_admin = if let Some(auth_header) = req
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
@@ -907,32 +1521,32 @@ pub async fn maintenance_mode_middleware(
         && let Ok(auth_context) = state.auth.verify_token(token).await
         && auth_context.has_permission(&Permission::SystemAdmin)
     {
-        // 管理员绕过维护模式（基于权限判断，API Key 无 SystemAdmin 权限，无法绕过）
         info!(
             user_id = %auth_context.user_id,
             "Admin bypassing maintenance mode"
         );
+        true
+    } else {
+        false
+    };
+    if maintenance_mode_allows_request(is_maintenance, is_system_admin) {
+        // 管理员绕过维护模式（基于权限判断，API Key 无 SystemAdmin 权限，无法绕过）
         return next.run(req).await;
     }
 
     // 获取维护消息
-    let maintenance_message = if let Some(pool) = state.pool.as_deref() {
-        keycompute_db::SystemSetting::get_string(
-            pool,
-            setting_keys::MAINTENANCE_MESSAGE,
-            "System is under maintenance. Please try again later.",
-        )
-        .await
-    } else {
-        "System is under maintenance. Please try again later.".to_string()
-    };
+    let maintenance_message = maintenance_mode_message(&state).await;
 
     warn!(
         path = %path,
         "Request blocked due to maintenance mode"
     );
 
-    (
+    maintenance_mode_response(maintenance_message)
+}
+
+fn maintenance_mode_response(maintenance_message: String) -> Response {
+    let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
         serde_json::json!({
             "error": {
@@ -943,7 +1557,11 @@ pub async fn maintenance_mode_middleware(
         })
         .to_string(),
     )
-        .into_response()
+        .into_response();
+    response
+        .extensions_mut()
+        .insert(TrustedPublicMaintenanceError);
+    response
 }
 
 fn is_maintenance_excluded_path(path: &str) -> bool {
@@ -967,9 +1585,17 @@ mod tests {
         Json, Router,
         body::Body,
         middleware::{from_fn, from_fn_with_state},
-        routing::get,
+        routing::{get, post},
     };
     use keycompute_auth::JwtValidator;
+    use std::{
+        convert::Infallible,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::Poll,
+    };
     use tower::ServiceExt;
     use uuid::Uuid;
 
@@ -982,11 +1608,541 @@ mod tests {
         next.run(req).await
     }
 
+    fn stalled_body(polls: Arc<AtomicUsize>) -> Body {
+        Body::from_stream(futures::stream::poll_fn(move |_| {
+            polls.fetch_add(1, Ordering::Relaxed);
+            Poll::<Option<std::result::Result<bytes::Bytes, Infallible>>>::Pending
+        }))
+    }
+
+    #[test]
+    fn responses_body_admission_targets_only_large_body_endpoints() {
+        assert!(responses_request_needs_body_admission(
+            &Method::POST,
+            "/v1/responses",
+            None,
+        ));
+        assert!(responses_request_needs_body_admission(
+            &Method::POST,
+            "/v1/responses/input_tokens",
+            Some(RESPONSES_LARGE_HTTP_BODY_BYTES + 1),
+        ));
+        assert!(!responses_request_needs_body_admission(
+            &Method::POST,
+            "/v1/responses",
+            Some(RESPONSES_LARGE_HTTP_BODY_BYTES),
+        ));
+        assert!(!responses_request_needs_body_admission(
+            &Method::POST,
+            "/v1/responses/resp_123/cancel",
+            None,
+        ));
+        assert!(!responses_request_needs_body_admission(
+            &Method::GET,
+            "/v1/responses",
+            None,
+        ));
+    }
+
+    #[test]
+    fn responses_body_admission_rejects_dense_json_before_deserialization() {
+        let string_heavy = br#"{"input":"0,0,0,0"}"#;
+        let array_heavy = br#"{"input":[0,0,0,0]}"#;
+        let threshold = estimated_json_parse_working_set_bytes(string_heavy);
+
+        assert_eq!(
+            responses_json_body_needs_working_set_admission(string_heavy, usize::MAX, threshold,),
+            Ok(false)
+        );
+        assert_eq!(
+            responses_json_body_needs_working_set_admission(array_heavy, usize::MAX, threshold,),
+            Ok(true)
+        );
+        assert_eq!(
+            responses_json_body_needs_working_set_admission(
+                array_heavy,
+                estimated_json_parse_working_set_bytes(array_heavy) - 1,
+                threshold,
+            ),
+            Err(())
+        );
+
+        const OFFICIAL_INLINE_SKILL_BASE64_MAX: usize = 70_254_592;
+        const {
+            assert!(
+                OFFICIAL_INLINE_SKILL_BASE64_MAX * 2 + 1024
+                    < OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_body_middleware_rejects_dense_json_at_production_limit() {
+        let item_count = OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES / 64 + 1;
+        let mut payload = String::with_capacity(item_count * 2 + 1);
+        payload.push('[');
+        for index in 0..item_count {
+            if index > 0 {
+                payload.push(',');
+            }
+            payload.push('0');
+        }
+        payload.push(']');
+        assert!(
+            estimated_json_parse_working_set_bytes(payload.as_bytes())
+                > OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES
+        );
+
+        let state = AppState::new();
+        let app = Router::new()
+            .route("/v1/responses", post(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn_with_state(
+                state.clone(),
+                responses_http_body_admission_middleware,
+            ))
+            .with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .extension(AuthExtractor::new(
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        "user",
+                    ))
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn responses_body_middleware_authenticates_before_polling_body() {
+        for authorization in [None, Some("Bearer invalid-token")] {
+            let state = AppState::new();
+            let app = Router::new()
+                .route("/v1/responses", post(|| async { StatusCode::NO_CONTENT }))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    responses_http_body_admission_middleware,
+                ))
+                .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+                .with_state(state);
+            let polls = Arc::new(AtomicUsize::new(0));
+            let mut request = Request::builder().method(Method::POST).uri("/v1/responses");
+            if let Some(authorization) = authorization {
+                request = request.header("Authorization", authorization);
+            }
+
+            let response = tokio::time::timeout(
+                Duration::from_secs(1),
+                app.oneshot(request.body(stalled_body(Arc::clone(&polls))).unwrap()),
+            )
+            .await
+            .expect("authentication should reject without waiting for the body")
+            .unwrap();
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(polls.load(Ordering::Relaxed), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_body_read_has_a_total_timeout() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let result = read_responses_http_body(
+            stalled_body(Arc::clone(&polls)),
+            OPENAI_RESPONSES_BODY_LIMIT_BYTES,
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(result, Err(ResponsesHttpBodyReadError::Timeout));
+        assert!(polls.load(Ordering::Relaxed) > 0);
+    }
+
+    #[tokio::test]
+    async fn authenticated_rate_limit_tenant_lookup_failure_denies_before_recording_rpm() {
+        let state = AppState::with_pool(keycompute_db::DbRouter::single(
+            sea_orm::DatabaseConnection::Disconnected,
+        ));
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+
+        let result = enforce_authenticated_rate_limit(&state, &auth, true).await;
+
+        assert!(matches!(result, Err(ApiError::ServiceUnavailable(_))));
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn tpm_precheck_only_applies_to_generation_endpoints() {
+        assert!(request_uses_tpm(&Method::POST, "/v1/chat/completions"));
+        assert!(request_uses_tpm(&Method::POST, "/v1/responses"));
+        assert!(request_uses_tpm(&Method::POST, "/v1/responses/compact"));
+        assert!(request_uses_tpm(&Method::POST, "/v1/messages"));
+        assert!(!request_uses_tpm(
+            &Method::POST,
+            "/v1/responses/input_tokens"
+        ));
+        assert!(!request_uses_tpm(
+            &Method::POST,
+            "/v1/responses/resp_123/cancel"
+        ));
+        assert!(!request_uses_tpm(&Method::DELETE, "/v1/responses/resp_123"));
+        assert!(!request_uses_tpm(&Method::GET, "/v1/models"));
+    }
+
+    #[test]
+    fn responses_idempotency_defers_tpm_until_execution_is_confirmed() {
+        let mut headers = HeaderMap::new();
+        assert!(!request_defers_tpm_for_responses_idempotency(
+            &Method::POST,
+            "/v1/responses",
+            &headers,
+        ));
+
+        headers.insert("idempotency-key", "retry-key".parse().unwrap());
+        for path in ["/v1/responses", "/v1/responses/compact"] {
+            assert!(request_defers_tpm_for_responses_idempotency(
+                &Method::POST,
+                path,
+                &headers,
+            ));
+        }
+        assert!(!request_defers_tpm_for_responses_idempotency(
+            &Method::GET,
+            "/v1/responses",
+            &headers,
+        ));
+        assert!(!request_defers_tpm_for_responses_idempotency(
+            &Method::POST,
+            "/v1/chat/completions",
+            &headers,
+        ));
+    }
+
+    #[tokio::test]
+    async fn responses_idempotency_reaches_handler_above_tpm_but_plain_request_does_not() {
+        let secret = "responses-idempotency-tpm-secret";
+        let issuer = "keycompute-test";
+        let state = AppState::with_config(AppStateConfig {
+            jwt: JwtConfig {
+                secret: secret.to_string(),
+                issuer: issuer.to_string(),
+                expiry_secs: 3600,
+            },
+            ..AppStateConfig::default()
+        });
+        let token = JwtValidator::new(secret, issuer)
+            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
+            .unwrap();
+        let auth = state.auth.verify_token(&token).await.unwrap();
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        state
+            .rate_limiter
+            .record_token_usage(&rate_key, keycompute_ratelimit::DEFAULT_TPM_LIMIT)
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route("/v1/responses", post(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+            .with_state(state.clone());
+
+        let replay_candidate = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Idempotency-Key", "completed-request")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(replay_candidate.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            1
+        );
+
+        let new_request = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(new_request.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_responses_tpm_check_fails_closed_before_execution() {
+        let state = AppState::with_config(AppStateConfig::default());
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        state
+            .rate_limiter
+            .record_token_usage(&rate_key, keycompute_ratelimit::DEFAULT_TPM_LIMIT)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            enforce_authenticated_tpm_limit(&state, &auth).await,
+            Err(ApiError::RateLimit(_))
+        ));
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn websocket_warmup_skips_tpm_but_still_records_rpm() {
+        let state = AppState::with_config(AppStateConfig::default());
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        state
+            .rate_limiter
+            .record_token_usage(&rate_key, keycompute_ratelimit::DEFAULT_TPM_LIMIT)
+            .await
+            .unwrap();
+
+        enforce_authenticated_rate_limit(&state, &auth, false)
+            .await
+            .expect("generate:false should remain available above TPM");
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            1
+        );
+        assert!(matches!(
+            enforce_authenticated_rate_limit(&state, &auth, true).await,
+            Err(ApiError::RateLimit(_))
+        ));
+    }
+
     #[tokio::test]
     async fn test_cors_layer() {
         let cors = cors_layer();
         // 确保可以创建 CORS 层
         let _ = cors;
+    }
+
+    #[tokio::test]
+    async fn responses_errors_use_openai_schema_and_redact_official_upstream_messages() {
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(|| async {
+                    Err::<(), _>(ApiError::BadRequest("model is required".to_string()))
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "invalid_request_error");
+        assert_eq!(body["error"]["message"], "model is required");
+        assert!(body["error"]["param"].is_null());
+        assert!(body["error"]["code"].is_null());
+
+        let official = r#"{"error":{"message":"slow down","type":"rate_limit_error","param":null,"code":"rate_limit_exceeded"}}"#;
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(move || async move {
+                    Response::builder()
+                        .status(StatusCode::TOO_MANY_REQUESTS)
+                        .body(Body::from(official))
+                        .unwrap()
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert!(body["error"]["param"].is_null());
+        assert_eq!(body["error"]["message"], "Upstream request failed");
+        assert!(!body.to_string().contains("slow down"));
+
+        // A compatible upstream can imitate ApiError's numeric code shape.
+        // Trust is carried in response extensions, never inferred from JSON.
+        let numeric_code_upstream = r#"{"error":{"message":"host=db.internal password=secret","type":"rate_limit_error","param":null,"code":429}}"#;
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(move || async move {
+                    Response::builder()
+                        .status(StatusCode::TOO_MANY_REQUESTS)
+                        .body(Body::from(numeric_code_upstream))
+                        .unwrap()
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "Request failed");
+        assert!(!body.to_string().contains("db.internal"));
+        assert!(!body.to_string().contains("secret"));
+
+        let untrusted_classification = r#"{"error":{"message":"failed","type":"credential_sk_live_secret","param":"authorization_token","code":"sk_live_secret"}}"#;
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(move || async move {
+                    Response::builder()
+                        .status(StatusCode::TOO_MANY_REQUESTS)
+                        .body(Body::from(untrusted_classification))
+                        .unwrap()
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert!(body["error"]["param"].is_null());
+        assert!(!body.to_string().contains("secret"));
+        assert!(!body.to_string().contains("authorization_token"));
+
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(|| async {
+                    Err::<(), _>(ApiError::ServiceUnavailable(
+                        "database host=db.internal password=secret".to_string(),
+                    ))
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "Request failed");
+        assert!(!body.to_string().contains("db.internal"));
+        assert!(!body.to_string().contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn responses_errors_preserve_only_marked_public_maintenance_messages() {
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(|| async {
+                    maintenance_mode_response("Planned maintenance".to_string())
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "maintenance_mode");
+        assert_eq!(body["error"]["code"], "service_unavailable");
+        assert_eq!(body["error"]["message"], "Planned maintenance");
+
+        let unmarked = r#"{"error":{"message":"Planned maintenance","type":"maintenance_mode","code":"service_unavailable"}}"#;
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(move || async move {
+                    Response::builder()
+                        .status(StatusCode::SERVICE_UNAVAILABLE)
+                        .body(Body::from(unmarked))
+                        .unwrap()
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "Upstream request failed");
     }
 
     #[test]
@@ -1517,12 +2673,75 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_mode_allows_only_system_administrators() {
+        assert!(maintenance_mode_allows_request(false, false));
+        assert!(maintenance_mode_allows_request(false, true));
+        assert!(!maintenance_mode_allows_request(true, false));
+        assert!(maintenance_mode_allows_request(true, true));
+    }
+
+    #[test]
     fn x_api_key_only_authorized_on_messages_path() {
         // 与认证提取器的路径限制对称：只有 /v1/messages 允许 x-api-key 身份。
         assert!(x_api_key_allowed_on_path("/v1/messages"));
         assert!(!x_api_key_allowed_on_path("/v1/chat/completions"));
         assert!(!x_api_key_allowed_on_path("/api/v1/me"));
         assert!(!x_api_key_allowed_on_path("/api/v1/admin/users"));
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_header_does_not_bypass_post_rate_limiting() {
+        let secret = "responses-upgrade-rate-limit-secret";
+        let issuer = "keycompute-test";
+        let state = AppState::with_config(AppStateConfig {
+            jwt: JwtConfig {
+                secret: secret.to_string(),
+                issuer: issuer.to_string(),
+                expiry_secs: 3600,
+            },
+            ..AppStateConfig::default()
+        });
+        let token = JwtValidator::new(secret, issuer)
+            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
+            .unwrap();
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+            .with_state(state);
+
+        for _ in 0..keycompute_ratelimit::DEFAULT_RPM_LIMIT {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/responses")
+                        .header("Authorization", format!("Bearer {token}"))
+                        .header("Upgrade", "websocket")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .header("Upgrade", "websocket")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

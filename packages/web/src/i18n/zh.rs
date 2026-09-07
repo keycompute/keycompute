@@ -250,7 +250,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.example_node", "OpenAI SDK（Node.js）");
     m.insert("api_keys.example_curl", "cURL");
     m.insert("api_keys.example_protocol_openai", "OpenAI");
+    m.insert("api_keys.example_protocol_responses", "Responses");
     m.insert("api_keys.example_protocol_anthropic", "Anthropic");
+    m.insert("api_keys.example_websocket", "WebSocket");
     m.insert(
         "api_keys.example_python_anthropic",
         "Anthropic SDK（Python）",
@@ -1407,6 +1409,15 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("accounts.supported_models", "支持模型 *");
     m.insert("accounts.models_hint", "多个模型用逗号分隔");
+    m.insert("accounts.api_mode", "API 接口能力 *");
+    m.insert("accounts.api_mode_chat_completions", "仅 Chat Completions");
+    m.insert("accounts.api_mode_responses", "仅 Responses");
+    m.insert("accounts.api_mode_both", "Chat Completions + Responses");
+    m.insert("accounts.api_mode_messages", "Anthropic Messages");
+    m.insert(
+        "accounts.api_mode_hint",
+        "路由和连接测试只会使用这里声明的上游接口",
+    );
     m.insert("accounts.api_key", "API Key *");
     m.insert("accounts.custom_base_url", "自定义 Base URL");
     m.insert("accounts.edit_title", "编辑 LLM 渠道");

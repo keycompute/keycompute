@@ -20,9 +20,9 @@ pub use lifecycle::*;
 pub use models::*;
 pub use schema::*;
 
-/// 全新部署使用的统一 V0001 数据库基线。
+/// 全新部署使用的统一 `001_init.sql` 数据库结构。
 #[cfg(test)]
-const DATABASE_SCHEMA: &str = include_str!("../migrations/V0001__baseline.sql");
+const DATABASE_SCHEMA: &str = include_str!("../migrations/001_init.sql");
 
 // ============================================================================
 // 错误类型定义
@@ -58,6 +58,10 @@ pub enum DbError {
     /// 订单状态无效
     #[error("invalid order status: expected {expected}, actual {actual}")]
     InvalidOrderStatus { expected: String, actual: String },
+
+    /// 租户级持久化资源配额已用尽
+    #[error("{resource} limit exceeded: {limit}")]
+    ResourceLimitExceeded { resource: String, limit: String },
 
     /// 数据库原生错误
     #[error("database error: {0}")]
@@ -235,6 +239,9 @@ const SCHEMA_SENTINEL_COLUMNS: &[(&str, &str)] = &[
     ("payment_notifications", "payload_digest"),
     ("payment_provider_states", "circuit_state"),
     ("accounts", "last_probe_status"),
+    ("accounts", "api_capabilities"),
+    ("responses_idempotency_claims", "billing_request_id"),
+    ("responses_idempotency_claims", "account_id"),
     ("gateway_requests", "trace_quality"),
     ("gateway_request_attempts", "attempt_no"),
 ];
@@ -429,9 +436,33 @@ mod tests {
         assert!(DATABASE_SCHEMA.contains("token_version INTEGER NOT NULL DEFAULT 0"));
         assert!(DATABASE_SCHEMA.contains("CONSTRAINT uk_distribution_records_unique"));
         assert!(DATABASE_SCHEMA.contains("CONSTRAINT uk_node_tips_usage_log_id UNIQUE"));
+        assert!(DATABASE_SCHEMA.contains(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log"
+        ));
         assert!(DATABASE_SCHEMA.contains("CREATE TABLE IF NOT EXISTS gateway_requests"));
+        assert!(DATABASE_SCHEMA.contains("idempotency_id UUID UNIQUE"));
+        assert!(
+            DATABASE_SCHEMA.contains("CONSTRAINT ck_tenants_responses_idempotency_claim_count")
+        );
+        assert!(
+            DATABASE_SCHEMA.contains("CREATE TABLE IF NOT EXISTS responses_idempotency_claims")
+        );
+        assert!(DATABASE_SCHEMA.contains("PRIMARY KEY (tenant_id, binding_id)"));
+        assert!(
+            DATABASE_SCHEMA.contains("CONSTRAINT uk_responses_idempotency_claims_billing UNIQUE")
+        );
         assert!(DATABASE_SCHEMA.contains("CREATE TABLE IF NOT EXISTS gateway_request_attempts"));
         assert!(DATABASE_SCHEMA.contains("last_probe_status VARCHAR(32)"));
+        assert!(DATABASE_SCHEMA.contains("api_capabilities TEXT[] NOT NULL"));
+        assert!(DATABASE_SCHEMA.contains("CONSTRAINT ck_accounts_api_capabilities"));
+        assert!(
+            DATABASE_SCHEMA.contains("account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT")
+        );
+        assert!(
+            !DATABASE_SCHEMA
+                .contains("account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE")
+        );
+        assert!(DATABASE_SCHEMA.contains("CONSTRAINT ck_response_affinities_account_owner"));
         assert!(DATABASE_SCHEMA.contains("CONSTRAINT ck_accounts_probe_status"));
         assert!(!DATABASE_SCHEMA.contains("ALTER TABLE"));
         assert!(!DATABASE_SCHEMA.contains("\nUPDATE "));

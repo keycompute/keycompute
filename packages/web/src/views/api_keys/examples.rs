@@ -1,7 +1,7 @@
 //! API Key 快速使用示例文本生成。
 //!
-//! 与后端双协议网关对应：OpenAI 兼容（/v1/chat/completions）与
-//! Anthropic Messages（/v1/messages）各有一套 env / python / node / curl 示例。
+//! 与后端协议网关对应：OpenAI Chat Completions、OpenAI Responses 与
+//! Anthropic Messages 各有一套可直接使用的示例。
 //! 示例文本生成与视图解耦，便于单元测试，防止占位符与参数失配导致
 //! 复制出去的示例不可用。
 
@@ -12,6 +12,9 @@ use client_api::api::openai::ModelInfo;
 /// 提示用户该模型不可用、需自行替换为实际可用的模型。
 /// `pub`：供视图层把模型名代入翻译文案（见 list.rs 的 example_note_anthropic）。
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "model-empty";
+/// Responses 目录为空时使用不可执行的显式占位，避免把 chat-only 模型
+/// 展示成可直接调用的 Responses 模型。
+pub const DEFAULT_RESPONSES_MODEL: &str = "model-empty";
 
 /// 一套四种示例文本（env / python / node / curl）
 pub struct ApiExamples {
@@ -19,6 +22,7 @@ pub struct ApiExamples {
     pub python: String,
     pub node: String,
     pub curl: String,
+    pub websocket: String,
 }
 
 impl ApiExamples {
@@ -28,6 +32,7 @@ impl ApiExamples {
             "python" => &self.python,
             "node" => &self.node,
             "curl" => &self.curl,
+            "websocket" => &self.websocket,
             _ => &self.env,
         }
     }
@@ -91,6 +96,103 @@ console.log(response.choices[0].message.content);"#,
     ]
   }}'"#,
             api_url, api_key, model
+        ),
+        websocket: String::new(),
+    }
+}
+
+/// OpenAI Responses 示例。HTTP JSON、HTTP SSE 与 WebSocket transport 共用
+/// 同一 `{base_url}/responses` 资源路径。
+pub fn responses_examples(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    env_comment: &str,
+) -> ApiExamples {
+    let api_url = api_url.trim_end_matches('/');
+    let websocket_url = if let Some(rest) = api_url.strip_prefix("https://") {
+        format!("wss://{rest}/responses")
+    } else if let Some(rest) = api_url.strip_prefix("http://") {
+        format!("ws://{rest}/responses")
+    } else {
+        format!("{api_url}/responses")
+    };
+    ApiExamples {
+        env: format!(
+            r#"# {}
+API_URL="{}"
+API_KEY="{}"
+API_MODEL="{}""#,
+            env_comment, api_url, api_key, model
+        ),
+        python: format!(
+            r#"from openai import OpenAI
+
+client = OpenAI(
+    base_url="{}",
+    api_key="{}",
+)
+
+response = client.responses.create(
+    model="{}",
+    input="Hello",
+)
+
+print(response.output_text)"#,
+            api_url, api_key, model
+        ),
+        node: format!(
+            r#"import OpenAI from "openai";
+
+const client = new OpenAI({{
+  baseURL: "{}",
+  apiKey: "{}",
+}});
+
+const response = await client.responses.create({{
+  model: "{}",
+  input: "Hello",
+}});
+
+console.log(response.output_text);"#,
+            api_url, api_key, model
+        ),
+        curl: format!(
+            r#"curl "{}/responses" \
+    -H "Authorization: Bearer {}" \
+    -H "Content-Type: application/json" \
+  -d '{{
+    "model": "{}",
+    "input": "Hello"
+  }}'"#,
+            api_url, api_key, model
+        ),
+        websocket: format!(
+            r#"from websocket import create_connection
+import json
+
+ws = create_connection(
+    "{}",
+    header=["Authorization: Bearer {}"],
+)
+
+# KeyCompute WebSocket mode currently supports response.create events only.
+ws.send(json.dumps({{
+    "type": "response.create",
+    "stream_id": "main",
+    "model": "{}",
+    "store": False,
+    "input": "Hello",
+}}))
+
+while True:
+    event = json.loads(ws.recv())
+    print(event)
+    if event.get("type") in {{"response.completed", "response.failed", "response.incomplete", "error"}}:
+        break
+
+ws.close()"#,
+            websocket_url, api_key, model
         ),
     }
 }
@@ -163,6 +265,7 @@ console.log(message.content[0].text);"#,
   }}'"#,
             root, api_key, model
         ),
+        websocket: String::new(),
     }
 }
 
@@ -172,6 +275,15 @@ pub fn pick_sample_model(models: &[ModelInfo]) -> String {
         .first()
         .map(|model| model.id.clone())
         .unwrap_or_else(|| "deepseek-chat".to_string())
+}
+
+/// 从 Responses-capable 模型目录选择示例模型；空目录不回退到 chat-only
+/// 默认模型，保留显式的不可用占位。
+pub fn pick_responses_model(models: &[ModelInfo]) -> String {
+    models
+        .first()
+        .map(|model| model.id.clone())
+        .unwrap_or_else(|| DEFAULT_RESPONSES_MODEL.to_string())
 }
 
 /// 从模型列表中选取 Anthropic 示例模型：优先第一个 Claude 模型
@@ -213,7 +325,7 @@ mod tests {
             "deepseek-chat",
             "# env",
         );
-        for text in [&e.env, &e.python, &e.node, &e.curl] {
+        for text in [&e.env, &e.python, &e.node, &e.curl, &e.websocket] {
             assert_no_leftover_placeholder(text);
         }
         assert!(e.python.contains("from openai import OpenAI"));
@@ -222,6 +334,23 @@ mod tests {
                 .contains("\"http://gw.example.com/v1/chat/completions\"")
         );
         assert!(e.curl.contains("-H \"Authorization: Bearer sk-test\""));
+    }
+
+    #[test]
+    fn responses_examples_cover_http_and_websocket_without_renaming_env_vars() {
+        let e = responses_examples("https://gw.example.com/v1", "sk-test", "gpt-5", "# env");
+        for text in [&e.env, &e.python, &e.node, &e.curl, &e.websocket] {
+            assert_no_leftover_placeholder(text);
+        }
+        assert!(e.env.contains("API_URL=\"https://gw.example.com/v1\""));
+        assert!(e.env.contains("API_KEY=\"sk-test\""));
+        assert!(e.env.contains("API_MODEL=\"gpt-5\""));
+        assert!(e.python.contains("client.responses.create("));
+        assert!(e.node.contains("client.responses.create({"));
+        assert!(e.curl.contains("https://gw.example.com/v1/responses"));
+        assert!(e.websocket.contains("wss://gw.example.com/v1/responses"));
+        assert!(e.websocket.contains("supports response.create events only"));
+        assert!(e.websocket.contains("\"type\": \"response.create\""));
     }
 
     #[test]
@@ -293,6 +422,7 @@ mod tests {
         assert_eq!(e.for_tab("python"), &e.python);
         assert_eq!(e.for_tab("node"), &e.node);
         assert_eq!(e.for_tab("curl"), &e.curl);
+        assert_eq!(e.for_tab("websocket"), &e.websocket);
         assert_eq!(e.for_tab("env"), &e.env);
         assert_eq!(e.for_tab("unknown"), &e.env);
     }
@@ -332,5 +462,11 @@ mod tests {
             "gpt-4o"
         );
         assert_eq!(pick_sample_model(&[]), "deepseek-chat");
+    }
+
+    #[test]
+    fn pick_responses_model_never_falls_back_to_a_chat_only_model() {
+        assert_eq!(pick_responses_model(&[model("gpt-5")]), "gpt-5");
+        assert_eq!(pick_responses_model(&[]), DEFAULT_RESPONSES_MODEL);
     }
 }

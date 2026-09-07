@@ -1,11 +1,12 @@
 //! OpenAI 协议实现
 //!
-//! OpenAI Chat Completions 协议的适配器实现。
+//! OpenAI Chat Completions 与 Responses 协议的适配器实现。
 //! 所有 OpenAI 兼容上游（OpenAI/DeepSeek/Ollama/vLLM/Gemini 兼容层等）
 //! 均通过本协议 + Base URL + API Key 接入，不区分具体厂商。
 
 pub mod adapter;
 pub mod protocol;
+pub mod responses_stream;
 pub mod stream;
 
 pub use adapter::{

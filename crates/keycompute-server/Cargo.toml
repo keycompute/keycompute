@@ -25,7 +25,7 @@ llm-protocol-provider = { workspace = true }
 llm-protocol-openai = { workspace = true }
 llm-protocol-anthropic = { workspace = true }
 
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 tower = "0.5"
@@ -46,6 +46,7 @@ anyhow = "1.0"
 thiserror = "2"
 percent-encoding = "2"
 sha2 = "0.10"
+subtle = "2.6"
 hex = "0.4"
 base64 = "0.22"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -60,3 +61,4 @@ redis = ["keycompute-ratelimit/redis", "keycompute-runtime/redis", "dep:deadpool
 llm-protocol-provider = { path = "../llm-protocol/provider", features = ["test-support"] }
 tokio-test = "0.4"
 reqwest = { version = "0.12", features = ["json"] }
+tokio-tungstenite = "0.28"
