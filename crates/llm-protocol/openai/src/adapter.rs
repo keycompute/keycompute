@@ -19,11 +19,11 @@ use futures::StreamExt;
 use keycompute_types::{KeyComputeError, Result};
 use llm_protocol_provider::{
     ByteStream, HttpTransport, LARGE_JSON_BODY_ADMISSION_BYTES,
-    LARGE_JSON_WORKING_SET_ADMISSION_BYTES, MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES,
-    MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, NativeResponsesRequest, NativeStreamEvent,
-    ProviderAdapter, StreamBox, StreamEvent, UpstreamFailure, UpstreamFailureKind, UpstreamRequest,
-    UpstreamResponse, UpstreamResponseMeta, body_read_failure,
-    estimated_json_parse_working_set_bytes, http_status_is_retryable,
+    LARGE_JSON_WORKING_SET_ADMISSION_BYTES, MAX_JSON_PASSTHROUGH_BODY_BYTES,
+    MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES, MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES,
+    NativeResponsesRequest, NativeStreamEvent, ProviderAdapter, StreamBox, StreamEvent,
+    UpstreamFailure, UpstreamFailureKind, UpstreamRequest, UpstreamResponse, UpstreamResponseMeta,
+    body_read_failure, estimated_json_parse_working_set_bytes, http_status_is_retryable,
     try_acquire_large_body_permit,
 };
 use serde::{Serialize, Serializer, ser::SerializeMap};
@@ -66,9 +66,11 @@ pub const SUPPORTED_CHAT_COMPLETIONS_FIELDS: &[&str] = &[
     "n",
     "parallel_tool_calls",
     "presence_penalty",
+    "prompt_cache_key",
     "reasoning_effort",
     "response_format",
     "seed",
+    "safety_identifier",
     "stop",
     "stream",
     "stream_options",
@@ -312,11 +314,47 @@ impl OpenAIProvider {
         if object.get("object").and_then(serde_json::Value::as_str) != Some("chat.completion") {
             return Err("Chat Completions response has an invalid object type");
         }
+        if !object.get("id").is_some_and(|id| {
+            id.as_str().is_some_and(|id| {
+                !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+            })
+        }) {
+            return Err("Chat Completions response has an invalid id");
+        }
         if !object
-            .get("choices")
-            .is_some_and(serde_json::Value::is_array)
+            .get("created")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|created| created >= 0)
         {
+            return Err("Chat Completions response has an invalid created timestamp");
+        }
+        if !object
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|model| !model.is_empty())
+        {
+            return Err("Chat Completions response has an invalid model");
+        }
+        let Some(choices) = object.get("choices").and_then(serde_json::Value::as_array) else {
             return Err("Chat Completions response choices must be an array");
+        };
+        for choice in choices {
+            let Some(choice) = choice.as_object() else {
+                return Err("Chat Completions response choices must contain objects");
+            };
+            if !choice
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .is_some()
+            {
+                return Err("Chat Completions response choice has an invalid index");
+            }
+            let Some(message) = choice.get("message").and_then(serde_json::Value::as_object) else {
+                return Err("Chat Completions response choice has an invalid message");
+            };
+            if message.get("role").and_then(serde_json::Value::as_str) != Some("assistant") {
+                return Err("Chat Completions response message has an invalid role");
+            }
         }
         Ok(())
     }
@@ -386,35 +424,49 @@ impl OpenAIProvider {
                 &response.body,
             ));
         }
-        let (body, _read_admission) = response.body.into_parts();
-        if body.len() > LARGE_JSON_BODY_ADMISSION_BYTES {
+        let (body, mut admission) = response.body.into_parts();
+        if body.len() > MAX_JSON_PASSTHROUGH_BODY_BYTES {
             return Err(body_read_failure(
                 &response.meta,
                 "upstream_body_too_large",
                 format!(
                     "Chat Completions upstream JSON exceeds the {}-byte limit",
-                    LARGE_JSON_BODY_ADMISSION_BYTES
+                    MAX_JSON_PASSTHROUGH_BODY_BYTES
                 ),
             ));
         }
         let working_set_bytes = estimated_json_parse_working_set_bytes(body.as_bytes());
-        if working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES {
+        if working_set_bytes > MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES {
             return Err(body_read_failure(
                 &response.meta,
                 "upstream_json_too_complex",
                 format!(
                     "Chat Completions upstream JSON exceeds the {}-byte working-set limit",
-                    LARGE_JSON_WORKING_SET_ADMISSION_BYTES
+                    MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES
                 ),
             ));
         }
+        if admission.is_none()
+            && (body.len() > LARGE_JSON_BODY_ADMISSION_BYTES
+                || working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES)
+        {
+            admission = Some(try_acquire_large_body_permit().ok_or_else(|| {
+                body_read_failure(
+                    &response.meta,
+                    "upstream_json_capacity_exhausted",
+                    "Chat Completions upstream JSON working-set capacity is exhausted",
+                )
+            })?);
+        }
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
+        drop(body);
         Self::validate_native_chat_success(&value)
             .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
         let usage = Self::chat_usage(&value);
         let mut events = vec![Ok(StreamEvent::native(NativeStreamEvent::OpenAiChatJson {
             body: value,
+            admission,
         }))];
         if let Some((input_tokens, output_tokens)) = usage {
             events.push(Ok(StreamEvent::usage(input_tokens, output_tokens)));
@@ -1550,6 +1602,8 @@ mod tests {
             ],
             "max_completion_tokens": 321,
             "parallel_tool_calls": false,
+            "prompt_cache_key": "cache-user-42",
+            "safety_identifier": "safe-user-42",
             "response_format": {
                 "type": "json_schema",
                 "json_schema": {"name": "answer", "schema": {"type": "object"}}
@@ -1565,6 +1619,8 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert_eq!(body["max_completion_tokens"], 321);
         assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["prompt_cache_key"], "cache-user-42");
+        assert_eq!(body["safety_identifier"], "safe-user-42");
         assert_eq!(body["messages"][0]["role"], "developer");
         assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_1");
         assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
@@ -1655,6 +1711,56 @@ mod tests {
             })
         ));
         assert!(matches!(events[2], Ok(StreamEvent::Done)));
+    }
+
+    #[test]
+    fn native_chat_non_stream_response_requires_the_core_openai_envelope() {
+        let valid = serde_json::json!({
+            "id": "chatcmpl-valid",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "Hello"},
+                "finish_reason": "stop"
+            }]
+        });
+        assert!(OpenAIProvider::validate_native_chat_success(&valid).is_ok());
+
+        let invalid = [
+            serde_json::json!([]),
+            serde_json::json!({
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-4o",
+                "choices": []
+            }),
+            serde_json::json!({
+                "id": "chatcmpl-invalid",
+                "object": "chat.completion",
+                "created": "now",
+                "model": "gpt-4o",
+                "choices": []
+            }),
+            serde_json::json!({
+                "id": "chatcmpl-invalid",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "",
+                "choices": []
+            }),
+            serde_json::json!({
+                "id": "chatcmpl-invalid",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-4o",
+                "choices": [{"index": 0, "message": "not-an-object"}]
+            }),
+        ];
+        for response in invalid {
+            assert!(OpenAIProvider::validate_native_chat_success(&response).is_err());
+        }
     }
 
     #[test]

@@ -242,6 +242,7 @@ fn parse_native_openai_event(
     mut value: serde_json::Value,
     forward_usage: bool,
 ) -> Result<Vec<StreamEvent>> {
+    validate_native_openai_chunk(&value)?;
     let usage = value.get("usage").and_then(|usage| {
         Some((
             u32::try_from(usage.get("prompt_tokens")?.as_u64()?).unwrap_or(u32::MAX),
@@ -270,6 +271,105 @@ fn parse_native_openai_event(
         events.push(StreamEvent::usage(input_tokens, output_tokens));
     }
     Ok(events)
+}
+
+fn validate_native_openai_chunk(value: &serde_json::Value) -> Result<()> {
+    let Some(object) = value.as_object() else {
+        return Err(KeyComputeError::ProviderError(
+            "OpenAI stream event must be a JSON object".to_string(),
+        ));
+    };
+
+    if let Some(kind) = object.get("object")
+        && kind.as_str() != Some("chat.completion.chunk")
+    {
+        return Err(KeyComputeError::ProviderError(
+            "OpenAI stream event has an invalid object type".to_string(),
+        ));
+    }
+    if let Some(id) = object.get("id")
+        && !id.as_str().is_some_and(|id| {
+            !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control)
+        })
+    {
+        return Err(KeyComputeError::ProviderError(
+            "OpenAI stream event has an invalid id".to_string(),
+        ));
+    }
+    if let Some(created) = object.get("created")
+        && !created.as_i64().is_some_and(|created| created >= 0)
+    {
+        return Err(KeyComputeError::ProviderError(
+            "OpenAI stream event has an invalid created timestamp".to_string(),
+        ));
+    }
+    if let Some(model) = object.get("model")
+        && !model.as_str().is_some_and(|model| !model.is_empty())
+    {
+        return Err(KeyComputeError::ProviderError(
+            "OpenAI stream event has an invalid model".to_string(),
+        ));
+    }
+
+    let choices = object.get("choices");
+    if choices.is_none() && object.get("usage").is_none_or(serde_json::Value::is_null) {
+        return Err(KeyComputeError::ProviderError(
+            "OpenAI stream event must contain choices or usage".to_string(),
+        ));
+    }
+    if let Some(choices) = choices {
+        let Some(choices) = choices.as_array() else {
+            return Err(KeyComputeError::ProviderError(
+                "OpenAI stream event choices must be an array".to_string(),
+            ));
+        };
+        for choice in choices {
+            let Some(choice) = choice.as_object() else {
+                return Err(KeyComputeError::ProviderError(
+                    "OpenAI stream event choices must contain objects".to_string(),
+                ));
+            };
+            if let Some(index) = choice.get("index")
+                && index.as_u64().is_none()
+            {
+                return Err(KeyComputeError::ProviderError(
+                    "OpenAI stream event choice has an invalid index".to_string(),
+                ));
+            }
+            if let Some(delta) = choice.get("delta")
+                && !delta.is_object()
+            {
+                return Err(KeyComputeError::ProviderError(
+                    "OpenAI stream event choice has an invalid delta".to_string(),
+                ));
+            }
+        }
+    }
+
+    if let Some(usage) = object.get("usage")
+        && !usage.is_null()
+    {
+        let Some(usage) = usage.as_object() else {
+            return Err(KeyComputeError::ProviderError(
+                "OpenAI stream event has invalid usage".to_string(),
+            ));
+        };
+        if ["prompt_tokens", "completion_tokens", "total_tokens"]
+            .into_iter()
+            .any(|name| {
+                usage
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none()
+            })
+        {
+            return Err(KeyComputeError::ProviderError(
+                "OpenAI stream event has invalid usage token counts".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 /// 提取上游错误 payload 中的错误信息
@@ -593,6 +693,32 @@ mod tests {
             } if data.get("usage").is_some()
         ));
         assert!(matches!(forwarded[1], StreamEvent::Usage { .. }));
+    }
+
+    #[test]
+    fn native_chat_stream_rejects_malformed_openai_chunks() {
+        let invalid = [
+            r#""not-an-object""#,
+            r#"[]"#,
+            r#"{"choices":"not-an-array"}"#,
+            r#"{"choices":[1]}"#,
+            r#"{"choices":[{"index":0,"delta":"not-an-object"}]}"#,
+            r#"{"usage":null}"#,
+            r#"{"usage":{"prompt_tokens":1,"completion_tokens":"bad","total_tokens":1}}"#,
+        ];
+
+        for data in invalid {
+            assert!(
+                parse_openai_event_with_mode(
+                    data,
+                    ChatStreamMode::Native {
+                        forward_usage: false,
+                    },
+                )
+                .is_err(),
+                "malformed chunk was accepted: {data}"
+            );
+        }
     }
 
     #[tokio::test]

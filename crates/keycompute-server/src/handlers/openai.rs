@@ -12,6 +12,7 @@ use crate::{
 };
 use axum::{
     Json,
+    body::Body,
     extract::{Path, Query, State},
     response::{
         IntoResponse,
@@ -26,7 +27,9 @@ use keycompute_types::{
     Message, MessageContent, MessageRole, NoopRequestLifecycleRecorder, RequestContext,
     RequestLifecycleRecorder, RequestStatus, RequestTraceStart, RouteType, TraceErrorCategory,
 };
-use llm_protocol_provider::NativeStreamEvent;
+use llm_protocol_provider::{
+    LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, LargeBodyPermit, NativeStreamEvent,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{convert::Infallible, sync::Arc, time::Duration};
@@ -74,6 +77,10 @@ pub struct ChatCompletionRequest {
     pub top_logprobs: Option<u32>,
     /// 用户标识 (用于监控滥用)
     pub user: Option<String>,
+    /// 稳定的提示缓存分组标识（OpenAI 推荐替代 user）
+    pub prompt_cache_key: Option<String>,
+    /// 用于滥用检测的稳定终端用户标识（OpenAI 推荐替代 user）
+    pub safety_identifier: Option<String>,
     /// 响应格式 (如 json_object)
     pub response_format: Option<ResponseFormat>,
     /// 种子值 (用于可重复的结果)
@@ -938,7 +945,7 @@ pub async fn chat_completions(
                         Arc::clone(&lifecycle),
                     )
                     .await?;
-                    Ok(Json(response).into_response())
+                    openai_json_response(response)
                 }
             }
         }
@@ -965,7 +972,7 @@ async fn create_openai_response_with_lifecycle(
     account_id: uuid::Uuid,
     settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
-) -> Result<Value> {
+) -> Result<OpenAiJsonResponse> {
     let mut client_response_guard =
         super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
     let (mut response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -1029,8 +1036,8 @@ async fn create_openai_response_with_lifecycle(
             Err(error)
         } else {
             let (prompt_tokens, completion_tokens) = worker_ctx.usage_snapshot();
-            if let Some(body) = collector.native_chat_response.take() {
-                Ok(body)
+            if let Some(response) = collector.native_chat_response.take() {
+                Ok(response)
             } else {
                 serde_json::to_value(build_chat_completion_response(
                     completion_id,
@@ -1042,6 +1049,10 @@ async fn create_openai_response_with_lifecycle(
                     completion_tokens,
                     provider_name,
                 ))
+                .map(|body| OpenAiJsonResponse {
+                    body,
+                    admission: None,
+                })
                 .map_err(|error| {
                     ApiError::Internal(format!(
                         "Failed to serialize Chat Completions response: {error}"
@@ -1085,6 +1096,60 @@ async fn create_openai_response_with_lifecycle(
     super::finish_client_response_trace(&lifecycle, &ctx, ClientResponseOutcome::Succeeded).await;
     client_response_guard.disarm();
     Ok(response)
+}
+
+#[derive(Debug)]
+struct OpenAiJsonResponse {
+    body: Value,
+    admission: Option<LargeBodyPermit>,
+}
+
+struct GuardedOpenAiBytes<G> {
+    bytes: bytes::Bytes,
+    _guard: G,
+}
+
+impl<G> AsRef<[u8]> for GuardedOpenAiBytes<G> {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+}
+
+fn retain_openai_bytes_guard<G>(bytes: bytes::Bytes, guard: G) -> bytes::Bytes
+where
+    G: Send + Sync + 'static,
+{
+    bytes::Bytes::from_owner(GuardedOpenAiBytes {
+        bytes,
+        _guard: guard,
+    })
+}
+
+fn serialize_openai_json_body(
+    response: OpenAiJsonResponse,
+) -> std::result::Result<bytes::Bytes, serde_json::Error> {
+    let bytes = bytes::Bytes::from(serde_json::to_vec(&response.body)?);
+    Ok(match response.admission {
+        Some(admission) => retain_openai_bytes_guard(bytes, admission),
+        None => bytes,
+    })
+}
+
+fn openai_json_response(response: OpenAiJsonResponse) -> Result<axum::response::Response> {
+    let body = serialize_openai_json_body(response).map_err(|error| {
+        ApiError::Internal(format!(
+            "Failed to serialize Chat Completions response: {error}"
+        ))
+    })?;
+    axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", "application/json")
+        .body(Body::from(body))
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "Failed to build Chat Completions response: {error}"
+            ))
+        })
 }
 
 /// 检测消息列表中是否包含需要网络下载的图片 URL
@@ -1152,7 +1217,7 @@ fn build_chat_completion_response(
 struct StreamCollector {
     content: String,
     finish_reason: Option<String>,
-    native_chat_response: Option<Value>,
+    native_chat_response: Option<OpenAiJsonResponse>,
     status: String,
     completed: bool,
 }
@@ -1198,9 +1263,9 @@ impl StreamCollector {
                 Err(message)
             }
             llm_protocol_provider::StreamEvent::Native {
-                event: NativeStreamEvent::OpenAiChatJson { body },
+                event: NativeStreamEvent::OpenAiChatJson { body, admission },
             } => {
-                self.native_chat_response = Some(body);
+                self.native_chat_response = Some(OpenAiJsonResponse { body, admission });
                 Ok(true)
             }
             llm_protocol_provider::StreamEvent::Usage { .. }
@@ -1489,45 +1554,44 @@ fn create_non_streaming_json_with_keepalive_and_lifecycle(
 
         // Provider 账号返回的原生 Chat Completions body 已包含工具调用、
         // logprobs、usage 细节等字段；标准化路径仅供 Node/旧测试适配器使用。
-        let response = if let Some(body) = collector.native_chat_response.take() {
-            body
+        let response = if let Some(response) = collector.native_chat_response.take() {
+            response
         } else {
-            serde_json::to_value(build_chat_completion_response(
-                completion_id,
-                created,
-                model,
-                collector.content,
-                collector.finish_reason,
-                prompt_tokens,
-                completion_tokens,
-                provider_name,
-            ))
-            .unwrap_or_else(|_| serde_json::json!({}))
+            OpenAiJsonResponse {
+                body: serde_json::to_value(build_chat_completion_response(
+                    completion_id,
+                    created,
+                    model,
+                    collector.content,
+                    collector.finish_reason,
+                    prompt_tokens,
+                    completion_tokens,
+                    provider_name,
+                ))
+                .unwrap_or_else(|_| serde_json::json!({})),
+                admission: None,
+            }
         };
 
-        let json = serde_json::to_string(&response).unwrap_or_else(|e| {
+        let json = serialize_openai_json_body(response).unwrap_or_else(|e| {
             tracing::error!(
                 request_id = %ctx.request_id,
                 error = %e,
                 "Failed to serialize chat completion response"
             );
-            serde_json::json!({
-                "error": {
-                    "message": "Internal error: failed to serialize response",
-                    "type": "server_error",
-                    "param": null,
-                    "code": null
-                }
-            })
-            .to_string()
+            bytes::Bytes::from(
+                serde_json::json!({
+                    "error": {
+                        "message": "Internal error: failed to serialize response",
+                        "type": "server_error",
+                        "param": null,
+                        "code": null
+                    }
+                })
+                .to_string(),
+            )
         });
-        let sent = forward_openai_json_chunk(
-            &body_tx,
-            &ctx,
-            &mut client_connected,
-            bytes::Bytes::from(json),
-        )
-        .await;
+        let sent = forward_openai_json_chunk(&body_tx, &ctx, &mut client_connected, json).await;
         if sent
             && let Err(error) =
                 super::record_final_client_first_content(&lifecycle, ctx.request_id).await
@@ -1734,6 +1798,14 @@ struct OpenAiStreamContext {
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
 }
 
+fn openai_sse_channel_capacity(ctx: &RequestContext) -> usize {
+    if ctx.native_openai_chat_request.is_some() {
+        LARGE_NATIVE_EVENT_CHANNEL_CAPACITY
+    } else {
+        100
+    }
+}
+
 async fn forward_openai_sse_event(
     sse_tx: &mpsc::Sender<Event>,
     ctx: &RequestContext,
@@ -1783,7 +1855,7 @@ fn create_openai_stream_with_lifecycle(
     mut rx: tokio::sync::mpsc::Receiver<llm_protocol_provider::StreamEvent>,
     stream_context: OpenAiStreamContext,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
-    let (sse_tx, sse_rx) = mpsc::channel(100);
+    let (sse_tx, sse_rx) = mpsc::channel(openai_sse_channel_capacity(&stream_context.ctx));
     let OpenAiStreamContext {
         ctx,
         model,
@@ -1992,7 +2064,7 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
     stream_context: OpenAiStreamContext,
     response_timeout: Duration,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
-    let (sse_tx, sse_rx) = mpsc::channel(100);
+    let (sse_tx, sse_rx) = mpsc::channel(openai_sse_channel_capacity(&stream_context.ctx));
     let OpenAiStreamContext {
         ctx,
         model,
@@ -2640,6 +2712,8 @@ mod tests {
             }],
             "tool_choice": "auto",
             "parallel_tool_calls": false,
+            "prompt_cache_key": "cache-user-42",
+            "safety_identifier": "safe-user-42",
             "max_completion_tokens": 128,
             "response_format": {
                 "type": "json_schema",
@@ -2651,6 +2725,8 @@ mod tests {
         assert_eq!(request.messages[0].role, "developer");
         assert_eq!(request.effective_max_tokens(), Some(128));
         assert_eq!(request.tools.as_ref().map(Vec::len), Some(1));
+        assert_eq!(request.prompt_cache_key.as_deref(), Some("cache-user-42"));
+        assert_eq!(request.safety_identifier.as_deref(), Some("safe-user-42"));
     }
 
     #[test]
@@ -2687,11 +2763,71 @@ mod tests {
         assert!(
             collector
                 .process_event(llm_protocol_provider::StreamEvent::native(
-                    NativeStreamEvent::OpenAiChatJson { body: body.clone() },
+                    NativeStreamEvent::OpenAiChatJson {
+                        body: body.clone(),
+                        admission: None,
+                    },
                 ))
                 .unwrap()
         );
-        assert_eq!(collector.native_chat_response.as_ref(), Some(&body));
+        assert_eq!(
+            collector
+                .native_chat_response
+                .as_ref()
+                .map(|response| &response.body),
+            Some(&body)
+        );
+    }
+
+    #[test]
+    fn native_chat_sse_uses_single_slot_client_backpressure() {
+        let mut ctx = RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-4o",
+            Vec::new(),
+            true,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        assert_eq!(openai_sse_channel_capacity(&ctx), 100);
+
+        ctx.native_openai_chat_request = Some(Arc::new(serde_json::json!({})));
+        assert_eq!(
+            openai_sse_channel_capacity(&ctx),
+            LARGE_NATIVE_EVENT_CHANNEL_CAPACITY
+        );
+    }
+
+    #[tokio::test]
+    async fn native_chat_response_chunk_owns_its_admission_guard() {
+        struct TestGuard(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for TestGuard {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let released = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let guarded = retain_openai_bytes_guard(
+            bytes::Bytes::from_static(b"large chat response"),
+            TestGuard(Arc::clone(&released)),
+        );
+        let response = axum::response::Response::new(Body::from(guarded));
+        let (head, body) = response.into_parts();
+        drop(head);
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+
+        let mut body = body.into_data_stream();
+        let chunk = body.next().await.unwrap().unwrap();
+        assert_eq!(chunk, bytes::Bytes::from_static(b"large chat response"));
+        assert!(body.next().await.is_none());
+        assert!(!released.load(std::sync::atomic::Ordering::SeqCst));
+
+        drop(chunk);
+        assert!(released.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     #[tokio::test]
