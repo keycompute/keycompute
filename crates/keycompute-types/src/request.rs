@@ -68,6 +68,12 @@ pub struct RequestContext {
     pub temperature: Option<f32>,
     /// 客户端指定的 Top P 参数（透传给上游协议层）
     pub top_p: Option<f32>,
+    /// 原生 OpenAI Chat Completions 请求。
+    ///
+    /// 该字段只在 `/v1/chat/completions` 入站时设置。工具调用、结构化输出、
+    /// developer 消息等官方字段无法无损投影到通用 `Message`，因此 Provider
+    /// 账号路径保留经入口校验的完整 JSON，并在协议适配器中只覆盖路由字段。
+    pub native_openai_chat_request: Option<Arc<serde_json::Value>>,
     /// 原生 Anthropic Messages 请求。
     ///
     /// 该字段只在 `/v1/messages` 入站时设置。它保留客户端的完整请求体，
@@ -153,6 +159,13 @@ impl fmt::Debug for RequestContext {
             // 原生 body 可能包含 base64 图片、工具输入和用户原文；禁止在
             // Debug/诊断输出中展开它，但保留是否存在的信息便于排查路由。
             .field(
+                "native_openai_chat_request",
+                &self
+                    .native_openai_chat_request
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .field(
                 "native_anthropic_request",
                 &self.native_anthropic_request.as_ref().map(|_| "<redacted>"),
             )
@@ -228,6 +241,7 @@ impl RequestContext {
             max_tokens: None,
             temperature: None,
             top_p: None,
+            native_openai_chat_request: None,
             native_anthropic_request: None,
             native_anthropic_headers: BTreeMap::new(),
             native_openai_responses_request: None,
@@ -266,6 +280,7 @@ impl RequestContext {
             max_tokens: self.max_tokens,
             temperature: self.temperature,
             top_p: self.top_p,
+            native_openai_chat_request: None,
             native_anthropic_request: None,
             native_anthropic_headers: self.native_anthropic_headers.clone(),
             native_openai_responses_request: None,
@@ -578,6 +593,7 @@ pub struct ExecutedProviderAccount {
 #[serde(rename_all = "lowercase")]
 pub enum MessageRole {
     System,
+    Developer,
     #[default]
     User,
     Assistant,
@@ -589,6 +605,7 @@ impl MessageRole {
     pub fn as_str(&self) -> &'static str {
         match self {
             MessageRole::System => "system",
+            MessageRole::Developer => "developer",
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
             MessageRole::Tool => "tool",
@@ -762,6 +779,7 @@ mod tests {
     #[test]
     fn test_message_role_as_str() {
         assert_eq!(MessageRole::System.as_str(), "system");
+        assert_eq!(MessageRole::Developer.as_str(), "developer");
         assert_eq!(MessageRole::User.as_str(), "user");
         assert_eq!(MessageRole::Assistant.as_str(), "assistant");
         assert_eq!(MessageRole::Tool.as_str(), "tool");
@@ -772,6 +790,7 @@ mod tests {
         // 测试所有变体的字符串表示
         let roles = vec![
             (MessageRole::System, "system"),
+            (MessageRole::Developer, "developer"),
             (MessageRole::User, "user"),
             (MessageRole::Assistant, "assistant"),
             (MessageRole::Tool, "tool"),
@@ -1109,6 +1128,9 @@ mod tests {
         ctx.native_anthropic_request = Some(Arc::new(serde_json::json!({
             "messages": [{"content": [{"type": "image", "source": {"data": "secret-base64"}}] }]
         })));
+        ctx.native_openai_chat_request = Some(Arc::new(serde_json::json!({
+            "messages": [{"role": "user", "content": "secret-chat-prompt"}]
+        })));
         ctx.native_openai_responses_request = Some(Arc::new(serde_json::json!({
             "input": [{"type": "input_image", "image_url": "secret-image"}]
         })));
@@ -1120,6 +1142,7 @@ mod tests {
         let debug = format!("{ctx:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("secret-base64"));
+        assert!(!debug.contains("secret-chat-prompt"));
         assert!(!debug.contains("secret-image"));
         assert!(!debug.contains("secret-idempotency-value"));
     }

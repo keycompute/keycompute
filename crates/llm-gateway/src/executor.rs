@@ -526,7 +526,9 @@ impl GatewayExecutor {
         provider_health: Option<Arc<ProviderHealthStore>>,
         lifecycle: Arc<dyn RequestLifecycleRecorder>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
-        let channel_capacity = if ctx.native_openai_responses_request.is_some() {
+        let channel_capacity = if ctx.native_openai_responses_request.is_some()
+            || ctx.native_openai_chat_request.is_some()
+        {
             LARGE_NATIVE_EVENT_CHANNEL_CAPACITY
         } else {
             100
@@ -1106,6 +1108,7 @@ impl GatewayExecutor {
             max_tokens: ctx.max_tokens,
             temperature: ctx.temperature,
             top_p: ctx.top_p,
+            native_openai_chat_request: ctx.native_openai_chat_request.clone(),
             native_anthropic_request: ctx.native_anthropic_request.clone(),
             native_anthropic_headers: ctx.native_anthropic_headers.clone(),
         };
@@ -1419,6 +1422,17 @@ impl GatewayExecutor {
                     // when it arrives, continues to replace this estimate.
                     if !ctx.is_output_finalized() {
                         match &event {
+                            NativeStreamEvent::OpenAiChatJson { body, .. } => {
+                                let estimated = estimate_chat_output_tokens(body);
+                                if estimated > 0 {
+                                    ctx.set_output_tokens_estimate(estimated);
+                                }
+                            }
+                            NativeStreamEvent::OpenAiChatSse { data, .. } => {
+                                for delta in native_chat_billable_deltas(data) {
+                                    ctx.add_output_tokens(Self::estimate_tokens(delta));
+                                }
+                            }
                             NativeStreamEvent::OpenAiResponsesJson { body, .. } => {
                                 let estimated = estimate_responses_output_tokens(body);
                                 if estimated > 0 {
@@ -1533,7 +1547,33 @@ impl GatewayExecutor {
             .and_then(|body| body.get("input"))
             .map(Self::estimate_responses_tool_input_tokens)
             .unwrap_or_default();
-        message_tokens.saturating_add(tool_tokens)
+        let chat_extra_tokens = ctx
+            .native_openai_chat_request
+            .as_deref()
+            .map(Self::estimate_chat_extra_input_tokens)
+            .unwrap_or_default();
+        message_tokens
+            .saturating_add(tool_tokens)
+            .saturating_add(chat_extra_tokens)
+    }
+
+    fn estimate_chat_extra_input_tokens(body: &serde_json::Value) -> u32 {
+        let mut tokens = 0_u32;
+        for name in ["tools", "tool_choice", "response_format"] {
+            if let Some(value) = body.get(name) {
+                tokens = tokens.saturating_add(Self::estimate_tokens(&value.to_string()));
+            }
+        }
+        if let Some(messages) = body.get("messages").and_then(serde_json::Value::as_array) {
+            for message in messages {
+                for name in ["tool_calls", "tool_call_id", "name"] {
+                    if let Some(value) = message.get(name) {
+                        tokens = tokens.saturating_add(Self::estimate_tokens(&value.to_string()));
+                    }
+                }
+            }
+        }
+        tokens
     }
 
     /// Count token-bearing function/custom-tool payloads that the generic
@@ -1697,6 +1737,50 @@ fn native_responses_billable_delta(event: &NativeStreamEvent) -> Option<&str> {
     )
     .then(|| data.get("delta").and_then(serde_json::Value::as_str))
     .flatten()
+}
+
+fn native_chat_billable_deltas(value: &serde_json::Value) -> Vec<&str> {
+    let mut deltas = Vec::new();
+    let Some(choices) = value.get("choices").and_then(serde_json::Value::as_array) else {
+        return deltas;
+    };
+    for choice in choices {
+        let Some(delta) = choice.get("delta").or_else(|| choice.get("message")) else {
+            continue;
+        };
+        for name in ["content", "refusal"] {
+            if let Some(text) = delta.get(name).and_then(serde_json::Value::as_str)
+                && !text.is_empty()
+            {
+                deltas.push(text);
+            }
+        }
+        if let Some(tool_calls) = delta
+            .get("tool_calls")
+            .and_then(serde_json::Value::as_array)
+        {
+            for tool_call in tool_calls {
+                if let Some(function) = tool_call.get("function") {
+                    for name in ["name", "arguments"] {
+                        if let Some(text) = function.get(name).and_then(serde_json::Value::as_str)
+                            && !text.is_empty()
+                        {
+                            deltas.push(text);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    deltas
+}
+
+fn estimate_chat_output_tokens(body: &serde_json::Value) -> u32 {
+    native_chat_billable_deltas(body)
+        .into_iter()
+        .fold(0_u32, |tokens, delta| {
+            tokens.saturating_add(GatewayExecutor::estimate_tokens(delta))
+        })
 }
 
 /// Estimate generated Responses output when a compatible upstream omits the
@@ -3466,6 +3550,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chat_tool_payloads_contribute_to_the_fallback_input_estimate() {
+        let mut plain = create_test_context();
+        plain.messages = vec![Message::user("weather")];
+        let mut with_tools = plain.clone();
+        with_tools.native_openai_chat_request = Some(Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "weather"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "lookup_weather",
+                    "description": "detailed weather lookup ".repeat(512),
+                    "parameters": {"type": "object"}
+                }
+            }]
+        })));
+
+        assert!(
+            GatewayExecutor::estimate_context_input_tokens(&with_tools)
+                > GatewayExecutor::estimate_context_input_tokens(&plain)
+        );
+    }
+
     #[tokio::test]
     async fn test_execute_returns_receiver_before_consuming_large_stream() {
         let config = GatewayConfig::default();
@@ -4420,6 +4528,27 @@ mod tests {
             GatewayExecutor::estimate_tokens("hello\ncannot comply\nlookup\n{\"city\":\"Paris\"}");
 
         assert_eq!(estimate_responses_output_tokens(&compact), expected);
+    }
+
+    #[test]
+    fn chat_output_estimate_includes_text_refusal_and_tool_calls() {
+        let body = serde_json::json!({
+            "choices": [
+                {"message": {"content": "hello", "refusal": "cannot comply"}},
+                {"message": {"tool_calls": [{
+                    "id": "call_ignored",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{\"city\":\"Paris\"}"}
+                }]}}
+            ]
+        });
+        let expected = ["hello", "cannot comply", "lookup", "{\"city\":\"Paris\"}"]
+            .into_iter()
+            .fold(0_u32, |tokens, text| {
+                tokens.saturating_add(GatewayExecutor::estimate_tokens(text))
+            });
+
+        assert_eq!(estimate_chat_output_tokens(&body), expected);
     }
 
     #[test]

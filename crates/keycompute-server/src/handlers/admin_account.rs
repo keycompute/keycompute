@@ -914,6 +914,7 @@ async fn probe_upstream_account(
                 Some(0.0)
             },
             top_p: None,
+            native_openai_chat_request: None,
             native_anthropic_request: None,
             native_anthropic_headers: BTreeMap::new(),
         };

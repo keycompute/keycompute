@@ -5,8 +5,8 @@
 use futures::{Stream, StreamExt};
 use keycompute_types::{KeyComputeError, Result};
 use llm_protocol_provider::ByteStream;
-use llm_protocol_provider::StreamEvent;
 use llm_protocol_provider::stream::sse;
+use llm_protocol_provider::{LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, NativeStreamEvent, StreamEvent};
 use std::pin::Pin;
 use tokio::sync::mpsc;
 
@@ -18,7 +18,34 @@ use crate::protocol::OpenAIStreamResponse;
 pub fn parse_openai_stream(
     stream: ByteStream,
 ) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
-    let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(100);
+    parse_chat_stream(stream, ChatStreamMode::Normalized)
+}
+
+/// Parse Chat Completions SSE while preserving every supported OpenAI chunk
+/// for the public compatibility endpoint. Usage requested only for internal
+/// billing is consumed but not exposed to a client that did not request it.
+pub fn parse_native_openai_chat_stream(
+    stream: ByteStream,
+    forward_usage: bool,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
+    parse_chat_stream(stream, ChatStreamMode::Native { forward_usage })
+}
+
+#[derive(Clone, Copy)]
+enum ChatStreamMode {
+    Normalized,
+    Native { forward_usage: bool },
+}
+
+fn parse_chat_stream(
+    stream: ByteStream,
+    mode: ChatStreamMode,
+) -> Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>> {
+    let channel_capacity = match mode {
+        ChatStreamMode::Normalized => 100,
+        ChatStreamMode::Native { .. } => LARGE_NATIVE_EVENT_CHANNEL_CAPACITY,
+    };
+    let (tx, rx) = mpsc::channel::<Result<StreamEvent>>(channel_capacity);
 
     tokio::spawn(async move {
         // Keep the raw bytes until a complete SSE line is available. Network
@@ -65,7 +92,7 @@ pub fn parse_openai_stream(
                             }
                         };
 
-                        if !handle_sse_line(&tx, line).await {
+                        if !handle_sse_line(&tx, line, mode).await {
                             return;
                         }
                     }
@@ -97,7 +124,7 @@ pub fn parse_openai_stream(
                 }
             };
             for raw_line in text.split('\n') {
-                if !handle_sse_line(&tx, raw_line.trim_end_matches('\r')).await {
+                if !handle_sse_line(&tx, raw_line.trim_end_matches('\r'), mode).await {
                     return;
                 }
             }
@@ -118,7 +145,11 @@ pub fn parse_openai_stream(
 }
 
 /// 处理单条 SSE 行；返回 `false` 表示应停止解析（完成 / 错误 / 接收端关闭）。
-async fn handle_sse_line(tx: &mpsc::Sender<Result<StreamEvent>>, line: &str) -> bool {
+async fn handle_sse_line(
+    tx: &mpsc::Sender<Result<StreamEvent>>,
+    line: &str,
+    mode: ChatStreamMode,
+) -> bool {
     let Some(data) = sse::parse_sse_line(line) else {
         return true;
     };
@@ -129,7 +160,7 @@ async fn handle_sse_line(tx: &mpsc::Sender<Result<StreamEvent>>, line: &str) -> 
     }
 
     // 解析 JSON 数据（一条上游事件可能产生多个 StreamEvent）
-    match parse_openai_event(&data) {
+    match parse_openai_event_with_mode(&data, mode) {
         Ok(events) => {
             for event in events {
                 if tx.send(Ok(event)).await.is_err() {
@@ -151,7 +182,12 @@ async fn handle_sse_line(tx: &mpsc::Sender<Result<StreamEvent>>, line: &str) -> 
 /// 一条上游事件可能产生 0~2 个 StreamEvent：部分上游（如 DeepSeek）
 /// 会在最后一个 chunk 中同时携带 finish_reason 与 usage，
 /// 先发 Delta（含 finish_reason）再发 Usage，避免两者互相吞掉
+#[cfg(test)]
 fn parse_openai_event(data: &str) -> Result<Vec<StreamEvent>> {
+    parse_openai_event_with_mode(data, ChatStreamMode::Normalized)
+}
+
+fn parse_openai_event_with_mode(data: &str, mode: ChatStreamMode) -> Result<Vec<StreamEvent>> {
     // 先解析为通用 JSON：需要识别上游在流中发送的错误 payload
     //（`{"error": {...}}`，限流/内容过滤时常见），
     // 否则会因结构不匹配报 serde 错误，掩盖真实的上游错误信息
@@ -161,6 +197,10 @@ fn parse_openai_event(data: &str) -> Result<Vec<StreamEvent>> {
 
     if let Some(message) = extract_upstream_error(&value) {
         return Ok(vec![StreamEvent::error(message)]);
+    }
+
+    if let ChatStreamMode::Native { forward_usage } = mode {
+        return parse_native_openai_event(value, forward_usage);
     }
 
     let response: OpenAIStreamResponse = serde_json::from_value(value).map_err(|e| {
@@ -195,6 +235,40 @@ fn parse_openai_event(data: &str) -> Result<Vec<StreamEvent>> {
         ));
     }
 
+    Ok(events)
+}
+
+fn parse_native_openai_event(
+    mut value: serde_json::Value,
+    forward_usage: bool,
+) -> Result<Vec<StreamEvent>> {
+    let usage = value.get("usage").and_then(|usage| {
+        Some((
+            u32::try_from(usage.get("prompt_tokens")?.as_u64()?).unwrap_or(u32::MAX),
+            u32::try_from(usage.get("completion_tokens")?.as_u64()?).unwrap_or(u32::MAX),
+        ))
+    });
+    let choices_are_empty = value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(Vec::is_empty);
+    let mut events = Vec::new();
+
+    if !forward_usage && let Some(object) = value.as_object_mut() {
+        object.remove("usage");
+    }
+    // `include_usage` adds one final choices=[] chunk. The gateway requests it
+    // internally for exact billing, but it must remain invisible unless the
+    // client opted in. A regular content/finish chunk that also carries usage
+    // is still forwarded after removing only its usage member.
+    if forward_usage || usage.is_none() || !choices_are_empty {
+        events.push(StreamEvent::native(NativeStreamEvent::OpenAiChatSse {
+            data: value,
+        }));
+    }
+    if let Some((input_tokens, output_tokens)) = usage {
+        events.push(StreamEvent::usage(input_tokens, output_tokens));
+    }
     Ok(events)
 }
 
@@ -441,6 +515,84 @@ mod tests {
                 output_tokens: 20
             }
         ));
+    }
+
+    #[test]
+    fn native_chat_event_preserves_tool_call_delta() {
+        let data = r#"{
+            "id": "chatcmpl-tools",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{\"city\":\"Paris\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }"#;
+
+        let events = parse_openai_event_with_mode(
+            data,
+            ChatStreamMode::Native {
+                forward_usage: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0],
+            StreamEvent::Native {
+                event: NativeStreamEvent::OpenAiChatSse { data, .. }
+            } if data.pointer("/choices/0/delta/tool_calls/0/function/name")
+                .and_then(serde_json::Value::as_str) == Some("weather")
+        ));
+    }
+
+    #[test]
+    fn native_chat_usage_is_internal_unless_client_requested_it() {
+        let data = r#"{
+            "id": "chatcmpl-usage",
+            "object": "chat.completion.chunk",
+            "choices": [],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}
+        }"#;
+
+        let internal = parse_openai_event_with_mode(
+            data,
+            ChatStreamMode::Native {
+                forward_usage: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(internal.len(), 1);
+        assert!(matches!(
+            internal[0],
+            StreamEvent::Usage {
+                input_tokens: 11,
+                output_tokens: 7
+            }
+        ));
+
+        let forwarded = parse_openai_event_with_mode(
+            data,
+            ChatStreamMode::Native {
+                forward_usage: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(forwarded.len(), 2);
+        assert!(matches!(
+            &forwarded[0],
+            StreamEvent::Native {
+                event: NativeStreamEvent::OpenAiChatSse { data, .. }
+            } if data.get("usage").is_some()
+        ));
+        assert!(matches!(forwarded[1], StreamEvent::Usage { .. }));
     }
 
     #[tokio::test]

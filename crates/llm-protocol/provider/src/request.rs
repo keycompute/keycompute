@@ -70,6 +70,12 @@ pub struct UpstreamRequest {
     pub temperature: Option<f32>,
     /// Top P 参数（可选）
     pub top_p: Option<f32>,
+    /// 经入口校验的原生 OpenAI Chat Completions 请求体。
+    ///
+    /// OpenAI 协议适配器会保留受支持的官方字段，并只覆盖路由层拥有的
+    /// `model`、`stream` 与内部 usage 请求选项。
+    #[serde(skip)]
+    pub native_openai_chat_request: Option<Arc<serde_json::Value>>,
     /// 原生 Anthropic Messages 请求体。
     ///
     /// 仅用于已验证的 Anthropic 入站请求的保真转发；其它 Provider 必须忽略
@@ -96,6 +102,13 @@ impl fmt::Debug for UpstreamRequest {
             .field("temperature", &self.temperature)
             .field("top_p", &self.top_p)
             .field(
+                "native_openai_chat_request",
+                &self
+                    .native_openai_chat_request
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
+            .field(
                 "native_anthropic_request",
                 &self.native_anthropic_request.as_ref().map(|_| "<redacted>"),
             )
@@ -121,6 +134,7 @@ impl UpstreamRequest {
             max_tokens: None,
             temperature: None,
             top_p: None,
+            native_openai_chat_request: None,
             native_anthropic_request: None,
             native_anthropic_headers: BTreeMap::new(),
         }
@@ -266,15 +280,20 @@ mod tests {
     fn upstream_request_debug_and_serde_redact_native_body() {
         let mut request =
             UpstreamRequest::new("https://provider.example/v1", "sk-test", "claude-test");
+        request.native_openai_chat_request = Some(Arc::new(serde_json::json!({
+            "messages": [{"content": "secret-chat-prompt"}]
+        })));
         request.native_anthropic_request = Some(Arc::new(serde_json::json!({
             "messages": [{"content": "secret-base64"}]
         })));
 
         let debug = format!("{request:?}");
         assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("secret-chat-prompt"));
         assert!(!debug.contains("secret-base64"));
 
         let serialized = serde_json::to_string(&request).unwrap();
+        assert!(!serialized.contains("secret-chat-prompt"));
         assert!(!serialized.contains("secret-base64"));
     }
 

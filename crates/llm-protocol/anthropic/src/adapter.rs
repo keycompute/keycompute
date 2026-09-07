@@ -985,6 +985,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: None,
             top_p: None,
+            native_openai_chat_request: None,
             native_anthropic_request: None,
             native_anthropic_headers: std::collections::BTreeMap::new(),
         };
@@ -1054,6 +1055,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             top_p: None,
+            native_openai_chat_request: None,
             native_anthropic_request: None,
             native_anthropic_headers: std::collections::BTreeMap::new(),
         };

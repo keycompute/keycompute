@@ -1,6 +1,6 @@
 //! OpenAI 兼容 API 处理器
 //
-//! 提供与 OpenAI API 完全兼容的接口
+//! 提供 OpenAI API 的常用关键字段与原生响应语义
 //! 参考: https://platform.openai.com/docs/api-reference
 
 #[cfg(test)]
@@ -26,7 +26,9 @@ use keycompute_types::{
     Message, MessageContent, MessageRole, NoopRequestLifecycleRecorder, RequestContext,
     RequestLifecycleRecorder, RequestStatus, RequestTraceStart, RouteType, TraceErrorCategory,
 };
+use llm_protocol_provider::NativeStreamEvent;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -34,7 +36,7 @@ use tokio_stream::wrappers::ReceiverStream;
 // ==================== Chat Completions ====================
 
 /// Chat Completions 请求
-/// 与 OpenAI API 完全对齐: https://platform.openai.com/docs/api-reference/chat/create
+/// 对齐 OpenAI API 的常用关键字段: https://platform.openai.com/docs/api-reference/chat/create
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionRequest {
     /// 模型 ID (必需)
@@ -87,7 +89,7 @@ fn default_n() -> Option<u32> {
 }
 
 impl ChatCompletionRequest {
-    /// 生效的最大生成 token 数（max_tokens 优先，回退 max_completion_tokens）
+    /// 内部路由/估算使用的最大生成 token 数；原生上游请求仍分别保留两字段。
     fn effective_max_tokens(&self) -> Option<u32> {
         self.max_tokens.or(self.max_completion_tokens)
     }
@@ -98,9 +100,14 @@ impl ChatCompletionRequest {
     /// 级联整条 fallback 链（浪费上游调用）并污染 Provider 健康评分。
     /// 注：NaN 不在任何区间内，同样会被拒绝
     fn validate_sampling_params(&self) -> Result<()> {
-        if self.effective_max_tokens() == Some(0) {
+        if self.max_tokens == Some(0) {
             return Err(ApiError::BadRequest(
                 "max_tokens must be greater than 0".to_string(),
+            ));
+        }
+        if self.max_completion_tokens == Some(0) {
+            return Err(ApiError::BadRequest(
+                "max_completion_tokens must be greater than 0".to_string(),
             ));
         }
         if let Some(temperature) = self.temperature
@@ -117,8 +124,77 @@ impl ChatCompletionRequest {
                 "top_p must be between 0.0 and 1.0".to_string(),
             ));
         }
+        if let Some(presence_penalty) = self.presence_penalty
+            && !(-2.0..=2.0).contains(&presence_penalty)
+        {
+            return Err(ApiError::BadRequest(
+                "presence_penalty must be between -2.0 and 2.0".to_string(),
+            ));
+        }
+        if let Some(frequency_penalty) = self.frequency_penalty
+            && !(-2.0..=2.0).contains(&frequency_penalty)
+        {
+            return Err(ApiError::BadRequest(
+                "frequency_penalty must be between -2.0 and 2.0".to_string(),
+            ));
+        }
+        if self.n == Some(0) {
+            return Err(ApiError::BadRequest("n must be greater than 0".to_string()));
+        }
+        if self.top_logprobs.is_some() && self.logprobs != Some(true) {
+            return Err(ApiError::BadRequest(
+                "logprobs must be true when top_logprobs is specified".to_string(),
+            ));
+        }
         Ok(())
     }
+
+    fn validate_core_fields(&self) -> Result<()> {
+        if self.model.trim().is_empty() {
+            return Err(ApiError::BadRequest("model must not be empty".to_string()));
+        }
+        if self.messages.is_empty() {
+            return Err(ApiError::BadRequest(
+                "messages must not be empty".to_string(),
+            ));
+        }
+        for message in &self.messages {
+            if !matches!(
+                message.role.as_str(),
+                "developer" | "system" | "user" | "assistant" | "tool"
+            ) {
+                return Err(ApiError::BadRequest(format!(
+                    "unsupported message role: {}",
+                    message.role
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn parse_chat_completion_request(body: &Value) -> Result<ChatCompletionRequest> {
+    let object = body.as_object().ok_or_else(|| {
+        ApiError::BadRequest("Chat Completions request body must be a JSON object".to_string())
+    })?;
+    let mut unsupported = object
+        .keys()
+        .filter(|name| {
+            !llm_protocol_openai::SUPPORTED_CHAT_COMPLETIONS_FIELDS.contains(&name.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    unsupported.sort();
+    if !unsupported.is_empty() {
+        return Err(ApiError::BadRequest(format!(
+            "unsupported Chat Completions field(s): {}",
+            unsupported.join(", ")
+        )));
+    }
+    let request: ChatCompletionRequest = serde_json::from_value(body.clone()).map_err(|error| {
+        ApiError::BadRequest(format!("invalid Chat Completions request: {error}"))
+    })?;
+    Ok(request)
 }
 
 /// Chat Completion 消息
@@ -157,7 +233,7 @@ pub struct FunctionDefinition {
     /// 函数描述
     pub description: Option<String>,
     /// 参数定义 (JSON Schema)
-    pub parameters: serde_json::Value,
+    pub parameters: Option<serde_json::Value>,
 }
 
 /// 工具调用
@@ -354,8 +430,10 @@ pub async fn chat_completions(
     request_id: RequestId,
     client_request_id: ClientRequestId,
     received_at: RequestReceivedAt,
-    Json(request): Json<ChatCompletionRequest>,
+    Json(body): Json<Value>,
 ) -> Result<axum::response::Response> {
+    let request = parse_chat_completion_request(&body)?;
+    let native_chat_request = Arc::new(body);
     let mut lifecycle: Arc<dyn RequestLifecycleRecorder> = Arc::clone(&state.lifecycle);
     let mut pre_execution_guard =
         super::PreExecutionTraceGuard::new(Arc::clone(&lifecycle), request_id.0);
@@ -392,18 +470,19 @@ pub async fn chat_completions(
             "API-use permission is required for /v1/chat/completions".to_string(),
         ));
     }
-    // 0. 采样参数范围校验（越界直接 400，不进入路由/上游调用）
-    if let Err(error) = request.validate_sampling_params() {
+    if let Err(error) = request
+        .validate_core_fields()
+        .and_then(|_| request.validate_sampling_params())
+    {
         finish_unexecuted_trace(
             &mut pre_execution_guard,
             ErrorOrigin::Client,
             TraceErrorCategory::InvalidRequest,
-            "invalid_sampling_parameters",
+            "invalid_chat_parameters",
         )
         .await;
         return Err(error);
     }
-
     // 1. 余额预检查
     // 如果余额低于阈值（0.1元），直接拒绝请求
     if let Some(balance_service) = state.billing.balance_service()
@@ -453,10 +532,11 @@ pub async fn chat_completions(
         .map(|m| {
             let role = match m.role.as_str() {
                 "system" => MessageRole::System,
+                "developer" => MessageRole::Developer,
                 "user" => MessageRole::User,
                 "assistant" => MessageRole::Assistant,
                 "tool" => MessageRole::Tool,
-                _ => MessageRole::User, // 默认角色
+                _ => unreachable!("message roles were validated before routing"),
             };
             Message {
                 role,
@@ -484,6 +564,7 @@ pub async fn chat_completions(
     request_ctx.max_tokens = request.effective_max_tokens();
     request_ctx.temperature = request.temperature;
     request_ctx.top_p = request.top_p;
+    request_ctx.native_openai_chat_request = Some(native_chat_request);
     let mut ctx = Arc::new(request_ctx);
 
     // 5. 智能路由
@@ -884,7 +965,7 @@ async fn create_openai_response_with_lifecycle(
     account_id: uuid::Uuid,
     settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
-) -> Result<ChatCompletionResponse> {
+) -> Result<Value> {
     let mut client_response_guard =
         super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
     let (mut response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -948,16 +1029,25 @@ async fn create_openai_response_with_lifecycle(
             Err(error)
         } else {
             let (prompt_tokens, completion_tokens) = worker_ctx.usage_snapshot();
-            Ok(build_chat_completion_response(
-                completion_id,
-                created,
-                model,
-                collector.content,
-                collector.finish_reason,
-                prompt_tokens,
-                completion_tokens,
-                provider_name,
-            ))
+            if let Some(body) = collector.native_chat_response.take() {
+                Ok(body)
+            } else {
+                serde_json::to_value(build_chat_completion_response(
+                    completion_id,
+                    created,
+                    model,
+                    collector.content,
+                    collector.finish_reason,
+                    prompt_tokens,
+                    completion_tokens,
+                    provider_name,
+                ))
+                .map_err(|error| {
+                    ApiError::Internal(format!(
+                        "Failed to serialize Chat Completions response: {error}"
+                    ))
+                })
+            }
         };
         if handler_connected && response_tx.send(result).is_err() {
             worker_ctx.mark_client_disconnected();
@@ -1062,6 +1152,7 @@ fn build_chat_completion_response(
 struct StreamCollector {
     content: String,
     finish_reason: Option<String>,
+    native_chat_response: Option<Value>,
     status: String,
     completed: bool,
 }
@@ -1071,6 +1162,7 @@ impl StreamCollector {
         Self {
             content: String::new(),
             finish_reason: None,
+            native_chat_response: None,
             status: "success".to_string(),
             completed: false,
         }
@@ -1104,6 +1196,12 @@ impl StreamCollector {
             llm_protocol_provider::StreamEvent::Error { message } => {
                 self.status = "error".to_string();
                 Err(message)
+            }
+            llm_protocol_provider::StreamEvent::Native {
+                event: NativeStreamEvent::OpenAiChatJson { body },
+            } => {
+                self.native_chat_response = Some(body);
+                Ok(true)
             }
             llm_protocol_provider::StreamEvent::Usage { .. }
             | llm_protocol_provider::StreamEvent::InputUsage { .. }
@@ -1389,17 +1487,23 @@ fn create_non_streaming_json_with_keepalive_and_lifecycle(
         // 获取用量信息
         let (prompt_tokens, completion_tokens) = ctx.usage_snapshot();
 
-        // 构建最终 JSON 响应
-        let response = build_chat_completion_response(
-            completion_id,
-            created,
-            model,
-            collector.content,
-            collector.finish_reason,
-            prompt_tokens,
-            completion_tokens,
-            provider_name,
-        );
+        // Provider 账号返回的原生 Chat Completions body 已包含工具调用、
+        // logprobs、usage 细节等字段；标准化路径仅供 Node/旧测试适配器使用。
+        let response = if let Some(body) = collector.native_chat_response.take() {
+            body
+        } else {
+            serde_json::to_value(build_chat_completion_response(
+                completion_id,
+                created,
+                model,
+                collector.content,
+                collector.finish_reason,
+                prompt_tokens,
+                completion_tokens,
+                provider_name,
+            ))
+            .unwrap_or_else(|_| serde_json::json!({}))
+        };
 
         let json = serde_json::to_string(&response).unwrap_or_else(|e| {
             tracing::error!(
@@ -1582,6 +1686,40 @@ fn openai_error_chunk(message: &str, error_type: &str, code: Option<&str>) -> St
     .to_string()
 }
 
+fn native_chat_chunk_has_content(data: &Value) -> bool {
+    data.get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                let Some(delta) = choice.get("delta") else {
+                    return false;
+                };
+                delta
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_some_and(|content| !content.is_empty())
+                    || delta
+                        .get("refusal")
+                        .and_then(Value::as_str)
+                        .is_some_and(|refusal| !refusal.is_empty())
+                    || delta
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|calls| !calls.is_empty())
+            })
+        })
+}
+
+fn native_chat_chunk_has_usage(data: &Value) -> bool {
+    data.pointer("/usage/prompt_tokens")
+        .and_then(Value::as_u64)
+        .is_some()
+        && data
+            .pointer("/usage/completion_tokens")
+            .and_then(Value::as_u64)
+            .is_some()
+}
+
 /// Bound SSE backpressure so a client that stops reading cannot indefinitely
 /// block the worker that owns upstream draining and billing settlement.
 const OPENAI_SSE_SEND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -1664,6 +1802,7 @@ fn create_openai_stream_with_lifecycle(
         let mut first_chunk = true;
         let mut client_connected = true;
         let mut client_first_content_recorded = false;
+        let mut native_usage_forwarded = false;
         let completion_id = generate_completion_id();
         let created = chrono::Utc::now().timestamp();
 
@@ -1709,7 +1848,9 @@ fn create_openai_stream_with_lifecycle(
                                 status,
                             )
                             .await;
-                            if stream_options.as_ref().is_some_and(|o| o.include_usage) {
+                            if stream_options.as_ref().is_some_and(|o| o.include_usage)
+                                && !native_usage_forwarded
+                            {
                                 let (input_tokens, output_tokens) = ctx.usage_snapshot();
                                 let data = make_usage_chunk_data(
                                     input_tokens, output_tokens,
@@ -1769,6 +1910,28 @@ fn create_openai_stream_with_lifecycle(
                             )
                             .await;
                             break;
+                        }
+                        llm_protocol_provider::StreamEvent::Native {
+                            event: NativeStreamEvent::OpenAiChatSse { data },
+                        } => {
+                            let has_content = native_chat_chunk_has_content(&data);
+                            native_usage_forwarded |= native_chat_chunk_has_usage(&data);
+                            let sent = forward_openai_sse_event(
+                                &sse_tx,
+                                &ctx,
+                                &mut client_connected,
+                                Event::default().data(data.to_string()),
+                            )
+                            .await;
+                            if sent && has_content && !client_first_content_recorded {
+                                if let Err(error) = lifecycle
+                                    .record_client_first_content(ctx.request_id, chrono::Utc::now())
+                                    .await
+                                {
+                                    tracing::warn!(request_id = %ctx.request_id, %error, "failed to record client first content");
+                                }
+                                client_first_content_recorded = true;
+                            }
                         }
                         llm_protocol_provider::StreamEvent::Usage { .. }
                         | llm_protocol_provider::StreamEvent::InputUsage { .. }
@@ -1845,6 +2008,7 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
         let mut first_chunk = true;
         let mut client_connected = true;
         let mut client_first_content_recorded = false;
+        let mut native_usage_forwarded = false;
         let completion_id = generate_completion_id();
         let created = chrono::Utc::now().timestamp();
 
@@ -1934,7 +2098,9 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                                 )
                                 .await;
 
-                                if stream_options.as_ref().is_some_and(|o| o.include_usage) {
+                                if stream_options.as_ref().is_some_and(|o| o.include_usage)
+                                    && !native_usage_forwarded
+                                {
                                     let (input_tokens, output_tokens) = ctx.usage_snapshot();
                                     let data = make_usage_chunk_data(
                                         input_tokens, output_tokens,
@@ -1995,6 +2161,31 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                                 )
                                 .await;
                                 return;
+                            }
+                            llm_protocol_provider::StreamEvent::Native {
+                                event: NativeStreamEvent::OpenAiChatSse { data },
+                            } => {
+                                let has_content = native_chat_chunk_has_content(&data);
+                                native_usage_forwarded |= native_chat_chunk_has_usage(&data);
+                                let sent = forward_openai_sse_event(
+                                    &sse_tx,
+                                    &ctx,
+                                    &mut client_connected,
+                                    Event::default().data(data.to_string()),
+                                )
+                                .await;
+                                if sent && has_content && !client_first_content_recorded {
+                                    if let Err(error) = lifecycle
+                                        .record_client_first_content(
+                                            ctx.request_id,
+                                            chrono::Utc::now(),
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(request_id = %ctx.request_id, %error, "failed to record client first content");
+                                    }
+                                    client_first_content_recorded = true;
+                                }
                             }
                             llm_protocol_provider::StreamEvent::Usage { .. }
                             | llm_protocol_provider::StreamEvent::InputUsage { .. }
@@ -2421,6 +2612,87 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use std::time::Duration;
+
+    #[test]
+    fn chat_request_accepts_common_official_tool_fields() {
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "developer", "content": "Use tools when needed"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+            ],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object"}
+                }
+            }],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "max_completion_tokens": 128,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}}
+            }
+        });
+
+        let request = parse_chat_completion_request(&body).unwrap();
+        assert_eq!(request.messages[0].role, "developer");
+        assert_eq!(request.effective_max_tokens(), Some(128));
+        assert_eq!(request.tools.as_ref().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn chat_request_rejects_vendor_private_top_level_fields() {
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "top_k": 40,
+            "enable_thinking": true
+        });
+
+        let error = parse_chat_completion_request(&body).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("enable_thinking"));
+        assert!(message.contains("top_k"));
+    }
+
+    #[test]
+    fn non_stream_collector_keeps_native_chat_response() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-native",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{"id": "call_1", "type": "function"}]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let mut collector = StreamCollector::new();
+        assert!(
+            collector
+                .process_event(llm_protocol_provider::StreamEvent::native(
+                    NativeStreamEvent::OpenAiChatJson { body: body.clone() },
+                ))
+                .unwrap()
+        );
+        assert_eq!(collector.native_chat_response.as_ref(), Some(&body));
+    }
 
     #[tokio::test]
     async fn chat_terminal_billing_records_tpm_once() {

@@ -18,11 +18,13 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use keycompute_types::{KeyComputeError, Result};
 use llm_protocol_provider::{
-    ByteStream, HttpTransport, LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
-    MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES, MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES,
-    NativeResponsesRequest, NativeStreamEvent, ProviderAdapter, StreamBox, StreamEvent,
-    UpstreamFailure, UpstreamFailureKind, UpstreamRequest, UpstreamResponse, UpstreamResponseMeta,
-    body_read_failure, estimated_json_parse_working_set_bytes, try_acquire_large_body_permit,
+    ByteStream, HttpTransport, LARGE_JSON_BODY_ADMISSION_BYTES,
+    LARGE_JSON_WORKING_SET_ADMISSION_BYTES, MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES,
+    MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, NativeResponsesRequest, NativeStreamEvent,
+    ProviderAdapter, StreamBox, StreamEvent, UpstreamFailure, UpstreamFailureKind, UpstreamRequest,
+    UpstreamResponse, UpstreamResponseMeta, body_read_failure,
+    estimated_json_parse_working_set_bytes, http_status_is_retryable,
+    try_acquire_large_body_permit,
 };
 use serde::{Serialize, Serializer, ser::SerializeMap};
 use serde_json;
@@ -33,7 +35,7 @@ use crate::protocol::{
     StreamOptions, convert_message_content,
 };
 use crate::responses_stream::{parse_responses_stream, response_usage, valid_response_status};
-use crate::stream::parse_openai_stream;
+use crate::stream::{parse_native_openai_chat_stream, parse_openai_stream};
 
 /// OpenAI Chat Completions 默认端点
 pub const OPENAI_CHAT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
@@ -49,6 +51,71 @@ pub const OPENAI_IMAGE_VARIATION_ENDPOINT: &str = "https://api.openai.com/v1/ima
 
 /// OpenAI Responses API 默认端点（统一多模态接口）
 pub const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
+
+/// Official Chat Completions request fields intentionally supported by the
+/// public KeyCompute endpoint. Keeping this list explicit prevents
+/// provider-private extensions from being mistaken for OpenAI compatibility.
+pub const SUPPORTED_CHAT_COMPLETIONS_FIELDS: &[&str] = &[
+    "frequency_penalty",
+    "logit_bias",
+    "logprobs",
+    "max_completion_tokens",
+    "max_tokens",
+    "messages",
+    "model",
+    "n",
+    "parallel_tool_calls",
+    "presence_penalty",
+    "reasoning_effort",
+    "response_format",
+    "seed",
+    "stop",
+    "stream",
+    "stream_options",
+    "temperature",
+    "tool_choice",
+    "tools",
+    "top_logprobs",
+    "top_p",
+    "user",
+];
+
+struct RoutedNativeChatBody<'a> {
+    source: &'a serde_json::Map<String, serde_json::Value>,
+    model: &'a str,
+    stream: bool,
+    include_stream_usage: bool,
+}
+
+impl Serialize for RoutedNativeChatBody<'_> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        for (name, value) in self.source {
+            if matches!(name.as_str(), "model" | "stream" | "stream_options") {
+                continue;
+            }
+            if SUPPORTED_CHAT_COMPLETIONS_FIELDS.contains(&name.as_str()) {
+                map.serialize_entry(name, value)?;
+            }
+        }
+        map.serialize_entry("model", self.model)?;
+        map.serialize_entry("stream", &self.stream)?;
+        if self.stream && self.include_stream_usage {
+            let mut options = self
+                .source
+                .get("stream_options")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+            map.serialize_entry("stream_options", &options)?;
+        }
+        map.end()
+    }
+}
 
 struct RoutedNativeResponsesBody<'a> {
     source: &'a serde_json::Map<String, serde_json::Value>,
@@ -196,6 +263,167 @@ impl OpenAIProvider {
                 None
             },
         }
+    }
+
+    fn serialize_native_chat_body(
+        request: &UpstreamRequest,
+    ) -> std::result::Result<String, UpstreamFailure> {
+        let source = request
+            .native_openai_chat_request
+            .as_deref()
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                Self::protocol_failure("Native Chat Completions request must be a JSON object")
+            })?;
+        serde_json::to_string(&RoutedNativeChatBody {
+            source,
+            model: &request.model,
+            stream: request.stream,
+            include_stream_usage: request.include_stream_usage,
+        })
+        .map_err(Self::protocol_failure)
+    }
+
+    fn client_requested_chat_stream_usage(request: &UpstreamRequest) -> bool {
+        request
+            .native_openai_chat_request
+            .as_deref()
+            .and_then(|body| body.pointer("/stream_options/include_usage"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn chat_usage(value: &serde_json::Value) -> Option<(u32, u32)> {
+        let usage = value.get("usage")?;
+        let input_tokens = usage.get("prompt_tokens")?.as_u64()?;
+        let output_tokens = usage.get("completion_tokens")?.as_u64()?;
+        Some((
+            u32::try_from(input_tokens).unwrap_or(u32::MAX),
+            u32::try_from(output_tokens).unwrap_or(u32::MAX),
+        ))
+    }
+
+    fn validate_native_chat_success(
+        value: &serde_json::Value,
+    ) -> std::result::Result<(), &'static str> {
+        let Some(object) = value.as_object() else {
+            return Err("Chat Completions response must be a JSON object");
+        };
+        if object.get("object").and_then(serde_json::Value::as_str) != Some("chat.completion") {
+            return Err("Chat Completions response has an invalid object type");
+        }
+        if !object
+            .get("choices")
+            .is_some_and(serde_json::Value::is_array)
+        {
+            return Err("Chat Completions response choices must be an array");
+        }
+        Ok(())
+    }
+
+    fn native_chat_http_failure(meta: &UpstreamResponseMeta, body: &str) -> UpstreamFailure {
+        let status = meta.status;
+        let mentions_stream_options =
+            matches!(status, 400 | 422) && body.to_ascii_lowercase().contains("stream_options");
+        UpstreamFailure {
+            kind: UpstreamFailureKind::HttpStatus,
+            status: Some(status),
+            headers_received_at: Some(meta.headers_received_at),
+            upstream_request_id: meta.upstream_request_id.clone(),
+            retryable: http_status_is_retryable(status),
+            stable_error_code: format!("upstream_http_{status}"),
+            sanitized_summary: if mentions_stream_options {
+                "Upstream rejected stream_options".to_string()
+            } else {
+                format!("Upstream returned HTTP {status}")
+            },
+        }
+    }
+
+    async fn native_chat_with_meta(
+        &self,
+        transport: &dyn HttpTransport,
+        request: UpstreamRequest,
+    ) -> std::result::Result<UpstreamResponse<StreamBox>, UpstreamFailure> {
+        let body_json = Self::serialize_native_chat_body(&request)?;
+        let mut headers = vec![
+            (
+                "Authorization".to_string(),
+                format!("Bearer {}", request.upstream_api_key.expose()),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+        let url = Self::chat_url(&request.endpoint);
+
+        if request.stream {
+            headers.push(("Accept".to_string(), "text/event-stream".to_string()));
+            let response = match transport
+                .post_stream_response(&url, headers, body_json)
+                .await
+            {
+                Ok(response) => response,
+                Err(mut error)
+                    if request.include_stream_usage && Self::is_structured_client_error(&error) =>
+                {
+                    error.retryable = true;
+                    error.stable_error_code = "upstream_stream_options_unsupported".to_string();
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
+            let forward_usage = Self::client_requested_chat_stream_usage(&request);
+            return Ok(
+                response.map_body(|stream| parse_native_openai_chat_stream(stream, forward_usage))
+            );
+        }
+
+        let response = transport
+            .post_json_passthrough_response(&url, headers, body_json)
+            .await?;
+        if !(200..300).contains(&response.meta.status) {
+            return Err(Self::native_chat_http_failure(
+                &response.meta,
+                &response.body,
+            ));
+        }
+        let (body, _read_admission) = response.body.into_parts();
+        if body.len() > LARGE_JSON_BODY_ADMISSION_BYTES {
+            return Err(body_read_failure(
+                &response.meta,
+                "upstream_body_too_large",
+                format!(
+                    "Chat Completions upstream JSON exceeds the {}-byte limit",
+                    LARGE_JSON_BODY_ADMISSION_BYTES
+                ),
+            ));
+        }
+        let working_set_bytes = estimated_json_parse_working_set_bytes(body.as_bytes());
+        if working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES {
+            return Err(body_read_failure(
+                &response.meta,
+                "upstream_json_too_complex",
+                format!(
+                    "Chat Completions upstream JSON exceeds the {}-byte working-set limit",
+                    LARGE_JSON_WORKING_SET_ADMISSION_BYTES
+                ),
+            ));
+        }
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
+        Self::validate_native_chat_success(&value)
+            .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
+        let usage = Self::chat_usage(&value);
+        let mut events = vec![Ok(StreamEvent::native(NativeStreamEvent::OpenAiChatJson {
+            body: value,
+        }))];
+        if let Some((input_tokens, output_tokens)) = usage {
+            events.push(Ok(StreamEvent::usage(input_tokens, output_tokens)));
+        }
+        events.push(Ok(StreamEvent::done()));
+        Ok(UpstreamResponse {
+            meta: response.meta,
+            body: Box::pin(futures::stream::iter(events)),
+        })
     }
 
     /// Build the final native Responses payload. The public handler retains
@@ -969,6 +1197,13 @@ impl ProviderAdapter for OpenAIProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> Result<StreamBox> {
+        if request.native_openai_chat_request.is_some() {
+            return self
+                .native_chat_with_meta(transport, request)
+                .await
+                .map(|response| response.body)
+                .map_err(UpstreamFailure::into_keycompute_error);
+        }
         if request.stream {
             self.stream_chat_internal_with_meta(transport, request)
                 .await
@@ -1006,6 +1241,9 @@ impl ProviderAdapter for OpenAIProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> std::result::Result<UpstreamResponse<StreamBox>, UpstreamFailure> {
+        if request.native_openai_chat_request.is_some() {
+            return self.native_chat_with_meta(transport, request).await;
+        }
         if request.stream {
             self.stream_chat_internal_with_meta(transport, request)
                 .await
@@ -1288,6 +1526,135 @@ mod tests {
         UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "gpt-4o")
             .with_message("user", "Hello")
             .with_stream(true)
+    }
+
+    #[test]
+    fn native_chat_serialization_preserves_supported_fields_and_overlays_routing() {
+        let mut request =
+            UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "routed-model")
+                .with_stream(true);
+        request.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "client-model",
+            "messages": [
+                {"role": "developer", "content": "Be concise"},
+                {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": "{}"}
+                    }]
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "sunny"}
+            ],
+            "max_completion_tokens": 321,
+            "parallel_tool_calls": false,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "answer", "schema": {"type": "object"}}
+            },
+            "stream_options": {"include_obfuscation": false},
+            "vendor_private": true
+        })));
+
+        let body: serde_json::Value =
+            serde_json::from_str(&OpenAIProvider::serialize_native_chat_body(&request).unwrap())
+                .unwrap();
+        assert_eq!(body["model"], "routed-model");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["max_completion_tokens"], 321);
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert_eq!(body["messages"][0]["role"], "developer");
+        assert_eq!(body["messages"][1]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(body["messages"][2]["tool_call_id"], "call_1");
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(body["stream_options"]["include_obfuscation"], false);
+        assert!(body.get("vendor_private").is_none());
+    }
+
+    #[test]
+    fn native_chat_compatibility_retry_removes_stream_options() {
+        let mut request = stream_request();
+        request.include_stream_usage = false;
+        request.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+            "stream_options": {"include_usage": true}
+        })));
+
+        let body: serde_json::Value =
+            serde_json::from_str(&OpenAIProvider::serialize_native_chat_body(&request).unwrap())
+                .unwrap();
+        assert!(body.get("stream_options").is_none());
+    }
+
+    #[tokio::test]
+    async fn native_chat_non_stream_response_preserves_tool_calls_and_usage_details() {
+        let transport = NativeResponsesTransport {
+            url: Mutex::new(None),
+            headers: Mutex::new(Vec::new()),
+            body: Mutex::new(None),
+            response: serde_json::json!({
+                "id": "chatcmpl-native",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "gpt-4o",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "weather", "arguments": "{}"}
+                        }]
+                    },
+                    "finish_reason": "tool_calls",
+                    "logprobs": null
+                }],
+                "usage": {
+                    "prompt_tokens": 12,
+                    "completion_tokens": 5,
+                    "total_tokens": 17,
+                    "prompt_tokens_details": {"cached_tokens": 4}
+                }
+            })
+            .to_string(),
+            status: 200,
+        };
+        let provider = OpenAIProvider::new();
+        let mut request = UpstreamRequest::new("https://api.openai.com/v1", "sk-test", "gpt-4o");
+        request.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "weather"}]
+        })));
+
+        let response = provider
+            .stream_chat_with_meta(&transport, request)
+            .await
+            .unwrap();
+        let events = response.body.collect::<Vec<_>>().await;
+        assert!(matches!(
+            &events[0],
+            Ok(StreamEvent::Native {
+                event: NativeStreamEvent::OpenAiChatJson { body, .. }
+            }) if body.pointer("/choices/0/message/tool_calls/0/function/name")
+                .and_then(serde_json::Value::as_str) == Some("weather")
+                && body.pointer("/usage/prompt_tokens_details/cached_tokens")
+                    .and_then(serde_json::Value::as_u64) == Some(4)
+        ));
+        assert!(matches!(
+            events[1],
+            Ok(StreamEvent::Usage {
+                input_tokens: 12,
+                output_tokens: 5
+            })
+        ));
+        assert!(matches!(events[2], Ok(StreamEvent::Done)));
     }
 
     #[test]

@@ -17,6 +17,10 @@ pub const LARGE_NATIVE_EVENT_CHANNEL_CAPACITY: usize = 1;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum NativeStreamEvent {
+    /// Complete non-streaming OpenAI Chat Completions body.
+    OpenAiChatJson { body: Value },
+    /// One OpenAI Chat Completions SSE data payload.
+    OpenAiChatSse { data: Value },
     /// Complete non-streaming OpenAI Responses body.
     OpenAiResponsesJson {
         body: Value,
