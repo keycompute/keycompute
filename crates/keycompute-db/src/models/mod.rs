@@ -68,7 +68,7 @@ pub use tenant_distribution_rule::{
 };
 pub use usage_log::{CreateUsageLogRequest, UsageLog, UsageStats, UserUsageStats};
 pub use user::{CreateUserRequest, UpdateUserRequest, User};
-pub use user_balance::{BalanceTransaction, TransactionType, UserBalance};
+pub use user_balance::{BalanceReservation, BalanceTransaction, TransactionType, UserBalance};
 pub use user_credential::{
     CreateUserCredentialRequest, UpdateUserCredentialRequest, UserCredential,
 };

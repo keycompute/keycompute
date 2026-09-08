@@ -10,8 +10,8 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use llm_protocol_provider::{
     AdmittedResponseText, ByteStream, GetBinaryResponse, HttpTransport, UpstreamFailure,
-    UpstreamFailureKind, UpstreamResponse, UpstreamResponseMeta, collect_bounded_response_text,
-    json_passthrough_body_limit, summarize_http_failure_response,
+    UpstreamFailureKind, UpstreamResponse, UpstreamResponseMeta, capture_http_failure_response,
+    collect_bounded_response_text, json_passthrough_body_limit,
 };
 use reqwest::{Client, ClientBuilder, Proxy, RequestBuilder, Response};
 use std::time::Duration;
@@ -275,6 +275,7 @@ impl HttpClient {
             status: None,
             headers_received_at: None,
             upstream_request_id: None,
+            client_response: None,
             retryable: definitely_pre_dispatch,
             stable_error_code: if ambiguous_after_dispatch && timeout {
                 "upstream_ambiguous_timeout"
@@ -292,12 +293,17 @@ impl HttpClient {
 
     async fn http_failure(response: Response, meta: UpstreamResponseMeta) -> UpstreamFailure {
         let status = meta.status;
-        let summary = summarize_http_failure_response(response).await;
+        let (summary, body) = capture_http_failure_response(response).await;
         UpstreamFailure {
             kind: UpstreamFailureKind::HttpStatus,
             status: Some(status),
             headers_received_at: Some(meta.headers_received_at),
-            upstream_request_id: meta.upstream_request_id,
+            upstream_request_id: meta.upstream_request_id.clone(),
+            client_response: Some(Box::new(keycompute_types::ClientUpstreamResponse {
+                status,
+                headers: meta.headers,
+                body,
+            })),
             retryable: status == 408 || status == 409 || status == 429 || status >= 500,
             stable_error_code: format!("upstream_http_{status}"),
             sanitized_summary: summary,
@@ -390,6 +396,7 @@ impl HttpTransport for HttpClient {
             status: Some(meta.status),
             headers_received_at: Some(meta.headers_received_at),
             upstream_request_id: meta.upstream_request_id.clone(),
+            client_response: None,
             // A successful status proves that the paid POST reached the
             // provider. Reissuing it without provider idempotency could charge
             // the request twice even though no body reached the client.
@@ -495,6 +502,7 @@ impl HttpTransport for HttpClient {
                 status: Some(meta.status),
                 headers_received_at: Some(meta.headers_received_at),
                 upstream_request_id: meta.upstream_request_id,
+                client_response: None,
                 retryable: false,
                 stable_error_code: "upstream_body_read".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -546,6 +554,7 @@ impl HttpTransport for HttpClient {
                     status: None,
                     headers_received_at: None,
                     upstream_request_id: None,
+                    client_response: None,
                     retryable: timeout || error.is_connect(),
                     stable_error_code: if timeout {
                         "upstream_timeout"
@@ -594,6 +603,7 @@ impl HttpTransport for HttpClient {
             status: Some(meta.status),
             headers_received_at: Some(meta.headers_received_at),
             upstream_request_id: meta.upstream_request_id.clone(),
+            client_response: None,
             retryable: true,
             stable_error_code: "upstream_body_read".to_string(),
             sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),

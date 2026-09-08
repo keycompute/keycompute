@@ -7,7 +7,10 @@
 //! - 权限控制通过中间件实现，而非路径前缀
 //! - Admin 和普通用户共用前端，通过权限控制展示不同模块
 
-use crate::handlers::responses::OPENAI_RESPONSES_BODY_LIMIT_BYTES;
+use crate::handlers::{
+    anthropic::ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES, openai::OPENAI_CHAT_BODY_LIMIT_BYTES,
+    responses::OPENAI_RESPONSES_BODY_LIMIT_BYTES,
+};
 use crate::{
     handlers::{
         admin_approve_token,
@@ -144,9 +147,9 @@ use crate::{
     },
     middleware::{
         admin_auth_middleware, anthropic_error_response_middleware, cors_layer,
-        maintenance_mode_middleware, openai_responses_error_response_middleware,
-        payment_notify_rate_limit_middleware, public_auth_rate_limit_middleware,
-        rate_limit_middleware, request_logger, responses_http_body_admission_middleware,
+        generation_http_body_admission_middleware, maintenance_mode_middleware,
+        openai_responses_error_response_middleware, payment_notify_rate_limit_middleware,
+        public_auth_rate_limit_middleware, rate_limit_middleware, request_logger,
         trace_id_middleware,
     },
     state::AppState,
@@ -158,11 +161,6 @@ use axum::{
     routing::{delete, get, post, put},
 };
 use tower_http::trace::TraceLayer;
-
-/// Anthropic permits inline multimodal blocks, so its compatibility endpoint
-/// needs a higher limit than Axum's 2 MiB default. Keep the limit explicit and
-/// bounded to avoid accepting arbitrarily large JSON payloads.
-const ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
 /// 创建路由器
 pub fn create_router(state: AppState) -> Router {
@@ -205,6 +203,11 @@ pub fn create_router(state: AppState) -> Router {
         // Models
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model}", get(retrieve_model))
+        .layer(DefaultBodyLimit::max(OPENAI_CHAT_BODY_LIMIT_BYTES))
+        .layer(from_fn_with_state(
+            state.clone(),
+            generation_http_body_admission_middleware,
+        ))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
     let responses_routes = Router::new()
@@ -226,13 +229,17 @@ pub fn create_router(state: AppState) -> Router {
         .layer(DefaultBodyLimit::max(OPENAI_RESPONSES_BODY_LIMIT_BYTES))
         .layer(from_fn_with_state(
             state.clone(),
-            responses_http_body_admission_middleware,
+            generation_http_body_admission_middleware,
         ))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
     let anthropic_routes = Router::new()
         .route("/v1/messages", post(messages))
         .layer(DefaultBodyLimit::max(ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES))
+        .layer(from_fn_with_state(
+            state.clone(),
+            generation_http_body_admission_middleware,
+        ))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
 
     // ==================== 4. 用户自服务 API（需要认证 + 限流） ====================

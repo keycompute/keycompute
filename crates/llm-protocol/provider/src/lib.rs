@@ -22,9 +22,10 @@ pub use http::{
     LARGE_JSON_BODY_ADMISSION_BYTES, LARGE_JSON_WORKING_SET_ADMISSION_BYTES, LargeBodyPermit,
     MAX_JSON_PASSTHROUGH_BODY_BYTES, MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES,
     MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, UpstreamFailure, UpstreamFailureKind, UpstreamResponse,
-    UpstreamResponseMeta, body_read_failure, collect_bounded_response_text,
-    estimated_json_parse_working_set_bytes, http_status_is_retryable, json_passthrough_body_limit,
-    summarize_http_failure_response, try_acquire_large_body_permit,
+    UpstreamResponseMeta, body_read_failure, capture_http_failure_response,
+    collect_bounded_response_text, estimated_json_parse_working_set_bytes,
+    http_status_is_retryable, json_passthrough_body_limit, summarize_http_failure_response,
+    try_acquire_large_body_permit,
 };
 pub use protocol::{ProtocolType, normalize_base_url};
 pub use request::{NativeResponsesRequest, UpstreamMessage, UpstreamRequest};
@@ -81,6 +82,7 @@ pub trait ProviderAdapter: Send + Sync + std::fmt::Debug {
                 status: None,
                 headers_received_at: None,
                 upstream_request_id: None,
+                client_response: None,
                 retryable: error.is_retryable(),
                 stable_error_code: "upstream_protocol".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -102,6 +104,7 @@ pub trait ProviderAdapter: Send + Sync + std::fmt::Debug {
             status: None,
             headers_received_at: None,
             upstream_request_id: None,
+            client_response: None,
             retryable: false,
             stable_error_code: "responses_protocol_unsupported".to_string(),
             sanitized_summary: "selected provider does not support the Responses protocol"
@@ -268,6 +271,7 @@ mod tests {
                 status: Some(429),
                 headers_received_at: Some(chrono::Utc::now()),
                 upstream_request_id: Some("models-rate-limit".to_string()),
+                client_response: None,
                 retryable: true,
                 stable_error_code: "upstream_http_429".to_string(),
                 sanitized_summary: "rate limited".to_string(),

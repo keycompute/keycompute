@@ -42,34 +42,34 @@ pub(crate) struct ResponsesAffinity {
 
 pub(crate) type ResponsesAffinityMap = tokio::sync::RwLock<HashMap<String, ResponsesAffinity>>;
 
-const RESPONSES_LARGE_HTTP_BODY_CONCURRENCY: usize = 2;
-pub(crate) const RESPONSES_LARGE_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024;
+const GENERATION_LARGE_HTTP_BODY_CONCURRENCY: usize = 2;
+pub(crate) const GENERATION_LARGE_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Permit inserted before Axum buffers a large Responses HTTP request. The
+/// Permit inserted before Axum buffers a large generation API request. The
 /// cloneable wrapper lets an extractor hand ownership to the response worker,
-/// which retains it for as long as the large request body remains resident.
+/// which retains it while the large request body remains resident.
 #[derive(Debug, Clone)]
-pub struct ResponsesHttpBodyPermit {
+pub struct GenerationHttpBodyPermit {
     _permit: Arc<OwnedSemaphorePermit>,
 }
 
 #[derive(Debug)]
-pub(crate) struct ResponsesHttpBodyAdmission {
+pub(crate) struct GenerationHttpBodyAdmission {
     slots: Arc<Semaphore>,
 }
 
-impl ResponsesHttpBodyAdmission {
+impl GenerationHttpBodyAdmission {
     fn default_limit() -> Self {
         Self {
-            slots: Arc::new(Semaphore::new(RESPONSES_LARGE_HTTP_BODY_CONCURRENCY)),
+            slots: Arc::new(Semaphore::new(GENERATION_LARGE_HTTP_BODY_CONCURRENCY)),
         }
     }
 
-    pub(crate) fn try_acquire(&self) -> Option<ResponsesHttpBodyPermit> {
+    pub(crate) fn try_acquire(&self) -> Option<GenerationHttpBodyPermit> {
         Arc::clone(&self.slots)
             .try_acquire_owned()
             .ok()
-            .map(|permit| ResponsesHttpBodyPermit {
+            .map(|permit| GenerationHttpBodyPermit {
                 _permit: Arc::new(permit),
             })
     }
@@ -298,8 +298,8 @@ pub struct AppState {
     pub(crate) responses_affinity: Arc<ResponsesAffinityMap>,
     /// Admission control for long-lived Responses WebSocket connections.
     pub(crate) responses_websocket_admission: Arc<ResponsesWebSocketAdmission>,
-    /// Bounds concurrently resident large Responses HTTP request bodies.
-    pub(crate) responses_http_body_admission: Arc<ResponsesHttpBodyAdmission>,
+    /// Bounds concurrently resident large generation API request bodies.
+    pub(crate) generation_http_body_admission: Arc<GenerationHttpBodyAdmission>,
     /// Gateway 配置
     pub gateway_config: keycompute_config::GatewayConfig,
     /// Best-effort lifecycle tracing sink.
@@ -337,8 +337,8 @@ impl std::fmt::Debug for AppState {
                 &"<ResponsesWebSocketAdmission>",
             )
             .field(
-                "responses_http_body_admission",
-                &"<ResponsesHttpBodyAdmission>",
+                "generation_http_body_admission",
+                &"<GenerationHttpBodyAdmission>",
             )
             .field("gateway_config", &self.gateway_config)
             .field("lifecycle", &"<RequestLifecycleRecorder>")
@@ -430,7 +430,7 @@ impl AppState {
             cache,
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
-            responses_http_body_admission: Arc::new(ResponsesHttpBodyAdmission::default_limit()),
+            generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }
@@ -764,7 +764,7 @@ impl AppState {
             cache,
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
-            responses_http_body_admission: Arc::new(ResponsesHttpBodyAdmission::default_limit()),
+            generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             gateway_config: config.gateway,
             lifecycle,
         }
@@ -856,7 +856,7 @@ impl AppState {
             cache,
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
-            responses_http_body_admission: Arc::new(ResponsesHttpBodyAdmission::default_limit()),
+            generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }
@@ -1025,8 +1025,8 @@ mod tests {
     }
 
     #[test]
-    fn responses_http_body_admission_bounds_resident_large_requests() {
-        let admission = ResponsesHttpBodyAdmission::default_limit();
+    fn generation_http_body_admission_bounds_resident_large_requests() {
+        let admission = GenerationHttpBodyAdmission::default_limit();
         let first = admission.try_acquire().unwrap();
         let second = admission.try_acquire().unwrap();
         assert!(admission.try_acquire().is_none());

@@ -1123,11 +1123,13 @@ impl GatewayExecutor {
                         .unwrap_or_else(|| "/responses".to_string()),
                     headers: ctx.native_openai_responses_headers.clone(),
                 });
+        // A fallback must expose only its own final response metadata for all
+        // native protocols. Otherwise Chat/Messages could surface an earlier
+        // account's captured HTTP error if a later attempt accepts the request
+        // and then fails while streaming.
+        ctx.clear_client_upstream_response();
+        ctx.clear_client_upstream_response_headers();
         if native_responses_request.is_some() {
-            // A fallback must expose only its own final error. Never leak an
-            // earlier account's payload after a later attempt succeeds.
-            ctx.clear_client_upstream_response();
-            ctx.clear_client_upstream_response_headers();
             *deferred_native_error = None;
         }
 
@@ -1163,7 +1165,7 @@ impl GatewayExecutor {
         };
         let response = match response_result {
             Ok(response) => response,
-            Err(failure) => {
+            Err(mut failure) => {
                 if let Some(attempt) = attempt {
                     let _ = lifecycle
                         .record_attempt_response_meta(
@@ -1176,6 +1178,9 @@ impl GatewayExecutor {
                             },
                         )
                         .await;
+                }
+                if let Some(response) = failure.client_response.take() {
+                    ctx.set_client_upstream_response(*response);
                 }
                 return Err(KeyComputeError::UpstreamFailure {
                     status: failure.status,
@@ -1210,6 +1215,12 @@ impl GatewayExecutor {
             if ctx.native_openai_responses_request.is_some() {
                 ctx.set_client_upstream_response_headers(response.meta.headers.clone());
             }
+            // Publish acceptance only after all response metadata is visible.
+            // Handlers may now commit SSE (and start forwarding keepalives)
+            // without waiting for the provider's first model event. Non-success
+            // HTTP responses never trip this signal, so their native status is
+            // still available to the handler.
+            ctx.mark_upstream_response_accepted();
         }
         let mut stream = response.body;
 
@@ -1539,7 +1550,7 @@ impl GatewayExecutor {
         Self::estimate_tokens(&json_str)
     }
 
-    fn estimate_context_input_tokens(ctx: &RequestContext) -> u32 {
+    pub fn estimate_context_input_tokens(ctx: &RequestContext) -> u32 {
         let message_tokens = Self::estimate_input_tokens(&ctx.messages);
         let tool_tokens = ctx
             .native_openai_responses_request
@@ -2532,6 +2543,7 @@ mod tests {
                 status: Some(200),
                 headers_received_at: Some(chrono::Utc::now()),
                 upstream_request_id: Some("accepted-request".to_string()),
+                client_response: None,
                 retryable: false,
                 stable_error_code: "upstream_protocol".to_string(),
                 sanitized_summary: "invalid successful Responses body".to_string(),
@@ -2571,6 +2583,7 @@ mod tests {
                 status: Some(429),
                 headers_received_at: Some(chrono::Utc::now()),
                 upstream_request_id: Some("rejected-request".to_string()),
+                client_response: None,
                 retryable: true,
                 stable_error_code: "upstream_body_read".to_string(),
                 sanitized_summary: "failed to read rejected response body".to_string(),
@@ -3035,6 +3048,7 @@ mod tests {
                     status: Some(400),
                     headers_received_at: Some(chrono::Utc::now()),
                     upstream_request_id: Some("compat-first-request".to_string()),
+                    client_response: None,
                     retryable: true,
                     stable_error_code: "upstream_stream_options_unsupported".to_string(),
                     sanitized_summary: "stream_options unsupported".to_string(),
@@ -3600,7 +3614,12 @@ mod tests {
 
         let mut rx = tokio::time::timeout(
             Duration::from_millis(50),
-            executor.execute(ctx, plan, account_states, Some(provider_health)),
+            executor.execute(
+                Arc::clone(&ctx),
+                plan,
+                account_states,
+                Some(provider_health),
+            ),
         )
         .await
         .expect("execute should return receiver immediately")
@@ -3612,6 +3631,7 @@ mod tests {
             .expect("channel should stay open");
 
         assert!(matches!(first_event, StreamEvent::Delta { .. }));
+        assert!(ctx.is_upstream_response_accepted());
     }
 
     #[tokio::test]

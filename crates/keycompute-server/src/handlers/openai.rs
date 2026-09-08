@@ -13,7 +13,7 @@ use crate::{
 use axum::{
     Json,
     body::Body,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     response::{
         IntoResponse,
         sse::{Event, Sse},
@@ -24,11 +24,12 @@ use keycompute_auth::Permission;
 use keycompute_db::models::account::Account;
 use keycompute_types::{
     AccountApiCapability, ClientResponseOutcome, ContentPart, ErrorOrigin, ExecutionTarget,
-    Message, MessageContent, MessageRole, NoopRequestLifecycleRecorder, RequestContext,
+    ImageUrl, Message, MessageContent, MessageRole, NoopRequestLifecycleRecorder, RequestContext,
     RequestLifecycleRecorder, RequestStatus, RequestTraceStart, RouteType, TraceErrorCategory,
 };
 use llm_protocol_provider::{
-    LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, LargeBodyPermit, NativeStreamEvent,
+    LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, LargeBodyPermit, MAX_JSON_PASSTHROUGH_BODY_BYTES,
+    MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, NativeStreamEvent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,19 +39,28 @@ use tokio_stream::wrappers::ReceiverStream;
 
 // ==================== Chat Completions ====================
 
-/// Chat Completions 请求
-/// 对齐 OpenAI API 的常用关键字段: https://platform.openai.com/docs/api-reference/chat/create
-#[derive(Debug, Deserialize)]
+/// Chat supports inline images, audio and files. Match the bounded native JSON
+/// passthrough allowance used by the provider layer instead of Axum's 2 MiB
+/// default.
+pub const OPENAI_CHAT_BODY_LIMIT_BYTES: usize = MAX_JSON_PASSTHROUGH_BODY_BYTES;
+pub const OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES: usize =
+    MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES;
+
+/// Chat Completions 路由投影。
+///
+/// 这里只反序列化路由、计费和本地校验实际需要的字段。完整 JSON 由
+/// `RequestContext::native_openai_chat_request` 保留并交给原生 OpenAI
+/// adapter；新增官方字段、自定义工具和新的内容块类型因此无需等待网关
+/// DTO 升级即可无损转发。
+#[derive(Debug)]
 pub struct ChatCompletionRequest {
     /// 模型 ID (必需)
     pub model: String,
     /// 消息列表 (必需)
-    pub messages: Vec<ChatCompletionMessage>,
+    pub messages: Vec<ChatRoutingMessage>,
     /// 是否流式输出 (默认 false)
-    #[serde(default)]
     pub stream: bool,
     /// 最大生成 token 数
-    #[serde(rename = "max_tokens")]
     pub max_tokens: Option<u32>,
     /// 最大生成 token 数（OpenAI 新版字段，与 max_tokens 等效；
     /// 两者同时提供时 max_tokens 优先）
@@ -60,13 +70,9 @@ pub struct ChatCompletionRequest {
     /// 核采样参数 (0-1)
     pub top_p: Option<f32>,
     /// 每个提示生成的结果数 (默认 1)
-    #[serde(default = "default_n")]
     pub n: Option<u32>,
     /// 是否返回输入 token 的用量
-    #[serde(default)]
     pub stream_options: Option<StreamOptions>,
-    /// 停止序列
-    pub stop: Option<StopSequence>,
     /// 存在惩罚 (-2.0 到 2.0)
     pub presence_penalty: Option<f32>,
     /// 频率惩罚 (-2.0 到 2.0)
@@ -75,24 +81,22 @@ pub struct ChatCompletionRequest {
     pub logprobs: Option<bool>,
     /// 返回的日志概率选项数
     pub top_logprobs: Option<u32>,
-    /// 用户标识 (用于监控滥用)
-    pub user: Option<String>,
-    /// 稳定的提示缓存分组标识（OpenAI 推荐替代 user）
-    pub prompt_cache_key: Option<String>,
-    /// 用于滥用检测的稳定终端用户标识（OpenAI 推荐替代 user）
-    pub safety_identifier: Option<String>,
-    /// 响应格式 (如 json_object)
-    pub response_format: Option<ResponseFormat>,
-    /// 种子值 (用于可重复的结果)
-    pub seed: Option<i64>,
-    /// 工具列表
-    pub tools: Option<Vec<Tool>>,
-    /// 工具选择策略
-    pub tool_choice: Option<ToolChoice>,
 }
 
-fn default_n() -> Option<u32> {
-    Some(1)
+#[derive(Debug, Clone)]
+pub struct ChatRoutingMessage {
+    pub role: String,
+    pub content: MessageContent,
+}
+
+impl<'de> Deserialize<'de> for ChatCompletionRequest {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let body = Value::deserialize(deserializer)?;
+        parse_chat_completion_request(&body).map_err(serde::de::Error::custom)
+    }
 }
 
 impl ChatCompletionRequest {
@@ -165,17 +169,6 @@ impl ChatCompletionRequest {
                 "messages must not be empty".to_string(),
             ));
         }
-        for message in &self.messages {
-            if !matches!(
-                message.role.as_str(),
-                "developer" | "system" | "user" | "assistant" | "tool"
-            ) {
-                return Err(ApiError::BadRequest(format!(
-                    "unsupported message role: {}",
-                    message.role
-                )));
-            }
-        }
         Ok(())
     }
 }
@@ -184,24 +177,101 @@ fn parse_chat_completion_request(body: &Value) -> Result<ChatCompletionRequest> 
     let object = body.as_object().ok_or_else(|| {
         ApiError::BadRequest("Chat Completions request body must be a JSON object".to_string())
     })?;
-    let mut unsupported = object
-        .keys()
-        .filter(|name| {
-            !llm_protocol_openai::SUPPORTED_CHAT_COMPLETIONS_FIELDS.contains(&name.as_str())
+    let model = object
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::BadRequest("model must be a string".to_string()))?
+        .to_string();
+    let raw_messages = object
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::BadRequest("messages must be an array".to_string()))?;
+    let messages = raw_messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let message = message.as_object().ok_or_else(|| {
+                ApiError::BadRequest(format!("messages[{index}] must be an object"))
+            })?;
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    ApiError::BadRequest(format!("messages[{index}].role must be a string"))
+                })?
+                .to_string();
+            Ok(ChatRoutingMessage {
+                role,
+                content: project_chat_message_content(message.get("content")),
+            })
         })
-        .cloned()
-        .collect::<Vec<_>>();
-    unsupported.sort();
-    if !unsupported.is_empty() {
-        return Err(ApiError::BadRequest(format!(
-            "unsupported Chat Completions field(s): {}",
-            unsupported.join(", ")
-        )));
+        .collect::<Result<Vec<_>>>()?;
+    let stream = match object.get("stream") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "stream must be a boolean or null".to_string(),
+            ));
+        }
+    };
+
+    Ok(ChatCompletionRequest {
+        model,
+        messages,
+        stream,
+        max_tokens: optional_chat_field(object, "max_tokens")?,
+        max_completion_tokens: optional_chat_field(object, "max_completion_tokens")?,
+        temperature: optional_chat_field(object, "temperature")?,
+        top_p: optional_chat_field(object, "top_p")?,
+        n: if object.contains_key("n") {
+            optional_chat_field(object, "n")?
+        } else {
+            Some(1)
+        },
+        stream_options: project_chat_stream_options(object.get("stream_options"))?,
+        presence_penalty: optional_chat_field(object, "presence_penalty")?,
+        frequency_penalty: optional_chat_field(object, "frequency_penalty")?,
+        logprobs: optional_chat_field(object, "logprobs")?,
+        top_logprobs: optional_chat_field(object, "top_logprobs")?,
+    })
+}
+
+fn project_chat_stream_options(value: Option<&Value>) -> Result<Option<StreamOptions>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
     }
-    let request: ChatCompletionRequest = serde_json::from_value(body.clone()).map_err(|error| {
-        ApiError::BadRequest(format!("invalid Chat Completions request: {error}"))
+    let object = value.as_object().ok_or_else(|| {
+        ApiError::BadRequest("stream_options must be an object or null".to_string())
     })?;
-    Ok(request)
+    let include_usage = match object.get("include_usage") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "stream_options.include_usage must be a boolean or null".to_string(),
+            ));
+        }
+    };
+    Ok(Some(StreamOptions { include_usage }))
+}
+
+fn optional_chat_field<T: serde::de::DeserializeOwned>(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<T>> {
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| ApiError::BadRequest(format!("invalid {field}: {error}")))
 }
 
 /// Chat Completion 消息
@@ -209,38 +279,18 @@ fn parse_chat_completion_request(body: &Value) -> Result<ChatCompletionRequest> 
 pub struct ChatCompletionMessage {
     /// 角色: system, user, assistant, tool
     pub role: String,
-    /// 内容：支持纯文本字符串或 Vision 多模态内容块数组
-    pub content: Option<MessageContent>,
+    /// 原生内容。OpenAI 可在这里增加 text/image/audio/file/refusal 等块；
+    /// 路由投影不得用封闭枚举拒绝它们。
+    pub content: Option<Value>,
     /// 工具调用 (assistant 消息中)
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_calls: Option<Vec<ToolCall>>,
+    pub tool_calls: Option<Value>,
     /// 工具调用 ID (tool 消息中)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// 名称 (function 消息中)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-}
-
-/// 工具定义
-#[derive(Debug, Deserialize)]
-pub struct Tool {
-    /// 工具类型 (目前只有 function)
-    #[serde(rename = "type")]
-    pub tool_type: String,
-    /// 函数定义
-    pub function: FunctionDefinition,
-}
-
-/// 函数定义
-#[derive(Debug, Deserialize)]
-pub struct FunctionDefinition {
-    /// 函数名称
-    pub name: String,
-    /// 函数描述
-    pub description: Option<String>,
-    /// 参数定义 (JSON Schema)
-    pub parameters: Option<serde_json::Value>,
 }
 
 /// 工具调用
@@ -264,26 +314,6 @@ pub struct FunctionCall {
     pub arguments: String,
 }
 
-/// 工具选择
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum ToolChoice {
-    /// 字符串选项: none, auto, required
-    String(String),
-    /// 指定调用特定函数
-    Object {
-        #[serde(rename = "type")]
-        tool_type: String,
-        function: FunctionChoice,
-    },
-}
-
-/// 函数选择
-#[derive(Debug, Deserialize)]
-pub struct FunctionChoice {
-    pub name: String,
-}
-
 /// 流式选项
 #[derive(Debug, Deserialize)]
 pub struct StreamOptions {
@@ -292,22 +322,140 @@ pub struct StreamOptions {
     pub include_usage: bool,
 }
 
-/// 停止序列
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-pub enum StopSequence {
-    /// 单个字符串
-    String(String),
-    /// 字符串数组 (最多 4 个)
-    Array(Vec<String>),
+/// 将原生 Chat 内容投影为通用路由/估算表示。
+///
+/// 原始内容始终由 native body 转发；这里的降维不会改变发往 Provider 的
+/// payload。无法表示的官方多模态块使用稳定占位文本，确保 token 估算不会
+/// 把 audio/file 等输入当成空消息。
+fn project_chat_message_content(content: Option<&Value>) -> MessageContent {
+    match content {
+        Some(Value::String(text)) => MessageContent::text(text.clone()),
+        Some(Value::Array(parts)) => {
+            let mut projected = Vec::new();
+            for part in parts {
+                let Some(object) = part.as_object() else {
+                    projected.push(ContentPart::Text {
+                        text: part.to_string(),
+                    });
+                    continue;
+                };
+                match object.get("type").and_then(Value::as_str) {
+                    Some("text" | "input_text") => {
+                        if let Some(text) = object.get("text").and_then(Value::as_str) {
+                            projected.push(ContentPart::Text {
+                                text: text.to_string(),
+                            });
+                        }
+                    }
+                    Some("image_url") => {
+                        projected.push(project_chat_image_url(object.get("image_url")))
+                    }
+                    Some(kind) => projected.push(ContentPart::Text {
+                        text: format!("[{kind}]"),
+                    }),
+                    None => projected.push(ContentPart::Text {
+                        text: part.to_string(),
+                    }),
+                }
+            }
+            if projected.is_empty() {
+                MessageContent::text(String::new())
+            } else {
+                MessageContent::Parts(projected)
+            }
+        }
+        Some(Value::Null) | None => MessageContent::text(String::new()),
+        Some(other) => MessageContent::text(other.to_string()),
+    }
 }
 
-/// 响应格式
-#[derive(Debug, Deserialize)]
-pub struct ResponseFormat {
-    /// 格式类型: text 或 json_object
-    #[serde(rename = "type")]
-    pub format_type: String,
+fn project_chat_image_url(value: Option<&Value>) -> ContentPart {
+    let (url, detail) = match value {
+        Some(Value::String(url)) => (Some(url.as_str()), None),
+        Some(Value::Object(image)) => (
+            image.get("url").and_then(Value::as_str),
+            image.get("detail").and_then(Value::as_str),
+        ),
+        _ => (None, None),
+    };
+    let Some(url) = url else {
+        return ContentPart::Text {
+            text: "[image_url]".to_string(),
+        };
+    };
+    // Inline base64 and pathological URLs stay only in the native body. The
+    // projection needs only enough information to select keepalive behavior.
+    if url.starts_with("data:") || url.len() > 8 * 1024 {
+        return ContentPart::Text {
+            text: "[inline_image]".to_string(),
+        };
+    }
+    ContentPart::ImageUrl {
+        image_url: ImageUrl {
+            url: url.to_string(),
+            detail: detail.map(str::to_string),
+        },
+    }
+}
+
+/// Roles are only a routing/token-estimation projection. Preserve the native
+/// role in the forwarded JSON and avoid making this gateway the compatibility
+/// bottleneck when OpenAI adds a role. The legacy `function` role is closest
+/// to the common tool role; unknown future roles use a neutral user projection.
+fn project_chat_message_role(role: &str) -> MessageRole {
+    match role {
+        "system" => MessageRole::System,
+        "developer" => MessageRole::Developer,
+        "assistant" => MessageRole::Assistant,
+        "tool" | "function" => MessageRole::Tool,
+        _ => MessageRole::User,
+    }
+}
+
+/// Rehydrate the subset of native Chat messages that the Node task protocol
+/// can represent. Provider routing continues to use the lightweight
+/// projection, while Node routing must retain supported inline image bytes.
+fn node_chat_messages(body: &Value) -> Result<Vec<Message>> {
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::BadRequest("messages must be an array".to_string()))?;
+
+    messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| {
+            let message = message.as_object().ok_or_else(|| {
+                ApiError::BadRequest(format!("messages[{index}] must be an object"))
+            })?;
+            let role = match message.get("role").and_then(Value::as_str) {
+                Some("system") => MessageRole::System,
+                Some("developer") => MessageRole::Developer,
+                Some("user") => MessageRole::User,
+                Some("assistant") => MessageRole::Assistant,
+                Some("tool") => MessageRole::Tool,
+                Some(role) => {
+                    return Err(ApiError::BadRequest(format!(
+                        "messages[{index}].role {role:?} is not supported by Node Chat tasks"
+                    )));
+                }
+                None => {
+                    return Err(ApiError::BadRequest(format!(
+                        "messages[{index}].role must be a string"
+                    )));
+                }
+            };
+            let content = match message.get("content") {
+                None | Some(Value::Null) => MessageContent::text(String::new()),
+                Some(content) => serde_json::from_value(content.clone()).map_err(|error| {
+                    ApiError::BadRequest(format!(
+                        "messages[{index}].content is not supported by Node Chat tasks: {error}"
+                    ))
+                })?,
+            };
+            Ok(Message { role, content })
+        })
+        .collect()
 }
 
 /// Chat Completion 响应 (非流式)
@@ -427,6 +575,19 @@ async fn finish_unexecuted_trace(
     guard.finish_failed(origin, category, code).await;
 }
 
+/// Tie large-request admission to detached work that still owns the decoded
+/// request or a derived payload after the HTTP handler can be cancelled.
+async fn retain_generation_body_permit<F>(
+    permit: Option<crate::state::GenerationHttpBodyPermit>,
+    future: F,
+) -> F::Output
+where
+    F: std::future::Future,
+{
+    let _permit = permit;
+    future.await
+}
+
 /// Chat Completions 处理器
 /// POST /v1/chat/completions
 ///
@@ -437,7 +598,10 @@ pub async fn chat_completions(
     request_id: RequestId,
     client_request_id: ClientRequestId,
     received_at: RequestReceivedAt,
-    Json(body): Json<Value>,
+    (body_permit, Json(body)): (
+        Option<Extension<crate::state::GenerationHttpBodyPermit>>,
+        Json<Value>,
+    ),
 ) -> Result<axum::response::Response> {
     let request = parse_chat_completion_request(&body)?;
     let native_chat_request = Arc::new(body);
@@ -490,23 +654,6 @@ pub async fn chat_completions(
         .await;
         return Err(error);
     }
-    // 1. 余额预检查
-    // 如果余额低于阈值（0.1元），直接拒绝请求
-    if let Some(balance_service) = state.billing.balance_service()
-        && let Err(error) = balance_service
-            .check_balance_for_tenant(auth.user_id, auth.tenant_id)
-            .await
-    {
-        finish_unexecuted_trace(
-            &mut pre_execution_guard,
-            ErrorOrigin::Client,
-            TraceErrorCategory::Balance,
-            "insufficient_balance",
-        )
-        .await;
-        return Err(ApiError::from(error));
-    }
-
     // 1. 构建 PricingSnapshot
     // 注意：此时 provider 尚未确定（路由在之后执行）
     // Node 模型（node:前缀）使用 empty provider，其他使用 openai
@@ -536,22 +683,9 @@ pub async fn chat_completions(
     let messages: Vec<Message> = request
         .messages
         .iter()
-        .map(|m| {
-            let role = match m.role.as_str() {
-                "system" => MessageRole::System,
-                "developer" => MessageRole::Developer,
-                "user" => MessageRole::User,
-                "assistant" => MessageRole::Assistant,
-                "tool" => MessageRole::Tool,
-                _ => unreachable!("message roles were validated before routing"),
-            };
-            Message {
-                role,
-                content: m
-                    .content
-                    .clone()
-                    .unwrap_or(MessageContent::Text(String::new())),
-            }
+        .map(|m| Message {
+            role: project_chat_message_role(&m.role),
+            content: m.content.clone(),
         })
         .collect();
 
@@ -628,18 +762,39 @@ pub async fn chat_completions(
                 ));
             };
 
+            let node_messages = match ctx
+                .native_openai_chat_request
+                .as_deref()
+                .ok_or_else(|| {
+                    ApiError::Internal("native Chat request missing for Node route".to_string())
+                })
+                .and_then(node_chat_messages)
+            {
+                Ok(messages) => messages,
+                Err(error) => {
+                    finish_unexecuted_trace(
+                        &mut pre_execution_guard,
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::InvalidRequest,
+                        "unsupported_node_chat_payload",
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+
             // 构建 NodeTaskPayload
             let payload = keycompute_types::node::NodeTaskPayload {
                 request_id: ctx.request_id,
                 chat: Some(keycompute_types::ChatCompletionRequest {
                     model: model.clone(), // 使用去掉 node: 前缀的实际模型名
-                    messages: ctx.messages.clone(),
+                    messages: node_messages,
                     stream: Some(request.stream), // 传递 stream 标志
                     max_tokens: request.effective_max_tokens(),
                     temperature: request.temperature,
                     top_p: request.top_p,
                     n: request.n,
-                    stop: None, // StopSequence 不支持 Clone，暂时使用 None
+                    stop: None,
                 }),
                 image_generation: None,
                 image_edit: None,
@@ -660,45 +815,93 @@ pub async fn chat_completions(
                 )));
             }
 
+            let balance_reservation = match super::reserve_generation_balance(
+                &state,
+                &ctx,
+                super::GenerationBalanceReservationLifetime::Node(node_gateway.task_deadline()),
+            )
+            .await
+            {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    finish_unexecuted_trace(
+                        &mut pre_execution_guard,
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::Balance,
+                        "balance_reservation_failed",
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+
             let mut client_response_guard =
                 super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
             pre_execution_guard.disarm();
             let settlement = super::ImmediateSettlementServices::from_state(&state);
 
+            // Once the task has been enqueued, its usage can arrive after the
+            // HTTP handler is cancelled. A detached owner therefore waits for
+            // the durable Node task and settles or releases the reservation;
+            // the handler only owns delivery of the completed result.
+            let worker_node_gateway = Arc::clone(node_gateway);
+            let worker_ctx = Arc::clone(&ctx);
+            let worker_body_permit = body_permit.map(|Extension(permit)| permit);
+            let mut worker_balance_reservation = balance_reservation;
+            let node_user_id = auth.user_id;
+            let node_model = model.clone();
+            let (node_result_tx, node_result_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(retain_generation_body_permit(
+                worker_body_permit,
+                async move {
+                    let result = worker_node_gateway
+                        .enqueue_and_wait(node_user_id, node_model, payload)
+                        .await;
+                    match &result {
+                        Ok(response) => {
+                            worker_balance_reservation.transfer_to_settlement();
+                            worker_ctx.set_input_tokens(response.usage.prompt_tokens);
+                            worker_ctx.add_output_tokens(response.usage.completion_tokens);
+                            finalize_openai_billing(
+                                &settlement,
+                                &worker_ctx,
+                                keycompute_pricing::NODE_PRICING_PROVIDER,
+                                uuid::Uuid::nil(),
+                                "success",
+                            )
+                            .await;
+                        }
+                        Err(_) => {
+                            worker_balance_reservation.release().await;
+                        }
+                    }
+                    let _ = node_result_tx.send(result);
+                },
+            ));
+            let response = match node_result_rx.await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    let outcome = error.client_response_outcome();
+                    ctx.set_execution_failure(error.request_failure());
+                    client_response_guard.finish_with_outcome(outcome).await;
+                    return Err(ApiError::from(error));
+                }
+                Err(_) => {
+                    client_response_guard
+                        .finish_with_outcome(ClientResponseOutcome::ResponseFailed)
+                        .await;
+                    return Err(ApiError::Internal(
+                        "Node settlement worker stopped before returning a result".to_string(),
+                    ));
+                }
+            };
+
             if request.stream {
                 // 流式路径：获取完整响应后模拟流式输出
-                let response = match node_gateway
-                    .enqueue_and_wait(auth.user_id, model.clone(), payload)
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(error) => {
-                        let outcome = error.client_response_outcome();
-                        ctx.set_execution_failure(error.request_failure());
-                        client_response_guard.finish_with_outcome(outcome).await;
-                        return Err(ApiError::from(error));
-                    }
-                };
-
-                // 更新 token 计数到 ctx（用于计费）
-                ctx.set_input_tokens(response.usage.prompt_tokens);
-                ctx.add_output_tokens(response.usage.completion_tokens);
-
-                // Node 返回在这里已经完整可用，计费必须在创建 HTTP body 前完成；
-                // 否则客户端在 [DONE] 前后断开都会 drop body 并跳过结算。
-                finalize_openai_billing(
-                    &settlement,
-                    &ctx,
-                    keycompute_pricing::NODE_PRICING_PROVIDER,
-                    uuid::Uuid::nil(),
-                    "success",
-                )
-                .await;
-
                 // 将完整响应转换为模拟流式输出
                 let stream = simulate_node_stream(
                     response,
-                    Arc::clone(&ctx),
+                    Arc::new(ctx.clone_without_request_payloads()),
                     model.clone(),
                     request.stream_options,
                     Arc::clone(&lifecycle),
@@ -708,23 +911,6 @@ pub async fn chat_completions(
                 Ok(Sse::new(stream).into_response())
             } else {
                 // 非流式路径：保持现有逻辑
-                let response = match node_gateway
-                    .enqueue_and_wait(auth.user_id, model.clone(), payload)
-                    .await
-                {
-                    Ok(response) => response,
-                    Err(error) => {
-                        let outcome = error.client_response_outcome();
-                        ctx.set_execution_failure(error.request_failure());
-                        client_response_guard.finish_with_outcome(outcome).await;
-                        return Err(ApiError::from(error));
-                    }
-                };
-
-                // 更新 token 计数到 ctx（用于计费）
-                ctx.set_input_tokens(response.usage.prompt_tokens);
-                ctx.add_output_tokens(response.usage.completion_tokens);
-
                 // 将 ChatCompletionResponse 转换为 OpenAI 格式
                 let openai_response = ChatCompletionResponse {
                     id: format!(
@@ -744,7 +930,7 @@ pub async fn chat_completions(
                             content: response
                                 .choices
                                 .first()
-                                .map(|c| MessageContent::text(c.message.content.clone())),
+                                .map(|c| Value::String(c.message.content.clone())),
                             tool_calls: None,
                             tool_call_id: None,
                             name: None,
@@ -764,16 +950,6 @@ pub async fn chat_completions(
                     },
                     system_fingerprint: None,
                 };
-
-                // 触发计费（使用 NODE_PRICING_PROVIDER 常量，与路由层定价维度一致）
-                finalize_openai_billing(
-                    &settlement,
-                    &ctx,
-                    keycompute_pricing::NODE_PRICING_PROVIDER,
-                    uuid::Uuid::nil(),
-                    "success",
-                )
-                .await;
 
                 if let Err(error) =
                     super::record_final_client_first_content(&lifecycle, ctx.request_id).await
@@ -809,6 +985,26 @@ pub async fn chat_completions(
                     .await;
             }
 
+            let mut balance_reservation = match super::reserve_generation_balance(
+                &state,
+                &ctx,
+                super::GenerationBalanceReservationLifetime::Gateway,
+            )
+            .await
+            {
+                Ok(reservation) => reservation,
+                Err(error) => {
+                    finish_unexecuted_trace(
+                        &mut pre_execution_guard,
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::Balance,
+                        "balance_reservation_failed",
+                    )
+                    .await;
+                    return Err(error);
+                }
+            };
+
             tracing::info!(
                 request_id = %request_id.0,
                 model = %request.model,
@@ -843,12 +1039,17 @@ pub async fn chat_completions(
             {
                 Ok(Ok(rx)) => rx,
                 Ok(Err(error)) => {
+                    balance_reservation.release().await;
                     client_response_guard
                         .finish_with_outcome(ClientResponseOutcome::ResponseFailed)
                         .await;
-                    return Err(crate::error::map_execution_error(error));
+                    return Err(crate::error::map_openai_execution_error(
+                        error,
+                        ctx.client_upstream_response(),
+                    ));
                 }
                 Err(_) => {
+                    balance_reservation.release().await;
                     tracing::error!(
                         request_id = %request_id.0,
                         timeout_secs = state.gateway_config.timeout_secs,
@@ -863,7 +1064,6 @@ pub async fn chat_completions(
                     )));
                 }
             };
-
             tracing::info!(
                 request_id = %request_id.0,
                 "Gateway execute returned, creating response"
@@ -876,9 +1076,16 @@ pub async fn chat_completions(
             let stream_options = request.stream_options;
 
             if is_stream {
+                // Pure-text streams wait for their first protocol event so a
+                // pre-stream rejection can retain its native HTTP status. The
+                // multimodal keepalive path instead commits once upstream HTTP
+                // acceptance is known, allowing keepalives during slow image
+                // processing without hiding an actual HTTP rejection.
                 // 流式响应
                 if has_image_content(&ctx.messages) {
                     // 流式 + 多模态：SSE keepalive 防止图片下载超时
+                    let error_ctx = Arc::clone(&ctx);
+                    let (initial_status_tx, initial_status_rx) = tokio::sync::oneshot::channel();
                     let stream = create_openai_stream_with_keepalive_and_lifecycle(
                         rx,
                         OpenAiStreamContext {
@@ -889,13 +1096,31 @@ pub async fn chat_completions(
                             settlement,
                             stream_options,
                             lifecycle: Arc::clone(&lifecycle),
+                            initial_event: None,
+                            initial_status: Some(initial_status_tx),
+                            body_permit: body_permit.map(|Extension(permit)| permit),
                         },
                         timeout_duration,
                     );
+                    balance_reservation.transfer_to_settlement();
                     client_response_guard.disarm();
+                    if !matches!(
+                        super::await_initial_stream_status(&error_ctx, initial_status_rx).await,
+                        super::InitialStreamStatus::Ready
+                    ) {
+                        drop(stream);
+                        return Err(error_ctx
+                            .client_upstream_response()
+                            .map(ApiError::OpenAiUpstream)
+                            .unwrap_or_else(|| {
+                                ApiError::Provider("Upstream request failed".to_string())
+                            }));
+                    }
                     Ok(Sse::new(stream).into_response())
                 } else {
                     // 流式 + 纯文本：原逻辑，无 keepalive
+                    let error_ctx = Arc::clone(&ctx);
+                    let (initial_status_tx, initial_status_rx) = tokio::sync::oneshot::channel();
                     let stream = create_openai_stream_with_lifecycle(
                         rx,
                         OpenAiStreamContext {
@@ -906,47 +1131,48 @@ pub async fn chat_completions(
                             settlement,
                             stream_options,
                             lifecycle: Arc::clone(&lifecycle),
+                            initial_event: None,
+                            initial_status: Some(initial_status_tx),
+                            body_permit: body_permit.map(|Extension(permit)| permit),
                         },
                     );
+                    balance_reservation.transfer_to_settlement();
                     client_response_guard.disarm();
+                    if !matches!(
+                        initial_status_rx.await,
+                        Ok(super::InitialStreamStatus::Ready)
+                    ) {
+                        drop(stream);
+                        return Err(error_ctx
+                            .client_upstream_response()
+                            .map(ApiError::OpenAiUpstream)
+                            .unwrap_or_else(|| {
+                                ApiError::Provider("Upstream request failed".to_string())
+                            }));
+                    }
                     Ok(Sse::new(stream).into_response())
                 }
             } else {
-                // 非流式响应
-                if has_image_content(&ctx.messages) {
-                    // 多模态请求：使用 chunked keepalive 防止图片下载超时
-                    let response = create_non_streaming_json_with_keepalive_and_lifecycle(
-                        rx,
-                        OpenAiNonStreamingResponseContext {
-                            ctx,
-                            model,
-                            provider_name: primary_provider,
-                            account_id: primary_account_id,
-                            settlement,
-                            lifecycle: Arc::clone(&lifecycle),
-                            response_timeout: timeout_duration,
-                        },
-                    );
-                    client_response_guard.disarm();
-                    Ok(response)
-                } else {
-                    // 纯文本请求：直接返回 JSON（原快速路径）
-                    // The nested response helper installs its own guard before
-                    // its first await, so ownership can be transferred without
-                    // leaving a cancellation gap.
-                    client_response_guard.disarm();
-                    let response = create_openai_response_with_lifecycle(
-                        rx,
+                // A non-streaming JSON response must retain its real HTTP error
+                // status. Whitespace keepalives commit 200 before the upstream
+                // result is known and break SDK retry/error handling. Clients
+                // that need incremental liveness should request SSE instead.
+                client_response_guard.disarm();
+                balance_reservation.transfer_to_settlement();
+                let response = create_openai_response_with_lifecycle(
+                    rx,
+                    OpenAiJsonRuntime {
                         ctx,
                         model,
-                        primary_provider,
-                        primary_account_id,
+                        provider_name: primary_provider,
+                        account_id: primary_account_id,
                         settlement,
-                        Arc::clone(&lifecycle),
-                    )
-                    .await?;
-                    openai_json_response(response)
-                }
+                        lifecycle: Arc::clone(&lifecycle),
+                        body_permit: body_permit.map(|Extension(permit)| permit),
+                    },
+                )
+                .await?;
+                openai_json_response(response)
             }
         }
     }
@@ -964,20 +1190,35 @@ fn initial_route_trace_state(target: &ExecutionTarget) -> (RouteType, RequestSta
     }
 }
 
-async fn create_openai_response_with_lifecycle(
-    mut rx: tokio::sync::mpsc::Receiver<llm_protocol_provider::StreamEvent>,
+struct OpenAiJsonRuntime {
     ctx: Arc<RequestContext>,
     model: String,
     provider_name: String,
     account_id: uuid::Uuid,
     settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+    body_permit: Option<crate::state::GenerationHttpBodyPermit>,
+}
+
+async fn create_openai_response_with_lifecycle(
+    mut rx: tokio::sync::mpsc::Receiver<llm_protocol_provider::StreamEvent>,
+    runtime: OpenAiJsonRuntime,
 ) -> Result<OpenAiJsonResponse> {
+    let OpenAiJsonRuntime {
+        ctx,
+        model,
+        provider_name,
+        account_id,
+        settlement,
+        lifecycle,
+        body_permit,
+    } = runtime;
     let mut client_response_guard =
         super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
     let (mut response_tx, response_rx) = tokio::sync::oneshot::channel();
     let worker_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
+        let _body_permit = body_permit;
         let completion_id = generate_completion_id();
         let created = chrono::Utc::now().timestamp();
         let mut collector = StreamCollector::new();
@@ -1005,7 +1246,12 @@ async fn create_openai_response_with_lifecycle(
                                 error = %message,
                                 "Stream error during non-streaming response"
                             );
-                            terminal_error = Some(ApiError::Internal(message));
+                            terminal_error = Some(
+                                worker_ctx
+                                    .client_upstream_response()
+                                    .map(ApiError::OpenAiUpstream)
+                                    .unwrap_or_else(|| ApiError::Provider(message)),
+                            );
                             break;
                         }
                     }
@@ -1168,9 +1414,7 @@ fn has_image_content(messages: &[Message]) -> bool {
     })
 }
 
-/// 构建 OpenAI 格式的 ChatCompletion 响应
-///
-/// create_openai_response 与 create_non_streaming_json_with_keepalive 共享
+/// 构建 OpenAI 格式的 ChatCompletion 响应。
 #[allow(clippy::too_many_arguments)]
 fn build_chat_completion_response(
     completion_id: String,
@@ -1191,7 +1435,7 @@ fn build_chat_completion_response(
             index: 0,
             message: ChatCompletionMessage {
                 role: "assistant".to_string(),
-                content: Some(MessageContent::text(content)),
+                content: Some(Value::String(content)),
                 tool_calls: None,
                 tool_call_id: None,
                 name: None,
@@ -1212,8 +1456,7 @@ fn build_chat_completion_response(
 
 /// 流事件收集器
 ///
-/// 封装非流式响应路径中共享的事件处理状态与逻辑，
-/// 消除 `create_openai_response` 与 `create_non_streaming_json_with_keepalive` 之间的重复。
+/// 封装非流式响应路径的事件处理状态与逻辑。
 struct StreamCollector {
     content: String,
     finish_reason: Option<String>,
@@ -1316,319 +1559,6 @@ fn generate_completion_id() -> String {
             .replace("-", "")
             .to_lowercase()
     )
-}
-
-struct OpenAiNonStreamingResponseContext {
-    ctx: Arc<RequestContext>,
-    model: String,
-    provider_name: String,
-    account_id: uuid::Uuid,
-    settlement: super::ImmediateSettlementServices,
-    lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
-    response_timeout: Duration,
-}
-
-const OPENAI_JSON_SEND_TIMEOUT: Duration = Duration::from_secs(30);
-
-async fn forward_openai_json_chunk(
-    body_tx: &mpsc::Sender<bytes::Bytes>,
-    ctx: &RequestContext,
-    client_connected: &mut bool,
-    chunk: bytes::Bytes,
-) -> bool {
-    if !*client_connected {
-        return false;
-    }
-    let sent = tokio::time::timeout(OPENAI_JSON_SEND_TIMEOUT, body_tx.send(chunk))
-        .await
-        .map(|result| result.is_ok())
-        .unwrap_or(false);
-    if !sent {
-        *client_connected = false;
-        ctx.mark_client_disconnected();
-    }
-    sent
-}
-
-/// 创建带 chunked keepalive 的非流式 JSON 响应
-///
-/// 利用 HTTP chunked transfer encoding，在等待上游 Provider 响应期间，
-/// 每 10 秒发送一个空格字符 chunk，保持 TCP 连接活跃。
-/// 空格是 JSON 规范（RFC 8259）允许的前导空白字符，JSON 解析器会自动忽略，
-/// 因此客户端收到的是完全合法的 JSON 响应，协议无变更。
-///
-/// 适用场景：非流式请求中包含图片 URL 需要下载时，
-/// 图片下载可能耗时 30-40 秒，期间无任何数据返回，
-/// 云平台 ~60s 超时会导致 504 Gateway Timeout。
-///
-/// ## 错误处理说明
-///
-/// 由于 HTTP chunked 响应的特性，一旦第一个数据帧发出，HTTP 状态码 (200)
-/// 即已提交，无法后续修改。因此当流内发生上游 Provider 错误时，错误以
-/// JSON error body 形式嵌入响应体（而非 HTTP 5xx），客户端需同时检查
-/// HTTP 状态码和响应体中的 `error` 字段来判定请求是否成功。
-///
-/// 首个 keepalive 在 ~10s 时发送（而非立即发送），为上游连接阶段的错误
-/// （如 DNS 解析失败、TLS 握手超时等）保留一个窗口期。上游 Provider
-/// 的连接错误通常在数秒内暴露，10s 间隔足以覆盖绝大多数场景。
-fn create_non_streaming_json_with_keepalive_and_lifecycle(
-    mut rx: tokio::sync::mpsc::Receiver<llm_protocol_provider::StreamEvent>,
-    response_context: OpenAiNonStreamingResponseContext,
-) -> axum::response::Response {
-    let OpenAiNonStreamingResponseContext {
-        ctx,
-        model,
-        provider_name,
-        account_id,
-        settlement,
-        lifecycle,
-        response_timeout,
-    } = response_context;
-
-    let (body_tx, body_rx) = mpsc::channel(8);
-
-    // The worker owns the upstream receiver and billing context. Dropping the
-    // HTTP body therefore cancels upstream work through RequestContext while
-    // still allowing the terminal event to be drained and settled.
-    tokio::spawn(async move {
-        let mut client_connected = true;
-        let completion_id = generate_completion_id();
-        let created = chrono::Utc::now().timestamp();
-        let mut collector = StreamCollector::new();
-
-        // 首个 keepalive 不在此时发送，而是在 loop 内通过 tokio::select! 的
-        // sleep 分支延迟 ~10s 触发。这样为上游连接阶段的错误（DNS/TLS 等）
-        // 保留一个窗口期，避免过早提交 HTTP 200 状态码。
-        //
-        // 响应期限与 executor 使用同一 Gateway timeout 配置，既防止上游
-        // 后台任务停滞导致无限 keepalive，也不会截断运维明确放宽的超时。
-        let deadline = tokio::time::sleep(response_timeout);
-        tokio::pin!(deadline);
-        loop {
-            tokio::select! {
-                biased;
-                _ = body_tx.closed(), if client_connected => {
-                    client_connected = false;
-                    ctx.mark_client_disconnected();
-                }
-                _ = &mut deadline => {
-                    collector.status = "timeout".to_string();
-                    tracing::error!(
-                        request_id = %ctx.request_id,
-                        timeout_secs = response_timeout.as_secs(),
-                        "Non-streaming keepalive response deadline exceeded"
-                    );
-                    finalize_openai_billing(
-                        &settlement,
-                        &ctx,
-                        &provider_name,
-                        account_id,
-                        &collector.status,
-                    )
-                    .await;
-                    let _ = forward_openai_json_chunk(
-                        &body_tx,
-                        &ctx,
-                        &mut client_connected,
-                        bytes::Bytes::from(openai_error_chunk(
-                            "Request timed out",
-                            "server_error",
-                            Some("timeout"),
-                        )),
-                    )
-                    .await;
-                    super::finish_client_response_trace(
-                        &lifecycle,
-                        &ctx,
-                        ClientResponseOutcome::TimedOut,
-                    )
-                    .await;
-                    return;
-                }
-                _ = tokio::time::sleep(Duration::from_secs(10)), if client_connected => {
-                    // 空格是合法 JSON 前导空白 (RFC 8259 §2)，
-                    // 作为 chunked encoding 的数据帧，重置 Nginx proxy_read_timeout
-                    let _ = forward_openai_json_chunk(
-                        &body_tx,
-                        &ctx,
-                        &mut client_connected,
-                        bytes::Bytes::from_static(b" "),
-                    )
-                    .await;
-                }
-                event = rx.recv() => {
-                    match event {
-                        Some(event) => match collector.process_event(event) {
-                            Ok(true) => {}
-                            Ok(false) => break,
-                            Err(message) => {
-                                tracing::error!(
-                                    request_id = %ctx.request_id,
-                                    error = %message,
-                                    "Stream error during non-streaming keepalive response"
-                                );
-                                finalize_openai_billing(
-                                    &settlement,
-                                    &ctx,
-                                    &provider_name,
-                                    account_id,
-                                    &collector.status,
-                                )
-                                .await;
-                                // 错误格式与 OpenAI API 对齐，包含 param 字段。
-                                // 消息已脱敏：上游原始错误只记录日志，不暴露给客户端。
-                                let _ = forward_openai_json_chunk(
-                                    &body_tx,
-                                    &ctx,
-                                    &mut client_connected,
-                                    bytes::Bytes::from(openai_error_chunk(
-                                        "Upstream request failed",
-                                        "api_error",
-                                        Some("internal_error"),
-                                    )),
-                                )
-                                .await;
-                                super::finish_client_response_trace(
-                                    &lifecycle,
-                                    &ctx,
-                                    ClientResponseOutcome::ResponseFailed,
-                                )
-                                .await;
-                                return;
-                            }
-                        },
-                        None => {
-                            // Channel 关闭但没有收到 Done 事件，将在循环后标记为 incomplete
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // 检查流完成状态
-        collector.check_completion(&ctx.request_id);
-
-        // 流意外结束：先执行计费，再返回 error JSON 而非空 content 的 200 响应
-        if collector.status == "incomplete" {
-            finalize_openai_billing(
-                &settlement,
-                &ctx,
-                &provider_name,
-                account_id,
-                &collector.status,
-            )
-            .await;
-            let _ = forward_openai_json_chunk(
-                &body_tx,
-                &ctx,
-                &mut client_connected,
-                bytes::Bytes::from(openai_error_chunk(
-                    "Stream ended unexpectedly",
-                    "server_error",
-                    Some("incomplete"),
-                )),
-            )
-            .await;
-            super::finish_client_response_trace(
-                &lifecycle,
-                &ctx,
-                ClientResponseOutcome::ResponseFailed,
-            )
-            .await;
-            return;
-        }
-
-        // 执行计费
-        finalize_openai_billing(
-            &settlement,
-            &ctx,
-            &provider_name,
-            account_id,
-            &collector.status,
-        )
-        .await;
-
-        // 获取用量信息
-        let (prompt_tokens, completion_tokens) = ctx.usage_snapshot();
-
-        // Provider 账号返回的原生 Chat Completions body 已包含工具调用、
-        // logprobs、usage 细节等字段；标准化路径仅供 Node/旧测试适配器使用。
-        let response = if let Some(response) = collector.native_chat_response.take() {
-            response
-        } else {
-            OpenAiJsonResponse {
-                body: serde_json::to_value(build_chat_completion_response(
-                    completion_id,
-                    created,
-                    model,
-                    collector.content,
-                    collector.finish_reason,
-                    prompt_tokens,
-                    completion_tokens,
-                    provider_name,
-                ))
-                .unwrap_or_else(|_| serde_json::json!({})),
-                admission: None,
-            }
-        };
-
-        let json = serialize_openai_json_body(response).unwrap_or_else(|e| {
-            tracing::error!(
-                request_id = %ctx.request_id,
-                error = %e,
-                "Failed to serialize chat completion response"
-            );
-            bytes::Bytes::from(
-                serde_json::json!({
-                    "error": {
-                        "message": "Internal error: failed to serialize response",
-                        "type": "server_error",
-                        "param": null,
-                        "code": null
-                    }
-                })
-                .to_string(),
-            )
-        });
-        let sent = forward_openai_json_chunk(&body_tx, &ctx, &mut client_connected, json).await;
-        if sent
-            && let Err(error) =
-                super::record_final_client_first_content(&lifecycle, ctx.request_id).await
-        {
-            tracing::warn!(request_id = %ctx.request_id, %error, "failed to record client first content");
-        }
-        super::finish_client_response_trace(
-            &lifecycle,
-            &ctx,
-            if sent {
-                ClientResponseOutcome::Succeeded
-            } else {
-                ClientResponseOutcome::ClientDisconnected
-            },
-        )
-        .await;
-    });
-
-    axum::response::Response::builder()
-        .status(200)
-        .header("Content-Type", "application/json")
-        .body(axum::body::Body::from_stream(
-            ReceiverStream::new(body_rx).map(Ok::<bytes::Bytes, Infallible>),
-        ))
-        .unwrap_or_else(|e| {
-            tracing::error!(
-                error = %e,
-                "Failed to build keepalive response headers, returning 500"
-            );
-            axum::response::Response::builder()
-                .status(500)
-                .header("Content-Type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":{"message":"Internal server error","type":"server_error","param":null,"code":null}}"#,
-                ))
-                .expect("500 response with static body should always succeed")
-        })
 }
 
 /// 构建流式 Delta chunk 的 SSE 数据字符串
@@ -1796,6 +1726,9 @@ struct OpenAiStreamContext {
     settlement: super::ImmediateSettlementServices,
     stream_options: Option<StreamOptions>,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+    initial_event: Option<llm_protocol_provider::StreamEvent>,
+    initial_status: Option<tokio::sync::oneshot::Sender<super::InitialStreamStatus>>,
+    body_permit: Option<crate::state::GenerationHttpBodyPermit>,
 }
 
 fn openai_sse_channel_capacity(ctx: &RequestContext) -> usize {
@@ -1847,6 +1780,9 @@ fn create_openai_stream(
             settlement: super::ImmediateSettlementServices::for_test(billing),
             stream_options,
             lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+            initial_event: None,
+            initial_status: None,
+            body_permit: None,
         },
     )
 }
@@ -1864,11 +1800,15 @@ fn create_openai_stream_with_lifecycle(
         settlement,
         stream_options,
         lifecycle,
+        mut initial_event,
+        mut initial_status,
+        body_permit,
     } = stream_context;
 
     // The worker, rather than the HTTP body, owns the upstream receiver and
     // billing context. Dropping the response therefore cannot skip settlement.
     tokio::spawn(async move {
+        let _body_permit = body_permit;
         let mut status = "success";
         let mut completed = false;
         let mut first_chunk = true;
@@ -1884,7 +1824,14 @@ fn create_openai_stream_with_lifecycle(
                     client_connected = false;
                     ctx.mark_client_disconnected();
                 }
-                event = rx.recv() => {
+                event = async {
+                    if initial_event.is_some() {
+                        initial_event.take()
+                    } else {
+                        rx.recv().await
+                    }
+                } => {
+                    super::report_initial_stream_status(&mut initial_status, event.as_ref());
                     let Some(event) = event else { break };
                     match event {
                         llm_protocol_provider::StreamEvent::Delta { content, finish_reason } => {
@@ -2051,9 +1998,8 @@ fn create_openai_stream_with_lifecycle(
     ReceiverStream::new(sse_rx).map(Ok)
 }
 
-/// 创建带 keepalive 的 SSE 流式响应（多模态专用）
+/// 创建带 keepalive 的 SSE 流式响应（多模态专用）。
 ///
-/// 与非流式 `create_non_streaming_json_with_keepalive` 用途一致：
 /// 图片下载期间每 10s 发送 SSE 空事件，防止 Nginx / 云平台
 /// `proxy_read_timeout` 超时触发 504。
 ///
@@ -2073,9 +2019,13 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
         settlement,
         stream_options,
         lifecycle,
+        mut initial_event,
+        mut initial_status,
+        body_permit,
     } = stream_context;
 
     tokio::spawn(async move {
+        let _body_permit = body_permit;
         let mut status = "success";
         let mut first_chunk = true;
         let mut client_connected = true;
@@ -2096,6 +2046,7 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                     ctx.mark_client_disconnected();
                 }
                 _ = &mut deadline => {
+                    super::report_initial_stream_status(&mut initial_status, None);
                     status = "timeout";
                     tracing::error!(
                         request_id = %ctx.request_id,
@@ -2136,7 +2087,14 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                     )
                     .await;
                 }
-                event = rx.recv() => {
+                event = async {
+                    if initial_event.is_some() {
+                        initial_event.take()
+                    } else {
+                        rx.recv().await
+                    }
+                } => {
+                    super::report_initial_stream_status(&mut initial_status, event.as_ref());
                     match event {
                         Some(event) => match event {
                             llm_protocol_provider::StreamEvent::Delta { content, finish_reason } => {
@@ -2724,24 +2682,128 @@ mod tests {
         let request = parse_chat_completion_request(&body).unwrap();
         assert_eq!(request.messages[0].role, "developer");
         assert_eq!(request.effective_max_tokens(), Some(128));
-        assert_eq!(request.tools.as_ref().map(Vec::len), Some(1));
-        assert_eq!(request.prompt_cache_key.as_deref(), Some("cache-user-42"));
-        assert_eq!(request.safety_identifier.as_deref(), Some("safe-user-42"));
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]
-    fn chat_request_rejects_vendor_private_top_level_fields() {
+    fn chat_request_preserves_unknown_top_level_fields_for_native_forwarding() {
         let body = serde_json::json!({
             "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "Hello"}],
+            "messages": [{"role": "future_official_role", "content": "Hello"}],
             "top_k": 40,
             "enable_thinking": true
         });
 
-        let error = parse_chat_completion_request(&body).unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("enable_thinking"));
-        assert!(message.contains("top_k"));
+        let request = parse_chat_completion_request(&body).unwrap();
+        assert_eq!(body["top_k"], 40);
+        assert_eq!(body["enable_thinking"], true);
+        assert_eq!(body["messages"][0]["role"], "future_official_role");
+        assert_eq!(
+            project_chat_message_role(&request.messages[0].role),
+            MessageRole::User
+        );
+    }
+
+    #[test]
+    fn chat_request_accepts_current_audio_file_and_custom_tool_shapes() {
+        let body = serde_json::json!({
+            "model": "gpt-4o-audio-preview",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+                    {"type": "file", "file": {"file_id": "file_123"}}
+                ]
+            }],
+            "modalities": ["text", "audio"],
+            "audio": {"voice": "alloy", "format": "wav"},
+            "tools": [{"type": "custom", "custom": {"name": "shell", "format": {"type": "text"}}}],
+            "tool_choice": {"type": "allowed_tools", "allowed_tools": {"mode": "auto", "tools": []}},
+            "metadata": {"source": "compat-test"},
+            "prediction": {"type": "content", "content": "expected"},
+            "service_tier": "auto",
+            "store": true,
+            "verbosity": "low",
+            "web_search_options": {}
+        });
+
+        let request = parse_chat_completion_request(&body).unwrap();
+        assert_eq!(request.messages.len(), 1);
+        assert!(
+            request.messages[0]
+                .content
+                .extract_text()
+                .contains("[input_audio]")
+        );
+        assert!(
+            request.messages[0]
+                .content
+                .extract_text()
+                .contains("[file]")
+        );
+    }
+
+    #[test]
+    fn chat_routing_projection_does_not_copy_large_inline_media() {
+        let inline = "A".repeat(1024 * 1024);
+        let body = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{inline}")}},
+                    {"type": "input_audio", "input_audio": {"data": inline, "format": "wav"}}
+                ]
+            }]
+        });
+
+        let request = parse_chat_completion_request(&body).unwrap();
+        let projected = request.messages[0].content.extract_text();
+        assert!(projected.contains("[inline_image]"));
+        assert!(projected.contains("[input_audio]"));
+        assert!(projected.len() < 128);
+        assert!(body.to_string().len() > 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn node_chat_messages_restore_supported_inline_images_from_the_native_body() {
+        let inline_url = "data:image/png;base64,AAEC";
+        let body = serde_json::json!({
+            "model": "node:vision-model",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe this"},
+                    {"type": "image_url", "image_url": {"url": inline_url, "detail": "high"}}
+                ]
+            }]
+        });
+
+        let messages = node_chat_messages(&body).unwrap();
+        let serialized = serde_json::to_value(messages).unwrap();
+        assert_eq!(serialized[0]["content"][1]["image_url"]["url"], inline_url);
+        assert_eq!(serialized[0]["content"][1]["image_url"]["detail"], "high");
+    }
+
+    #[test]
+    fn node_chat_messages_reject_content_the_node_protocol_cannot_represent() {
+        let body = serde_json::json!({
+            "model": "node:audio-model",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_audio",
+                    "input_audio": {"data": "AA==", "format": "wav"}
+                }]
+            }]
+        });
+
+        let error = node_chat_messages(&body).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("not supported by Node Chat tasks")
+        );
     }
 
     #[test]
@@ -2831,6 +2893,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn detached_generation_worker_retains_large_request_admission() {
+        let state = AppState::new();
+        let admission = Arc::clone(&state.generation_http_body_admission);
+        let worker_permit = admission.try_acquire().unwrap();
+        let second_permit = admission.try_acquire().unwrap();
+        assert!(admission.try_acquire().is_none());
+
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(retain_generation_body_permit(
+            Some(worker_permit),
+            async move {
+                let _ = finish_rx.await;
+            },
+        ));
+        tokio::task::yield_now().await;
+        assert!(admission.try_acquire().is_none());
+
+        finish_tx.send(()).unwrap();
+        worker.await.unwrap();
+        assert!(admission.try_acquire().is_some());
+        drop(second_permit);
+    }
+
+    #[tokio::test]
     async fn chat_terminal_billing_records_tpm_once() {
         let ctx = RequestContext::new(
             uuid::Uuid::new_v4(),
@@ -2889,7 +2975,7 @@ mod tests {
             RequestId::new(),
             ClientRequestId(None),
             RequestReceivedAt(received_at),
-            Json(request),
+            (None, Json(request)),
         )
         .await;
 
@@ -3103,7 +3189,8 @@ mod tests {
             "temperature": 0.7,
             "max_tokens": 100
         }"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let body: Value = serde_json::from_str(json).unwrap();
+        let req = parse_chat_completion_request(&body).unwrap();
         assert_eq!(req.model, "gpt-4o");
         assert!(!req.stream);
         assert_eq!(req.temperature, Some(0.7));
@@ -3117,7 +3204,8 @@ mod tests {
             "stream": true,
             "stream_options": {"include_usage": true}
         }"#;
-        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let body: Value = serde_json::from_str(json).unwrap();
+        let req = parse_chat_completion_request(&body).unwrap();
         assert!(req.stream);
         assert!(req.stream_options.unwrap().include_usage);
     }
@@ -3260,6 +3348,9 @@ mod tests {
                 )),
                 stream_options: None,
                 lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+                initial_event: None,
+                initial_status: None,
+                body_permit: None,
             },
             Duration::from_secs(120),
         ));
@@ -3275,6 +3366,57 @@ mod tests {
             "incomplete keepalive stream must surface a generic error, got: {body}"
         );
         assert!(body.contains("[DONE]"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accepted_multimodal_stream_emits_keepalive_before_first_provider_event() {
+        let (_upstream_tx, upstream_rx) = tokio::sync::mpsc::channel(4);
+        let ctx = Arc::new(RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            true,
+            keycompute_types::PricingSnapshot::default(),
+        ));
+        let (initial_status_tx, initial_status_rx) = tokio::sync::oneshot::channel();
+        let stream = create_openai_stream_with_keepalive_and_lifecycle(
+            upstream_rx,
+            OpenAiStreamContext {
+                ctx: Arc::clone(&ctx),
+                model: "gpt-test".to_string(),
+                provider_name: "openai".to_string(),
+                account_id: uuid::Uuid::new_v4(),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
+                stream_options: None,
+                lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+                initial_event: None,
+                initial_status: Some(initial_status_tx),
+                body_permit: None,
+            },
+            Duration::from_secs(60),
+        );
+
+        ctx.mark_upstream_response_accepted();
+        assert_eq!(
+            crate::handlers::await_initial_stream_status(&ctx, initial_status_rx).await,
+            crate::handlers::InitialStreamStatus::Ready
+        );
+
+        let response = Sse::new(stream).into_response();
+        let mut body = response.into_body().into_data_stream();
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(10)).await;
+        let chunk = body
+            .next()
+            .await
+            .expect("keepalive body must remain open")
+            .expect("keepalive frame must be valid");
+        assert!(!chunk.is_empty(), "expected SSE keepalive bytes");
     }
 
     #[tokio::test(start_paused = true)]
@@ -3304,6 +3446,9 @@ mod tests {
                 )),
                 stream_options: None,
                 lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+                initial_event: None,
+                initial_status: None,
+                body_permit: None,
             },
             Duration::from_secs(180),
         ));
@@ -3353,138 +3498,6 @@ mod tests {
         );
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn openai_non_streaming_keepalive_honors_configured_timeout_above_120_seconds() {
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let ctx = Arc::new(RequestContext::new(
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            "gpt-4o",
-            Vec::new(),
-            false,
-            keycompute_types::PricingSnapshot::default(),
-        ));
-        let recorder = Arc::new(keycompute_types::TestRequestLifecycleRecorder::default());
-        let response = create_non_streaming_json_with_keepalive_and_lifecycle(
-            rx,
-            OpenAiNonStreamingResponseContext {
-                ctx: Arc::clone(&ctx),
-                model: "gpt-4o".to_string(),
-                provider_name: "openai".to_string(),
-                account_id: uuid::Uuid::new_v4(),
-                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
-                    keycompute_billing::BillingService::new(),
-                )),
-                lifecycle: Arc::clone(&recorder) as Arc<dyn RequestLifecycleRecorder>,
-                response_timeout: Duration::from_secs(180),
-            },
-        );
-        let body_handle = tokio::spawn(async move {
-            axum::body::to_bytes(response.into_body(), 64 * 1024)
-                .await
-                .unwrap()
-        });
-        tokio::task::yield_now().await;
-
-        for _ in 0..1300 {
-            if body_handle.is_finished() {
-                break;
-            }
-            tokio::time::advance(Duration::from_millis(100)).await;
-        }
-        assert!(
-            !body_handle.is_finished(),
-            "configured 180s timeout must not terminate at the old 120s cap"
-        );
-
-        tx.send(llm_protocol_provider::StreamEvent::Delta {
-            content: "late multimodal response".to_string(),
-            finish_reason: Some("stop".to_string()),
-        })
-        .await
-        .unwrap();
-        tx.send(llm_protocol_provider::StreamEvent::Done)
-            .await
-            .unwrap();
-        drop(tx);
-
-        let body = tokio::time::timeout(Duration::from_secs(1), body_handle)
-            .await
-            .expect("configured timeout should allow the late response")
-            .expect("body collection should succeed");
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("late multimodal response"));
-        assert!(!body.contains("Request timed out"));
-        assert_eq!(
-            ctx.client_response_outcome(),
-            Some(ClientResponseOutcome::Succeeded)
-        );
-        assert_eq!(recorder.request_finishes().len(), 1);
-        assert_eq!(
-            recorder.request_finishes()[0].status,
-            RequestStatus::Succeeded
-        );
-    }
-
-    #[tokio::test]
-    async fn openai_non_streaming_worker_settles_after_client_disconnect() {
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
-        let ctx = Arc::new(RequestContext::new(
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            "gpt-4o",
-            Vec::new(),
-            false,
-            keycompute_types::PricingSnapshot::default(),
-        ));
-        let recorder = Arc::new(keycompute_types::TestRequestLifecycleRecorder::default());
-        let response = create_non_streaming_json_with_keepalive_and_lifecycle(
-            rx,
-            OpenAiNonStreamingResponseContext {
-                ctx: Arc::clone(&ctx),
-                model: "gpt-4o".to_string(),
-                provider_name: "openai".to_string(),
-                account_id: uuid::Uuid::new_v4(),
-                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
-                    keycompute_billing::BillingService::new(),
-                )),
-                lifecycle: Arc::clone(&recorder) as Arc<dyn RequestLifecycleRecorder>,
-                response_timeout: Duration::from_secs(30),
-            },
-        );
-        drop(response);
-
-        tx.send(llm_protocol_provider::StreamEvent::error(
-            "client disconnected",
-        ))
-        .await
-        .unwrap();
-        tokio::time::timeout(Duration::from_secs(1), tx.closed())
-            .await
-            .expect("worker must consume the terminal event and finish settlement");
-
-        assert!(ctx.is_client_disconnected());
-        assert_eq!(
-            ctx.client_response_outcome(),
-            Some(ClientResponseOutcome::ClientDisconnected)
-        );
-        assert_eq!(recorder.request_finishes().len(), 1);
-        assert_eq!(
-            recorder.request_finishes()[0].status,
-            RequestStatus::Cancelled
-        );
-        assert!(
-            recorder
-                .events()
-                .iter()
-                .all(|event| !event.starts_with("client_first_content:"))
-        );
-    }
-
     #[tokio::test]
     async fn openai_plain_non_streaming_worker_survives_handler_cancellation() {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -3500,14 +3513,17 @@ mod tests {
         ));
         let handler = tokio::spawn(create_openai_response_with_lifecycle(
             rx,
-            Arc::clone(&ctx),
-            "gpt-4o".to_string(),
-            "openai".to_string(),
-            uuid::Uuid::new_v4(),
-            super::ImmediateSettlementServices::for_test(Arc::new(
-                keycompute_billing::BillingService::new(),
-            )),
-            Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+            OpenAiJsonRuntime {
+                ctx: Arc::clone(&ctx),
+                model: "gpt-4o".to_string(),
+                provider_name: "openai".to_string(),
+                account_id: uuid::Uuid::new_v4(),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
+                lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+                body_permit: None,
+            },
         ));
         tokio::task::yield_now().await;
         handler.abort();
@@ -3585,14 +3601,23 @@ mod tests {
             true,
             keycompute_types::PricingSnapshot::default(),
         ));
-        let stream = create_openai_stream(
+        let (initial_status_tx, initial_status_rx) = tokio::sync::oneshot::channel();
+        let stream = create_openai_stream_with_lifecycle(
             rx,
-            Arc::clone(&ctx),
-            "gpt-4o".to_string(),
-            "openai".to_string(),
-            uuid::Uuid::new_v4(),
-            Arc::new(keycompute_billing::BillingService::new()),
-            None,
+            OpenAiStreamContext {
+                ctx: Arc::clone(&ctx),
+                model: "gpt-4o".to_string(),
+                provider_name: "openai".to_string(),
+                account_id: uuid::Uuid::new_v4(),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
+                stream_options: None,
+                lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+                initial_event: None,
+                initial_status: Some(initial_status_tx),
+                body_permit: None,
+            },
         );
         drop(stream);
 
@@ -3603,6 +3628,11 @@ mod tests {
         ))
         .await
         .unwrap();
+
+        assert_eq!(
+            initial_status_rx.await.unwrap(),
+            crate::handlers::InitialStreamStatus::Failed
+        );
 
         tokio::time::timeout(Duration::from_secs(1), tx.closed())
             .await
@@ -3636,6 +3666,9 @@ mod tests {
                 )),
                 stream_options: None,
                 lifecycle: Arc::clone(&recorder) as Arc<dyn RequestLifecycleRecorder>,
+                initial_event: None,
+                initial_status: None,
+                body_permit: None,
             },
         );
         drop(stream);
@@ -3671,7 +3704,8 @@ mod tests {
             if extra.is_empty() { "" } else { "," },
             extra
         );
-        serde_json::from_str(&json).unwrap()
+        let body: Value = serde_json::from_str(&json).unwrap();
+        parse_chat_completion_request(&body).unwrap()
     }
 
     #[test]

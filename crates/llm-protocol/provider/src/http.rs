@@ -65,6 +65,10 @@ pub struct UpstreamFailure {
     pub status: Option<u16>,
     pub headers_received_at: Option<DateTime<Utc>>,
     pub upstream_request_id: Option<String>,
+    /// Bounded native-protocol HTTP error retained for the public compatibility
+    /// handler. Debug output of the nested value redacts its body.
+    #[serde(skip)]
+    pub client_response: Option<Box<keycompute_types::ClientUpstreamResponse>>,
     pub retryable: bool,
     pub stable_error_code: String,
     pub sanitized_summary: String,
@@ -84,6 +88,7 @@ impl UpstreamFailure {
             status: None,
             headers_received_at: None,
             upstream_request_id: None,
+            client_response: None,
             retryable: definitely_pre_dispatch || (request_is_idempotent && timeout),
             stable_error_code: if ambiguous_after_dispatch && timeout {
                 "upstream_ambiguous_timeout"
@@ -277,6 +282,7 @@ pub fn body_read_failure(
         status: Some(meta.status),
         headers_received_at: Some(meta.headers_received_at),
         upstream_request_id: meta.upstream_request_id.clone(),
+        client_response: None,
         retryable: http_status_is_retryable(meta.status),
         stable_error_code: stable_error_code.to_string(),
         sanitized_summary: keycompute_types::sanitize_error_summary(&summary.into()),
@@ -417,7 +423,7 @@ fn summarize_http_failure_body(status: u16, body: &[u8]) -> String {
 /// Consume a bounded prefix of an unsuccessful HTTP response and return an
 /// allowlisted summary. Raw upstream bodies must never enter errors, traces,
 /// logs, or admin monitoring records.
-pub async fn summarize_http_failure_response(mut response: reqwest::Response) -> String {
+pub async fn capture_http_failure_response(mut response: reqwest::Response) -> (String, String) {
     let status = response.status().as_u16();
     let mut inspected = Vec::new();
     while inspected.len() < MAX_HTTP_FAILURE_INSPECTION_BYTES {
@@ -430,17 +436,28 @@ pub async fn summarize_http_failure_response(mut response: reqwest::Response) ->
             break;
         }
     }
-    summarize_http_failure_body(status, &inspected)
+    let summary = summarize_http_failure_body(status, &inspected);
+    let body = String::from_utf8_lossy(&inspected).into_owned();
+    (summary, body)
+}
+
+pub async fn summarize_http_failure_response(response: reqwest::Response) -> String {
+    capture_http_failure_response(response).await.0
 }
 
 async fn http_failure(response: reqwest::Response, meta: UpstreamResponseMeta) -> UpstreamFailure {
     let status = meta.status;
-    let summary = summarize_http_failure_response(response).await;
+    let (summary, body) = capture_http_failure_response(response).await;
     UpstreamFailure {
         kind: UpstreamFailureKind::HttpStatus,
         status: Some(status),
         headers_received_at: Some(meta.headers_received_at),
-        upstream_request_id: meta.upstream_request_id,
+        upstream_request_id: meta.upstream_request_id.clone(),
+        client_response: Some(Box::new(keycompute_types::ClientUpstreamResponse {
+            status,
+            headers: meta.headers,
+            body,
+        })),
         retryable: http_status_is_retryable(status),
         stable_error_code: format!("upstream_http_{status}"),
         sanitized_summary: keycompute_types::sanitize_error_summary(&summary),
@@ -479,6 +496,7 @@ pub trait HttpTransport: Send + Sync + std::fmt::Debug {
                 status: None,
                 headers_received_at: None,
                 upstream_request_id: None,
+                client_response: None,
                 retryable: error.is_retryable(),
                 stable_error_code: "upstream_transport".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -507,6 +525,7 @@ pub trait HttpTransport: Send + Sync + std::fmt::Debug {
                 status: None,
                 headers_received_at: None,
                 upstream_request_id: None,
+                client_response: None,
                 retryable: error.is_retryable(),
                 stable_error_code: "upstream_transport".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -617,6 +636,7 @@ pub trait HttpTransport: Send + Sync + std::fmt::Debug {
                 status: None,
                 headers_received_at: None,
                 upstream_request_id: None,
+                client_response: None,
                 retryable: error.is_retryable(),
                 stable_error_code: "upstream_transport".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -764,6 +784,7 @@ impl HttpTransport for DefaultHttpTransport {
             status: Some(meta.status),
             headers_received_at: Some(meta.headers_received_at),
             upstream_request_id: meta.upstream_request_id.clone(),
+            client_response: None,
             // Headers from a successful paid POST make the outcome ambiguous:
             // the provider may have completed and charged the inference.
             retryable: false,
@@ -860,6 +881,7 @@ impl HttpTransport for DefaultHttpTransport {
                 status: Some(meta.status),
                 headers_received_at: Some(meta.headers_received_at),
                 upstream_request_id: meta.upstream_request_id,
+                client_response: None,
                 retryable: false,
                 stable_error_code: "upstream_body_read".to_string(),
                 sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -918,6 +940,7 @@ impl HttpTransport for DefaultHttpTransport {
             status: Some(meta.status),
             headers_received_at: Some(meta.headers_received_at),
             upstream_request_id: meta.upstream_request_id.clone(),
+            client_response: None,
             retryable: true,
             stable_error_code: "upstream_body_read".to_string(),
             sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),

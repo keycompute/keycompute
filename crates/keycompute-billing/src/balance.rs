@@ -6,10 +6,10 @@
 //! - 业务层：负责余额相关业务规则
 //! - 数据层（keycompute-db）：负责数据库持久化
 
-use keycompute_db::{BalanceTransaction, DbRouter, UserBalance};
+use keycompute_db::{BalanceReservation, BalanceTransaction, DbRouter, UserBalance};
 use keycompute_types::{KeyComputeError, Result};
 use rust_decimal::Decimal;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 /// 余额不足阈值（元）
@@ -58,9 +58,10 @@ impl BalanceService {
 
     /// 查询用户余额
     ///
-    /// 返回 `None` 表示用户没有余额记录
+    /// 返回 `None` 表示用户没有余额记录。查询前会原子回收已过期的请求预留，
+    /// 因而调用方看到的是当前可用余额。
     pub async fn find_by_user(&self, user_id: Uuid) -> Result<Option<UserBalance>> {
-        UserBalance::find_by_user(self.pool.as_ref(), user_id)
+        UserBalance::find_by_user_reclaiming_expired(self.pool.as_ref(), user_id)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find balance: {}", e)))
     }
@@ -72,60 +73,94 @@ impl BalanceService {
         &self,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalance>> {
-        UserBalance::find_by_users(self.pool.as_ref(), user_ids)
+        UserBalance::find_by_users_reclaiming_expired(self.pool.as_ref(), user_ids)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find balances: {}", e)))
     }
 
-    /// 检查用户余额是否足够
-    ///
-    /// 如果用户余额低于阈值（0.1元），返回错误
-    /// 用于在请求处理前进行预检查，避免执行后才发现余额不足
-    ///
-    /// # 返回
-    /// - `Ok(balance)`: 余额足够，返回当前余额
-    /// - `Err(ValidationError)`: 余额不足或用户不存在
-    pub async fn check_balance(&self, user_id: Uuid) -> Result<UserBalance> {
-        let balance = self.find_by_user(user_id).await?;
-
-        match balance {
-            Some(b) => {
-                if b.available_balance < min_balance_threshold() {
-                    Err(KeyComputeError::ValidationError(format!(
-                        "Insufficient balance: current balance {:.4} is below minimum threshold {:.4}",
-                        b.available_balance,
-                        min_balance_threshold()
-                    )))
-                } else {
-                    Ok(b)
-                }
-            }
-            None => {
-                // 用户没有余额记录，视为余额为 0
-                Err(KeyComputeError::ValidationError(
-                    "Insufficient balance: no balance record found".to_string(),
-                ))
-            }
-        }
-    }
-
-    /// 检查用户余额是否足够（带租户验证）
-    ///
-    /// 额外验证余额记录属于指定租户
-    pub async fn check_balance_for_tenant(
+    /// Persistently reserve the estimated maximum charge before dispatch.
+    /// `None` reserves all currently available funds for requests whose output
+    /// is not bounded by the client.
+    pub async fn reserve_request(
         &self,
         user_id: Uuid,
         tenant_id: Uuid,
-    ) -> Result<UserBalance> {
-        let balance = self.check_balance(user_id).await?;
+        request_id: Uuid,
+        amount: Option<Decimal>,
+        reservation_ttl: Duration,
+    ) -> Result<BalanceReservation> {
+        let reservation_ttl = chrono::Duration::from_std(reservation_ttl).map_err(|error| {
+            KeyComputeError::ValidationError(format!(
+                "Balance reservation TTL is out of range: {error}"
+            ))
+        })?;
+        let expires_at = chrono::Utc::now()
+            .checked_add_signed(reservation_ttl)
+            .ok_or_else(|| {
+                KeyComputeError::ValidationError(
+                    "Balance reservation expiry is out of range".to_string(),
+                )
+            })?;
+        BalanceReservation::reserve(
+            self.pool.as_ref(),
+            tenant_id,
+            user_id,
+            request_id,
+            amount,
+            min_balance_threshold(),
+            expires_at,
+        )
+        .await
+        .map_err(|error| {
+            if error.is_insufficient_balance() {
+                KeyComputeError::ValidationError(format!(
+                    "Insufficient balance for request reservation: {error}"
+                ))
+            } else {
+                KeyComputeError::DatabaseError(format!(
+                    "Failed to reserve request balance: {error}"
+                ))
+            }
+        })
+    }
 
-        if balance.tenant_id != tenant_id {
-            return Err(KeyComputeError::ValidationError(
-                "Balance record tenant mismatch".to_string(),
-            ));
-        }
+    /// Release a reservation when dispatch never transferred ownership to the
+    /// normal durable billing settlement path.
+    pub async fn release_request_reservation(
+        &self,
+        request_id: Uuid,
+        owner_token: Uuid,
+    ) -> Result<bool> {
+        BalanceReservation::release(self.pool.as_ref(), request_id, owner_token)
+            .await
+            .map_err(|error| {
+                KeyComputeError::DatabaseError(format!(
+                    "Failed to release request balance reservation: {error}"
+                ))
+            })
+    }
 
-        Ok(balance)
+    /// Apply a usage-ledger charge to a matching active reservation.
+    pub async fn settle_request_reservation(
+        &self,
+        request_id: Uuid,
+        amount: Decimal,
+        usage_log_id: Uuid,
+        description: Option<&str>,
+    ) -> Result<Option<(UserBalance, BalanceTransaction)>> {
+        BalanceReservation::settle(
+            self.pool.as_ref(),
+            request_id,
+            amount,
+            usage_log_id,
+            description,
+        )
+        .await
+        .map_err(|error| {
+            KeyComputeError::DatabaseError(format!(
+                "Failed to settle request balance reservation: {error}"
+            ))
+        })
     }
 
     /// 充值

@@ -129,6 +129,11 @@ impl NodeGatewayService {
         )
     }
 
+    /// Maximum time the request-side owner waits for a queued task result.
+    pub fn task_deadline(&self) -> Duration {
+        self.config.task_deadline()
+    }
+
     /// 入队并等待任务完成（核心接口）
     pub async fn enqueue_and_wait(
         &self,

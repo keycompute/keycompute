@@ -12,7 +12,7 @@ use crate::{
 };
 use axum::{
     Json,
-    extract::State,
+    extract::{Extension, State},
     http::HeaderMap,
     response::{
         IntoResponse,
@@ -31,6 +31,11 @@ use serde_json::{Map, Value, json};
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
+
+/// Bound inline image/document payloads while admitting only a small number
+/// of large decoded JSON trees at once.
+pub const ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+pub const ANTHROPIC_MESSAGES_REQUEST_WORKING_SET_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 
 /// Anthropic Messages 请求。
 ///
@@ -64,11 +69,8 @@ impl AnthropicMessagesRequest {
         if self.model.trim().is_empty() {
             return Err(ApiError::BadRequest("model must not be empty".to_string()));
         }
-        if self.max_tokens == 0 {
-            return Err(ApiError::BadRequest(
-                "max_tokens must be greater than 0".to_string(),
-            ));
-        }
+        // Anthropic explicitly permits zero to populate prompt caches without
+        // requesting generated output. Preserve the caller's exact value.
         if self.messages.is_empty() {
             return Err(ApiError::BadRequest(
                 "messages must contain at least one message".to_string(),
@@ -151,7 +153,10 @@ pub async fn messages(
     client_request_id: ClientRequestId,
     received_at: RequestReceivedAt,
     headers: HeaderMap,
-    Json(request): Json<AnthropicMessagesRequest>,
+    (body_permit, Json(request)): (
+        Option<Extension<crate::state::GenerationHttpBodyPermit>>,
+        Json<AnthropicMessagesRequest>,
+    ),
 ) -> Result<axum::response::Response> {
     let mut lifecycle: Arc<dyn RequestLifecycleRecorder> = Arc::clone(&state.lifecycle);
     let mut pre_execution_guard =
@@ -206,21 +211,6 @@ pub async fn messages(
         )
         .await;
         return Err(error);
-    }
-
-    if let Some(balance_service) = state.billing.balance_service()
-        && let Err(error) = balance_service
-            .check_balance_for_tenant(auth.user_id, auth.tenant_id)
-            .await
-    {
-        finish_anthropic_unexecuted_trace(
-            &mut pre_execution_guard,
-            ErrorOrigin::Client,
-            TraceErrorCategory::Balance,
-            "insufficient_balance",
-        )
-        .await;
-        return Err(ApiError::from(error));
     }
 
     // 在将反序列化请求转为原生 JSON 前提取轻量路由字段。若同时保留两种
@@ -355,6 +345,26 @@ pub async fn messages(
         .update_context_pricing(Arc::make_mut(&mut ctx), &primary_provider)
         .await;
 
+    let mut balance_reservation = match super::reserve_generation_balance(
+        &state,
+        &ctx,
+        super::GenerationBalanceReservationLifetime::Gateway,
+    )
+    .await
+    {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            finish_anthropic_unexecuted_trace(
+                &mut pre_execution_guard,
+                ErrorOrigin::Client,
+                TraceErrorCategory::Balance,
+                "balance_reservation_failed",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+
     let timeout_duration = std::time::Duration::from_secs(state.gateway_config.timeout_secs);
     let mut client_response_guard =
         super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
@@ -376,12 +386,17 @@ pub async fn messages(
     {
         Ok(Ok(rx)) => rx,
         Ok(Err(error)) => {
+            balance_reservation.release().await;
             client_response_guard
                 .finish_with_outcome(ClientResponseOutcome::ResponseFailed)
                 .await;
-            return Err(crate::error::map_execution_error(error));
+            return Err(crate::error::map_anthropic_execution_error(
+                error,
+                ctx.client_upstream_response(),
+            ));
         }
         Err(_) => {
+            balance_reservation.release().await;
             client_response_guard
                 .finish_with_outcome(ClientResponseOutcome::TimedOut)
                 .await;
@@ -391,7 +406,6 @@ pub async fn messages(
             )));
         }
     };
-
     tracing::info!(
         request_id = %request_id.0,
         model = %model,
@@ -402,20 +416,39 @@ pub async fn messages(
 
     let settlement = super::ImmediateSettlementServices::from_state(&state);
     if stream {
+        let error_ctx = Arc::clone(&ctx);
+        let (initial_status_tx, initial_status_rx) = tokio::sync::oneshot::channel();
         let stream = create_anthropic_stream_with_lifecycle(
             rx,
-            ctx,
-            primary_provider,
-            primary_account_id,
-            settlement,
-            Arc::clone(&lifecycle),
+            AnthropicStreamContext {
+                ctx,
+                provider_name: primary_provider,
+                account_id: primary_account_id,
+                settlement,
+                lifecycle: Arc::clone(&lifecycle),
+                initial_event: None,
+                initial_status: Some(initial_status_tx),
+                body_permit: body_permit.map(|Extension(permit)| permit),
+            },
         );
+        balance_reservation.transfer_to_settlement();
         client_response_guard.disarm();
+        if !matches!(
+            initial_status_rx.await,
+            Ok(super::InitialStreamStatus::Ready)
+        ) {
+            drop(stream);
+            return Err(error_ctx
+                .client_upstream_response()
+                .map(ApiError::AnthropicUpstream)
+                .unwrap_or_else(|| ApiError::Provider("Upstream request failed".to_string())));
+        }
         Ok(Sse::new(stream).into_response())
     } else {
         // The nested response helper installs its own guard before its first
         // await, so ownership transfers without a cancellation gap.
         client_response_guard.disarm();
+        balance_reservation.transfer_to_settlement();
         let response = create_anthropic_response_with_lifecycle(
             rx,
             ctx,
@@ -423,6 +456,7 @@ pub async fn messages(
             primary_account_id,
             settlement,
             Arc::clone(&lifecycle),
+            body_permit.map(|Extension(permit)| permit),
         )
         .await?;
         Ok(Json(response).into_response())
@@ -457,6 +491,7 @@ async fn create_anthropic_response(
         account_id,
         super::ImmediateSettlementServices::for_test(billing),
         Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+        None,
     )
     .await
 }
@@ -468,12 +503,14 @@ async fn create_anthropic_response_with_lifecycle(
     account_id: uuid::Uuid,
     settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+    body_permit: Option<crate::state::GenerationHttpBodyPermit>,
 ) -> Result<Value> {
     let mut client_response_guard =
         super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
     let (mut response_tx, response_rx) = tokio::sync::oneshot::channel();
     let worker_ctx = Arc::clone(&ctx);
     tokio::spawn(async move {
+        let _body_permit = body_permit;
         let mut complete = false;
         let mut native_response = None;
         let mut status = "success";
@@ -502,9 +539,14 @@ async fn create_anthropic_response_with_lifecycle(
                         llm_protocol_provider::StreamEvent::Error { message } => {
                             status = "error";
                             tracing::warn!(request_id = %worker_ctx.request_id, error = %message, "Anthropic upstream request failed");
-                            terminal_error = Some(ApiError::Provider(
-                                "Upstream request failed".to_string(),
-                            ));
+                            terminal_error = Some(
+                                worker_ctx
+                                    .client_upstream_response()
+                                    .map(ApiError::AnthropicUpstream)
+                                    .unwrap_or_else(|| ApiError::Provider(
+                                        "Upstream request failed".to_string(),
+                                    )),
+                            );
                             break;
                         }
                         // 原生非流式路径由 Raw(anthropic_message) 承载完整响应体，不产生
@@ -638,27 +680,50 @@ fn create_anthropic_stream(
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
     create_anthropic_stream_with_lifecycle(
         rx,
-        ctx,
-        provider_name,
-        account_id,
-        super::ImmediateSettlementServices::for_test(billing),
-        Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+        AnthropicStreamContext {
+            ctx,
+            provider_name,
+            account_id,
+            settlement: super::ImmediateSettlementServices::for_test(billing),
+            lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+            initial_event: None,
+            initial_status: None,
+            body_permit: None,
+        },
     )
 }
 
-fn create_anthropic_stream_with_lifecycle(
-    mut rx: tokio::sync::mpsc::Receiver<llm_protocol_provider::StreamEvent>,
+struct AnthropicStreamContext {
     ctx: Arc<RequestContext>,
     provider_name: String,
     account_id: uuid::Uuid,
     settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+    initial_event: Option<llm_protocol_provider::StreamEvent>,
+    initial_status: Option<tokio::sync::oneshot::Sender<super::InitialStreamStatus>>,
+    body_permit: Option<crate::state::GenerationHttpBodyPermit>,
+}
+
+fn create_anthropic_stream_with_lifecycle(
+    mut rx: tokio::sync::mpsc::Receiver<llm_protocol_provider::StreamEvent>,
+    stream_context: AnthropicStreamContext,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+    let AnthropicStreamContext {
+        ctx,
+        provider_name,
+        account_id,
+        settlement,
+        lifecycle,
+        mut initial_event,
+        mut initial_status,
+        body_permit,
+    } = stream_context;
     let (sse_tx, sse_rx) = mpsc::channel(100);
 
     // 结算不能依赖 HTTP response body 的生命周期：客户端断开时 Axum 会 drop
     // SSE Stream，但上游调用和已产生的用量仍必须被完整消费和结算。
     tokio::spawn(async move {
+        let _body_permit = body_permit;
         let mut completed = false;
         let mut status = "success";
         let mut client_connected = true;
@@ -676,7 +741,14 @@ fn create_anthropic_stream_with_lifecycle(
                     client_connected = false;
                     ctx.mark_client_disconnected();
                 }
-                event = rx.recv() => {
+                event = async {
+                    if initial_event.is_some() {
+                        initial_event.take()
+                    } else {
+                        rx.recv().await
+                    }
+                } => {
+                    super::report_initial_stream_status(&mut initial_status, event.as_ref());
                     let Some(event) = event else { break };
                     match event {
                         llm_protocol_provider::StreamEvent::Raw { data } => {
@@ -1020,7 +1092,7 @@ mod tests {
             ClientRequestId(None),
             RequestReceivedAt(received_at),
             HeaderMap::new(),
-            Json(request),
+            (None, Json(request)),
         )
         .await;
 
@@ -1049,6 +1121,19 @@ mod tests {
             serialized["messages"][0]["content"][0]["cache_control"]["type"],
             "ephemeral"
         );
+    }
+
+    #[test]
+    fn accepts_zero_max_tokens_for_prompt_cache_population() {
+        let request: AnthropicMessagesRequest = serde_json::from_value(json!({
+            "model": "claude-test",
+            "max_tokens": 0,
+            "messages": [{"role": "user", "content": "cache this prompt"}]
+        }))
+        .unwrap();
+
+        request.validate().unwrap();
+        assert_eq!(request.max_tokens, 0);
     }
 
     #[test]
@@ -1378,13 +1463,19 @@ mod tests {
         let recorder = Arc::new(keycompute_types::TestRequestLifecycleRecorder::default());
         let stream = create_anthropic_stream_with_lifecycle(
             rx,
-            Arc::clone(&ctx),
-            "anthropic".to_string(),
-            uuid::Uuid::new_v4(),
-            super::ImmediateSettlementServices::for_test(Arc::new(
-                keycompute_billing::BillingService::new(),
-            )),
-            Arc::clone(&recorder) as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+            AnthropicStreamContext {
+                ctx: Arc::clone(&ctx),
+                provider_name: "anthropic".to_string(),
+                account_id: uuid::Uuid::new_v4(),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
+                lifecycle: Arc::clone(&recorder)
+                    as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+                initial_event: None,
+                initial_status: None,
+                body_permit: None,
+            },
         );
         drop(stream);
 
@@ -1439,13 +1530,19 @@ mod tests {
         let recorder = Arc::new(keycompute_types::TestRequestLifecycleRecorder::default());
         let mut stream = Box::pin(create_anthropic_stream_with_lifecycle(
             rx,
-            Arc::clone(&ctx),
-            "anthropic".to_string(),
-            uuid::Uuid::new_v4(),
-            super::ImmediateSettlementServices::for_test(Arc::new(
-                keycompute_billing::BillingService::new(),
-            )),
-            Arc::clone(&recorder) as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+            AnthropicStreamContext {
+                ctx: Arc::clone(&ctx),
+                provider_name: "anthropic".to_string(),
+                account_id: uuid::Uuid::new_v4(),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
+                lifecycle: Arc::clone(&recorder)
+                    as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+                initial_event: None,
+                initial_status: None,
+                body_permit: None,
+            },
         ));
 
         tx.send(llm_protocol_provider::StreamEvent::raw(
@@ -1517,12 +1614,21 @@ mod tests {
             true,
             keycompute_types::PricingSnapshot::default(),
         ));
-        let stream = create_anthropic_stream(
+        let (initial_status_tx, initial_status_rx) = tokio::sync::oneshot::channel();
+        let stream = create_anthropic_stream_with_lifecycle(
             rx,
-            Arc::clone(&ctx),
-            "anthropic".to_string(),
-            uuid::Uuid::new_v4(),
-            Arc::new(keycompute_billing::BillingService::new()),
+            AnthropicStreamContext {
+                ctx: Arc::clone(&ctx),
+                provider_name: "anthropic".to_string(),
+                account_id: uuid::Uuid::new_v4(),
+                settlement: super::ImmediateSettlementServices::for_test(Arc::new(
+                    keycompute_billing::BillingService::new(),
+                )),
+                lifecycle: Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+                initial_event: None,
+                initial_status: Some(initial_status_tx),
+                body_permit: None,
+            },
         );
         // 客户端断开：drop SSE stream，不发送任何上游事件
         drop(stream);
@@ -1540,6 +1646,10 @@ mod tests {
         tx.send(llm_protocol_provider::StreamEvent::Done)
             .await
             .unwrap();
+        assert_eq!(
+            initial_status_rx.await.unwrap(),
+            crate::handlers::InitialStreamStatus::Ready
+        );
         tokio::time::timeout(Duration::from_secs(1), tx.closed())
             .await
             .expect("worker should keep draining upstream events after marking disconnect");
@@ -1761,6 +1871,7 @@ mod tests {
                 keycompute_billing::BillingService::new(),
             )),
             Arc::new(keycompute_types::NoopRequestLifecycleRecorder),
+            None,
         ));
         tokio::task::yield_now().await;
         handler.abort();
@@ -1867,6 +1978,7 @@ mod tests {
                 keycompute_billing::BillingService::new(),
             )),
             recorder as Arc<dyn keycompute_types::RequestLifecycleRecorder>,
+            None,
         )
         .await
         .unwrap_err();

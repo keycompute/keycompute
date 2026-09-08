@@ -258,6 +258,12 @@ mod tests {
             "deleted_at TIMESTAMPTZ",
             "CREATE INDEX IF NOT EXISTS idx_response_affinities_local_warmups",
             "CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_due",
+            "CREATE TABLE IF NOT EXISTS balance_reservations",
+            "owner_token UUID NOT NULL DEFAULT gen_random_uuid()",
+            "request_id UUID NOT NULL UNIQUE",
+            "CHECK (status IN ('active', 'settled', 'released', 'expired'))",
+            "CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_expiry",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_reservations_usage_log",
             "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log",
         ] {
             assert!(V0001.contains(expected), "V0001 is missing {expected}");

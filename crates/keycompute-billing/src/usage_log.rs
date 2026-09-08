@@ -342,6 +342,7 @@ impl BillingService {
         let balance_result = self
             .deduct_balance_if_configured(
                 ctx.request_id,
+                ctx.billing_request_id,
                 user_id,
                 user_amount,
                 usage_log.id,
@@ -369,6 +370,7 @@ impl BillingService {
     async fn deduct_balance_if_configured(
         &self,
         request_id: Uuid,
+        billing_request_id: Uuid,
         user_id: Uuid,
         user_amount: Decimal,
         usage_log_id: Uuid,
@@ -382,15 +384,25 @@ impl BillingService {
             return Ok(());
         };
 
-        match balance
-            .consume(
-                user_id,
+        let description = format!("API调用: {model_name}");
+        let reserved = balance
+            .settle_request_reservation(
+                billing_request_id,
                 user_amount,
-                Some(usage_log_id),
-                Some(&format!("API调用: {}", model_name)),
+                usage_log_id,
+                Some(&description),
             )
-            .await
-        {
+            .await?;
+        let result = match reserved {
+            Some(result) => Ok(result),
+            None => {
+                balance
+                    .consume(user_id, user_amount, Some(usage_log_id), Some(&description))
+                    .await
+            }
+        };
+
+        match result {
             Ok((updated_balance, _transaction)) => {
                 tracing::info!(
                     request_id = %request_id,

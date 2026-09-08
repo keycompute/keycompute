@@ -104,7 +104,7 @@ pub async fn cleanup_test_data(
     )).await?;
     pool.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "DELETE FROM usage_logs WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
+        "DELETE FROM balance_reservations WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
         [slug_pattern.clone().into()],
     ))
     .await?;
@@ -113,6 +113,12 @@ pub async fn cleanup_test_data(
         "DELETE FROM balance_transactions WHERE user_id IN (SELECT id FROM users WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1))",
         [slug_pattern.clone().into()],
     )).await?;
+    pool.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "DELETE FROM usage_logs WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
+        [slug_pattern.clone().into()],
+    ))
+    .await?;
     pool.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "DELETE FROM user_balances WHERE user_id IN (SELECT id FROM users WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1))",

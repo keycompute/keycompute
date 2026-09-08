@@ -70,10 +70,10 @@ pub struct UpstreamRequest {
     pub temperature: Option<f32>,
     /// Top P 参数（可选）
     pub top_p: Option<f32>,
-    /// 经入口校验的原生 OpenAI Chat Completions 请求体。
+    /// 经入口投影校验的原生 OpenAI Chat Completions 请求体。
     ///
-    /// OpenAI 协议适配器会保留受支持的官方字段，并只覆盖路由层拥有的
-    /// `model`、`stream` 与内部 usage 请求选项。
+    /// OpenAI 协议适配器保留全部顶层字段（包括未来新增字段），并只覆盖
+    /// 路由层拥有的 `model`、`stream` 与内部 usage 请求选项。
     #[serde(skip)]
     pub native_openai_chat_request: Option<Arc<serde_json::Value>>,
     /// 原生 Anthropic Messages 请求体。

@@ -170,6 +170,357 @@ impl ImmediateSettlementServices {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InitialStreamStatus {
+    Ready,
+    Failed,
+}
+
+pub(crate) fn report_initial_stream_status(
+    status: &mut Option<tokio::sync::oneshot::Sender<InitialStreamStatus>>,
+    event: Option<&llm_protocol_provider::StreamEvent>,
+) {
+    let Some(status) = status.take() else {
+        return;
+    };
+    let outcome = if matches!(
+        event,
+        Some(llm_protocol_provider::StreamEvent::Error { .. }) | None
+    ) {
+        InitialStreamStatus::Failed
+    } else {
+        InitialStreamStatus::Ready
+    };
+    let _ = status.send(outcome);
+}
+
+/// Wait until the upstream HTTP request is accepted or the stream worker
+/// proves that no successful response can be committed. Successful acceptance
+/// is deliberately independent of the first protocol event so SSE keepalives
+/// can reach the client during long model startup.
+pub(crate) async fn await_initial_stream_status(
+    ctx: &keycompute_types::RequestContext,
+    status: tokio::sync::oneshot::Receiver<InitialStreamStatus>,
+) -> InitialStreamStatus {
+    tokio::select! {
+        biased;
+        _ = ctx.wait_for_upstream_response_accepted() => InitialStreamStatus::Ready,
+        status = status => status.unwrap_or(InitialStreamStatus::Failed),
+    }
+}
+
+/// Reserve the estimated maximum user charge before an upstream request is
+/// dispatched. Requests without an explicit output-token ceiling reserve all
+/// currently available funds, preventing concurrent requests from spending the
+/// same prepaid balance.
+pub(crate) struct GenerationBalanceReservation {
+    owner: Option<(keycompute_billing::BalanceService, uuid::Uuid)>,
+    billing_request_id: uuid::Uuid,
+}
+
+impl GenerationBalanceReservation {
+    /// Release this exact ownership generation and disarm Drop cleanup.
+    pub(crate) async fn release(&mut self) {
+        let Some((balance, owner_token)) = self.owner.take() else {
+            return;
+        };
+        if let Err(error) = balance
+            .release_request_reservation(self.billing_request_id, owner_token)
+            .await
+        {
+            // Re-arm Drop for one best-effort retry. The durable row still has
+            // an expiry fallback, and the ownership token makes the retry safe
+            // if a newer attempt has already reclaimed this request ID.
+            tracing::error!(billing_request_id = %self.billing_request_id, %error, "failed to release balance reservation");
+            self.owner = Some((balance, owner_token));
+        }
+    }
+
+    /// The durable usage settlement path now owns this reservation.
+    pub(crate) fn transfer_to_settlement(&mut self) {
+        self.owner = None;
+    }
+}
+
+impl Drop for GenerationBalanceReservation {
+    fn drop(&mut self) {
+        let Some((balance, owner_token)) = self.owner.take() else {
+            return;
+        };
+        let billing_request_id = self.billing_request_id;
+        // Handler cancellation cannot await cleanup. The reservation remains
+        // durable and has an expiry fallback if runtime shutdown prevents this
+        // best-effort release task from completing.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Err(error) = balance
+                    .release_request_reservation(billing_request_id, owner_token)
+                    .await
+                {
+                    tracing::error!(%billing_request_id, %error, "failed to release cancelled request balance reservation");
+                }
+            });
+        }
+    }
+}
+
+pub(crate) async fn reserve_generation_balance(
+    state: &crate::state::AppState,
+    ctx: &keycompute_types::RequestContext,
+    lifetime: GenerationBalanceReservationLifetime,
+) -> crate::error::Result<GenerationBalanceReservation> {
+    let Some(balance) = state.billing.balance_service() else {
+        return Ok(GenerationBalanceReservation {
+            owner: None,
+            billing_request_id: ctx.billing_request_id,
+        });
+    };
+    let amount = maximum_generation_reservation_amount(ctx);
+    let reservation = balance
+        .reserve_request(
+            ctx.user_id,
+            ctx.tenant_id,
+            ctx.billing_request_id,
+            amount,
+            generation_balance_reservation_ttl(&state.gateway_config, lifetime),
+        )
+        .await
+        .map_err(crate::error::ApiError::from)?;
+    Ok(GenerationBalanceReservation {
+        owner: Some((balance.clone(), reservation.owner_token)),
+        billing_request_id: ctx.billing_request_id,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GenerationBalanceReservationLifetime {
+    Gateway,
+    Node(std::time::Duration),
+    Responses,
+}
+
+const GENERATION_BALANCE_RESERVATION_HANDOFF_MARGIN: std::time::Duration =
+    std::time::Duration::from_secs(2 * 60 * 60);
+
+fn generation_balance_reservation_ttl(
+    config: &keycompute_config::GatewayConfig,
+    lifetime: GenerationBalanceReservationLifetime,
+) -> std::time::Duration {
+    let gateway_max = std::time::Duration::from_secs(
+        config
+            .timeout_secs
+            .max(config.request_timeout_secs)
+            .max(config.stream_timeout_secs),
+    );
+    let execution_max = match lifetime {
+        GenerationBalanceReservationLifetime::Gateway => gateway_max,
+        GenerationBalanceReservationLifetime::Node(task_deadline) => gateway_max.max(task_deadline),
+        GenerationBalanceReservationLifetime::Responses => {
+            gateway_max.max(responses::BACKGROUND_SETTLEMENT_MAX)
+        }
+    };
+    execution_max.saturating_add(GENERATION_BALANCE_RESERVATION_HANDOFF_MARGIN)
+}
+
+fn maximum_generation_reservation_amount(
+    ctx: &keycompute_types::RequestContext,
+) -> Option<rust_decimal::Decimal> {
+    let input_tokens = if ctx.pricing_snapshot.input_price_per_1k == rust_decimal::Decimal::ZERO {
+        Some(0)
+    } else {
+        conservative_generation_input_tokens(ctx)
+    };
+    let output_tokens = conservative_generation_output_tokens(ctx).map(|tokens| {
+        let choices = ctx
+            .native_openai_chat_request
+            .as_deref()
+            .and_then(|body| body.get("n"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .unwrap_or(1);
+        tokens.saturating_mul(choices)
+    });
+    let output_tokens = if ctx.pricing_snapshot.output_price_per_1k == rust_decimal::Decimal::ZERO {
+        Some(0)
+    } else {
+        output_tokens
+    };
+    match (input_tokens, output_tokens) {
+        (Some(input_tokens), Some(output_tokens)) => Some(keycompute_billing::calculate_amount(
+            input_tokens,
+            output_tokens,
+            &ctx.pricing_snapshot,
+        )),
+        // Media/file references and unbounded billable output do not have a
+        // trustworthy request-side maximum. Reserve all available funds.
+        _ => None,
+    }
+}
+
+fn conservative_generation_output_tokens(ctx: &keycompute_types::RequestContext) -> Option<u32> {
+    let native_chat_limits = ctx
+        .native_openai_chat_request
+        .as_deref()
+        .into_iter()
+        .flat_map(|body| [body.get("max_tokens"), body.get("max_completion_tokens")])
+        .flatten()
+        .filter_map(serde_json::Value::as_u64)
+        .filter_map(|value| u32::try_from(value).ok());
+
+    ctx.max_tokens.into_iter().chain(native_chat_limits).max()
+}
+
+/// Return a conservative request-side upper bound for billable input tokens.
+///
+/// Native protocol bodies are deliberately richer than the lightweight
+/// routing projection. For text/JSON-only requests, every tokenizer token
+/// consumes at least one serialized UTF-8 byte, so the serialized byte count
+/// is a conservative bound and naturally includes tools, schemas, Anthropic
+/// system blocks, and protocol-specific fields. Media and hosted files can be
+/// metered from decoded content that is not bounded by their JSON reference;
+/// those return `None` and force an all-balance reservation.
+fn conservative_generation_input_tokens(ctx: &keycompute_types::RequestContext) -> Option<u32> {
+    let native_body = ctx
+        .native_openai_chat_request
+        .as_deref()
+        .or(ctx.native_openai_responses_request.as_deref())
+        .or(ctx.native_anthropic_request.as_deref());
+
+    if let Some(body) = native_body {
+        if contains_unbounded_metered_input(body) {
+            return None;
+        }
+        let serialized_bytes = serialized_json_size_bound(body);
+        return Some(serialized_bytes.max(
+            llm_gateway::GatewayExecutor::estimate_context_input_tokens(ctx),
+        ));
+    }
+
+    if ctx.messages.iter().any(|message| {
+        matches!(
+            &message.content,
+            keycompute_types::MessageContent::Parts(parts)
+                if parts.iter().any(|part| matches!(part, keycompute_types::ContentPart::ImageUrl { .. }))
+        )
+    }) {
+        return None;
+    }
+    Some(llm_gateway::GatewayExecutor::estimate_context_input_tokens(
+        ctx,
+    ))
+}
+
+fn contains_unbounded_metered_input(value: &serde_json::Value) -> bool {
+    let Some(root) = value.as_object() else {
+        return contains_unbounded_content_type(value);
+    };
+
+    // These fields can make the provider load billable context that is not
+    // present in this request body.
+    if root
+        .get("web_search_options")
+        .is_some_and(serde_json::Value::is_object)
+        || ["previous_response_id", "conversation", "container"]
+            .iter()
+            .any(|name| root.get(*name).is_some_and(non_empty_json_value))
+        || root.get("mcp_servers").is_some_and(non_empty_json_value)
+        || root
+            .get("prompt")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|prompt| prompt.get("id").is_some_and(non_empty_json_value))
+    {
+        return true;
+    }
+
+    if root
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+                    && message
+                        .pointer("/audio/id")
+                        .is_some_and(non_empty_json_value)
+            })
+        })
+    {
+        return true;
+    }
+
+    // Function/custom tools only contribute their in-body schema. Hosted
+    // tools may add search, file, MCP, code-execution, or computer context.
+    if root
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|tools| {
+            tools.iter().any(|tool| {
+                tool.get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| !matches!(kind, "function" | "custom"))
+            })
+        })
+    {
+        return true;
+    }
+
+    contains_unbounded_content_type(value)
+}
+
+fn non_empty_json_value(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => false,
+        serde_json::Value::String(value) => !value.is_empty(),
+        serde_json::Value::Array(value) => !value.is_empty(),
+        serde_json::Value::Object(value) => !value.is_empty(),
+        _ => true,
+    }
+}
+
+fn contains_unbounded_content_type(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Array(values) => values.iter().any(contains_unbounded_content_type),
+        serde_json::Value::Object(object) => {
+            if object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| {
+                    let kind = kind.to_ascii_lowercase();
+                    ["image", "audio", "video", "file", "document", "screenshot"]
+                        .iter()
+                        .any(|marker| kind.contains(marker))
+                        || kind == "item_reference"
+                })
+            {
+                return true;
+            }
+            object.values().any(contains_unbounded_content_type)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+struct JsonSizeCounter(u64);
+
+impl std::io::Write for JsonSizeCounter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0 = self.0.saturating_add(buffer.len() as u64);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialized_json_size_bound(value: &serde_json::Value) -> u32 {
+    let mut counter = JsonSizeCounter::default();
+    // Serializing a Value into an infallible counter cannot fail. Counting via
+    // a writer avoids allocating another copy of a potentially 96 MiB body.
+    serde_json::to_writer(&mut counter, value).expect("JSON Value serialization must succeed");
+    u32::try_from(counter.0).unwrap_or(u32::MAX)
+}
+
 /// Idempotently add one request's terminal usage to the shared TPM window.
 ///
 /// Every generation protocol uses the same tenant/user/API-key key. Keeping
@@ -546,6 +897,271 @@ pub(crate) fn configured_public_base_url(configured_base_url: Option<&str>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn initial_stream_gate_opens_on_http_acceptance_without_a_protocol_event() {
+        let ctx = keycompute_types::RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            true,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        let (_status_tx, status_rx) = tokio::sync::oneshot::channel();
+
+        ctx.mark_upstream_response_accepted();
+
+        assert_eq!(
+            await_initial_stream_status(&ctx, status_rx).await,
+            InitialStreamStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_stream_gate_preserves_pre_acceptance_failure() {
+        let ctx = keycompute_types::RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            true,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        let (status_tx, status_rx) = tokio::sync::oneshot::channel();
+        status_tx.send(InitialStreamStatus::Failed).unwrap();
+
+        assert_eq!(
+            await_initial_stream_status(&ctx, status_rx).await,
+            InitialStreamStatus::Failed
+        );
+    }
+
+    fn reservation_context(
+        pricing: keycompute_types::PricingSnapshot,
+    ) -> keycompute_types::RequestContext {
+        keycompute_types::RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "test-model",
+            vec![keycompute_types::Message::user("short projection")],
+            false,
+            pricing,
+        )
+    }
+
+    #[test]
+    fn native_anthropic_tools_are_included_in_the_reservation_upper_bound() {
+        let pricing = keycompute_types::PricingSnapshot::new(
+            "claude-test",
+            "CNY",
+            rust_decimal::Decimal::ONE,
+            rust_decimal::Decimal::from(2),
+        );
+        let mut ctx = reservation_context(pricing);
+        let body = serde_json::json!({
+            "model": "claude-test",
+            "max_tokens": 100,
+            "system": "Follow the supplied tool contract",
+            "messages": [{"role": "user", "content": "run it"}],
+            "tools": [{
+                "name": "large_tool",
+                "description": "detailed contract ".repeat(256),
+                "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}
+            }]
+        });
+        let serialized_bytes = serialized_json_size_bound(&body);
+        ctx.native_anthropic_request = Some(std::sync::Arc::new(body));
+        ctx.max_tokens = Some(100);
+
+        let input_bound = conservative_generation_input_tokens(&ctx).unwrap();
+        assert!(input_bound >= serialized_bytes);
+        assert!(
+            input_bound > llm_gateway::GatewayExecutor::estimate_context_input_tokens(&ctx),
+            "the native tool schema must not collapse to the routing projection"
+        );
+        assert_eq!(
+            maximum_generation_reservation_amount(&ctx),
+            Some(keycompute_billing::calculate_amount(
+                input_bound,
+                100,
+                &ctx.pricing_snapshot,
+            ))
+        );
+    }
+
+    #[test]
+    fn metered_media_forces_an_all_balance_reservation() {
+        let pricing = keycompute_types::PricingSnapshot::new(
+            "gpt-test",
+            "CNY",
+            rust_decimal::Decimal::ONE,
+            rust_decimal::Decimal::ONE,
+        );
+        let mut ctx = reservation_context(pricing);
+        ctx.native_openai_responses_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "input": [{
+                "role": "user",
+                "content": [{"type": "input_image", "image_url": "https://example.invalid/image.png"}]
+            }],
+            "max_output_tokens": 32
+        })));
+        ctx.max_tokens = Some(32);
+
+        assert_eq!(conservative_generation_input_tokens(&ctx), None);
+        assert_eq!(maximum_generation_reservation_amount(&ctx), None);
+    }
+
+    #[test]
+    fn inherited_context_and_hosted_tools_force_an_all_balance_reservation() {
+        for body in [
+            serde_json::json!({
+                "model": "gpt-test",
+                "previous_response_id": "resp_existing",
+                "input": "continue"
+            }),
+            serde_json::json!({
+                "model": "gpt-test",
+                "input": "search",
+                "tools": [{"type": "web_search_preview"}]
+            }),
+            serde_json::json!({
+                "model": "gpt-test",
+                "input": "use the saved prompt",
+                "prompt": {"id": "pmpt_existing"}
+            }),
+        ] {
+            assert!(contains_unbounded_metered_input(&body));
+        }
+
+        assert!(!contains_unbounded_metered_input(&serde_json::json!({
+            "model": "gpt-test",
+            "input": "call a client tool",
+            "tools": [{
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object"}
+            }]
+        })));
+    }
+
+    #[test]
+    fn chat_search_and_stored_audio_force_an_all_balance_reservation() {
+        for body in [
+            serde_json::json!({
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "search"}],
+                "web_search_options": {}
+            }),
+            serde_json::json!({
+                "model": "gpt-test",
+                "messages": [{
+                    "role": "assistant",
+                    "content": null,
+                    "audio": {"id": "audio_existing"}
+                }]
+            }),
+        ] {
+            assert!(contains_unbounded_metered_input(&body));
+        }
+
+        assert!(!contains_unbounded_metered_input(&serde_json::json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "audio": {"format": "wav", "voice": "alloy"}
+        })));
+    }
+
+    #[test]
+    fn reservation_uses_the_larger_chat_output_limit() {
+        let pricing = keycompute_types::PricingSnapshot::new(
+            "gpt-test",
+            "CNY",
+            rust_decimal::Decimal::ZERO,
+            rust_decimal::Decimal::ONE,
+        );
+        let mut ctx = reservation_context(pricing);
+        ctx.max_tokens = Some(100);
+        ctx.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 100,
+            "max_completion_tokens": 256,
+            "n": 2
+        })));
+
+        assert_eq!(conservative_generation_output_tokens(&ctx), Some(256));
+        assert_eq!(
+            maximum_generation_reservation_amount(&ctx),
+            Some(keycompute_billing::calculate_amount(
+                0,
+                512,
+                &ctx.pricing_snapshot,
+            ))
+        );
+    }
+
+    #[test]
+    fn reservation_ttl_tracks_the_execution_lifecycle() {
+        let mut config = keycompute_config::GatewayConfig::default();
+        assert_eq!(
+            generation_balance_reservation_ttl(
+                &config,
+                GenerationBalanceReservationLifetime::Gateway,
+            ),
+            std::time::Duration::from_secs(2 * 60 * 60 + 10 * 60)
+        );
+        assert_eq!(
+            generation_balance_reservation_ttl(
+                &config,
+                GenerationBalanceReservationLifetime::Node(std::time::Duration::from_secs(
+                    3 * 60 * 60,
+                )),
+            ),
+            std::time::Duration::from_secs(5 * 60 * 60)
+        );
+        assert_eq!(
+            generation_balance_reservation_ttl(
+                &config,
+                GenerationBalanceReservationLifetime::Responses,
+            ),
+            std::time::Duration::from_secs(26 * 60 * 60)
+        );
+
+        config.stream_timeout_secs = 30 * 60 * 60;
+        assert_eq!(
+            generation_balance_reservation_ttl(
+                &config,
+                GenerationBalanceReservationLifetime::Gateway,
+            ),
+            std::time::Duration::from_secs(32 * 60 * 60)
+        );
+    }
+
+    #[test]
+    fn unbounded_billable_output_forces_an_all_balance_reservation() {
+        let pricing = keycompute_types::PricingSnapshot::new(
+            "gpt-test",
+            "CNY",
+            rust_decimal::Decimal::ONE,
+            rust_decimal::Decimal::ONE,
+        );
+        let mut ctx = reservation_context(pricing);
+        ctx.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}]
+        })));
+
+        assert!(conservative_generation_input_tokens(&ctx).is_some());
+        assert_eq!(maximum_generation_reservation_amount(&ctx), None);
+    }
 
     #[tokio::test]
     async fn generation_protocols_share_one_idempotent_tpm_window() {

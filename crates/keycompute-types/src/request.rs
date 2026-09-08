@@ -114,6 +114,10 @@ pub struct RequestContext {
     /// endpoint and credential that created a queued resource. `ExecutionTarget`
     /// redacts its credential in every diagnostic representation.
     accepted_execution_target: Arc<RwLock<Option<ExecutionTarget>>>,
+    /// One-way signal that an upstream returned a successful HTTP status.
+    /// Streaming handlers may commit their protocol response after this point
+    /// without waiting for the first model event.
+    upstream_response_accepted: CancellationToken,
     /// 客户端是否已断开（仅流式路径使用）。
     ///
     /// OpenAI 与 Anthropic 的后台结算任务会继续持有 executor receiver，确保
@@ -197,6 +201,10 @@ impl fmt::Debug for RequestContext {
                     .as_ref()
                     .map(|_| "<redacted>"),
             )
+            .field(
+                "upstream_response_accepted",
+                &self.is_upstream_response_accepted(),
+            )
             .field("client_disconnected", &self.is_client_disconnected())
             .field("client_response_outcome", &self.client_response_outcome())
             .field(
@@ -250,6 +258,7 @@ impl RequestContext {
             executed_provider_account: Arc::new(RwLock::new(None)),
             usage_provider_account: Arc::new(RwLock::new(None)),
             accepted_execution_target: Arc::new(RwLock::new(None)),
+            upstream_response_accepted: CancellationToken::new(),
             client_disconnect: CancellationToken::new(),
             client_response_outcome,
             execution_failure: Arc::new(RwLock::new(None)),
@@ -289,6 +298,7 @@ impl RequestContext {
             executed_provider_account: Arc::clone(&self.executed_provider_account),
             usage_provider_account: Arc::clone(&self.usage_provider_account),
             accepted_execution_target: Arc::clone(&self.accepted_execution_target),
+            upstream_response_accepted: self.upstream_response_accepted.clone(),
             client_disconnect: self.client_disconnect.clone(),
             client_response_outcome: self.client_response_outcome.clone(),
             execution_failure: Arc::clone(&self.execution_failure),
@@ -438,6 +448,21 @@ impl RequestContext {
             .read()
             .ok()
             .and_then(|target| target.clone())
+    }
+
+    /// Signal that at least one upstream attempt accepted the HTTP request.
+    pub fn mark_upstream_response_accepted(&self) {
+        self.upstream_response_accepted.cancel();
+    }
+
+    /// Whether an upstream attempt has accepted the HTTP request.
+    pub fn is_upstream_response_accepted(&self) -> bool {
+        self.upstream_response_accepted.is_cancelled()
+    }
+
+    /// Wait until an upstream attempt accepts the HTTP request.
+    pub async fn wait_for_upstream_response_accepted(&self) {
+        self.upstream_response_accepted.cancelled().await;
     }
 
     /// Return the target that should be used for billing.
@@ -958,6 +983,30 @@ mod tests {
             ctx.native_anthropic_request.as_ref().unwrap(),
             cloned.native_anthropic_request.as_ref().unwrap(),
         ));
+    }
+
+    #[tokio::test]
+    async fn upstream_acceptance_signal_is_shared_with_payloadless_clones() {
+        let ctx = RequestContext::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            true,
+            PricingSnapshot::default(),
+        );
+        let settlement_ctx = ctx.clone_without_request_payloads();
+        let waiter = tokio::spawn(async move {
+            settlement_ctx.wait_for_upstream_response_accepted().await;
+            settlement_ctx.is_upstream_response_accepted()
+        });
+
+        ctx.mark_upstream_response_accepted();
+
+        assert!(waiter.await.unwrap());
+        assert!(ctx.is_upstream_response_accepted());
     }
 
     #[test]

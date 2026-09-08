@@ -780,6 +780,40 @@ COMMENT ON COLUMN user_balances.frozen_balance IS '冻结余额（单位：元�
 COMMENT ON COLUMN user_balances.total_recharged IS '累计充值金额';
 COMMENT ON COLUMN user_balances.total_consumed IS '累计消费金额';
 
+-- API 请求余额预留。预留与 billing_request_id 一一对应，确保并发请求
+-- 不能共同消费同一份可用余额；终态结算与 usage_logs 绑定并可安全重放。
+CREATE TABLE IF NOT EXISTS balance_reservations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id UUID NOT NULL UNIQUE,
+    -- 每次处理器取得同一逻辑请求的预留所有权时轮换。旧处理器只能用
+    -- 自己持有的 token 释放，不能误释放幂等重试重新接管的预留。
+    owner_token UUID NOT NULL DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    amount DECIMAL(20, 10) NOT NULL CHECK (amount >= 0),
+    status VARCHAR(20) NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'settled', 'released', 'expired')),
+    usage_log_id UUID REFERENCES usage_logs(id),
+    expires_at TIMESTAMPTZ NOT NULL,
+    settled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_balance_reservations_user_id
+    ON balance_reservations(user_id);
+CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_expiry
+    ON balance_reservations(expires_at)
+    WHERE status = 'active';
+CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_reservations_usage_log
+    ON balance_reservations(usage_log_id)
+    WHERE usage_log_id IS NOT NULL;
+
+COMMENT ON TABLE balance_reservations IS 'API 请求预付费余额预留';
+COMMENT ON COLUMN balance_reservations.request_id IS '稳定 billing_request_id';
+COMMENT ON COLUMN balance_reservations.owner_token IS '当前处理器持有的预留所有权 token';
+COMMENT ON COLUMN balance_reservations.amount IS '从可用余额转入冻结余额的最大预留金额';
+
 -- 余额变动记录表
 CREATE TABLE IF NOT EXISTS balance_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

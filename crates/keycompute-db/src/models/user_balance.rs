@@ -66,6 +66,458 @@ pub struct UserBalance {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Durable pre-dispatch balance reservation keyed by the logical billing
+/// request. Active rows own the matching amount in `frozen_balance`.
+#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
+pub struct BalanceReservation {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub owner_token: Uuid,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub amount: Decimal,
+    pub status: String,
+    pub usage_log_id: Option<Uuid>,
+    pub expires_at: DateTime<Utc>,
+    pub settled_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ActiveReservationTotal {
+    amount: Decimal,
+}
+
+impl BalanceReservation {
+    fn settlement_available_balances(
+        available_balance: Decimal,
+        reserved_amount: Decimal,
+        consumed_amount: Decimal,
+    ) -> (Decimal, Decimal) {
+        let balance_before = available_balance + reserved_amount;
+        (balance_before, balance_before - consumed_amount)
+    }
+
+    fn amount_to_reserve(
+        available: Decimal,
+        requested: Option<Decimal>,
+        minimum_available: Decimal,
+    ) -> Result<Decimal, DbError> {
+        if minimum_available < Decimal::ZERO {
+            return Err(DbError::Other(
+                "minimum available balance must not be negative".to_string(),
+            ));
+        }
+        if requested.is_some_and(|amount| amount < Decimal::ZERO) {
+            return Err(DbError::Other(
+                "balance reservation amount must not be negative".to_string(),
+            ));
+        }
+        if available < minimum_available {
+            return Err(DbError::insufficient_balance(
+                minimum_available.to_string(),
+                available.to_string(),
+            ));
+        }
+
+        // Preserve the existing minimum-balance admission rule inside the
+        // same transaction as the reservation. In particular, an unbounded
+        // request that follows another all-balance reservation sees zero here
+        // and is rejected instead of creating a zero-valued reservation.
+        let amount = requested
+            .map(|amount| amount.max(minimum_available))
+            .unwrap_or(available);
+        if available < amount {
+            return Err(DbError::insufficient_balance(
+                amount.to_string(),
+                available.to_string(),
+            ));
+        }
+        Ok(amount)
+    }
+
+    async fn find_by_request(
+        db: &impl ConnectionTrait,
+        request_id: Uuid,
+        for_update: bool,
+    ) -> Result<Option<Self>, DbError> {
+        let suffix = if for_update { " FOR UPDATE" } else { "" };
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!("SELECT * FROM balance_reservations WHERE request_id = $1{suffix}"),
+            [request_id.into()],
+        );
+        Ok(Self::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// Release expired reservations after their owning balance rows have been
+    /// locked. Callers that lock more than one balance must do so in user ID
+    /// order before entering this helper.
+    async fn reclaim_expired_for_locked_balances(
+        tx: &DatabaseTransaction,
+        mut balances: Vec<UserBalance>,
+    ) -> Result<Vec<UserBalance>, DbError> {
+        if balances.is_empty() {
+            return Ok(balances);
+        }
+
+        let user_ids = balances
+            .iter()
+            .map(|balance| balance.user_id)
+            .collect::<Vec<_>>();
+        let expired_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM balance_reservations WHERE user_id = ANY($1) AND status = 'active' AND expires_at <= NOW() ORDER BY user_id, id FOR UPDATE",
+            [user_ids.into()],
+        );
+        let expired = Self::find_by_statement(expired_stmt).all(tx).await?;
+        if expired.is_empty() {
+            return Ok(balances);
+        }
+
+        let mut expired_by_user = std::collections::HashMap::new();
+        for reservation in &expired {
+            let amount = expired_by_user
+                .entry(reservation.user_id)
+                .or_insert(Decimal::ZERO);
+            *amount += reservation.amount;
+        }
+        for balance in &balances {
+            let expired_amount = expired_by_user
+                .get(&balance.user_id)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            if balance.frozen_balance < expired_amount {
+                return Err(DbError::Other(format!(
+                    "expired balance reservations for user {} exceed frozen balance",
+                    balance.user_id
+                )));
+            }
+        }
+
+        for balance in &mut balances {
+            let expired_amount = expired_by_user
+                .get(&balance.user_id)
+                .copied()
+                .unwrap_or(Decimal::ZERO);
+            if expired_amount <= Decimal::ZERO {
+                continue;
+            }
+            let update_balance = Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2 RETURNING *",
+                [expired_amount.into(), balance.user_id.into()],
+            );
+            *balance = UserBalance::find_by_statement(update_balance)
+                .one(tx)
+                .await?
+                .ok_or_else(|| DbError::not_found("UserBalance", balance.user_id.to_string()))?;
+        }
+
+        // Update exactly the rows included in the amount calculation. Using a
+        // second expires_at <= NOW() predicate could catch a reservation whose
+        // deadline passed between the SELECT and UPDATE without refunding it.
+        let expired_ids = expired
+            .into_iter()
+            .map(|reservation| reservation.id)
+            .collect::<Vec<_>>();
+        let expire_rows = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE balance_reservations SET status = 'expired', updated_at = NOW() WHERE id = ANY($1) AND status = 'active'",
+            [expired_ids.into()],
+        );
+        tx.execute(expire_rows).await?;
+
+        Ok(balances)
+    }
+
+    /// Atomically move an estimated request cost from available to frozen
+    /// balance. `amount = None` reserves the whole currently available balance,
+    /// which closes the concurrency overspend window for requests without an
+    /// explicit output-token ceiling.
+    pub async fn reserve(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
+        user_id: Uuid,
+        request_id: Uuid,
+        amount: Option<Decimal>,
+        minimum_available: Decimal,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, DbError> {
+        // Reject invalid caller input before opening a transaction. Capacity
+        // is evaluated again by `amount_to_reserve` after stale reservations
+        // have been reclaimed under the balance-row lock.
+        Self::amount_to_reserve(Decimal::MAX, amount, minimum_available)?;
+        if expires_at <= Utc::now() {
+            return Err(DbError::Other(
+                "balance reservation expiry must be in the future".to_string(),
+            ));
+        }
+        let tx = db.begin().await?;
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+            [user_id.into()],
+        );
+        let mut balance = UserBalance::find_by_statement(lock_stmt)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| {
+                DbError::insufficient_balance(minimum_available.to_string(), "0".to_string())
+            })?;
+        if balance.tenant_id != tenant_id {
+            return Err(DbError::Other(
+                "balance reservation tenant mismatch".to_string(),
+            ));
+        }
+
+        // Release crash-orphaned reservations before evaluating capacity or
+        // deciding whether the target request still owns frozen funds. Doing
+        // this first also avoids double-counting a reservation that expires at
+        // the boundary between the application clock and PostgreSQL's clock.
+        balance = Self::reclaim_expired_for_locked_balances(&tx, vec![balance])
+            .await?
+            .pop()
+            .expect("the locked balance must be preserved during reclamation");
+
+        let owner_token = Uuid::new_v4();
+        let mut reusable_request = None;
+        let mut replaced_active_amount = Decimal::ZERO;
+        if let Some(existing) = Self::find_by_request(&tx, request_id, true).await? {
+            if existing.tenant_id != tenant_id || existing.user_id != user_id {
+                return Err(DbError::Other(format!(
+                    "balance reservation {request_id} belongs to another principal"
+                )));
+            }
+            if existing.status == "active" {
+                // A crash recovery or idempotent retry can recompute the
+                // maximum charge with a newer pricing snapshot. Treat the
+                // currently frozen amount as capacity owned by this logical
+                // request, then resize it atomically instead of silently
+                // retaining a stale amount.
+                replaced_active_amount = existing.amount;
+            }
+            if existing.status == "settled" {
+                return Err(DbError::Other(format!(
+                    "balance reservation {request_id} is already settled"
+                )));
+            }
+            reusable_request = Some(existing);
+        }
+
+        let reservable_balance = balance.available_balance + replaced_active_amount;
+        let amount = Self::amount_to_reserve(reservable_balance, amount, minimum_available)?;
+        let balance_delta = amount - replaced_active_amount;
+        if balance_delta != Decimal::ZERO {
+            let update_stmt = Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE user_balances SET available_balance = available_balance - $1, frozen_balance = frozen_balance + $1, updated_at = NOW() WHERE user_id = $2",
+                [balance_delta.into(), user_id.into()],
+            );
+            tx.execute(update_stmt).await?;
+        }
+        let reserve_stmt = if reusable_request.is_some() {
+            Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE balance_reservations SET owner_token = $1, amount = $2, status = 'active', usage_log_id = NULL, expires_at = $3, settled_at = NULL, updated_at = NOW() WHERE request_id = $4 RETURNING *",
+                [
+                    owner_token.into(),
+                    amount.into(),
+                    expires_at.into(),
+                    request_id.into(),
+                ],
+            )
+        } else {
+            Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO balance_reservations (request_id, owner_token, tenant_id, user_id, amount, expires_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
+                [
+                    request_id.into(),
+                    owner_token.into(),
+                    tenant_id.into(),
+                    user_id.into(),
+                    amount.into(),
+                    expires_at.into(),
+                ],
+            )
+        };
+        let reservation = Self::find_by_statement(reserve_stmt)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::Other("create balance reservation failed".to_string()))?;
+        tx.commit().await?;
+        Ok(reservation)
+    }
+
+    /// Settle an active reservation against the immutable usage ledger. The
+    /// update releases unused funds and consumes the actual amount atomically.
+    /// `Ok(None)` means no active reservation exists and the caller should use
+    /// the legacy idempotent consumption path.
+    pub async fn settle(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        request_id: Uuid,
+        amount: Decimal,
+        usage_log_id: Uuid,
+        description: Option<&str>,
+    ) -> Result<Option<(UserBalance, BalanceTransaction)>, DbError> {
+        if amount < Decimal::ZERO {
+            return Err(DbError::Other(
+                "balance settlement amount must not be negative".to_string(),
+            ));
+        }
+        // Use a locking-shaped lookup to force DbRouter onto the writer. The
+        // lock itself is statement-scoped here; the transaction below takes
+        // the authoritative balance/reservation locks in their common order.
+        let Some(snapshot) = Self::find_by_request(db, request_id, true).await? else {
+            return Ok(None);
+        };
+        let tx = db.begin().await?;
+        let lock_balance = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+            [snapshot.user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(lock_balance)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserBalance", snapshot.user_id.to_string()))?;
+        let Some(reservation) = Self::find_by_request(&tx, request_id, true).await? else {
+            return Err(DbError::Other(format!(
+                "balance reservation {request_id} disappeared during settlement"
+            )));
+        };
+
+        if reservation.status == "settled" {
+            if reservation.usage_log_id != Some(usage_log_id) {
+                return Err(DbError::Other(format!(
+                    "balance reservation {request_id} is already bound to another usage log"
+                )));
+            }
+            let transaction = BalanceTransaction::find_consumption_by_usage_log(&tx, usage_log_id)
+                .await?
+                .ok_or_else(|| {
+                    DbError::Other(format!(
+                        "settled balance reservation {request_id} has no consumption transaction"
+                    ))
+                })?;
+            tx.commit().await?;
+            return Ok(Some((balance, transaction)));
+        }
+        if reservation.status != "active" {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        if balance.frozen_balance < reservation.amount {
+            return Err(DbError::Other(format!(
+                "balance reservation {request_id} exceeds frozen balance"
+            )));
+        }
+
+        // The consumption ledger describes the logical post-unfreeze debit.
+        // The reservation move itself is tracked by balance_reservations, so
+        // include the released amount in `balance_before`; this preserves the
+        // invariant `balance_after - balance_before == transaction.amount`.
+        let (balance_before, balance_after) = Self::settlement_available_balances(
+            balance.available_balance,
+            reservation.amount,
+            amount,
+        );
+        let update_balance = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE user_balances SET available_balance = available_balance + $1 - $2, frozen_balance = frozen_balance - $1, total_consumed = total_consumed + $2, updated_at = NOW() WHERE user_id = $3 RETURNING *",
+            [
+                reservation.amount.into(),
+                amount.into(),
+                reservation.user_id.into(),
+            ],
+        );
+        let updated_balance = UserBalance::find_by_statement(update_balance)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserBalance", reservation.user_id.to_string()))?;
+        let transaction = BalanceTransaction::create_internal(
+            &tx,
+            reservation.tenant_id,
+            reservation.user_id,
+            None,
+            Some(usage_log_id),
+            TransactionType::Consume,
+            -amount,
+            balance_before,
+            balance_after,
+            description,
+        )
+        .await?;
+        let settle_reservation = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE balance_reservations SET status = 'settled', usage_log_id = $1, settled_at = NOW(), updated_at = NOW() WHERE request_id = $2",
+            [usage_log_id.into(), request_id.into()],
+        );
+        tx.execute(settle_reservation).await?;
+        tx.commit().await?;
+        Ok(Some((updated_balance, transaction)))
+    }
+
+    /// Release a request that failed before a usage settlement worker took
+    /// ownership. Repeated releases are harmless.
+    pub async fn release(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        request_id: Uuid,
+        owner_token: Uuid,
+    ) -> Result<bool, DbError> {
+        // A freshly-created reservation may not yet be visible on a read
+        // replica. Force this locator query to the writer before opening the
+        // lock-ordered release transaction.
+        let Some(snapshot) = Self::find_by_request(db, request_id, true).await? else {
+            return Ok(false);
+        };
+        if snapshot.owner_token != owner_token {
+            return Ok(false);
+        }
+        let tx = db.begin().await?;
+        let lock_balance = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+            [snapshot.user_id.into()],
+        );
+        let balance = UserBalance::find_by_statement(lock_balance)
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("UserBalance", snapshot.user_id.to_string()))?;
+        let Some(reservation) = Self::find_by_request(&tx, request_id, true).await? else {
+            return Err(DbError::Other(format!(
+                "balance reservation {request_id} disappeared during release"
+            )));
+        };
+        if reservation.status != "active" || reservation.owner_token != owner_token {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        if balance.frozen_balance < reservation.amount {
+            return Err(DbError::Other(format!(
+                "balance reservation {request_id} exceeds frozen balance"
+            )));
+        }
+        if reservation.amount > Decimal::ZERO {
+            let update_balance = Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2",
+                [reservation.amount.into(), reservation.user_id.into()],
+            );
+            tx.execute(update_balance).await?;
+        }
+        let release_reservation = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE balance_reservations SET status = 'released', updated_at = NOW() WHERE request_id = $1",
+            [request_id.into()],
+        );
+        tx.execute(release_reservation).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+}
+
 impl UserBalance {
     /// 总余额（可用 + 冻结）
     pub fn total_balance(&self) -> Decimal {
@@ -112,6 +564,31 @@ impl UserBalance {
         Ok(balance)
     }
 
+    /// Find a balance after atomically reclaiming any expired request
+    /// reservations. This is the user-facing read path; the simpler
+    /// `find_by_user` remains available inside existing transactions.
+    pub async fn find_by_user_reclaiming_expired(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        user_id: Uuid,
+    ) -> Result<Option<UserBalance>, DbError> {
+        let tx = db.begin().await?;
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
+            [user_id.into()],
+        );
+        let Some(balance) = UserBalance::find_by_statement(lock_stmt).one(&tx).await? else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let balance = BalanceReservation::reclaim_expired_for_locked_balances(&tx, vec![balance])
+            .await?
+            .pop()
+            .expect("the locked balance must be preserved during reclamation");
+        tx.commit().await?;
+        Ok(Some(balance))
+    }
+
     /// 批量根据用户ID查找余额
     pub async fn find_by_users(
         db: &impl ConnectionTrait,
@@ -127,6 +604,36 @@ impl UserBalance {
         );
         let balances = UserBalance::find_by_statement(stmt).all(db).await?;
         Ok(balances.into_iter().map(|b| (b.user_id, b)).collect())
+    }
+
+    /// Batch balance read with the same expiry semantics as
+    /// `find_by_user_reclaiming_expired`. Balance rows are locked in a stable
+    /// order to preserve the lock order used by reservation settlement.
+    pub async fn find_by_users_reclaiming_expired(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        user_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, UserBalance>, DbError> {
+        if user_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let mut user_ids = user_ids.to_vec();
+        user_ids.sort_unstable();
+        user_ids.dedup();
+
+        let tx = db.begin().await?;
+        let lock_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_balances WHERE user_id = ANY($1) ORDER BY user_id FOR UPDATE",
+            [user_ids.into()],
+        );
+        let balances = UserBalance::find_by_statement(lock_stmt).all(&tx).await?;
+        let balances =
+            BalanceReservation::reclaim_expired_for_locked_balances(&tx, balances).await?;
+        tx.commit().await?;
+        Ok(balances
+            .into_iter()
+            .map(|balance| (balance.user_id, balance))
+            .collect())
     }
 
     /// 充值（自身创建事务执行）
@@ -439,10 +946,28 @@ impl UserBalance {
             None => return Err(DbError::not_found("UserBalance", user_id.to_string())),
         };
 
-        if balance.frozen_balance < amount {
+        let balance = BalanceReservation::reclaim_expired_for_locked_balances(&tx, vec![balance])
+            .await?
+            .pop()
+            .expect("the locked balance must be preserved during reclamation");
+
+        // After expiry reclamation, every row still marked active owns frozen
+        // funds. Keep those request-owned funds separate from manual freezes.
+        let reserved_stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COALESCE(SUM(amount), 0) AS amount FROM balance_reservations WHERE user_id = $1 AND status = 'active'",
+            [user_id.into()],
+        );
+        let active_reserved = ActiveReservationTotal::find_by_statement(reserved_stmt)
+            .one(&tx)
+            .await?
+            .map(|total| total.amount)
+            .unwrap_or(Decimal::ZERO);
+        let manually_frozen = balance.frozen_balance - active_reserved;
+        if manually_frozen < amount {
             return Err(DbError::insufficient_balance(
                 amount.to_string(),
-                balance.frozen_balance.to_string(),
+                manually_frozen.to_string(),
             ));
         }
 
@@ -565,5 +1090,61 @@ impl BalanceTransaction {
     /// 获取交易类型枚举
     pub fn get_transaction_type(&self) -> Option<TransactionType> {
         TransactionType::parse(&self.transaction_type)
+    }
+}
+
+#[cfg(test)]
+mod reservation_tests {
+    use super::*;
+
+    fn minimum() -> Decimal {
+        Decimal::new(1, 1)
+    }
+
+    #[test]
+    fn unbounded_reservation_cannot_succeed_with_zero_available_balance() {
+        let error =
+            BalanceReservation::amount_to_reserve(Decimal::ZERO, None, minimum()).unwrap_err();
+        assert!(error.is_insufficient_balance());
+    }
+
+    #[test]
+    fn bounded_reservation_owns_the_minimum_admission_balance() {
+        assert_eq!(
+            BalanceReservation::amount_to_reserve(Decimal::ONE, Some(Decimal::ZERO), minimum(),)
+                .unwrap(),
+            minimum()
+        );
+    }
+
+    #[test]
+    fn unbounded_reservation_owns_all_available_balance_after_reclamation() {
+        let reclaimed_available = Decimal::new(25, 1);
+        assert_eq!(
+            BalanceReservation::amount_to_reserve(reclaimed_available, None, minimum(),).unwrap(),
+            reclaimed_available
+        );
+    }
+
+    #[test]
+    fn bounded_reservation_rejects_cost_above_available_balance() {
+        let error =
+            BalanceReservation::amount_to_reserve(Decimal::ONE, Some(Decimal::from(2)), minimum())
+                .unwrap_err();
+        assert!(error.is_insufficient_balance());
+    }
+
+    #[test]
+    fn settlement_transaction_amount_matches_its_balance_delta() {
+        let consumed = Decimal::from(3);
+        let (before, after) = BalanceReservation::settlement_available_balances(
+            Decimal::from(2),
+            Decimal::from(8),
+            consumed,
+        );
+
+        assert_eq!(before, Decimal::from(10));
+        assert_eq!(after, Decimal::from(7));
+        assert_eq!(after - before, -consumed);
     }
 }

@@ -52,36 +52,6 @@ pub const OPENAI_IMAGE_VARIATION_ENDPOINT: &str = "https://api.openai.com/v1/ima
 /// OpenAI Responses API 默认端点（统一多模态接口）
 pub const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
-/// Official Chat Completions request fields intentionally supported by the
-/// public KeyCompute endpoint. Keeping this list explicit prevents
-/// provider-private extensions from being mistaken for OpenAI compatibility.
-pub const SUPPORTED_CHAT_COMPLETIONS_FIELDS: &[&str] = &[
-    "frequency_penalty",
-    "logit_bias",
-    "logprobs",
-    "max_completion_tokens",
-    "max_tokens",
-    "messages",
-    "model",
-    "n",
-    "parallel_tool_calls",
-    "presence_penalty",
-    "prompt_cache_key",
-    "reasoning_effort",
-    "response_format",
-    "seed",
-    "safety_identifier",
-    "stop",
-    "stream",
-    "stream_options",
-    "temperature",
-    "tool_choice",
-    "tools",
-    "top_logprobs",
-    "top_p",
-    "user",
-];
-
 struct RoutedNativeChatBody<'a> {
     source: &'a serde_json::Map<String, serde_json::Value>,
     model: &'a str,
@@ -99,9 +69,7 @@ impl Serialize for RoutedNativeChatBody<'_> {
             if matches!(name.as_str(), "model" | "stream" | "stream_options") {
                 continue;
             }
-            if SUPPORTED_CHAT_COMPLETIONS_FIELDS.contains(&name.as_str()) {
-                map.serialize_entry(name, value)?;
-            }
+            map.serialize_entry(name, value)?;
         }
         map.serialize_entry("model", self.model)?;
         map.serialize_entry("stream", &self.stream)?;
@@ -114,6 +82,13 @@ impl Serialize for RoutedNativeChatBody<'_> {
                 .unwrap_or_default();
             options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
             map.serialize_entry("stream_options", &options)?;
+        } else if !self.stream
+            && let Some(options) = self.source.get("stream_options")
+        {
+            // Preserve the native request exactly outside the executor's one
+            // explicit streaming compatibility retry. The upstream remains
+            // authoritative if it considers stream_options invalid here.
+            map.serialize_entry("stream_options", options)?;
         }
         map.end()
     }
@@ -196,6 +171,7 @@ impl OpenAIProvider {
             status: None,
             headers_received_at: None,
             upstream_request_id: None,
+            client_response: None,
             retryable: false,
             stable_error_code: "upstream_protocol".to_string(),
             sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -211,6 +187,7 @@ impl OpenAIProvider {
             status: Some(meta.status),
             headers_received_at: Some(meta.headers_received_at),
             upstream_request_id: meta.upstream_request_id.clone(),
+            client_response: None,
             retryable: false,
             stable_error_code: "upstream_protocol".to_string(),
             sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
@@ -368,6 +345,11 @@ impl OpenAIProvider {
             status: Some(status),
             headers_received_at: Some(meta.headers_received_at),
             upstream_request_id: meta.upstream_request_id.clone(),
+            client_response: Some(Box::new(keycompute_types::ClientUpstreamResponse {
+                status,
+                headers: meta.headers.clone(),
+                body: body.chars().take(8 * 1024).collect(),
+            })),
             retryable: http_status_is_retryable(status),
             stable_error_code: format!("upstream_http_{status}"),
             sanitized_summary: if mentions_stream_options {
@@ -1468,6 +1450,7 @@ mod tests {
                     status: Some(429),
                     headers_received_at: Some(received_at),
                     upstream_request_id: Some("upstream-rate-id".to_string()),
+                    client_response: None,
                     retryable: true,
                     stable_error_code: "upstream_http_429".to_string(),
                     sanitized_summary: "rate limited".to_string(),
@@ -1526,6 +1509,7 @@ mod tests {
                         UpstreamResponseMeta::synthetic_success().headers_received_at,
                     ),
                     upstream_request_id: None,
+                    client_response: None,
                     retryable: status == Some(429),
                     stable_error_code: status
                         .map(|status| format!("upstream_http_{status}"))
@@ -1627,7 +1611,7 @@ mod tests {
         assert_eq!(body["response_format"]["type"], "json_schema");
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(body["stream_options"]["include_obfuscation"], false);
-        assert!(body.get("vendor_private").is_none());
+        assert_eq!(body["vendor_private"], true);
     }
 
     #[test]
@@ -1645,6 +1629,23 @@ mod tests {
             serde_json::from_str(&OpenAIProvider::serialize_native_chat_body(&request).unwrap())
                 .unwrap();
         assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn native_chat_non_stream_preserves_unowned_stream_options() {
+        let mut request = stream_request();
+        request.stream = false;
+        request.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": false,
+            "stream_options": {"future_option": true}
+        })));
+
+        let body: serde_json::Value =
+            serde_json::from_str(&OpenAIProvider::serialize_native_chat_body(&request).unwrap())
+                .unwrap();
+        assert_eq!(body["stream_options"]["future_option"], true);
     }
 
     #[tokio::test]

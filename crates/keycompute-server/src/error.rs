@@ -4,10 +4,11 @@
 
 use axum::{
     Json,
-    http::StatusCode,
+    body::Body,
+    http::{HeaderName, HeaderValue, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use std::fmt;
 
 const UPSTREAM_REQUEST_FAILED_MESSAGE: &str = "Upstream request failed";
@@ -55,6 +56,12 @@ pub enum ApiError {
     NodeTaskConflict(String),
     /// 通用冲突错误（409），如并发操作冲突
     Conflict(String),
+    /// Native OpenAI-compatible upstream HTTP error. The body is sanitized
+    /// when converted to a public response.
+    OpenAiUpstream(keycompute_types::ClientUpstreamResponse),
+    /// Native Anthropic upstream HTTP error. The body is sanitized while the
+    /// protocol-specific envelope and status are retained.
+    AnthropicUpstream(keycompute_types::ClientUpstreamResponse),
 }
 
 impl fmt::Display for ApiError {
@@ -74,6 +81,12 @@ impl fmt::Display for ApiError {
             ApiError::NodeIdentityMismatch { .. } => write!(f, "Node identity mismatch"),
             ApiError::NodeTaskConflict(msg) => write!(f, "Node task conflict: {}", msg),
             ApiError::Conflict(msg) => write!(f, "Conflict: {}", msg),
+            ApiError::OpenAiUpstream(response) => {
+                write!(f, "OpenAI upstream HTTP error: {}", response.status)
+            }
+            ApiError::AnthropicUpstream(response) => {
+                write!(f, "Anthropic upstream HTTP error: {}", response.status)
+            }
         }
     }
 }
@@ -82,6 +95,12 @@ impl std::error::Error for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::OpenAiUpstream(upstream) = &self {
+            return native_openai_error_response(upstream);
+        }
+        if let ApiError::AnthropicUpstream(upstream) = &self {
+            return native_anthropic_error_response(upstream);
+        }
         let (status, error_message) = match &self {
             ApiError::Auth(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             ApiError::RateLimit(msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone()),
@@ -107,6 +126,7 @@ impl IntoResponse for ApiError {
             ),
             ApiError::NodeTaskConflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            ApiError::OpenAiUpstream(_) | ApiError::AnthropicUpstream(_) => unreachable!(),
         };
 
         let body = Json(json!({
@@ -139,7 +159,150 @@ fn error_type(error: &ApiError) -> &'static str {
         ApiError::NodeIdentityMismatch { .. } => "node_identity_mismatch_error",
         ApiError::NodeTaskConflict(_) => "node_task_conflict_error",
         ApiError::Conflict(_) => "conflict_error",
+        ApiError::OpenAiUpstream(_) | ApiError::AnthropicUpstream(_) => "upstream_error",
     }
+}
+
+fn native_error_status(status: u16) -> StatusCode {
+    StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+fn append_safe_upstream_error_headers(
+    mut builder: axum::http::response::Builder,
+    headers: &[(String, String)],
+) -> axum::http::response::Builder {
+    for (name, value) in headers {
+        let lower = name.to_ascii_lowercase();
+        let allowed = matches!(
+            lower.as_str(),
+            "request-id"
+                | "x-request-id"
+                | "x-amzn-requestid"
+                | "retry-after"
+                | "retry-after-ms"
+                | "openai-processing-ms"
+        ) || lower.starts_with("x-ratelimit-")
+            || lower.starts_with("anthropic-ratelimit-");
+        if !allowed {
+            continue;
+        }
+        let (Ok(name), Ok(value)) = (HeaderName::try_from(name), HeaderValue::try_from(value))
+        else {
+            continue;
+        };
+        builder = builder.header(name, value);
+    }
+    builder
+}
+
+fn openai_error_defaults(status: StatusCode) -> (&'static str, Value) {
+    match status.as_u16() {
+        401 => ("authentication_error", json!("invalid_api_key")),
+        403 => ("permission_error", Value::Null),
+        404 => ("not_found_error", Value::Null),
+        413 => ("invalid_request_error", json!("request_too_large")),
+        429 => ("rate_limit_error", json!("rate_limit_exceeded")),
+        500..=599 => ("server_error", json!("server_error")),
+        _ => ("invalid_request_error", Value::Null),
+    }
+}
+
+fn native_openai_error_response(upstream: &keycompute_types::ClientUpstreamResponse) -> Response {
+    let status = native_error_status(upstream.status);
+    let parsed = serde_json::from_str::<Value>(&upstream.body).unwrap_or(Value::Null);
+    let error = parsed.get("error").and_then(Value::as_object);
+    let (fallback_type, fallback_code) = openai_error_defaults(status);
+    let error_type = crate::middleware::sanitize_openai_responses_error_type(
+        error.and_then(|value| value.get("type")),
+        fallback_type,
+    );
+    let code = crate::middleware::sanitize_openai_responses_error_code(
+        error.and_then(|value| value.get("code")),
+        fallback_code,
+    );
+    let param = crate::middleware::sanitize_openai_responses_error_param(
+        error.and_then(|value| value.get("param")),
+    );
+    let body = json!({
+        "error": {
+            "message": UPSTREAM_REQUEST_FAILED_MESSAGE,
+            "type": error_type,
+            "param": param,
+            "code": code,
+        }
+    })
+    .to_string();
+    append_safe_upstream_error_headers(Response::builder().status(status), &upstream.headers)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn anthropic_error_type_for_status(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 | 405 | 415 | 422 => "invalid_request_error",
+        401 => "authentication_error",
+        403 => "permission_error",
+        404 => "not_found_error",
+        413 => "request_too_large",
+        429 => "rate_limit_error",
+        503 | 529 => "overloaded_error",
+        _ => "api_error",
+    }
+}
+
+fn sanitized_anthropic_error_type(body: &Value, status: StatusCode) -> String {
+    const ALLOWED: &[&str] = &[
+        "api_error",
+        "authentication_error",
+        "billing_error",
+        "gateway_timeout",
+        "invalid_request_error",
+        "not_found_error",
+        "overloaded_error",
+        "permission_error",
+        "rate_limit_error",
+        "request_too_large",
+    ];
+    body.pointer("/error/type")
+        .and_then(Value::as_str)
+        .filter(|value| ALLOWED.contains(value))
+        .unwrap_or_else(|| anthropic_error_type_for_status(status))
+        .to_string()
+}
+
+fn sanitized_upstream_request_id(body: &Value) -> Option<&str> {
+    body.get("request_id")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || "-_.".contains(character))
+        })
+}
+
+fn native_anthropic_error_response(
+    upstream: &keycompute_types::ClientUpstreamResponse,
+) -> Response {
+    let status = native_error_status(upstream.status);
+    let parsed = serde_json::from_str::<Value>(&upstream.body).unwrap_or(Value::Null);
+    let error_type = sanitized_anthropic_error_type(&parsed, status);
+    let mut body = json!({
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": UPSTREAM_REQUEST_FAILED_MESSAGE,
+        }
+    });
+    if let Some(request_id) = sanitized_upstream_request_id(&parsed) {
+        body["request_id"] = Value::String(request_id.to_string());
+    }
+    append_safe_upstream_error_headers(Response::builder().status(status), &upstream.headers)
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// API 结果类型
@@ -302,6 +465,52 @@ pub fn map_execution_error(e: keycompute_types::KeyComputeError) -> ApiError {
         )),
         other => ApiError::Internal(format!("Execution failed: {other}")),
     }
+}
+
+/// Map an exhausted native-protocol execution while preserving a bounded
+/// upstream HTTP response captured by the transport. If a custom transport did
+/// not retain the body, the structured status still survives in a sanitized
+/// protocol envelope.
+pub fn map_openai_execution_error(
+    error: keycompute_types::KeyComputeError,
+    upstream: Option<keycompute_types::ClientUpstreamResponse>,
+) -> ApiError {
+    if let Some(upstream) = upstream {
+        return ApiError::OpenAiUpstream(upstream);
+    }
+    if let keycompute_types::KeyComputeError::UpstreamFailure {
+        status: Some(status),
+        ..
+    } = &error
+    {
+        return ApiError::OpenAiUpstream(keycompute_types::ClientUpstreamResponse {
+            status: *status,
+            headers: Vec::new(),
+            body: String::new(),
+        });
+    }
+    map_execution_error(error)
+}
+
+pub fn map_anthropic_execution_error(
+    error: keycompute_types::KeyComputeError,
+    upstream: Option<keycompute_types::ClientUpstreamResponse>,
+) -> ApiError {
+    if let Some(upstream) = upstream {
+        return ApiError::AnthropicUpstream(upstream);
+    }
+    if let keycompute_types::KeyComputeError::UpstreamFailure {
+        status: Some(status),
+        ..
+    } = &error
+    {
+        return ApiError::AnthropicUpstream(keycompute_types::ClientUpstreamResponse {
+            status: *status,
+            headers: Vec::new(),
+            body: String::new(),
+        });
+    }
+    map_execution_error(error)
 }
 
 #[cfg(test)]
@@ -477,5 +686,73 @@ mod tests {
         let body = String::from_utf8(body.to_vec()).unwrap();
         assert!(body.contains("Internal server error"));
         assert!(!body.contains("upstream secret detail"));
+    }
+
+    #[tokio::test]
+    async fn native_openai_error_preserves_status_classification_and_request_id() {
+        let response = ApiError::OpenAiUpstream(keycompute_types::ClientUpstreamResponse {
+            status: 429,
+            headers: vec![
+                ("x-request-id".to_string(), "req_upstream_123".to_string()),
+                ("set-cookie".to_string(), "secret=cookie".to_string()),
+            ],
+            body: json!({
+                "error": {
+                    "message": "account sk-secret has exhausted quota",
+                    "type": "rate_limit_error",
+                    "code": "rate_limit_exceeded",
+                    "param": "model",
+                    "provider_private": "do not expose"
+                }
+            })
+            .to_string(),
+        })
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["x-request-id"], "req_upstream_123");
+        assert!(response.headers().get("set-cookie").is_none());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], UPSTREAM_REQUEST_FAILED_MESSAGE);
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert_eq!(body["error"]["param"], "model");
+        assert!(body["error"].get("provider_private").is_none());
+        assert!(!body.to_string().contains("sk-secret"));
+    }
+
+    #[tokio::test]
+    async fn native_anthropic_error_preserves_schema_and_safe_request_id() {
+        let response = ApiError::AnthropicUpstream(keycompute_types::ClientUpstreamResponse {
+            status: 529,
+            headers: vec![("request-id".to_string(), "req-header-1".to_string())],
+            body: json!({
+                "type": "error",
+                "error": {
+                    "type": "overloaded_error",
+                    "message": "internal provider detail"
+                },
+                "request_id": "req_body-1",
+                "debug": "secret"
+            })
+            .to_string(),
+        })
+        .into_response();
+
+        assert_eq!(response.status().as_u16(), 529);
+        assert_eq!(response.headers()["request-id"], "req-header-1");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["type"], "error");
+        assert_eq!(body["error"]["type"], "overloaded_error");
+        assert_eq!(body["error"]["message"], UPSTREAM_REQUEST_FAILED_MESSAGE);
+        assert_eq!(body["request_id"], "req_body-1");
+        assert!(body.get("debug").is_none());
+        assert!(!body.to_string().contains("internal provider detail"));
     }
 }

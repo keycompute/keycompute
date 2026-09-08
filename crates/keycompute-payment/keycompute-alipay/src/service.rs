@@ -566,20 +566,23 @@ impl PaymentService {
 
     /// 获取用户余额
     pub async fn get_user_balance(&self, user_id: Uuid) -> Result<UserBalanceInfo, PaymentError> {
-        let balance = keycompute_db::UserBalance::find_by_user(self.pool.as_ref(), user_id)
-            .await
-            .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
-            .unwrap_or_else(|| keycompute_db::UserBalance {
-                id: Uuid::nil(),
-                tenant_id: Uuid::nil(),
-                user_id,
-                available_balance: Decimal::ZERO,
-                frozen_balance: Decimal::ZERO,
-                total_recharged: Decimal::ZERO,
-                total_consumed: Decimal::ZERO,
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            });
+        let balance = keycompute_db::UserBalance::find_by_user_reclaiming_expired(
+            self.pool.as_ref(),
+            user_id,
+        )
+        .await
+        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
+        .unwrap_or_else(|| keycompute_db::UserBalance {
+            id: Uuid::nil(),
+            tenant_id: Uuid::nil(),
+            user_id,
+            available_balance: Decimal::ZERO,
+            frozen_balance: Decimal::ZERO,
+            total_recharged: Decimal::ZERO,
+            total_consumed: Decimal::ZERO,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
 
         Ok(UserBalanceInfo {
             user_id: balance.user_id,

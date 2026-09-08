@@ -8,7 +8,13 @@ use crate::{
     handlers::responses::{
         OPENAI_RESPONSES_BODY_LIMIT_BYTES, OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES,
     },
-    state::{AppState, RESPONSES_LARGE_HTTP_BODY_BYTES},
+    handlers::{
+        anthropic::{
+            ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES, ANTHROPIC_MESSAGES_REQUEST_WORKING_SET_LIMIT_BYTES,
+        },
+        openai::{OPENAI_CHAT_BODY_LIMIT_BYTES, OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES},
+    },
+    state::{AppState, GENERATION_LARGE_HTTP_BODY_BYTES},
 };
 use axum::{
     body::{Body, to_bytes},
@@ -32,29 +38,29 @@ use uuid::Uuid;
 
 const PUBLIC_AUTH_COOKIE_NAME: &str = "keyc_reg_sid";
 const PUBLIC_AUTH_COOKIE_MAX_AGE_SECS: i64 = 60 * 60 * 24 * 30;
-/// Maximum wall-clock time spent receiving a Responses JSON request body.
+/// Maximum wall-clock time spent receiving a generation JSON request body.
 ///
 /// The largest supported inline skill payload is roughly 70 MiB, so this is
 /// deliberately longer than the normal upstream request timeout while still
 /// preventing an authenticated slow client from holding a process-wide body
 /// admission permit indefinitely.
-const RESPONSES_HTTP_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const GENERATION_HTTP_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, PartialEq, Eq)]
-enum ResponsesHttpBodyReadError {
+enum GenerationHttpBodyReadError {
     InvalidOrTooLarge,
     Timeout,
 }
 
-async fn read_responses_http_body(
+async fn read_generation_http_body(
     body: Body,
     limit: usize,
     timeout: Duration,
-) -> std::result::Result<bytes::Bytes, ResponsesHttpBodyReadError> {
+) -> std::result::Result<bytes::Bytes, GenerationHttpBodyReadError> {
     match tokio::time::timeout(timeout, to_bytes(body, limit)).await {
         Ok(Ok(body)) => Ok(body),
-        Ok(Err(_)) => Err(ResponsesHttpBodyReadError::InvalidOrTooLarge),
-        Err(_) => Err(ResponsesHttpBodyReadError::Timeout),
+        Ok(Err(_)) => Err(GenerationHttpBodyReadError::InvalidOrTooLarge),
+        Err(_) => Err(GenerationHttpBodyReadError::Timeout),
     }
 }
 
@@ -64,17 +70,19 @@ async fn read_responses_http_body(
 #[derive(Clone, Copy, Debug)]
 struct TrustedPublicMaintenanceError;
 
-/// Admit potentially large Responses bodies before Axum's JSON extractor
+/// Admit potentially large generation bodies before Axum's JSON extractor
 /// buffers them. Requests without Content-Length are treated conservatively as
-/// large; the normal body limit remains the final per-request bound.
-pub async fn responses_http_body_admission_middleware(
+/// large while they are being received; after buffering, the permit is kept
+/// only when the actual body or its estimated parse working set is large. The
+/// normal body limit remains the final per-request bound.
+pub async fn generation_http_body_admission_middleware(
     State(state): State<AppState>,
     req: Request,
     next: Next,
 ) -> Response {
-    if !responses_request_targets_json_body(req.method(), req.uri().path()) {
+    let Some(policy) = generation_json_body_policy(req.method(), req.uri().path()) else {
         return next.run(req).await;
-    }
+    };
 
     // Authenticate before reading any body bytes. The rate-limit middleware
     // deliberately lets invalid credentials reach the normal auth path, so
@@ -91,19 +99,17 @@ pub async fn responses_http_body_admission_middleware(
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok());
-    if content_length.is_some_and(|bytes| bytes > OPENAI_RESPONSES_BODY_LIMIT_BYTES as u64) {
+    if content_length.is_some_and(|bytes| bytes > policy.body_limit_bytes as u64) {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
 
-    let mut permit = if responses_request_needs_body_admission(
-        &parts.method,
-        parts.uri.path(),
-        content_length,
-    ) {
-        let Some(permit) = state.responses_http_body_admission.try_acquire() else {
-            return ApiError::RateLimit(
-                "Too many large Responses request bodies are active".to_string(),
-            )
+    let mut permit = if content_length.is_none_or(|bytes| bytes > GENERATION_LARGE_HTTP_BODY_BYTES)
+    {
+        let Some(permit) = state.generation_http_body_admission.try_acquire() else {
+            return ApiError::RateLimit(format!(
+                "Too many large {} request bodies are active",
+                policy.name
+            ))
             .into_response();
         };
         Some(permit)
@@ -114,34 +120,43 @@ pub async fn responses_http_body_admission_middleware(
     // Inspect the serialized representation before Axum's JSON extractor
     // builds a potentially much larger Value tree. Rebuild the body from
     // Bytes so the extractor retains its normal content-type/error behavior.
-    let body = match read_responses_http_body(
+    let body = match read_generation_http_body(
         body,
-        OPENAI_RESPONSES_BODY_LIMIT_BYTES,
-        RESPONSES_HTTP_BODY_READ_TIMEOUT,
+        policy.body_limit_bytes,
+        GENERATION_HTTP_BODY_READ_TIMEOUT,
     )
     .await
     {
         Ok(body) => body,
-        Err(ResponsesHttpBodyReadError::InvalidOrTooLarge) => {
+        Err(GenerationHttpBodyReadError::InvalidOrTooLarge) => {
             return StatusCode::PAYLOAD_TOO_LARGE.into_response();
         }
-        Err(ResponsesHttpBodyReadError::Timeout) => {
+        Err(GenerationHttpBodyReadError::Timeout) => {
             return StatusCode::REQUEST_TIMEOUT.into_response();
         }
     };
-    let needs_working_set_admission = match responses_json_body_needs_working_set_admission(
+    let needs_working_set_admission = match generation_json_body_needs_working_set_admission(
         &body,
-        OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES,
+        policy.working_set_limit_bytes,
         LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
     ) {
         Ok(needs_admission) => needs_admission,
         Err(()) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
     };
-    if permit.is_none() && needs_working_set_admission {
-        let Some(acquired) = state.responses_http_body_admission.try_acquire() else {
-            return ApiError::RateLimit(
-                "Too many large Responses request bodies are active".to_string(),
-            )
+    let needs_resident_body_admission =
+        body.len() as u64 > GENERATION_LARGE_HTTP_BODY_BYTES || needs_working_set_admission;
+    if permit.is_some() && !needs_resident_body_admission {
+        // Content-Length is optional (for example with chunked transfer
+        // encoding), so an unknown-size body needs a provisional receive
+        // permit. Do not retain that scarce permit through inference once the
+        // fully-buffered representation proves small.
+        permit = None;
+    } else if permit.is_none() && needs_resident_body_admission {
+        let Some(acquired) = state.generation_http_body_admission.try_acquire() else {
+            return ApiError::RateLimit(format!(
+                "Too many large {} request bodies are active",
+                policy.name
+            ))
             .into_response();
         };
         permit = Some(acquired);
@@ -154,15 +169,40 @@ pub async fn responses_http_body_admission_middleware(
     next.run(req).await
 }
 
-fn responses_request_targets_json_body(method: &Method, path: &str) -> bool {
-    method == Method::POST
-        && matches!(
-            path,
-            "/v1/responses" | "/v1/responses/compact" | "/v1/responses/input_tokens"
-        )
+#[derive(Clone, Copy)]
+struct GenerationJsonBodyPolicy {
+    name: &'static str,
+    body_limit_bytes: usize,
+    working_set_limit_bytes: usize,
 }
 
-fn responses_json_body_needs_working_set_admission(
+fn generation_json_body_policy(method: &Method, path: &str) -> Option<GenerationJsonBodyPolicy> {
+    if method != Method::POST {
+        return None;
+    }
+    match path {
+        "/v1/chat/completions" => Some(GenerationJsonBodyPolicy {
+            name: "Chat Completions",
+            body_limit_bytes: OPENAI_CHAT_BODY_LIMIT_BYTES,
+            working_set_limit_bytes: OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES,
+        }),
+        "/v1/messages" => Some(GenerationJsonBodyPolicy {
+            name: "Anthropic Messages",
+            body_limit_bytes: ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES,
+            working_set_limit_bytes: ANTHROPIC_MESSAGES_REQUEST_WORKING_SET_LIMIT_BYTES,
+        }),
+        "/v1/responses" | "/v1/responses/compact" | "/v1/responses/input_tokens" => {
+            Some(GenerationJsonBodyPolicy {
+                name: "Responses",
+                body_limit_bytes: OPENAI_RESPONSES_BODY_LIMIT_BYTES,
+                working_set_limit_bytes: OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn generation_json_body_needs_working_set_admission(
     body: &[u8],
     max_working_set_bytes: usize,
     admission_threshold_bytes: usize,
@@ -174,13 +214,14 @@ fn responses_json_body_needs_working_set_admission(
     Ok(working_set_bytes > admission_threshold_bytes)
 }
 
-fn responses_request_needs_body_admission(
+#[cfg(test)]
+fn generation_request_needs_body_admission(
     method: &Method,
     path: &str,
     content_length: Option<u64>,
 ) -> bool {
-    responses_request_targets_json_body(method, path)
-        && content_length.is_none_or(|bytes| bytes > RESPONSES_LARGE_HTTP_BODY_BYTES)
+    generation_json_body_policy(method, path).is_some()
+        && content_length.is_none_or(|bytes| bytes > GENERATION_LARGE_HTTP_BODY_BYTES)
 }
 
 /// 权限中间件的返回类型
@@ -520,24 +561,39 @@ pub(crate) fn sanitize_openai_responses_error_param(
     value: Option<&serde_json::Value>,
 ) -> serde_json::Value {
     const ALLOWED: &[&str] = &[
+        "audio",
         "background",
         "conversation",
+        "frequency_penalty",
         "include",
         "input",
         "instructions",
+        "logit_bias",
+        "logprobs",
+        "max_completion_tokens",
         "max_output_tokens",
+        "max_tokens",
         "max_tool_calls",
+        "messages",
         "metadata",
         "model",
+        "modalities",
+        "n",
         "parallel_tool_calls",
+        "prediction",
+        "presence_penalty",
         "previous_response_id",
         "prompt",
         "prompt_cache_key",
         "prompt_cache_options",
         "prompt_cache_retention",
         "reasoning",
+        "reasoning_effort",
+        "response_format",
         "safety_identifier",
+        "seed",
         "service_tier",
+        "stop",
         "store",
         "stream",
         "stream_options",
@@ -549,6 +605,8 @@ pub(crate) fn sanitize_openai_responses_error_param(
         "top_p",
         "truncation",
         "user",
+        "verbosity",
+        "web_search_options",
     ];
     match value {
         Some(serde_json::Value::String(value)) if ALLOWED.contains(&value.as_str()) => {
@@ -1616,50 +1674,73 @@ mod tests {
     }
 
     #[test]
-    fn responses_body_admission_targets_only_large_body_endpoints() {
-        assert!(responses_request_needs_body_admission(
+    fn generation_body_admission_targets_only_generation_endpoints() {
+        assert!(generation_request_needs_body_admission(
             &Method::POST,
             "/v1/responses",
             None,
         ));
-        assert!(responses_request_needs_body_admission(
+        assert!(generation_request_needs_body_admission(
             &Method::POST,
             "/v1/responses/input_tokens",
-            Some(RESPONSES_LARGE_HTTP_BODY_BYTES + 1),
+            Some(GENERATION_LARGE_HTTP_BODY_BYTES + 1),
         ));
-        assert!(!responses_request_needs_body_admission(
+        assert!(!generation_request_needs_body_admission(
             &Method::POST,
             "/v1/responses",
-            Some(RESPONSES_LARGE_HTTP_BODY_BYTES),
+            Some(GENERATION_LARGE_HTTP_BODY_BYTES),
         ));
-        assert!(!responses_request_needs_body_admission(
+        assert!(!generation_request_needs_body_admission(
             &Method::POST,
             "/v1/responses/resp_123/cancel",
             None,
         ));
-        assert!(!responses_request_needs_body_admission(
+        assert!(!generation_request_needs_body_admission(
             &Method::GET,
             "/v1/responses",
             None,
         ));
+
+        let chat = generation_json_body_policy(&Method::POST, "/v1/chat/completions")
+            .expect("Chat Completions must use bounded JSON admission");
+        assert_eq!(chat.body_limit_bytes, OPENAI_CHAT_BODY_LIMIT_BYTES);
+        assert_eq!(
+            chat.working_set_limit_bytes,
+            OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES
+        );
+        assert!(generation_request_needs_body_admission(
+            &Method::POST,
+            "/v1/chat/completions",
+            None,
+        ));
+        let messages = generation_json_body_policy(&Method::POST, "/v1/messages")
+            .expect("Anthropic Messages must use bounded JSON admission");
+        assert_eq!(
+            messages.body_limit_bytes,
+            ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES
+        );
+        assert_eq!(
+            messages.working_set_limit_bytes,
+            ANTHROPIC_MESSAGES_REQUEST_WORKING_SET_LIMIT_BYTES
+        );
     }
 
     #[test]
-    fn responses_body_admission_rejects_dense_json_before_deserialization() {
+    fn generation_body_admission_rejects_dense_json_before_deserialization() {
         let string_heavy = br#"{"input":"0,0,0,0"}"#;
         let array_heavy = br#"{"input":[0,0,0,0]}"#;
         let threshold = estimated_json_parse_working_set_bytes(string_heavy);
 
         assert_eq!(
-            responses_json_body_needs_working_set_admission(string_heavy, usize::MAX, threshold,),
+            generation_json_body_needs_working_set_admission(string_heavy, usize::MAX, threshold,),
             Ok(false)
         );
         assert_eq!(
-            responses_json_body_needs_working_set_admission(array_heavy, usize::MAX, threshold,),
+            generation_json_body_needs_working_set_admission(array_heavy, usize::MAX, threshold,),
             Ok(true)
         );
         assert_eq!(
-            responses_json_body_needs_working_set_admission(
+            generation_json_body_needs_working_set_admission(
                 array_heavy,
                 estimated_json_parse_working_set_bytes(array_heavy) - 1,
                 threshold,
@@ -1677,7 +1758,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn responses_body_middleware_rejects_dense_json_at_production_limit() {
+    async fn generation_body_middleware_rejects_dense_json_at_production_limit() {
         let item_count = OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES / 64 + 1;
         let mut payload = String::with_capacity(item_count * 2 + 1);
         payload.push('[');
@@ -1698,7 +1779,7 @@ mod tests {
             .route("/v1/responses", post(|| async { StatusCode::NO_CONTENT }))
             .layer(from_fn_with_state(
                 state.clone(),
-                responses_http_body_admission_middleware,
+                generation_http_body_admission_middleware,
             ))
             .with_state(state);
         let response = app
@@ -1722,6 +1803,120 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn small_chunked_generation_bodies_do_not_hold_resident_body_permits() {
+        let state = AppState::new();
+        let barrier = Arc::new(tokio::sync::Barrier::new(4));
+        let handler_barrier = Arc::clone(&barrier);
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                post(
+                    move |permit: Option<
+                        axum::Extension<crate::state::GenerationHttpBodyPermit>,
+                    >| {
+                        let barrier = Arc::clone(&handler_barrier);
+                        async move {
+                            assert!(
+                                permit.is_none(),
+                                "a small buffered body must release its provisional permit"
+                            );
+                            barrier.wait().await;
+                            StatusCode::NO_CONTENT
+                        }
+                    },
+                ),
+            )
+            .layer(from_fn_with_state(
+                state.clone(),
+                generation_http_body_admission_middleware,
+            ))
+            .with_state(state);
+
+        let mut requests = Vec::new();
+        for _ in 0..3 {
+            let app = app.clone();
+            requests.push(tokio::spawn(async move {
+                let body = Body::from_stream(futures::stream::once(async {
+                    Ok::<_, Infallible>(bytes::Bytes::from_static(b"{}"))
+                }));
+                app.oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/responses")
+                        .extension(AuthExtractor::new(
+                            Uuid::new_v4(),
+                            Uuid::new_v4(),
+                            Uuid::new_v4(),
+                            "user",
+                        ))
+                        .body(body)
+                        .unwrap(),
+                )
+                .await
+                .unwrap()
+            }));
+        }
+
+        tokio::time::timeout(Duration::from_secs(5), barrier.wait())
+            .await
+            .expect("three small chunked requests should reach the handler concurrently");
+        for request in requests {
+            assert_eq!(request.await.unwrap().status(), StatusCode::NO_CONTENT);
+        }
+    }
+
+    #[tokio::test]
+    async fn large_chunked_generation_body_retains_its_resident_body_permit() {
+        let state = AppState::new();
+        let app =
+            Router::new()
+                .route(
+                    "/v1/responses",
+                    post(
+                        |permit: Option<
+                            axum::Extension<crate::state::GenerationHttpBodyPermit>,
+                        >| async move {
+                            if permit.is_some() {
+                                StatusCode::NO_CONTENT
+                            } else {
+                                StatusCode::INTERNAL_SERVER_ERROR
+                            }
+                        },
+                    ),
+                )
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    generation_http_body_admission_middleware,
+                ))
+                .with_state(state);
+        let mut payload = vec![b'a'; GENERATION_LARGE_HTTP_BODY_BYTES as usize];
+        payload.insert(0, b'"');
+        payload.push(b'"');
+        let body = Body::from_stream(futures::stream::once(async {
+            Ok::<_, Infallible>(bytes::Bytes::from(payload))
+        }));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/responses")
+                    .extension(AuthExtractor::new(
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        Uuid::new_v4(),
+                        "user",
+                    ))
+                    .body(body)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
     async fn responses_body_middleware_authenticates_before_polling_body() {
         for authorization in [None, Some("Bearer invalid-token")] {
             let state = AppState::new();
@@ -1729,7 +1924,7 @@ mod tests {
                 .route("/v1/responses", post(|| async { StatusCode::NO_CONTENT }))
                 .layer(from_fn_with_state(
                     state.clone(),
-                    responses_http_body_admission_middleware,
+                    generation_http_body_admission_middleware,
                 ))
                 .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
                 .with_state(state);
@@ -1755,14 +1950,14 @@ mod tests {
     #[tokio::test]
     async fn responses_body_read_has_a_total_timeout() {
         let polls = Arc::new(AtomicUsize::new(0));
-        let result = read_responses_http_body(
+        let result = read_generation_http_body(
             stalled_body(Arc::clone(&polls)),
             OPENAI_RESPONSES_BODY_LIMIT_BYTES,
             Duration::from_millis(10),
         )
         .await;
 
-        assert_eq!(result, Err(ResponsesHttpBodyReadError::Timeout));
+        assert_eq!(result, Err(GenerationHttpBodyReadError::Timeout));
         assert!(polls.load(Ordering::Relaxed) > 0);
     }
 
