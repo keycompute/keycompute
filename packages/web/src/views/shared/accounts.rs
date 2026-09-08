@@ -1,11 +1,39 @@
 use client_api::api::admin::AccountTestResponse;
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 use ui::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, PageHeader, Pagination, Table,
     TableHead,
 };
 
 const PAGE_SIZE: usize = 20;
+const SEARCH_DEBOUNCE_MS: u32 = 300;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AccountListQuery {
+    search: String,
+    page: u32,
+}
+
+impl Default for AccountListQuery {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            page: 1,
+        }
+    }
+}
+
+impl AccountListQuery {
+    fn reset_page(&mut self) {
+        self.page = 1;
+    }
+
+    fn commit_search(&mut self, search: String) {
+        self.search = search;
+        self.reset_page();
+    }
+}
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::i18n::I18n;
@@ -16,6 +44,7 @@ use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
 use crate::stores::user_store::UserStore;
 use crate::utils::display::short_id;
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
 /// 厂商预设列表：(预设 id, 显示名 i18n key, 协议, Base URL 模板)
@@ -229,7 +258,8 @@ fn AdminAccountsView() -> Element {
     let mut create_models_input = use_signal(String::new); // 逗号分隔的模型列表
     let mut saving = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
-    let mut page = use_signal(|| 1u32);
+    let mut search = use_signal(String::new);
+    let mut query = use_signal(AccountListQuery::default);
 
     // 全局重置健康状态
     let mut resetting = use_signal(|| false);
@@ -256,17 +286,39 @@ fn AdminAccountsView() -> Element {
     let mut show_delete = use_signal(|| false);
     let mut deleting = use_signal(|| false);
 
-    let mut accounts = use_resource(move || async move {
-        with_auto_refresh(auth_store, |token| async move {
-            account_service::list(None, &token).await
-        })
-        .await
+    use_effect(move || {
+        let next_search = search();
+        spawn(async move {
+            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
+            if search() == next_search && query.read().search != next_search {
+                query.write().commit_search(next_search);
+            }
+        });
+    });
+
+    let mut accounts = use_resource(move || {
+        let current_query = query();
+        async move {
+            let request_key = current_query.clone();
+            let mut params = client_api::api::admin::AccountQueryParams::new()
+                .with_page(current_query.page)
+                .with_page_size(PAGE_SIZE as u32);
+            if !current_query.search.is_empty() {
+                params = params.with_search(current_query.search);
+            }
+            let result = with_auto_refresh(auth_store, move |token| {
+                let params = params.clone();
+                async move { account_service::list_page(params, &token).await }
+            })
+            .await;
+            KeyedResourceValue::new(request_key, result)
+        }
     });
 
     // 租户列表（编辑弹窗下拉选项）
     let tenants = use_resource(move || async move {
         let token = auth_store.token().unwrap_or_default();
-        tenant_service::list(None, &token).await
+        tenant_service::list_all(&token).await
     });
 
     // 全局重置健康状态处理函数
@@ -326,7 +378,7 @@ fn AdminAccountsView() -> Element {
                     create_api_base.write().clear();
                     *create_api_mode.write() = "both".to_string();
                     create_models_input.write().clear();
-                    page.set(1);
+                    query.write().reset_page();
                     accounts.restart();
                     ui_store.show_success(i18n.t("accounts.created"));
                 }
@@ -379,6 +431,7 @@ fn AdminAccountsView() -> Element {
             match account_service::update(&id, req, &token).await {
                 Ok(_) => {
                     show_edit.set(false);
+                    query.write().reset_page();
                     accounts.restart();
                     ui_store.show_success(i18n.t("accounts.updated"));
                 }
@@ -428,6 +481,28 @@ fn AdminAccountsView() -> Element {
             // 操作工具栏
             div { class: "toolbar",
                 div { class: "toolbar-left",
+                    div { class: "input-wrapper search-input-wrapper",
+                        input {
+                            class: "input-field",
+                            r#type: "search",
+                            aria_label: i18n.t("accounts.search_placeholder"),
+                            placeholder: "{i18n.t(\"accounts.search_placeholder\")}",
+                            value: "{search}",
+                            oninput: move |event| *search.write() = event.value(),
+                        }
+                        if !search().is_empty() {
+                            button {
+                                class: "btn btn-ghost btn-sm input-clear-button",
+                                r#type: "button",
+                                aria_label: i18n.t("common.clear"),
+                                onclick: move |_| {
+                                    search.set(String::new());
+                                    query.write().commit_search(String::new());
+                                },
+                                "×"
+                            }
+                        }
+                    }
                     Button {
                         variant: ButtonVariant::Ghost,
                         size: ButtonSize::Small,
@@ -439,18 +514,32 @@ fn AdminAccountsView() -> Element {
             }
 
             {
-                let (is_empty, empty_text) = match accounts() {
+                let current_query = query();
+                let result = current_keyed_value(
+                    &current_query,
+                    accounts.state().cloned(),
+                    accounts(),
+                );
+                let (is_empty, empty_text) = match &result {
                     None => (true, i18n.t("table.loading")),
                     Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                    Some(Ok(ref l)) if l.is_empty() => (true, i18n.t("accounts.empty")),
+                    Some(Ok(result)) if result.accounts.is_empty() => (true, i18n.t("accounts.empty")),
                     _ => (false, ""),
                 };
-                let total = accounts().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0);
-                let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
-                let start = (page() as usize - 1) * PAGE_SIZE;
-                let paged_list: Vec<_> = accounts()
-                    .and_then(|r| r.ok())
-                    .map(|l| l.into_iter().skip(start).take(PAGE_SIZE).collect())
+                let total = result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|result| result.total)
+                    .unwrap_or(0);
+                let total_pages = result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|result| result.total_pages.max(1))
+                    .unwrap_or(1);
+                let paged_list = result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|result| result.accounts.as_slice())
                     .unwrap_or_default();
                 rsx! {
                     div { class: "accounts-table-shell",
@@ -480,8 +569,7 @@ fn AdminAccountsView() -> Element {
                                 }
                             }
                             tbody {
-                                if accounts().and_then(|r| r.ok()).is_some() {
-                                    for acc in paged_list.iter() {
+                                for acc in paged_list.iter() {
                                         tr {
                                             td {
                                                 div { class: "account-cell-main",
@@ -717,7 +805,6 @@ fn AdminAccountsView() -> Element {
                                             }
                                         }
                                     }
-                                }
                             }
                         }
                         div { class: "pagination",
@@ -725,11 +812,11 @@ fn AdminAccountsView() -> Element {
                                 "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}"
                             }
                             Pagination {
-                                current: page(),
+                                current: current_query.page,
                                 total_pages,
                                 previous_label: i18n.t("table.previous").to_string(),
                                 next_label: i18n.t("table.next").to_string(),
-                                on_page_change: move |p| page.set(p),
+                                on_page_change: move |page| query.write().page = page,
                             }
                         }
                     }
@@ -1081,6 +1168,7 @@ fn AdminAccountsView() -> Element {
                                         match account_service::delete(&id, &token).await {
                                             Ok(_) => {
                                                 ui_store.show_success(i18n.t("accounts.deleted"));
+                                                query.write().reset_page();
                                                 accounts.restart();
                                             }
                                             Err(e) => {
@@ -1127,6 +1215,31 @@ pub fn NoPermissionView(resource: String) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_search_is_debounced_and_resets_the_database_page() {
+        assert!((250..=500).contains(&SEARCH_DEBOUNCE_MS));
+        let mut query = AccountListQuery {
+            search: "old".to_string(),
+            page: 5,
+        };
+        query.commit_search("new".to_string());
+        assert_eq!(query.search, "new");
+        assert_eq!(query.page, 1);
+    }
+
+    #[test]
+    fn account_mutations_can_reset_an_orphaned_last_page() {
+        let mut query = AccountListQuery {
+            search: "matched before editing".to_string(),
+            page: 2,
+        };
+
+        query.reset_page();
+
+        assert_eq!(query.page, 1);
+        assert_eq!(query.search, "matched before editing");
+    }
 
     fn response(success: bool, message: &str) -> AccountTestResponse {
         AccountTestResponse {

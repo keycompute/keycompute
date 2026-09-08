@@ -19,6 +19,64 @@ pub struct PricingInfo {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct PricingPage {
+    pub pricing: Vec<PricingInfo>,
+    pub total: u64,
+    pub page: u64,
+    pub page_size: u64,
+    pub total_pages: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PricingQueryParams {
+    pub search: Option<String>,
+    pub page: Option<u64>,
+    pub page_size: Option<u64>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+
+impl PricingQueryParams {
+    pub fn with_search(mut self, search: impl Into<String>) -> Self {
+        self.search = Some(search.into());
+        self
+    }
+
+    pub fn with_page(mut self, page: u64) -> Self {
+        self.page = Some(page);
+        self
+    }
+
+    pub fn with_page_size(mut self, page_size: u64) -> Self {
+        self.page_size = Some(page_size);
+        self
+    }
+
+    pub fn to_query_string(&self) -> String {
+        let mut params = Vec::new();
+        if let Some(search) = self.search.as_deref().filter(|value| !value.is_empty()) {
+            params.push(format!(
+                "search={}",
+                crate::api::common::encode_query_value(search)
+            ));
+        }
+        if let Some(page) = self.page {
+            params.push(format!("page={page}"));
+        }
+        if let Some(page_size) = self.page_size {
+            params.push(format!("page_size={page_size}"));
+        }
+        if let Some(limit) = self.limit {
+            params.push(format!("limit={limit}"));
+        }
+        if let Some(offset) = self.offset {
+            params.push(format!("offset={offset}"));
+        }
+        params.join("&")
+    }
+}
+
 /// 创建定价请求
 #[derive(Debug, Clone, Serialize)]
 pub struct CreatePricingRequest {
@@ -135,4 +193,19 @@ pub struct CostCalculationResponse {
     pub output_cost: f64,
     pub total_cost: f64,
     pub currency: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PricingQueryParams;
+
+    #[test]
+    fn pricing_query_serializes_server_side_search_and_pagination() {
+        let query = PricingQueryParams::default()
+            .with_search("gpt 4")
+            .with_page(2)
+            .with_page_size(50)
+            .to_query_string();
+        assert_eq!(query, "search=gpt%204&page=2&page_size=50");
+    }
 }

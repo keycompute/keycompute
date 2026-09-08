@@ -13,9 +13,11 @@ pub use super::common::MessageResponse;
 use crate::client::ApiClient;
 use crate::error::Result;
 
+const COMPAT_LIST_PAGE_SIZE: u64 = 100;
+
 // Re-export 各子模块的公共类型
 pub use account::{
-    AccountInfo, AccountQueryParams, AccountRefreshResponse, AccountTestResponse,
+    AccountInfo, AccountPage, AccountQueryParams, AccountRefreshResponse, AccountTestResponse,
     CreateAccountRequest, UpdateAccountRequest,
 };
 pub use monitoring::{
@@ -25,15 +27,17 @@ pub use monitoring::{
     MonitoringTargetHealthResponse, MonitoringTraceEntry, MonitoringTraceSummary,
 };
 pub use node_gateway::{
-    ApproveTokenRequest, DeleteNodeResponse, ExcludeNodeResponse, NodeGatewayNodeInfo,
-    NodeGatewayNodeStats, NodeGatewayOverviewResponse, NodeGatewayTaskInfo, NodeGatewayTaskStats,
-    PendingTokenWithUser, RecoverNodeResponse, RevokeNodeRequest, RevokeNodeTokenResponse,
+    ApproveTokenRequest, DeleteNodeResponse, ExcludeNodeResponse, NodeGatewayListQueryParams,
+    NodeGatewayNodeInfo, NodeGatewayNodePage, NodeGatewayNodeStats, NodeGatewayOverviewResponse,
+    NodeGatewayTaskInfo, NodeGatewayTaskPage, NodeGatewayTaskStats, PendingTokenPage,
+    PendingTokenQueryParams, PendingTokenWithUser, RecoverNodeResponse, RevokeNodeRequest,
+    RevokeNodeTokenResponse,
 };
 pub use payment::{PaymentOrderInfo, PaymentOrderPage, PaymentProviderStatus};
 pub use pricing::{
     CalculateCostRequest, CostCalculationResponse, CreatePricingRequest, CreatePricingResponse,
-    MakeDefaultPricingResponse, PricingInfo, SetDefaultPricingRequest, UpdatePricingRequest,
-    UpdatePricingResponse,
+    MakeDefaultPricingResponse, PricingInfo, PricingPage, PricingQueryParams,
+    SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
 };
 pub use user::{
     ApiKeyInfo, UpdateBalanceRequest, UpdateBalanceResponse, UpdateUserRequest, UpdateUserResponse,
@@ -158,6 +162,34 @@ impl AdminApi {
         params: Option<&AccountQueryParams>,
         token: &str,
     ) -> Result<Vec<AccountInfo>> {
+        if params.is_some_and(AccountQueryParams::has_explicit_pagination) {
+            return Ok(self.list_accounts_page(params, token).await?.accounts);
+        }
+
+        let mut params = params.cloned().unwrap_or_default();
+        params.page_size = Some(COMPAT_LIST_PAGE_SIZE as u32);
+        params.limit = None;
+        params.offset = None;
+
+        let mut accounts = Vec::new();
+        let mut page = 1u32;
+        loop {
+            params.page = Some(page);
+            let response = self.list_accounts_page(Some(&params), token).await?;
+            accounts.extend(response.accounts);
+            if response.total_pages == 0 || page >= response.total_pages {
+                break;
+            }
+            page += 1;
+        }
+        Ok(accounts)
+    }
+
+    pub async fn list_accounts_page(
+        &self,
+        params: Option<&AccountQueryParams>,
+        token: &str,
+    ) -> Result<AccountPage> {
         let path = if let Some(p) = params {
             format!("/api/v1/accounts?{}", p.to_query_string())
         } else {
@@ -226,10 +258,63 @@ impl AdminApi {
             .await
     }
 
+    pub async fn list_node_gateway_nodes(
+        &self,
+        params: &NodeGatewayListQueryParams,
+        token: &str,
+    ) -> Result<NodeGatewayNodePage> {
+        let query = params.to_query_string();
+        self.client
+            .get_json(
+                &format!("/api/v1/admin/node-gateway/nodes?{query}"),
+                Some(token),
+            )
+            .await
+    }
+
+    pub async fn list_node_gateway_tasks(
+        &self,
+        params: &NodeGatewayListQueryParams,
+        token: &str,
+    ) -> Result<NodeGatewayTaskPage> {
+        let query = params.to_query_string();
+        self.client
+            .get_json(
+                &format!("/api/v1/admin/node-gateway/tasks?{query}"),
+                Some(token),
+            )
+            .await
+    }
+
     /// 获取待审批的注册令牌列表
     pub async fn list_pending_tokens(&self, token: &str) -> Result<Vec<PendingTokenWithUser>> {
+        let mut tokens = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let params = PendingTokenQueryParams::default()
+                .with_page(page)
+                .with_page_size(COMPAT_LIST_PAGE_SIZE);
+            let response = self.list_pending_tokens_page(&params, token).await?;
+            tokens.extend(response.tokens);
+            if response.total_pages == 0 || page >= response.total_pages {
+                break;
+            }
+            page += 1;
+        }
+        Ok(tokens)
+    }
+
+    pub async fn list_pending_tokens_page(
+        &self,
+        params: &PendingTokenQueryParams,
+        token: &str,
+    ) -> Result<PendingTokenPage> {
+        let query = params.to_query_string();
         self.client
-            .get_json("/api/v1/admin/node-gateway/tokens/pending", Some(token))
+            .get_json(
+                &format!("/api/v1/admin/node-gateway/tokens/pending?{query}"),
+                Some(token),
+            )
             .await
     }
 
@@ -376,7 +461,34 @@ impl AdminApi {
 
     /// 获取定价列表
     pub async fn list_pricing(&self, token: &str) -> Result<Vec<PricingInfo>> {
-        self.client.get_json("/api/v1/pricing", Some(token)).await
+        let mut pricing = Vec::new();
+        let mut page = 1u64;
+        loop {
+            let params = PricingQueryParams::default()
+                .with_page(page)
+                .with_page_size(COMPAT_LIST_PAGE_SIZE);
+            let response = self.list_pricing_page(&params, token).await?;
+            pricing.extend(response.pricing);
+            if response.total_pages == 0 || page >= response.total_pages {
+                break;
+            }
+            page += 1;
+        }
+        Ok(pricing)
+    }
+
+    pub async fn list_pricing_page(
+        &self,
+        params: &PricingQueryParams,
+        token: &str,
+    ) -> Result<PricingPage> {
+        let query = params.to_query_string();
+        let path = if query.is_empty() {
+            "/api/v1/pricing".to_string()
+        } else {
+            format!("/api/v1/pricing?{query}")
+        };
+        self.client.get_json(&path, Some(token)).await
     }
 
     /// 创建定价

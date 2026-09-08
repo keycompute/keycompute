@@ -1,3 +1,4 @@
+use super::query::escape_like_pattern;
 use crate::DbError;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
@@ -80,6 +81,11 @@ pub struct PricingModel {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, FromQueryResult)]
+struct PricingCount {
+    total: i64,
+}
+
 /// 创建定价请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreatePricingRequest {
@@ -103,6 +109,61 @@ pub struct UpdatePricingRequest {
 }
 
 impl PricingModel {
+    /// 管理端按条件分页查询定价。
+    pub async fn find_all_filtered(
+        db: &impl ConnectionTrait,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<PricingModel>, DbError> {
+        let search_pattern = search
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("%{}%", escape_like_pattern(&value.trim().to_lowercase())));
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT * FROM pricing_models
+            WHERE $1::TEXT IS NULL
+               OR LOWER(model_name) LIKE $1 ESCAPE '\'
+               OR LOWER(billing_dimension) LIKE $1 ESCAPE '\'
+               OR LOWER(id::TEXT) LIKE $1 ESCAPE '\'
+               OR LOWER(COALESCE(tenant_id::TEXT, '')) LIKE $1 ESCAPE '\'
+            ORDER BY model_name, tenant_id NULLS LAST, created_at DESC, id
+            LIMIT $2 OFFSET $3
+            "#,
+            [search_pattern.clone().into(), limit.into(), offset.into()],
+        );
+        Ok(PricingModel::find_by_statement(stmt).all(db).await?)
+    }
+
+    /// 统计管理端筛选后的定价数量。
+    pub async fn count_all_filtered(
+        db: &impl ConnectionTrait,
+        search: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let search_pattern = search
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("%{}%", escape_like_pattern(&value.trim().to_lowercase())));
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT COUNT(*)::BIGINT AS total
+            FROM pricing_models
+            WHERE $1::TEXT IS NULL
+               OR LOWER(model_name) LIKE $1 ESCAPE '\'
+               OR LOWER(billing_dimension) LIKE $1 ESCAPE '\'
+               OR LOWER(id::TEXT) LIKE $1 ESCAPE '\'
+               OR LOWER(COALESCE(tenant_id::TEXT, '')) LIKE $1 ESCAPE '\'
+            "#,
+            [search_pattern.into()],
+        );
+        let count = PricingCount::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("pricing count query returned no row".to_string()))?;
+        Ok(count.total.max(0))
+    }
+
     /// 创建新定价
     pub async fn create(
         db: &impl ConnectionTrait,

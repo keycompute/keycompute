@@ -1,3 +1,4 @@
+use super::query::escape_like_pattern;
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use keycompute_types::{AssignableUserRole, UserRole};
@@ -34,20 +35,6 @@ pub struct CreateUserRequest {
 pub struct UpdateUserRequest {
     pub name: Option<String>,
     pub role: Option<AssignableUserRole>,
-}
-
-/// 转义 LIKE 通配符
-fn escape_like_pattern(s: &str) -> String {
-    let mut escaped = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '%' => escaped.push_str(r"\%"),
-            '_' => escaped.push_str(r"\_"),
-            '\\' => escaped.push_str(r"\\"),
-            c => escaped.push(c),
-        }
-    }
-    escaped
 }
 
 /// 用户过滤参数

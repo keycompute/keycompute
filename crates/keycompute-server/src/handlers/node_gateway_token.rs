@@ -9,12 +9,13 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
 use axum::http::StatusCode;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use keycompute_db::models::user::User;
 use keycompute_db::models::user_node_gateway_token::{
@@ -320,17 +321,50 @@ pub async fn delete_my_node_gateway_token(
 /// 认证由 `admin_auth_middleware` 中间件层完成，此 handler 无需 `AuthExtractor`。
 pub async fn admin_list_pending_tokens(
     State(state): State<AppState>,
-) -> Result<Json<Vec<PendingTokenWithUser>>> {
+    Query(params): Query<PendingTokenListQueryParams>,
+) -> Result<Json<PendingTokenListResponse>> {
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let tokens = UserNodeGatewayToken::list_pending_with_users(pool)
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, None, None);
+    let tokens = UserNodeGatewayToken::list_pending_with_users(
+        pool,
+        params.search.as_deref(),
+        page_size,
+        offset,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to list pending tokens: {}", e)))?;
+    let total = UserNodeGatewayToken::count_pending_with_users(pool, params.search.as_deref())
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to list pending tokens: {}", e)))?;
+        .map_err(|e| ApiError::Internal(format!("Failed to count pending tokens: {}", e)))?;
 
-    Ok(Json(tokens))
+    Ok(Json(PendingTokenListResponse {
+        tokens,
+        total,
+        page,
+        page_size,
+        total_pages: total_pages(total, page_size),
+    }))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PendingTokenListQueryParams {
+    pub search: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingTokenListResponse {
+    pub tokens: Vec<PendingTokenWithUser>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
 }
 
 /// Admin 审批请求

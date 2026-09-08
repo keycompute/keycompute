@@ -2,16 +2,31 @@ use client_api::api::common::MessageResponse;
 use client_api::error::Result;
 use client_api::{
     TenantApi,
-    api::tenant::{CreateTenantRequest, TenantInfo, TenantQueryParams, UpdateTenantRequest},
+    api::tenant::{
+        CreateTenantRequest, TenantInfo, TenantPage, TenantQueryParams, UpdateTenantRequest,
+    },
 };
 
 use super::api_client::get_client;
 
+#[allow(dead_code)]
 pub async fn list(params: Option<TenantQueryParams>, token: &str) -> Result<Vec<TenantInfo>> {
     let client = get_client();
     TenantApi::new(&client)
         .list_tenants(params.as_ref(), token)
         .await
+}
+
+pub async fn list_page(params: TenantQueryParams, token: &str) -> Result<TenantPage> {
+    let client = get_client();
+    TenantApi::new(&client)
+        .list_tenants_page(Some(&params), token)
+        .await
+}
+
+pub async fn list_all(token: &str) -> Result<Vec<TenantInfo>> {
+    let client = get_client();
+    TenantApi::new(&client).list_all_tenants(token).await
 }
 
 #[allow(dead_code)]

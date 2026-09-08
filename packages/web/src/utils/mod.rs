@@ -1,5 +1,6 @@
 pub mod copy;
 pub mod display;
+pub(crate) mod resource;
 pub mod time;
 
 pub use copy::on_copy;

@@ -1,8 +1,36 @@
-use client_api::api::admin::CreatePricingRequest;
+use client_api::api::admin::{CreatePricingRequest, PricingQueryParams};
 use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 use ui::{Badge, BadgeVariant, ConfirmModal, PageHeader, Pagination, Table, TableHead};
 
 const PAGE_SIZE: usize = 20;
+const SEARCH_DEBOUNCE_MS: u32 = 300;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PricingListQuery {
+    search: String,
+    page: u32,
+}
+
+impl Default for PricingListQuery {
+    fn default() -> Self {
+        Self {
+            search: String::new(),
+            page: 1,
+        }
+    }
+}
+
+impl PricingListQuery {
+    fn reset_page(&mut self) {
+        self.page = 1;
+    }
+
+    fn commit_search(&mut self, search: String) {
+        self.search = search;
+        self.reset_page();
+    }
+}
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::i18n::I18n;
@@ -13,6 +41,7 @@ use crate::services::{
 };
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
 fn pricing_provider_label<'a>(dimension: &'a str, i18n: &I18n) -> &'a str {
@@ -62,15 +91,37 @@ pub fn Pricing() -> Element {
     let mut op_err = use_signal(String::new);
     // 刷新触发器
     let mut refresh_tick = use_signal(|| 0u32);
-    // 分页
-    let mut page = use_signal(|| 1u32);
+    let mut search = use_signal(String::new);
+    let mut query = use_signal(PricingListQuery::default);
 
-    let pricing_list = use_resource(move || async move {
-        let _tick = refresh_tick();
-        with_auto_refresh(auth_store, |token| async move {
-            pricing_service::list(&token).await
-        })
-        .await
+    use_effect(move || {
+        let next_search = search();
+        spawn(async move {
+            TimeoutFuture::new(SEARCH_DEBOUNCE_MS).await;
+            if search() == next_search && query.read().search != next_search {
+                query.write().commit_search(next_search);
+            }
+        });
+    });
+
+    let pricing_list = use_resource(move || {
+        let refresh_revision = refresh_tick();
+        let current_query = query();
+        async move {
+            let request_key = (current_query.clone(), refresh_revision);
+            let mut params = PricingQueryParams::default()
+                .with_page(current_query.page as u64)
+                .with_page_size(PAGE_SIZE as u64);
+            if !current_query.search.is_empty() {
+                params = params.with_search(current_query.search);
+            }
+            let result = with_auto_refresh(auth_store, move |token| {
+                let params = params.clone();
+                async move { pricing_service::list_page(&params, &token).await }
+            })
+            .await;
+            KeyedResourceValue::new(request_key, result)
+        }
     });
     let page_description = if is_admin {
         i18n.t("pricing.admin_desc")
@@ -104,19 +155,48 @@ pub fn Pricing() -> Element {
                 div { class: "alert alert-error", "{op_err}" }
             }
 
+            div { class: "toolbar",
+                div { class: "toolbar-left",
+                    div { class: "input-wrapper",
+                        input {
+                            class: "input-field",
+                            r#type: "search",
+                            placeholder: "{i18n.t(\"pricing.search_placeholder\")}",
+                            value: "{search}",
+                            oninput: move |e| search.set(e.value()),
+                        }
+                    }
+                }
+            }
+
             {
-                let (is_empty, empty_text) = match pricing_list() {
+                let current_query = query();
+                let current_key = (current_query.clone(), refresh_tick());
+                let result = current_keyed_value(
+                    &current_key,
+                    pricing_list.state().cloned(),
+                    pricing_list(),
+                );
+                let (is_empty, empty_text) = match &result {
                     None => (true, i18n.t("table.loading")),
                     Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                    Some(Ok(ref l)) if l.is_empty() => (true, i18n.t("pricing.empty")),
+                    Some(Ok(result)) if result.pricing.is_empty() => (true, i18n.t("pricing.empty")),
                     _ => (false, ""),
                 };
-                let total = pricing_list().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0);
-                let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
-                let start = (page() as usize - 1) * PAGE_SIZE;
-                let paged_list: Vec<_> = pricing_list()
-                    .and_then(|r| r.ok())
-                    .map(|l| l.into_iter().skip(start).take(PAGE_SIZE).collect())
+                let total = result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|result| result.total)
+                    .unwrap_or(0);
+                let total_pages = result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|result| result.total_pages.max(1) as u32)
+                    .unwrap_or(1);
+                let paged_list = result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|result| result.pricing.as_slice())
                     .unwrap_or_default();
                 rsx! {
                     div { class: "pricing-table-shell",
@@ -149,8 +229,7 @@ pub fn Pricing() -> Element {
                             }
                             tbody { // 显示租户 ID：nil UUID 表示全局默认 // 显示租户 ID：nil UUID 表示全局默认
 
-                                if pricing_list().and_then(|r| r.ok()).is_some() {
-                                    for p in paged_list.iter() {
+                                for p in paged_list.iter() {
                                         tr { key: "{p.id}",
                                             td {
                                                 div { class: "pricing-model-cell",
@@ -296,7 +375,6 @@ pub fn Pricing() -> Element {
                                             }
                                         }
                                     }
-                                }
                             }
                         }
                     }
@@ -305,11 +383,11 @@ pub fn Pricing() -> Element {
                             "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}"
                         }
                         Pagination {
-                            current: page(),
+                            current: current_query.page,
                             total_pages,
                             previous_label: i18n.t("table.previous").to_string(),
                             next_label: i18n.t("table.next").to_string(),
-                            on_page_change: move |p| page.set(p),
+                            on_page_change: move |p| query.write().page = p,
                         }
                     }
                 }
@@ -324,7 +402,7 @@ pub fn Pricing() -> Element {
                         show_create.set(false);
                         op_ok.set(i18n.t("pricing.created").to_string());
                         op_err.set(String::new());
-                        page.set(1);
+                        query.write().reset_page();
                         *refresh_tick.write() += 1;
                         spawn(async move {
                             gloo_timers::future::TimeoutFuture::new(3_000).await;
@@ -348,6 +426,7 @@ pub fn Pricing() -> Element {
                         editing_pricing.set(None);
                         op_ok.set(i18n.t("pricing.updated").to_string());
                         op_err.set(String::new());
+                        query.write().reset_page();
                         *refresh_tick.write() += 1;
                         spawn(async move {
                             gloo_timers::future::TimeoutFuture::new(3_000).await;
@@ -379,6 +458,7 @@ pub fn Pricing() -> Element {
                                 Ok(_) => {
                                     op_ok.set(i18n.t("pricing.deleted").to_string());
                                     op_err.set(String::new());
+                                    query.write().reset_page();
                                     *refresh_tick.write() += 1;
                                     spawn(async move {
                                         gloo_timers::future::TimeoutFuture::new(3_000).await;
@@ -421,7 +501,7 @@ fn CreatePricingModal(
     // 获取租户列表
     let tenant_list = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
-            tenant_service::list(None, &token).await
+            tenant_service::list_all(&token).await
         })
         .await
     });
@@ -764,11 +844,35 @@ fn EditPricingModal(
 
 #[cfg(test)]
 mod tests {
-    use super::pricing_col_count;
+    use super::{PricingListQuery, pricing_col_count};
 
     #[test]
     fn empty_table_colspan_matches_visible_pricing_columns() {
         assert_eq!(pricing_col_count(true), 7);
         assert_eq!(pricing_col_count(false), 6);
+    }
+
+    #[test]
+    fn committing_search_resets_pricing_page() {
+        let mut query = PricingListQuery {
+            search: String::new(),
+            page: 4,
+        };
+        query.commit_search("gpt".to_string());
+        assert_eq!(query.search, "gpt");
+        assert_eq!(query.page, 1);
+    }
+
+    #[test]
+    fn pricing_mutations_can_reset_an_orphaned_last_page() {
+        let mut query = PricingListQuery {
+            search: "matched before editing".to_string(),
+            page: 2,
+        };
+
+        query.reset_page();
+
+        assert_eq!(query.page, 1);
+        assert_eq!(query.search, "matched before editing");
     }
 }

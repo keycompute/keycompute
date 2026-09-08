@@ -2,11 +2,12 @@
 
 use crate::{
     error::{ApiError, Result},
+    handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use chrono;
@@ -65,9 +66,100 @@ pub struct NodeGatewayOverviewResponse {
     pub enabled: bool,
     pub node_stats: NodeGatewayNodeStats,
     pub task_stats: NodeGatewayTaskStats,
-    pub nodes: Vec<NodeGatewayNodeInfo>,
-    pub recent_tasks: Vec<NodeGatewayTaskInfo>,
 }
+
+#[derive(Debug, Default, Deserialize)]
+pub struct NodeGatewayListQueryParams {
+    pub status: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NodeGatewayNodePage {
+    pub nodes: Vec<NodeGatewayNodeInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NodeGatewayTaskPage {
+    pub tasks: Vec<NodeGatewayTaskInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ListCount {
+    total: i64,
+}
+
+const LIST_NODE_GATEWAY_NODES_SQL: &str = r#"
+        SELECT
+            n.id,
+            n.display_name,
+            n.client_instance_id,
+            CASE
+                WHEN n.status = 'online'
+                     AND n.last_heartbeat_at IS NOT NULL
+                     AND n.last_heartbeat_at < NOW() - INTERVAL '3 minutes'
+                THEN 'offline'
+                ELSE n.status
+            END AS status,
+            COALESCE(latest_session.accepted_models_json, '[]'::jsonb) AS accepted_models_json,
+            n.consecutive_failure_count,
+            n.failure_threshold,
+            n.last_heartbeat_at,
+            n.updated_at,
+            t.token_preview
+        FROM nodes n
+        LEFT JOIN LATERAL (
+            SELECT accepted_models_json
+            FROM node_sessions ns
+            WHERE ns.node_id = n.id
+            ORDER BY ns.last_seen_at DESC, ns.id DESC
+            LIMIT 1
+        ) latest_session ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT token_preview
+            FROM user_node_gateway_tokens token
+            WHERE token.consumed_node_id = n.id
+            ORDER BY token.issued_at DESC, token.id DESC
+            LIMIT 1
+        ) t ON TRUE
+        WHERE $1::TEXT IS NULL OR (
+            CASE
+                WHEN n.status = 'online'
+                     AND n.last_heartbeat_at IS NOT NULL
+                     AND n.last_heartbeat_at < NOW() - INTERVAL '3 minutes'
+                THEN 'offline'
+                ELSE n.status
+            END
+        ) = $1
+        ORDER BY n.created_at DESC, n.id DESC
+        LIMIT $2 OFFSET $3
+        "#;
+
+const LIST_NODE_GATEWAY_TASKS_SQL: &str = r#"
+        SELECT
+            id,
+            model,
+            status,
+            assigned_node_id,
+            failure_count,
+            failure_threshold,
+            queued_at,
+            deadline_at,
+            updated_at
+        FROM node_tasks
+        WHERE $1::TEXT IS NULL OR status = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT $2 OFFSET $3
+        "#;
 
 pub async fn get_node_gateway_overview(
     State(state): State<AppState>,
@@ -113,39 +205,29 @@ pub async fn get_node_gateway_overview(
         .await?
         .ok_or_else(|| ApiError::Internal("Failed to load task stats: no data".to_string()))?;
 
+    Ok(Json(NodeGatewayOverviewResponse {
+        enabled: state.node_gateway.is_some(),
+        node_stats,
+        task_stats,
+    }))
+}
+
+pub async fn list_node_gateway_nodes(
+    State(state): State<AppState>,
+    Query(params): Query<NodeGatewayListQueryParams>,
+) -> Result<Json<NodeGatewayNodePage>> {
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, None, None);
+    let status = params.status.filter(|value| !value.trim().is_empty());
+
     let stmt = Statement::from_sql_and_values(
         DbBackend::Postgres,
-        r#"
-        SELECT
-            n.id,
-            n.display_name,
-            n.client_instance_id,
-            CASE
-                WHEN n.status = 'online'
-                     AND n.last_heartbeat_at IS NOT NULL
-                     AND n.last_heartbeat_at < NOW() - INTERVAL '3 minutes'
-                THEN 'offline'
-                ELSE n.status
-            END AS status,
-            COALESCE(latest_session.accepted_models_json, '[]'::jsonb) AS accepted_models_json,
-            n.consecutive_failure_count,
-            n.failure_threshold,
-            n.last_heartbeat_at,
-            n.updated_at,
-            t.token_preview
-        FROM nodes n
-        LEFT JOIN LATERAL (
-            SELECT accepted_models_json
-            FROM node_sessions ns
-            WHERE ns.node_id = n.id
-            ORDER BY ns.last_seen_at DESC
-            LIMIT 1
-        ) latest_session ON TRUE
-        LEFT JOIN user_node_gateway_tokens t ON t.consumed_node_id = n.id
-        ORDER BY n.updated_at DESC
-        LIMIT 20
-        "#,
-        [],
+        LIST_NODE_GATEWAY_NODES_SQL,
+        [status.clone().into(), page_size.into(), offset.into()],
     );
     let nodes = NodeGatewayNodeInfo::find_by_statement(stmt)
         .all(pool)
@@ -154,32 +236,72 @@ pub async fn get_node_gateway_overview(
     let stmt = Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"
-        SELECT
-            id,
-            model,
-            status,
-            assigned_node_id,
-            failure_count,
-            failure_threshold,
-            queued_at,
-            deadline_at,
-            updated_at
-        FROM node_tasks
-        ORDER BY created_at DESC
-        LIMIT 20
+        SELECT COUNT(*)::BIGINT AS total
+        FROM nodes n
+        WHERE $1::TEXT IS NULL OR (
+            CASE
+                WHEN n.status = 'online'
+                     AND n.last_heartbeat_at IS NOT NULL
+                     AND n.last_heartbeat_at < NOW() - INTERVAL '3 minutes'
+                THEN 'offline'
+                ELSE n.status
+            END
+        ) = $1
         "#,
-        [],
+        [status.into()],
     );
-    let recent_tasks = NodeGatewayTaskInfo::find_by_statement(stmt)
+    let total = ListCount::find_by_statement(stmt)
+        .one(pool)
+        .await?
+        .map(|count| count.total.max(0))
+        .unwrap_or(0);
+
+    Ok(Json(NodeGatewayNodePage {
+        nodes,
+        total,
+        page,
+        page_size,
+        total_pages: total_pages(total, page_size),
+    }))
+}
+
+pub async fn list_node_gateway_tasks(
+    State(state): State<AppState>,
+    Query(params): Query<NodeGatewayListQueryParams>,
+) -> Result<Json<NodeGatewayTaskPage>> {
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, None, None);
+    let status = params.status.filter(|value| !value.trim().is_empty());
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        LIST_NODE_GATEWAY_TASKS_SQL,
+        [status.clone().into(), page_size.into(), offset.into()],
+    );
+    let tasks = NodeGatewayTaskInfo::find_by_statement(stmt)
         .all(pool)
         .await?;
 
-    Ok(Json(NodeGatewayOverviewResponse {
-        enabled: state.node_gateway.is_some(),
-        node_stats,
-        task_stats,
-        nodes,
-        recent_tasks,
+    let stmt = Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT COUNT(*)::BIGINT AS total FROM node_tasks WHERE $1::TEXT IS NULL OR status = $1",
+        [status.into()],
+    );
+    let total = ListCount::find_by_statement(stmt)
+        .one(pool)
+        .await?
+        .map(|count| count.total.max(0))
+        .unwrap_or(0);
+
+    Ok(Json(NodeGatewayTaskPage {
+        tasks,
+        total,
+        page,
+        page_size,
+        total_pages: total_pages(total, page_size),
     }))
 }
 
@@ -511,4 +633,20 @@ pub async fn delete_node(
             deleted: true,
         }),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LIST_NODE_GATEWAY_NODES_SQL, LIST_NODE_GATEWAY_TASKS_SQL};
+
+    #[test]
+    fn node_list_uses_an_immutable_unique_pagination_order() {
+        assert!(LIST_NODE_GATEWAY_NODES_SQL.contains("ORDER BY n.created_at DESC, n.id DESC"));
+        assert!(!LIST_NODE_GATEWAY_NODES_SQL.contains("ORDER BY n.updated_at"));
+    }
+
+    #[test]
+    fn task_list_uses_a_unique_pagination_order() {
+        assert!(LIST_NODE_GATEWAY_TASKS_SQL.contains("ORDER BY created_at DESC, id DESC"));
+    }
 }

@@ -104,6 +104,8 @@ use crate::{
         list_my_api_keys,
         list_my_node_gateway_tokens,
         list_my_payment_orders,
+        list_node_gateway_nodes,
+        list_node_gateway_tasks,
         list_payment_methods,
         // 定价管理
         list_pricing,
@@ -368,6 +370,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/admin/node-gateway/overview",
             get(get_node_gateway_overview),
+        )
+        .route(
+            "/api/v1/admin/node-gateway/nodes",
+            get(list_node_gateway_nodes),
+        )
+        .route(
+            "/api/v1/admin/node-gateway/tasks",
+            get(list_node_gateway_tasks),
         )
         .route("/api/v1/admin/nodes/{id}/recover", post(recover_node))
         .route("/api/v1/admin/nodes/{id}/exclude", post(exclude_node))

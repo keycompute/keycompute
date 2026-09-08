@@ -782,6 +782,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.user_desc", "查看当前平台可用的定价策略");
     m.insert("pricing.create", "+ 新建定价");
     m.insert("pricing.empty", "暂无定价策略");
+    m.insert("pricing.search_placeholder", "搜索模型、计费维度或租户 ID");
     m.insert("pricing.table_title", "模型定价表");
     m.insert(
         "pricing.table_subtitle",
@@ -1361,6 +1362,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.reset_health", "重置健康状态");
     m.insert("accounts.add_channel", "+ 新增渠道");
     m.insert("accounts.empty", "暂无渠道配置，请点击“新增渠道”添加");
+    m.insert("accounts.search_placeholder", "搜索渠道名称、供应商或 ID");
     m.insert("accounts.table_title", "渠道资产表");
     m.insert(
         "accounts.table_subtitle",

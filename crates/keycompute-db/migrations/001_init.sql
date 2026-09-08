@@ -980,6 +980,9 @@ CREATE TABLE IF NOT EXISTS nodes (
 
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
 CREATE INDEX IF NOT EXISTS idx_nodes_last_heartbeat_at ON nodes(last_heartbeat_at);
+-- 管理后台默认按创建时间倒序分页，唯一 ID 作为稳定排序兜底
+CREATE INDEX IF NOT EXISTS idx_nodes_created_at_desc
+    ON nodes(created_at DESC, id DESC);
 
 -- node_sessions: 节点会话管理表
 CREATE TABLE IF NOT EXISTS node_sessions (
@@ -1021,6 +1024,7 @@ CREATE TABLE IF NOT EXISTS node_tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_node_tasks_status_model_deadline ON node_tasks(status, model, deadline_at);
+CREATE INDEX IF NOT EXISTS idx_node_tasks_status_created_at_desc ON node_tasks(status, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_node_tasks_assigned_node_status ON node_tasks(assigned_node_id, status);
 CREATE INDEX IF NOT EXISTS idx_node_tasks_assigned_session_lease ON node_tasks(assigned_session_id, lease_id);
 
@@ -1103,9 +1107,15 @@ CREATE TABLE IF NOT EXISTS user_node_gateway_tokens (
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_user_id ON user_node_gateway_tokens(user_id);
 -- 待审批列表查询
-CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_pending ON user_node_gateway_tokens(status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_pending_issued
+    ON user_node_gateway_tokens(issued_at ASC, id ASC)
+    WHERE status = 'pending';
 -- 已审批且未被消费的 token 查询（注册时使用）
 CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_approved ON user_node_gateway_tokens(status) WHERE status = 'approved';
+-- 管理后台节点列表按节点查找最近消费的 token
+CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_consumed_node_issued
+    ON user_node_gateway_tokens(consumed_node_id, issued_at DESC, id DESC)
+    WHERE consumed_node_id IS NOT NULL;
 -- token_hash 上有 UNIQUE 约束，已自动创建唯一索引，无需额外 B-tree 索引
 -- 确保每用户同一时间仅有一个活跃 token（pending 或 approved），防止并发 POST 创建多个
 CREATE UNIQUE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_one_active ON user_node_gateway_tokens(user_id) WHERE status IN ('pending', 'approved');

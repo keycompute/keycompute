@@ -265,6 +265,11 @@ mod tests {
             "CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_expiry",
             "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_reservations_usage_log",
             "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log",
+            "CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_consumed_node_issued",
+            "ON user_node_gateway_tokens(consumed_node_id, issued_at DESC, id DESC)",
+            "WHERE consumed_node_id IS NOT NULL",
+            "CREATE INDEX IF NOT EXISTS idx_node_tasks_status_created_at_desc",
+            "ON node_tasks(status, created_at DESC, id DESC)",
         ] {
             assert!(V0001.contains(expected), "V0001 is missing {expected}");
         }
@@ -275,5 +280,20 @@ mod tests {
         assert!(!V0001.contains("ALTER TABLE"));
         assert!(!V0001.contains("\nUPDATE "));
         assert!(!V0001.contains("\nDELETE FROM "));
+    }
+
+    #[test]
+    fn initial_schema_indexes_match_admin_pagination_orders() {
+        for expected in [
+            r#"CREATE INDEX IF NOT EXISTS idx_nodes_created_at_desc
+    ON nodes(created_at DESC, id DESC);"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_pending_issued
+    ON user_node_gateway_tokens(issued_at ASC, id ASC)
+    WHERE status = 'pending';"#,
+        ] {
+            assert!(V0001.contains(expected), "V0001 is missing {expected}");
+        }
+
+        assert!(!V0001.contains("ON user_node_gateway_tokens(status) WHERE status = 'pending'"));
     }
 }

@@ -5,7 +5,8 @@ use client_api::{
     AdminApi,
     api::admin::{
         CreatePricingRequest, CreatePricingResponse, MakeDefaultPricingResponse, MessageResponse,
-        PricingInfo, SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
+        PricingInfo, PricingPage, PricingQueryParams, SetDefaultPricingRequest,
+        UpdatePricingRequest, UpdatePricingResponse,
     },
 };
 
@@ -24,6 +25,13 @@ pub fn is_global_default(tenant_id: &Option<String>) -> bool {
 pub async fn list(token: &str) -> Result<Vec<PricingInfo>> {
     let client = get_client();
     AdminApi::new(&client).list_pricing(token).await
+}
+
+pub async fn list_page(params: &PricingQueryParams, token: &str) -> Result<PricingPage> {
+    let client = get_client();
+    AdminApi::new(&client)
+        .list_pricing_page(params, token)
+        .await
 }
 
 pub async fn create(req: CreatePricingRequest, token: &str) -> Result<CreatePricingResponse> {

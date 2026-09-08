@@ -20,6 +20,7 @@ pub mod node;
 pub mod node_gateway_token;
 pub mod node_tips;
 pub mod openai;
+pub(crate) mod pagination;
 pub mod payment;
 pub mod pricing;
 pub mod requirement;
@@ -68,20 +69,23 @@ pub use user::{
 
 // 用户管理（admin_user）
 pub use admin_user::{
-    AdminUserInfo, UpdateUserRequest, UserListQueryParams, UserListResponse, delete_user,
-    freeze_user_balance, get_user_by_id, list_all_api_keys, list_all_users, list_tenants,
-    unfreeze_user_balance, update_user, update_user_balance,
+    AdminUserInfo, TenantListQueryParams, TenantListResponse, UpdateUserRequest,
+    UserListQueryParams, UserListResponse, delete_user, freeze_user_balance, get_user_by_id,
+    list_all_api_keys, list_all_users, list_tenants, unfreeze_user_balance, update_user,
+    update_user_balance,
 };
 
 // 账号管理（admin_account）
 pub use admin_account::{
-    AccountInfo, CreateAccountRequest, UpdateAccountRequest, create_account, delete_account,
-    get_default_endpoint, list_accounts, refresh_account, test_account, update_account,
+    AccountInfo, AccountListQueryParams, AccountListResponse, CreateAccountRequest,
+    UpdateAccountRequest, create_account, delete_account, get_default_endpoint, list_accounts,
+    refresh_account, test_account, update_account,
 };
 
 // Node Gateway 管理
 pub use admin_node_gateway::{
-    delete_node, exclude_node, get_node_gateway_overview, recover_node, revoke_node_token,
+    delete_node, exclude_node, get_node_gateway_overview, list_node_gateway_nodes,
+    list_node_gateway_tasks, recover_node, revoke_node_token,
 };
 
 // 监控追踪

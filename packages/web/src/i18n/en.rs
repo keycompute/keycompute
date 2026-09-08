@@ -884,6 +884,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("pricing.create", "+ Create Pricing");
     m.insert("pricing.empty", "No pricing policies yet");
+    m.insert(
+        "pricing.search_placeholder",
+        "Search model, billing dimension, or tenant ID",
+    );
     m.insert("pricing.table_title", "Model Pricing Table");
     m.insert("pricing.table_subtitle", "Review provider ownership, input/output rates, and default strategies for each model in a single place.");
     m.insert("pricing.items_suffix", "items");
@@ -1604,6 +1608,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "accounts.empty",
         "No channels configured yet. Use Add Channel to create one.",
+    );
+    m.insert(
+        "accounts.search_placeholder",
+        "Search channel, provider, or ID",
     );
     m.insert("accounts.table_title", "Channel Asset Table");
     m.insert(

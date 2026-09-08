@@ -15,6 +15,7 @@ pub mod password_reset;
 pub mod payment_order;
 pub mod pending_registration;
 pub mod pricing_model;
+mod query;
 pub mod response_affinity;
 pub mod responses_idempotency_claim;
 pub mod system_setting;

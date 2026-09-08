@@ -7,8 +7,11 @@ use crate::api::common::encode_query_value;
 /// 账号查询参数
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AccountQueryParams {
+    pub search: Option<String>,
     pub provider: Option<String>,
     pub status: Option<String>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
 }
@@ -20,6 +23,11 @@ impl AccountQueryParams {
 
     pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
         self.provider = Some(provider.into());
+        self
+    }
+
+    pub fn with_search(mut self, search: impl Into<String>) -> Self {
+        self.search = Some(search.into());
         self
     }
 
@@ -38,13 +46,39 @@ impl AccountQueryParams {
         self
     }
 
+    pub fn with_page(mut self, page: u32) -> Self {
+        self.page = Some(page);
+        self
+    }
+
+    pub fn with_page_size(mut self, page_size: u32) -> Self {
+        self.page_size = Some(page_size);
+        self
+    }
+
+    pub(crate) fn has_explicit_pagination(&self) -> bool {
+        self.page.is_some()
+            || self.page_size.is_some()
+            || self.limit.is_some()
+            || self.offset.is_some()
+    }
+
     pub fn to_query_string(&self) -> String {
         let mut params = Vec::new();
+        if let Some(ref search) = self.search {
+            params.push(format!("search={}", encode_query_value(search)));
+        }
         if let Some(ref provider) = self.provider {
             params.push(format!("provider={}", encode_query_value(provider)));
         }
         if let Some(ref status) = self.status {
             params.push(format!("status={}", encode_query_value(status)));
+        }
+        if let Some(page) = self.page {
+            params.push(format!("page={page}"));
+        }
+        if let Some(page_size) = self.page_size {
+            params.push(format!("page_size={page_size}"));
         }
         if let Some(limit) = self.limit {
             params.push(format!("limit={}", limit));
@@ -78,6 +112,19 @@ pub struct AccountInfo {
     pub visibility: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct AccountPage {
+    pub accounts: Vec<AccountInfo>,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub page: u32,
+    #[serde(default)]
+    pub page_size: u32,
+    #[serde(default)]
+    pub total_pages: u32,
 }
 
 /// 创建账号请求
@@ -193,7 +240,19 @@ pub struct AccountRefreshResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{AccountRefreshResponse, AccountTestResponse, CreateAccountRequest};
+    use super::{
+        AccountQueryParams, AccountRefreshResponse, AccountTestResponse, CreateAccountRequest,
+    };
+
+    #[test]
+    fn account_query_serializes_server_side_search_and_pagination() {
+        let query = AccountQueryParams::new()
+            .with_search("OpenAI & team")
+            .with_page(3)
+            .with_page_size(20)
+            .to_query_string();
+        assert_eq!(query, "search=OpenAI%20%26%20team&page=3&page_size=20");
+    }
 
     #[test]
     fn account_test_response_reads_top_level_latency() {

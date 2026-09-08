@@ -1,3 +1,4 @@
+use super::query::escape_like_pattern;
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
@@ -21,6 +22,11 @@ pub struct Tenant {
     pub responses_idempotency_claim_count: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct TenantCount {
+    total: i64,
 }
 
 /// 创建租户请求
@@ -115,6 +121,58 @@ impl Tenant {
         let tenants = Tenant::find_by_statement(stmt).all(db).await?;
 
         Ok(tenants)
+    }
+
+    /// 分页查找租户，供管理面使用。
+    pub async fn find_all_filtered(
+        db: &impl ConnectionTrait,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Tenant>, DbError> {
+        let search = search
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(escape_like_pattern);
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT * FROM tenants
+            WHERE ($1::text IS NULL
+                OR LOWER(name) LIKE '%' || LOWER($1) || '%' ESCAPE '\'
+                OR LOWER(id::text) LIKE '%' || LOWER($1) || '%' ESCAPE '\')
+            ORDER BY created_at DESC, id DESC
+            LIMIT $2 OFFSET $3
+            "#,
+            [search.as_deref().into(), limit.into(), offset.into()],
+        );
+        Ok(Tenant::find_by_statement(stmt).all(db).await?)
+    }
+
+    /// 统计管理面过滤后的租户数量。
+    pub async fn count_all_filtered(
+        db: &impl ConnectionTrait,
+        search: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let search = search
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(escape_like_pattern);
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT COUNT(*)::BIGINT AS total FROM tenants
+            WHERE ($1::text IS NULL
+                OR LOWER(name) LIKE '%' || LOWER($1) || '%' ESCAPE '\'
+                OR LOWER(id::text) LIKE '%' || LOWER($1) || '%' ESCAPE '\')
+            "#,
+            [search.as_deref().into()],
+        );
+        Ok(TenantCount::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .map(|row| row.total)
+            .unwrap_or(0))
     }
 
     /// 查找激活的租户

@@ -5,11 +5,12 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use futures::StreamExt;
 use keycompute_db::models::{
@@ -57,13 +58,45 @@ pub struct AccountInfo {
     pub last_used_at: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct AccountListQueryParams {
+    pub search: Option<String>,
+    pub provider: Option<String>,
+    pub status: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountListResponse {
+    pub accounts: Vec<AccountInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+}
+
+fn parse_account_status(status: Option<&str>) -> Result<Option<bool>> {
+    match status.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("all") => Ok(None),
+        Some("active" | "enabled") => Ok(Some(true)),
+        Some("inactive" | "disabled") => Ok(Some(false)),
+        Some(status) => Err(ApiError::BadRequest(format!(
+            "Invalid account status '{status}', expected active or inactive"
+        ))),
+    }
+}
+
 /// 列出所有账号（Admin 全局视图，不限租户）
 ///
 /// GET /api/v1/accounts
 pub async fn list_accounts(
     auth: AuthExtractor,
     State(state): State<AppState>,
-) -> Result<Json<Vec<AccountInfo>>> {
+    Query(params): Query<AccountListQueryParams>,
+) -> Result<Json<AccountListResponse>> {
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
@@ -73,10 +106,27 @@ pub async fn list_accounts(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    // Admin 管理面加载所有租户的账号
-    let db_accounts = Account::find_all(pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
+    let enabled = parse_account_status(params.status.as_deref())?;
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
+    let db_accounts = Account::find_all_filtered(
+        pool,
+        params.provider.as_deref(),
+        enabled,
+        params.search.as_deref(),
+        page_size,
+        offset,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
+    let total = Account::count_all_filtered(
+        pool,
+        params.provider.as_deref(),
+        enabled,
+        params.search.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to count accounts: {}", e)))?;
 
     let accounts: Vec<AccountInfo> = db_accounts
         .into_iter()
@@ -112,7 +162,13 @@ pub async fn list_accounts(
         })
         .collect();
 
-    Ok(Json(accounts))
+    Ok(Json(AccountListResponse {
+        accounts,
+        total,
+        page,
+        page_size,
+        total_pages: total_pages(total, page_size),
+    }))
 }
 
 /// 创建账号请求
@@ -1096,6 +1152,14 @@ pub fn get_default_endpoint(provider: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_status_filter_accepts_documented_values() {
+        assert_eq!(parse_account_status(None).unwrap(), None);
+        assert_eq!(parse_account_status(Some("active")).unwrap(), Some(true));
+        assert_eq!(parse_account_status(Some("disabled")).unwrap(), Some(false));
+        assert!(parse_account_status(Some("unknown")).is_err());
+    }
     use llm_protocol_provider::{
         ByteStream, GetBinaryResponse, UpstreamResponse, UpstreamResponseMeta,
         test_support::RecordingGetTransport,

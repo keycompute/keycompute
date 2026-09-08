@@ -1,3 +1,4 @@
+use super::query::escape_like_pattern;
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
@@ -28,6 +29,11 @@ pub struct Account {
     pub last_probe_error_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromQueryResult)]
+struct AccountCount {
+    total: i64,
 }
 
 /// 创建账号请求
@@ -209,6 +215,76 @@ impl Account {
         let accounts = Account::find_by_statement(stmt).all(db).await?;
 
         Ok(accounts)
+    }
+
+    /// 分页查找所有租户的账号，供 Admin 管理面使用。
+    pub async fn find_all_filtered(
+        db: &impl ConnectionTrait,
+        provider: Option<&str>,
+        enabled: Option<bool>,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Account>, DbError> {
+        let search = search
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(escape_like_pattern);
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT * FROM accounts
+            WHERE ($1::text IS NULL OR LOWER(provider) = LOWER($1))
+              AND ($2::boolean IS NULL OR enabled = $2)
+              AND ($3::text IS NULL
+                OR LOWER(name) LIKE '%' || LOWER($3) || '%' ESCAPE '\'
+                OR LOWER(provider) LIKE '%' || LOWER($3) || '%' ESCAPE '\'
+                OR LOWER(id::text) LIKE '%' || LOWER($3) || '%' ESCAPE '\'
+                OR LOWER(tenant_id::text) LIKE '%' || LOWER($3) || '%' ESCAPE '\')
+            ORDER BY priority DESC, created_at ASC, id ASC
+            LIMIT $4 OFFSET $5
+            "#,
+            [
+                provider.into(),
+                enabled.into(),
+                search.as_deref().into(),
+                limit.into(),
+                offset.into(),
+            ],
+        );
+        Ok(Account::find_by_statement(stmt).all(db).await?)
+    }
+
+    /// 统计 Admin 管理面过滤后的账号数量。
+    pub async fn count_all_filtered(
+        db: &impl ConnectionTrait,
+        provider: Option<&str>,
+        enabled: Option<bool>,
+        search: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let search = search
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(escape_like_pattern);
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT COUNT(*)::BIGINT AS total FROM accounts
+            WHERE ($1::text IS NULL OR LOWER(provider) = LOWER($1))
+              AND ($2::boolean IS NULL OR enabled = $2)
+              AND ($3::text IS NULL
+                OR LOWER(name) LIKE '%' || LOWER($3) || '%' ESCAPE '\'
+                OR LOWER(provider) LIKE '%' || LOWER($3) || '%' ESCAPE '\'
+                OR LOWER(id::text) LIKE '%' || LOWER($3) || '%' ESCAPE '\'
+                OR LOWER(tenant_id::text) LIKE '%' || LOWER($3) || '%' ESCAPE '\')
+            "#,
+            [provider.into(), enabled.into(), search.as_deref().into()],
+        );
+        Ok(AccountCount::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .map(|row| row.total)
+            .unwrap_or(0))
     }
 
     /// 查找租户启用的账号（含本租户 + 全局可见）

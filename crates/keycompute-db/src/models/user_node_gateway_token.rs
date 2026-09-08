@@ -1,5 +1,6 @@
 //! 用户节点网关注册令牌模型
 
+use super::query::escape_like_pattern;
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
@@ -43,6 +44,25 @@ pub struct PendingTokenWithUser {
     pub issued_at: DateTime<Utc>,
     pub user_email: String,
 }
+
+#[derive(Debug, FromQueryResult)]
+struct PendingTokenCount {
+    total: i64,
+}
+
+const LIST_PENDING_WITH_USERS_SQL: &str = r#"
+    SELECT t.id, t.user_id, t.token_preview, t.status, t.issued_at,
+           COALESCE(u.email, 'deleted_user') AS user_email
+    FROM user_node_gateway_tokens t
+    LEFT JOIN users u ON t.user_id = u.id
+    WHERE t.status = 'pending'
+      AND ($1::TEXT IS NULL
+           OR LOWER(COALESCE(u.email, 'deleted_user')) LIKE $1 ESCAPE '\'
+           OR LOWER(t.token_preview) LIKE $1 ESCAPE '\'
+           OR LOWER(t.id::TEXT) LIKE $1 ESCAPE '\')
+    ORDER BY t.issued_at ASC, t.id
+    LIMIT $2 OFFSET $3
+    "#;
 
 /// 令牌响应（不含 hash，安全）
 #[derive(Debug, Clone, Serialize)]
@@ -241,16 +261,53 @@ impl UserNodeGatewayToken {
     /// 列出待审批 token 并附带用户邮箱
     pub async fn list_pending_with_users(
         db: &impl ConnectionTrait,
+        search: Option<&str>,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<PendingTokenWithUser>, DbError> {
-        let stmt = Statement::from_string(
+        let search_pattern = search
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("%{}%", escape_like_pattern(&value.trim().to_lowercase())));
+        let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"SELECT t.id, t.user_id, t.token_preview, t.status, t.issued_at, COALESCE(u.email, 'deleted_user') AS user_email FROM user_node_gateway_tokens t LEFT JOIN users u ON t.user_id = u.id WHERE t.status = 'pending' ORDER BY t.issued_at ASC LIMIT 100"#.to_string(),
+            LIST_PENDING_WITH_USERS_SQL,
+            [search_pattern.into(), limit.into(), offset.into()],
         );
         let rows = PendingTokenWithUser::find_by_statement(stmt)
             .all(db)
             .await?;
 
         Ok(rows)
+    }
+
+    pub async fn count_pending_with_users(
+        db: &impl ConnectionTrait,
+        search: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let search_pattern = search
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| format!("%{}%", escape_like_pattern(&value.trim().to_lowercase())));
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT COUNT(*)::BIGINT AS total
+            FROM user_node_gateway_tokens t
+            LEFT JOIN users u ON t.user_id = u.id
+            WHERE t.status = 'pending'
+              AND ($1::TEXT IS NULL
+                   OR LOWER(COALESCE(u.email, 'deleted_user')) LIKE $1 ESCAPE '\'
+                   OR LOWER(t.token_preview) LIKE $1 ESCAPE '\'
+                   OR LOWER(t.id::TEXT) LIKE $1 ESCAPE '\')
+            "#,
+            [search_pattern.into()],
+        );
+        let count = PendingTokenCount::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| {
+                DbError::Other("pending token count query returned no row".to_string())
+            })?;
+        Ok(count.total.max(0))
     }
 
     /// 审批通过 token
@@ -404,5 +461,19 @@ impl UserNodeGatewayToken {
         let result = db.execute(stmt).await?;
 
         Ok(result.rows_affected() > 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LIST_PENDING_WITH_USERS_SQL;
+
+    #[test]
+    fn pending_token_list_uses_the_partial_index_predicate_and_order() {
+        assert!(LIST_PENDING_WITH_USERS_SQL.contains("WHERE t.status = 'pending'"));
+        assert!(
+            LIST_PENDING_WITH_USERS_SQL.contains("ORDER BY t.issued_at ASC, t.id"),
+            "pending tokens must keep an immutable oldest-first pagination order"
+        );
     }
 }

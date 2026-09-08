@@ -1,8 +1,9 @@
 use client_api::{
     AdminApi,
     api::admin::{
-        ApproveTokenRequest, DeleteNodeResponse, NodeGatewayOverviewResponse, PendingTokenWithUser,
-        RecoverNodeResponse,
+        ApproveTokenRequest, DeleteNodeResponse, NodeGatewayListQueryParams, NodeGatewayNodePage,
+        NodeGatewayOverviewResponse, NodeGatewayTaskPage, PendingTokenPage,
+        PendingTokenQueryParams, RecoverNodeResponse,
     },
     error::Result,
 };
@@ -14,9 +15,34 @@ pub async fn overview(token: &str) -> Result<NodeGatewayOverviewResponse> {
     AdminApi::new(&client).node_gateway_overview(token).await
 }
 
-pub async fn list_pending_tokens(token: &str) -> Result<Vec<PendingTokenWithUser>> {
+pub async fn list_pending_tokens(
+    params: &PendingTokenQueryParams,
+    token: &str,
+) -> Result<PendingTokenPage> {
     let client = get_client();
-    AdminApi::new(&client).list_pending_tokens(token).await
+    AdminApi::new(&client)
+        .list_pending_tokens_page(params, token)
+        .await
+}
+
+pub async fn list_nodes(
+    params: &NodeGatewayListQueryParams,
+    token: &str,
+) -> Result<NodeGatewayNodePage> {
+    let client = get_client();
+    AdminApi::new(&client)
+        .list_node_gateway_nodes(params, token)
+        .await
+}
+
+pub async fn list_tasks(
+    params: &NodeGatewayListQueryParams,
+    token: &str,
+) -> Result<NodeGatewayTaskPage> {
+    let client = get_client();
+    AdminApi::new(&client)
+        .list_node_gateway_tasks(params, token)
+        .await
 }
 
 pub async fn approve_token(

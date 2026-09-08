@@ -5,6 +5,7 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
 use axum::{
@@ -675,13 +676,32 @@ pub struct TenantInfo {
     pub created_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TenantListQueryParams {
+    pub search: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TenantListResponse {
+    pub tenants: Vec<TenantInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+}
+
 /// 列出所有租户
 ///
 /// GET /api/v1/tenants
 pub async fn list_tenants(
     auth: AuthExtractor,
     State(state): State<AppState>,
-) -> Result<Json<Vec<TenantInfo>>> {
+    Query(params): Query<TenantListQueryParams>,
+) -> Result<Json<TenantListResponse>> {
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
@@ -691,9 +711,14 @@ pub async fn list_tenants(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let tenants = Tenant::find_all(pool)
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
+    let tenants = Tenant::find_all_filtered(pool, params.search.as_deref(), page_size, offset)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query tenants: {}", e)))?;
+    let total = Tenant::count_all_filtered(pool, params.search.as_deref())
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to count tenants: {}", e)))?;
 
     // 批量统计各租户用户数量（避免 N+1 查询）
     let tenant_ids: Vec<Uuid> = tenants.iter().map(|t| t.id).collect();
@@ -718,7 +743,13 @@ pub async fn list_tenants(
         })
         .collect();
 
-    Ok(Json(result))
+    Ok(Json(TenantListResponse {
+        tenants: result,
+        total,
+        page,
+        page_size,
+        total_pages: total_pages(total, page_size),
+    }))
 }
 
 #[cfg(test)]

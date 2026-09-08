@@ -5,11 +5,12 @@
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
+    handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use bigdecimal::BigDecimal;
 use keycompute_db::models::pricing_model::{
@@ -137,6 +138,24 @@ pub struct PricingInfo {
     pub created_at: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct PricingListQueryParams {
+    pub search: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PricingListResponse {
+    pub pricing: Vec<PricingInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+}
+
 /// 创建定价请求（管理员）
 #[derive(Debug, Deserialize)]
 pub struct CreatePricingAdminRequest {
@@ -186,7 +205,8 @@ pub struct UpdatePricingAdminRequest {
 pub async fn list_pricing(
     auth: AuthExtractor,
     State(state): State<AppState>,
-) -> Result<Json<Vec<PricingInfo>>> {
+    Query(params): Query<PricingListQueryParams>,
+) -> Result<Json<PricingListResponse>> {
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
@@ -196,19 +216,15 @@ pub async fn list_pricing(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    // Admin 查看所有定价（包括所有租户和全局默认）
-    let stmt = Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r#"
-        SELECT * FROM pricing_models
-        ORDER BY model_name, tenant_id NULLS LAST, created_at DESC
-    "#,
-        [],
-    );
-    let pricing_models = PricingModel::find_by_statement(stmt)
-        .all(pool)
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
+    let pricing_models =
+        PricingModel::find_all_filtered(pool, params.search.as_deref(), page_size, offset)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
+    let total = PricingModel::count_all_filtered(pool, params.search.as_deref())
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
+        .map_err(|e| ApiError::Internal(format!("Failed to count pricing: {}", e)))?;
 
     let pricing_list: Vec<PricingInfo> = pricing_models
         .into_iter()
@@ -231,7 +247,13 @@ pub async fn list_pricing(
         })
         .collect();
 
-    Ok(Json(pricing_list))
+    Ok(Json(PricingListResponse {
+        pricing: pricing_list,
+        total,
+        page,
+        page_size,
+        total_pages: total_pages(total, page_size),
+    }))
 }
 
 /// 创建定价

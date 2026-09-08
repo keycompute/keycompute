@@ -1,12 +1,31 @@
+use client_api::api::admin::{NodeGatewayListQueryParams, PendingTokenQueryParams};
 use dioxus::prelude::*;
 use ui::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, PageHeader, Table,
-    TableHead,
+    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, PageHeader, Pagination,
+    Table, TableHead,
 };
+
+const PAGE_SIZE: u64 = 20;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NodeGatewayPageKey {
+    refresh_revision: u64,
+    page: u32,
+}
+
+impl NodeGatewayPageKey {
+    fn new(refresh_revision: u64, page: u32) -> Self {
+        Self {
+            refresh_revision,
+            page,
+        }
+    }
+}
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, node_gateway_service};
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore};
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::{format_time, format_time_opt};
 use crate::views::shared::accounts::NoPermissionView;
 
@@ -30,6 +49,9 @@ pub fn NodeGateway() -> Element {
     // 触发刷新
     let tokens_key = use_signal(|| 0u64);
     let overview_key = use_signal(|| 0u64);
+    let mut token_page = use_signal(|| 1u32);
+    let mut node_page = use_signal(|| 1u32);
+    let mut task_page = use_signal(|| 1u32);
     // 审批弹窗控制
     let mut modal_open = use_signal(|| false);
     let mut modal_token_id = use_signal(String::new);
@@ -56,12 +78,53 @@ pub fn NodeGateway() -> Element {
     });
 
     let pending_tokens = use_resource(move || {
-        let _key = tokens_key();
+        let refresh_revision = tokens_key();
+        let current_page = token_page();
         async move {
-            with_auto_refresh(auth_store, |token| async move {
-                node_gateway_service::list_pending_tokens(&token).await
+            let request_key = NodeGatewayPageKey::new(refresh_revision, current_page);
+            let params = PendingTokenQueryParams::default()
+                .with_page(current_page as u64)
+                .with_page_size(PAGE_SIZE);
+            let result = with_auto_refresh(auth_store, move |token| {
+                let params = params.clone();
+                async move { node_gateway_service::list_pending_tokens(&params, &token).await }
             })
-            .await
+            .await;
+            KeyedResourceValue::new(request_key, result)
+        }
+    });
+
+    let nodes = use_resource(move || {
+        let refresh_revision = overview_key();
+        let current_page = node_page();
+        async move {
+            let request_key = NodeGatewayPageKey::new(refresh_revision, current_page);
+            let params = NodeGatewayListQueryParams::default()
+                .with_page(current_page as u64)
+                .with_page_size(PAGE_SIZE);
+            let result = with_auto_refresh(auth_store, move |token| {
+                let params = params.clone();
+                async move { node_gateway_service::list_nodes(&params, &token).await }
+            })
+            .await;
+            KeyedResourceValue::new(request_key, result)
+        }
+    });
+
+    let tasks = use_resource(move || {
+        let refresh_revision = overview_key();
+        let current_page = task_page();
+        async move {
+            let request_key = NodeGatewayPageKey::new(refresh_revision, current_page);
+            let params = NodeGatewayListQueryParams::default()
+                .with_page(current_page as u64)
+                .with_page_size(PAGE_SIZE);
+            let result = with_auto_refresh(auth_store, move |token| {
+                let params = params.clone();
+                async move { node_gateway_service::list_tasks(&params, &token).await }
+            })
+            .await;
+            KeyedResourceValue::new(request_key, result)
         }
     });
 
@@ -69,6 +132,7 @@ pub fn NodeGateway() -> Element {
         let mut ui_store = ui_store;
         #[allow(unused_mut)]
         let mut tokens_key = tokens_key;
+        let mut token_page = token_page;
         let i18n = i18n;
         spawn(async move {
             let req = client_api::api::admin::ApproveTokenRequest {
@@ -90,6 +154,7 @@ pub fn NodeGateway() -> Element {
                         i18n.t("node_gateway.reject_success")
                     };
                     ui_store.show_success(msg);
+                    token_page.set(1);
                     tokens_key.with_mut(|v| *v += 1);
                 }
                 Err(e) => {
@@ -127,6 +192,7 @@ pub fn NodeGateway() -> Element {
     let do_delete = move |node_id: String| {
         let mut ui_store = ui_store;
         let mut overview_key = overview_key;
+        let mut node_page = node_page;
         let i18n = i18n;
         spawn(async move {
             let result = with_auto_refresh(auth_store, |token| {
@@ -137,6 +203,7 @@ pub fn NodeGateway() -> Element {
             match result {
                 Ok(_) => {
                     ui_store.show_success(i18n.t("node_gateway.delete_success"));
+                    node_page.set(1);
                     overview_key.with_mut(|v| *v += 1);
                 }
                 Err(e) => {
@@ -169,6 +236,22 @@ pub fn NodeGateway() -> Element {
             }
         });
     };
+
+    let pending_tokens_result = current_keyed_value(
+        &NodeGatewayPageKey::new(tokens_key(), token_page()),
+        pending_tokens.state().cloned(),
+        pending_tokens(),
+    );
+    let nodes_result = current_keyed_value(
+        &NodeGatewayPageKey::new(overview_key(), node_page()),
+        nodes.state().cloned(),
+        nodes(),
+    );
+    let tasks_result = current_keyed_value(
+        &NodeGatewayPageKey::new(overview_key(), task_page()),
+        tasks.state().cloned(),
+        tasks(),
+    );
 
     rsx! {
         // 审批确认弹窗
@@ -363,10 +446,10 @@ pub fn NodeGateway() -> Element {
                                 p { class: "text-secondary", {i18n.t("node_gateway.token_approval_desc")} }
                             }
                             {
-                                match pending_tokens() {
-                                    Some(Ok(ref tokens)) if !tokens.is_empty() => rsx! {
+                                match pending_tokens_result.as_ref() {
+                                    Some(Ok(result)) if !result.tokens.is_empty() => rsx! {
                                         Badge { variant: BadgeVariant::Warning,
-                                            {i18n.t("node_gateway.token_approval_pending_count").replace("{count}", &tokens.len().to_string())}
+                                            {i18n.t("node_gateway.token_approval_pending_count").replace("{count}", &result.total.to_string())}
                                         }
                                     },
                                     _ => rsx! {},
@@ -374,18 +457,18 @@ pub fn NodeGateway() -> Element {
                             }
                         }
 
-                        match pending_tokens() {
+                        match pending_tokens_result.as_ref() {
                             None => rsx! {
                                 p { class: "text-secondary", {i18n.t("table.loading")} }
                             },
-                            Some(Err(ref e)) => rsx! {
+                            Some(Err(e)) => rsx! {
                                 div { class: "alert alert-warning",
                                     p { "{i18n.t(\"common.load_failed\")}: {e}" }
                                 }
                             },
-                            Some(Ok(ref tokens)) => rsx! {
+                            Some(Ok(result)) => rsx! {
                                 Table {
-                                    empty: tokens.is_empty(),
+                                    empty: result.tokens.is_empty(),
                                     empty_text: i18n.t("node_gateway.no_pending_tokens"),
                                     col_count: 5,
                                     thead {
@@ -398,7 +481,7 @@ pub fn NodeGateway() -> Element {
                                         }
                                     }
                                     tbody {
-                                        for t in tokens.iter() {
+                                        for t in result.tokens.iter() {
                                             tr {
                                                 td {
                                                     div { class: "account-cell-main",
@@ -450,141 +533,186 @@ pub fn NodeGateway() -> Element {
                                         }
                                     }
                                 }
+                                Pagination {
+                                    current: token_page(),
+                                    total_pages: result.total_pages.max(1) as u32,
+                                    previous_label: i18n.t("table.previous").to_string(),
+                                    next_label: i18n.t("table.next").to_string(),
+                                    on_page_change: move |page| token_page.set(page),
+                                }
                             },
                         }
                     }
 
                     div { class: "section",
                         h2 { class: "section-title", {i18n.t("node_gateway.nodes_title")} }
-                        Table {
-                            empty: data.nodes.is_empty(),
-                            empty_text: i18n.t("node_gateway.no_nodes"),
-                            col_count: 8,
-                            thead {
-                                tr {
-                                    TableHead { {i18n.t("node_gateway.node")} }
-                                    TableHead { {i18n.t("table.status")} }
-                                    TableHead { {i18n.t("node_gateway.models")} }
-                                    TableHead { {i18n.t("node_gateway.failures")} }
-                                    TableHead { {i18n.t("node_gateway.heartbeat")} }
-                                    TableHead { {i18n.t("node_gateway.token_preview")} }
-                                    TableHead { "ID" }
-                                    TableHead { {i18n.t("table.actions")} }
+                        match nodes_result.as_ref() {
+                            None => rsx! {
+                                p { class: "text-secondary", {i18n.t("table.loading")} }
+                            },
+                            Some(Err(e)) => rsx! {
+                                div { class: "alert alert-warning",
+                                    p { "{i18n.t(\"common.load_failed\")}: {e}" }
                                 }
-                            }
-                            tbody {
-                                for node in data.nodes.iter() {
-                                    tr {
-                                        td {
-                                            div { class: "account-cell-main",
-                                                div { class: "account-name-row",
-                                                    span { class: "account-name", "{node.display_name}" }
-                                                }
-                                                div { class: "account-subline", "{node.client_instance_id}" }
-                                            }
+                            },
+                            Some(Ok(result)) => rsx! {
+                                Table {
+                                    empty: result.nodes.is_empty(),
+                                    empty_text: i18n.t("node_gateway.no_nodes"),
+                                    col_count: 8,
+                                    thead {
+                                        tr {
+                                            TableHead { {i18n.t("node_gateway.node")} }
+                                            TableHead { {i18n.t("table.status")} }
+                                            TableHead { {i18n.t("node_gateway.models")} }
+                                            TableHead { {i18n.t("node_gateway.failures")} }
+                                            TableHead { {i18n.t("node_gateway.heartbeat")} }
+                                            TableHead { {i18n.t("node_gateway.token_preview")} }
+                                            TableHead { "ID" }
+                                            TableHead { {i18n.t("table.actions")} }
                                         }
-                                        td { NodeStatusBadge { status: node.status.clone() } }
-                                        td {
-                                            div { class: "account-models",
-                                                for model in accepted_models(&node.accepted_models_json).iter() {
-                                                    span { class: "account-model-chip", "{model}" }
-                                                }
-                                                if accepted_models(&node.accepted_models_json).is_empty() {
-                                                    span { class: "account-model-chip account-model-chip-muted", {i18n.t("node_gateway.no_models")} }
-                                                }
-                                            }
-                                        }
-                                        td { "{node.consecutive_failure_count}/{node.failure_threshold}" }
-                                        td { span { class: "account-time-value", {format_time_opt(node.last_heartbeat_at.as_deref())} } }
-                                        td {
-                                            if let Some(ref preview) = node.token_preview {
-                                                code { "{preview}" }
-                                            } else {
-                                                span { class: "text-secondary", "—" }
-                                            }
-                                        }
-                                        td { span { class: "account-id", "{short_id(&node.id)}" } }
-                                        td {
-                                            div { class: "accounts-actions",
-                                                if node.status == "excluded" {
-                                                    Button {
-                                                        variant: ButtonVariant::Ghost,
-                                                        size: ButtonSize::Small,
-                                                        disabled: recover_modal_open(),
-                                                        onclick: {
-                                                            let node_id = node.id.clone();
-                                                            move |_| {
-                                                                recover_node_id.set(node_id.clone());
-                                                                recover_modal_open.set(true);
-                                                            }
-                                                        },
-                                                        {i18n.t("node_gateway.recover")}
-                                                    }
-                                                } else {
-                                                    Button {
-                                                        variant: ButtonVariant::Ghost,
-                                                        size: ButtonSize::Small,
-                                                        disabled: revoke_modal_open(),
-                                                        onclick: {
-                                                            let node_id = node.id.clone();
-                                                            move |_| {
-                                                                revoke_node_id.set(node_id.clone());
-                                                                revoke_reason.set(String::new());
-                                                                revoke_modal_open.set(true);
-                                                            }
-                                                        },
-                                                        {i18n.t("node_gateway.revoke")}
-                                                    }
-                                                }
-                                                Button {
-                                                    variant: ButtonVariant::Danger,
-                                                    size: ButtonSize::Small,
-                                                    disabled: delete_modal_open(),
-                                                    onclick: {
-                                                        let node_id = node.id.clone();
-                                                        move |_| {
-                                                            delete_node_id.set(node_id.clone());
-                                                            delete_modal_open.set(true);
+                                    }
+                                    tbody {
+                                        for node in result.nodes.iter() {
+                                            tr {
+                                                td {
+                                                    div { class: "account-cell-main",
+                                                        div { class: "account-name-row",
+                                                            span { class: "account-name", "{node.display_name}" }
                                                         }
-                                                    },
-                                                    {i18n.t("node_gateway.delete")}
+                                                        div { class: "account-subline", "{node.client_instance_id}" }
+                                                    }
+                                                }
+                                                td { NodeStatusBadge { status: node.status.clone() } }
+                                                td {
+                                                    div { class: "account-models",
+                                                        for model in accepted_models(&node.accepted_models_json).iter() {
+                                                            span { class: "account-model-chip", "{model}" }
+                                                        }
+                                                        if accepted_models(&node.accepted_models_json).is_empty() {
+                                                            span { class: "account-model-chip account-model-chip-muted", {i18n.t("node_gateway.no_models")} }
+                                                        }
+                                                    }
+                                                }
+                                                td { "{node.consecutive_failure_count}/{node.failure_threshold}" }
+                                                td { span { class: "account-time-value", {format_time_opt(node.last_heartbeat_at.as_deref())} } }
+                                                td {
+                                                    if let Some(ref preview) = node.token_preview {
+                                                        code { "{preview}" }
+                                                    } else {
+                                                        span { class: "text-secondary", "—" }
+                                                    }
+                                                }
+                                                td { span { class: "account-id", "{short_id(&node.id)}" } }
+                                                td {
+                                                    div { class: "accounts-actions",
+                                                        if node.status == "excluded" {
+                                                            Button {
+                                                                variant: ButtonVariant::Ghost,
+                                                                size: ButtonSize::Small,
+                                                                disabled: recover_modal_open(),
+                                                                onclick: {
+                                                                    let node_id = node.id.clone();
+                                                                    move |_| {
+                                                                        recover_node_id.set(node_id.clone());
+                                                                        recover_modal_open.set(true);
+                                                                    }
+                                                                },
+                                                                {i18n.t("node_gateway.recover")}
+                                                            }
+                                                        } else {
+                                                            Button {
+                                                                variant: ButtonVariant::Ghost,
+                                                                size: ButtonSize::Small,
+                                                                disabled: revoke_modal_open(),
+                                                                onclick: {
+                                                                    let node_id = node.id.clone();
+                                                                    move |_| {
+                                                                        revoke_node_id.set(node_id.clone());
+                                                                        revoke_reason.set(String::new());
+                                                                        revoke_modal_open.set(true);
+                                                                    }
+                                                                },
+                                                                {i18n.t("node_gateway.revoke")}
+                                                            }
+                                                        }
+                                                        Button {
+                                                            variant: ButtonVariant::Danger,
+                                                            size: ButtonSize::Small,
+                                                            disabled: delete_modal_open(),
+                                                            onclick: {
+                                                                let node_id = node.id.clone();
+                                                                move |_| {
+                                                                    delete_node_id.set(node_id.clone());
+                                                                    delete_modal_open.set(true);
+                                                                }
+                                                            },
+                                                            {i18n.t("node_gateway.delete")}
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
+                                Pagination {
+                                    current: node_page(),
+                                    total_pages: result.total_pages.max(1) as u32,
+                                    previous_label: i18n.t("table.previous").to_string(),
+                                    next_label: i18n.t("table.next").to_string(),
+                                    on_page_change: move |page| node_page.set(page),
+                                }
+                            },
                         }
                     }
 
                     div { class: "section",
                         h2 { class: "section-title", {i18n.t("node_gateway.tasks_title")} }
-                        Table {
-                            empty: data.recent_tasks.is_empty(),
-                            empty_text: i18n.t("node_gateway.no_tasks"),
-                            col_count: 6,
-                            thead {
-                                tr {
-                                    TableHead { {i18n.t("pricing.model_name")} }
-                                    TableHead { {i18n.t("table.status")} }
-                                    TableHead { {i18n.t("node_gateway.assigned_node")} }
-                                    TableHead { {i18n.t("node_gateway.failures")} }
-                                    TableHead { {i18n.t("node_gateway.deadline")} }
-                                    TableHead { "ID" }
+                        match tasks_result.as_ref() {
+                            None => rsx! {
+                                p { class: "text-secondary", {i18n.t("table.loading")} }
+                            },
+                            Some(Err(e)) => rsx! {
+                                div { class: "alert alert-warning",
+                                    p { "{i18n.t(\"common.load_failed\")}: {e}" }
                                 }
-                            }
-                            tbody {
-                                for task in data.recent_tasks.iter() {
-                                    tr {
-                                        td { "{task.model}" }
-                                        td { TaskStatusBadge { status: task.status.clone() } }
-                                        td { "{task.assigned_node_id.as_deref().map(short_id).unwrap_or_else(|| \"—\".to_string())}" }
-                                        td { "{task.failure_count}/{task.failure_threshold}" }
-                                        td { span { class: "account-time-value", {format_time(&task.deadline_at)} } }
-                                        td { span { class: "account-id", "{short_id(&task.id)}" } }
+                            },
+                            Some(Ok(result)) => rsx! {
+                                Table {
+                                    empty: result.tasks.is_empty(),
+                                    empty_text: i18n.t("node_gateway.no_tasks"),
+                                    col_count: 6,
+                                    thead {
+                                        tr {
+                                            TableHead { {i18n.t("pricing.model_name")} }
+                                            TableHead { {i18n.t("table.status")} }
+                                            TableHead { {i18n.t("node_gateway.assigned_node")} }
+                                            TableHead { {i18n.t("node_gateway.failures")} }
+                                            TableHead { {i18n.t("node_gateway.deadline")} }
+                                            TableHead { "ID" }
+                                        }
+                                    }
+                                    tbody {
+                                        for task in result.tasks.iter() {
+                                            tr {
+                                                td { "{task.model}" }
+                                                td { TaskStatusBadge { status: task.status.clone() } }
+                                                td { "{task.assigned_node_id.as_deref().map(short_id).unwrap_or_else(|| \"—\".to_string())}" }
+                                                td { "{task.failure_count}/{task.failure_threshold}" }
+                                                td { span { class: "account-time-value", {format_time(&task.deadline_at)} } }
+                                                td { span { class: "account-id", "{short_id(&task.id)}" } }
+                                            }
+                                        }
                                     }
                                 }
-                            }
+                                Pagination {
+                                    current: task_page(),
+                                    total_pages: result.total_pages.max(1) as u32,
+                                    previous_label: i18n.t("table.previous").to_string(),
+                                    next_label: i18n.t("table.next").to_string(),
+                                    on_page_change: move |page| task_page.set(page),
+                                }
+                            },
                         }
                     }
                 },
