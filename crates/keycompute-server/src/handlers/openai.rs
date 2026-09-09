@@ -700,8 +700,8 @@ pub async fn chat_completions(
         request.stream,
         pricing,
     );
-    // 透传客户端采样参数（协议层构建上游请求时使用，
-    // Anthropic 协议的 max_tokens 为必填字段，不透传会被默认值硬截断）
+    // 仅投影客户端显式提供的采样参数。缺省或显式 null 时保持 None，
+    // 且原生 OpenAI JSON 不被改写；余额预留默认值只属于内部风控。
     request_ctx.max_tokens = request.effective_max_tokens();
     request_ctx.temperature = request.temperature;
     request_ctx.top_p = request.top_p;
@@ -729,6 +729,27 @@ pub async fn chat_completions(
     {
         tracing::warn!(request_id=%request_id.0, %error, "failed to record request route");
     }
+
+    let mut tpm_reservation = match super::reserve_generation_tpm(&state, &ctx).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                (
+                    ErrorOrigin::Client,
+                    TraceErrorCategory::RateLimit,
+                    "tpm_limit_exceeded",
+                )
+            } else {
+                (
+                    ErrorOrigin::Gateway,
+                    TraceErrorCategory::Internal,
+                    "tpm_reservation_failed",
+                )
+            };
+            finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+            return Err(error);
+        }
+    };
 
     // 5. 根据 ExecutionTarget 分流执行路径
     match &plan.primary {
@@ -824,6 +845,7 @@ pub async fn chat_completions(
             {
                 Ok(reservation) => reservation,
                 Err(error) => {
+                    tpm_reservation.release().await;
                     finish_unexecuted_trace(
                         &mut pre_execution_guard,
                         ErrorOrigin::Client,
@@ -848,6 +870,7 @@ pub async fn chat_completions(
             let worker_ctx = Arc::clone(&ctx);
             let worker_body_permit = body_permit.map(|Extension(permit)| permit);
             let mut worker_balance_reservation = balance_reservation;
+            let mut worker_tpm_reservation = tpm_reservation;
             let node_user_id = auth.user_id;
             let node_model = model.clone();
             let (node_result_tx, node_result_rx) = tokio::sync::oneshot::channel();
@@ -860,6 +883,7 @@ pub async fn chat_completions(
                     match &result {
                         Ok(response) => {
                             worker_balance_reservation.transfer_to_settlement();
+                            worker_tpm_reservation.transfer_to_settlement();
                             worker_ctx.set_input_tokens(response.usage.prompt_tokens);
                             worker_ctx.add_output_tokens(response.usage.completion_tokens);
                             finalize_openai_billing(
@@ -873,6 +897,7 @@ pub async fn chat_completions(
                         }
                         Err(_) => {
                             worker_balance_reservation.release().await;
+                            worker_tpm_reservation.release().await;
                         }
                     }
                     let _ = node_result_tx.send(result);
@@ -994,6 +1019,7 @@ pub async fn chat_completions(
             {
                 Ok(reservation) => reservation,
                 Err(error) => {
+                    tpm_reservation.release().await;
                     finish_unexecuted_trace(
                         &mut pre_execution_guard,
                         ErrorOrigin::Client,
@@ -1040,6 +1066,7 @@ pub async fn chat_completions(
                 Ok(Ok(rx)) => rx,
                 Ok(Err(error)) => {
                     balance_reservation.release().await;
+                    tpm_reservation.release().await;
                     client_response_guard
                         .finish_with_outcome(ClientResponseOutcome::ResponseFailed)
                         .await;
@@ -1050,6 +1077,7 @@ pub async fn chat_completions(
                 }
                 Err(_) => {
                     balance_reservation.release().await;
+                    tpm_reservation.release().await;
                     tracing::error!(
                         request_id = %request_id.0,
                         timeout_secs = state.gateway_config.timeout_secs,
@@ -1103,6 +1131,7 @@ pub async fn chat_completions(
                         timeout_duration,
                     );
                     balance_reservation.transfer_to_settlement();
+                    tpm_reservation.transfer_to_settlement();
                     client_response_guard.disarm();
                     if !matches!(
                         super::await_initial_stream_status(&error_ctx, initial_status_rx).await,
@@ -1137,6 +1166,7 @@ pub async fn chat_completions(
                         },
                     );
                     balance_reservation.transfer_to_settlement();
+                    tpm_reservation.transfer_to_settlement();
                     client_response_guard.disarm();
                     if !matches!(
                         initial_status_rx.await,
@@ -1159,6 +1189,7 @@ pub async fn chat_completions(
                 // that need incremental liveness should request SSE instead.
                 client_response_guard.disarm();
                 balance_reservation.transfer_to_settlement();
+                tpm_reservation.transfer_to_settlement();
                 let response = create_openai_response_with_lifecycle(
                     rx,
                     OpenAiJsonRuntime {
@@ -2642,6 +2673,64 @@ mod tests {
     use super::*;
     use futures::StreamExt;
     use std::time::Duration;
+
+    #[test]
+    fn omitted_and_null_chat_output_limits_remain_unbounded_and_native() {
+        let omitted = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hello"}]
+        });
+        let original = omitted.clone();
+        let request = parse_chat_completion_request(&omitted).unwrap();
+        assert_eq!(request.effective_max_tokens(), None);
+        assert_eq!(omitted, original);
+
+        let legacy_null = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": null
+        });
+        let original = legacy_null.clone();
+        let request = parse_chat_completion_request(&legacy_null).unwrap();
+        assert_eq!(request.effective_max_tokens(), None);
+        assert_eq!(legacy_null, original);
+
+        let both_null = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": null,
+            "max_completion_tokens": null
+        });
+        let original = both_null.clone();
+        let request = parse_chat_completion_request(&both_null).unwrap();
+        assert_eq!(request.effective_max_tokens(), None);
+        assert_eq!(both_null, original);
+    }
+
+    #[test]
+    fn explicit_chat_output_limit_fields_are_preserved_verbatim() {
+        let explicit_legacy = serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 321,
+            "max_completion_tokens": null
+        });
+        let original = explicit_legacy.clone();
+        let request = parse_chat_completion_request(&explicit_legacy).unwrap();
+        assert_eq!(request.effective_max_tokens(), Some(321));
+        assert_eq!(explicit_legacy, original);
+
+        let explicit_current = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": null,
+            "max_completion_tokens": 654
+        });
+        let original = explicit_current.clone();
+        let request = parse_chat_completion_request(&explicit_current).unwrap();
+        assert_eq!(request.effective_max_tokens(), Some(654));
+        assert_eq!(explicit_current, original);
+    }
 
     #[test]
     fn chat_request_accepts_common_official_tool_fields() {

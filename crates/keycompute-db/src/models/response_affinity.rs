@@ -30,6 +30,44 @@ pub struct ResponseAffinity {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Exclusive lower bound for one finite settlement-claim sweep.
+///
+/// The field order matches PostgreSQL's claim index and row comparison. The
+/// response ID is compared with the database's `C` collation so Rust's bytewise
+/// `String` ordering produces the same maximum cursor even though `UPDATE ...
+/// RETURNING` does not guarantee row order.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SettlementClaimCursor {
+    settlement_next_poll_at: DateTime<Utc>,
+    tenant_id: Uuid,
+    response_id: String,
+}
+
+/// Exclusive lower bound for the read-only startup TPM recovery scan.
+///
+/// Startup recovery deliberately does not claim settlement work: it only
+/// reconstructs the already-admitted Redis/memory reservations before HTTP
+/// generation routes become reachable. The ordering is independent from the
+/// settlement retry time and lease so delayed or currently claimed rows cannot
+/// be omitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementRecoveryCursor {
+    tenant_id: Uuid,
+    response_id: String,
+}
+
+/// Minimal durable-settlement projection used by the startup TPM barrier.
+/// Response bodies and continuation contexts can be large and are unrelated
+/// to restoring rate-limit capacity, so the scan must not materialize them.
+#[derive(Debug, Clone, FromQueryResult, PartialEq)]
+pub struct SettlementRecoveryRow {
+    pub tenant_id: Uuid,
+    pub response_id: String,
+    pub provider: String,
+    pub account_id: Option<Uuid>,
+    pub settlement: Value,
+}
+
 /// The minimal fields needed to replay a KeyCompute-local warmup. Keeping this
 /// projection separate prevents ordinary resource lookups from decoding the
 /// potentially large continuation context.
@@ -44,6 +82,43 @@ struct LocalWarmupStorageUsage {
     entry_count: i64,
     total_bytes: i64,
 }
+
+const CLAIM_DUE_SETTLEMENTS_BEFORE_SQL: &str = "UPDATE response_affinities AS affinity \
+     SET settlement_lease_until = clock_timestamp() + make_interval(secs => $2::double precision), \
+         updated_at = GREATEST(clock_timestamp(), $3 + INTERVAL '1 microsecond') \
+     FROM (SELECT tenant_id, response_id FROM response_affinities \
+           WHERE settlement IS NOT NULL AND settlement_next_poll_at <= $3 \
+             AND updated_at <= $3 \
+             AND (settlement_lease_until IS NULL OR settlement_lease_until <= clock_timestamp()) \
+           ORDER BY settlement_next_poll_at, tenant_id, response_id COLLATE \"C\" \
+           FOR UPDATE SKIP LOCKED LIMIT $1) AS due \
+     WHERE affinity.tenant_id = due.tenant_id AND affinity.response_id = due.response_id \
+     RETURNING affinity.*";
+
+const CLAIM_DUE_SETTLEMENTS_AFTER_BEFORE_SQL: &str = "UPDATE response_affinities AS affinity \
+     SET settlement_lease_until = clock_timestamp() + make_interval(secs => $2::double precision), \
+         updated_at = GREATEST(clock_timestamp(), $3 + INTERVAL '1 microsecond') \
+     FROM (SELECT tenant_id, response_id FROM response_affinities \
+           WHERE settlement IS NOT NULL AND settlement_next_poll_at <= $3 \
+             AND updated_at <= $3 \
+             AND (settlement_lease_until IS NULL OR settlement_lease_until <= clock_timestamp()) \
+             AND (settlement_next_poll_at, tenant_id, response_id COLLATE \"C\") > \
+                 ($4::timestamptz, $5::uuid, $6::varchar COLLATE \"C\") \
+           ORDER BY settlement_next_poll_at, tenant_id, response_id COLLATE \"C\" \
+           FOR UPDATE SKIP LOCKED LIMIT $1) AS due \
+     WHERE affinity.tenant_id = due.tenant_id AND affinity.response_id = due.response_id \
+     RETURNING affinity.*";
+
+const SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_SQL: &str = "SELECT tenant_id, response_id, provider, account_id, settlement \
+     FROM response_affinities \
+     WHERE settlement IS NOT NULL AND updated_at <= $2 \
+     ORDER BY tenant_id, response_id LIMIT $1";
+
+const SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_AFTER_SQL: &str = "SELECT tenant_id, response_id, provider, account_id, settlement \
+     FROM response_affinities \
+     WHERE settlement IS NOT NULL AND updated_at <= $2 \
+       AND (tenant_id, response_id) > ($3::uuid, $4::varchar) \
+     ORDER BY tenant_id, response_id LIMIT $1";
 
 fn local_warmup_fits_quota(
     existing_entries: i64,
@@ -177,7 +252,7 @@ impl ResponseAffinity {
              provider = EXCLUDED.provider, model = EXCLUDED.model, \
              account_id = EXCLUDED.account_id, is_reservation = FALSE, \
              deleted_at = NULL, expires_at = EXCLUDED.expires_at, \
-             updated_at = NOW() \
+             updated_at = GREATEST(response_affinities.updated_at, clock_timestamp()) \
              WHERE response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id \
              RETURNING *",
             [
@@ -270,8 +345,8 @@ impl ResponseAffinity {
             DbBackend::Postgres,
             "INSERT INTO response_affinities \
              (tenant_id, response_id, provider, model, account_id, is_reservation, expires_at, \
-              settlement, settlement_next_poll_at, deleted_at) \
-             VALUES ($1, $2, $3, $4, $5, FALSE, $6, $7, $8, $9) \
+              settlement, settlement_next_poll_at, deleted_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, FALSE, $6, $7, $8, $9, clock_timestamp()) \
              ON CONFLICT (tenant_id, response_id) DO UPDATE SET \
              provider = EXCLUDED.provider, model = EXCLUDED.model, \
              account_id = EXCLUDED.account_id, is_reservation = FALSE, \
@@ -283,7 +358,8 @@ impl ResponseAffinity {
                  THEN response_affinities.deleted_at \
                  WHEN EXCLUDED.deleted_at IS NULL THEN NULL \
                  ELSE response_affinities.deleted_at END, \
-             expires_at = EXCLUDED.expires_at, updated_at = NOW() \
+             expires_at = EXCLUDED.expires_at, \
+             updated_at = GREATEST(response_affinities.updated_at, clock_timestamp()) \
              WHERE response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id \
              RETURNING *",
             [
@@ -331,7 +407,7 @@ impl ResponseAffinity {
              local_response = EXCLUDED.local_response, local_context = EXCLUDED.local_context, \
              local_context_bytes = EXCLUDED.local_context_bytes, \
              deleted_at = NULL, expires_at = EXCLUDED.expires_at, \
-             updated_at = NOW() \
+             updated_at = GREATEST(response_affinities.updated_at, clock_timestamp()) \
              WHERE response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id",
             [
                 tenant_id.into(),
@@ -587,7 +663,8 @@ impl ResponseAffinity {
              ), tombstoned_owned AS ( \
                  UPDATE response_affinities \
                  SET deleted_at = COALESCE(deleted_at, NOW()), local_response = NULL, \
-                     local_context = NULL, local_context_bytes = NULL, updated_at = NOW() \
+                     local_context = NULL, local_context_bytes = NULL, \
+                     updated_at = GREATEST(updated_at, clock_timestamp()) \
                  WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
                    AND account_id IS NOT NULL RETURNING 1 \
              ) SELECT (SELECT COUNT(*) FROM deleted_local) + \
@@ -625,7 +702,9 @@ impl ResponseAffinity {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE response_affinities AS affinity SET settlement_lease_until = $2, updated_at = NOW() \
+            "UPDATE response_affinities AS affinity \
+             SET settlement_lease_until = $2, \
+                 updated_at = GREATEST(affinity.updated_at, clock_timestamp()) \
              FROM (SELECT tenant_id, response_id FROM response_affinities \
                    WHERE settlement IS NOT NULL AND settlement_next_poll_at <= NOW() \
                      AND (settlement_lease_until IS NULL OR settlement_lease_until <= NOW()) \
@@ -635,6 +714,232 @@ impl ResponseAffinity {
             [limit.into(), lease_until.into()],
         );
         Ok(Self::find_by_statement(stmt).all(db).await?)
+    }
+
+    /// Atomically lease due work for a duration measured by the database
+    /// clock. Durable workers use this form so application/DB clock skew cannot
+    /// accidentally turn a short crash-recovery lease into a long one.
+    pub async fn claim_due_settlements_for(
+        db: &impl ConnectionTrait,
+        limit: u64,
+        lease_duration: std::time::Duration,
+    ) -> Result<Vec<Self>, DbError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+        if lease_seconds <= 0 {
+            return Err(DbError::Other(
+                "settlement lease duration must be positive".to_string(),
+            ));
+        }
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities AS affinity \
+             SET settlement_lease_until = clock_timestamp() + make_interval(secs => $2::double precision), \
+                 updated_at = GREATEST(affinity.updated_at, clock_timestamp()) \
+             FROM (SELECT tenant_id, response_id FROM response_affinities \
+                   WHERE settlement IS NOT NULL AND settlement_next_poll_at <= NOW() \
+                     AND (settlement_lease_until IS NULL OR settlement_lease_until <= NOW()) \
+                   ORDER BY settlement_next_poll_at FOR UPDATE SKIP LOCKED LIMIT $1) AS due \
+             WHERE affinity.tenant_id = due.tenant_id AND affinity.response_id = due.response_id \
+             RETURNING affinity.*",
+            [limit.into(), lease_seconds.into()],
+        );
+        Ok(Self::find_by_statement(stmt).all(db).await?)
+    }
+
+    /// Read the writer's wall clock before draining a finite snapshot of due
+    /// settlement work. Keeping the cutoff in the database clock domain avoids
+    /// application/DB clock skew while ensuring work inserted during a drain is
+    /// left for the next maintenance tick.
+    pub async fn settlement_claim_cutoff(db: &DbRouter) -> Result<DateTime<Utc>, DbError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT clock_timestamp() AS claim_cutoff".to_string(),
+        );
+        let row =
+            db.write_conn().query_one(stmt).await?.ok_or_else(|| {
+                DbError::Other("settlement claim clock returned no row".to_string())
+            })?;
+        row.try_get_by_index(0).map_err(DbError::DatabaseError)
+    }
+
+    /// Read one keyset page of every durable settlement that may own a TPM
+    /// reservation at process startup.
+    ///
+    /// This scan intentionally ignores both `settlement_next_poll_at` and
+    /// `settlement_lease_until`: a terminal outbox can be delayed to let inline
+    /// settlement win, and another replica may currently own the monetary
+    /// worker, but neither condition proves that this process may safely open
+    /// generation admission with an empty local rate-limit backend. Reading
+    /// from the writer prevents replica lag from omitting recently committed
+    /// outboxes. `snapshot_cutoff` makes a multi-page scan finite while other
+    /// serving replicas continue to write; those newer requests already own
+    /// live limiter reservations on the instance that admitted them. No
+    /// settlement lease is acquired or changed here.
+    pub async fn scan_settlements_for_tpm_recovery(
+        db: &DbRouter,
+        limit: u64,
+        snapshot_cutoff: DateTime<Utc>,
+        after: Option<&SettlementRecoveryCursor>,
+    ) -> Result<(Vec<SettlementRecoveryRow>, Option<SettlementRecoveryCursor>), DbError> {
+        if limit == 0 {
+            return Err(DbError::Other(
+                "settlement TPM recovery page size must be positive".to_string(),
+            ));
+        }
+        let limit = i64::try_from(limit)
+            .map_err(|_| DbError::Other("settlement TPM recovery page is too large".to_string()))?;
+        let stmt = match after {
+            Some(after) => Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_AFTER_SQL,
+                [
+                    limit.into(),
+                    snapshot_cutoff.into(),
+                    after.tenant_id.into(),
+                    after.response_id.clone().into(),
+                ],
+            ),
+            None => Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_SQL,
+                [limit.into(), snapshot_cutoff.into()],
+            ),
+        };
+        let rows = SettlementRecoveryRow::find_by_statement(stmt)
+            .all(db.write_conn())
+            .await?;
+        let next = rows.last().map(|row| SettlementRecoveryCursor {
+            tenant_id: row.tenant_id,
+            response_id: row.response_id.clone(),
+        });
+        Ok((rows, next))
+    }
+
+    /// Atomically lease one batch from the due set that existed at `due_before`.
+    /// `updated_at` freezes the drain snapshot: newly inserted or rescheduled
+    /// work cannot keep an otherwise finite batch loop alive indefinitely.
+    pub async fn claim_due_settlements_before_for(
+        db: &impl ConnectionTrait,
+        limit: u64,
+        lease_duration: std::time::Duration,
+        due_before: DateTime<Utc>,
+        after: Option<&SettlementClaimCursor>,
+    ) -> Result<(Vec<Self>, Option<SettlementClaimCursor>), DbError> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+        if lease_seconds <= 0 {
+            return Err(DbError::Other(
+                "settlement lease duration must be positive".to_string(),
+            ));
+        }
+        let stmt = match after {
+            Some(after) => Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                CLAIM_DUE_SETTLEMENTS_AFTER_BEFORE_SQL,
+                [
+                    limit.into(),
+                    lease_seconds.into(),
+                    due_before.into(),
+                    after.settlement_next_poll_at.into(),
+                    after.tenant_id.into(),
+                    after.response_id.clone().into(),
+                ],
+            ),
+            None => Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                CLAIM_DUE_SETTLEMENTS_BEFORE_SQL,
+                [limit.into(), lease_seconds.into(), due_before.into()],
+            ),
+        };
+        let claimed = Self::find_by_statement(stmt).all(db).await?;
+        let mut next_cursor = None;
+        for affinity in &claimed {
+            let settlement_next_poll_at = affinity.settlement_next_poll_at.ok_or_else(|| {
+                DbError::Other(format!(
+                    "claimed settlement {} has no next poll timestamp",
+                    affinity.response_id
+                ))
+            })?;
+            let candidate = SettlementClaimCursor {
+                settlement_next_poll_at,
+                tenant_id: affinity.tenant_id,
+                response_id: affinity.response_id.clone(),
+            };
+            if next_cursor
+                .as_ref()
+                .is_none_or(|current| candidate > *current)
+            {
+                next_cursor = Some(candidate);
+            }
+        }
+        Ok((claimed, next_cursor))
+    }
+
+    /// Extend a settlement claim only while the caller still owns the exact
+    /// lease generation. The returned database timestamp becomes the CAS token
+    /// for the next renewal, reschedule, or acknowledgement.
+    pub async fn renew_claimed_settlement(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        response_id: &str,
+        expected_lease_until: DateTime<Utc>,
+        lease_duration: std::time::Duration,
+    ) -> Result<Option<DateTime<Utc>>, DbError> {
+        let lease_seconds = i64::try_from(lease_duration.as_secs()).unwrap_or(i64::MAX);
+        if lease_seconds <= 0 {
+            return Err(DbError::Other(
+                "settlement lease duration must be positive".to_string(),
+            ));
+        }
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities \
+             SET settlement_lease_until = clock_timestamp() + make_interval(secs => $4::double precision), \
+                 updated_at = GREATEST(updated_at, clock_timestamp()) \
+             WHERE tenant_id = $1 AND response_id = $2 \
+               AND settlement IS NOT NULL AND settlement_lease_until = $3 \
+               AND settlement_lease_until > clock_timestamp() \
+             RETURNING settlement_lease_until",
+            [
+                tenant_id.into(),
+                response_id.into(),
+                expected_lease_until.into(),
+                lease_seconds.into(),
+            ],
+        );
+        let Some(result) = db.query_one(stmt).await? else {
+            return Ok(None);
+        };
+        result
+            .try_get_by_index(0)
+            .map(Some)
+            .map_err(DbError::DatabaseError)
+    }
+
+    /// Relinquish a claim without changing its durable payload or retry time.
+    /// This is used when a worker cannot keep the corresponding external TPM
+    /// lease alive after extending the DB lease.
+    pub async fn relinquish_claimed_settlement(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        response_id: &str,
+        expected_lease_until: DateTime<Utc>,
+    ) -> Result<u64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities \
+             SET settlement_lease_until = NULL, \
+                 updated_at = GREATEST(updated_at, clock_timestamp()) \
+             WHERE tenant_id = $1 AND response_id = $2 \
+               AND settlement IS NOT NULL AND settlement_lease_until = $3",
+            [
+                tenant_id.into(),
+                response_id.into(),
+                expected_lease_until.into(),
+            ],
+        );
+        Ok(db.execute(stmt).await?.rows_affected())
     }
 
     /// Reschedule work only while the caller still owns the lease returned by
@@ -651,7 +956,8 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE response_affinities SET settlement_next_poll_at = $3, settlement = $4, \
-             settlement_lease_until = NULL, updated_at = NOW() \
+             settlement_lease_until = NULL, \
+             updated_at = GREATEST(updated_at, clock_timestamp()) \
              WHERE tenant_id = $1 AND response_id = $2 \
                AND settlement IS NOT NULL AND settlement_lease_until = $5",
             [
@@ -745,7 +1051,11 @@ impl ResponseAffinity {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResponseAffinity, local_warmup_fits_quota};
+    use super::{
+        CLAIM_DUE_SETTLEMENTS_AFTER_BEFORE_SQL, CLAIM_DUE_SETTLEMENTS_BEFORE_SQL, ResponseAffinity,
+        SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_AFTER_SQL, SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_SQL,
+        SettlementClaimCursor, local_warmup_fits_quota,
+    };
     use crate::DbRouter;
     use async_trait::async_trait;
     use sea_orm::{
@@ -823,5 +1133,72 @@ mod tests {
         assert!(!local_warmup_fits_quota(-1, 0, 1, 2, 100));
         assert!(!local_warmup_fits_quota(0, 0, -1, 2, 100));
         assert!(!local_warmup_fits_quota(0, i64::MAX, 1, 1, i64::MAX as u64));
+    }
+
+    #[test]
+    fn finite_claim_sweep_excludes_rows_touched_after_its_cutoff() {
+        assert!(CLAIM_DUE_SETTLEMENTS_BEFORE_SQL.contains("updated_at <= $3"));
+        assert!(
+            CLAIM_DUE_SETTLEMENTS_BEFORE_SQL.contains(
+                "updated_at = GREATEST(clock_timestamp(), $3 + INTERVAL '1 microsecond')"
+            ),
+            "claiming or quickly relinquishing a row must move it strictly beyond this sweep's cutoff"
+        );
+        assert!(
+            CLAIM_DUE_SETTLEMENTS_AFTER_BEFORE_SQL
+                .contains("(settlement_next_poll_at, tenant_id, response_id COLLATE \"C\") >")
+        );
+        assert!(
+            CLAIM_DUE_SETTLEMENTS_AFTER_BEFORE_SQL
+                .contains("ORDER BY settlement_next_poll_at, tenant_id, response_id COLLATE \"C\"")
+        );
+    }
+
+    #[test]
+    fn settlement_claim_cursor_uses_the_complete_database_order() {
+        let next_poll_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let tenant_id = Uuid::from_u128(1);
+        let earlier = SettlementClaimCursor {
+            settlement_next_poll_at: next_poll_at,
+            tenant_id,
+            response_id: "resp_a".to_string(),
+        };
+        let later_response = SettlementClaimCursor {
+            settlement_next_poll_at: next_poll_at,
+            tenant_id,
+            response_id: "resp_b".to_string(),
+        };
+        let later_tenant = SettlementClaimCursor {
+            settlement_next_poll_at: next_poll_at,
+            tenant_id: Uuid::from_u128(2),
+            response_id: "resp_a".to_string(),
+        };
+
+        assert!(earlier < later_response);
+        assert!(later_response < later_tenant);
+    }
+
+    #[test]
+    fn startup_tpm_recovery_scan_ignores_retry_and_worker_lease_state() {
+        for sql in [
+            SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_SQL,
+            SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_AFTER_SQL,
+        ] {
+            assert!(sql.starts_with(
+                "SELECT tenant_id, response_id, provider, account_id, settlement FROM"
+            ));
+            assert!(!sql.contains("SELECT *"));
+            assert!(!sql.contains("local_response"));
+            assert!(!sql.contains("local_context"));
+            assert!(sql.contains("WHERE settlement IS NOT NULL AND updated_at <= $2"));
+            assert!(!sql.contains("settlement_next_poll_at <="));
+            assert!(!sql.contains("settlement_lease_until"));
+            assert!(sql.contains("ORDER BY tenant_id, response_id"));
+            assert!(!sql.contains("FOR UPDATE"));
+        }
+        assert!(
+            SCAN_SETTLEMENTS_FOR_TPM_RECOVERY_AFTER_SQL
+                .contains("(tenant_id, response_id) > ($3::uuid, $4::varchar)")
+        );
     }
 }

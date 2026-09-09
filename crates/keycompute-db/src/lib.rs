@@ -439,6 +439,13 @@ mod tests {
         assert!(DATABASE_SCHEMA.contains(
             "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log"
         ));
+        assert!(DATABASE_SCHEMA.contains("CREATE TABLE IF NOT EXISTS admin_balance_operations"));
+        assert!(DATABASE_SCHEMA.contains("idempotency_key_hash VARCHAR(64) NOT NULL UNIQUE"));
+        assert!(
+            DATABASE_SCHEMA.contains(
+                "CHECK (operation_type IN ('recharge', 'consume', 'freeze', 'unfreeze'))"
+            )
+        );
         assert!(DATABASE_SCHEMA.contains("CREATE TABLE IF NOT EXISTS balance_reservations"));
         assert!(DATABASE_SCHEMA.contains("request_id UUID NOT NULL UNIQUE"));
         assert!(DATABASE_SCHEMA.contains("owner_token UUID NOT NULL DEFAULT gen_random_uuid()"));

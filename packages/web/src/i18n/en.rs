@@ -1524,6 +1524,63 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.balance_title", "Balance Management");
     m.insert("users.balance_available", "Available Balance");
     m.insert("users.balance_frozen", "Frozen Balance");
+    m.insert("users.balance_total_frozen", "Total Frozen Balance");
+    m.insert("users.balance_request_reserved", "Request-reserved Balance");
+    m.insert(
+        "users.balance_manually_frozen",
+        "Manually Releasable Balance",
+    );
+    m.insert(
+        "users.balance_active_reservations",
+        "Active Request Reservations",
+    );
+    m.insert(
+        "users.balance_release_warning",
+        "Release only after confirming that the request failed or is stuck. A late usage settlement may still deduct the final charge from available balance.",
+    );
+    m.insert("users.balance_reservation_expires", "Expires");
+    m.insert("users.balance_reservations_previous_page", "Previous page");
+    m.insert("users.balance_reservations_page", "Page {page}");
+    m.insert("users.balance_reservations_next_page", "Next page");
+    m.insert("users.balance_release_reservation", "Release Reservation");
+    m.insert("users.balance_release_reason", "Release Reason");
+    m.insert(
+        "users.balance_release_reason_placeholder",
+        "Explain how the request was confirmed stuck",
+    );
+    m.insert(
+        "users.balance_release_reason_required",
+        "Please enter a release reason",
+    );
+    m.insert("users.balance_confirm_release", "Confirm Forced Release");
+    m.insert(
+        "users.balance_reservation_released",
+        "Request balance reservation released",
+    );
+    m.insert(
+        "users.balance_reservation_release_failed",
+        "Failed to release request balance reservation",
+    );
+    m.insert(
+        "users.balance_reservation_changed",
+        "The reservation ended or was taken over by a newer retry, so nothing was released. Balance details were refreshed; confirm the current reservation and try again.",
+    );
+    m.insert(
+        "users.balance_details_load_failed",
+        "Failed to load live balance",
+    );
+    m.insert(
+        "users.balance_details_unavailable",
+        "Live balance is not loaded yet; please try again shortly",
+    );
+    m.insert(
+        "users.balance_unfreeze_exceeds_releasable",
+        "The amount exceeds the manually releasable balance of {amount}; release request reservations separately by request_id",
+    );
+    m.insert(
+        "users.balance_unfreeze_hint",
+        "Standard unfreeze releases only administrator-created freezes and never active request reservations.",
+    );
     m.insert("users.balance_action", "Action Type");
     m.insert("users.balance_recharge", "Recharge");
     m.insert("users.balance_deduct", "Deduct");
@@ -1549,6 +1606,22 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.balance_action_invalid", "Invalid action type");
     m.insert("users.balance_updated", "Balance updated successfully");
     m.insert("users.balance_update_failed", "Balance update failed");
+    m.insert(
+        "users.balance_repeat_operation_warning",
+        "An identical balance operation already reached a definitive result, so no request was sent. Click “Run another identical balance operation” only if you intend another recharge, deduction, freeze, or unfreeze.",
+    );
+    m.insert(
+        "users.balance_repeat_operation_confirm",
+        "Run another identical balance operation",
+    );
+    m.insert(
+        "users.balance_idempotency_prepare_failed",
+        "The retry key could not be stored safely. Check browser storage and try again; no request was sent.",
+    );
+    m.insert(
+        "users.balance_idempotency_cleanup_failed",
+        "The server completed the balance operation, but its completion marker could not be stored safely. Keep this page open and retry; the original retry key will be reused.",
+    );
     m.insert(
         "users.cannot_modify_system",
         "Only system role can manage system users",

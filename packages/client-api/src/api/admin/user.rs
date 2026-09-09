@@ -214,6 +214,73 @@ pub struct UpdateBalanceResponse {
     pub new_frozen_balance: Option<String>,
 }
 
+/// 管理员查看的单笔活跃请求余额预留。
+///
+/// `version` 是不透明的并发控制值。释放操作必须回传刚从列表读取的
+/// version，避免相同 `request_id` 已被新重试接管后误释放新预留。
+#[derive(Debug, Clone, Deserialize)]
+pub struct BalanceReservationInfo {
+    pub request_id: String,
+    pub version: String,
+    pub amount: String,
+    pub status: String,
+    pub expires_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 用户余额拆分及一页当前活跃的请求预留。
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserBalanceReservationsResponse {
+    pub user_id: String,
+    pub available_balance: String,
+    /// 总冻结余额，包括请求预留和管理员手工冻结。
+    pub total_frozen_balance: String,
+    /// 当前活跃请求持有的冻结余额，不能通过通用解冻接口释放。
+    pub request_reserved_balance: String,
+    /// 管理员通用解冻接口实际可释放的余额。
+    pub manually_frozen_balance: String,
+    pub reservations: Vec<BalanceReservationInfo>,
+    /// Opaque cursor for the next page. `None` means the traversal is complete.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// 管理员按请求释放余额预留的请求。
+#[derive(Debug, Clone, Serialize)]
+pub struct ReleaseBalanceReservationRequest {
+    /// 最新余额预留列表返回的不透明版本。
+    pub expected_version: String,
+    pub reason: String,
+}
+
+impl ReleaseBalanceReservationRequest {
+    pub fn new(expected_version: impl Into<String>, reason: impl Into<String>) -> Self {
+        Self {
+            expected_version: expected_version.into(),
+            reason: reason.into(),
+        }
+    }
+}
+
+/// 管理员按请求释放余额预留后的响应。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReleaseBalanceReservationResponse {
+    pub success: bool,
+    pub message: String,
+    pub user_id: String,
+    pub request_id: String,
+    pub released_amount: String,
+    pub reason: String,
+    pub new_available_balance: String,
+    pub new_total_frozen_balance: String,
+    pub request_reserved_balance: String,
+    pub manually_frozen_balance: String,
+    pub released_by: String,
+    /// 迟到的用量结算仍可能从可用余额扣款，调用方应向管理员明确展示。
+    pub warning: String,
+}
+
 /// API Key 信息（用于 Admin 查看用户 API Key 列表）
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiKeyInfo {

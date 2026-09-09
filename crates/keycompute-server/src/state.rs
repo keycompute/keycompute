@@ -352,7 +352,11 @@ impl AppState {
         Self::with_config(AppStateConfig::default())
     }
 
-    /// 创建带配置的应用状态（无数据库连接）
+    /// 创建带配置的应用状态（无数据库连接）。
+    ///
+    /// # Panics
+    /// Panics when an explicitly selected backend cannot be initialized. The
+    /// production entry point uses the asynchronous fallible constructor.
     pub fn with_config(config: AppStateConfig) -> Self {
         // 创建 API Key 验证器
         let api_key_validator = ProduceAiKeyValidator::new();
@@ -398,7 +402,8 @@ impl AppState {
         let billing = Arc::new(BillingService::new());
 
         // 根据配置创建限流服务
-        let rate_limiter = Self::create_rate_limiter(&config.rate_limit);
+        let rate_limiter = Self::create_rate_limiter(&config.rate_limit)
+            .expect("configured rate-limit backend must initialize");
 
         // 创建缓存服务（降级为 no-op，因为无 Redis 连接池）
         let cache = Self::create_disabled_cache();
@@ -459,48 +464,40 @@ impl AppState {
 
     /// 根据配置创建限流服务
     ///
-    /// 如果 Redis 后端创建失败，会优雅降级到内存后端，
-    /// 确保应用不会因为 Redis 不可用而无法启动。
-    /// Redis 后端内部使用 `deadpool_redis` 连接池管理连接。
+    /// An explicitly configured Redis backend is a correctness dependency for
+    /// distributed rate limiting. Initialization therefore fails closed; only
+    /// an explicit `Memory` configuration may construct the in-memory backend.
     fn create_rate_limiter(
         config: &RateLimitBackendConfig,
-    ) -> keycompute_ratelimit::RateLimitService {
+    ) -> crate::error::Result<keycompute_ratelimit::RateLimitService> {
         match config {
             RateLimitBackendConfig::Memory => {
-                keycompute_ratelimit::RateLimitService::default_memory()
+                Ok(keycompute_ratelimit::RateLimitService::default_memory())
             }
             #[cfg(feature = "redis")]
             RateLimitBackendConfig::Redis {
                 url,
                 pool_size,
                 connect_timeout,
-            } => {
-                match keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_options(
-                    url,
-                    *pool_size,
-                    *connect_timeout,
-                ) {
-                    Ok(pool) => {
-                        tracing::info!(redis_url = %url, "Redis rate limiter initialized successfully");
-                        keycompute_ratelimit::RateLimitService::with_redis_pool(pool)
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            redis_url = %url,
-                            error = %e,
-                            "Failed to create Redis rate limiter, falling back to memory backend"
-                        );
-                        keycompute_ratelimit::RateLimitService::default_memory()
-                    }
-                }
-            }
+            } => keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_options(
+                url,
+                *pool_size,
+                *connect_timeout,
+            )
+            .map(|pool| {
+                tracing::info!("Redis rate limiter pool initialized successfully");
+                keycompute_ratelimit::RateLimitService::with_redis_pool(pool)
+            })
+            .map_err(|error| {
+                crate::error::ApiError::Config(format!(
+                    "configured Redis rate limiter could not initialize: {error}"
+                ))
+            }),
             #[cfg(not(feature = "redis"))]
-            RateLimitBackendConfig::Redis { .. } => {
-                tracing::warn!(
-                    "Redis backend requested but redis feature is not enabled, falling back to memory backend"
-                );
-                keycompute_ratelimit::RateLimitService::default_memory()
-            }
+            RateLimitBackendConfig::Redis { .. } => Err(crate::error::ApiError::Config(
+                "Redis rate limiter is configured, but this server was built without Redis support"
+                    .to_string(),
+            )),
         }
     }
 
@@ -588,11 +585,55 @@ impl AppState {
 
     /// 创建带数据库连接的应用状态（使用默认配置）
     pub fn with_pool(pool: Arc<DbRouter>) -> Self {
-        Self::with_pool_and_config(pool, AppStateConfig::default())
+        Self::build_with_pool_and_config(pool, AppStateConfig::default())
+            .expect("default in-memory rate-limit backend must initialize")
     }
 
-    /// 创建带数据库连接和自定义配置的应用状态
-    pub fn with_pool_and_config(pool: Arc<DbRouter>, config: AppStateConfig) -> Self {
+    /// Create application state and verify that an explicitly configured
+    /// distributed rate-limit backend is reachable before any route opens.
+    pub async fn try_with_pool_and_config(
+        pool: Arc<DbRouter>,
+        config: AppStateConfig,
+    ) -> crate::error::Result<Self> {
+        let requires_redis = matches!(&config.rate_limit, RateLimitBackendConfig::Redis { .. });
+        let state = Self::build_with_pool_and_config(pool, config)?;
+        if requires_redis {
+            if state.rate_limiter.backend() != keycompute_ratelimit::RateLimitBackend::Redis {
+                return Err(crate::error::ApiError::Config(
+                    "configured Redis rate limiter was not installed".to_string(),
+                ));
+            }
+            let health_key = keycompute_ratelimit::RateLimitKey::new(
+                uuid::Uuid::nil(),
+                uuid::Uuid::nil(),
+                uuid::Uuid::nil(),
+            );
+            state
+                .rate_limiter
+                .get_rpm_count(&health_key)
+                .await
+                .map_err(|error| {
+                    crate::error::ApiError::Config(format!(
+                        "configured Redis rate limiter is unreachable: {error}"
+                    ))
+                })?;
+            state
+                .rate_limiter
+                .get_tpm_count(&health_key)
+                .await
+                .map_err(|error| {
+                    crate::error::ApiError::Config(format!(
+                        "configured Redis TPM limiter is unavailable: {error}"
+                    ))
+                })?;
+        }
+        Ok(state)
+    }
+
+    fn build_with_pool_and_config(
+        pool: Arc<DbRouter>,
+        config: AppStateConfig,
+    ) -> crate::error::Result<Self> {
         // 创建带数据库连接的 API Key 验证器
         let api_key_validator = ProduceAiKeyValidator::with_pool(Arc::clone(&pool));
         // 创建 JWT 验证器
@@ -659,26 +700,18 @@ impl AppState {
                     url,
                     pool_size,
                     connect_timeout,
-                } => {
-                    match keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_options(
+                } => Some(
+                    keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_options(
                         url,
                         *pool_size,
                         *connect_timeout,
-                    ) {
-                        Ok(pool) => {
-                            tracing::info!(redis_url = %url, "Shared Redis connection pool created");
-                            Some(pool)
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                redis_url = %url,
-                                error = %e,
-                                "Failed to create Redis pool, falling back to memory backend"
-                            );
-                            None
-                        }
-                    }
-                }
+                    )
+                    .map_err(|error| {
+                        crate::error::ApiError::Config(format!(
+                            "configured shared Redis pool could not initialize: {error}"
+                        ))
+                    })?,
+                ),
                 _ => None,
             };
 
@@ -688,7 +721,7 @@ impl AppState {
                     keycompute_ratelimit::RateLimitService::with_redis_pool(pool.clone())
                 }
                 None => {
-                    tracing::info!("Rate limiter using memory backend (Redis pool unavailable)");
+                    tracing::info!("Rate limiter using explicitly configured memory backend");
                     keycompute_ratelimit::RateLimitService::default_memory()
                 }
             };
@@ -724,7 +757,13 @@ impl AppState {
 
         #[cfg(not(feature = "redis"))]
         let (rate_limiter, node_gateway, cache) = {
-            tracing::info!("Redis feature disabled, using memory rate limiter");
+            if matches!(&config.rate_limit, RateLimitBackendConfig::Redis { .. }) {
+                return Err(crate::error::ApiError::Config(
+                    "Redis rate limiter is configured, but this server was built without Redis support"
+                        .to_string(),
+                ));
+            }
+            tracing::info!("Using explicitly configured memory rate limiter");
             (
                 keycompute_ratelimit::RateLimitService::default_memory(),
                 None,
@@ -745,7 +784,7 @@ impl AppState {
             crate::payment_registry::PaymentRegistry::from_env(Arc::clone(&pool)),
         ));
 
-        Self {
+        Ok(Self {
             app_base_url: config.app_base_url,
             pool: Some(pool),
             auth: Arc::new(auth_service),
@@ -767,7 +806,7 @@ impl AppState {
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             gateway_config: config.gateway,
             lifecycle,
-        }
+        })
     }
 
     /// 创建用于测试的应用状态，使用自定义 Provider（默认配置）
@@ -775,7 +814,10 @@ impl AppState {
         Self::with_providers_and_config(providers, AppStateConfig::default())
     }
 
-    /// 创建用于测试的应用状态，使用自定义 Provider和配置
+    /// 创建用于测试的应用状态，使用自定义 Provider和配置。
+    ///
+    /// # Panics
+    /// Panics when an explicitly selected backend cannot be initialized.
     pub fn with_providers_and_config(
         providers: HashMap<String, Arc<dyn ProviderAdapter>>,
         config: AppStateConfig,
@@ -824,7 +866,8 @@ impl AppState {
         let billing = Arc::new(BillingService::new());
 
         // 根据配置创建限流服务
-        let rate_limiter = Self::create_rate_limiter(&config.rate_limit);
+        let rate_limiter = Self::create_rate_limiter(&config.rate_limit)
+            .expect("configured rate-limit backend must initialize");
 
         // 创建缓存服务（降级为 no-op，因为无 Redis 连接池）
         let cache = Self::create_disabled_cache();
@@ -981,6 +1024,92 @@ mod tests {
                 connect_timeout,
                 ..
             } if connect_timeout == Duration::from_secs(7)
+        ));
+    }
+
+    #[test]
+    fn explicit_memory_rate_limiter_initializes_as_memory() {
+        let limiter = AppState::create_rate_limiter(&RateLimitBackendConfig::Memory).unwrap();
+        assert_eq!(
+            limiter.backend(),
+            keycompute_ratelimit::RateLimitBackend::Memory
+        );
+    }
+
+    #[cfg(feature = "redis")]
+    #[test]
+    fn invalid_configured_redis_rate_limiter_does_not_fall_back_to_memory() {
+        let result = AppState::create_rate_limiter(&RateLimitBackendConfig::Redis {
+            url: "not-a-redis-url".to_string(),
+            pool_size: 1,
+            connect_timeout: Duration::from_millis(10),
+        });
+        assert!(matches!(
+            result,
+            Err(crate::error::ApiError::Config(message))
+                if message.contains("Redis rate limiter could not initialize")
+        ));
+    }
+
+    #[cfg(feature = "redis")]
+    #[tokio::test]
+    async fn unreachable_configured_redis_stays_fail_closed() {
+        let limiter = AppState::create_rate_limiter(&RateLimitBackendConfig::Redis {
+            url: "redis://127.0.0.1:1".to_string(),
+            pool_size: 1,
+            connect_timeout: Duration::from_millis(50),
+        })
+        .expect("a syntactically valid Redis URL should create its pool");
+        assert_eq!(
+            limiter.backend(),
+            keycompute_ratelimit::RateLimitBackend::Redis
+        );
+        let key = keycompute_ratelimit::RateLimitKey::new(
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+            uuid::Uuid::nil(),
+        );
+        assert!(limiter.get_rpm_count(&key).await.is_err());
+        assert_eq!(
+            limiter.backend(),
+            keycompute_ratelimit::RateLimitBackend::Redis,
+            "an outage must not replace the configured backend with process-local memory"
+        );
+    }
+
+    #[cfg(feature = "redis")]
+    #[tokio::test]
+    async fn fallible_app_state_constructor_rejects_unreachable_redis() {
+        let pool = keycompute_db::DbRouter::single(sea_orm::DatabaseConnection::Disconnected);
+        let config = AppStateConfig {
+            rate_limit: RateLimitBackendConfig::Redis {
+                url: "redis://127.0.0.1:1".to_string(),
+                pool_size: 1,
+                connect_timeout: Duration::from_millis(50),
+            },
+            ..AppStateConfig::default()
+        };
+
+        let result = AppState::try_with_pool_and_config(pool, config).await;
+        assert!(matches!(
+            result,
+            Err(crate::error::ApiError::Config(message))
+                if message.contains("Redis rate limiter is unreachable")
+        ));
+    }
+
+    #[cfg(not(feature = "redis"))]
+    #[test]
+    fn configured_redis_requires_a_redis_enabled_build() {
+        let result = AppState::create_rate_limiter(&RateLimitBackendConfig::Redis {
+            url: "redis://redis.internal:6379".to_string(),
+            pool_size: 1,
+            connect_timeout: Duration::from_secs(1),
+        });
+        assert!(matches!(
+            result,
+            Err(crate::error::ApiError::Config(message))
+                if message.contains("without Redis support")
         ));
     }
 

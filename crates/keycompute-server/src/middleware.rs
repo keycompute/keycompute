@@ -377,12 +377,20 @@ pub async fn openai_responses_error_response_middleware(req: Request, next: Next
                 .get("code")
                 .is_some_and(|code| code.is_string() || code.is_null())
     });
+    let trusted_local_error_shape = error.is_some_and(|error| {
+        let numeric_status_code = error.get("code").and_then(serde_json::Value::as_u64)
+            == Some(u64::from(parts.status.as_u16()));
+        let local_rate_limit = parts.status == StatusCode::TOO_MANY_REQUESTS
+            && matches!(
+                error.get("type").and_then(serde_json::Value::as_str),
+                Some("rate_limit_error" | "rate_limit_exceeded")
+            )
+            && error.get("code").and_then(serde_json::Value::as_str) == Some("rate_limit_exceeded");
+        numeric_status_code || local_rate_limit
+    });
     let message = error
         .filter(|error| {
-            (is_trusted_local_error
-                && parts.status.is_client_error()
-                && error.get("code").and_then(serde_json::Value::as_u64)
-                    == Some(u64::from(parts.status.as_u16())))
+            (is_trusted_local_error && parts.status.is_client_error() && trusted_local_error_shape)
                 || (is_public_maintenance_error
                     && parts.status == StatusCode::SERVICE_UNAVAILABLE
                     && error.get("type").and_then(serde_json::Value::as_str)
@@ -416,6 +424,48 @@ pub async fn openai_responses_error_response_middleware(req: Request, next: Next
         }
     })
     .to_string();
+    Response::from_parts(parts, Body::from(body))
+}
+
+/// Normalize only trusted, locally-produced 429 responses on the OpenAI Chat
+/// and Models routes. Generic `/api/v1/**` clients retain the service's normal
+/// REST error contract, while native upstream 429 responses remain untouched.
+pub async fn openai_rate_limit_response_middleware(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let is_openai_route =
+        path == "/v1/chat/completions" || path == "/v1/models" || path.starts_with("/v1/models/");
+    let response = next.run(req).await;
+    if !is_openai_route
+        || response.status() != StatusCode::TOO_MANY_REQUESTS
+        || response
+            .extensions()
+            .get::<TrustedLocalApiError>()
+            .is_none()
+    {
+        return response;
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body = to_bytes(body, 64 * 1024).await.unwrap_or_default();
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    let message = parsed
+        .pointer("/error/message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("Rate limit exceeded. Please try again later.");
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "rate_limit_error",
+            "param": serde_json::Value::Null,
+            "code": "rate_limit_exceeded",
+        }
+    })
+    .to_string();
+    parts.headers.remove(CONTENT_LENGTH);
+    parts
+        .headers
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     Response::from_parts(parts, Body::from(body))
 }
 
@@ -737,24 +787,42 @@ pub fn validate_client_request_id(value: &str) -> Option<String> {
 ///
 /// 用于限流检查出错时（如 Redis 不可用），遵循 fail-closed 安全原则。
 fn service_unavailable_response() -> Response {
-    (
+    let mut response = (
         StatusCode::SERVICE_UNAVAILABLE,
-        serde_json::json!({
+        axum::Json(serde_json::json!({
             "error": {
                 "message": "Rate limit check failed. Please try again later.",
                 "type": "service_unavailable",
                 "code": "rate_limit_check_failed"
             }
-        })
-        .to_string(),
+        })),
     )
-        .into_response()
+        .into_response();
+    response.extensions_mut().insert(TrustedLocalApiError);
+    response
+}
+
+/// Construct a sanitized 503 for authentication dependency failures.
+fn authentication_service_unavailable_response() -> Response {
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({
+            "error": {
+                "message": "Authentication service is temporarily unavailable. Please try again later.",
+                "type": "service_unavailable",
+                "code": "authentication_unavailable"
+            }
+        })),
+    )
+        .into_response();
+    response.extensions_mut().insert(TrustedLocalApiError);
+    response
 }
 
 /// Load the authenticated tenant's limits from the authoritative database.
 /// A configured database is part of the quota decision, so a missing tenant
 /// or a failed lookup must not silently widen the request to global defaults.
-async fn authenticated_rate_limit_config(
+pub(crate) async fn authenticated_rate_limit_config(
     state: &AppState,
     tenant_id: Uuid,
 ) -> Result<RateLimitConfig> {
@@ -812,96 +880,56 @@ pub async fn rate_limit_middleware(
         return next.run(req).await;
     }
 
-    // 从请求头中提取认证信息
-    let headers = req.headers();
-    let token = match headers.get("Authorization").and_then(|h| h.to_str().ok()) {
-        Some(auth_header) => match auth_header.strip_prefix("Bearer ") {
-            Some(token) => token,
-            None => return next.run(req).await,
-        },
-        None => {
-            // 与认证提取器保持一致：x-api-key 是 Anthropic 传输层约定，
-            // 仅 /v1/messages 使用；其他路径不得以 x-api-key 身份消耗配额。
-            if !x_api_key_allowed_on_path(req.uri().path()) {
+    // Reuse authentication performed by an outer middleware/extractor. Apart
+    // from avoiding a redundant database read, this is important for fail
+    // closed behavior: a transient failure during a second verification must
+    // not turn an already-authenticated admin request into an RPM bypass.
+    let auth = if let Some(auth) = req.extensions().get::<AuthExtractor>().cloned() {
+        auth
+    } else {
+        // No cached identity is available, so parse credentials exactly as the
+        // normal authentication extractor does. Credential errors continue to
+        // the authentication layer so it can return its canonical 401.
+        let headers = req.headers();
+        let token = match headers.get("Authorization").and_then(|h| h.to_str().ok()) {
+            Some(auth_header) => match auth_header.strip_prefix("Bearer ") {
+                Some(token) => token,
+                None => return next.run(req).await,
+            },
+            None => {
+                // 与认证提取器保持一致：x-api-key 是 Anthropic 传输层约定，
+                // 仅 /v1/messages 使用；其他路径不得以 x-api-key 身份消耗配额。
+                if !x_api_key_allowed_on_path(req.uri().path()) {
+                    return next.run(req).await;
+                }
+                match headers.get("x-api-key").and_then(|h| h.to_str().ok()) {
+                    Some(token) if !token.is_empty() => token,
+                    _ => return next.run(req).await,
+                }
+            }
+        };
+
+        match state.auth.verify_token(token).await {
+            Ok(auth_context) => AuthExtractor::from_auth_context(auth_context),
+            Err(keycompute_types::KeyComputeError::AuthError(_)) => {
                 return next.run(req).await;
             }
-            match headers.get("x-api-key").and_then(|h| h.to_str().ok()) {
-                Some(token) if !token.is_empty() => token,
-                _ => return next.run(req).await,
+            Err(error) => {
+                error!(%error, "Authentication backend failed during rate limiting, denying request");
+                return authentication_service_unavailable_response();
             }
         }
     };
 
-    // 使用 AuthService 验证 token 获取真实的用户信息
-    let (auth, rate_key, tenant_id) = match state.auth.verify_token(token).await {
-        Ok(auth_context) => {
-            // 使用真实的 user_id, tenant_id, produce_ai_key_id 创建限流键
-            let rate_key = RateLimitKey::new(
-                auth_context.tenant_id,
-                auth_context.user_id,
-                auth_context.produce_ai_key_id,
-            );
-            let tenant_id = auth_context.tenant_id;
-            (
-                AuthExtractor::from_auth_context(auth_context),
-                rate_key,
-                tenant_id,
-            )
-        }
-        Err(_) => {
-            // 认证失败，直接放行（由认证层处理错误）
-            return next.run(req).await;
-        }
-    };
+    // 使用真实的 user_id, tenant_id, produce_ai_key_id 创建限流键
+    let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+    let tenant_id = auth.tenant_id;
 
     // 从数据库加载租户特定的限流配置
     let rate_limit_config = match authenticated_rate_limit_config(&state, tenant_id).await {
         Ok(config) => config,
         Err(_) => return service_unavailable_response(),
     };
-
-    // 仅生成类端点执行 TPM 预检。资源读取、取消、删除、模型列表和
-    // input_tokens 仍计入 RPM，但不得因为此前的 token 用量而被锁死。
-    let check_tpm = request_uses_tpm(req.method(), req.uri().path())
-        && !request_defers_tpm_for_responses_idempotency(
-            req.method(),
-            req.uri().path(),
-            req.headers(),
-        );
-
-    // 先检查 TPM（预检：读取当前窗口已积累的 token 计数，不消耗配额）
-    //
-    // NOTE: 此方法不是纯读操作——`get_token_count` 会在 Redis 端附带清理过期 ZSET 条目
-    // 和刷新 TTL 的副作用，确保活跃 key 不会被提前驱逐。
-    //
-    // TPM 的记录（record_token_usage）发生在 handler/billing 层（LLM 响应后才知道 token 用量）。
-    // 这里的 check_tpm 是一个前置预检，仅读取之前请求累计的 token 数。
-    // 这意味着 TPM 限制的实时性受限于 billing 层是否及时调用 record_token_usage。
-    if check_tpm {
-        match state
-            .rate_limiter
-            .check_tpm(&rate_key, &rate_limit_config)
-            .await
-        {
-            Ok(false) => {
-                // TPM 超限，拒绝请求
-                info!(
-                    tenant_id = %rate_key.tenant_id,
-                    tpm_limit = rate_limit_config.tpm_limit,
-                    "TPM limit exceeded"
-                );
-                return rate_limit_exceeded_response();
-            }
-            Err(e) => {
-                // TPM 检查出错（如 Redis 不可用），按 fail-closed原则拒绝生成请求
-                error!("TPM check failed, denying request: {}", e);
-                return service_unavailable_response();
-            }
-            Ok(true) => {
-                // TPM 通过，继续检查 RPM
-            }
-        }
-    }
 
     // 执行 RPM 原子检查并记录
     match state
@@ -933,74 +961,16 @@ pub async fn rate_limit_middleware(
     }
 }
 
-fn request_uses_tpm(method: &Method, path: &str) -> bool {
-    method == Method::POST
-        && matches!(
-            path,
-            "/v1/chat/completions" | "/v1/messages" | "/v1/responses" | "/v1/responses/compact"
-        )
-}
-
-fn request_defers_tpm_for_responses_idempotency(
-    method: &Method,
-    path: &str,
-    headers: &HeaderMap,
-) -> bool {
-    method == Method::POST
-        && matches!(path, "/v1/responses" | "/v1/responses/compact")
-        && headers.contains_key("idempotency-key")
-}
-
-/// Check TPM without consuming RPM. HTTP Responses requests carrying an
-/// idempotency key call this only after durable binding proves that the request
-/// will execute rather than replaying a cached result.
-pub(crate) async fn enforce_authenticated_tpm_limit(
-    state: &AppState,
-    auth: &AuthExtractor,
-) -> Result<()> {
-    let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
-    let config = authenticated_rate_limit_config(state, auth.tenant_id).await?;
-    match state.rate_limiter.check_tpm(&rate_key, &config).await {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(ApiError::RateLimit(
-            "Rate limit exceeded. Please try again later.".to_string(),
-        )),
-        Err(error) => {
-            error!(%error, "deferred Responses TPM check failed, denying request");
-            Err(ApiError::ServiceUnavailable(
-                "Rate limit check failed. Please try again later.".to_string(),
-            ))
-        }
-    }
-}
-
 /// 对已经完成 API Key 认证的长连接子请求执行与 HTTP 入口相同的限流。
 /// WebSocket 握手本身不消耗一次请求额度；每个 `response.create` 都检查并
-/// 记录 RPM，只有 `generate:true` 执行 TPM 预检。
+/// 记录 RPM。生成事件的 TPM 预测额度在完整上下文解析后由 Responses
+/// handler 原子预留，避免此处先读后写的并发穿透。
 pub(crate) async fn enforce_authenticated_rate_limit(
     state: &AppState,
     auth: &AuthExtractor,
-    check_tpm: bool,
 ) -> Result<()> {
     let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
     let config = authenticated_rate_limit_config(state, auth.tenant_id).await?;
-
-    if check_tpm {
-        match state.rate_limiter.check_tpm(&rate_key, &config).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(ApiError::RateLimit(
-                    "Rate limit exceeded. Please try again later.".to_string(),
-                ));
-            }
-            Err(error) => {
-                error!(%error, "WebSocket TPM check failed, denying request");
-                return Err(ApiError::ServiceUnavailable(
-                    "Rate limit check failed. Please try again later.".to_string(),
-                ));
-            }
-        }
-    }
 
     state
         .rate_limiter
@@ -1261,7 +1231,7 @@ fn x_api_key_allowed_on_path(path: &str) -> bool {
 }
 
 fn rate_limit_exceeded_response() -> Response {
-    (
+    let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         serde_json::json!({
             "error": {
@@ -1272,7 +1242,9 @@ fn rate_limit_exceeded_response() -> Response {
         })
         .to_string(),
     )
-        .into_response()
+        .into_response();
+    response.extensions_mut().insert(TrustedLocalApiError);
+    response
 }
 
 /// 权限检查中间件
@@ -1398,9 +1370,9 @@ pub async fn admin_auth_middleware(
     // 3. 验证 token 并获取认证上下文（支持 JWT 和 API Key）
     let auth_context = match state.auth.verify_token(token).await {
         Ok(ctx) => ctx,
-        Err(e) => {
+        Err(keycompute_types::KeyComputeError::AuthError(error)) => {
             // 内部错误细节只记录日志，不回传客户端（避免信息泄露）
-            warn!(error = %e, "Authentication failed for admin route");
+            warn!(%error, "Authentication failed for admin route");
             return (
                 StatusCode::UNAUTHORIZED,
                 serde_json::json!({
@@ -1413,6 +1385,10 @@ pub async fn admin_auth_middleware(
                 .to_string(),
             )
                 .into_response();
+        }
+        Err(error) => {
+            error!(%error, "Authentication backend failed for admin route");
+            return authentication_service_unavailable_response();
         }
     };
 
@@ -1969,7 +1945,7 @@ mod tests {
         let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
 
-        let result = enforce_authenticated_rate_limit(&state, &auth, true).await;
+        let result = enforce_authenticated_rate_limit(&state, &auth).await;
 
         assert!(matches!(result, Err(ApiError::ServiceUnavailable(_))));
         assert_eq!(
@@ -1978,55 +1954,297 @@ mod tests {
         );
     }
 
-    #[test]
-    fn tpm_precheck_only_applies_to_generation_endpoints() {
-        assert!(request_uses_tpm(&Method::POST, "/v1/chat/completions"));
-        assert!(request_uses_tpm(&Method::POST, "/v1/responses"));
-        assert!(request_uses_tpm(&Method::POST, "/v1/responses/compact"));
-        assert!(request_uses_tpm(&Method::POST, "/v1/messages"));
-        assert!(!request_uses_tpm(
-            &Method::POST,
-            "/v1/responses/input_tokens"
-        ));
-        assert!(!request_uses_tpm(
-            &Method::POST,
-            "/v1/responses/resp_123/cancel"
-        ));
-        assert!(!request_uses_tpm(&Method::DELETE, "/v1/responses/resp_123"));
-        assert!(!request_uses_tpm(&Method::GET, "/v1/models"));
+    #[tokio::test]
+    async fn rate_limit_middleware_reuses_cached_auth_and_records_rpm() {
+        let state = AppState::new();
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        let app = Router::new()
+            .route("/rate-limited", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+            .with_state(state.clone());
+
+        // An outer authentication layer may have consumed the credentials or
+        // may leave a malformed header behind. The verified extension remains
+        // authoritative and must still consume the authenticated RPM quota.
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rate-limited")
+                    .header("Authorization", "not-a-bearer-header")
+                    .extension(auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            1
+        );
     }
 
-    #[test]
-    fn responses_idempotency_defers_tpm_until_execution_is_confirmed() {
-        let mut headers = HeaderMap::new();
-        assert!(!request_defers_tpm_for_responses_idempotency(
-            &Method::POST,
-            "/v1/responses",
-            &headers,
-        ));
-
-        headers.insert("idempotency-key", "retry-key".parse().unwrap());
-        for path in ["/v1/responses", "/v1/responses/compact"] {
-            assert!(request_defers_tpm_for_responses_idempotency(
-                &Method::POST,
-                path,
-                &headers,
-            ));
-        }
-        assert!(!request_defers_tpm_for_responses_idempotency(
-            &Method::GET,
-            "/v1/responses",
-            &headers,
-        ));
-        assert!(!request_defers_tpm_for_responses_idempotency(
-            &Method::POST,
-            "/v1/chat/completions",
-            &headers,
-        ));
+    async fn assert_canonical_chat_rate_limit_response(response: Response) {
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+        // Local quota decisions do not expose a trustworthy remaining-window
+        // duration. Do not manufacture Retry-After; native upstream 429s keep
+        // the provider's value in `native_openai_error_response`.
+        assert!(response.headers().get("retry-after").is_none());
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": {
+                    "message": "Rate limit exceeded. Please try again later.",
+                    "type": "rate_limit_error",
+                    "param": null,
+                    "code": "rate_limit_exceeded",
+                }
+            })
+        );
     }
 
     #[tokio::test]
-    async fn responses_idempotency_reaches_handler_above_tpm_but_plain_request_does_not() {
+    async fn chat_route_rpm_rejection_uses_canonical_openai_rate_limit_response() {
+        let state = AppState::new();
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        let config = RateLimitConfig::default();
+        for _ in 0..config.rpm_limit {
+            state
+                .rate_limiter
+                .check_and_record_with_config(&rate_key, &config)
+                .await
+                .unwrap();
+        }
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+            .layer(from_fn(openai_rate_limit_response_middleware))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .extension(auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_canonical_chat_rate_limit_response(response).await;
+    }
+
+    #[tokio::test]
+    async fn generic_rest_rpm_rejection_keeps_generic_rate_limit_contract() {
+        let state = AppState::new();
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        let config = RateLimitConfig::default();
+        for _ in 0..config.rpm_limit {
+            state
+                .rate_limiter
+                .check_and_record_with_config(&rate_key, &config)
+                .await
+                .unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/me", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/me")
+                    .extension(auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "rate_limit_exceeded");
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert!(body["error"].get("param").is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_rate_limit_normalizer_leaves_untrusted_upstream_429_unchanged() {
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    (
+                        StatusCode::TOO_MANY_REQUESTS,
+                        [("retry-after", "7")],
+                        Json(serde_json::json!({
+                            "error": {
+                                "message": "sanitized upstream failure",
+                                "type": "provider_rate_limit",
+                                "code": "provider_limit"
+                            }
+                        })),
+                    )
+                }),
+            )
+            .layer(from_fn(openai_rate_limit_response_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()["retry-after"], "7");
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "provider_rate_limit");
+        assert_eq!(body["error"]["code"], "provider_limit");
+    }
+
+    #[tokio::test]
+    async fn openai_rate_limit_normalizer_preserves_trusted_local_headers() {
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(|| async {
+                    let mut response = rate_limit_exceeded_response();
+                    response
+                        .headers_mut()
+                        .insert("x-request-id", HeaderValue::from_static("req_local_123"));
+                    response
+                }),
+            )
+            .layer(from_fn(openai_rate_limit_response_middleware));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.headers()["x-request-id"], "req_local_123");
+        assert_canonical_chat_rate_limit_response(response).await;
+    }
+
+    #[tokio::test]
+    async fn chat_route_tpm_rejection_uses_canonical_openai_rate_limit_response() {
+        let state = AppState::new();
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        state
+            .rate_limiter
+            .record_token_usage(&rate_key, keycompute_ratelimit::DEFAULT_TPM_LIMIT)
+            .await
+            .unwrap();
+        let ctx = keycompute_types::RequestContext::new(
+            Uuid::new_v4(),
+            auth.user_id,
+            auth.tenant_id,
+            auth.produce_ai_key_id,
+            "gpt-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        let handler_state = state.clone();
+        let app = Router::new()
+            .route(
+                "/v1/chat/completions",
+                post(move || {
+                    let state = handler_state.clone();
+                    let ctx = ctx.clone();
+                    async move {
+                        crate::handlers::reserve_generation_tpm(&state, &ctx)
+                            .await
+                            .map(|_reservation| StatusCode::NO_CONTENT)
+                    }
+                }),
+            )
+            .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+            .layer(from_fn(openai_rate_limit_response_middleware))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/v1/chat/completions")
+                    .extension(auth)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_canonical_chat_rate_limit_response(response).await;
+    }
+
+    #[tokio::test]
+    async fn rate_limit_middleware_fails_closed_on_authentication_backend_error() {
+        let state = AppState::with_pool(keycompute_db::DbRouter::single(
+            sea_orm::DatabaseConnection::Disconnected,
+        ));
+        let jwt = JwtConfig::default();
+        let token = JwtValidator::new(&jwt.secret, &jwt.issuer)
+            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
+            .unwrap();
+        let app = Router::new()
+            .route("/rate-limited", get(|| async { StatusCode::NO_CONTENT }))
+            .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/rate-limited")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "authentication_unavailable");
+    }
+
+    #[tokio::test]
+    async fn middleware_defers_all_tpm_admission_until_the_generation_handler() {
         let secret = "responses-idempotency-tpm-secret";
         let issuer = "keycompute-test";
         let state = AppState::with_config(AppStateConfig {
@@ -2082,15 +2300,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(new_request.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(new_request.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
-            1
+            2
+        );
+        assert_eq!(
+            state.rate_limiter.get_tpm_count(&rate_key).await.unwrap(),
+            u64::from(keycompute_ratelimit::DEFAULT_TPM_LIMIT),
+            "the transport middleware must not mutate TPM state"
         );
     }
 
     #[tokio::test]
-    async fn deferred_responses_tpm_check_fails_closed_before_execution() {
+    async fn websocket_event_transport_check_records_only_rpm() {
         let state = AppState::with_config(AppStateConfig::default());
         let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
@@ -2100,38 +2323,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(matches!(
-            enforce_authenticated_tpm_limit(&state, &auth).await,
-            Err(ApiError::RateLimit(_))
-        ));
-        assert_eq!(
-            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn websocket_warmup_skips_tpm_but_still_records_rpm() {
-        let state = AppState::with_config(AppStateConfig::default());
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
-        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
-        state
-            .rate_limiter
-            .record_token_usage(&rate_key, keycompute_ratelimit::DEFAULT_TPM_LIMIT)
+        enforce_authenticated_rate_limit(&state, &auth)
             .await
-            .unwrap();
-
-        enforce_authenticated_rate_limit(&state, &auth, false)
-            .await
-            .expect("generate:false should remain available above TPM");
+            .expect("event transport admission should remain available above TPM");
         assert_eq!(
             state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
             1
         );
-        assert!(matches!(
-            enforce_authenticated_rate_limit(&state, &auth, true).await,
-            Err(ApiError::RateLimit(_))
-        ));
+        enforce_authenticated_rate_limit(&state, &auth)
+            .await
+            .expect("the parsed generation handler owns TPM admission");
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -2168,6 +2373,69 @@ mod tests {
         assert_eq!(body["error"]["message"], "model is required");
         assert!(body["error"]["param"].is_null());
         assert!(body["error"]["code"].is_null());
+
+        // The Responses outer normalizer must recognize the generic local
+        // numeric status as trusted, preserve its safe message, and map a
+        // handler-side TPM decision onto the OpenAI-compatible 429 contract.
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                axum::routing::post(|| async {
+                    Err::<(), _>(ApiError::RateLimit(
+                        "Rate limit exceeded. Please try again later.".to_string(),
+                    ))
+                }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert!(body["error"]["param"].is_null());
+        assert_eq!(
+            body["error"]["message"],
+            "Rate limit exceeded. Please try again later."
+        );
+
+        // Transport RPM rejection uses the long-standing generic middleware
+        // envelope before the Responses route-specific normalizer sees it.
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                post(|| async { rate_limit_exceeded_response() }),
+            )
+            .layer(from_fn(openai_responses_error_response_middleware));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/responses")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], "rate_limit_exceeded");
+        assert_eq!(
+            body["error"]["message"],
+            "Rate limit exceeded. Please try again later."
+        );
 
         let official = r#"{"error":{"message":"slow down","type":"rate_limit_error","param":null,"code":"rate_limit_exceeded"}}"#;
         let app = Router::new()
@@ -2683,19 +2951,7 @@ mod tests {
         let app = Router::new()
             .route(
                 "/v1/messages",
-                get(|| async {
-                    (
-                        StatusCode::TOO_MANY_REQUESTS,
-                        serde_json::json!({
-                            "error": {
-                                "message": "Rate limit exceeded. Please try again later.",
-                                "type": "rate_limit_exceeded",
-                                "code": "rate_limit_exceeded"
-                            }
-                        })
-                        .to_string(),
-                    )
-                }),
+                get(|| async { rate_limit_exceeded_response() }),
             )
             .layer(from_fn(anthropic_error_response_middleware));
         let response = app
@@ -3097,5 +3353,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn admin_auth_middleware_reports_backend_failure_as_service_unavailable() {
+        let state = AppState::with_pool(keycompute_db::DbRouter::single(
+            sea_orm::DatabaseConnection::Disconnected,
+        ));
+        let jwt = JwtConfig::default();
+        let token = JwtValidator::new(&jwt.secret, &jwt.issuer)
+            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "admin")
+            .unwrap();
+        let app = Router::new()
+            .route(
+                "/api/v1/admin/users",
+                get(|| async { StatusCode::NO_CONTENT }),
+            )
+            .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/users")
+                    .header("Authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], "authentication_unavailable");
     }
 }

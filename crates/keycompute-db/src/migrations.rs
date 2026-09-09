@@ -258,13 +258,46 @@ mod tests {
             "deleted_at TIMESTAMPTZ",
             "CREATE INDEX IF NOT EXISTS idx_response_affinities_local_warmups",
             "CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_due",
+            "CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_recovery",
             "CREATE TABLE IF NOT EXISTS balance_reservations",
             "owner_token UUID NOT NULL DEFAULT gen_random_uuid()",
             "request_id UUID NOT NULL UNIQUE",
             "CHECK (status IN ('active', 'settled', 'released', 'expired'))",
+            "CONSTRAINT ck_user_balances_frozen_nonnegative CHECK (frozen_balance >= 0)",
+            "CONSTRAINT ck_user_balances_total_recharged_nonnegative CHECK (total_recharged >= 0)",
+            "CONSTRAINT ck_user_balances_total_consumed_nonnegative CHECK (total_consumed >= 0)",
+            "released_at TIMESTAMPTZ",
+            "release_kind VARCHAR(20)",
+            "release_reason TEXT",
+            "released_by UUID REFERENCES users(id) ON DELETE SET NULL",
+            "CONSTRAINT ck_balance_reservations_release_audit CHECK",
+            "release_kind IN ('automatic', 'administrative')",
+            "CHAR_LENGTH(BTRIM(release_reason)) <= 1000",
+            "CONSTRAINT ck_balance_reservations_settlement_audit CHECK",
+            "status = 'settled' AND usage_log_id IS NOT NULL AND settled_at IS NOT NULL",
+            "status <> 'settled' AND usage_log_id IS NULL AND settled_at IS NULL",
+            "CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_user_created",
+            "CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_user_expiry",
             "CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_expiry",
             "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_reservations_usage_log",
+            "CREATE TABLE IF NOT EXISTS balance_reservation_events",
+            "event_sequence BIGINT GENERATED ALWAYS AS IDENTITY NOT NULL UNIQUE",
+            "CHECK (event_type IN ('reserved', 'reowned', 'resized', 'settled', 'released', 'expired', 'updated'))",
+            "CREATE INDEX IF NOT EXISTS idx_balance_reservation_events_request_sequence",
+            "ON balance_reservation_events(request_id, event_sequence)",
+            "CREATE INDEX IF NOT EXISTS idx_balance_reservation_events_reservation_sequence",
+            "ON balance_reservation_events(reservation_id, event_sequence)",
+            "CREATE OR REPLACE FUNCTION record_balance_reservation_event()",
+            "CREATE TRIGGER trg_record_balance_reservation_event",
+            "CREATE OR REPLACE FUNCTION reject_balance_reservation_event_mutation()",
+            "CREATE TRIGGER trg_reject_balance_reservation_event_mutation",
             "CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log",
+            "CREATE TABLE IF NOT EXISTS admin_balance_operations",
+            "idempotency_key_hash VARCHAR(64) NOT NULL UNIQUE",
+            "CHECK (operation_type IN ('recharge', 'consume', 'freeze', 'unfreeze'))",
+            "AND CHAR_LENGTH(reason) <= 1000",
+            "CONSTRAINT ck_admin_balance_operations_completion CHECK",
+            "CREATE INDEX IF NOT EXISTS idx_admin_balance_operations_user_created",
             "CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_consumed_node_issued",
             "ON user_node_gateway_tokens(consumed_node_id, issued_at DESC, id DESC)",
             "WHERE consumed_node_id IS NOT NULL",
@@ -280,20 +313,43 @@ mod tests {
         assert!(!V0001.contains("ALTER TABLE"));
         assert!(!V0001.contains("\nUPDATE "));
         assert!(!V0001.contains("\nDELETE FROM "));
+        assert!(!V0001.contains("reservation_id UUID NOT NULL REFERENCES balance_reservations"));
     }
 
     #[test]
-    fn initial_schema_indexes_match_admin_pagination_orders() {
+    fn initial_schema_indexes_match_bounded_admin_and_balance_queries() {
         for expected in [
             r#"CREATE INDEX IF NOT EXISTS idx_nodes_created_at_desc
     ON nodes(created_at DESC, id DESC);"#,
             r#"CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_pending_issued
     ON user_node_gateway_tokens(issued_at ASC, id ASC)
     WHERE status = 'pending';"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_user_created
+    ON balance_reservations(user_id, created_at DESC, id DESC)
+    INCLUDE (amount)
+    WHERE status = 'active';"#,
+            r#"CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_user_expiry
+    ON balance_reservations(user_id, expires_at, id)
+    INCLUDE (amount)
+    WHERE status = 'active';"#,
         ] {
             assert!(V0001.contains(expected), "V0001 is missing {expected}");
         }
 
         assert!(!V0001.contains("ON user_node_gateway_tokens(status) WHERE status = 'pending'"));
+    }
+
+    #[test]
+    fn initial_schema_settlement_claim_index_matches_the_keyset_order() {
+        let expected = r#"CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_due
+    ON response_affinities(settlement_next_poll_at, tenant_id, response_id COLLATE "C")
+    WHERE settlement IS NOT NULL;"#;
+
+        assert!(V0001.contains(expected), "V0001 is missing {expected}");
+
+        let recovery = r#"CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_recovery
+    ON response_affinities(tenant_id, response_id)
+    WHERE settlement IS NOT NULL;"#;
+        assert!(V0001.contains(recovery), "V0001 is missing {recovery}");
     }
 }

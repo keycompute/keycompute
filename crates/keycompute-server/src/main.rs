@@ -197,7 +197,13 @@ async fn main() -> anyhow::Result<()> {
     info!("正在初始化应用状态...");
 
     let state_config = AppStateConfig::from_config(&config);
-    let app_state = AppState::with_pool_and_config(pool, state_config);
+    let app_state = match AppState::try_with_pool_and_config(pool, state_config).await {
+        Ok(state) => state,
+        Err(error) => {
+            error!(%error, "应用状态初始化失败，服务拒绝继续启动");
+            return Err(error.into());
+        }
+    };
 
     // 验证生产环境配置
     if is_production && let Err(e) = app_state.validate_for_production() {
@@ -220,6 +226,34 @@ async fn main() -> anyhow::Result<()> {
     }
     if let Some(pool) = app_state.pool.clone() {
         spawn_stale_trace_reconciler(pool, config.gateway.timeout_secs as i64);
+    }
+    if let Some(balance) = app_state.billing.balance_service().cloned() {
+        spawn_balance_reservation_sweeper(balance);
+    }
+    let startup_tpm_recovery = tokio::time::timeout(
+        keycompute_server::handlers::responses::STARTUP_TPM_RECOVERY_TIMEOUT,
+        keycompute_server::handlers::responses::restore_durable_tpm_before_serving(&app_state),
+    )
+    .await;
+    match startup_tpm_recovery {
+        Ok(Ok(restored)) => {
+            info!(restored, "持久 TPM 预留启动恢复完成");
+        }
+        Ok(Err(error)) => {
+            error!(%error, "持久 TPM 预留启动恢复失败，服务拒绝开放生成接口");
+            return Err(error.into());
+        }
+        Err(_) => {
+            error!(
+                timeout_secs =
+                    keycompute_server::handlers::responses::STARTUP_TPM_RECOVERY_TIMEOUT.as_secs(),
+                "持久 TPM 预留启动恢复超时，服务拒绝开放生成接口"
+            );
+            return Err(anyhow::anyhow!(
+                "durable TPM startup recovery timed out after {} seconds",
+                keycompute_server::handlers::responses::STARTUP_TPM_RECOVERY_TIMEOUT.as_secs()
+            ));
+        }
     }
     keycompute_server::handlers::responses::spawn_responses_maintenance(app_state.clone());
     if let Some(node_gateway) = app_state.node_gateway.as_ref() {
@@ -331,6 +365,40 @@ fn spawn_stale_trace_reconciler(
                 }
                 Ok(_) => {}
                 Err(error) => warn!(%error,"stale request trace 修复失败，将在下一周期重试"),
+            }
+        }
+    });
+}
+
+/// Reclaim request-owned funds even when no later request or balance query
+/// touches the user. This closes the crash/shutdown path that previously left
+/// an expired reservation displayed as frozen until another balance operation.
+fn spawn_balance_reservation_sweeper(balance: keycompute_billing::BalanceService) {
+    const INTERVAL_SECS: u64 = 30;
+    const USERS_PER_BATCH: u64 = 200;
+    const MAX_BATCHES_PER_TICK: usize = 25;
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(INTERVAL_SECS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let mut reclaimed_total = 0_u64;
+            for _ in 0..MAX_BATCHES_PER_TICK {
+                match balance
+                    .reclaim_expired_request_reservations(USERS_PER_BATCH)
+                    .await
+                {
+                    Ok(0) => break,
+                    Ok(reclaimed) => reclaimed_total = reclaimed_total.saturating_add(reclaimed),
+                    Err(error) => {
+                        warn!(%error, "过期余额预留回收失败，将在下一周期重试");
+                        break;
+                    }
+                }
+            }
+            if reclaimed_total > 0 {
+                info!(reclaimed = reclaimed_total, "已回收过期的请求余额预留");
             }
         }
     });

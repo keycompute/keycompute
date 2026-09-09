@@ -959,7 +959,7 @@ async fn process_response_create(
             .get("generate")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        enforce_authenticated_rate_limit(&state, &auth, generate)
+        enforce_authenticated_rate_limit(&state, &auth)
             .await
             .map_err(|error| api_error(error, lane.clone()))?;
         let stored = body.get("store").and_then(Value::as_bool).unwrap_or(true);

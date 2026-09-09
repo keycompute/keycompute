@@ -14,8 +14,10 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 # Android/Windows/Apple 时区实现。`wasmbind` 为 wasm32 提供 JS Date。
 chrono = { version = "0.4", default-features = false, features = ["std", "now", "wasmbind"] }
 rust_decimal = "1.35"
+uuid = { version = "1", features = ["v4", "js"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "DomTokenList", "Storage", "Navigator", "Clipboard", "UrlSearchParams"] }

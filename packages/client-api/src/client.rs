@@ -122,6 +122,25 @@ impl ApiClient {
         self.send_and_parse(builder.json(body)).await
     }
 
+    /// Send an idempotent POST. The header is attached before the retryable
+    /// request builder is cloned, so every transport retry uses the exact same
+    /// key.
+    pub async fn post_json_with_idempotency_key<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        idempotency_key: &str,
+        token: Option<&str>,
+    ) -> Result<T> {
+        let builder = self.request_with_auth(Method::POST, path, token).await?;
+        self.send_and_parse(
+            builder
+                .header("Idempotency-Key", idempotency_key)
+                .json(body),
+        )
+        .await
+    }
+
     /// 发送 PUT 请求并解析响应
     pub async fn put_json<T: DeserializeOwned, B: Serialize>(
         &self,

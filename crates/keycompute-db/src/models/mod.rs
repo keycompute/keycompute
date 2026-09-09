@@ -57,7 +57,9 @@ pub use payment_order::{
 };
 pub use pending_registration::{PendingRegistration, UpsertPendingRegistrationRequest};
 pub use pricing_model::{CreatePricingRequest, PricingModel, UpdatePricingRequest};
-pub use response_affinity::ResponseAffinity;
+pub use response_affinity::{
+    ResponseAffinity, SettlementClaimCursor, SettlementRecoveryCursor, SettlementRecoveryRow,
+};
 pub use responses_idempotency_claim::ResponsesIdempotencyClaim;
 pub use system_setting::{
     BatchUpdateSettingsRequest, PublicSettings, SettingValueType, SystemSetting,
@@ -69,7 +71,11 @@ pub use tenant_distribution_rule::{
 };
 pub use usage_log::{CreateUsageLogRequest, UsageLog, UsageStats, UserUsageStats};
 pub use user::{CreateUserRequest, UpdateUserRequest, User};
-pub use user_balance::{BalanceReservation, BalanceTransaction, TransactionType, UserBalance};
+pub use user_balance::{
+    BalanceReservation, BalanceReservationEvent, BalanceReservationPageCursor, BalanceTransaction,
+    ManualBalanceOperationDecision, ManualBalanceOperationKind, ManualBalanceOperationOutcome,
+    TransactionType, UserBalance, UserBalanceBreakdown, UserBalanceBreakdownPage,
+};
 pub use user_credential::{
     CreateUserCredentialRequest, UpdateUserCredentialRequest, UserCredential,
 };

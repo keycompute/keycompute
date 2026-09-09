@@ -7,6 +7,9 @@
 //! - 权限控制通过中间件实现，而非路径前缀
 //! - Admin 和普通用户共用前端，通过权限控制展示不同模块
 
+use crate::handlers::admin_user::{
+    list_user_balance_reservations, release_user_balance_reservation,
+};
 use crate::handlers::{
     anthropic::ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES, openai::OPENAI_CHAT_BODY_LIMIT_BYTES,
     responses::OPENAI_RESPONSES_BODY_LIMIT_BYTES,
@@ -150,9 +153,9 @@ use crate::{
     middleware::{
         admin_auth_middleware, anthropic_error_response_middleware, cors_layer,
         generation_http_body_admission_middleware, maintenance_mode_middleware,
-        openai_responses_error_response_middleware, payment_notify_rate_limit_middleware,
-        public_auth_rate_limit_middleware, rate_limit_middleware, request_logger,
-        trace_id_middleware,
+        openai_rate_limit_response_middleware, openai_responses_error_response_middleware,
+        payment_notify_rate_limit_middleware, public_auth_rate_limit_middleware,
+        rate_limit_middleware, request_logger, trace_id_middleware,
     },
     state::AppState,
 };
@@ -210,7 +213,10 @@ pub fn create_router(state: AppState) -> Router {
             state.clone(),
             generation_http_body_admission_middleware,
         ))
-        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(axum::middleware::from_fn(
+            openai_rate_limit_response_middleware,
+        ));
 
     let responses_routes = Router::new()
         .route("/v1/responses", post(responses).get(responses_websocket))
@@ -305,6 +311,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/api/v1/users/{id}/balance/unfreeze",
             post(unfreeze_user_balance),
+        )
+        .route(
+            "/api/v1/users/{id}/balance/reservations",
+            get(list_user_balance_reservations),
+        )
+        .route(
+            "/api/v1/users/{id}/balance/reservations/{request_id}/release",
+            post(release_user_balance_reservation),
         )
         .route("/api/v1/users/{id}/api-keys", get(list_all_api_keys));
 
@@ -594,6 +608,7 @@ mod tests {
     };
     use serde_json::Value;
     use tower::ServiceExt;
+    use uuid::Uuid;
 
     #[test]
     fn test_create_router() {
@@ -717,6 +732,46 @@ mod tests {
                 "{method} {uri} must resolve to an authenticated route"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn admin_reservation_release_route_is_mounted_behind_admin_auth() {
+        let user_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let expected_version = Uuid::new_v4();
+        let response = create_router(AppState::new())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/users/{user_id}/balance/reservations/{request_id}/release"
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "expected_version": expected_version,
+                            "reason": "confirmed upstream failure",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": {
+                    "message": "Authentication required",
+                    "type": "auth_required",
+                    "code": "unauthorized",
+                }
+            })
+        );
     }
 
     #[tokio::test]

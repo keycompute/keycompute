@@ -1301,6 +1301,48 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.balance_title", "余额管理");
     m.insert("users.balance_available", "可用余额");
     m.insert("users.balance_frozen", "冻结余额");
+    m.insert("users.balance_total_frozen", "总冻结余额");
+    m.insert("users.balance_request_reserved", "请求预留余额");
+    m.insert("users.balance_manually_frozen", "可人工解冻余额");
+    m.insert("users.balance_active_reservations", "活跃请求预留");
+    m.insert(
+        "users.balance_release_warning",
+        "仅在确认请求已失败或卡死时释放。释放后若迟到的用量结算到达，最终费用仍可能从可用余额扣除。",
+    );
+    m.insert("users.balance_reservation_expires", "到期时间");
+    m.insert("users.balance_reservations_previous_page", "上一页");
+    m.insert("users.balance_reservations_page", "第 {page} 页");
+    m.insert("users.balance_reservations_next_page", "下一页");
+    m.insert("users.balance_release_reservation", "释放预留");
+    m.insert("users.balance_release_reason", "释放原因");
+    m.insert(
+        "users.balance_release_reason_placeholder",
+        "请说明确认该请求已卡死的依据",
+    );
+    m.insert("users.balance_release_reason_required", "请输入释放原因");
+    m.insert("users.balance_confirm_release", "确认强制释放");
+    m.insert("users.balance_reservation_released", "请求余额预留已释放");
+    m.insert(
+        "users.balance_reservation_release_failed",
+        "请求余额预留释放失败",
+    );
+    m.insert(
+        "users.balance_reservation_changed",
+        "该请求预留已结束或已被新的重试接管，未执行释放。余额明细已刷新，请重新确认后再试。",
+    );
+    m.insert("users.balance_details_load_failed", "实时余额加载失败");
+    m.insert(
+        "users.balance_details_unavailable",
+        "实时余额尚未加载，请稍候重试",
+    );
+    m.insert(
+        "users.balance_unfreeze_exceeds_releasable",
+        "解冻金额超过可人工解冻余额 {amount}；请求预留请按 request_id 单独释放",
+    );
+    m.insert(
+        "users.balance_unfreeze_hint",
+        "普通解冻仅释放管理员手工冻结，不会影响活跃请求预留。",
+    );
     m.insert("users.balance_action", "操作类型");
     m.insert("users.balance_recharge", "充值");
     m.insert("users.balance_deduct", "扣除");
@@ -1317,6 +1359,22 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.balance_action_invalid", "无效的操作类型");
     m.insert("users.balance_updated", "余额操作成功");
     m.insert("users.balance_update_failed", "余额操作失败");
+    m.insert(
+        "users.balance_repeat_operation_warning",
+        "相同内容的上一笔余额操作已经收到确定结果，本次请求尚未发送。只有在你确实要再执行一笔新的充值、扣除、冻结或解冻时，才点击下方“再次执行新的余额操作”。",
+    );
+    m.insert(
+        "users.balance_repeat_operation_confirm",
+        "再次执行新的余额操作",
+    );
+    m.insert(
+        "users.balance_idempotency_prepare_failed",
+        "无法安全保存余额操作的重试标识，请检查浏览器本地存储后重试；请求尚未发送",
+    );
+    m.insert(
+        "users.balance_idempotency_cleanup_failed",
+        "余额操作已在服务端完成，但无法安全保存完成标记；请保留当前页面并重试，系统会复用原重试标识",
+    );
     m.insert("users.cannot_modify_system", "仅 system 角色可操作系统用户");
     m.insert("tenants.subtitle", "查看和管理平台所有租户信息");
     m.insert("tenants.search_placeholder", "搜索租户名称或 ID...");

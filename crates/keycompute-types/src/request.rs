@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -62,7 +62,7 @@ pub struct RequestContext {
     pub provider: Option<String>,
     pub messages: Vec<Message>,
     pub stream: bool,
-    /// 客户端指定的最大生成 token 数（透传给上游协议层）
+    /// 客户端在请求中指定的最大输出 token 数；未指定时保持 `None`。
     pub max_tokens: Option<u32>,
     /// 客户端指定的温度参数（透传给上游协议层）
     pub temperature: Option<f32>,
@@ -139,6 +139,23 @@ pub struct RequestContext {
     /// Headers from the accepted native-protocol HTTP response. The protocol
     /// handler applies its own allowlist before exposing these to the client.
     client_upstream_response_headers: Arc<RwLock<Vec<(String, String)>>>,
+    /// Ownership generation for the durable balance reservation attached to
+    /// this logical billing request. Settlement must present this token so a
+    /// late attempt cannot consume a newer retry's frozen funds.
+    balance_reservation_owner_token: Arc<RwLock<Option<Uuid>>>,
+    /// Predicted tokens held by this request's TPM reservation. Durable
+    /// background settlement persists this value so it can restore the same
+    /// already-admitted lease after a process restart.
+    tpm_reservation_tokens: Arc<RwLock<Option<u32>>>,
+    /// Shared lifetime sentinel for the active TPM lease heartbeat. Request
+    /// clones used by detached settlement workers retain the strong reference;
+    /// the heartbeat itself only receives a `Weak`, so it cannot keep an
+    /// abandoned request alive forever.
+    tpm_reservation_lifetime: Arc<()>,
+    /// Explicit terminal signal shared by every clone of this request. A
+    /// successful reconcile/release can stop the heartbeat immediately instead
+    /// of waiting for its next backend probe.
+    tpm_reservation_heartbeat_stop: CancellationToken,
     pub pricing_snapshot: PricingSnapshot, // 请求开始时固化
     usage: Arc<UsageAccumulator>,          // streaming 中累积（共享状态）
     pub started_at: DateTime<Utc>,
@@ -213,6 +230,13 @@ impl fmt::Debug for RequestContext {
                     .execution_failure()
                     .map(|failure| (failure.status, failure.error.code)),
             )
+            // The ownership token is an internal compare-and-swap capability;
+            // expose only whether one has been bound in diagnostics.
+            .field(
+                "has_balance_reservation_owner_token",
+                &self.balance_reservation_owner_token().is_some(),
+            )
+            .field("tpm_reservation_tokens", &self.tpm_reservation_tokens())
             .field("pricing_snapshot", &self.pricing_snapshot)
             .field("usage", &self.usage)
             .field("started_at", &self.started_at)
@@ -264,6 +288,10 @@ impl RequestContext {
             execution_failure: Arc::new(RwLock::new(None)),
             client_upstream_response: Arc::new(RwLock::new(None)),
             client_upstream_response_headers: Arc::new(RwLock::new(Vec::new())),
+            balance_reservation_owner_token: Arc::new(RwLock::new(None)),
+            tpm_reservation_tokens: Arc::new(RwLock::new(None)),
+            tpm_reservation_lifetime: Arc::new(()),
+            tpm_reservation_heartbeat_stop: CancellationToken::new(),
             pricing_snapshot,
             usage: Arc::new(UsageAccumulator::new()),
             started_at: Utc::now(),
@@ -304,6 +332,10 @@ impl RequestContext {
             execution_failure: Arc::clone(&self.execution_failure),
             client_upstream_response: Arc::clone(&self.client_upstream_response),
             client_upstream_response_headers: Arc::clone(&self.client_upstream_response_headers),
+            balance_reservation_owner_token: Arc::clone(&self.balance_reservation_owner_token),
+            tpm_reservation_tokens: Arc::clone(&self.tpm_reservation_tokens),
+            tpm_reservation_lifetime: Arc::clone(&self.tpm_reservation_lifetime),
+            tpm_reservation_heartbeat_stop: self.tpm_reservation_heartbeat_stop.clone(),
             pricing_snapshot: self.pricing_snapshot.clone(),
             usage: Arc::clone(&self.usage),
             started_at: self.started_at,
@@ -313,6 +345,58 @@ impl RequestContext {
     /// Bind billing and terminal token accounting to a stable logical request.
     pub fn set_billing_request_id(&mut self, billing_request_id: Uuid) {
         self.billing_request_id = billing_request_id;
+    }
+
+    /// Bind the durable reservation ownership generation before dispatch.
+    ///
+    /// Clones used by detached settlement workers share this value. A retry
+    /// gets a fresh `RequestContext` and therefore cannot inherit the previous
+    /// attempt's token.
+    pub fn set_balance_reservation_owner_token(&self, owner_token: Uuid) {
+        if let Ok(mut bound) = self.balance_reservation_owner_token.write() {
+            *bound = Some(owner_token);
+        }
+    }
+
+    /// Return the ownership generation required to settle frozen funds.
+    pub fn balance_reservation_owner_token(&self) -> Option<Uuid> {
+        self.balance_reservation_owner_token
+            .read()
+            .ok()
+            .and_then(|bound| *bound)
+    }
+
+    /// Bind the exact prediction admitted by the TPM limiter.
+    pub fn set_tpm_reservation_tokens(&self, tokens: u32) {
+        if let Ok(mut bound) = self.tpm_reservation_tokens.write() {
+            *bound = Some(tokens);
+        }
+    }
+
+    /// Return the exact prediction owned by this request's TPM lease.
+    pub fn tpm_reservation_tokens(&self) -> Option<u32> {
+        self.tpm_reservation_tokens
+            .read()
+            .ok()
+            .and_then(|bound| *bound)
+    }
+
+    /// Return a weak request-lifetime sentinel for a detached TPM heartbeat.
+    pub fn tpm_reservation_lifetime(&self) -> Weak<()> {
+        Arc::downgrade(&self.tpm_reservation_lifetime)
+    }
+
+    /// Return an owned future completed by successful terminal TPM settlement.
+    pub fn tpm_reservation_heartbeat_stopped(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>> {
+        let stop = self.tpm_reservation_heartbeat_stop.clone();
+        Box::pin(async move { stop.cancelled().await })
+    }
+
+    /// Mark terminal TPM settlement and wake the lease heartbeat immediately.
+    pub fn stop_tpm_reservation_heartbeat(&self) {
+        self.tpm_reservation_heartbeat_stop.cancel();
     }
 
     /// 设置 Provider（路由确定后调用）
@@ -985,8 +1069,8 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn upstream_acceptance_signal_is_shared_with_payloadless_clones() {
+    #[test]
+    fn upstream_acceptance_signal_is_shared_with_payloadless_clones() {
         let ctx = RequestContext::new(
             Uuid::new_v4(),
             Uuid::new_v4(),
@@ -998,15 +1082,67 @@ mod tests {
             PricingSnapshot::default(),
         );
         let settlement_ctx = ctx.clone_without_request_payloads();
-        let waiter = tokio::spawn(async move {
-            settlement_ctx.wait_for_upstream_response_accepted().await;
-            settlement_ctx.is_upstream_response_accepted()
-        });
-
         ctx.mark_upstream_response_accepted();
 
-        assert!(waiter.await.unwrap());
+        assert!(settlement_ctx.is_upstream_response_accepted());
         assert!(ctx.is_upstream_response_accepted());
+    }
+
+    #[test]
+    fn balance_reservation_owner_is_shared_with_settlement_clones() {
+        let ctx = RequestContext::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            false,
+            PricingSnapshot::default(),
+        );
+        let settlement_ctx = ctx.clone_without_request_payloads();
+        let owner_token = Uuid::new_v4();
+
+        assert_eq!(settlement_ctx.balance_reservation_owner_token(), None);
+        ctx.set_balance_reservation_owner_token(owner_token);
+        assert_eq!(
+            settlement_ctx.balance_reservation_owner_token(),
+            Some(owner_token)
+        );
+    }
+
+    #[test]
+    fn tpm_reservation_state_is_shared_with_payloadless_settlement_clones() {
+        let ctx = RequestContext::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            false,
+            PricingSnapshot::default(),
+        );
+        let lifetime = ctx.tpm_reservation_lifetime();
+        let settlement_ctx = ctx.clone_without_request_payloads();
+        ctx.set_tpm_reservation_tokens(321);
+
+        assert_eq!(settlement_ctx.tpm_reservation_tokens(), Some(321));
+        ctx.stop_tpm_reservation_heartbeat();
+        assert!(
+            settlement_ctx.tpm_reservation_heartbeat_stop.is_cancelled(),
+            "terminal settlement signal must be shared with detached clones"
+        );
+        drop(ctx);
+        assert!(
+            lifetime.upgrade().is_some(),
+            "detached settlement must retain the heartbeat lifetime"
+        );
+        drop(settlement_ctx);
+        assert!(
+            lifetime.upgrade().is_none(),
+            "the heartbeat must not own the request lifetime itself"
+        );
     }
 
     #[test]

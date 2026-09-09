@@ -1103,8 +1103,8 @@ impl GatewayExecutor {
             messages: upstream_messages,
             stream: ctx.stream,
             include_stream_usage,
-            // 透传客户端采样参数（Anthropic 协议的 max_tokens 为必填字段，
-            // 未指定时由协议层使用默认值）
+            // 仅透传客户端指定的采样参数。余额预留使用独立的本地风险预算，
+            // 不得为了计费而改变发往上游的协议请求。
             max_tokens: ctx.max_tokens,
             temperature: ctx.temperature,
             top_p: ctx.top_p,

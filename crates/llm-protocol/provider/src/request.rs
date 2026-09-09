@@ -64,7 +64,7 @@ pub struct UpstreamRequest {
     /// 已被完整追踪的兼容性重试中关闭，协议适配器本身不得隐藏发起第二个请求。
     #[serde(default = "default_true")]
     pub include_stream_usage: bool,
-    /// 最大 token 数（可选）
+    /// 客户端指定的最大输出 token 数；未指定时保持 `None`
     pub max_tokens: Option<u32>,
     /// 温度参数（可选）
     pub temperature: Option<f32>,

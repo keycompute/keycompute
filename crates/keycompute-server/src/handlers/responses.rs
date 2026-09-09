@@ -9,8 +9,8 @@ use crate::{
     error::{ApiError, Result},
     extractors::{AuthExtractor, ClientRequestId, RequestId, RequestReceivedAt},
     middleware::{
-        enforce_authenticated_tpm_limit, sanitize_openai_responses_error_code,
-        sanitize_openai_responses_error_param, sanitize_openai_responses_error_type,
+        sanitize_openai_responses_error_code, sanitize_openai_responses_error_param,
+        sanitize_openai_responses_error_type,
     },
     state::{
         AppState, GENERATION_LARGE_HTTP_BODY_BYTES, GenerationHttpBodyPermit, ResponsesAffinity,
@@ -30,7 +30,7 @@ use futures::{Stream, StreamExt};
 use keycompute_auth::Permission;
 use keycompute_db::models::{
     account::Account,
-    response_affinity::ResponseAffinity,
+    response_affinity::{ResponseAffinity, SettlementRecoveryRow},
     responses_idempotency_claim::{
         RESPONSES_IDEMPOTENCY_MAX_IDENTITIES_PER_TENANT,
         RESPONSES_IDEMPOTENCY_MAX_RESPONSE_BODY_BYTES, ResponsesIdempotencyClaim,
@@ -116,6 +116,17 @@ pub use create::{compact_response, responses};
 
 pub fn spawn_responses_maintenance(state: AppState) {
     background::run_responses_maintenance(state);
+}
+
+/// Maximum time allowed to reconstruct all durable TPM reservations before
+/// the server opens generation admission.
+pub const STARTUP_TPM_RECOVERY_TIMEOUT: Duration = background::STARTUP_TPM_RECOVERY_TIMEOUT;
+
+/// Restore already-admitted TPM capacity without running provider polling or
+/// monetary settlement. The production entry point awaits this barrier before
+/// spawning ordinary maintenance and binding the HTTP listener.
+pub async fn restore_durable_tpm_before_serving(state: &AppState) -> Result<usize> {
+    background::restore_durable_tpm_before_serving(state).await
 }
 
 pub(super) async fn persist_immediate_terminal_settlement_outbox(
@@ -1903,7 +1914,10 @@ async fn record_responses_token_usage_for_timing(
     let terminal_at = match timing {
         ResponsesTpmTiming::LedgerFinishedAt => ledger_finished_at,
         ResponsesTpmTiming::TerminalAt(terminal_at) => terminal_at,
-        ResponsesTpmTiming::Skip => return Ok(()),
+        ResponsesTpmTiming::Skip => {
+            return super::release_terminal_token_reservation(state.rate_limiter.as_ref(), ctx)
+                .await;
+        }
     };
     record_responses_token_usage_values_if_fresh(state, ctx, total_tokens, terminal_at).await
 }
@@ -1914,11 +1928,19 @@ async fn record_responses_token_usage_values_if_fresh(
     total_tokens: u32,
     terminal_at: chrono::DateTime<chrono::Utc>,
 ) -> keycompute_types::Result<()> {
+    let now = chrono::Utc::now();
+    // Provider timestamps are clamped once when first observed. Dynamically
+    // clamping an already-persisted future value to every retry's `now` would
+    // create a new occurrence after each terminal tombstone expires. This
+    // shared last line of defense therefore releases invalid future usage.
+    if terminal_at > now {
+        return super::release_terminal_token_reservation(state.rate_limiter.as_ref(), ctx).await;
+    }
     let window = chrono::Duration::seconds(
         i64::try_from(keycompute_ratelimit::WINDOW_SECS).unwrap_or(i64::MAX),
     );
-    if chrono::Utc::now().signed_duration_since(terminal_at) >= window {
-        return Ok(());
+    if now.signed_duration_since(terminal_at) >= window {
+        return super::release_terminal_token_reservation(state.rate_limiter.as_ref(), ctx).await;
     }
     record_responses_token_usage_values_at(state, ctx, total_tokens, terminal_at.into()).await
 }
@@ -2646,6 +2668,9 @@ mod tests {
     #[derive(Debug)]
     struct TerminalUsageCallCounter {
         calls: Arc<std::sync::atomic::AtomicUsize>,
+        restore_calls: Arc<std::sync::atomic::AtomicUsize>,
+        release_calls: Arc<std::sync::atomic::AtomicUsize>,
+        restore_active: bool,
     }
 
     #[async_trait::async_trait]
@@ -2680,10 +2705,54 @@ mod tests {
             Ok(())
         }
 
-        async fn record_tokens_once_at(
+        async fn reserve_tokens(
             &self,
             _key: &keycompute_ratelimit::RateLimitKey,
-            _request_id: uuid::Uuid,
+            _reservation_id: uuid::Uuid,
+            _terminal_id: uuid::Uuid,
+            _predicted_tokens: u32,
+            _limit: u32,
+        ) -> keycompute_types::Result<()> {
+            Ok(())
+        }
+
+        async fn renew_token_reservation(
+            &self,
+            _key: &keycompute_ratelimit::RateLimitKey,
+            _reservation_id: uuid::Uuid,
+            _terminal_id: uuid::Uuid,
+            _predicted_tokens: u32,
+        ) -> keycompute_types::Result<bool> {
+            Ok(true)
+        }
+
+        async fn restore_token_reservation(
+            &self,
+            _key: &keycompute_ratelimit::RateLimitKey,
+            _reservation_id: uuid::Uuid,
+            _terminal_id: uuid::Uuid,
+            _predicted_tokens: u32,
+        ) -> keycompute_types::Result<bool> {
+            self.restore_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.restore_active)
+        }
+
+        async fn release_token_reservation(
+            &self,
+            _key: &keycompute_ratelimit::RateLimitKey,
+            _reservation_id: uuid::Uuid,
+        ) -> keycompute_types::Result<()> {
+            self.release_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn reconcile_tokens_once_at(
+            &self,
+            _key: &keycompute_ratelimit::RateLimitKey,
+            _reservation_id: uuid::Uuid,
+            _terminal_id: uuid::Uuid,
             _tokens: u32,
             _occurred_at: std::time::SystemTime,
         ) -> keycompute_types::Result<()> {
@@ -4060,6 +4129,9 @@ mod tests {
         state.rate_limiter = Arc::new(keycompute_ratelimit::RateLimitService::new(
             Arc::new(TerminalUsageCallCounter {
                 calls: Arc::clone(&terminal_usage_calls),
+                restore_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                release_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                restore_active: true,
             }),
             keycompute_ratelimit::RateLimitBackend::Memory,
         ));
@@ -4291,6 +4363,7 @@ mod tests {
             false,
             keycompute_types::PricingSnapshot::default(),
         ));
+        ctx.set_tpm_reservation_tokens(100);
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tx.send(llm_protocol_provider::StreamEvent::native(
             NativeStreamEvent::OpenAiResponsesJson {
@@ -4349,6 +4422,7 @@ mod tests {
             false,
             keycompute_types::PricingSnapshot::default(),
         ));
+        ctx.set_tpm_reservation_tokens(100);
         let (tx, rx) = tokio::sync::mpsc::channel(2);
         tx.send(llm_protocol_provider::StreamEvent::native(
             NativeStreamEvent::OpenAiResponsesJson {
@@ -5261,6 +5335,8 @@ mod tests {
         let mut settlement = BackgroundSettlement {
             request_id: uuid::Uuid::new_v4(),
             billing_request_id: Some(uuid::Uuid::new_v4()),
+            balance_reservation_owner_token: Some(uuid::Uuid::new_v4()),
+            tpm_reserved_tokens: 100,
             tenant_id: uuid::Uuid::new_v4(),
             user_id: uuid::Uuid::new_v4(),
             produce_ai_key_id: uuid::Uuid::new_v4(),
@@ -5301,6 +5377,176 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn durable_background_restores_tpm_only_inside_the_active_horizon() {
+        let now = chrono::Utc::now();
+        let restore_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let release_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut state = AppState::new();
+        state.rate_limiter = Arc::new(keycompute_ratelimit::RateLimitService::new(
+            Arc::new(TerminalUsageCallCounter {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                restore_calls: Arc::clone(&restore_calls),
+                release_calls: Arc::clone(&release_calls),
+                restore_active: true,
+            }),
+            keycompute_ratelimit::RateLimitBackend::Memory,
+        ));
+        let mut settlement = BackgroundSettlement {
+            request_id: uuid::Uuid::new_v4(),
+            billing_request_id: Some(uuid::Uuid::new_v4()),
+            balance_reservation_owner_token: Some(uuid::Uuid::new_v4()),
+            tpm_reserved_tokens: 77,
+            tenant_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
+            produce_ai_key_id: uuid::Uuid::new_v4(),
+            model: "gpt-test".to_string(),
+            provider: "openai".to_string(),
+            account_id: uuid::Uuid::new_v4(),
+            pricing_snapshot: keycompute_types::PricingSnapshot::default(),
+            started_at: now,
+            input_tokens: 7,
+            output_tokens: 5,
+            input_tokens_finalized: false,
+            output_tokens_finalized: false,
+            openai_beta: None,
+            terminal_status: None,
+            terminal_at: None,
+            deadline_at: now + chrono::Duration::hours(1),
+            attempt: 0,
+        };
+
+        let active = restore_background_tpm_lease_if_needed(&state, &settlement, now)
+            .await
+            .unwrap()
+            .expect("pending work must restore its admitted lease");
+        assert_eq!(restore_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        settlement.deadline_at = now - chrono::Duration::seconds(1);
+        assert!(!background_settlement_needs_tpm_lease(&settlement, now));
+        crate::handlers::release_terminal_token_reservation(state.rate_limiter.as_ref(), &active)
+            .await
+            .unwrap();
+        assert_eq!(release_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // Repeated calls model a settlement failure followed by durable
+        // rescheduling: a Skip job must never leave a restored 60-second lease.
+        for _ in 0..2 {
+            assert!(
+                restore_background_tpm_lease_if_needed(&state, &settlement, now)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(restore_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        settlement.deadline_at = now + chrono::Duration::hours(1);
+        settlement.terminal_status = Some("incomplete".to_string());
+        assert!(!background_settlement_needs_tpm_lease(&settlement, now));
+
+        settlement.terminal_at = Some(
+            now - chrono::Duration::seconds(
+                i64::try_from(keycompute_ratelimit::WINDOW_SECS).unwrap() + 1,
+            ),
+        );
+        assert!(!background_settlement_needs_tpm_lease(&settlement, now));
+
+        settlement.terminal_at = Some(now - chrono::Duration::seconds(1));
+        let fresh_terminal = restore_background_tpm_lease_if_needed(&state, &settlement, now)
+            .await
+            .unwrap()
+            .expect("fresh terminal work still belongs to the current TPM horizon");
+        assert_eq!(restore_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        fresh_terminal.stop_tpm_reservation_heartbeat();
+
+        let terminal_fence_restore_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        state.rate_limiter = Arc::new(keycompute_ratelimit::RateLimitService::new(
+            Arc::new(TerminalUsageCallCounter {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                restore_calls: Arc::clone(&terminal_fence_restore_calls),
+                release_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                restore_active: false,
+            }),
+            keycompute_ratelimit::RateLimitBackend::Memory,
+        ));
+        assert!(
+            restore_background_tpm_lease_if_needed(&state, &settlement, now)
+                .await
+                .unwrap()
+                .is_none(),
+            "a terminal-fenced restore must not pretend that a heartbeat is active"
+        );
+        assert_eq!(
+            terminal_fence_restore_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_restore_blocks_fresh_admission_for_a_delayed_and_leased_outbox() {
+        let state = AppState::new();
+        let now = chrono::Utc::now();
+        let settlement = BackgroundSettlement {
+            request_id: uuid::Uuid::new_v4(),
+            billing_request_id: Some(uuid::Uuid::new_v4()),
+            balance_reservation_owner_token: Some(uuid::Uuid::new_v4()),
+            tpm_reserved_tokens: 80,
+            tenant_id: uuid::Uuid::new_v4(),
+            user_id: uuid::Uuid::new_v4(),
+            produce_ai_key_id: uuid::Uuid::new_v4(),
+            model: "gpt-test".to_string(),
+            provider: "openai".to_string(),
+            account_id: uuid::Uuid::new_v4(),
+            pricing_snapshot: keycompute_types::PricingSnapshot::default(),
+            started_at: now,
+            input_tokens: 7,
+            output_tokens: 5,
+            input_tokens_finalized: false,
+            output_tokens_finalized: false,
+            openai_beta: None,
+            terminal_status: None,
+            terminal_at: None,
+            deadline_at: now + chrono::Duration::hours(1),
+            attempt: 0,
+        };
+        let affinity = SettlementRecoveryRow {
+            tenant_id: settlement.tenant_id,
+            response_id: "resp_startup_tpm_recovery".to_string(),
+            provider: settlement.provider.clone(),
+            account_id: Some(settlement.account_id),
+            settlement: serde_json::to_value(&settlement).unwrap(),
+        };
+
+        assert!(
+            restore_startup_tpm_affinity(&state, affinity)
+                .await
+                .unwrap()
+        );
+
+        let rate_key = RateLimitKey::new(
+            settlement.tenant_id,
+            settlement.user_id,
+            settlement.produce_ai_key_id,
+        );
+        let result = state
+            .rate_limiter
+            .reserve_token_usage(
+                &rate_key,
+                uuid::Uuid::new_v4(),
+                uuid::Uuid::new_v4(),
+                21,
+                &keycompute_ratelimit::RateLimitConfig::new(100, 100),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(keycompute_types::KeyComputeError::RateLimitExceeded(_))
+        ));
+        assert_eq!(
+            state.rate_limiter.get_tpm_count(&rate_key).await.unwrap(),
+            80
+        );
+    }
+
     #[test]
     fn deferred_terminal_outbox_preserves_tpm_timing() {
         let ctx = RequestContext::new(
@@ -5313,6 +5559,7 @@ mod tests {
             false,
             keycompute_types::PricingSnapshot::default(),
         );
+        ctx.set_tpm_reservation_tokens(100);
         let account_id = uuid::Uuid::new_v4();
         let skipped: BackgroundSettlement = serde_json::from_value(
             terminal_settlement_value_with_tpm_timing(
@@ -5351,6 +5598,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn future_provider_terminal_time_is_clamped_once_before_durable_replay() {
+        let observed_at = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0)
+            .expect("current timestamp is representable");
+        let provider_future = observed_at + chrono::Duration::hours(1);
+        let terminal_at = background_response_terminal_at_observed(
+            &json!({"completed_at": provider_future.timestamp()}),
+            observed_at,
+        )
+        .expect("provider timestamp is parseable");
+        assert_eq!(terminal_at, observed_at);
+
+        let ctx = RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        ctx.set_tpm_reservation_tokens(100);
+        let settlement: BackgroundSettlement = serde_json::from_value(
+            terminal_settlement_value_with_tpm_timing(
+                &ctx,
+                "openai",
+                uuid::Uuid::new_v4(),
+                "success",
+                ResponsesTpmTiming::TerminalAt(terminal_at),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(settlement.terminal_at, Some(observed_at));
+        assert!(background_settlement_needs_tpm_lease(
+            &settlement,
+            observed_at + chrono::Duration::seconds(1),
+        ));
+        assert!(!background_settlement_needs_tpm_lease(
+            &settlement,
+            observed_at
+                + chrono::Duration::seconds(
+                    i64::try_from(keycompute_ratelimit::WINDOW_SECS).unwrap() + 1,
+                ),
+        ));
+
+        // Defensive handling of corrupted durable data is stable across
+        // retries: never slide a future timestamp forward to each new `now`.
+        let mut corrupted = settlement;
+        corrupted.terminal_at = Some(provider_future);
+        assert_eq!(
+            background_settlement_tpm_timing(&corrupted, observed_at),
+            ResponsesTpmTiming::Skip
+        );
+        assert_eq!(
+            background_settlement_tpm_timing(
+                &corrupted,
+                observed_at + chrono::Duration::seconds(10),
+            ),
+            ResponsesTpmTiming::Skip
+        );
+    }
+
     #[tokio::test]
     async fn replayed_ledger_rows_do_not_enter_the_current_tpm_window() {
         let state = AppState::new();
@@ -5365,6 +5676,18 @@ mod tests {
             keycompute_types::PricingSnapshot::default(),
         );
         let rate_key = RateLimitKey::new(ctx.tenant_id, ctx.user_id, ctx.produce_ai_key_id);
+
+        let invalid_future = chrono::Utc::now() + chrono::Duration::hours(1);
+        for _ in 0..2 {
+            record_responses_token_usage_values_if_fresh(&state, &ctx, 99, invalid_future)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            state.rate_limiter.get_tpm_count(&rate_key).await.unwrap(),
+            0,
+            "replaying an invalid future occurrence must always release, never slide it to now"
+        );
 
         record_responses_token_usage_values_if_fresh(
             &state,
@@ -5410,6 +5733,72 @@ mod tests {
         assert_eq!(
             state.rate_limiter.get_tpm_count(&rate_key).await.unwrap(),
             26
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_ledger_records_tpm_before_failing_effects_idempotently() {
+        let state = AppState::new();
+        let ctx = RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        ctx.set_tpm_reservation_tokens(80);
+        let rate_key = RateLimitKey::new(ctx.tenant_id, ctx.user_id, ctx.produce_ai_key_id);
+        state
+            .rate_limiter
+            .reserve_token_usage(
+                &rate_key,
+                ctx.request_id,
+                ctx.billing_request_id,
+                80,
+                &keycompute_ratelimit::RateLimitConfig::new(100, 100),
+            )
+            .await
+            .unwrap();
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        for _ in 0..2 {
+            let tpm_events = Arc::clone(&events);
+            let effects_events = Arc::clone(&events);
+            let result = run_tpm_before_post_ledger_effects(
+                || async {
+                    tpm_events.lock().unwrap().push("tpm");
+                    record_responses_token_usage_values_at(
+                        &state,
+                        &ctx,
+                        30,
+                        std::time::SystemTime::now(),
+                    )
+                    .await
+                },
+                || async {
+                    effects_events.lock().unwrap().push("effects");
+                    Err(keycompute_types::KeyComputeError::Internal(
+                        "forced post-ledger failure".to_string(),
+                    ))
+                },
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(BackgroundLedgerSettlementError::PostLedger(_))
+            ));
+            assert_eq!(
+                state.rate_limiter.get_tpm_count(&rate_key).await.unwrap(),
+                30,
+                "a post-ledger retry must not duplicate authoritative terminal usage"
+            );
+        }
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["tpm", "effects", "tpm", "effects"]
         );
     }
 
@@ -5676,21 +6065,423 @@ mod tests {
         ));
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn blocked_initialization_keeps_a_large_backlog_bounded_and_maintained() {
+        const JOBS: usize = BACKGROUND_SETTLEMENT_INITIALIZATION_CONCURRENCY * 4 + 3;
+        let due = Arc::new(std::sync::Mutex::new(
+            (0..JOBS).collect::<std::collections::VecDeque<_>>(),
+        ));
+        let initialization_capacity = Arc::new(Semaphore::new(
+            BACKGROUND_SETTLEMENT_INITIALIZATION_CONCURRENCY,
+        ));
+        let processing_capacity =
+            Arc::new(Semaphore::new(BACKGROUND_SETTLEMENT_PROCESSING_CONCURRENCY));
+        // Deliberately smaller than both the backlog and initialization budget,
+        // matching a saturated writer pool without allowing claim/task growth.
+        let writer_capacity = Arc::new(Semaphore::new(2));
+        let (release_writer, _) = tokio::sync::watch::channel(false);
+        let restored = Arc::new(
+            (0..JOBS)
+                .map(|_| std::sync::atomic::AtomicBool::new(false))
+                .collect::<Vec<_>>(),
+        );
+        let lease_renewals = Arc::new(
+            (0..JOBS)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect::<Vec<_>>(),
+        );
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max_active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let drain = tokio::spawn({
+            let due = Arc::clone(&due);
+            let initialization_capacity = Arc::clone(&initialization_capacity);
+            let processing_capacity = Arc::clone(&processing_capacity);
+            let writer_capacity = Arc::clone(&writer_capacity);
+            let restored = Arc::clone(&restored);
+            let lease_renewals = Arc::clone(&lease_renewals);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
+            let handles = Arc::clone(&handles);
+            let release_writer = release_writer.subscribe();
+            async move {
+                drain_claim_batches_bounded(
+                    BACKGROUND_SETTLEMENT_CLAIM_BATCH_SIZE,
+                    &initialization_capacity,
+                    move |limit, _after: Option<usize>| {
+                        let mut due = due.lock().unwrap();
+                        let mut batch = Vec::new();
+                        for _ in 0..limit {
+                            let Some(job) = due.pop_front() else {
+                                break;
+                            };
+                            batch.push(job);
+                        }
+                        let next = batch.last().copied();
+                        std::future::ready(Ok::<_, std::convert::Infallible>((batch, next)))
+                    },
+                    move |job, initialization_permit| {
+                        let current = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        max_active.fetch_max(current, std::sync::atomic::Ordering::SeqCst);
+                        let processing_capacity = Arc::clone(&processing_capacity);
+                        let writer_capacity = Arc::clone(&writer_capacity);
+                        let restored = Arc::clone(&restored);
+                        let lease_renewals = Arc::clone(&lease_renewals);
+                        let active = Arc::clone(&active);
+                        let mut release_writer = release_writer.clone();
+                        let handle = tokio::spawn(async move {
+                            let worker = async {
+                                let mut resident =
+                                    BackgroundResidentPermit::initializing(initialization_permit);
+                                // Production restores TPM before entering the
+                                // potentially saturated writer lookup/fence.
+                                restored[job].store(true, std::sync::atomic::Ordering::SeqCst);
+                                if !resident
+                                    .try_transfer_to_processing(&processing_capacity)
+                                    .unwrap()
+                                {
+                                    return;
+                                }
+                                let _writer = writer_capacity.acquire_owned().await.unwrap();
+                                while !*release_writer.borrow() {
+                                    release_writer.changed().await.unwrap();
+                                }
+                                drop(resident);
+                            };
+                            let maintenance = async {
+                                let mut tick = tokio::time::interval(
+                                    BACKGROUND_SETTLEMENT_LEASE_RENEW_INTERVAL,
+                                );
+                                tick.set_missed_tick_behavior(
+                                    tokio::time::MissedTickBehavior::Delay,
+                                );
+                                tick.tick().await;
+                                loop {
+                                    tick.tick().await;
+                                    lease_renewals[job]
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                }
+                            };
+                            run_background_worker_with_maintenance(worker, maintenance).await;
+                            active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        });
+                        handles.lock().unwrap().push(handle);
+                    },
+                )
+                .await
+            }
+        });
+
+        let claimed = drain.await.unwrap().unwrap();
+        assert_eq!(claimed, JOBS);
+        for _ in 0..JOBS * 2 {
+            tokio::task::yield_now().await;
+            if restored
+                .iter()
+                .all(|restored| restored.load(std::sync::atomic::Ordering::SeqCst))
+                && active.load(std::sync::atomic::Ordering::SeqCst)
+                    == BACKGROUND_SETTLEMENT_PROCESSING_CONCURRENCY
+            {
+                break;
+            }
+        }
+        assert!(due.lock().unwrap().is_empty());
+        assert!(
+            restored
+                .iter()
+                .all(|restored| restored.load(std::sync::atomic::Ordering::SeqCst))
+        );
+        assert_eq!(
+            active.load(std::sync::atomic::Ordering::SeqCst),
+            BACKGROUND_SETTLEMENT_PROCESSING_CONCURRENCY,
+            "only processing-slot owners may remain while the writer is blocked"
+        );
+
+        for _ in 0..=keycompute_ratelimit::WINDOW_SECS
+            / BACKGROUND_SETTLEMENT_LEASE_RENEW_INTERVAL.as_secs()
+        {
+            tokio::time::advance(BACKGROUND_SETTLEMENT_LEASE_RENEW_INTERVAL).await;
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            lease_renewals
+                .iter()
+                .filter(|renewals| renewals.load(std::sync::atomic::Ordering::SeqCst) > 0)
+                .count()
+                >= BACKGROUND_SETTLEMENT_PROCESSING_CONCURRENCY,
+            "every resident processing job must remain maintained beyond one TPM window while the writer is blocked"
+        );
+
+        release_writer.send(true).unwrap();
+        let handles = std::mem::take(&mut *handles.lock().unwrap());
+        for handle in handles {
+            handle.await.unwrap();
+        }
+        assert!(
+            max_active.load(std::sync::atomic::Ordering::SeqCst)
+                <= BACKGROUND_SETTLEMENT_INITIALIZATION_CONCURRENCY
+                    + BACKGROUND_SETTLEMENT_PROCESSING_CONCURRENCY,
+            "a backlog much larger than the writer pool must not create an unbounded resident task set"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn saturated_processing_reclaims_and_refreshes_the_whole_backlog_before_tpm_expiry() {
+        const INITIALIZATION: usize = 4;
+        const JOBS: usize = INITIALIZATION * 8 + 3;
+        let initialization = Arc::new(Semaphore::new(INITIALIZATION));
+        let processing = Arc::new(Semaphore::new(0));
+        let now = tokio::time::Instant::now();
+        let claim_until = Arc::new(std::sync::Mutex::new(vec![now; JOBS]));
+        let restored_until = Arc::new(std::sync::Mutex::new(vec![now; JOBS]));
+        let restore_calls = Arc::new(
+            (0..JOBS)
+                .map(|_| std::sync::atomic::AtomicUsize::new(0))
+                .collect::<Vec<_>>(),
+        );
+
+        for round in 1..=3 {
+            if round > 1 {
+                tokio::time::advance(BACKGROUND_SETTLEMENT_LEASE_TTL + Duration::from_secs(1))
+                    .await;
+                let now = tokio::time::Instant::now();
+                assert!(
+                    restored_until
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .all(|expires_at| *expires_at > now),
+                    "the prior restore must cover the next post-claim-expiry sweep"
+                );
+            }
+
+            let claimed = drain_claim_batches_bounded(
+                INITIALIZATION,
+                &initialization,
+                {
+                    let claim_until = Arc::clone(&claim_until);
+                    move |limit, after: Option<usize>| {
+                        let now = tokio::time::Instant::now();
+                        let mut claim_until = claim_until.lock().unwrap();
+                        let mut jobs = Vec::new();
+                        for job in after.map_or(0, |job| job + 1)..JOBS {
+                            if claim_until[job] > now {
+                                continue;
+                            }
+                            claim_until[job] = now + BACKGROUND_SETTLEMENT_LEASE_TTL;
+                            jobs.push(job);
+                            if jobs.len() == limit as usize {
+                                break;
+                            }
+                        }
+                        let next = jobs.last().copied();
+                        std::future::ready(Ok::<_, std::convert::Infallible>((jobs, next)))
+                    }
+                },
+                {
+                    let processing = Arc::clone(&processing);
+                    let restored_until = Arc::clone(&restored_until);
+                    let restore_calls = Arc::clone(&restore_calls);
+                    move |job, initialization_permit| {
+                        // Model the terminal-fenced Redis restore, then the
+                        // immediate processing transfer used in production.
+                        restored_until.lock().unwrap()[job] = tokio::time::Instant::now()
+                            + Duration::from_secs(keycompute_ratelimit::WINDOW_SECS);
+                        restore_calls[job].fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        let mut resident =
+                            BackgroundResidentPermit::initializing(initialization_permit);
+                        assert!(!resident.try_transfer_to_processing(&processing).unwrap());
+                    }
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(claimed, JOBS);
+            assert!(
+                restore_calls
+                    .iter()
+                    .all(|calls| { calls.load(std::sync::atomic::Ordering::SeqCst) == round })
+            );
+            assert_eq!(initialization.available_permits(), INITIALIZATION);
+        }
+
+        assert!(
+            tokio::time::Instant::now().duration_since(now)
+                > Duration::from_secs(keycompute_ratelimit::WINDOW_SECS),
+            "the model must cross the original 60-second reservation horizon"
+        );
+    }
+
+    #[tokio::test]
+    async fn resident_permit_transfers_atomically_and_lives_through_settlement() {
+        let initialization = Arc::new(Semaphore::new(1));
+        let processing = Arc::new(Semaphore::new(1));
+        let initialization_permit = Arc::clone(&initialization).acquire_owned().await.unwrap();
+        let mut resident = BackgroundResidentPermit::initializing(initialization_permit);
+
+        assert!(resident.try_transfer_to_processing(&processing).unwrap());
+        assert_eq!(initialization.available_permits(), 1);
+        assert_eq!(processing.available_permits(), 0);
+        // Model a slow terminal ledger replay after the provider GET. The
+        // processing slot remains the resident bound for that entire phase.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(processing.available_permits(), 0);
+        drop(resident);
+        assert_eq!(processing.available_permits(), 1);
+
+        let held_processing = Arc::clone(&processing).acquire_owned().await.unwrap();
+        let initialization_permit = Arc::clone(&initialization).acquire_owned().await.unwrap();
+        let mut resident = BackgroundResidentPermit::initializing(initialization_permit);
+        assert!(!resident.try_transfer_to_processing(&processing).unwrap());
+        assert_eq!(initialization.available_permits(), 0);
+        drop(resident);
+        assert_eq!(initialization.available_permits(), 1);
+        drop(held_processing);
+
+        processing.close();
+        let initialization_permit = Arc::clone(&initialization).acquire_owned().await.unwrap();
+        let mut resident = BackgroundResidentPermit::initializing(initialization_permit);
+        assert!(resident.try_transfer_to_processing(&processing).is_err());
+        assert_eq!(initialization.available_permits(), 0);
+    }
+
     #[test]
-    fn settlement_permits_cap_claims_at_available_capacity() {
-        let semaphore = Arc::new(Semaphore::new(3));
-        let mut permits = take_available_settlement_permits(&semaphore, 16);
-        assert_eq!(permits.len(), 3);
-        assert!(take_available_settlement_permits(&semaphore, 16).is_empty());
-        drop(permits.pop());
-        assert_eq!(take_available_settlement_permits(&semaphore, 16).len(), 1);
+    fn background_claim_renewal_prevents_slow_poll_overlap_and_expires_before_tpm() {
+        assert!(
+            BACKGROUND_SETTLEMENT_LEASE_RENEW_INTERVAL < BACKGROUND_SETTLEMENT_LEASE_TTL,
+            "a healthy slow poll must renew its DB claim before it can be reclaimed"
+        );
+        assert!(
+            BACKGROUND_SETTLEMENT_LEASE_TTL + crate::handlers::TPM_RESERVATION_HEARTBEAT_INTERVAL
+                < Duration::from_secs(keycompute_ratelimit::WINDOW_SECS),
+            "after a crash, the DB claim must expire before the last TPM lease"
+        );
+        assert!(
+            BACKGROUND_SETTLEMENT_LEASE_TTL + Duration::from_secs(1)
+                < Duration::from_secs(keycompute_ratelimit::WINDOW_SECS),
+            "a restored job without processing capacity must be reclaimable on a later maintenance tick before its TPM lease expires"
+        );
+        assert!(
+            BACKGROUND_SETTLEMENT_LEASE_TTL.as_secs() * 2
+                < BACKGROUND_SETTLEMENT_LEASE_RENEW_INTERVAL.as_secs()
+                    + keycompute_ratelimit::WINDOW_SECS,
+            "even a DB renewal completing at the old claim boundary must expire before its pre-renewed TPM lease"
+        );
+    }
+
+    #[test]
+    fn unrenewed_background_work_stops_at_the_original_claim_boundary() {
+        let lease = BackgroundSettlementLease::new(chrono::Utc::now());
+        let deadline = lease.local_deadline();
+        assert!(!lease.locally_expired(deadline - Duration::from_millis(1)));
+        assert!(lease.locally_expired(deadline));
+        assert!(
+            lease.locally_expired(deadline + BACKGROUND_SETTLEMENT_LEASE_TTL),
+            "changing worker phases cannot extend a claim without a successful DB CAS"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_tpm_restore_keeps_its_bounded_initialization_slot() {
+        let initialization = Arc::new(Semaphore::new(1));
+        let initialization_permit = Arc::clone(&initialization).acquire_owned().await.unwrap();
+        let resident = BackgroundResidentPermit::initializing(initialization_permit);
+        let lease = BackgroundSettlementLease::new(chrono::Utc::now());
+
+        tokio::time::advance(BACKGROUND_SETTLEMENT_LEASE_TTL + Duration::from_secs(1)).await;
+        assert!(lease.locally_expired(tokio::time::Instant::now()));
+        assert!(
+            !background_worker_claim_deadline_applies(true),
+            "an in-flight terminal-fenced Redis restore must not be detached by DB claim expiry"
+        );
+        assert_eq!(
+            initialization.available_permits(),
+            0,
+            "the stalled restore must retain its bounded initialization slot"
+        );
+
+        assert!(background_worker_claim_deadline_applies(false));
+        drop(resident);
+        assert_eq!(initialization.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn maintenance_waiting_on_the_worker_cas_does_not_deadlock_it() {
+        let lease_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let worker_has_lock = Arc::new(tokio::sync::Notify::new());
+        let maintenance_polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let worker = {
+            let lease_lock = Arc::clone(&lease_lock);
+            let worker_has_lock = Arc::clone(&worker_has_lock);
+            async move {
+                let _lease_generation = lease_lock.lock().await;
+                worker_has_lock.notify_one();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        let maintenance = {
+            let lease_lock = Arc::clone(&lease_lock);
+            let worker_has_lock = Arc::clone(&worker_has_lock);
+            let maintenance_polled = Arc::clone(&maintenance_polled);
+            async move {
+                worker_has_lock.notified().await;
+                maintenance_polled.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _lease_generation = lease_lock.lock().await;
+                std::future::pending::<()>().await;
+            }
+        };
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            run_background_worker_with_maintenance(worker, maintenance),
+        )
+        .await
+        .expect("maintenance waiting on the CAS mutex must keep polling the worker");
+        assert!(maintenance_polled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn hung_lease_renewal_cancels_the_worker_at_the_claim_deadline() {
+        struct WorkerDropFlag(Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for WorkerDropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker = {
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _drop_flag = WorkerDropFlag(dropped);
+                std::future::pending::<()>().await;
+            }
+        };
+        let deadline = tokio::time::Instant::now() + BACKGROUND_SETTLEMENT_LEASE_TTL;
+        let maintenance = async move {
+            assert!(
+                complete_before_background_claim_deadline(deadline, std::future::pending::<()>(),)
+                    .await
+                    .is_none()
+            );
+        };
+
+        run_background_worker_with_maintenance(worker, maintenance).await;
+        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(tokio::time::Instant::now() >= deadline);
     }
 
     #[test]
     fn background_settlement_round_trips_all_billing_identity() {
+        let owner_token = uuid::Uuid::new_v4();
         let settlement = BackgroundSettlement {
             request_id: uuid::Uuid::new_v4(),
             billing_request_id: Some(uuid::Uuid::new_v4()),
+            balance_reservation_owner_token: Some(owner_token),
+            tpm_reserved_tokens: 123,
             tenant_id: uuid::Uuid::new_v4(),
             user_id: uuid::Uuid::new_v4(),
             produce_ai_key_id: uuid::Uuid::new_v4(),
@@ -5713,6 +6504,8 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&settlement).unwrap()).unwrap();
         assert_eq!(restored.request_id, settlement.request_id);
         assert_eq!(restored.billing_request_id, settlement.billing_request_id);
+        assert_eq!(restored.balance_reservation_owner_token, Some(owner_token));
+        assert_eq!(restored.tpm_reserved_tokens, 123);
         assert_eq!(restored.produce_ai_key_id, settlement.produce_ai_key_id);
         assert_eq!(restored.account_id, settlement.account_id);
         assert_eq!((restored.input_tokens, restored.output_tokens), (7, 9));
@@ -5722,6 +6515,8 @@ mod tests {
         assert_eq!(restored.attempt, 2);
 
         let ctx = background_billing_context(&restored, 7, 9);
+        assert_eq!(ctx.balance_reservation_owner_token(), Some(owner_token));
+        assert_eq!(ctx.tpm_reservation_tokens(), Some(123));
         assert!(ctx.is_input_finalized());
         assert!(!ctx.is_output_finalized());
     }
@@ -5740,11 +6535,31 @@ mod tests {
             false,
             keycompute_types::PricingSnapshot::default(),
         );
+        ctx.set_tpm_reservation_tokens(100);
         ctx.set_usage_provider_account("openai-fallback", executed_account_id);
 
         let settlement = background_settlement_value(&ctx, "openai", primary_account_id).unwrap();
         assert_eq!(settlement["provider"], "openai-fallback");
         assert_eq!(settlement["account_id"], executed_account_id.to_string());
+    }
+
+    #[test]
+    fn background_settlement_requires_the_admitted_tpm_prediction() {
+        let ctx = RequestContext::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "gpt-test",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+
+        assert!(matches!(
+            background_settlement_value(&ctx, "openai", uuid::Uuid::new_v4()),
+            Err(ApiError::Internal(message)) if message.contains("TPM reservation prediction")
+        ));
     }
 
     #[test]
@@ -5760,6 +6575,7 @@ mod tests {
             keycompute_types::PricingSnapshot::default(),
         );
         ctx.set_billing_request_id(uuid::Uuid::new_v4());
+        ctx.set_tpm_reservation_tokens(100);
         ctx.set_input_tokens(13);
         ctx.set_output_tokens(8);
         let settlement =
@@ -5788,6 +6604,7 @@ mod tests {
             false,
             keycompute_types::PricingSnapshot::default(),
         );
+        ctx.set_tpm_reservation_tokens(100);
         let value = terminal_settlement_value(
             &ctx,
             keycompute_pricing::NODE_PRICING_PROVIDER,
@@ -6015,11 +6832,13 @@ mod tests {
             "https://accepted.example/v1",
             "accepted-key",
         ));
+        ctx.set_tpm_reservation_tokens(444);
 
         let settlement_ctx = background_settlement_context(&ctx);
         assert!(settlement_ctx.native_openai_responses_request.is_none());
         assert!(settlement_ctx.native_anthropic_request.is_none());
         assert!(settlement_ctx.messages.is_empty());
+        assert_eq!(settlement_ctx.tpm_reservation_tokens(), Some(444));
         assert_eq!(
             background_account_snapshot(&settlement_ctx, "openai", account_id)
                 .unwrap()

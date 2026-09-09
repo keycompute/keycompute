@@ -18,13 +18,27 @@ use uuid::Uuid;
 mod tests {
     use super::*;
 
+    // Every isolated schema contains the complete production baseline. Creating or dropping too
+    // many of them concurrently can exhaust PostgreSQL's shared lock table on otherwise valid
+    // default installations (`max_locks_per_transaction`). Keep a small amount of test
+    // parallelism while bounding each schema's whole lifetime, including `DROP SCHEMA CASCADE`.
+    static ISOLATED_SCHEMA_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
     fn test_database_url() -> String {
         std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgres://keycompute:change-me-strong-password@localhost:5432/keycompute".to_string()
         })
     }
 
-    async fn create_isolated_schema() -> (DatabaseConnection, String) {
+    async fn create_isolated_schema() -> (
+        DatabaseConnection,
+        String,
+        tokio::sync::SemaphorePermit<'static>,
+    ) {
+        let permit = ISOLATED_SCHEMA_PERMITS
+            .acquire()
+            .await
+            .expect("isolated schema concurrency semaphore should remain open");
         let admin = Database::connect(test_database_url())
             .await
             .expect("migration test admin connection should succeed");
@@ -33,7 +47,7 @@ mod tests {
             .execute_unprepared(&format!(r#"CREATE SCHEMA "{schema}""#))
             .await
             .expect("isolated migration test schema should be created");
-        (admin, schema)
+        (admin, schema, permit)
     }
 
     async fn connect_to_schema(schema: &str) -> DatabaseConnection {
@@ -190,7 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn responses_conversation_discovery_candidates_are_bounded_and_tenant_private() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -359,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_responses_cleanup_preserves_pending_settlement_and_account_fk() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -500,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn stateless_background_settlement_is_durable_but_not_resource_visible() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -648,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn accountless_terminal_settlement_is_durable_and_claimable() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -721,7 +735,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_settlement_worker_cannot_overwrite_or_clear_a_newer_lease() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -758,11 +772,24 @@ mod tests {
         let stale_lease_until = stale_claim
             .settlement_lease_until
             .expect("first claim should carry its lease");
+        assert_eq!(
+            keycompute_db::ResponseAffinity::renew_claimed_settlement(
+                &pool,
+                tenant_id,
+                response_id,
+                stale_lease_until,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect("an expired lease renewal should be rejected cleanly"),
+            None,
+            "an unclaimed but expired generation must not be resurrected"
+        );
 
-        let current_claim = keycompute_db::ResponseAffinity::claim_due_settlements(
+        let current_claim = keycompute_db::ResponseAffinity::claim_due_settlements_for(
             &pool,
             1,
-            chrono::Utc::now() + chrono::Duration::minutes(5),
+            std::time::Duration::from_secs(60),
         )
         .await
         .expect("second worker should reclaim the expired lease")
@@ -772,6 +799,29 @@ mod tests {
             .settlement_lease_until
             .expect("second claim should carry its lease");
         assert_ne!(stale_lease_until, current_lease_until);
+        let renewed_lease_until = keycompute_db::ResponseAffinity::renew_claimed_settlement(
+            &pool,
+            tenant_id,
+            response_id,
+            current_lease_until,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("current worker lease renewal should succeed")
+        .expect("current worker should still own its lease");
+        assert!(renewed_lease_until > chrono::Utc::now());
+        assert_eq!(
+            keycompute_db::ResponseAffinity::renew_claimed_settlement(
+                &pool,
+                tenant_id,
+                response_id,
+                current_lease_until,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .expect("superseded lease renewal should be rejected cleanly"),
+            None
+        );
 
         assert_eq!(
             keycompute_db::ResponseAffinity::reschedule_claimed_settlement(
@@ -805,8 +855,32 @@ mod tests {
         assert_eq!(still_current.settlement, Some(original_settlement));
         assert_eq!(
             still_current.settlement_lease_until,
-            Some(current_lease_until)
+            Some(renewed_lease_until)
         );
+
+        assert_eq!(
+            keycompute_db::ResponseAffinity::relinquish_claimed_settlement(
+                &pool,
+                tenant_id,
+                response_id,
+                renewed_lease_until,
+            )
+            .await
+            .expect("current worker should relinquish its claim"),
+            1
+        );
+        let reclaimed = keycompute_db::ResponseAffinity::claim_due_settlements_for(
+            &pool,
+            1,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .expect("relinquished work should be immediately claimable")
+        .pop()
+        .expect("relinquished settlement should be returned");
+        let reclaimed_lease_until = reclaimed
+            .settlement_lease_until
+            .expect("reclaimed settlement should carry its lease");
 
         assert_eq!(
             keycompute_db::ResponseAffinity::reschedule_claimed_settlement(
@@ -815,7 +889,7 @@ mod tests {
                 response_id,
                 serde_json::json!({"worker": "current"}),
                 chrono::Utc::now() - chrono::Duration::seconds(1),
-                current_lease_until,
+                reclaimed_lease_until,
             )
             .await
             .expect("current worker should reschedule"),
@@ -856,8 +930,422 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_tpm_scan_includes_delayed_and_leased_rows_in_a_finite_snapshot() {
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("isolated Responses schema should migrate");
+        let tenant_id = create_responses_test_tenant(&pool, "Startup TPM recovery scan").await;
+        let account = create_responses_test_account(&pool, tenant_id, "startup-tpm", 0).await;
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(2);
+        let delayed_until = chrono::Utc::now() + chrono::Duration::hours(1);
+
+        for response_id in [
+            "resp_startup_tpm_a",
+            "resp_startup_tpm_b",
+            "resp_startup_tpm_after_cutoff",
+        ] {
+            keycompute_db::ResponseAffinity::upsert_route_with_settlement(
+                &pool,
+                tenant_id,
+                response_id,
+                "openai",
+                Some("gpt-test"),
+                account.id,
+                expires_at,
+                serde_json::json!({"request_id": Uuid::new_v4()}),
+                delayed_until,
+            )
+            .await
+            .expect("startup recovery settlement should be persisted");
+        }
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities SET settlement_lease_until = $1 \
+             WHERE tenant_id = $2 AND response_id IN ($3, $4)",
+            [
+                delayed_until.into(),
+                tenant_id.into(),
+                "resp_startup_tpm_a".into(),
+                "resp_startup_tpm_b".into(),
+            ],
+        ))
+        .await
+        .expect("test settlements should carry an existing worker lease");
+        let router = keycompute_db::DbRouter::single(pool.clone());
+        let cutoff = keycompute_db::ResponseAffinity::settlement_claim_cutoff(router.as_ref())
+            .await
+            .expect("startup recovery cutoff should use the writer clock");
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities SET updated_at = $1 \
+             WHERE tenant_id = $2 AND response_id = $3",
+            [
+                (cutoff + chrono::Duration::seconds(1)).into(),
+                tenant_id.into(),
+                "resp_startup_tpm_after_cutoff".into(),
+            ],
+        ))
+        .await
+        .expect("a concurrent post-cutoff update should be represented");
+
+        let mut cursor = None;
+        let mut response_ids = Vec::new();
+        loop {
+            let (rows, next_cursor) =
+                keycompute_db::ResponseAffinity::scan_settlements_for_tpm_recovery(
+                    router.as_ref(),
+                    1,
+                    cutoff,
+                    cursor.as_ref(),
+                )
+                .await
+                .expect("startup recovery scan should succeed");
+            let count = rows.len();
+            response_ids.extend(rows.into_iter().map(|row| row.response_id));
+            if count < 1 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+
+        assert_eq!(
+            response_ids,
+            vec![
+                "resp_startup_tpm_a".to_string(),
+                "resp_startup_tpm_b".to_string(),
+            ],
+            "retry delay and an existing lease must not hide pre-cutoff TPM work, while a post-cutoff mutation keeps the scan finite"
+        );
+        for response_id in &response_ids {
+            let row = keycompute_db::ResponseAffinity::find_active(
+                router.as_ref(),
+                tenant_id,
+                response_id,
+            )
+            .await
+            .expect("settlement lookup should succeed")
+            .expect("startup recovery must not remove or hide the affinity");
+            assert_eq!(
+                row.settlement_lease_until
+                    .expect("test worker lease should remain present")
+                    .timestamp_micros(),
+                delayed_until.timestamp_micros()
+            );
+            assert_eq!(
+                row.settlement_next_poll_at
+                    .expect("test retry delay should remain present")
+                    .timestamp_micros(),
+                delayed_until.timestamp_micros()
+            );
+        }
+
+        drop(router);
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn finite_settlement_claim_does_not_reclaim_a_quickly_relinquished_row() {
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        let worker_pool = connect_to_schema(&schema).await;
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("isolated Responses schema should migrate");
+        let tenant_id =
+            create_responses_test_tenant(&pool, "Finite Responses settlement claim test").await;
+        let account = create_responses_test_account(&pool, tenant_id, "finite-claim", 0).await;
+        let response_id = "resp_finite_claim_relinquish";
+
+        keycompute_db::ResponseAffinity::upsert_route_with_settlement(
+            &pool,
+            tenant_id,
+            response_id,
+            "openai",
+            Some("gpt-test"),
+            account.id,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+            serde_json::json!({"request_id": Uuid::new_v4()}),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("test settlement should be persisted");
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities \
+             SET settlement_next_poll_at = NOW() - INTERVAL '1 second', updated_at = NOW() \
+             WHERE tenant_id = $1 AND response_id = $2",
+            [tenant_id.into(), response_id.into()],
+        ))
+        .await
+        .expect("test settlement should be made due in the database clock domain");
+
+        // Start the worker transaction before reading the cutoff. PostgreSQL's
+        // NOW() would otherwise regress updated_at to this old transaction
+        // timestamp when the worker relinquishes its freshly claimed lease.
+        let worker = worker_pool
+            .begin()
+            .await
+            .expect("worker transaction should begin");
+        worker
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT NOW()".to_string(),
+            ))
+            .await
+            .expect("worker transaction timestamp should be established");
+        let router = keycompute_db::DbRouter::single(pool.clone());
+        let cutoff = keycompute_db::ResponseAffinity::settlement_claim_cutoff(router.as_ref())
+            .await
+            .expect("finite claim cutoff should come from the writer");
+        let (mut claimed, cursor) =
+            keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+                &worker,
+                1,
+                std::time::Duration::from_secs(60),
+                cutoff,
+                None,
+            )
+            .await
+            .expect("due settlement should be claimed");
+        assert!(cursor.is_some());
+        let claimed = claimed.pop().expect("one settlement should be claimed");
+        assert_eq!(claimed.response_id, response_id);
+        assert_eq!(
+            keycompute_db::ResponseAffinity::relinquish_claimed_settlement(
+                &worker,
+                tenant_id,
+                response_id,
+                claimed
+                    .settlement_lease_until
+                    .expect("claim should carry a lease"),
+            )
+            .await
+            .expect("current worker should relinquish its lease"),
+            1
+        );
+        worker
+            .commit()
+            .await
+            .expect("claim and relinquish should commit");
+
+        let (same_sweep, _) = keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+            &pool,
+            1,
+            std::time::Duration::from_secs(60),
+            cutoff,
+            None,
+        )
+        .await
+        .expect("same-cutoff claim should execute");
+        assert!(
+            same_sweep.is_empty(),
+            "relinquishing must not make a row eligible in the same finite sweep"
+        );
+
+        let next_cutoff = keycompute_db::ResponseAffinity::settlement_claim_cutoff(router.as_ref())
+            .await
+            .expect("next claim cutoff should come from the writer");
+        let (mut next_sweep, _) =
+            keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+                &pool,
+                1,
+                std::time::Duration::from_secs(60),
+                next_cutoff,
+                None,
+            )
+            .await
+            .expect("next-cutoff claim should execute");
+        assert_eq!(
+            next_sweep
+                .pop()
+                .expect("next sweep should reclaim the relinquished row")
+                .response_id,
+            response_id
+        );
+
+        drop(router);
+        drop(worker_pool);
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn finite_settlement_keyset_and_concurrent_claims_are_complete_and_disjoint() {
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        let second_pool = connect_to_schema(&schema).await;
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("isolated Responses schema should migrate");
+        let tenant_id =
+            create_responses_test_tenant(&pool, "Responses settlement keyset test").await;
+        let account = create_responses_test_account(&pool, tenant_id, "claim-keyset", 0).await;
+        let response_ids = [
+            "resp_claim_keyset_d",
+            "resp_claim_keyset_a",
+            "resp_claim_keyset_c",
+            "resp_claim_keyset_b",
+        ];
+        for response_id in response_ids {
+            keycompute_db::ResponseAffinity::upsert_route_with_settlement(
+                &pool,
+                tenant_id,
+                response_id,
+                "openai",
+                Some("gpt-test"),
+                account.id,
+                chrono::Utc::now() + chrono::Duration::hours(1),
+                serde_json::json!({"request_id": Uuid::new_v4()}),
+                chrono::Utc::now(),
+            )
+            .await
+            .expect("test settlement should be persisted");
+        }
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities \
+             SET settlement_next_poll_at = NOW() - INTERVAL '1 second', updated_at = NOW() \
+             WHERE tenant_id = $1 AND response_id = ANY($2)",
+            [
+                tenant_id.into(),
+                response_ids
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<Vec<_>>()
+                    .into(),
+            ],
+        ))
+        .await
+        .expect("all test settlements should share one database poll timestamp");
+
+        let router = keycompute_db::DbRouter::single(pool.clone());
+        let cutoff = keycompute_db::ResponseAffinity::settlement_claim_cutoff(router.as_ref())
+            .await
+            .expect("finite claim cutoff should come from the writer");
+        let (first_batch, first_cursor) =
+            keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+                &pool,
+                2,
+                std::time::Duration::from_secs(60),
+                cutoff,
+                None,
+            )
+            .await
+            .expect("first keyset batch should be claimed");
+        let (second_batch, second_cursor) =
+            keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+                &pool,
+                2,
+                std::time::Duration::from_secs(60),
+                cutoff,
+                first_cursor.as_ref(),
+            )
+            .await
+            .expect("second keyset batch should be claimed");
+        let (exhausted, _) = keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+            &pool,
+            2,
+            std::time::Duration::from_secs(60),
+            cutoff,
+            second_cursor.as_ref(),
+        )
+        .await
+        .expect("exhausted keyset claim should execute");
+        assert!(exhausted.is_empty());
+        let expected = response_ids
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::HashSet<_>>();
+        let sequential = first_batch
+            .iter()
+            .chain(&second_batch)
+            .map(|row| row.response_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(sequential, expected);
+
+        for row in first_batch.iter().chain(&second_batch) {
+            assert_eq!(
+                keycompute_db::ResponseAffinity::relinquish_claimed_settlement(
+                    &pool,
+                    row.tenant_id,
+                    &row.response_id,
+                    row.settlement_lease_until
+                        .expect("claimed settlement should carry a lease"),
+                )
+                .await
+                .expect("keyset claim should be relinquished"),
+                1
+            );
+        }
+        let concurrent_cutoff =
+            keycompute_db::ResponseAffinity::settlement_claim_cutoff(router.as_ref())
+                .await
+                .expect("concurrent claim cutoff should come from the writer");
+        let first_worker = pool
+            .begin()
+            .await
+            .expect("first worker transaction should begin");
+        let second_worker = second_pool
+            .begin()
+            .await
+            .expect("second worker transaction should begin");
+        let first_claim = keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+            &first_worker,
+            2,
+            std::time::Duration::from_secs(60),
+            concurrent_cutoff,
+            None,
+        );
+        let second_claim = keycompute_db::ResponseAffinity::claim_due_settlements_before_for(
+            &second_worker,
+            2,
+            std::time::Duration::from_secs(60),
+            concurrent_cutoff,
+            None,
+        );
+        let (first_claim, second_claim) = tokio::join!(first_claim, second_claim);
+        let (first_claim, _) = first_claim.expect("first concurrent claim should succeed");
+        let (second_claim, _) = second_claim.expect("second concurrent claim should succeed");
+        first_worker
+            .commit()
+            .await
+            .expect("first worker claim should commit");
+        second_worker
+            .commit()
+            .await
+            .expect("second worker claim should commit");
+
+        assert_eq!(first_claim.len(), 2);
+        assert_eq!(second_claim.len(), 2);
+        let first_ids = first_claim
+            .iter()
+            .map(|row| row.response_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let second_ids = second_claim
+            .iter()
+            .map(|row| row.response_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert!(first_ids.is_disjoint(&second_ids));
+        assert_eq!(
+            first_ids
+                .union(&second_ids)
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            expected
+        );
+
+        drop(router);
+        drop(second_pool);
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
     async fn connection_material_update_invalidates_settled_responses_routes_atomically() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -994,7 +1482,7 @@ mod tests {
 
     #[tokio::test]
     async fn account_deletion_preserves_account_independent_responses_state() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -1125,7 +1613,7 @@ mod tests {
 
     #[tokio::test]
     async fn responses_execution_reservation_closes_the_account_update_race() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let execution_pool = connect_to_schema(&schema).await;
         let update_pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&execution_pool)
@@ -1237,7 +1725,7 @@ mod tests {
 
     #[tokio::test]
     async fn responses_affinity_ids_cannot_be_reassigned_between_accounts() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -1581,7 +2069,7 @@ mod tests {
 
     #[tokio::test]
     async fn idempotency_identity_quota_is_atomic_and_unstarted_claims_are_reclaimable() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         let second_pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
@@ -1727,7 +2215,7 @@ mod tests {
 
     #[tokio::test]
     async fn rolled_back_idempotency_claim_can_be_retried() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -1791,7 +2279,7 @@ mod tests {
 
     #[tokio::test]
     async fn idempotency_execution_lease_is_reclaimable_only_before_dispatch() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -2019,7 +2507,7 @@ mod tests {
 
     #[tokio::test]
     async fn idempotency_replay_quota_is_atomic_and_oversized_entries_are_not_stored() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         let second_pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
@@ -2197,7 +2685,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleted_route_stays_tombstoned_when_terminal_settlement_arrives() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -2302,7 +2790,7 @@ mod tests {
         use bigdecimal::BigDecimal;
         use keycompute_db::CreateUsageLogRequest;
 
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -2598,7 +3086,7 @@ mod tests {
     /// the baseline and converge on one migration-history row.
     #[tokio::test]
     async fn concurrent_migration_startup_applies_baseline_once() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let first = connect_to_schema(&schema).await;
         let second = connect_to_schema(&schema).await;
 
@@ -2633,7 +3121,7 @@ mod tests {
         use keycompute_db::CreateUsageLogRequest;
         use rust_decimal::Decimal;
 
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -2746,7 +3234,7 @@ mod tests {
     /// migration must fail closed instead of silently accepting schema drift.
     #[tokio::test]
     async fn migration_checksum_mismatch_is_rejected() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         keycompute_db::migrations::run_migrations(&pool)
             .await
@@ -2772,7 +3260,7 @@ mod tests {
     /// must not receive a misleading schema_migrations table.
     #[tokio::test]
     async fn nonempty_database_without_history_is_rejected_atomically() {
-        let (admin, schema) = create_isolated_schema().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         pool.execute_unprepared("CREATE TABLE legacy_application_data (id BIGINT PRIMARY KEY)")
             .await

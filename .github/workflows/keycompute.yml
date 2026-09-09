@@ -280,6 +280,11 @@ jobs:
       - name: Run Server Unit Tests
         run: cargo test --package keycompute-server --features redis --verbose
 
+      # Redis tests fail rather than skip under GitHub Actions' standard CI
+      # environment, so a missing/unhealthy service cannot produce a green run.
+      - name: Run Redis Rate Limiter Tests
+        run: cargo test --package keycompute-ratelimit --features redis --verbose
+
       # ── Step: Run Other Workspace Unit Tests ───────────────────────────────
       # These crates don't have a "redis" feature, so run without it.
       # Exclude WASM/mobile/DB-dependent integration tests.

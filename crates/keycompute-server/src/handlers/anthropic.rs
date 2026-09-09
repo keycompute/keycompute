@@ -345,6 +345,28 @@ pub async fn messages(
         .update_context_pricing(Arc::make_mut(&mut ctx), &primary_provider)
         .await;
 
+    let mut tpm_reservation = match super::reserve_generation_tpm(&state, &ctx).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                (
+                    ErrorOrigin::Client,
+                    TraceErrorCategory::RateLimit,
+                    "tpm_limit_exceeded",
+                )
+            } else {
+                (
+                    ErrorOrigin::Gateway,
+                    TraceErrorCategory::Internal,
+                    "tpm_reservation_failed",
+                )
+            };
+            finish_anthropic_unexecuted_trace(&mut pre_execution_guard, origin, category, code)
+                .await;
+            return Err(error);
+        }
+    };
+
     let mut balance_reservation = match super::reserve_generation_balance(
         &state,
         &ctx,
@@ -354,6 +376,7 @@ pub async fn messages(
     {
         Ok(reservation) => reservation,
         Err(error) => {
+            tpm_reservation.release().await;
             finish_anthropic_unexecuted_trace(
                 &mut pre_execution_guard,
                 ErrorOrigin::Client,
@@ -387,6 +410,7 @@ pub async fn messages(
         Ok(Ok(rx)) => rx,
         Ok(Err(error)) => {
             balance_reservation.release().await;
+            tpm_reservation.release().await;
             client_response_guard
                 .finish_with_outcome(ClientResponseOutcome::ResponseFailed)
                 .await;
@@ -397,6 +421,7 @@ pub async fn messages(
         }
         Err(_) => {
             balance_reservation.release().await;
+            tpm_reservation.release().await;
             client_response_guard
                 .finish_with_outcome(ClientResponseOutcome::TimedOut)
                 .await;
@@ -432,6 +457,7 @@ pub async fn messages(
             },
         );
         balance_reservation.transfer_to_settlement();
+        tpm_reservation.transfer_to_settlement();
         client_response_guard.disarm();
         if !matches!(
             initial_status_rx.await,
@@ -449,6 +475,7 @@ pub async fn messages(
         // await, so ownership transfers without a cancellation gap.
         client_response_guard.disarm();
         balance_reservation.transfer_to_settlement();
+        tpm_reservation.transfer_to_settlement();
         let response = create_anthropic_response_with_lifecycle(
             rx,
             ctx,

@@ -535,6 +535,20 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn generic_rate_limit_error_keeps_rest_contract() {
+        let response = ApiError::RateLimit("slow down".to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["message"], "slow down");
+        assert_eq!(body["error"]["type"], "rate_limit_error");
+        assert_eq!(body["error"]["code"], 429);
+        assert!(body["error"].get("param").is_none());
+    }
+
     #[test]
     fn mismatched_node_result_is_a_client_visible_task_conflict() {
         let error = ApiError::from(keycompute_db::DbError::Other(
@@ -694,6 +708,7 @@ mod tests {
             status: 429,
             headers: vec![
                 ("x-request-id".to_string(), "req_upstream_123".to_string()),
+                ("retry-after".to_string(), "7".to_string()),
                 ("set-cookie".to_string(), "secret=cookie".to_string()),
             ],
             body: json!({
@@ -711,6 +726,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers()["x-request-id"], "req_upstream_123");
+        assert_eq!(response.headers()["retry-after"], "7");
         assert!(response.headers().get("set-cookie").is_none());
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await

@@ -174,7 +174,10 @@ pub(in crate::handlers) async fn responses_inner(
 
     // A local warmup may expand inherited request fields, including model and
     // input. Parse the effective body rather than retaining the pre-replay
-    // routing projection.
+    // routing projection. Do not synthesize `max_output_tokens`: an omitted or
+    // explicit-null client limit must remain absent from the native upstream
+    // body and unspecified in routing. Balance reservation applies its own
+    // internal risk budget independently of the wire request.
     routing = ResponsesRoutingFields::parse(&body)?;
     let persist_response_affinity = response_affinity_storage_enabled(upstream_path, &body);
     // A root `generate:false` warmup never created upstream state. Its durable
@@ -477,27 +480,6 @@ pub(in crate::handlers) async fn responses_inner(
         .await
         {
             Ok(ResponsesIdempotencyBinding::Execute { account, execution }) => {
-                if let Err(error) = enforce_authenticated_tpm_limit(&state, &auth).await {
-                    reservations.release().await;
-                    abandon_unstarted_responses_idempotency_execution(&state, &execution).await;
-                    let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
-                        (
-                            ErrorOrigin::Client,
-                            TraceErrorCategory::RateLimit,
-                            "tpm_limit_exceeded",
-                        )
-                    } else {
-                        (
-                            ErrorOrigin::Gateway,
-                            TraceErrorCategory::Internal,
-                            "tpm_check_failed",
-                        )
-                    };
-                    pre_execution_guard
-                        .finish_failed(origin, category, code)
-                        .await;
-                    return Err(error);
-                }
                 if account.account_id != primary_account_id
                     || !account.provider.eq_ignore_ascii_case(&primary_provider)
                 {
@@ -580,6 +562,32 @@ pub(in crate::handlers) async fn responses_inner(
             }
         }
     }
+    let mut tpm_reservation = match crate::handlers::reserve_generation_tpm(&state, &ctx).await {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            reservations.release().await;
+            if let Some(execution) = idempotency_execution.as_ref() {
+                abandon_unstarted_responses_idempotency_execution(&state, execution).await;
+            }
+            let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                (
+                    ErrorOrigin::Client,
+                    TraceErrorCategory::RateLimit,
+                    "tpm_limit_exceeded",
+                )
+            } else {
+                (
+                    ErrorOrigin::Gateway,
+                    TraceErrorCategory::Internal,
+                    "tpm_reservation_failed",
+                )
+            };
+            pre_execution_guard
+                .finish_failed(origin, category, code)
+                .await;
+            return Err(error);
+        }
+    };
     let mut balance_reservation = match crate::handlers::reserve_generation_balance(
         &state,
         &ctx,
@@ -589,6 +597,7 @@ pub(in crate::handlers) async fn responses_inner(
     {
         Ok(reservation) => reservation,
         Err(error) => {
+            tpm_reservation.release().await;
             reservations.release().await;
             if let Some(execution) = idempotency_execution.as_ref() {
                 abandon_unstarted_responses_idempotency_execution(&state, execution).await;
@@ -607,6 +616,7 @@ pub(in crate::handlers) async fn responses_inner(
         && let Err(error) = mark_responses_idempotency_dispatched(&state, execution).await
     {
         balance_reservation.release().await;
+        tpm_reservation.release().await;
         reservations.release().await;
         abandon_unstarted_responses_idempotency_execution(&state, execution).await;
         pre_execution_guard
@@ -637,6 +647,7 @@ pub(in crate::handlers) async fn responses_inner(
         Ok(Ok(rx)) => rx,
         Ok(Err(error)) => {
             balance_reservation.release().await;
+            tpm_reservation.release().await;
             reservations.release().await;
             expire_dispatched_responses_idempotency_execution(
                 &state,
@@ -650,6 +661,7 @@ pub(in crate::handlers) async fn responses_inner(
         }
         Err(_) => {
             balance_reservation.release().await;
+            tpm_reservation.release().await;
             reservations.release().await;
             expire_dispatched_responses_idempotency_execution(
                 &state,
@@ -695,6 +707,7 @@ pub(in crate::handlers) async fn responses_inner(
             },
         );
         balance_reservation.transfer_to_settlement();
+        tpm_reservation.transfer_to_settlement();
         client_response_guard.disarm();
         if !matches!(
             initial_status_rx.await,
@@ -713,6 +726,7 @@ pub(in crate::handlers) async fn responses_inner(
     } else {
         client_response_guard.disarm();
         balance_reservation.transfer_to_settlement();
+        tpm_reservation.transfer_to_settlement();
         let response = create_responses_json(
             rx,
             ResponsesJsonRuntime {
@@ -1199,4 +1213,61 @@ pub(super) fn cacheable_upstream_responses_error(
         upstream.body.as_bytes(),
     );
     Ok(upstream)
+}
+
+#[cfg(test)]
+mod native_output_limit_tests {
+    use super::*;
+
+    #[test]
+    fn omitted_and_null_responses_limits_remain_unspecified_and_native() {
+        let omitted = json!({"model": "gpt-5", "input": "hello"});
+        let omitted_before = omitted.clone();
+        let routing = ResponsesRoutingFields::parse(&omitted).unwrap();
+        assert_eq!(routing.max_output_tokens, None);
+        assert_eq!(omitted, omitted_before);
+        assert!(omitted.get("max_output_tokens").is_none());
+
+        let nullable = json!({
+            "model": "gpt-5",
+            "input": "hello",
+            "max_output_tokens": null
+        });
+        let nullable_before = nullable.clone();
+        let routing = ResponsesRoutingFields::parse(&nullable).unwrap();
+        assert_eq!(routing.max_output_tokens, None);
+        assert_eq!(nullable, nullable_before);
+        assert!(nullable["max_output_tokens"].is_null());
+    }
+
+    #[test]
+    fn explicit_responses_limit_and_compact_body_are_preserved() {
+        let explicit = json!({
+            "model": "gpt-5",
+            "input": "hello",
+            "max_output_tokens": 123
+        });
+        let explicit_before = explicit.clone();
+        let routing = ResponsesRoutingFields::parse(&explicit).unwrap();
+        assert_eq!(routing.max_output_tokens, Some(123));
+        assert_eq!(explicit, explicit_before);
+
+        let compact = json!({"model": "gpt-5", "input": "hello"});
+        let compact_before = compact.clone();
+        let routing = ResponsesRoutingFields::parse(&compact).unwrap();
+        assert_eq!(routing.max_output_tokens, None);
+        assert_eq!(compact, compact_before);
+        assert!(compact.get("max_output_tokens").is_none());
+
+        let compact_null = json!({
+            "model": "gpt-5",
+            "input": "hello",
+            "max_output_tokens": null
+        });
+        let compact_null_before = compact_null.clone();
+        let routing = ResponsesRoutingFields::parse(&compact_null).unwrap();
+        assert_eq!(routing.max_output_tokens, None);
+        assert_eq!(compact_null, compact_null_before);
+        assert!(compact_null["max_output_tokens"].is_null());
+    }
 }

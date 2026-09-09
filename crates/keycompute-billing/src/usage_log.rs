@@ -343,6 +343,7 @@ impl BillingService {
             .deduct_balance_if_configured(
                 ctx.request_id,
                 ctx.billing_request_id,
+                ctx.balance_reservation_owner_token(),
                 user_id,
                 user_amount,
                 usage_log.id,
@@ -367,10 +368,14 @@ impl BillingService {
     /// 扣除用户余额（如果已配置余额服务）
     ///
     /// 永久业务状态只记录欠费；瞬时基础设施错误返回给调用方以便持久化重试。
+    // Keep both physical/logical request identities and the reservation owner
+    // explicit: collapsing them would weaken the stale-owner settlement fence.
+    #[allow(clippy::too_many_arguments)]
     async fn deduct_balance_if_configured(
         &self,
         request_id: Uuid,
         billing_request_id: Uuid,
+        expected_owner_token: Option<Uuid>,
         user_id: Uuid,
         user_amount: Decimal,
         usage_log_id: Uuid,
@@ -388,6 +393,7 @@ impl BillingService {
         let reserved = balance
             .settle_request_reservation(
                 billing_request_id,
+                expected_owner_token,
                 user_amount,
                 usage_log_id,
                 Some(&description),

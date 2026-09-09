@@ -40,8 +40,10 @@ pub use pricing::{
     SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
 };
 pub use user::{
-    ApiKeyInfo, UpdateBalanceRequest, UpdateBalanceResponse, UpdateUserRequest, UpdateUserResponse,
-    UserDetail, UserListResponse, UserQueryParams,
+    ApiKeyInfo, BalanceReservationInfo, ReleaseBalanceReservationRequest,
+    ReleaseBalanceReservationResponse, UpdateBalanceRequest, UpdateBalanceResponse,
+    UpdateUserRequest, UpdateUserResponse, UserBalanceReservationsResponse, UserDetail,
+    UserListResponse, UserQueryParams,
 };
 
 // Re-export admin payment's PaymentQueryParams distinctly
@@ -103,44 +105,113 @@ impl AdminApi {
             .await
     }
 
-    /// 更新用户余额（充值/扣除）
+    /// 更新用户余额（充值/扣除）。`idempotency_key` 必填；同一逻辑操作的
+    /// 超时或网络重试必须复用同一个 key。
     pub async fn update_user_balance(
         &self,
         id: &str,
         req: &UpdateBalanceRequest,
+        idempotency_key: &str,
         token: &str,
     ) -> Result<UpdateBalanceResponse> {
         self.client
-            .post_json(&format!("/api/v1/users/{}/balance", id), req, Some(token))
-            .await
-    }
-
-    /// 冻结用户余额
-    pub async fn freeze_user_balance(
-        &self,
-        id: &str,
-        req: &UpdateBalanceRequest,
-        token: &str,
-    ) -> Result<UpdateBalanceResponse> {
-        self.client
-            .post_json(
-                &format!("/api/v1/users/{}/balance/freeze", id),
+            .post_json_with_idempotency_key(
+                &format!("/api/v1/users/{}/balance", id),
                 req,
+                idempotency_key,
                 Some(token),
             )
             .await
     }
 
-    /// 解冻用户余额
+    /// 冻结用户余额。`idempotency_key` 必填；同一逻辑操作的超时或网络
+    /// 重试必须复用同一个 key。
+    pub async fn freeze_user_balance(
+        &self,
+        id: &str,
+        req: &UpdateBalanceRequest,
+        idempotency_key: &str,
+        token: &str,
+    ) -> Result<UpdateBalanceResponse> {
+        self.client
+            .post_json_with_idempotency_key(
+                &format!("/api/v1/users/{}/balance/freeze", id),
+                req,
+                idempotency_key,
+                Some(token),
+            )
+            .await
+    }
+
+    /// 解冻用户余额。`idempotency_key` 必填；同一逻辑操作的超时或网络
+    /// 重试必须复用同一个 key。
     pub async fn unfreeze_user_balance(
         &self,
         id: &str,
         req: &UpdateBalanceRequest,
+        idempotency_key: &str,
         token: &str,
     ) -> Result<UpdateBalanceResponse> {
         self.client
-            .post_json(
+            .post_json_with_idempotency_key(
                 &format!("/api/v1/users/{}/balance/unfreeze", id),
+                req,
+                idempotency_key,
+                Some(token),
+            )
+            .await
+    }
+
+    /// 获取用户余额拆分及活跃请求预留的第一页。需要遍历后续页面时，
+    /// 使用响应的 `next_cursor` 调用 `list_user_balance_reservations_page`。
+    pub async fn list_user_balance_reservations(
+        &self,
+        id: &str,
+        token: &str,
+    ) -> Result<UserBalanceReservationsResponse> {
+        self.list_user_balance_reservations_page(id, None, None, token)
+            .await
+    }
+
+    /// 获取一页用户余额预留。`cursor` 必须原样使用前一页返回的
+    /// `next_cursor`；`limit` 在服务端约束到 1..=100。
+    pub async fn list_user_balance_reservations_page(
+        &self,
+        id: &str,
+        cursor: Option<&str>,
+        limit: Option<u64>,
+        token: &str,
+    ) -> Result<UserBalanceReservationsResponse> {
+        let mut path = format!("/api/v1/users/{}/balance/reservations", id);
+        let mut query = Vec::new();
+        if let Some(cursor) = cursor {
+            query.push(format!("cursor={}", urlencoding::encode(cursor)));
+        }
+        if let Some(limit) = limit {
+            query.push(format!("limit={limit}"));
+        }
+        if !query.is_empty() {
+            path.push('?');
+            path.push_str(&query.join("&"));
+        }
+        self.client.get_json(&path, Some(token)).await
+    }
+
+    /// 按 request_id 和列表返回的预留版本安全释放一笔卡死的请求余额预留。
+    /// 自动或手工重试必须复用相同版本和 reason；完全相同的重试会安全重放。
+    pub async fn release_user_balance_reservation(
+        &self,
+        id: &str,
+        request_id: &str,
+        req: &ReleaseBalanceReservationRequest,
+        token: &str,
+    ) -> Result<ReleaseBalanceReservationResponse> {
+        self.client
+            .post_json(
+                &format!(
+                    "/api/v1/users/{}/balance/reservations/{}/release",
+                    id, request_id
+                ),
                 req,
                 Some(token),
             )

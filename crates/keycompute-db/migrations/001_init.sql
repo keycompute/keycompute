@@ -289,7 +289,10 @@ CREATE INDEX IF NOT EXISTS idx_response_affinities_local_warmups
     ON response_affinities(tenant_id)
     WHERE local_response IS NOT NULL AND NOT is_reservation AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_due
-    ON response_affinities(settlement_next_poll_at)
+    ON response_affinities(settlement_next_poll_at, tenant_id, response_id COLLATE "C")
+    WHERE settlement IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_recovery
+    ON response_affinities(tenant_id, response_id)
     WHERE settlement IS NOT NULL;
 
 -- pricing_models: 模型定价表
@@ -766,7 +769,12 @@ CREATE TABLE IF NOT EXISTS user_balances (
     -- 创建时间
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- 更新时间
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- available_balance may be negative when a ledger-backed late settlement
+    -- records auditable debt. Frozen funds and cumulative counters may not.
+    CONSTRAINT ck_user_balances_frozen_nonnegative CHECK (frozen_balance >= 0),
+    CONSTRAINT ck_user_balances_total_recharged_nonnegative CHECK (total_recharged >= 0),
+    CONSTRAINT ck_user_balances_total_consumed_nonnegative CHECK (total_consumed >= 0)
 );
 
 -- 创建索引
@@ -796,12 +804,39 @@ CREATE TABLE IF NOT EXISTS balance_reservations (
     usage_log_id UUID REFERENCES usage_logs(id),
     expires_at TIMESTAMPTZ NOT NULL,
     settled_at TIMESTAMPTZ,
+    released_at TIMESTAMPTZ,
+    release_kind VARCHAR(20),
+    release_reason TEXT,
+    released_by UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_balance_reservations_release_audit CHECK (
+        (status = 'released' AND released_at IS NOT NULL
+            AND release_kind IN ('automatic', 'administrative')
+            AND release_reason IS NOT NULL AND BTRIM(release_reason) <> ''
+            AND CHAR_LENGTH(BTRIM(release_reason)) <= 1000)
+        OR
+        (status <> 'released' AND released_at IS NULL
+            AND release_kind IS NULL AND release_reason IS NULL
+            AND released_by IS NULL)
+    ),
+    CONSTRAINT ck_balance_reservations_settlement_audit CHECK (
+        (status = 'settled' AND usage_log_id IS NOT NULL AND settled_at IS NOT NULL)
+        OR
+        (status <> 'settled' AND usage_log_id IS NULL AND settled_at IS NULL)
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_balance_reservations_user_id
     ON balance_reservations(user_id);
+CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_user_created
+    ON balance_reservations(user_id, created_at DESC, id DESC)
+    INCLUDE (amount)
+    WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_user_expiry
+    ON balance_reservations(user_id, expires_at, id)
+    INCLUDE (amount)
+    WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_balance_reservations_active_expiry
     ON balance_reservations(expires_at)
     WHERE status = 'active';
@@ -813,6 +848,107 @@ COMMENT ON TABLE balance_reservations IS 'API 请求预付费余额预留';
 COMMENT ON COLUMN balance_reservations.request_id IS '稳定 billing_request_id';
 COMMENT ON COLUMN balance_reservations.owner_token IS '当前处理器持有的预留所有权 token';
 COMMENT ON COLUMN balance_reservations.amount IS '从可用余额转入冻结余额的最大预留金额';
+COMMENT ON COLUMN balance_reservations.released_at IS '主动释放预留的时间；过期回收不使用此字段';
+COMMENT ON COLUMN balance_reservations.release_kind IS '释放类型：automatic 自动补偿；administrative 管理员强制释放';
+COMMENT ON COLUMN balance_reservations.release_reason IS '主动释放原因，包括自动补偿与管理员操作';
+COMMENT ON COLUMN balance_reservations.released_by IS '管理员释放时的操作用户；自动补偿为空';
+
+-- Append-only snapshots of reservation ownership and terminal transitions.
+-- The live reservation row may be reused after an automatic release or
+-- expiry, so audit evidence must not depend on fields retained in that row.
+CREATE TABLE IF NOT EXISTS balance_reservation_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Sequence is the authoritative event order. NOW() is transaction-stable
+    -- and UUIDv4 is unordered, so neither can prove the order of multiple
+    -- transitions recorded by one transaction.
+    event_sequence BIGINT GENERATED ALWAYS AS IDENTITY NOT NULL UNIQUE,
+    -- Intentionally no foreign key: reservation/user/tenant deletion must not
+    -- erase immutable financial audit evidence.
+    reservation_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    owner_token UUID NOT NULL,
+    tenant_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    event_type VARCHAR(20) NOT NULL
+        CHECK (event_type IN ('reserved', 'reowned', 'resized', 'settled', 'released', 'expired', 'updated')),
+    amount DECIMAL(20, 10) NOT NULL CHECK (amount >= 0),
+    status VARCHAR(20) NOT NULL
+        CHECK (status IN ('active', 'settled', 'released', 'expired')),
+    usage_log_id UUID,
+    expires_at TIMESTAMPTZ NOT NULL,
+    settled_at TIMESTAMPTZ,
+    released_at TIMESTAMPTZ,
+    release_kind VARCHAR(20),
+    release_reason TEXT,
+    released_by UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_balance_reservation_events_request_sequence
+    ON balance_reservation_events(request_id, event_sequence);
+CREATE INDEX IF NOT EXISTS idx_balance_reservation_events_reservation_sequence
+    ON balance_reservation_events(reservation_id, event_sequence);
+
+CREATE OR REPLACE FUNCTION record_balance_reservation_event()
+RETURNS TRIGGER AS $$
+DECLARE
+    reservation_event_type VARCHAR(20);
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        reservation_event_type := 'reserved';
+    ELSIF NEW.owner_token IS DISTINCT FROM OLD.owner_token THEN
+        reservation_event_type := 'reowned';
+    ELSIF NEW.status IS DISTINCT FROM OLD.status THEN
+        reservation_event_type := CASE NEW.status
+            WHEN 'settled' THEN 'settled'
+            WHEN 'released' THEN 'released'
+            WHEN 'expired' THEN 'expired'
+            ELSE 'updated'
+        END;
+    ELSIF NEW.amount IS DISTINCT FROM OLD.amount THEN
+        reservation_event_type := 'resized';
+    ELSE
+        reservation_event_type := 'updated';
+    END IF;
+
+    INSERT INTO balance_reservation_events (
+        reservation_id, request_id, owner_token, tenant_id, user_id,
+        event_type, amount, status, usage_log_id, expires_at, settled_at,
+        released_at, release_kind, release_reason, released_by
+    ) VALUES (
+        NEW.id, NEW.request_id, NEW.owner_token, NEW.tenant_id, NEW.user_id,
+        reservation_event_type, NEW.amount, NEW.status, NEW.usage_log_id,
+        NEW.expires_at, NEW.settled_at, NEW.released_at, NEW.release_kind,
+        NEW.release_reason, NEW.released_by
+    );
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_record_balance_reservation_event ON balance_reservations;
+CREATE TRIGGER trg_record_balance_reservation_event
+    AFTER INSERT OR UPDATE OF owner_token, amount, status, usage_log_id,
+        expires_at, settled_at, released_at, release_kind, release_reason, released_by
+    ON balance_reservations
+    FOR EACH ROW
+    EXECUTE FUNCTION record_balance_reservation_event();
+
+CREATE OR REPLACE FUNCTION reject_balance_reservation_event_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'balance_reservation_events is append-only';
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_reject_balance_reservation_event_mutation ON balance_reservation_events;
+CREATE TRIGGER trg_reject_balance_reservation_event_mutation
+    BEFORE UPDATE OR DELETE ON balance_reservation_events
+    FOR EACH ROW
+    EXECUTE FUNCTION reject_balance_reservation_event_mutation();
+
+COMMENT ON TABLE balance_reservation_events IS '余额预留所有权和状态变更的不可变审计快照';
+COMMENT ON COLUMN balance_reservation_events.event_sequence IS '不可变且单调递增的审计事件顺序';
+COMMENT ON COLUMN balance_reservation_events.reservation_id IS '原预留 UUID 快照；故意不设外键以保留删除后的审计证据';
 
 -- 余额变动记录表
 CREATE TABLE IF NOT EXISTS balance_transactions (
@@ -856,6 +992,52 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_recharge_order
 CREATE UNIQUE INDEX IF NOT EXISTS uk_balance_transactions_consume_usage_log
     ON balance_transactions(usage_log_id)
     WHERE transaction_type = 'consume' AND usage_log_id IS NOT NULL;
+
+-- 管理员手工充值、扣款、冻结和解冻操作的持久化幂等账本。Idempotency-Key 只保存
+-- SHA-256 摘要；全局唯一约束使同一 key 即使换租户、目标用户或操作者也会
+-- 命中同一行并由请求指纹判定为冲突。结果快照与余额变更在同一事务完成，
+-- 因而可在响应丢失后跨进程、跨副本返回完全相同的操作结果。
+CREATE TABLE IF NOT EXISTS admin_balance_operations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    idempotency_key_hash VARCHAR(64) NOT NULL UNIQUE,
+    request_fingerprint VARCHAR(64) NOT NULL,
+    operation_type VARCHAR(20) NOT NULL
+        CHECK (operation_type IN ('recharge', 'consume', 'freeze', 'unfreeze')),
+    tenant_id UUID NOT NULL,
+    user_id UUID NOT NULL,
+    actor_user_id UUID NOT NULL,
+    amount DECIMAL(20, 10) NOT NULL CHECK (amount > 0),
+    reason TEXT NOT NULL CHECK (
+        BTRIM(reason) <> '' AND reason = BTRIM(reason)
+        AND CHAR_LENGTH(reason) <= 1000
+    ),
+    balance_transaction_id UUID,
+    balance_before DECIMAL(20, 10),
+    balance_after DECIMAL(20, 10),
+    frozen_balance_after DECIMAL(20, 10),
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_admin_balance_operations_key_hash
+        CHECK (idempotency_key_hash ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_admin_balance_operations_request_fingerprint
+        CHECK (request_fingerprint ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_admin_balance_operations_completion CHECK (
+        (completed_at IS NULL AND balance_transaction_id IS NULL
+            AND balance_before IS NULL AND balance_after IS NULL
+            AND frozen_balance_after IS NULL)
+        OR
+        (completed_at IS NOT NULL AND balance_transaction_id IS NOT NULL
+            AND balance_before IS NOT NULL AND balance_after IS NOT NULL
+            AND frozen_balance_after IS NOT NULL AND frozen_balance_after >= 0)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_balance_operations_user_created
+    ON admin_balance_operations(user_id, created_at DESC, id DESC);
+
+COMMENT ON TABLE admin_balance_operations IS '管理员手工充值、扣款、冻结和解冻操作的持久化幂等账本';
+COMMENT ON COLUMN admin_balance_operations.idempotency_key_hash IS 'Idempotency-Key 的 SHA-256 摘要，永不保存明文 key';
+COMMENT ON COLUMN admin_balance_operations.request_fingerprint IS '规范化操作类型、租户、目标用户、操作者、金额和原因的 SHA-256';
 
 -- 添加注释
 COMMENT ON TABLE balance_transactions IS '余额变动记录表';

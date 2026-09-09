@@ -3,10 +3,11 @@
 use client_api::AssignableUserRole;
 use client_api::api::admin::{
     AccountQueryParams, AdminApi, CalculateCostRequest, CreateAccountRequest, CreatePricingRequest,
-    PendingTokenQueryParams, UpdateBalanceRequest, UpdateUserRequest,
+    PendingTokenQueryParams, ReleaseBalanceReservationRequest, UpdateBalanceRequest,
+    UpdateUserRequest,
 };
 use client_api::error::ClientError;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
 mod common;
@@ -207,6 +208,7 @@ async fn test_update_user_balance_success() {
 
     Mock::given(method("POST"))
         .and(path("/api/v1/users/user_001/balance"))
+        .and(header("idempotency-key", "balance-op-update-001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "success": true,
             "message": "Balance updated",
@@ -222,7 +224,12 @@ async fn test_update_user_balance_success() {
 
     let req = UpdateBalanceRequest::add(50.0, "Admin recharge");
     let result = admin_api
-        .update_user_balance("user_001", &req, fixtures::TEST_ACCESS_TOKEN)
+        .update_user_balance(
+            "user_001",
+            &req,
+            "balance-op-update-001",
+            fixtures::TEST_ACCESS_TOKEN,
+        )
         .await;
 
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
@@ -230,6 +237,216 @@ async fn test_update_user_balance_success() {
     assert!(resp.success);
     assert_eq!(resp.new_balance.as_deref(), Some("150.00"));
     assert_eq!(resp.available_balance_before.as_deref(), Some("100.00"));
+}
+
+#[tokio::test]
+async fn freeze_user_balance_sends_idempotency_key() {
+    let (client, mock_server) = create_test_client().await;
+    let admin_api = AdminApi::new(&client);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/users/user_001/balance/freeze"))
+        .and(header("idempotency-key", "balance-op-freeze-001"))
+        .and(body_json(serde_json::json!({
+            "amount": "2",
+            "reason": "manual hold"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "message": "Balance frozen",
+            "user_id": "user_001",
+            "amount": "2",
+            "reason": "manual hold",
+            "available_balance_before": "10",
+            "new_available_balance": "8",
+            "new_frozen_balance": "2",
+            "updated_by": "admin_001"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let response = admin_api
+        .freeze_user_balance(
+            "user_001",
+            &UpdateBalanceRequest::new(2.0, "manual hold"),
+            "balance-op-freeze-001",
+            fixtures::TEST_ACCESS_TOKEN,
+        )
+        .await
+        .expect("freeze response should deserialize");
+    assert_eq!(response.new_balance.as_deref(), Some("8"));
+    assert_eq!(response.new_frozen_balance.as_deref(), Some("2"));
+}
+
+#[tokio::test]
+async fn unfreeze_user_balance_sends_idempotency_key() {
+    let (client, mock_server) = create_test_client().await;
+    let admin_api = AdminApi::new(&client);
+
+    Mock::given(method("POST"))
+        .and(path("/api/v1/users/user_001/balance/unfreeze"))
+        .and(header("idempotency-key", "balance-op-unfreeze-001"))
+        .and(body_json(serde_json::json!({
+            "amount": "2",
+            "reason": "release hold"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "message": "Balance unfrozen",
+            "user_id": "user_001",
+            "amount": "2",
+            "reason": "release hold",
+            "frozen_balance_before": "5",
+            "new_available_balance": "7",
+            "new_frozen_balance": "3",
+            "updated_by": "admin_001"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let response = admin_api
+        .unfreeze_user_balance(
+            "user_001",
+            &UpdateBalanceRequest::new(2.0, "release hold"),
+            "balance-op-unfreeze-001",
+            fixtures::TEST_ACCESS_TOKEN,
+        )
+        .await
+        .expect("unfreeze response should deserialize");
+    assert_eq!(response.frozen_balance_before.as_deref(), Some("5"));
+    assert_eq!(response.new_balance.as_deref(), Some("7"));
+}
+
+#[tokio::test]
+async fn test_list_user_balance_reservations_returns_exact_breakdown() {
+    let (client, mock_server) = create_test_client().await;
+    let admin_api = AdminApi::new(&client);
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users/user_001/balance/reservations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "user_id": "user_001",
+            "available_balance": "988.78",
+            "total_frozen_balance": "899530.03",
+            "request_reserved_balance": "899530.03",
+            "manually_frozen_balance": "0",
+            "reservations": [{
+                "request_id": "request_001",
+                "version": "8b9232cc-fb67-4bc4-a578-c0c6095f2e5e",
+                "amount": "899530.03",
+                "status": "active",
+                "expires_at": "2026-09-09T03:10:00Z",
+                "created_at": "2026-09-09T01:00:00Z",
+                "updated_at": "2026-09-09T01:00:00Z"
+            }],
+            "next_cursor": "opaque-page-2"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let response = admin_api
+        .list_user_balance_reservations("user_001", fixtures::TEST_ACCESS_TOKEN)
+        .await
+        .expect("balance reservation breakdown should deserialize");
+
+    assert_eq!(response.total_frozen_balance, "899530.03");
+    assert_eq!(response.request_reserved_balance, "899530.03");
+    assert_eq!(response.manually_frozen_balance, "0");
+    assert_eq!(response.reservations.len(), 1);
+    assert_eq!(response.reservations[0].request_id, "request_001");
+    assert_eq!(response.next_cursor.as_deref(), Some("opaque-page-2"));
+    assert_eq!(
+        response.reservations[0].version,
+        "8b9232cc-fb67-4bc4-a578-c0c6095f2e5e"
+    );
+}
+
+#[tokio::test]
+async fn test_list_user_balance_reservations_page_forwards_cursor_and_limit() {
+    let (client, mock_server) = create_test_client().await;
+    let admin_api = AdminApi::new(&client);
+
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users/user_001/balance/reservations"))
+        .and(query_param("cursor", "opaque+/cursor="))
+        .and(query_param("limit", "25"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "user_id": "user_001",
+            "available_balance": "988.78",
+            "total_frozen_balance": "899530.03",
+            "request_reserved_balance": "899530.03",
+            "manually_frozen_balance": "0",
+            "reservations": [],
+            "next_cursor": null
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let response = admin_api
+        .list_user_balance_reservations_page(
+            "user_001",
+            Some("opaque+/cursor="),
+            Some(25),
+            fixtures::TEST_ACCESS_TOKEN,
+        )
+        .await
+        .expect("reservation page should deserialize");
+
+    assert!(response.reservations.is_empty());
+    assert!(response.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn test_release_user_balance_reservation_uses_scoped_request_id_and_reason() {
+    let (client, mock_server) = create_test_client().await;
+    let admin_api = AdminApi::new(&client);
+
+    Mock::given(method("POST"))
+        .and(path(
+            "/api/v1/users/user_001/balance/reservations/request_001/release",
+        ))
+        .and(body_json(serde_json::json!({
+            "expected_version": "8b9232cc-fb67-4bc4-a578-c0c6095f2e5e",
+            "reason": "Release a provider-rate-limit orphan"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "success": true,
+            "message": "Request balance reservation released",
+            "user_id": "user_001",
+            "request_id": "request_001",
+            "released_amount": "899530.03",
+            "reason": "Release a provider-rate-limit orphan",
+            "new_available_balance": "900518.81",
+            "new_total_frozen_balance": "0",
+            "request_reserved_balance": "0",
+            "manually_frozen_balance": "0",
+            "released_by": "admin_001",
+            "warning": "Late usage settlement may still deduct the final charge from available balance"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let request = ReleaseBalanceReservationRequest::new(
+        "8b9232cc-fb67-4bc4-a578-c0c6095f2e5e",
+        "Release a provider-rate-limit orphan",
+    );
+    let response = admin_api
+        .release_user_balance_reservation(
+            "user_001",
+            "request_001",
+            &request,
+            fixtures::TEST_ACCESS_TOKEN,
+        )
+        .await
+        .expect("active reservation should be releasable by request id");
+
+    assert!(response.success);
+    assert_eq!(response.request_id, "request_001");
+    assert_eq!(response.released_amount, "899530.03");
+    assert_eq!(response.request_reserved_balance, "0");
 }
 
 // ==================== 账号管理测试 ====================
