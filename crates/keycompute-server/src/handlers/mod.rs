@@ -566,9 +566,9 @@ impl Drop for GenerationTpmReservation {
 }
 
 /// Atomically admit one generation attempt against settled and in-flight TPM.
-/// Known request bounds reserve their full prediction. A request whose input or
-/// output cannot be bounded occupies the tenant's whole configured window,
-/// which admits at most one such request into an otherwise empty window.
+/// Known request bounds reserve their full prediction. An omitted output bound
+/// uses the shared internal fallback, while input that cannot be bounded still
+/// occupies the tenant's whole configured window.
 pub(crate) async fn reserve_generation_tpm(
     state: &crate::state::AppState,
     ctx: &keycompute_types::RequestContext,
@@ -775,10 +775,11 @@ pub(crate) enum GenerationBalanceReservationLifetime {
 
 const GENERATION_BALANCE_RESERVATION_HANDOFF_MARGIN: std::time::Duration =
     std::time::Duration::from_secs(2 * 60 * 60);
-/// 客户端未提供生成上限时使用的内部余额预留回退值。
+/// 客户端未提供生成上限时使用的内部预留回退值。
 ///
-/// 该值不会写入上游请求，也不是模型输出的硬限制。
-const DEFAULT_OUTPUT_RESERVATION_TOKENS: u32 = 16_384;
+/// 余额和 TPM 预留共用该值。它不会写入上游请求，也不是模型输出的硬限制；
+/// 请求结束后仍以上游返回的实际 usage 为准结算。
+const DEFAULT_OUTPUT_RESERVATION_TOKENS: u32 = 4_096;
 /// 无法从请求 JSON 精确估算媒体、托管文件或历史响应输入时使用的风险下限。
 const UNBOUNDED_INPUT_RESERVATION_TOKENS: u32 = 1_000_000;
 
@@ -843,12 +844,9 @@ fn generation_tpm_reservation_tokens(
     ctx: &keycompute_types::RequestContext,
     tpm_limit: u32,
 ) -> u32 {
-    // The fixed fallback below bounds prepaid-balance exposure only; because it
-    // is not sent upstream, it is not an output ceiling. An unbounded output
-    // must therefore occupy the complete TPM window while it is in flight.
-    if conservative_generation_output_tokens(ctx).is_none() {
-        return tpm_limit;
-    }
+    // Omitted output limits use the same shared prediction as balance
+    // reservation. It is an admission estimate rather than an upstream output
+    // ceiling; terminal settlement replaces it with authoritative actual usage.
     let budget = conservative_generation_token_budget(ctx);
     budget
         .input_tokens
@@ -866,7 +864,7 @@ fn conservative_generation_token_budget(
         .as_deref()
         .and_then(|body| body.get("n"))
         .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
+        .map(|value| u32::try_from(value).map_or(u32::MAX, |value| value.max(1)))
         .unwrap_or(1);
     ConservativeGenerationTokenBudget {
         input_tokens: conservative_generation_input_tokens(ctx),
@@ -2474,10 +2472,54 @@ mod tests {
             );
             assert_eq!(
                 generation_tpm_reservation_tokens(&ctx, 100_000),
-                100_000,
-                "an upstream-unbounded output must occupy the complete TPM window"
+                input_tokens.saturating_add(DEFAULT_OUTPUT_RESERVATION_TOKENS),
+                "an omitted output limit must use the shared TPM reservation fallback"
             );
         }
+    }
+
+    #[test]
+    fn omitted_output_limit_multiplies_the_shared_fallback_by_chat_choices() {
+        let pricing = keycompute_types::PricingSnapshot::new(
+            "gpt-test",
+            "CNY",
+            rust_decimal::Decimal::ONE,
+            rust_decimal::Decimal::ONE,
+        );
+        let mut ctx = reservation_context(pricing);
+        ctx.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "n": 3
+        })));
+
+        let input_tokens = conservative_generation_input_tokens(&ctx).unwrap();
+        assert_eq!(
+            generation_tpm_reservation_tokens(&ctx, 100_000),
+            input_tokens.saturating_add(DEFAULT_OUTPUT_RESERVATION_TOKENS.saturating_mul(3))
+        );
+    }
+
+    #[test]
+    fn omitted_output_limit_bounds_chat_choices_to_minimum_one() {
+        let pricing = keycompute_types::PricingSnapshot::new(
+            "gpt-test",
+            "CNY",
+            rust_decimal::Decimal::ONE,
+            rust_decimal::Decimal::ONE,
+        );
+        let mut ctx = reservation_context(pricing);
+        ctx.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "n": 0
+        })));
+
+        let input_tokens = conservative_generation_input_tokens(&ctx).unwrap();
+        assert_eq!(
+            generation_tpm_reservation_tokens(&ctx, 100_000),
+            input_tokens.saturating_add(DEFAULT_OUTPUT_RESERVATION_TOKENS)
+        );
     }
 
     #[tokio::test]
