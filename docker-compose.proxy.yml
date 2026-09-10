@@ -1,0 +1,34 @@
+services:
+  keycompute-server:
+    build:
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-${http_proxy:-}}
+        HTTPS_PROXY: ${HTTPS_PROXY:-${https_proxy:-}}
+        ALL_PROXY: ${ALL_PROXY:-${all_proxy:-}}
+        NO_PROXY: ${NO_PROXY:-${no_proxy:-127.0.0.1,localhost}}
+        http_proxy: ${http_proxy:-${HTTP_PROXY:-}}
+        https_proxy: ${https_proxy:-${HTTPS_PROXY:-}}
+        all_proxy: ${all_proxy:-${ALL_PROXY:-}}
+        no_proxy: ${no_proxy:-${NO_PROXY:-127.0.0.1,localhost}}
+
+  keycompute-web:
+    build:
+      args:
+        API_BASE_URL: ${API_BASE_URL:-}
+        HTTP_PROXY: ${HTTP_PROXY:-${http_proxy:-}}
+        HTTPS_PROXY: ${HTTPS_PROXY:-${https_proxy:-}}
+        ALL_PROXY: ${ALL_PROXY:-${all_proxy:-}}
+        NO_PROXY: ${NO_PROXY:-${no_proxy:-127.0.0.1,localhost}}
+        http_proxy: ${http_proxy:-${HTTP_PROXY:-}}
+        https_proxy: ${https_proxy:-${HTTPS_PROXY:-}}
+        all_proxy: ${all_proxy:-${ALL_PROXY:-}}
+        no_proxy: ${no_proxy:-${NO_PROXY:-127.0.0.1,localhost}}
+    environment:
+      HTTP_PROXY: ${HTTP_PROXY:-${http_proxy:-}}
+      HTTPS_PROXY: ${HTTPS_PROXY:-${https_proxy:-}}
+      ALL_PROXY: ${ALL_PROXY:-${all_proxy:-}}
+      NO_PROXY: ${NO_PROXY:-${no_proxy:-127.0.0.1,localhost}}
+      http_proxy: ${http_proxy:-${HTTP_PROXY:-}}
+      https_proxy: ${https_proxy:-${HTTPS_PROXY:-}}
+      all_proxy: ${all_proxy:-${ALL_PROXY:-}}
+      no_proxy: ${no_proxy:-${NO_PROXY:-127.0.0.1,localhost}}
