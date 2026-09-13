@@ -14,6 +14,7 @@ use keycompute_db::{
 };
 use keycompute_ratelimit::{RateLimitConfig, RateLimitKey};
 use keycompute_server::{create_router, state::AppState};
+use rust_decimal::Decimal;
 use serde_json::json;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -81,6 +82,26 @@ fn assert_rate_limit_error(body: &serde_json::Value) {
     );
 }
 
+async fn fund_rate_limit_test_user(
+    pool: &sea_orm::DatabaseConnection,
+    tenant_id: Uuid,
+    user_id: Uuid,
+) {
+    // Generation admission reserves balance before recording RPM. Keep these
+    // tests focused on account-aware rate limits by providing enough credit to
+    // pass the billing gate and reach the limiter under test.
+    keycompute_db::UserBalance::recharge(
+        pool,
+        user_id,
+        tenant_id,
+        Decimal::from(100),
+        None,
+        Some("rate-limit integration test credit"),
+    )
+    .await
+    .expect("rate-limit test user should have a positive balance");
+}
+
 #[tokio::test]
 async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpoints() {
     let pool = create_test_pool().await;
@@ -92,6 +113,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpo
 
     let tenant = create_test_tenant(&pool, "db-rate-all-routes", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-all-routes", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -288,6 +310,7 @@ async fn postgres_tenant_rpm_cap_is_not_widened_by_a_provider_account() {
         .await
         .expect("tenant RPM limit should be updated");
     let user = create_test_user(&pool, tenant.id, "db-rate-tenant-cap", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_row = keycompute_db::ProduceAiKey::create(
         &pool,
@@ -364,6 +387,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
 
     let tenant = create_test_tenant(&pool, "db-rate-triplet", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-triplet", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -505,6 +529,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
 
     let tenant = create_test_tenant(&pool, "db-rate-rpm-triplet-messages", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-rpm-triplet-messages", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -649,6 +674,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
 
     let tenant = create_test_tenant(&pool, "db-rate-rpm-triplet-responses", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-rpm-triplet-responses", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -803,6 +829,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_all_generation_endpo
 
     let tenant = create_test_tenant(&pool, "db-rate-tpm-all-routes", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-tpm-all-routes", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -983,6 +1010,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
 
     let tenant = create_test_tenant(&pool, "db-rate-tpm-triplet", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-tpm-triplet", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -1125,6 +1153,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
 
     let tenant = create_test_tenant(&pool, "db-rate-tpm-triplet-messages", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-tpm-triplet-messages", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -1269,6 +1298,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
 
     let tenant = create_test_tenant(&pool, "db-rate-tpm-triplet-responses", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-tpm-triplet-responses", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -1415,6 +1445,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_request_key_triplet(
 
     let tenant = create_test_tenant(&pool, "db-rate-rpm", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-rpm", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
@@ -1537,6 +1568,7 @@ async fn postgres_responses_rpm_rejection_releases_idempotency_claim_for_retry()
 
     let tenant = create_test_tenant(&pool, "db-rate-responses-cleanup", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-responses-cleanup", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_row = keycompute_db::ProduceAiKey::create(
         &pool,
@@ -1634,6 +1666,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_triplet_key() {
 
     let tenant = create_test_tenant(&pool, "db-rate-tpm", &test_id).await;
     let user = create_test_user(&pool, tenant.id, "db-rate-tpm", &test_id).await;
+    fund_rate_limit_test_user(&pool, tenant.id, user.id).await;
 
     let api_key = ProduceAiKeyValidator::generate_key();
     let api_key_hash = ProduceAiKeyValidator::hash_key(&api_key);
