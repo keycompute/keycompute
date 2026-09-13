@@ -115,6 +115,19 @@ CREATE TABLE IF NOT EXISTS accounts (
     models_supported TEXT[] NOT NULL DEFAULT '{}',
     api_capabilities TEXT[] NOT NULL,
     visibility VARCHAR(20) NOT NULL DEFAULT 'tenant',
+    -- Account-level routing health. `enabled` remains the administrator's
+    -- intent; health is an independent operational signal used by routing.
+    health_status VARCHAR(20) NOT NULL DEFAULT 'unknown',
+    health_reason VARCHAR(128),
+    health_penalty INTEGER NOT NULL DEFAULT 0,
+    health_consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    health_success_count BIGINT NOT NULL DEFAULT 0,
+    health_failure_count BIGINT NOT NULL DEFAULT 0,
+    health_avg_latency_ms BIGINT,
+    health_last_success_at TIMESTAMPTZ,
+    health_last_failure_at TIMESTAMPTZ,
+    health_updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    health_generation BIGINT NOT NULL DEFAULT 0,
     last_probe_at TIMESTAMPTZ,
     last_probe_latency_ms BIGINT,
     last_probe_status VARCHAR(32),
@@ -130,7 +143,17 @@ CREATE TABLE IF NOT EXISTS accounts (
         )
     ),
     CONSTRAINT ck_accounts_probe_status
-        CHECK (last_probe_status IS NULL OR last_probe_status IN ('succeeded', 'failed'))
+        CHECK (last_probe_status IS NULL OR last_probe_status IN ('succeeded', 'failed')),
+    CONSTRAINT ck_accounts_priority
+        CHECK (priority BETWEEN 0 AND 10),
+    CONSTRAINT ck_accounts_health_status
+        CHECK (health_status IN ('unknown', 'healthy', 'degraded', 'unhealthy')),
+    CONSTRAINT ck_accounts_health_penalty
+        CHECK (health_penalty BETWEEN 0 AND 100),
+    CONSTRAINT ck_accounts_health_counters
+        CHECK (health_consecutive_failures >= 0
+            AND health_success_count >= 0
+            AND health_failure_count >= 0)
 );
 
 CREATE INDEX IF NOT EXISTS idx_accounts_tenant_id ON accounts(tenant_id);
@@ -138,6 +161,9 @@ CREATE INDEX IF NOT EXISTS idx_accounts_provider ON accounts(provider);
 CREATE INDEX IF NOT EXISTS idx_accounts_enabled ON accounts(enabled) WHERE enabled = TRUE;
 CREATE INDEX IF NOT EXISTS idx_accounts_visibility ON accounts(visibility) WHERE visibility = 'global';
 CREATE INDEX IF NOT EXISTS idx_accounts_api_capabilities ON accounts USING GIN(api_capabilities);
+CREATE INDEX IF NOT EXISTS idx_accounts_health_routing
+    ON accounts(health_status, health_penalty, priority)
+    WHERE enabled = TRUE;
 
 -- responses_idempotency_claims: Responses Idempotency-Key 的永久身份绑定及短期结果缓存。
 -- 只保留哈希后的绑定 ID；account_id 是历史执行归属，故意不引用可删除的

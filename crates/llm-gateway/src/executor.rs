@@ -827,10 +827,17 @@ impl GatewayExecutor {
 
                     // 成功：更新 Provider 健康状态
                     let latency_ms = target_start.elapsed().as_millis() as u64;
-                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target
+                    if let ExecutionTarget::ProviderAccount {
+                        provider,
+                        account_id,
+                        ..
+                    } = &target
                         && let Some(ref health_store) = provider_health
                     {
+                        // Keep the legacy Provider metric for diagnostics, but
+                        // route health is now tracked per concrete account.
                         health_store.record_success(provider, latency_ms);
+                        health_store.record_account_success(*account_id, latency_ms);
                         if !same_provider_account(&primary_target, &target) {
                             health_store.record_fallback();
                         }
@@ -984,11 +991,17 @@ impl GatewayExecutor {
                         return Err(e);
                     }
 
-                    // 生产调用仅保留已有的协议级健康统计；账号探测不会修改该状态。
-                    if let ExecutionTarget::ProviderAccount { provider, .. } = &target
+                    // 生产调用同时更新账号级运行健康和兼容性的协议诊断统计；
+                    // 后台账号探测只更新账号级运行健康，不污染协议诊断统计。
+                    if let ExecutionTarget::ProviderAccount {
+                        provider,
+                        account_id,
+                        ..
+                    } = &target
                         && let Some(ref health_store) = provider_health
                     {
                         health_store.record_failure(provider);
+                        health_store.record_account_failure(*account_id, &e);
                     }
 
                     tracing::warn!(

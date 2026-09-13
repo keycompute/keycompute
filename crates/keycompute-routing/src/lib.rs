@@ -14,7 +14,10 @@ use keycompute_types::{
     AccountApiCapability, ExecutionPlan, ExecutionTarget, KeyComputeError, PricingSnapshot,
     RequestContext, Result,
 };
-pub use provider_health::{ProviderHealth, ProviderHealthStore};
+pub use provider_health::{
+    ACCOUNT_DEGRADED, ACCOUNT_HEALTH_UNKNOWN, ACCOUNT_HEALTHY, ACCOUNT_UNHEALTHY, AccountHealth,
+    ProviderHealth, ProviderHealthStore,
+};
 use sea_orm::ConnectionTrait;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -39,14 +42,6 @@ pub trait NodeCapabilityIndex: Send + Sync {
     async fn has_ready_node(&self, model: &str) -> bool;
 }
 
-/// 路由权重常量（硬编码，不可通过配置修改）
-const COST_WEIGHT: f64 = 0.3;
-const LATENCY_WEIGHT: f64 = 0.25;
-const SUCCESS_WEIGHT: f64 = 0.25;
-const HEALTH_WEIGHT: f64 = 0.2;
-const UNHEALTHY_PENALTY: f64 = 100.0;
-const HIGH_LATENCY_THRESHOLD_MS: u64 = 1000;
-
 /// 每个 Provider（协议）最多选入执行计划的账号数
 ///
 /// 协议收敛为两种后，同一协议下可能挂载多个厂商的账号（如 OpenAI 官方 +
@@ -66,14 +61,14 @@ fn required_api_capability(ctx: &RequestContext) -> AccountApiCapability {
 /// 路由引擎
 ///
 /// 双层路由：Layer1 模型路由，Layer2 账号路由
-/// 集成 ProviderHealthStore 进行健康评分路由
+/// 集成 ProviderHealthStore 进行账号级健康/惩罚路由
 /// 集成 AccountStateStore 进行账号冷却状态检查
 /// 集成 NodeCapabilityIndex 进行 Node 路由支持
 #[derive(Clone)]
 pub struct RoutingEngine {
     /// 账号状态存储（只读）
     account_states: Arc<AccountStateStore>,
-    /// Provider 健康状态存储（只读）
+    /// 账号健康状态存储（类型名保留以兼容现有调用方）
     provider_health: Arc<ProviderHealthStore>,
     /// 数据库连接池（可选）
     pool: Option<Arc<DbRouter>>,
@@ -103,7 +98,7 @@ impl RoutingEngine {
     ///
     /// # 参数
     /// - `account_states`: 账号状态存储
-    /// - `provider_health`: Provider 健康状态存储
+    /// - `provider_health`: 账号健康状态存储
     /// - `providers`: Provider 名称列表（从外部传入，确保与 Gateway 一致）
     pub fn new(
         account_states: Arc<AccountStateStore>,
@@ -123,7 +118,7 @@ impl RoutingEngine {
     ///
     /// # 参数
     /// - `account_states`: 账号状态存储
-    /// - `provider_health`: Provider 健康状态存储
+    /// - `provider_health`: 账号健康状态存储
     /// - `pool`: 数据库连接池
     /// - `providers`: Provider 名称列表（从外部传入，确保与 Gateway 一致）
     pub fn with_pool(
@@ -145,7 +140,7 @@ impl RoutingEngine {
     ///
     /// # 参数
     /// - `account_states`: 账号状态存储
-    /// - `provider_health`: Provider 健康状态存储
+    /// - `provider_health`: 账号健康状态存储
     /// - `pool`: 数据库连接池
     /// - `providers`: Provider 名称列表（从外部传入，确保与 Gateway 一致）
     /// - `node_index`: Node 能力索引，用于检查是否存在 ready 节点
@@ -302,25 +297,20 @@ impl RoutingEngine {
         })
     }
 
-    /// Layer1: 模型路由
+    /// Layer1: 入口协议选择。
     ///
-    /// 根据模型、价格、延迟、失败率、不健康度对 Provider 排序
-    /// 注意：暂时不过滤不健康的 Provider，所有 Provider 都参与路由
-    /// 评分规则：所有指标统一为"越高越不优先"，最终分数越低越优先
-    /// 综合评分 = weighted_average + unhealthy_penalty
+    /// Provider 仅表示 wire protocol（openai / anthropic）。入口协议彼此
+    /// 隔离，因此这里不再使用 Provider 健康分排序或惩罚；实际的动态排序
+    /// 发生在 Layer2 的具体账号池内。
     ///
     /// 入口协议隔离：候选 Provider 仅限入口协议本身（openai / anthropic），
     /// 不跨协议兜底；本协议未配置账号时返回空列表，由 route 报 RoutingFailed
     async fn rank_providers(
         &self,
         _model: &str,
-        pricing: &PricingSnapshot,
+        _pricing: &PricingSnapshot,
         entry_protocol: &str,
     ) -> Result<Vec<String>> {
-        // 注意：暂时不过滤不健康的 Provider，所有 Provider 都参与路由
-        // 健康状态仅用于评分排序，不用于过滤
-        let _healthy_providers = self.provider_health.healthy_providers(&self.providers);
-
         // 候选 Provider 仅限入口协议本身
         let candidates: Vec<&String> = self
             .providers
@@ -328,133 +318,16 @@ impl RoutingEngine {
             .filter(|p| p.eq_ignore_ascii_case(entry_protocol))
             .collect();
 
-        // 计算每个 Provider 的综合评分
-        let mut scored_providers: Vec<(String, f64)> = candidates
-            .iter()
-            .map(|p| {
-                let score = self.score_provider(p, pricing);
-                ((*p).clone(), score)
-            })
-            .collect();
-
-        // 按分数排序（分数越低越好）
-        scored_providers.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-        tracing::debug!(
-            provider_scores = ?scored_providers,
-            "Provider ranking completed"
-        );
-
-        Ok(scored_providers.into_iter().map(|(p, _)| p).collect())
-    }
-
-    /// 计算 Provider 综合评分
-    ///
-    /// 评分规则：所有指标统一为"越高越不优先"
-    /// - 成本越高 → 分数越高
-    /// - 延迟越高 → 分数越高
-    /// - 成功率越低 → 分数越高
-    /// - 健康度越低 → 分数越高
-    /// - 不健康 → 额外惩罚分
-    ///   最终分数越低越优先选择
-    fn score_provider(&self, provider: &str, pricing: &PricingSnapshot) -> f64 {
-        // 1. 成本评分 (0-100，越高越不优先)
-        let cost_score = self.calculate_cost_score(pricing);
-
-        // 2. 从 ProviderHealthStore 获取健康状态
-        let health = self.provider_health.get_health(provider);
-
-        // 3. 延迟评分 (0-100，越高越不优先)
-        let latency_score = health
-            .as_ref()
-            .map(|h| self.calculate_latency_score(h.avg_latency_ms))
-            .unwrap_or(50.0); // 默认中等延迟
-
-        // 4. 失败率评分 (0-100，越高越不优先)
-        // 成功率越高 → 失败率越低 → 分数越低（越好）
-        let failure_score = health
-            .as_ref()
-            .map(|h| 100.0 - h.success_rate)
-            .unwrap_or(0.0); // 默认 0 失败率
-
-        // 5. 不健康度评分 (0-100，越高越不健康)
-        // health_score() 越高 → 越健康 → 不健康度越低（越好）
-        let unhealthiness_score = health
-            .as_ref()
-            .map(|h| 100.0 - h.health_score() as f64)
-            .unwrap_or(50.0); // 默认中等
-
-        // 6. 不健康额外惩罚
-        let unhealthy_penalty = health
-            .as_ref()
-            .filter(|h| !h.healthy)
-            .map(|_| UNHEALTHY_PENALTY)
-            .unwrap_or(0.0);
-
-        // 7. 综合评分（加权平均）
-        let total_weight = COST_WEIGHT + LATENCY_WEIGHT + SUCCESS_WEIGHT + HEALTH_WEIGHT;
-        let weighted_score = (COST_WEIGHT * cost_score
-            + LATENCY_WEIGHT * latency_score
-            + SUCCESS_WEIGHT * failure_score
-            + HEALTH_WEIGHT * unhealthiness_score)
-            / total_weight;
-
-        let final_score = weighted_score + unhealthy_penalty;
-
-        tracing::debug!(
-            provider = %provider,
-            cost_score = cost_score,
-            latency_score = latency_score,
-            failure_score = failure_score,
-            unhealthiness_score = unhealthiness_score,
-            unhealthy_penalty = unhealthy_penalty,
-            final_score = final_score,
-            "Provider scored (lower is better)"
-        );
-
-        final_score
-    }
-
-    /// 计算成本评分
-    fn calculate_cost_score(&self, pricing: &PricingSnapshot) -> f64 {
-        // 将价格转换为 f64，价格越高分数越高（越不优先）
-        let input_price: f64 = pricing
-            .input_price_per_1k
-            .to_string()
-            .parse()
-            .unwrap_or(1.0);
-        let output_price: f64 = pricing
-            .output_price_per_1k
-            .to_string()
-            .parse()
-            .unwrap_or(2.0);
-
-        // 归一化到 0-100 范围（假设价格范围 0-10）
-        let avg_price = (input_price + output_price) / 2.0;
-        (avg_price * 10.0).min(100.0)
-    }
-
-    /// 计算延迟评分
-    fn calculate_latency_score(&self, latency_ms: u64) -> f64 {
-        if latency_ms == 0 {
-            // 无延迟数据，返回中等分数
-            50.0
-        } else if latency_ms < 100 {
-            10.0 // 优秀
-        } else if latency_ms < 300 {
-            30.0 // 良好
-        } else if latency_ms < HIGH_LATENCY_THRESHOLD_MS {
-            60.0 // 一般
-        } else {
-            90.0 // 较差
-        }
+        let ranked = candidates.into_iter().cloned().collect::<Vec<_>>();
+        tracing::debug!(providers = ?ranked, "Entry protocol selected");
+        Ok(ranked)
     }
 
     /// Layer2: 账号路由（带模型过滤）
     ///
     /// 为指定 Provider 选择支持特定模型的账号（top-N）
     /// 按优先级排序，跳过冷却中的账号，最多返回 MAX_ACCOUNTS_PER_PROVIDER 个
-    /// 注意：暂时不检查 Provider 健康状态，所有 Provider 都可以选择账号
+    /// 健康门槛和动态惩罚均检查具体账号，Provider 只负责协议隔离。
     ///
     /// # 参数
     /// - `provider`: Provider 名称
@@ -467,20 +340,18 @@ impl RoutingEngine {
         model: &str,
         required_capability: AccountApiCapability,
     ) -> Result<Vec<ExecutionTarget>> {
-        // 注意：暂时不检查 Provider 健康状态
-        // 即使 Provider 不健康，仍然尝试选择其下的账号
-        // 健康状态仅影响 Layer1 的路由排序
-        let _is_healthy = self.provider_health.is_healthy(provider);
-
         // 尝试从数据库加载租户专属账号
         let accounts = if let Some(pool) = &self.pool {
             // 根据是否指定模型选择不同的加载方式
             let result = if model.is_empty() {
-                self.load_accounts_from_database(pool.as_ref(), provider, tenant_id)
+                // Routing health is a hard eligibility gate. Do not use a
+                // lagging read replica for the account snapshot that decides
+                // whether a quarantined account may receive traffic.
+                self.load_accounts_from_database(pool.write_conn(), provider, tenant_id)
                     .await
             } else {
                 self.load_accounts_for_model(
-                    pool.as_ref(),
+                    pool.write_conn(),
                     provider,
                     tenant_id,
                     model,
@@ -507,7 +378,8 @@ impl RoutingEngine {
             return self.select_fallback_account(provider).await;
         };
 
-        // 从账号列表中选择最优账号（top-N）
+        // 从账号列表中选择最优账号（top-N）。健康状态和动态惩罚均以
+        // account_id 为键；Provider 仅用于协议适配，不再参与健康评分。
         self.select_best_accounts(provider, accounts, required_capability)
             .await
     }
@@ -623,9 +495,25 @@ impl RoutingEngine {
             return Ok(Vec::new());
         }
 
-        // 按优先级排序
-        let mut sorted_accounts: Vec<_> = accounts.into_iter().collect();
-        sorted_accounts.sort_by_key(|account| std::cmp::Reverse(account.priority));
+        for account in &accounts {
+            self.provider_health.hydrate_account_health(account);
+        }
+
+        // unhealthy 是硬路由门槛；unknown/degraded 仍可参与，其中 degraded
+        // 按动态惩罚降权，健康等级相同时再尊重管理员配置的 priority。
+        let mut sorted_accounts: Vec<_> = accounts
+            .into_iter()
+            .filter(|account| self.provider_health.account_is_routable(account))
+            .collect();
+        sorted_accounts.sort_by(|a, b| {
+            let a_health = self.provider_health.account_health_for(a);
+            let b_health = self.provider_health.account_health_for(b);
+            a_health
+                .penalty
+                .cmp(&b_health.penalty)
+                .then_with(|| b.priority.cmp(&a.priority))
+                .then_with(|| a.id.cmp(&b.id))
+        });
 
         let mut targets = Vec::new();
         for account in sorted_accounts {
@@ -755,17 +643,17 @@ impl RoutingEngine {
         Ok(vec![target])
     }
 
-    /// 获取 Provider 健康状态存储（只读访问）
+    /// 获取账号健康状态存储（只读访问；方法名兼容旧调用方）
     pub fn provider_health(&self) -> &Arc<ProviderHealthStore> {
         &self.provider_health
     }
 
-    /// 获取指定 Provider 的健康评分
+    /// 获取协议级兼容诊断评分（账号路由不使用）
     pub fn get_provider_health_score(&self, provider: &str) -> u64 {
         self.provider_health.get_score(provider)
     }
 
-    /// 检查 Provider 是否健康
+    /// 检查协议级兼容诊断状态（账号路由不使用）
     pub fn is_provider_healthy(&self, provider: &str) -> bool {
         self.provider_health.is_healthy(provider)
     }
@@ -790,7 +678,7 @@ impl RoutingEngine {
         &self.providers
     }
 
-    /// 获取当前健康的 Provider 列表
+    /// 获取协议级兼容诊断列表（账号路由不使用）
     pub fn healthy_providers(&self) -> Vec<String> {
         self.provider_health.healthy_providers(&self.providers)
     }
@@ -1085,24 +973,6 @@ mod tests {
     }
 
     #[test]
-    fn test_score_provider() {
-        let engine = create_test_engine();
-        let pricing = PricingSnapshot {
-            model_name: "test".to_string(),
-            currency: "CNY".to_string(),
-            input_price_per_1k: Decimal::from(1),
-            output_price_per_1k: Decimal::from(2),
-        };
-
-        let openai_score = engine.score_provider("openai", &pricing);
-        let other_score = engine.score_provider("other", &pricing);
-
-        // 两者应该都有合理的分数（0-200 范围）
-        assert!((0.0..=200.0).contains(&openai_score));
-        assert!((0.0..=200.0).contains(&other_score));
-    }
-
-    #[test]
     fn test_provider_health_integration() {
         let account_states = Arc::new(AccountStateStore::new());
         let provider_health = Arc::new(ProviderHealthStore::new());
@@ -1144,53 +1014,6 @@ mod tests {
         // 健康列表应该不包含 claude（但路由时不会过滤，只是评分靠后）
         let healthy = engine.healthy_providers();
         assert!(!healthy.contains(&"claude".to_string()));
-    }
-
-    #[test]
-    fn test_routing_constants() {
-        // 验证路由权重常量总和为 1.0
-        let total = COST_WEIGHT + LATENCY_WEIGHT + SUCCESS_WEIGHT + HEALTH_WEIGHT;
-        assert!(
-            (total - 1.0).abs() < 0.001,
-            "Routing weights should sum to 1.0"
-        );
-        assert_eq!(COST_WEIGHT, 0.3);
-        assert_eq!(LATENCY_WEIGHT, 0.25);
-        assert_eq!(UNHEALTHY_PENALTY, 100.0);
-    }
-
-    #[test]
-    fn test_calculate_cost_score() {
-        let engine = create_test_engine();
-
-        let cheap_pricing = PricingSnapshot {
-            model_name: "test".to_string(),
-            currency: "CNY".to_string(),
-            input_price_per_1k: Decimal::from(1),
-            output_price_per_1k: Decimal::from(2),
-        };
-
-        let expensive_pricing = PricingSnapshot {
-            model_name: "test".to_string(),
-            currency: "CNY".to_string(),
-            input_price_per_1k: Decimal::from(5),
-            output_price_per_1k: Decimal::from(10),
-        };
-
-        let cheap_score = engine.calculate_cost_score(&cheap_pricing);
-        let expensive_score = engine.calculate_cost_score(&expensive_pricing);
-
-        // 贵的应该分数更高（越不优先）
-        assert!(expensive_score > cheap_score);
-    }
-
-    #[test]
-    fn test_calculate_latency_score() {
-        let engine = create_test_engine();
-
-        assert!(engine.calculate_latency_score(50) < engine.calculate_latency_score(200));
-        assert!(engine.calculate_latency_score(200) < engine.calculate_latency_score(500));
-        assert!(engine.calculate_latency_score(500) < engine.calculate_latency_score(1500));
     }
 
     #[test]
@@ -1452,6 +1275,17 @@ mod tests {
                 ]
             },
             visibility: "tenant".to_string(),
+            health_status: "unknown".to_string(),
+            health_reason: None,
+            health_penalty: 0,
+            health_consecutive_failures: 0,
+            health_success_count: 0,
+            health_failure_count: 0,
+            health_avg_latency_ms: None,
+            health_last_success_at: None,
+            health_last_failure_at: None,
+            health_updated_at: now,
+            health_generation: 0,
             last_probe_at: None,
             last_probe_latency_ms: None,
             last_probe_status: None,
@@ -1490,7 +1324,7 @@ mod tests {
         let engine = create_test_engine();
         let chat_endpoint = "https://chat.example.com/v1";
         let responses_endpoint = "https://responses.example.com/v1";
-        let mut chat = create_test_account("openai", chat_endpoint, 100);
+        let mut chat = create_test_account("openai", chat_endpoint, 10);
         chat.api_capabilities = vec![AccountApiCapability::ChatCompletions.as_str().to_string()];
         let mut responses = create_test_account("openai", responses_endpoint, 1);
         responses.api_capabilities = vec![AccountApiCapability::Responses.as_str().to_string()];
@@ -1515,8 +1349,8 @@ mod tests {
     async fn test_select_best_accounts_skips_undecryptable_account() {
         // 单个账号密钥损坏不应中止整条路由，其余健康账号仍应入选
         let engine = create_test_engine();
-        let healthy_high = create_test_account("openai", "https://high.example.com/v1", 100);
-        let mut broken = create_test_account("openai", "https://broken.example.com/v1", 50);
+        let healthy_high = create_test_account("openai", "https://high.example.com/v1", 10);
+        let mut broken = create_test_account("openai", "https://broken.example.com/v1", 5);
         // 非 Base64/非合法密文，解密必失败（全局密钥已在 create_test_account 中设置）
         broken.upstream_api_key_encrypted = "!!not-valid-ciphertext!!".to_string();
         let healthy_low = create_test_account("openai", "https://low.example.com/v1", 1);
@@ -1550,8 +1384,8 @@ mod tests {
         let engine = create_test_engine();
         let accounts = vec![
             create_test_account("openai", "https://low.example.com/v1", 1),
-            create_test_account("openai", "https://high.example.com/v1", 100),
-            create_test_account("openai", "https://mid.example.com/v1", 50),
+            create_test_account("openai", "https://high.example.com/v1", 10),
+            create_test_account("openai", "https://mid.example.com/v1", 5),
             create_test_account("openai", "https://lowest.example.com/v1", 0),
         ];
 
@@ -1580,6 +1414,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_account_health_penalty_precedes_static_priority_and_unhealthy_is_skipped() {
+        let engine = create_test_engine();
+        let mut high_priority = create_test_account("openai", "https://high.example.com/v1", 10);
+        let low_priority = create_test_account("openai", "https://low.example.com/v1", 1);
+        let unhealthy = create_test_account("openai", "https://unhealthy.example.com/v1", 10);
+
+        // A direct executor callback after restart must continue from the
+        // persisted threshold rather than treating the account as unknown.
+        let mut persisted = create_test_account("openai", "https://persisted.example.com/v1", 5);
+        persisted.health_status = "degraded".to_string();
+        persisted.health_consecutive_failures = 2;
+        persisted.health_failure_count = 2;
+        engine.provider_health().hydrate_account_health(&persisted);
+        engine.provider_health().record_account_failure(
+            persisted.id,
+            &KeyComputeError::NetworkError("upstream reset".to_string()),
+        );
+        let resumed = engine
+            .provider_health()
+            .account_health(&persisted.id)
+            .expect("hydrated account health");
+        assert_eq!(resumed.status, ACCOUNT_UNHEALTHY);
+        assert_eq!(resumed.failure_count, 3);
+
+        // A transient failure only degrades the account, but its dynamic penalty
+        // must take precedence over the administrator's static priority.
+        engine.provider_health().record_account_probe(
+            high_priority.id,
+            false,
+            30,
+            Some("upstream_http_503"),
+        );
+        // A hard probe failure quarantines the account entirely.
+        engine.provider_health().record_account_probe(
+            unhealthy.id,
+            false,
+            30,
+            Some("upstream_http_401"),
+        );
+        high_priority.health_status = "degraded".to_string();
+
+        let targets = engine
+            .select_best_accounts(
+                "openai",
+                vec![high_priority, low_priority, unhealthy],
+                AccountApiCapability::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        let endpoints: Vec<&str> = targets
+            .iter()
+            .map(|target| match target {
+                ExecutionTarget::ProviderAccount { endpoint, .. } => endpoint.as_str(),
+                _ => panic!("expected provider account"),
+            })
+            .collect();
+
+        assert_eq!(
+            endpoints,
+            vec!["https://low.example.com/v1", "https://high.example.com/v1"],
+            "unhealthy accounts are excluded and dynamic penalty outranks static priority"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_health_is_routable_but_disabled_is_not() {
+        let engine = create_test_engine();
+        let unknown = create_test_account("openai", "https://unknown.example.com/v1", 10);
+        let mut disabled = create_test_account("openai", "https://disabled.example.com/v1", 10);
+        disabled.enabled = false;
+
+        let targets = engine
+            .select_best_accounts(
+                "openai",
+                vec![unknown, disabled],
+                AccountApiCapability::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(
+            &targets[0],
+            ExecutionTarget::ProviderAccount { endpoint, .. }
+                if endpoint == "https://unknown.example.com/v1"
+        ));
+    }
+
+    #[tokio::test]
     async fn test_select_best_accounts_empty_when_all_cooling() {
         // 全部账号冷却时返回空 targets，route() 据此报 RoutingFailed（不跨协议兜底）；
         // 冷却耗尽是"账号池临时不可用"的一种来源，验证空结果语义而非静默选错账号
@@ -1591,7 +1513,7 @@ mod tests {
             vec!["openai".to_string()],
         );
         let accounts = vec![
-            create_test_account("openai", "https://high.example.com/v1", 100),
+            create_test_account("openai", "https://high.example.com/v1", 10),
             create_test_account("openai", "https://low.example.com/v1", 1),
         ];
         for account in &accounts {

@@ -935,6 +935,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("system.health_status", "健康状态");
     m.insert("system.account_count", "账号数量");
     m.insert("system.healthy", "健康");
+    m.insert("system.degraded", "降级");
     m.insert("system.unhealthy", "不健康");
     m.insert("system.pricing_info", "定价信息");
 
@@ -1437,6 +1438,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.route_ready", "可参与正常路由");
     m.insert("accounts.enabled_but_unhealthy", "已启用，但健康状态异常");
     m.insert("accounts.not_routed", "当前不参与路由调度");
+    m.insert("accounts.health_penalty", "动态惩罚分");
     m.insert("accounts.rpm_label", "当前 RPM / 上限");
     m.insert("accounts.last_used", "最近使用");
     m.insert("accounts.no_usage_record", "暂无记录");
@@ -1447,6 +1449,15 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.refresh_failed", "刷新模型列表失败");
     m.insert("accounts.create_title", "新增 LLM 渠道");
     m.insert("accounts.channel_name", "渠道名称 *");
+    m.insert("accounts.priority", "静态优先级");
+    m.insert(
+        "accounts.priority_hint",
+        "请输入 0 到 10 的整数；0 表示无优先级",
+    );
+    m.insert(
+        "accounts.priority_invalid",
+        "静态优先级必须是 0 到 10 的整数",
+    );
     m.insert("accounts.channel_name_placeholder", "如 OpenAI 官方");
     m.insert("accounts.provider", "Provider *");
     m.insert("accounts.provider_openai_compatible", "OpenAI 兼容");

@@ -2419,7 +2419,7 @@ mod tests {
                     upstream_api_key_preview: "plain****".to_string(),
                     rpm_limit: Some(100),
                     tpm_limit: Some(10),
-                    priority: Some(100),
+                    priority: Some(10),
                     models_supported: vec![model],
                     api_capabilities: capabilities,
                     visibility: Some("tenant".to_string()),

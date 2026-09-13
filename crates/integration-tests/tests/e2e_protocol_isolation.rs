@@ -85,7 +85,7 @@ async fn create_test_account(
             upstream_api_key_preview: "sk-e2e****".to_string(),
             rpm_limit: Some(60),
             tpm_limit: Some(100_000),
-            priority: Some(100),
+            priority: Some(10),
             models_supported: models.iter().map(|m| m.to_string()).collect(),
             api_capabilities: if provider == "anthropic" {
                 vec!["messages".to_string()]

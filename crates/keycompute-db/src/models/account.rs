@@ -5,6 +5,20 @@ use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub const ACCOUNT_PRIORITY_MIN: i32 = 0;
+pub const ACCOUNT_PRIORITY_MAX: i32 = 10;
+
+fn validate_priority(priority: Option<i32>) -> Result<(), DbError> {
+    if let Some(priority) = priority
+        && !(ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX).contains(&priority)
+    {
+        return Err(DbError::Other(format!(
+            "account priority must be between {ACCOUNT_PRIORITY_MIN} and {ACCOUNT_PRIORITY_MAX}"
+        )));
+    }
+    Ok(())
+}
+
 /// 上游 Provider 账号模型
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct Account {
@@ -23,6 +37,18 @@ pub struct Account {
     pub api_capabilities: Vec<String>,
     /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
     pub visibility: String,
+    /// 账号级运行健康状态，独立于管理员 `enabled` 开关。
+    pub health_status: String,
+    pub health_reason: Option<String>,
+    pub health_penalty: i32,
+    pub health_consecutive_failures: i32,
+    pub health_success_count: i64,
+    pub health_failure_count: i64,
+    pub health_avg_latency_ms: Option<i64>,
+    pub health_last_success_at: Option<DateTime<Utc>>,
+    pub health_last_failure_at: Option<DateTime<Utc>>,
+    pub health_updated_at: DateTime<Utc>,
+    pub health_generation: i64,
     pub last_probe_at: Option<DateTime<Utc>>,
     pub last_probe_latency_ms: Option<i64>,
     pub last_probe_status: Option<String>,
@@ -76,6 +102,7 @@ impl Account {
         db: &impl ConnectionTrait,
         req: &CreateAccountRequest,
     ) -> Result<Account, DbError> {
+        validate_priority(req.priority)?;
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -317,10 +344,71 @@ impl Account {
     /// since the probe started.
     ///
     /// Probe telemetry deliberately does not modify `updated_at`: that column is
-    /// the optimistic version for account configuration, while concurrent probes
-    /// of the same version may safely use completion order for the latest health
-    /// snapshot.
+    /// the optimistic version for account configuration. The expected health
+    /// timestamp is a second compare-and-swap token, so a late probe cannot
+    /// overwrite a newer live transition or administrator reset.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_probe_snapshot_if_config_current(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        expected_updated_at: DateTime<Utc>,
+        expected_health_updated_at: DateTime<Utc>,
+        expected_health_generation: i64,
+        probed_at: DateTime<Utc>,
+        latency_ms: i64,
+        status: &str,
+        error_code: Option<&str>,
+        health_status: &str,
+        health_reason: Option<&str>,
+        health_penalty: i32,
+        health_consecutive_failures: i32,
+        health_success_count: i64,
+        health_failure_count: i64,
+        health_avg_latency_ms: Option<i64>,
+        health_last_success_at: Option<DateTime<Utc>>,
+        health_last_failure_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, DbError> {
+        let result = db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"UPDATE accounts
+                   SET last_probe_at=$1,last_probe_latency_ms=$2,
+                       last_probe_status=$3,last_probe_error_code=$4,
+                       health_status=$5,health_reason=$6,health_penalty=$7,
+                       health_consecutive_failures=$8,health_success_count=$9,
+                       health_failure_count=$10,health_avg_latency_ms=$11,
+                       health_last_success_at=$12,health_last_failure_at=$13,
+                       health_updated_at=GREATEST(health_updated_at,$1),
+                       health_generation=health_generation+1
+                   WHERE id=$14 AND updated_at=$15 AND health_updated_at=$16
+                     AND health_generation=$17"#,
+                [
+                    probed_at.into(),
+                    latency_ms.into(),
+                    status.into(),
+                    error_code.into(),
+                    health_status.into(),
+                    health_reason.into(),
+                    health_penalty.into(),
+                    health_consecutive_failures.into(),
+                    health_success_count.into(),
+                    health_failure_count.into(),
+                    health_avg_latency_ms.into(),
+                    health_last_success_at.into(),
+                    health_last_failure_at.into(),
+                    id.into(),
+                    expected_updated_at.into(),
+                    expected_health_updated_at.into(),
+                    expected_health_generation.into(),
+                ],
+            ))
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Persist probe telemetry without changing the operational health
+    /// snapshot. This is used when a probe finishes after a live transition.
+    pub async fn record_probe_telemetry_if_config_current(
         db: &impl ConnectionTrait,
         id: Uuid,
         expected_updated_at: DateTime<Utc>,
@@ -347,6 +435,166 @@ impl Account {
             ))
             .await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Atomically persist one successful runtime request.
+    ///
+    /// Runtime health is emitted as an event rather than as a complete
+    /// in-memory snapshot. This lets concurrent server replicas increment the
+    /// counters against the current row instead of overwriting each other's
+    /// counters with stale values. The health generation fences events that
+    /// were queued before a newer probe/reset, while all events in the same
+    /// generation are merged atomically.
+    pub async fn record_runtime_success(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        expected_health_generation: i64,
+        latency_ms: i64,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<bool, DbError> {
+        let result = db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"UPDATE accounts
+                   SET health_status='healthy',health_reason=NULL,health_penalty=0,
+                       health_consecutive_failures=0,
+                       health_success_count=health_success_count+1,
+                       health_avg_latency_ms=CASE
+                           WHEN health_avg_latency_ms IS NULL THEN $2
+                           ELSE ((health_avg_latency_ms * 7) + ($2 * 3)) / 10
+                       END,
+                       health_last_success_at=CASE
+                           WHEN health_last_success_at IS NULL OR health_last_success_at < $3
+                               THEN $3 ELSE health_last_success_at END,
+                       health_updated_at=GREATEST(health_updated_at, $3) + INTERVAL '1 microsecond'
+                   WHERE id=$1 AND health_generation=$4"#,
+                [
+                    id.into(),
+                    latency_ms.max(0).into(),
+                    occurred_at.into(),
+                    expected_health_generation.into(),
+                ],
+            ))
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Atomically persist one failed runtime request.
+    ///
+    /// Counter increments and status transitions are atomic within the current
+    /// health generation. Events queued before a newer probe/reset are ignored
+    /// by the generation fence.
+    pub async fn record_runtime_failure(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        expected_health_generation: i64,
+        reason: &str,
+        hard_failure: bool,
+        occurred_at: DateTime<Utc>,
+    ) -> Result<bool, DbError> {
+        let result = db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"UPDATE accounts
+                   SET health_status=CASE
+                           WHEN $3 OR health_consecutive_failures + 1 >= 3
+                               THEN 'unhealthy'
+                           ELSE 'degraded'
+                       END,
+                       health_reason=$2,
+                       health_penalty=CASE
+                           WHEN $3 OR health_consecutive_failures + 1 >= 3
+                               THEN 100
+                           ELSE LEAST(health_penalty + 35, 99)
+                       END,
+                       health_consecutive_failures=health_consecutive_failures + 1,
+                       health_failure_count=health_failure_count+1,
+                       health_last_failure_at=CASE
+                           WHEN health_last_failure_at IS NULL OR health_last_failure_at < $4
+                               THEN $4 ELSE health_last_failure_at END,
+                       health_updated_at=GREATEST(health_updated_at, $4) + INTERVAL '1 microsecond'
+                   WHERE id=$1 AND health_generation=$5"#,
+                [
+                    id.into(),
+                    reason.into(),
+                    hard_failure.into(),
+                    occurred_at.into(),
+                    expected_health_generation.into(),
+                ],
+            ))
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Reset one account's persisted operational health without changing its
+    /// administrator-controlled enabled flag or priority.
+    pub async fn reset_health(db: &impl ConnectionTrait, id: Uuid) -> Result<(), DbError> {
+        Self::reset_health_snapshot(db, id).await.map(|_| ())
+    }
+
+    /// Reset one account's persisted operational health and return the writer
+    /// snapshot that was actually committed. Callers that keep an in-memory
+    /// mirror must use this value rather than reconstructing `NOW()` locally:
+    /// the health CAS token is an exact database timestamp.
+    pub async fn reset_health_snapshot(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Account>, DbError> {
+        let account = Account::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"UPDATE accounts
+               SET health_status='unknown',health_reason=NULL,health_penalty=0,
+                   health_consecutive_failures=0,health_success_count=0,
+                   health_failure_count=0,health_avg_latency_ms=NULL,
+                   health_last_success_at=NULL,health_last_failure_at=NULL,
+                   health_updated_at=GREATEST(health_updated_at, NOW()) + INTERVAL '1 microsecond',
+                   health_generation=health_generation+1
+               WHERE id=$1
+               RETURNING *"#,
+            [id.into()],
+        ))
+        .one(db)
+        .await?;
+        Ok(account)
+    }
+
+    /// Reset all persisted account health snapshots and return the exact
+    /// writer snapshots produced by PostgreSQL.
+    pub async fn reset_all_health_snapshot(
+        db: &impl ConnectionTrait,
+    ) -> Result<Vec<Account>, DbError> {
+        let accounts = Account::find_by_statement(Statement::from_string(
+            DbBackend::Postgres,
+            r#"UPDATE accounts
+               SET health_status='unknown',health_reason=NULL,health_penalty=0,
+                   health_consecutive_failures=0,health_success_count=0,
+                   health_failure_count=0,health_avg_latency_ms=NULL,
+                   health_last_success_at=NULL,health_last_failure_at=NULL,
+                   health_updated_at=GREATEST(health_updated_at, NOW()) + INTERVAL '1 microsecond',
+                   health_generation=health_generation+1
+               RETURNING *"#
+                .to_string(),
+        ))
+        .all(db)
+        .await?;
+        Ok(accounts)
+    }
+
+    /// Reset all persisted account health snapshots without returning rows.
+    pub async fn reset_all_health(db: &impl ConnectionTrait) -> Result<(), DbError> {
+        db.execute(Statement::from_string(
+            DbBackend::Postgres,
+            r#"UPDATE accounts
+               SET health_status='unknown',health_reason=NULL,health_penalty=0,
+                   health_consecutive_failures=0,health_success_count=0,
+                   health_failure_count=0,health_avg_latency_ms=NULL,
+                   health_last_success_at=NULL,health_last_failure_at=NULL,
+                   health_updated_at=GREATEST(health_updated_at, NOW()) + INTERVAL '1 microsecond',
+                   health_generation=health_generation+1"#
+                .to_string(),
+        ))
+        .await?;
+        Ok(())
     }
 
     /// 查找支持指定模型的账号（含本租户 + 全局可见）
@@ -379,6 +627,7 @@ impl Account {
         db: &impl ConnectionTrait,
         req: &UpdateAccountRequest,
     ) -> Result<Account, DbError> {
+        validate_priority(req.priority)?;
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -394,8 +643,13 @@ impl Account {
                 models_supported = COALESCE($9, models_supported),
                 api_capabilities = COALESCE($10, api_capabilities),
                 visibility = COALESCE($11, visibility),
+                -- Fence runtime health events that were started against the
+                -- previous account configuration. The health snapshot itself
+                -- is preserved until a probe or runtime result replaces it.
+                health_updated_at = GREATEST(health_updated_at, NOW()) + INTERVAL '1 microsecond',
+                health_generation = health_generation + 1,
                 tenant_id = COALESCE($12, tenant_id),
-                updated_at = NOW()
+                updated_at = GREATEST(updated_at, NOW()) + INTERVAL '1 microsecond'
             WHERE id = $13
             RETURNING *
             "#,
@@ -433,5 +687,19 @@ impl Account {
         db.execute(stmt).await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_priority_accepts_only_zero_through_ten() {
+        assert!(validate_priority(None).is_ok());
+        assert!(validate_priority(Some(ACCOUNT_PRIORITY_MIN)).is_ok());
+        assert!(validate_priority(Some(ACCOUNT_PRIORITY_MAX)).is_ok());
+        assert!(validate_priority(Some(-1)).is_err());
+        assert!(validate_priority(Some(11)).is_err());
     }
 }

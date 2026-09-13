@@ -652,7 +652,7 @@ impl AppState {
 
         // 创建运行时状态存储
         let account_states = Arc::new(AccountStateStore::new());
-        let provider_health = Arc::new(ProviderHealthStore::new());
+        let provider_health = Arc::new(ProviderHealthStore::with_account_db(Arc::clone(&pool)));
 
         // 获取 Provider 名称列表（与 Gateway 使用一致的列表）
         let provider_names = crate::providers::get_provider_names();

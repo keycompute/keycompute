@@ -1114,7 +1114,10 @@ async fn discover_conversation_account(
     // miss from an eligible set that was intentionally truncated.
     let candidate_limit = RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES.saturating_add(1);
     let accounts = Account::find_tenant_discovery_candidates(
-        pool,
+        // Discovery immediately uses the returned endpoint/key for a direct
+        // upstream request. A lagging replica could otherwise resurrect a
+        // deleted/disabled account or miss a just-created owner.
+        pool.write_conn(),
         tenant_id,
         "openai",
         AccountApiCapability::Responses.as_str(),
@@ -1133,6 +1136,13 @@ async fn discover_conversation_account(
         Duration::from_secs(state.gateway_config.request_timeout_secs)
             .min(RESPONSES_CONVERSATION_DISCOVERY_MAX_DURATION),
         |configured_account| async move {
+            // Conversation discovery bypasses normal model routing. Register
+            // every real candidate before a successful discovery can construct
+            // a direct execution plan, so executor health callbacks are not
+            // rejected by the database-backed account allowlist.
+            state
+                .provider_health
+                .hydrate_account_health(&configured_account);
             let protocol = ProtocolType::parse(&configured_account.provider).ok_or_else(|| {
                 ApiError::Internal(format!(
                     "Conversation discovery account {} has an invalid protocol",
@@ -1277,6 +1287,10 @@ async fn resolve_response_account(
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to load Responses account: {error}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Response not found: {response_id}")))?;
+    // Affinity execution intentionally bypasses fresh-account routing so an
+    // existing upstream resource remains addressable, but its health events
+    // must still continue from the persisted snapshot after a restart.
+    state.provider_health.hydrate_account_health(&account);
     if !responses_account_is_visible_to_tenant(&account, tenant_id) {
         return Err(ApiError::NotFound(format!(
             "Response not found: {response_id}"
@@ -2374,6 +2388,10 @@ async fn bind_responses_idempotency(
                 "The idempotent Responses account is no longer available".to_string(),
             )
         })?;
+    // This account is about to be used as a direct idempotency-affinity
+    // target, so seed the runtime health state before executor callbacks can
+    // record a success or failure.
+    state.provider_health.hydrate_account_health(&account);
     // Reclamation is possible only while `upstream_dispatched_at` is NULL, so
     // the abandoned execution cannot have produced upstream side effects. Use
     // the account's current connection snapshot: the durable reservation held
@@ -4945,6 +4963,17 @@ mod tests {
             models_supported: vec!["gpt-test".to_string()],
             api_capabilities: vec![AccountApiCapability::Responses.as_str().to_string()],
             visibility: "tenant".to_string(),
+            health_status: "unknown".to_string(),
+            health_reason: None,
+            health_penalty: 0,
+            health_consecutive_failures: 0,
+            health_success_count: 0,
+            health_failure_count: 0,
+            health_avg_latency_ms: None,
+            health_last_success_at: None,
+            health_last_failure_at: None,
+            health_updated_at: now,
+            health_generation: 0,
             last_probe_at: None,
             last_probe_latency_ms: None,
             last_probe_status: None,

@@ -58,12 +58,14 @@ pub struct RoutingTargetInfo {
 /// Provider 状态信息
 #[derive(Debug, Serialize)]
 pub struct ProviderStatusInfo {
-    /// Provider 名称
+    /// 协议名称（Provider 仅表示 wire protocol）
     pub provider: String,
-    /// 是否健康
+    /// 是否至少存在一个可路由账号
     pub is_healthy: bool,
-    /// 账号数量
+    /// 已启用账号数量
     pub account_count: usize,
+    /// 当前可参与正常路由的账号数量
+    pub routable_account_count: usize,
     /// 状态描述
     pub status: String,
 }
@@ -170,11 +172,8 @@ pub async fn debug_routing(
     // 入口协议隔离：按 entry 参数模拟对应入口的路由（与真实 handler 行为一致）
     apply_debug_entry_protocol(&mut ctx, query.entry.as_deref());
 
-    // 3. 获取所有配置的 provider 列表
+    // 3. 获取所有配置的 protocol 列表
     let all_providers: Vec<String> = state.routing.configured_providers().to_vec();
-    let healthy_providers = state.routing.healthy_providers();
-    let healthy_set: std::collections::HashSet<String> =
-        healthy_providers.iter().cloned().collect();
 
     // 4. 查询每个 provider 的账号数量
     let pool = state
@@ -185,32 +184,46 @@ pub async fn debug_routing(
     // 获取所有启用的账号
     let all_accounts = Account::find_enabled_all(pool).await.unwrap_or_default();
 
-    // 按 provider 统计账号数量
+    // 按协议统计账号数量；健康与路由资格都取决于具体账号。
     let mut provider_account_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut provider_routable_counts: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     for account in &all_accounts {
         *provider_account_counts
             .entry(account.provider.clone())
             .or_insert(0) += 1;
+        if state.provider_health.account_is_routable(account)
+            && !state.account_states.is_cooling_down(&account.id)
+        {
+            *provider_routable_counts
+                .entry(account.provider.clone())
+                .or_insert(0) += 1;
+        }
     }
 
     let mut provider_status = Vec::new();
     for provider in all_providers {
-        let is_healthy = healthy_set.contains(&provider);
         let account_count = provider_account_counts.get(&provider).copied().unwrap_or(0);
+        let routable_account_count = provider_routable_counts
+            .get(&provider)
+            .copied()
+            .unwrap_or(0);
+        let is_healthy = routable_account_count > 0;
 
         let status = if account_count == 0 {
             "未配置账号".to_string()
-        } else if !is_healthy {
-            "Provider 不健康".to_string()
+        } else if routable_account_count == 0 {
+            "没有可路由账号".to_string()
         } else {
-            format!("{} 个账号", account_count)
+            format!("{} 个账号可路由", routable_account_count)
         };
 
         provider_status.push(ProviderStatusInfo {
             provider: provider.clone(),
             is_healthy,
             account_count,
+            routable_account_count,
             status,
         });
     }
@@ -307,25 +320,69 @@ pub async fn debug_routing(
     }
 }
 
-/// Provider 健康状态响应
+/// 协议入口下的账号路由健康摘要。
+///
+/// 字段名称保留 `Provider` 以兼容旧客户端，但列表内容已经按具体账号
+/// 的持久化健康状态计算，不再读取协议级惩罚分。
 #[derive(Debug, Serialize)]
 pub struct ProviderHealthResponse {
-    /// 可用 Provider 列表
+    /// 至少有一个可路由账号的协议列表
     pub healthy_providers: Vec<String>,
-    /// 账号状态存储中的账号数量
+    /// 已启用账号总数
     pub account_count: usize,
+    /// 当前可参与正常路由的账号总数
+    pub routable_account_count: usize,
 }
 
 /// 获取 Provider 健康状态
 pub async fn get_provider_health(
     State(state): State<AppState>,
 ) -> Result<Json<ProviderHealthResponse>> {
-    let providers = state.routing.healthy_providers().to_vec();
-    let account_count = state.account_states.all_states().len();
+    let (providers, account_count, routable_account_count) = if let Some(pool) =
+        state.pool.as_deref()
+    {
+        let accounts = keycompute_db::Account::find_enabled_all(pool.write_conn())
+            .await
+            .map_err(|error| ApiError::Internal(format!("Failed to query accounts: {error}")))?;
+        let mut routable = std::collections::HashSet::new();
+        for account in &accounts {
+            if state.provider_health.account_is_routable(account)
+                && !state.account_states.is_cooling_down(&account.id)
+            {
+                routable.insert(account.provider.clone());
+            }
+        }
+        (
+            state
+                .routing
+                .configured_providers()
+                .iter()
+                .filter(|provider| routable.contains(*provider))
+                .cloned()
+                .collect(),
+            accounts.len(),
+            accounts
+                .iter()
+                .filter(|account| {
+                    state.provider_health.account_is_routable(account)
+                        && !state.account_states.is_cooling_down(&account.id)
+                })
+                .count(),
+        )
+    } else {
+        // In-memory/test states have no account rows to inspect. Keep the
+        // protocol list as a compatibility fallback.
+        (
+            state.routing.configured_providers().to_vec(),
+            state.account_states.all_states().len(),
+            state.account_states.all_states().len(),
+        )
+    };
 
     Ok(Json(ProviderHealthResponse {
         healthy_providers: providers,
         account_count,
+        routable_account_count,
     }))
 }
 
@@ -342,7 +399,16 @@ pub struct ResetHealthResponse {
 ///
 /// 用于调试，清除所有 Provider 和账号的健康状态和冷却状态
 pub async fn reset_health(State(state): State<AppState>) -> Result<Json<ResetHealthResponse>> {
-    // 重置所有 Provider 的健康状态
+    // Reset the durable account state first. If the database operation fails,
+    // leave the in-memory diagnostics untouched instead of reporting an
+    // apparently successful partial reset.
+    state
+        .provider_health
+        .reset_all_account_health()
+        .await
+        .map_err(|error| ApiError::Internal(format!("Failed to reset account health: {error}")))?;
+
+    // Provider 仅保留兼容性诊断统计；实际路由健康状态按账号重置并持久化。
     let providers = state.routing.configured_providers();
     for provider in providers {
         state.provider_health.reset_stats(provider);
@@ -357,7 +423,7 @@ pub async fn reset_health(State(state): State<AppState>) -> Result<Json<ResetHea
 
     Ok(Json(ResetHealthResponse {
         success: true,
-        message: "All provider health and cooldown states have been reset".to_string(),
+        message: "All account health and cooldown states have been reset".to_string(),
     }))
 }
 

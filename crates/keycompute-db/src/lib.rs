@@ -239,6 +239,8 @@ const SCHEMA_SENTINEL_COLUMNS: &[(&str, &str)] = &[
     ("payment_notifications", "payload_digest"),
     ("payment_provider_states", "circuit_state"),
     ("accounts", "last_probe_status"),
+    ("accounts", "health_status"),
+    ("accounts", "health_penalty"),
     ("accounts", "api_capabilities"),
     ("responses_idempotency_claims", "billing_request_id"),
     ("responses_idempotency_claims", "account_id"),

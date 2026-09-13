@@ -226,11 +226,11 @@ mod tests {
                 .await,
             );
         }
-        let global = create_responses_test_account(&pool, tenant_id, "global", 100).await;
-        let disabled = create_responses_test_account(&pool, tenant_id, "disabled", 99).await;
-        let chat_only = create_responses_test_account(&pool, tenant_id, "chat-only", 98).await;
+        let global = create_responses_test_account(&pool, tenant_id, "global", 10).await;
+        let disabled = create_responses_test_account(&pool, tenant_id, "disabled", 9).await;
+        let chat_only = create_responses_test_account(&pool, tenant_id, "chat-only", 8).await;
         let _other_tenant =
-            create_responses_test_account(&pool, other_tenant_id, "other-tenant", 101).await;
+            create_responses_test_account(&pool, other_tenant_id, "other-tenant", 7).await;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE accounts SET visibility = 'global' WHERE id = $1",
@@ -292,7 +292,11 @@ mod tests {
 
     #[tokio::test]
     async fn stale_account_probe_snapshot_does_not_overwrite_new_configuration() {
-        let pool = create_test_pool().await;
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("isolated probe race schema should migrate");
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
@@ -329,10 +333,21 @@ mod tests {
             &pool,
             account.id,
             account.updated_at,
+            account.health_updated_at,
+            account.health_generation,
             chrono::Utc::now(),
             42,
             "failed",
             Some("upstream_http_401"),
+            "unhealthy",
+            Some("configuration_or_auth_failure"),
+            100,
+            1,
+            0,
+            1,
+            None,
+            None,
+            Some(chrono::Utc::now()),
         )
         .await
         .expect("stale probe write should be evaluated");
@@ -345,14 +360,70 @@ mod tests {
         assert_eq!(current.updated_at, new_config_version);
         assert!(current.last_probe_at.is_none());
 
+        let newer_health_version = account.health_updated_at + chrono::Duration::seconds(1);
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE accounts SET health_status='healthy',health_updated_at=$1 WHERE id=$2",
+            [newer_health_version.into(), account.id.into()],
+        ))
+        .await
+        .expect("runtime health should advance while probe is in flight");
+        let stale_health = keycompute_db::Account::record_probe_snapshot_if_config_current(
+            &pool,
+            account.id,
+            new_config_version,
+            account.health_updated_at,
+            account.health_generation,
+            chrono::Utc::now(),
+            42,
+            "failed",
+            Some("upstream_http_401"),
+            "unhealthy",
+            Some("configuration_or_auth_failure"),
+            100,
+            1,
+            0,
+            1,
+            None,
+            None,
+            Some(chrono::Utc::now()),
+        )
+        .await
+        .expect("stale health write should be evaluated");
+        assert!(
+            !stale_health,
+            "stale probe health must not overwrite runtime health"
+        );
+        let current = keycompute_db::Account::find_by_id(&pool, account.id)
+            .await
+            .expect("account reload should succeed")
+            .expect("account should still exist");
+        assert_eq!(current.health_status, "healthy");
+        assert_eq!(current.health_updated_at, newer_health_version);
+
+        // Even if a probe completion timestamp is behind the current writer
+        // version (for example after a wall-clock adjustment), the health
+        // CAS version must remain monotonic.
+        let current_probe_completed_at = newer_health_version - chrono::Duration::seconds(1);
         assert!(
             keycompute_db::Account::record_probe_snapshot_if_config_current(
                 &pool,
                 account.id,
                 new_config_version,
-                chrono::Utc::now(),
+                newer_health_version,
+                account.health_generation,
+                current_probe_completed_at,
                 7,
                 "succeeded",
+                None,
+                "healthy",
+                None,
+                0,
+                0,
+                1,
+                0,
+                Some(7),
+                Some(chrono::Utc::now()),
                 None,
             )
             .await
@@ -364,11 +435,291 @@ mod tests {
             .expect("account should still exist");
         assert_eq!(current.last_probe_status.as_deref(), Some("succeeded"));
         assert_eq!(current.updated_at, new_config_version);
+        assert_eq!(current.health_updated_at, newer_health_version);
+        assert_eq!(current.health_generation, 1);
 
         current
             .delete(&pool)
             .await
             .expect("probe race account should be removed");
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_runtime_health_events_merge_without_losing_counters() {
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("isolated runtime health schema should migrate");
+        let account = keycompute_db::Account::create(
+            &pool,
+            &keycompute_db::CreateAccountRequest {
+                tenant_id: Uuid::new_v4(),
+                provider: "openai".to_string(),
+                name: format!("runtime-health-{}", Uuid::new_v4()),
+                endpoint: "https://runtime-health.example/v1".to_string(),
+                upstream_api_key_encrypted: "test-encrypted-key".to_string(),
+                upstream_api_key_preview: "test****".to_string(),
+                rpm_limit: Some(60),
+                tpm_limit: Some(100_000),
+                priority: Some(0),
+                models_supported: vec!["test-model".to_string()],
+                api_capabilities: vec!["chat_completions".to_string()],
+                visibility: Some("tenant".to_string()),
+            },
+        )
+        .await
+        .expect("runtime health account should be created");
+        let base = account.health_updated_at + chrono::Duration::seconds(1);
+
+        let (first_success, second_success) = tokio::join!(
+            keycompute_db::Account::record_runtime_success(&pool, account.id, 0, 100, base),
+            keycompute_db::Account::record_runtime_success(
+                &pool,
+                account.id,
+                0,
+                200,
+                base + chrono::Duration::microseconds(1),
+            ),
+        );
+        assert!(first_success.expect("first runtime success should persist"));
+        assert!(second_success.expect("second runtime success should persist"));
+
+        let (first_failure, second_failure, third_failure) = tokio::join!(
+            keycompute_db::Account::record_runtime_failure(
+                &pool,
+                account.id,
+                0,
+                "transient_upstream_failure",
+                false,
+                base + chrono::Duration::seconds(1),
+            ),
+            keycompute_db::Account::record_runtime_failure(
+                &pool,
+                account.id,
+                0,
+                "transient_upstream_failure",
+                false,
+                base + chrono::Duration::seconds(2),
+            ),
+            keycompute_db::Account::record_runtime_failure(
+                &pool,
+                account.id,
+                0,
+                "transient_upstream_failure",
+                false,
+                base + chrono::Duration::seconds(3),
+            ),
+        );
+        assert!(first_failure.expect("first runtime failure should persist"));
+        assert!(second_failure.expect("second runtime failure should persist"));
+        assert!(third_failure.expect("third runtime failure should persist"));
+
+        let current = keycompute_db::Account::find_by_id(&pool, account.id)
+            .await
+            .expect("runtime health account should reload")
+            .expect("runtime health account should still exist");
+        assert_eq!(current.health_success_count, 2);
+        assert_eq!(current.health_failure_count, 3);
+        assert_eq!(current.health_consecutive_failures, 3);
+        assert_eq!(current.health_status, "unhealthy");
+        assert_eq!(current.health_penalty, 100);
+
+        keycompute_db::Account::reset_health(&pool, account.id)
+            .await
+            .expect("runtime health should reset");
+        let stale_after_reset = keycompute_db::Account::record_runtime_failure(
+            &pool,
+            account.id,
+            0,
+            "stale_before_reset",
+            true,
+            base + chrono::Duration::seconds(4),
+        )
+        .await
+        .expect("stale runtime event should be evaluated");
+        assert!(
+            !stale_after_reset,
+            "reset must fence queued old-generation events"
+        );
+        let reset = keycompute_db::Account::find_by_id(&pool, account.id)
+            .await
+            .expect("reset account should reload")
+            .expect("reset account should still exist");
+        assert_eq!(reset.health_generation, 1);
+        assert_eq!(reset.health_status, "unknown");
+        assert_eq!(reset.health_success_count, 0);
+        assert_eq!(reset.health_failure_count, 0);
+
+        reset
+            .delete(&pool)
+            .await
+            .expect("runtime health account should be removed");
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn account_configuration_update_fences_previous_runtime_events() {
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("isolated configuration fence schema should migrate");
+        let account = keycompute_db::Account::create(
+            &pool,
+            &keycompute_db::CreateAccountRequest {
+                tenant_id: Uuid::new_v4(),
+                provider: "openai".to_string(),
+                name: format!("configuration-fence-{}", Uuid::new_v4()),
+                endpoint: "https://old-config.example/v1".to_string(),
+                upstream_api_key_encrypted: "old-encrypted-key".to_string(),
+                upstream_api_key_preview: "old****".to_string(),
+                rpm_limit: Some(60),
+                tpm_limit: Some(100_000),
+                priority: Some(0),
+                models_supported: vec!["test-model".to_string()],
+                api_capabilities: vec!["chat_completions".to_string()],
+                visibility: Some("tenant".to_string()),
+            },
+        )
+        .await
+        .expect("configuration fence account should be created");
+
+        let updated = account
+            .update(
+                &pool,
+                &keycompute_db::UpdateAccountRequest {
+                    tenant_id: None,
+                    name: None,
+                    endpoint: Some("https://new-config.example/v1".to_string()),
+                    upstream_api_key_encrypted: Some("new-encrypted-key".to_string()),
+                    upstream_api_key_preview: Some("new****".to_string()),
+                    rpm_limit: None,
+                    tpm_limit: None,
+                    priority: None,
+                    enabled: None,
+                    models_supported: None,
+                    api_capabilities: None,
+                    visibility: None,
+                },
+            )
+            .await
+            .expect("configuration update should succeed");
+        assert!(updated.updated_at > account.updated_at);
+        assert!(updated.health_updated_at > account.health_updated_at);
+        assert_eq!(updated.health_generation, account.health_generation + 1);
+
+        let stale = keycompute_db::Account::record_runtime_failure(
+            &pool,
+            account.id,
+            account.health_generation,
+            "stale_before_configuration_update",
+            true,
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("stale runtime event should be evaluated");
+        assert!(!stale, "old configuration events must be fenced");
+
+        let current = keycompute_db::Account::find_by_id(&pool, account.id)
+            .await
+            .expect("updated account should reload")
+            .expect("updated account should still exist");
+        assert_eq!(current.endpoint, "https://new-config.example/v1");
+        assert_eq!(current.health_status, "unknown");
+        assert_eq!(current.health_failure_count, 0);
+        assert_eq!(current.health_generation, updated.health_generation);
+
+        current
+            .delete(&pool)
+            .await
+            .expect("configuration fence account should be removed");
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
+    }
+
+    #[tokio::test]
+    async fn provider_health_reset_reuses_the_writer_snapshot_for_followup_probe() {
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("isolated provider health reset schema should migrate");
+        let account = keycompute_db::Account::create(
+            &pool,
+            &keycompute_db::CreateAccountRequest {
+                tenant_id: Uuid::new_v4(),
+                provider: "openai".to_string(),
+                name: format!("provider-health-reset-{}", Uuid::new_v4()),
+                endpoint: "https://provider-health-reset.example/v1".to_string(),
+                upstream_api_key_encrypted: "test-encrypted-key".to_string(),
+                upstream_api_key_preview: "test****".to_string(),
+                rpm_limit: Some(60),
+                tpm_limit: Some(100_000),
+                priority: Some(0),
+                models_supported: vec!["test-model".to_string()],
+                api_capabilities: vec!["chat_completions".to_string()],
+                visibility: Some("tenant".to_string()),
+            },
+        )
+        .await
+        .expect("provider health reset account should be created");
+        let future_health_version = account.health_updated_at + chrono::Duration::hours(1);
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE accounts SET health_updated_at = $1 WHERE id = $2",
+            [future_health_version.into(), account.id.into()],
+        ))
+        .await
+        .expect("future health version should be installed");
+        let before_reset = keycompute_db::Account::find_by_id(&pool, account.id)
+            .await
+            .expect("account before reset should reload")
+            .expect("account before reset should still exist");
+        let store = keycompute_routing::ProviderHealthStore::with_account_db(
+            keycompute_db::DbRouter::single(pool.clone()),
+        );
+        store.hydrate_account_health(&before_reset);
+
+        store
+            .reset_account_health(account.id)
+            .await
+            .expect("provider health reset should succeed");
+        let persisted = keycompute_db::Account::find_by_id(&pool, account.id)
+            .await
+            .expect("reset account should reload")
+            .expect("reset account should still exist");
+        assert!(persisted.health_updated_at > before_reset.health_updated_at);
+        let local = store
+            .account_health(&account.id)
+            .expect("reset account should remain tracked");
+        assert_eq!(local.updated_at, persisted.health_updated_at);
+        assert_eq!(local.generation, persisted.health_generation);
+
+        let probe = store
+            .record_account_probe_if_current_and_enqueue(
+                account.id,
+                persisted.updated_at,
+                persisted.health_updated_at,
+                persisted.health_generation,
+                chrono::Utc::now(),
+                10,
+                "succeeded",
+                None,
+                true,
+            )
+            .expect("probe should use the exact reset CAS snapshot");
+        assert_eq!(probe.generation, persisted.health_generation + 1);
+
+        persisted
+            .delete(&pool)
+            .await
+            .expect("provider health reset account should be removed");
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
     }
 
     #[tokio::test]

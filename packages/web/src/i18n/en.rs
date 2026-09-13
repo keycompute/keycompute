@@ -1101,6 +1101,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("system.health_status", "Health");
     m.insert("system.account_count", "Accounts");
     m.insert("system.healthy", "Healthy");
+    m.insert("system.degraded", "Degraded");
     m.insert("system.unhealthy", "Unhealthy");
     m.insert("system.pricing_info", "Pricing");
 
@@ -1708,6 +1709,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Enabled, but health status is abnormal",
     );
     m.insert("accounts.not_routed", "Not participating in routing");
+    m.insert("accounts.health_penalty", "Dynamic penalty");
     m.insert("accounts.rpm_label", "Current RPM / Limit");
     m.insert("accounts.last_used", "Last Used");
     m.insert("accounts.no_usage_record", "No record");
@@ -1718,6 +1720,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.refresh_failed", "Failed to refresh model list");
     m.insert("accounts.create_title", "Create LLM Channel");
     m.insert("accounts.channel_name", "Channel Name *");
+    m.insert("accounts.priority", "Priority");
+    m.insert(
+        "accounts.priority_hint",
+        "Integer from 0 to 10; 0 means no priority",
+    );
+    m.insert(
+        "accounts.priority_invalid",
+        "Priority must be an integer from 0 to 10",
+    );
     m.insert(
         "accounts.channel_name_placeholder",
         "For example: OpenAI Official",

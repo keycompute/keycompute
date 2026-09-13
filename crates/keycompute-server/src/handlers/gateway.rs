@@ -95,6 +95,53 @@ async fn aggregate_provider_models(state: &AppState, provider: &str) -> Vec<Stri
         .unwrap_or_default()
 }
 
+/// Aggregate runtime health from concrete enabled accounts. Protocol names are
+/// only adapters; they do not own routing health or penalties.
+async fn provider_account_health(
+    state: &AppState,
+    provider: &str,
+) -> (bool, Option<u64>, Option<String>) {
+    let Some(pool) = state.pool.as_deref() else {
+        return (state.gateway.has_provider(provider), None, None);
+    };
+    let accounts = match keycompute_db::Account::find_enabled_all(pool.write_conn()).await {
+        Ok(accounts) => accounts,
+        Err(error) => {
+            tracing::warn!(%error, %provider, "Failed to load account health summary");
+            return (false, None, Some("Account health unavailable".to_string()));
+        }
+    };
+    let accounts = accounts
+        .into_iter()
+        .filter(|account| account.provider.eq_ignore_ascii_case(provider))
+        .collect::<Vec<_>>();
+    if accounts.is_empty() {
+        return (
+            false,
+            None,
+            Some("No enabled accounts configured".to_string()),
+        );
+    }
+
+    let mut routable = 0usize;
+    let mut latency_sum = 0u64;
+    let mut latency_samples = 0u64;
+    for account in &accounts {
+        let health = state.provider_health.account_health_for(account);
+        if health.is_routable() && !state.account_states.is_cooling_down(&account.id) {
+            routable += 1;
+        }
+        if let Some(latency) = health.avg_latency_ms {
+            latency_sum = latency_sum.saturating_add(latency.max(0) as u64);
+            latency_samples += 1;
+        }
+    }
+    let healthy = routable > 0;
+    let latency_ms = (latency_samples > 0).then(|| latency_sum / latency_samples);
+    let error = (!healthy).then(|| "No routable accounts".to_string());
+    (healthy, latency_ms, error)
+}
+
 /// 获取 Gateway 状态
 pub async fn get_gateway_status(
     State(state): State<AppState>,
@@ -103,12 +150,12 @@ pub async fn get_gateway_status(
     let mut models_by_provider = aggregate_models_by_provider(&state).await;
     let mut providers = Vec::new();
     for name in state.gateway.list_providers() {
-        let health = state.provider_health.get_health(&name);
+        let (healthy, _, _) = provider_account_health(&state, &name).await;
         let supported_models = models_by_provider.remove(&name).unwrap_or_default();
         providers.push(ProviderInfo {
             name: name.clone(),
             supported_models,
-            healthy: health.as_ref().map(|h| h.healthy).unwrap_or(true),
+            healthy,
         });
     }
 
@@ -148,45 +195,24 @@ pub async fn check_provider_health(
     State(state): State<AppState>,
     Json(request): Json<ProviderHealthRequest>,
 ) -> Result<Json<ProviderHealthResponse>> {
-    // 从 ProviderHealthStore 获取真实健康状态
-    let health = state.provider_health.get_health(&request.provider);
-
-    // 检查 Provider 是否在 Gateway 中配置
-    let configured = state.gateway.has_provider(&request.provider);
-
-    if let Some(health) = health {
-        let models = aggregate_provider_models(&state, &request.provider).await;
-        Ok(Json(ProviderHealthResponse {
-            provider: request.provider,
-            healthy: health.healthy,
-            latency_ms: Some(health.avg_latency_ms),
-            error: if health.healthy {
-                None
-            } else {
-                Some(format!("Success rate too low: {:.1}%", health.success_rate))
-            },
-            models,
-        }))
-    } else if configured {
-        // Provider 已配置但还没有请求记录，默认健康
-        let models = aggregate_provider_models(&state, &request.provider).await;
-        Ok(Json(ProviderHealthResponse {
-            provider: request.provider,
-            healthy: true,
-            latency_ms: None,
-            error: None,
-            models,
-        }))
-    } else {
-        // Provider 未配置
-        Ok(Json(ProviderHealthResponse {
+    if !state.gateway.has_provider(&request.provider) {
+        return Ok(Json(ProviderHealthResponse {
             provider: request.provider,
             healthy: false,
             latency_ms: None,
             error: Some("Provider not configured".to_string()),
-            models: vec![],
-        }))
+            models: Vec::new(),
+        }));
     }
+    let (healthy, latency_ms, error) = provider_account_health(&state, &request.provider).await;
+    let models = aggregate_provider_models(&state, &request.provider).await;
+    Ok(Json(ProviderHealthResponse {
+        provider: request.provider,
+        healthy,
+        latency_ms,
+        error,
+        models,
+    }))
 }
 
 /// 执行统计信息
@@ -282,5 +308,23 @@ mod tests {
         let req: ProviderHealthRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.provider, "openai");
         assert_eq!(req.api_key, Some("test-key".to_string()));
+    }
+
+    #[tokio::test]
+    async fn unconfigured_provider_health_keeps_legacy_error_contract() {
+        let response = check_provider_health(
+            State(AppState::new()),
+            Json(ProviderHealthRequest {
+                provider: "not-configured".to_string(),
+                api_key: None,
+            }),
+        )
+        .await
+        .expect("health check should return a response")
+        .0;
+
+        assert!(!response.healthy);
+        assert_eq!(response.error.as_deref(), Some("Provider not configured"));
+        assert!(response.models.is_empty());
     }
 }

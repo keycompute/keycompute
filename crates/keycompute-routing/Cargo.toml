@@ -13,7 +13,7 @@ chrono = "0.4"
 dashmap = "6"
 rust_decimal = "1.40"
 sea-orm = { workspace = true }
-tokio = { version = "1", features = ["sync", "rt", "macros"] }
+tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 

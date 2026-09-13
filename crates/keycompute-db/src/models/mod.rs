@@ -29,7 +29,9 @@ pub mod user_node_gateway_token;
 pub mod user_referral;
 
 // 重新导出常用模型
-pub use account::{Account, CreateAccountRequest, UpdateAccountRequest};
+pub use account::{
+    ACCOUNT_PRIORITY_MAX, ACCOUNT_PRIORITY_MIN, Account, CreateAccountRequest, UpdateAccountRequest,
+};
 pub use api_key::{CreateProduceAiKeyRequest, ProduceAiKey, ProduceAiKeyResponse};
 pub use distribution_record::{
     CreateDistributionRecordRequest, DistributionLevelStats, DistributionRecord, DistributionStats,

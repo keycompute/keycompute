@@ -148,6 +148,8 @@ pub struct ProviderStatusInfo {
     pub provider: String,
     pub is_healthy: bool,
     pub account_count: i64,
+    #[serde(default)]
+    pub routable_account_count: i64,
     pub status: String,
 }
 
@@ -156,6 +158,8 @@ pub struct ProviderStatusInfo {
 pub struct ProviderHealthResponse {
     pub healthy_providers: Vec<String>,
     pub account_count: usize,
+    #[serde(default)]
+    pub routable_account_count: usize,
 }
 
 /// 网关状态

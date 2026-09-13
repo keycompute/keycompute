@@ -107,11 +107,29 @@ pub struct AccountInfo {
     pub current_rpm: i32,
     pub is_active: bool,
     pub is_healthy: bool,
+    #[serde(default = "default_health_status")]
+    pub health_status: String,
+    #[serde(default)]
+    pub health_penalty: i32,
+    #[serde(default)]
+    pub health_reason: Option<String>,
+    #[serde(default)]
+    pub routing_eligible: bool,
+    #[serde(default)]
+    pub last_probe_at: Option<String>,
+    #[serde(default)]
+    pub last_probe_status: Option<String>,
+    #[serde(default)]
+    pub last_probe_error_code: Option<String>,
     pub priority: i32,
     /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
     pub visibility: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
+}
+
+fn default_health_status() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -136,6 +154,8 @@ pub struct CreateAccountRequest {
     pub api_base: Option<String>,
     pub models: Vec<String>,
     pub api_capabilities: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
 }
 
 impl CreateAccountRequest {
@@ -151,6 +171,7 @@ impl CreateAccountRequest {
             api_base: None,
             models: Vec::new(),
             api_capabilities: None,
+            priority: None,
         }
     }
 
@@ -168,6 +189,11 @@ impl CreateAccountRequest {
         self.api_capabilities = Some(api_capabilities);
         self
     }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = Some(priority);
+        self
+    }
 }
 
 /// 更新账号请求
@@ -179,6 +205,8 @@ pub struct UpdateAccountRequest {
     pub api_base: Option<String>,
     pub api_capabilities: Option<Vec<String>>,
     pub is_active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i32>,
     /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
     pub visibility: Option<String>,
 }
@@ -205,6 +233,11 @@ impl UpdateAccountRequest {
 
     pub fn with_is_active(mut self, is_active: bool) -> Self {
         self.is_active = Some(is_active);
+        self
+    }
+
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = Some(priority);
         self
     }
 
@@ -298,12 +331,14 @@ mod tests {
             .with_api_capabilities(vec![
                 "chat_completions".to_string(),
                 "responses".to_string(),
-            ]);
+            ])
+            .with_priority(10);
 
         let value = serde_json::to_value(request).unwrap();
         assert_eq!(
             value["api_capabilities"],
             serde_json::json!(["chat_completions", "responses"])
         );
+        assert_eq!(value["priority"], serde_json::json!(10));
     }
 }

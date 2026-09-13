@@ -108,7 +108,7 @@ impl ChatCompletionRequest {
     /// 校验采样参数范围
     ///
     /// 越界参数在 handler 层直接返回 400，避免确定性的上游 400
-    /// 级联整条 fallback 链（浪费上游调用）并污染 Provider 健康评分。
+    /// 级联整条 fallback 链（浪费上游调用）并污染账号健康状态。
     /// 注：NaN 不在任何区间内，同样会被拒绝
     fn validate_sampling_params(&self) -> Result<()> {
         if self.max_tokens == Some(0) {
@@ -4065,6 +4065,17 @@ mod tests {
                 vec!["chat_completions".to_string(), "responses".to_string()]
             },
             visibility: "tenant".to_string(),
+            health_status: "unknown".to_string(),
+            health_reason: None,
+            health_penalty: 0,
+            health_consecutive_failures: 0,
+            health_success_count: 0,
+            health_failure_count: 0,
+            health_avg_latency_ms: None,
+            health_last_success_at: None,
+            health_last_failure_at: None,
+            health_updated_at: now,
+            health_generation: 0,
             last_probe_at: None,
             last_probe_latency_ms: None,
             last_probe_status: None,

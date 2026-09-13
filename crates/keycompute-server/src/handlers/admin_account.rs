@@ -20,12 +20,13 @@ use keycompute_db::models::{
     },
     response_affinity::ResponseAffinity,
 };
+use keycompute_db::{ACCOUNT_PRIORITY_MAX, ACCOUNT_PRIORITY_MIN};
 use keycompute_types::{AccountApiCapability, SensitiveString};
 use llm_protocol_provider::{
     HttpTransport, NativeResponsesRequest, ProtocolType, UpstreamMessage, UpstreamRequest,
     normalize_base_url,
 };
-use sea_orm::TransactionTrait;
+use sea_orm::{DatabaseConnection, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use subtle::ConstantTimeEq;
@@ -33,6 +34,17 @@ use tracing;
 use uuid::Uuid;
 
 const RESPONSES_PROBE_MAX_OUTPUT_TOKENS: u32 = 16;
+
+fn validate_account_priority(priority: Option<i32>) -> Result<()> {
+    if let Some(priority) = priority
+        && !(ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX).contains(&priority)
+    {
+        return Err(ApiError::BadRequest(format!(
+            "priority must be an integer between {ACCOUNT_PRIORITY_MIN} and {ACCOUNT_PRIORITY_MAX}"
+        )));
+    }
+    Ok(())
+}
 
 /// Provider 账号信息
 #[derive(Debug, Serialize)]
@@ -51,6 +63,13 @@ pub struct AccountInfo {
     pub current_rpm: i32,
     pub is_active: bool,
     pub is_healthy: bool,
+    pub health_status: String,
+    pub health_penalty: i32,
+    pub health_reason: Option<String>,
+    pub routing_eligible: bool,
+    pub last_probe_at: Option<String>,
+    pub last_probe_status: Option<String>,
+    pub last_probe_error_code: Option<String>,
     pub priority: i32,
     /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
     pub visibility: String,
@@ -131,11 +150,12 @@ pub async fn list_accounts(
     let accounts: Vec<AccountInfo> = db_accounts
         .into_iter()
         .map(|acc| {
-            // 从 ProviderHealthStore 获取真实健康状态
-            let is_healthy = state.provider_health.is_healthy(&acc.provider);
-
+            // 健康状态以具体账号为键；Provider 仅表示协议。
+            let health = state.provider_health.account_health_for(&acc);
+            let is_healthy = health.status == keycompute_routing::ACCOUNT_HEALTHY;
             // 检查账号是否在冷却中
             let is_cooling = state.account_states.is_cooling_down(&acc.id);
+            let routing_eligible = acc.enabled && health.is_routable() && !is_cooling;
 
             AccountInfo {
                 id: acc.id,
@@ -154,6 +174,13 @@ pub async fn list_accounts(
                 current_rpm: if is_cooling { -1 } else { 0 }, // -1 表示冷却中
                 is_active: acc.enabled,
                 is_healthy,
+                health_status: health.status,
+                health_penalty: health.penalty,
+                health_reason: health.reason,
+                routing_eligible,
+                last_probe_at: acc.last_probe_at.map(|value| value.to_rfc3339()),
+                last_probe_status: acc.last_probe_status,
+                last_probe_error_code: acc.last_probe_error_code,
                 priority: acc.priority,
                 visibility: acc.visibility,
                 created_at: acc.created_at.to_rfc3339(),
@@ -255,6 +282,7 @@ pub async fn create_account(
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
+    validate_account_priority(req.priority)?;
 
     let pool = state
         .pool
@@ -345,7 +373,16 @@ pub async fn create_account(
         "rpm_limit": account.rpm_limit,
         "current_rpm": 0,
         "is_active": account.enabled,
-        "is_healthy": true,
+        "is_healthy": account.health_status == keycompute_routing::ACCOUNT_HEALTHY,
+        "health_status": account.health_status,
+        "health_penalty": account.health_penalty,
+        "health_reason": account.health_reason,
+        "routing_eligible": account.enabled
+            && account.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
+            && !state.account_states.is_cooling_down(&account.id),
+        "last_probe_at": account.last_probe_at.map(|value| value.to_rfc3339()),
+        "last_probe_status": account.last_probe_status,
+        "last_probe_error_code": account.last_probe_error_code,
         "priority": account.priority,
         "visibility": account.visibility,
         "created_at": account.created_at.to_rfc3339(),
@@ -382,6 +419,7 @@ pub async fn update_account(
     if !auth.is_admin() {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
+    validate_account_priority(req.priority)?;
 
     let pool = state
         .pool
@@ -525,7 +563,16 @@ pub async fn update_account(
         "rpm_limit": updated.rpm_limit,
         "current_rpm": 0,
         "is_active": updated.enabled,
-        "is_healthy": true,
+        "is_healthy": updated.health_status == keycompute_routing::ACCOUNT_HEALTHY,
+        "health_status": updated.health_status,
+        "health_penalty": updated.health_penalty,
+        "health_reason": updated.health_reason,
+        "routing_eligible": updated.enabled
+            && updated.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
+            && !state.account_states.is_cooling_down(&updated.id),
+        "last_probe_at": updated.last_probe_at.map(|value| value.to_rfc3339()),
+        "last_probe_status": updated.last_probe_status,
+        "last_probe_error_code": updated.last_probe_error_code,
         "priority": updated.priority,
         "visibility": updated.visibility,
         "created_at": updated.created_at.to_rfc3339(),
@@ -596,6 +643,9 @@ pub async fn delete_account(
         .write()
         .await
         .retain(|_, affinity| affinity.account_id != account_id);
+    // Account health is process-local and otherwise would retain one entry
+    // for every deleted account until process restart.
+    state.provider_health.forget_account_health(&account_id);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -747,16 +797,51 @@ async fn probe_account_for_monitoring_with_policy(
         };
     };
 
+    let start = Instant::now();
+    // All probe exits, including local configuration failures, must start
+    // from and persist the account's existing health snapshot.
+    let health_started = state.provider_health.hydrate_account_health(&account);
+    let health_started_at = health_started.updated_at;
+    let health_started_generation = health_started.generation;
+
     // 解密 API Key
-    let api_key = decrypt_account_api_key(&account.upstream_api_key_encrypted)?;
+    let api_key = match decrypt_account_api_key(&account.upstream_api_key_encrypted) {
+        Ok(api_key) => api_key,
+        Err(error) => {
+            persist_probe_outcome(
+                state,
+                writer,
+                &account,
+                health_started_at,
+                health_started_generation,
+                start.elapsed().as_millis() as i64,
+                "account_credentials_invalid",
+            )
+            .await;
+            return Err(error);
+        }
+    };
 
     // 解析账号协议（非法值是数据状态问题而非服务器故障，返回 409 提示重建账号）
-    let protocol = ProtocolType::parse(&account.provider).ok_or_else(|| {
-        ApiError::Conflict(format!(
-            "Account has unsupported protocol '{}'; please recreate it with 'openai' or 'anthropic'",
-            account.provider
-        ))
-    })?;
+    let protocol = match ProtocolType::parse(&account.provider) {
+        Some(protocol) => protocol,
+        None => {
+            persist_probe_outcome(
+                state,
+                writer,
+                &account,
+                health_started_at,
+                health_started_generation,
+                start.elapsed().as_millis() as i64,
+                "provider_not_registered",
+            )
+            .await;
+            return Err(ApiError::Conflict(format!(
+                "Account has unsupported protocol '{}'; please recreate it with 'openai' or 'anthropic'",
+                account.provider
+            )));
+        }
+    };
 
     // 构建 endpoint（Base URL）
     let endpoint = if account.endpoint.is_empty() {
@@ -771,8 +856,6 @@ async fn probe_account_for_monitoring_with_policy(
         .http_proxy
         .client_for_provider_and_account(protocol.as_str(), Some(account_id));
 
-    let start = Instant::now();
-
     // 按协议分发调用上游模型列表接口，验证 API Key 连通性
     let test_result = probe_upstream_account(
         protocol,
@@ -785,37 +868,21 @@ async fn probe_account_for_monitoring_with_policy(
     .await;
 
     let latency_ms = start.elapsed().as_millis() as i64;
-    let (probe_status, probe_error_code) = if test_result.is_ok() {
-        ("succeeded", None)
+    let probe_error_code = if test_result.is_ok() {
+        None
     } else {
-        ("failed", test_result.as_ref().err().cloned())
+        test_result.as_ref().err().cloned()
     };
-    keycompute_observability::metrics::ACCOUNT_PROBE_TOTAL
-        .with_label_values(&[probe_status])
-        .inc();
-    keycompute_observability::metrics::ACCOUNT_PROBE_LATENCY
-        .with_label_values(&[probe_status])
-        .observe(latency_ms.max(0) as f64 / 1000.0);
-    match Account::record_probe_snapshot_if_config_current(
+    persist_probe_outcome(
+        state,
         writer,
-        account_id,
-        account.updated_at,
-        chrono::Utc::now(),
+        &account,
+        health_started_at,
+        health_started_generation,
         latency_ms,
-        probe_status,
-        probe_error_code.as_deref(),
+        probe_error_code.as_deref().unwrap_or("probe_succeeded"),
     )
-    .await
-    {
-        Ok(true) => {}
-        Ok(false) => tracing::debug!(
-            %account_id,
-            "discarded account probe snapshot because configuration changed during the probe"
-        ),
-        Err(error) => {
-            tracing::warn!(%account_id, %error, "failed to persist account probe snapshot");
-        }
-    }
+    .await;
 
     match test_result {
         Ok(models) => Ok(Some(account_test_response(
@@ -843,6 +910,105 @@ async fn probe_account_for_monitoring_with_policy(
                 probe_error_code.as_deref(),
                 &account.api_capabilities,
             )))
+        }
+    }
+}
+
+async fn persist_probe_outcome(
+    state: &AppState,
+    writer: &DatabaseConnection,
+    account: &Account,
+    expected_health_updated_at: chrono::DateTime<chrono::Utc>,
+    expected_health_generation: i64,
+    latency_ms: i64,
+    error_code: &str,
+) {
+    let success = error_code == "probe_succeeded";
+    let probe_status = if success { "succeeded" } else { "failed" };
+    let health_error_code = (!success).then_some(error_code);
+    let persisted_error_code = (!success).then_some(error_code);
+    keycompute_observability::metrics::ACCOUNT_PROBE_TOTAL
+        .with_label_values(&[probe_status])
+        .inc();
+    keycompute_observability::metrics::ACCOUNT_PROBE_LATENCY
+        .with_label_values(&[probe_status])
+        .observe(latency_ms.max(0) as f64 / 1000.0);
+    let probed_at = chrono::Utc::now();
+    let Some(health_snapshot) = state
+        .provider_health
+        .record_account_probe_if_current_and_enqueue(
+            account.id,
+            account.updated_at,
+            expected_health_updated_at,
+            expected_health_generation,
+            probed_at,
+            latency_ms,
+            probe_status,
+            health_error_code,
+            success,
+        )
+    else {
+        match Account::record_probe_telemetry_if_config_current(
+            writer,
+            account.id,
+            account.updated_at,
+            probed_at,
+            latency_ms,
+            probe_status,
+            persisted_error_code,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(error) => tracing::warn!(
+                account_id = %account.id,
+                %error,
+                "failed to persist stale account probe telemetry"
+            ),
+        }
+        tracing::debug!(
+            account_id = %account.id,
+            "discarded account probe health because a newer transition completed during the probe"
+        );
+        return;
+    };
+    match Account::record_probe_snapshot_if_config_current(
+        writer,
+        account.id,
+        account.updated_at,
+        expected_health_updated_at,
+        expected_health_generation,
+        probed_at,
+        latency_ms,
+        probe_status,
+        persisted_error_code,
+        &health_snapshot.status,
+        health_snapshot.reason.as_deref(),
+        health_snapshot.penalty,
+        health_snapshot.consecutive_failures,
+        health_snapshot.success_count,
+        health_snapshot.failure_count,
+        health_snapshot.avg_latency_ms,
+        health_snapshot.last_success_at,
+        health_snapshot.last_failure_at,
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            state
+                .provider_health
+                .discard_account_health_override_if_current(
+                    &account.id,
+                    health_snapshot.updated_at,
+                );
+            tracing::debug!(
+                account_id = %account.id,
+                "discarded account probe snapshot because configuration or health changed during the probe"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(account_id = %account.id, %error, "failed to persist account probe snapshot");
         }
     }
 }
@@ -1159,6 +1325,18 @@ mod tests {
         assert_eq!(parse_account_status(Some("active")).unwrap(), Some(true));
         assert_eq!(parse_account_status(Some("disabled")).unwrap(), Some(false));
         assert!(parse_account_status(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn account_priority_validation_accepts_zero_through_ten_only() {
+        assert!(validate_account_priority(None).is_ok());
+        assert!(validate_account_priority(Some(0)).is_ok());
+        assert!(validate_account_priority(Some(10)).is_ok());
+        assert!(matches!(
+            validate_account_priority(Some(-1)),
+            Err(ApiError::BadRequest(message)) if message.contains("between 0 and 10")
+        ));
+        assert!(validate_account_priority(Some(11)).is_err());
     }
     use llm_protocol_provider::{
         ByteStream, GetBinaryResponse, UpstreamResponse, UpstreamResponseMeta,

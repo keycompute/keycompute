@@ -8,6 +8,15 @@ use ui::{
 
 const PAGE_SIZE: usize = 20;
 const SEARCH_DEBOUNCE_MS: u32 = 300;
+const ACCOUNT_PRIORITY_MIN: i32 = 0;
+const ACCOUNT_PRIORITY_MAX: i32 = 10;
+
+fn parse_account_priority(value: &str) -> Option<i32> {
+    let priority = value.trim().parse::<i32>().ok()?;
+    (ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX)
+        .contains(&priority)
+        .then_some(priority)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AccountListQuery {
@@ -256,6 +265,7 @@ fn AdminAccountsView() -> Element {
     let mut create_api_base = use_signal(String::new);
     let mut create_api_mode = use_signal(|| "both".to_string());
     let mut create_models_input = use_signal(String::new); // 逗号分隔的模型列表
+    let mut create_priority = use_signal(|| "0".to_string());
     let mut saving = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
     let mut search = use_signal(String::new);
@@ -274,6 +284,7 @@ fn AdminAccountsView() -> Element {
     let mut edit_reset_api_base = use_signal(|| false);
     let mut edit_is_active = use_signal(|| true);
     let mut edit_visibility = use_signal(|| "tenant".to_string());
+    let mut edit_priority = use_signal(|| "0".to_string());
     let mut edit_tenant_id = use_signal(String::new);
     let mut show_tenant_dropdown = use_signal(|| false);
     let mut show_edit = use_signal(|| false);
@@ -347,6 +358,7 @@ fn AdminAccountsView() -> Element {
         let api_base = create_api_base();
         let api_mode = create_api_mode();
         let models_str = create_models_input();
+        let priority_input = create_priority();
         // 解析模型列表（逗号分隔，去空格，去空项）
         let models: Vec<String> = models_str
             .split(',')
@@ -357,6 +369,10 @@ fn AdminAccountsView() -> Element {
             *error_msg.write() = i18n.t("accounts.fill_required").to_string();
             return;
         }
+        let Some(priority) = parse_account_priority(&priority_input) else {
+            *error_msg.write() = i18n.t("accounts.priority_invalid").to_string();
+            return;
+        };
         let token = auth_store.token().unwrap_or_default();
         *saving.write() = true;
         *error_msg.write() = String::new();
@@ -364,7 +380,8 @@ fn AdminAccountsView() -> Element {
             use client_api::api::admin::CreateAccountRequest;
             let mut req = CreateAccountRequest::new(name, provider.clone(), api_key_val)
                 .with_models(models)
-                .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode));
+                .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode))
+                .with_priority(priority);
             if !api_base.is_empty() {
                 req = req.with_api_base(api_base);
             }
@@ -378,6 +395,7 @@ fn AdminAccountsView() -> Element {
                     create_api_base.write().clear();
                     *create_api_mode.write() = "both".to_string();
                     create_models_input.write().clear();
+                    create_priority.set("0".to_string());
                     query.write().reset_page();
                     accounts.restart();
                     ui_store.show_success(i18n.t("accounts.created"));
@@ -402,10 +420,15 @@ fn AdminAccountsView() -> Element {
         let active = edit_is_active();
         let visibility = edit_visibility();
         let tenant_id = edit_tenant_id();
+        let priority_input = edit_priority();
         if name_val.trim().is_empty() {
             *edit_error.write() = i18n.t("accounts.name_required").to_string();
             return;
         }
+        let Some(priority) = parse_account_priority(&priority_input) else {
+            *edit_error.write() = i18n.t("accounts.priority_invalid").to_string();
+            return;
+        };
         let token = auth_store.token().unwrap_or_default();
         edit_saving.set(true);
         *edit_error.write() = String::new();
@@ -415,6 +438,7 @@ fn AdminAccountsView() -> Element {
                 .with_name(name_val)
                 .with_is_active(active)
                 .with_visibility(visibility)
+                .with_priority(priority)
                 .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode));
             if !tenant_id.trim().is_empty() {
                 req = req.with_tenant_id(tenant_id);
@@ -636,9 +660,17 @@ fn AdminAccountsView() -> Element {
                                                                 {i18n.t("common.disabled")}
                                                             }
                                                         }
-                                                        if acc.is_healthy {
+                                                        if acc.health_status == "healthy" {
                                                             Badge { variant: BadgeVariant::Success,
                                                                 {i18n.t("system.healthy")}
+                                                            }
+                                                        } else if acc.health_status == "unhealthy" {
+                                                            Badge { variant: BadgeVariant::Error,
+                                                                {i18n.t("system.unhealthy")}
+                                                            }
+                                                        } else if acc.health_status == "degraded" {
+                                                            Badge { variant: BadgeVariant::Warning,
+                                                                {i18n.t("system.degraded")}
                                                             }
                                                         } else {
                                                             Badge { variant: BadgeVariant::Warning,
@@ -647,13 +679,24 @@ fn AdminAccountsView() -> Element {
                                                         }
                                                     }
                                                     p { class: "account-status-note",
-                                                        if acc.is_active && acc.is_healthy {
+                                                        if acc.is_active && acc.routing_eligible {
                                                             {i18n.t("accounts.route_ready")}
                                                         } else if acc.is_active {
                                                             {i18n.t("accounts.enabled_but_unhealthy")}
                                                         } else {
                                                             {i18n.t("accounts.not_routed")}
                                                         }
+                                                    }
+                                                    p { class: "account-status-note",
+                                                        "{i18n.t(\"accounts.priority\")}: {acc.priority}"
+                                                    }
+                                                    if acc.health_penalty > 0 {
+                                                        p { class: "account-status-note",
+                                                            "{i18n.t(\"accounts.health_penalty\")}: {acc.health_penalty}"
+                                                        }
+                                                    }
+                                                    if let Some(reason) = &acc.health_reason {
+                                                        p { class: "account-status-note", "{reason}" }
                                                     }
                                                 }
                                             }
@@ -711,6 +754,7 @@ fn AdminAccountsView() -> Element {
                                                             )
                                                             .to_string();
                                                             let active = acc.is_active;
+                                                            let priority = acc.priority;
                                                             let visibility = acc.visibility.clone();
                                                             let tenant_id = acc.tenant_id.clone();
                                                             move |_| {
@@ -722,6 +766,7 @@ fn AdminAccountsView() -> Element {
                                                                 edit_api_base.set(String::new());
                                                                 edit_reset_api_base.set(false);
                                                                 edit_is_active.set(active);
+                                                                edit_priority.set(priority.to_string());
                                                                 edit_visibility.set(visibility.clone());
                                                                 edit_tenant_id.set(tenant_id.clone());
                                                                 *edit_error.write() = String::new();
@@ -909,6 +954,19 @@ fn AdminAccountsView() -> Element {
                                 }
                             }
                             div { class: "form-group",
+                                label { class: "form-label", {i18n.t("accounts.priority")} }
+                                input {
+                                    class: "input-field",
+                                    r#type: "number",
+                                    min: "0",
+                                    max: "10",
+                                    step: "1",
+                                    value: "{create_priority}",
+                                    oninput: move |e| *create_priority.write() = e.value(),
+                                }
+                                small { class: "form-hint", {i18n.t("accounts.priority_hint")} }
+                            }
+                            div { class: "form-group",
                                 label { class: "form-label", {i18n.t("accounts.api_key")} }
                                 input {
                                     class: "input-field",
@@ -978,6 +1036,19 @@ fn AdminAccountsView() -> Element {
                                     value: "{edit_name}",
                                     oninput: move |e| *edit_name.write() = e.value(),
                                 }
+                            }
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("accounts.priority")} }
+                                input {
+                                    class: "input-field",
+                                    r#type: "number",
+                                    min: "0",
+                                    max: "10",
+                                    step: "1",
+                                    value: "{edit_priority}",
+                                    oninput: move |e| *edit_priority.write() = e.value(),
+                                }
+                                small { class: "form-hint", {i18n.t("accounts.priority_hint")} }
                             }
                             div { class: "form-group",
                                 label { class: "form-label", {i18n.t("accounts.new_api_key")} }
@@ -1338,5 +1409,14 @@ mod tests {
             api_mode_for_capabilities("anthropic", &["messages".to_string()]),
             "messages"
         );
+    }
+
+    #[test]
+    fn account_priority_parser_accepts_only_integer_values_in_range() {
+        assert_eq!(parse_account_priority("0"), Some(0));
+        assert_eq!(parse_account_priority(" 10 "), Some(10));
+        assert_eq!(parse_account_priority("-1"), None);
+        assert_eq!(parse_account_priority("11"), None);
+        assert_eq!(parse_account_priority("1.5"), None);
     }
 }
