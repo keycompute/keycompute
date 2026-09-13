@@ -121,21 +121,27 @@ jobs:
           bash scripts/tests/reset_admin_password_test.sh
           printf 'POSTGRES_PASSWORD=conflicting-local-password\nREDIS_PASSWORD=conflicting-local-password\n' > .env
           trap 'rm -f .env' EXIT
-          docker compose --env-file .env.example \
+          # Keep the check independent of runner/organization-level variables;
+          # Compose gives exported variables precedence over --env-file.
+          env -u POSTGRES_PASSWORD -u REDIS_PASSWORD docker compose --env-file .env.example \
             -f docker-compose.yml \
             -f docker-compose.dev.yml \
             config --quiet
-          docker compose --env-file .env.example \
+          env -u POSTGRES_PASSWORD -u REDIS_PASSWORD docker compose --env-file .env.example \
             -f docker-compose.yml \
             -f docker-compose.dev.yml \
             config --format json \
             | jq -e '
                 .services.postgres.environment.POSTGRES_PASSWORD == "change-me-strong-password"
                 and ((.services.redis.command | tostring) | contains("change-me-redis-password"))
-                and .services.postgres.ports[0].published == "5432"
-                and .services.redis.ports[0].published == "6379"
+                # Compose has emitted these fields as both JSON strings and
+                # numbers across runner/Compose versions.  Compare their
+                # textual form so the validation checks the port value rather
+                # than an implementation detail of Compose's JSON renderer.
+                and ((.services.postgres.ports[0].published | tostring) == "5432")
+                and ((.services.redis.ports[0].published | tostring) == "6379")
               ' >/dev/null
-          docker compose --env-file .env.example \
+          env -u POSTGRES_PASSWORD -u REDIS_PASSWORD docker compose --env-file .env.example \
             -f docker-compose.replicas.yml \
             config --quiet
 
