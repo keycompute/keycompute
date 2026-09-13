@@ -10,6 +10,7 @@ const SEARCH_DEBOUNCE_MS: u32 = 300;
 struct PricingListQuery {
     search: String,
     page: u32,
+    page_size: u32,
 }
 
 impl Default for PricingListQuery {
@@ -17,6 +18,7 @@ impl Default for PricingListQuery {
         Self {
             search: String::new(),
             page: 1,
+            page_size: PAGE_SIZE as u32,
         }
     }
 }
@@ -28,6 +30,11 @@ impl PricingListQuery {
 
     fn commit_search(&mut self, search: String) {
         self.search = search;
+        self.reset_page();
+    }
+
+    fn set_page_size(&mut self, page_size: u32) {
+        self.page_size = page_size;
         self.reset_page();
     }
 }
@@ -111,7 +118,7 @@ pub fn Pricing() -> Element {
             let request_key = (current_query.clone(), refresh_revision);
             let mut params = PricingQueryParams::default()
                 .with_page(current_query.page as u64)
-                .with_page_size(PAGE_SIZE as u64);
+                .with_page_size(current_query.page_size as u64);
             if !current_query.search.is_empty() {
                 params = params.with_search(current_query.search);
             }
@@ -378,17 +385,25 @@ pub fn Pricing() -> Element {
                             }
                         }
                     }
-                    div { class: "pagination",
-                        span { class: "pagination-info",
-                            "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}"
-                        }
-                        Pagination {
-                            current: current_query.page,
-                            total_pages,
-                            previous_label: i18n.t("table.previous").to_string(),
-                            next_label: i18n.t("table.next").to_string(),
-                            on_page_change: move |p| query.write().page = p,
-                        }
+                    Pagination {
+                        current: current_query.page,
+                        total_pages,
+                        total,
+                        page_size: current_query.page_size,
+                        summary: i18n.t_with_args(
+                            "common.pagination_summary",
+                            &[
+                                ("total", &total.to_string()),
+                                ("current", &current_query.page.to_string()),
+                                ("total_pages", &total_pages.to_string()),
+                            ],
+                        ),
+                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                        page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                        previous_label: i18n.t("table.previous").to_string(),
+                        next_label: i18n.t("table.next").to_string(),
+                        on_page_change: move |p| query.write().page = p,
+                        on_page_size_change: move |size| query.write().set_page_size(size),
                     }
                 }
             }
@@ -844,7 +859,7 @@ fn EditPricingModal(
 
 #[cfg(test)]
 mod tests {
-    use super::{PricingListQuery, pricing_col_count};
+    use super::{PAGE_SIZE, PricingListQuery, pricing_col_count};
 
     #[test]
     fn empty_table_colspan_matches_visible_pricing_columns() {
@@ -857,6 +872,7 @@ mod tests {
         let mut query = PricingListQuery {
             search: String::new(),
             page: 4,
+            page_size: PAGE_SIZE as u32,
         };
         query.commit_search("gpt".to_string());
         assert_eq!(query.search, "gpt");
@@ -868,6 +884,7 @@ mod tests {
         let mut query = PricingListQuery {
             search: "matched before editing".to_string(),
             page: 2,
+            page_size: PAGE_SIZE as u32,
         };
 
         query.reset_page();

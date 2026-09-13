@@ -11,6 +11,7 @@ use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
     handlers::configured_public_base_url,
+    handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
 use axum::{
@@ -34,6 +35,10 @@ pub struct DistributionQuery {
     /// 分页偏移
     #[serde(default)]
     pub offset: Option<i64>,
+    /// 页码（现代分页接口）
+    pub page: Option<i64>,
+    /// 每页数量（现代分页接口）
+    pub page_size: Option<i64>,
     /// 分页限制
     #[serde(default = "default_limit")]
     pub limit: Option<i64>,
@@ -66,6 +71,15 @@ pub struct DistributionRecordResponse {
     pub status: String,
     /// 创建时间
     pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DistributionRecordPageResponse {
+    pub records: Vec<DistributionRecordResponse>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
 }
 
 /// 分销统计响应
@@ -401,62 +415,109 @@ pub async fn list_distribution_records(
     auth: AuthExtractor,
     State(state): State<AppState>,
     Query(query): Query<DistributionQuery>,
-) -> Result<Json<Vec<DistributionRecordResponse>>> {
+) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
-    let limit = query.limit.unwrap_or(20);
-    let offset = query.offset.unwrap_or(0);
+    let modern_pagination = query.page.is_some() || query.page_size.is_some();
+    let (page, page_size, offset) =
+        normalize_list_pagination(query.page, query.page_size, query.limit, query.offset);
 
     let records = if auth.is_admin() {
         // Admin 可以查看所有记录，或按受益人筛选
         if let Some(beneficiary_id) = query.beneficiary_id {
-            keycompute_db::DistributionRecord::find_by_beneficiary(
+            keycompute_db::DistributionRecord::find_by_beneficiary_filtered(
                 pool,
                 beneficiary_id,
-                limit,
+                query.status.as_deref(),
+                query.level.as_deref(),
+                page_size,
                 offset,
             )
             .await
             .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
         } else {
-            keycompute_db::DistributionRecord::find_by_tenant(pool, auth.tenant_id, limit, offset)
-                .await
-                .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
+            keycompute_db::DistributionRecord::find_by_tenant_filtered(
+                pool,
+                auth.tenant_id,
+                query.status.as_deref(),
+                query.level.as_deref(),
+                page_size,
+                offset,
+            )
+            .await
+            .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
         }
     } else {
         // 普通用户只能查看自己的记录
-        keycompute_db::DistributionRecord::find_by_beneficiary(pool, auth.user_id, limit, offset)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
+        keycompute_db::DistributionRecord::find_by_beneficiary_filtered(
+            pool,
+            auth.user_id,
+            query.status.as_deref(),
+            query.level.as_deref(),
+            page_size,
+            offset,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
     };
 
-    let filtered_records = records
-        .into_iter()
-        .filter(|r| {
-            if let Some(ref status) = query.status {
-                r.status == *status
-            } else {
-                true
-            }
-        })
-        .filter(|r| {
-            if let Some(ref level) = query.level {
-                r.level == *level
-            } else {
-                true
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let mut responses = Vec::with_capacity(filtered_records.len());
-    for record in filtered_records {
+    let mut responses = Vec::with_capacity(records.len());
+    for record in records {
         responses.push(build_distribution_record_response(pool, record).await?);
     }
 
-    Ok(Json(responses))
+    if !modern_pagination {
+        return Ok(Json(serde_json::to_value(responses).map_err(|error| {
+            ApiError::Internal(format!("Failed to serialize distribution records: {error}"))
+        })?));
+    }
+
+    let total = if auth.is_admin() {
+        if let Some(beneficiary_id) = query.beneficiary_id {
+            keycompute_db::DistributionRecord::count_by_beneficiary_filtered(
+                pool,
+                beneficiary_id,
+                query.status.as_deref(),
+                query.level.as_deref(),
+            )
+            .await
+        } else {
+            keycompute_db::DistributionRecord::count_by_tenant_filtered(
+                pool,
+                auth.tenant_id,
+                query.status.as_deref(),
+                query.level.as_deref(),
+            )
+            .await
+        }
+    } else {
+        keycompute_db::DistributionRecord::count_by_beneficiary_filtered(
+            pool,
+            auth.user_id,
+            query.status.as_deref(),
+            query.level.as_deref(),
+        )
+        .await
+    }
+    .map_err(|e| ApiError::Internal(format!("Database error: {e}")))?;
+
+    Ok(Json(
+        serde_json::to_value(DistributionRecordPageResponse {
+            records: responses,
+            total,
+            page,
+            page_size,
+            total_pages: total_pages(total, page_size),
+        })
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "Failed to serialize distribution record page: {error}"
+            ))
+        })?,
+    ))
 }
 
 /// 获取分销统计
@@ -783,6 +844,24 @@ mod tests {
     fn test_distribution_query_default_limit() {
         let query: DistributionQuery = serde_json::from_str("{}").unwrap();
         assert_eq!(query.limit, Some(20));
+    }
+
+    #[test]
+    fn modern_distribution_query_preserves_filter_and_page_inputs() {
+        let query: DistributionQuery = serde_json::from_str(
+            r#"{
+                "status": "pending",
+                "level": "level2",
+                "page": 3,
+                "page_size": 10
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(query.status.as_deref(), Some("pending"));
+        assert_eq!(query.level.as_deref(), Some("level2"));
+        assert_eq!(query.page, Some(3));
+        assert_eq!(query.page_size, Some(10));
     }
 
     #[test]

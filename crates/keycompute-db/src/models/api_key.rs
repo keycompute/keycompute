@@ -131,7 +131,7 @@ impl ProduceAiKey {
     ) -> Result<Vec<ProduceAiKey>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM produce_ai_keys WHERE user_id = $1 ORDER BY created_at DESC",
+            "SELECT * FROM produce_ai_keys WHERE user_id = $1 ORDER BY created_at DESC, id DESC",
             [user_id.into()],
         );
         let keys = ProduceAiKey::find_by_statement(stmt).all(db).await?;
@@ -146,12 +146,56 @@ impl ProduceAiKey {
     ) -> Result<Vec<ProduceAiKey>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM produce_ai_keys WHERE user_id = $1 AND revoked = FALSE ORDER BY created_at DESC",
+            "SELECT * FROM produce_ai_keys WHERE user_id = $1 AND revoked = FALSE ORDER BY created_at DESC, id DESC",
             [user_id.into()],
         );
         let keys = ProduceAiKey::find_by_statement(stmt).all(db).await?;
 
         Ok(keys)
+    }
+
+    /// 分页查找用户的 Produce AI Key。
+    pub async fn find_by_user_page(
+        db: &impl ConnectionTrait,
+        user_id: Uuid,
+        include_revoked: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<ProduceAiKey>, DbError> {
+        let condition = if include_revoked {
+            ""
+        } else {
+            " AND revoked = FALSE"
+        };
+        let sql = format!(
+            "SELECT * FROM produce_ai_keys WHERE user_id = $1{condition} ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3"
+        );
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            &sql,
+            [user_id.into(), limit.into(), offset.into()],
+        );
+        Ok(ProduceAiKey::find_by_statement(stmt).all(db).await?)
+    }
+
+    /// 获取用户 API Key 总数。
+    pub async fn count_by_user(
+        db: &impl ConnectionTrait,
+        user_id: Uuid,
+        include_revoked: bool,
+    ) -> Result<i64, DbError> {
+        let condition = if include_revoked {
+            ""
+        } else {
+            " AND revoked = FALSE"
+        };
+        let sql = format!("SELECT COUNT(*) FROM produce_ai_keys WHERE user_id = $1{condition}");
+        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, &sql, [user_id.into()]);
+        let result = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("count query failed".to_string()))?;
+        result.try_get_by_index(0).map_err(DbError::DatabaseError)
     }
 
     /// 查找租户的所有 Produce AI Key

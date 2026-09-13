@@ -1,6 +1,15 @@
 pub(crate) const DEFAULT_PAGE_SIZE: i64 = 20;
 pub(crate) const MAX_PAGE_SIZE: i64 = 100;
 
+pub(crate) fn has_explicit_pagination(
+    page: Option<i64>,
+    page_size: Option<i64>,
+    legacy_limit: Option<i64>,
+    legacy_offset: Option<i64>,
+) -> bool {
+    page.is_some() || page_size.is_some() || legacy_limit.is_some() || legacy_offset.is_some()
+}
+
 pub(crate) fn normalize_list_pagination(
     page: Option<i64>,
     page_size: Option<i64>,
@@ -35,6 +44,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_pagination_includes_legacy_slice_parameters() {
+        assert!(!has_explicit_pagination(None, None, None, None));
+        assert!(has_explicit_pagination(None, None, Some(10), None));
+        assert!(has_explicit_pagination(None, None, None, Some(20)));
+        assert!(has_explicit_pagination(Some(2), None, None, None));
+        assert!(has_explicit_pagination(None, Some(50), None, None));
+    }
+
+    #[test]
     fn list_pagination_supports_modern_and_legacy_parameters() {
         assert_eq!(
             normalize_list_pagination(Some(3), Some(25), Some(10), Some(0)),
@@ -43,6 +61,10 @@ mod tests {
         assert_eq!(
             normalize_list_pagination(None, None, Some(50), Some(100)),
             (3, 50, 100)
+        );
+        assert_eq!(
+            normalize_list_pagination(None, None, Some(1), Some(1)),
+            (2, 1, 1)
         );
     }
 

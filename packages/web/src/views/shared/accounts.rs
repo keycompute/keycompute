@@ -22,6 +22,7 @@ fn parse_account_priority(value: &str) -> Option<i32> {
 struct AccountListQuery {
     search: String,
     page: u32,
+    page_size: u32,
 }
 
 impl Default for AccountListQuery {
@@ -29,6 +30,7 @@ impl Default for AccountListQuery {
         Self {
             search: String::new(),
             page: 1,
+            page_size: PAGE_SIZE as u32,
         }
     }
 }
@@ -40,6 +42,11 @@ impl AccountListQuery {
 
     fn commit_search(&mut self, search: String) {
         self.search = search;
+        self.reset_page();
+    }
+
+    fn set_page_size(&mut self, page_size: u32) {
+        self.page_size = page_size;
         self.reset_page();
     }
 }
@@ -313,7 +320,7 @@ fn AdminAccountsView() -> Element {
             let request_key = current_query.clone();
             let mut params = client_api::api::admin::AccountQueryParams::new()
                 .with_page(current_query.page)
-                .with_page_size(PAGE_SIZE as u32);
+                .with_page_size(current_query.page_size);
             if !current_query.search.is_empty() {
                 params = params.with_search(current_query.search);
             }
@@ -852,17 +859,25 @@ fn AdminAccountsView() -> Element {
                                     }
                             }
                         }
-                        div { class: "pagination",
-                            span { class: "pagination-info",
-                                "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}"
-                            }
-                            Pagination {
-                                current: current_query.page,
-                                total_pages,
-                                previous_label: i18n.t("table.previous").to_string(),
-                                next_label: i18n.t("table.next").to_string(),
-                                on_page_change: move |page| query.write().page = page,
-                            }
+                        Pagination {
+                            current: current_query.page,
+                            total_pages,
+                            total,
+                            page_size: current_query.page_size,
+                            summary: i18n.t_with_args(
+                                "common.pagination_summary",
+                                &[
+                                    ("total", &total.to_string()),
+                                    ("current", &current_query.page.to_string()),
+                                    ("total_pages", &total_pages.to_string()),
+                                ],
+                            ),
+                            page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                            page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                            previous_label: i18n.t("table.previous").to_string(),
+                            next_label: i18n.t("table.next").to_string(),
+                            on_page_change: move |page| query.write().page = page,
+                            on_page_size_change: move |size| query.write().set_page_size(size),
                         }
                     }
                 }
@@ -1293,6 +1308,7 @@ mod tests {
         let mut query = AccountListQuery {
             search: "old".to_string(),
             page: 5,
+            page_size: PAGE_SIZE as u32,
         };
         query.commit_search("new".to_string());
         assert_eq!(query.search, "new");
@@ -1304,6 +1320,7 @@ mod tests {
         let mut query = AccountListQuery {
             search: "matched before editing".to_string(),
             page: 2,
+            page_size: PAGE_SIZE as u32,
         };
 
         query.reset_page();

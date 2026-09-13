@@ -3,6 +3,9 @@
 //! 处理用户管理自己资源的请求
 //! Admin 也可以访问这些端点，但会根据权限返回不同范围的数据
 
+use crate::handlers::pagination::{
+    has_explicit_pagination, normalize_list_pagination, total_pages,
+};
 use crate::{
     error::{ApiError, Result},
     extractors::AuthExtractor,
@@ -203,6 +206,22 @@ pub struct ApiKeyQueryParams {
     /// 是否包含已撤销的 Key（默认 false）
     #[serde(default)]
     pub include_revoked: bool,
+    /// 页码（传入后返回分页对象；不传则保持兼容的数组响应）
+    pub page: Option<i64>,
+    /// 每页数量
+    pub page_size: Option<i64>,
+    /// 兼容旧版 limit/offset 参数
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApiKeyPageResponse {
+    pub keys: Vec<ApiKeyInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
 }
 
 /// 列出我的 API Keys
@@ -215,19 +234,32 @@ pub async fn list_my_api_keys(
     auth: AuthExtractor,
     State(state): State<AppState>,
     Query(params): Query<ApiKeyQueryParams>,
-) -> Result<Json<Vec<ApiKeyInfo>>> {
+) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let keys = if params.include_revoked {
-        // 包含已撤销的 Key
+    let has_pagination =
+        has_explicit_pagination(params.page, params.page_size, params.limit, params.offset);
+    let modern_pagination = params.page.is_some() || params.page_size.is_some();
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
+    let keys = if has_pagination {
+        ProduceAiKey::find_by_user_page(
+            pool,
+            auth.user_id,
+            params.include_revoked,
+            page_size,
+            offset,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?
+    } else if params.include_revoked {
         ProduceAiKey::find_by_user(pool, auth.user_id)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?
     } else {
-        // 默认只返回活跃的 Key
         ProduceAiKey::find_active_by_user(pool, auth.user_id)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?
@@ -250,7 +282,25 @@ pub async fn list_my_api_keys(
         })
         .collect();
 
-    Ok(Json(api_keys))
+    if modern_pagination {
+        let total = ProduceAiKey::count_by_user(pool, auth.user_id, params.include_revoked)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to count API keys: {}", e)))?;
+        Ok(Json(
+            serde_json::to_value(ApiKeyPageResponse {
+                keys: api_keys,
+                total,
+                page,
+                page_size,
+                total_pages: total_pages(total, page_size),
+            })
+            .map_err(|e| ApiError::Internal(format!("Failed to serialize API keys: {}", e)))?,
+        ))
+    } else {
+        Ok(Json(serde_json::to_value(api_keys).map_err(|e| {
+            ApiError::Internal(format!("Failed to serialize API keys: {}", e))
+        })?))
+    }
 }
 
 /// 创建 API Key 请求
@@ -389,6 +439,23 @@ pub struct UsageRecord {
     pub created_at: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UsageQueryParams {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UsagePageResponse {
+    pub records: Vec<UsageRecord>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+}
+
 /// 获取我的用量记录
 ///
 /// GET /api/v1/usage
@@ -397,15 +464,26 @@ pub struct UsageRecord {
 pub async fn get_my_usage(
     auth: AuthExtractor,
     State(state): State<AppState>,
-) -> Result<Json<Vec<UsageRecord>>> {
+    Query(params): Query<UsageQueryParams>,
+) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let logs = UsageLog::find_by_user(pool, auth.user_id, 100, 0)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch usage logs: {}", e)))?;
+    let has_pagination =
+        has_explicit_pagination(params.page, params.page_size, params.limit, params.offset);
+    let modern_pagination = params.page.is_some() || params.page_size.is_some();
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
+    let logs = UsageLog::find_by_user(
+        pool,
+        auth.user_id,
+        if has_pagination { page_size } else { 100 },
+        if has_pagination { offset } else { 0 },
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to fetch usage logs: {}", e)))?;
 
     let usage: Vec<UsageRecord> = logs
         .into_iter()
@@ -422,7 +500,25 @@ pub async fn get_my_usage(
         })
         .collect();
 
-    Ok(Json(usage))
+    if modern_pagination {
+        let total = UsageLog::count_by_user(pool, auth.user_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to count usage logs: {}", e)))?;
+        Ok(Json(
+            serde_json::to_value(UsagePageResponse {
+                records: usage,
+                total,
+                page,
+                page_size,
+                total_pages: total_pages(total, page_size),
+            })
+            .map_err(|e| ApiError::Internal(format!("Failed to serialize usage logs: {}", e)))?,
+        ))
+    } else {
+        Ok(Json(serde_json::to_value(usage).map_err(|e| {
+            ApiError::Internal(format!("Failed to serialize usage logs: {}", e))
+        })?))
+    }
 }
 
 /// 用量统计响应

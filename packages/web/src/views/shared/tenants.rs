@@ -10,6 +10,7 @@ const SEARCH_DEBOUNCE_MS: u32 = 300;
 struct TenantListQuery {
     search: String,
     page: u32,
+    page_size: u32,
 }
 
 impl TenantListQuery {
@@ -17,11 +18,17 @@ impl TenantListQuery {
         Self {
             search: String::new(),
             page: 1,
+            page_size: PAGE_SIZE as u32,
         }
     }
 
     fn commit_search(&mut self, search: String) {
         self.search = search;
+        self.page = 1;
+    }
+
+    fn set_page_size(&mut self, page_size: u32) {
+        self.page_size = page_size;
         self.page = 1;
     }
 }
@@ -74,7 +81,7 @@ pub fn Tenants() -> Element {
             let request_key = current_query.clone();
             let mut params = TenantQueryParams::new()
                 .with_page(current_query.page)
-                .with_page_size(PAGE_SIZE as u32);
+                .with_page_size(current_query.page_size);
             if !current_query.search.is_empty() {
                 params = params.with_search(current_query.search);
             }
@@ -168,17 +175,25 @@ pub fn Tenants() -> Element {
                         }
                     }
                 }
-                div { class: "pagination",
-                    span { class: "pagination-info",
-                        "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}"
-                    }
-                    Pagination {
-                        current: current_query.page,
-                        total_pages,
-                        previous_label: i18n.t("table.previous").to_string(),
-                        next_label: i18n.t("table.next").to_string(),
-                        on_page_change: move |page| query.write().page = page,
-                    }
+                Pagination {
+                    current: current_query.page,
+                    total_pages,
+                    total,
+                    page_size: current_query.page_size,
+                    summary: i18n.t_with_args(
+                        "common.pagination_summary",
+                        &[
+                            ("total", &total.to_string()),
+                            ("current", &current_query.page.to_string()),
+                            ("total_pages", &total_pages.to_string()),
+                        ],
+                    ),
+                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                    previous_label: i18n.t("table.previous").to_string(),
+                    next_label: i18n.t("table.next").to_string(),
+                    on_page_change: move |page| query.write().page = page,
+                    on_page_size_change: move |size| query.write().set_page_size(size),
                 }
             }
         }
@@ -188,7 +203,7 @@ pub fn Tenants() -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::{SEARCH_DEBOUNCE_MS, TenantListQuery};
+    use super::{PAGE_SIZE, SEARCH_DEBOUNCE_MS, TenantListQuery};
 
     #[test]
     fn tenant_search_uses_a_short_debounce() {
@@ -200,6 +215,7 @@ mod tests {
         let mut query = TenantListQuery {
             search: "old".to_string(),
             page: 4,
+            page_size: PAGE_SIZE as u32,
         };
         query.commit_search("new".to_string());
         assert_eq!(query.search, "new");

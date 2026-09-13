@@ -36,6 +36,18 @@ impl UsageApi {
         self.client.get_json(&path, Some(token)).await
     }
 
+    /// 分页获取用量记录。
+    pub async fn get_my_usage_page(
+        &self,
+        params: &UsageQueryParams,
+        token: &str,
+    ) -> Result<UsagePage> {
+        let query = params.to_query_string();
+        self.client
+            .get_json(&format!("/api/v1/usage?{query}"), Some(token))
+            .await
+    }
+
     /// 获取用量统计
     pub async fn get_usage_stats(&self, token: &str) -> Result<UsageStats> {
         self.client
@@ -51,6 +63,8 @@ pub struct UsageQueryParams {
     pub end_date: Option<String>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
+    pub page: Option<i32>,
+    pub page_size: Option<i32>,
 }
 
 impl UsageQueryParams {
@@ -78,6 +92,16 @@ impl UsageQueryParams {
         self
     }
 
+    pub fn with_page(mut self, page: i32) -> Self {
+        self.page = Some(page);
+        self
+    }
+
+    pub fn with_page_size(mut self, page_size: i32) -> Self {
+        self.page_size = Some(page_size);
+        self
+    }
+
     pub fn to_query_string(&self) -> String {
         let mut params = Vec::new();
         if let Some(ref start) = self.start_date {
@@ -92,8 +116,23 @@ impl UsageQueryParams {
         if let Some(offset) = self.offset {
             params.push(format!("offset={}", offset));
         }
+        if let Some(page) = self.page {
+            params.push(format!("page={}", page));
+        }
+        if let Some(page_size) = self.page_size {
+            params.push(format!("page_size={}", page_size));
+        }
         params.join("&")
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsagePage {
+    pub records: Vec<UsageRecord>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
 }
 
 /// 用量记录

@@ -10,6 +10,7 @@ use crate::i18n::I18n;
 use crate::router::Route;
 use crate::services::{api_client::with_auto_refresh, monitoring_service};
 use crate::stores::{auth_store::AuthStore, user_store::UserStore};
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 use crate::views::shared::accounts::NoPermissionView;
 use crate::views::shared::system::SystemDiagnostics;
@@ -24,6 +25,19 @@ enum MonitoringData {
     },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct MonitoringRequestKey {
+    range: String,
+    custom_from: String,
+    custom_to: String,
+    status: String,
+    route: String,
+    cursor: String,
+    page_size: u32,
+    relative_to: chrono::DateTime<chrono::Utc>,
+    refresh_revision: u64,
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum MonitoringView {
     Overview,
@@ -32,6 +46,14 @@ enum MonitoringView {
 
 fn aria_current(active: MonitoringView, view: MonitoringView) -> &'static str {
     if active == view { "page" } else { "false" }
+}
+
+fn should_show_monitoring_pagination(
+    has_items: bool,
+    has_next_cursor: bool,
+    current_page: u32,
+) -> bool {
+    has_items || has_next_cursor || current_page > 1
 }
 
 #[component]
@@ -122,6 +144,9 @@ pub fn Monitoring() -> Element {
     let mut refresh_tick = use_signal(|| 0u64);
     let mut selected_request = use_signal(String::new);
     let mut cursor = use_signal(String::new);
+    let mut cursor_history = use_signal(Vec::<String>::new);
+    let mut monitoring_page = use_signal(|| 1u32);
+    let mut monitoring_page_size = use_signal(|| 50u32);
     let mut relative_to = use_signal(chrono::Utc::now);
     let mut probe_message = use_signal(String::new);
     let mut probing = use_signal(|| false);
@@ -143,24 +168,29 @@ pub fn Monitoring() -> Element {
     });
 
     let console = use_resource(move || {
-        let selected_range = range();
-        let selected_from = custom_from();
-        let selected_to = custom_to();
-        let selected_status = status_filter();
-        let selected_route = route_filter();
-        let selected_cursor = cursor();
-        let selected_relative_to = relative_to();
-        let _ = refresh_tick();
+        let request_key = MonitoringRequestKey {
+            range: range(),
+            custom_from: custom_from(),
+            custom_to: custom_to(),
+            status: status_filter(),
+            route: route_filter(),
+            cursor: cursor(),
+            page_size: monitoring_page_size(),
+            relative_to: relative_to(),
+            refresh_revision: refresh_tick(),
+        };
+        let query_key = request_key.clone();
         async move {
-            with_auto_refresh(auth_store, move |token| {
-                let query = build_query(
-                    &selected_range,
-                    &selected_from,
-                    &selected_to,
-                    &selected_status,
-                    &selected_route,
-                    &selected_cursor,
-                    selected_relative_to,
+            let result = with_auto_refresh(auth_store, move |token| {
+                let query = build_query_with_page_size(
+                    &query_key.range,
+                    &query_key.custom_from,
+                    &query_key.custom_to,
+                    &query_key.status,
+                    &query_key.route,
+                    &query_key.cursor,
+                    query_key.relative_to,
+                    query_key.page_size,
                 );
                 async move {
                     match monitoring_service::summary(&token, &query).await {
@@ -178,14 +208,16 @@ pub fn Monitoring() -> Element {
                     }
                 }
             })
-            .await
+            .await;
+            KeyedResourceValue::new(request_key, result)
         }
     });
 
     let detail = use_resource(move || {
         let key = detail_resource_key(&selected_request(), refresh_tick());
+        let request_key = key.clone();
         async move {
-            match key {
+            let result = match key {
                 None => None,
                 Some((id, _refresh_generation)) => Some(
                     with_auto_refresh(auth_store, move |token| {
@@ -194,7 +226,8 @@ pub fn Monitoring() -> Element {
                     })
                     .await,
                 ),
-            }
+            };
+            KeyedResourceValue::new(request_key, result)
         }
     });
 
@@ -225,6 +258,29 @@ pub fn Monitoring() -> Element {
         });
     };
 
+    // Dioxus keeps the last successful resource value while a dependency
+    // change is loading. Require both Ready and an exact request-key match so
+    // old rows/cursors cannot be exposed even in the render before the
+    // dependency watcher marks the resource Pending.
+    let current_console = move || {
+        let request_key = MonitoringRequestKey {
+            range: range(),
+            custom_from: custom_from(),
+            custom_to: custom_to(),
+            status: status_filter(),
+            route: route_filter(),
+            cursor: cursor(),
+            page_size: monitoring_page_size(),
+            relative_to: relative_to(),
+            refresh_revision: refresh_tick(),
+        };
+        current_keyed_value(&request_key, console.state().cloned(), console())
+    };
+    let console_value = current_console();
+    let console_pending = console_value.is_none();
+    let detail_request_key = detail_resource_key(&selected_request(), refresh_tick());
+    let detail_value = current_keyed_value(&detail_request_key, detail.state().cloned(), detail());
+
     rsx! {
         div { class: "page-container monitoring-page",
             PageHeader {
@@ -240,6 +296,8 @@ pub fn Monitoring() -> Element {
                     onchange: move |event| {
                         range.set(event.value());
                         cursor.set(String::new());
+                        cursor_history.write().clear();
+                        monitoring_page.set(1);
                         relative_to.set(chrono::Utc::now());
                     },
                     option { value: "1h", {i18n.t("monitoring.range_1h")} }
@@ -257,6 +315,8 @@ pub fn Monitoring() -> Element {
                             onchange: move |event| {
                                 custom_from.set(event.value());
                                 cursor.set(String::new());
+                                cursor_history.write().clear();
+                                monitoring_page.set(1);
                                 relative_to.set(chrono::Utc::now());
                             },
                         }
@@ -268,6 +328,8 @@ pub fn Monitoring() -> Element {
                             onchange: move |event| {
                                 custom_to.set(event.value());
                                 cursor.set(String::new());
+                                cursor_history.write().clear();
+                                monitoring_page.set(1);
                                 relative_to.set(chrono::Utc::now());
                             },
                         }
@@ -279,6 +341,8 @@ pub fn Monitoring() -> Element {
                     onchange: move |event| {
                         status_filter.set(event.value());
                         cursor.set(String::new());
+                        cursor_history.write().clear();
+                        monitoring_page.set(1);
                         relative_to.set(chrono::Utc::now());
                     },
                     option { value: "", {i18n.t("monitoring.all_statuses")} }
@@ -294,6 +358,8 @@ pub fn Monitoring() -> Element {
                     onchange: move |event| {
                         route_filter.set(event.value());
                         cursor.set(String::new());
+                        cursor_history.write().clear();
+                        monitoring_page.set(1);
                         relative_to.set(chrono::Utc::now());
                     },
                     option { value: "", {i18n.t("monitoring.all_routes")} }
@@ -311,6 +377,8 @@ pub fn Monitoring() -> Element {
                     r#type: "button",
                     onclick: move |_| {
                         cursor.set(String::new());
+                        cursor_history.write().clear();
+                        monitoring_page.set(1);
                         relative_to.set(chrono::Utc::now());
                         refresh_tick += 1;
                     },
@@ -344,7 +412,7 @@ pub fn Monitoring() -> Element {
                 oncancel: move |_| probe_confirm_open.set(false),
             }
 
-            match console() {
+            match console_value {
                 None => rsx! { p { class: "text-secondary monitoring-load-state", {i18n.t("table.loading")} } },
                 Some(Err(ref error)) => rsx! { div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}: {error}" } },
                 Some(Ok(MonitoringData::Unified { ref summary, ref requests, ref health, ref updated_at })) => rsx! {
@@ -386,21 +454,72 @@ pub fn Monitoring() -> Element {
                             }
                         }
                     }
-                    if let Some(ref next) = requests.next_cursor {
-                        button {
-                            class: "btn btn-secondary monitoring-next-page",
-                            r#type: "button",
-                            onclick: {
-                                let next = next.clone();
-                                move |_| cursor.set(next.clone())
-                            },
-                            {i18n.t("monitoring.next_page")}
+                    if should_show_monitoring_pagination(
+                        !requests.items.is_empty(),
+                        requests.next_cursor.is_some(),
+                        monitoring_page(),
+                    ) {
+                        div { class: "pagination monitoring-pagination",
+                            span { class: "pagination-summary",
+                                {i18n.t_with_args("monitoring.page", &[("page", &monitoring_page().to_string())])}
+                            }
+                            label { class: "pagination-page-size",
+                                {i18n.t("common.pagination_page_size")}
+                                select {
+                                    value: "{monitoring_page_size}",
+                                    onchange: move |event| {
+                                        if let Ok(size) = event.value().parse::<u32>() {
+                                            monitoring_page_size.set(size);
+                                            cursor.set(String::new());
+                                            cursor_history.write().clear();
+                                            monitoring_page.set(1);
+                                        }
+                                    },
+                                    for size in [20u32, 50, 100] {
+                                        option { value: "{size}", "{size} {i18n.t(\"pricing.items_suffix\")}" }
+                                    }
+                                }
+                            }
+                            button {
+                                class: "btn btn-secondary monitoring-prev-page",
+                                r#type: "button",
+                                disabled: console_pending || cursor_history.read().is_empty(),
+                                onclick: move |_| {
+                                    if current_console().is_none() {
+                                        return;
+                                    }
+                                    if let Some(previous) = cursor_history.write().pop() {
+                                        cursor.set(previous);
+                                        monitoring_page.set(monitoring_page().saturating_sub(1));
+                                    }
+                                },
+                                {i18n.t("table.previous")}
+                            }
+                            if let Some(ref next) = requests.next_cursor {
+                                button {
+                                    class: "btn btn-secondary monitoring-next-page",
+                                    r#type: "button",
+                                    disabled: console_pending,
+                                    onclick: {
+                                        let next = next.clone();
+                                        move |_| {
+                                            if current_console().is_none() {
+                                                return;
+                                            }
+                                            cursor_history.write().push(cursor());
+                                            cursor.set(next.clone());
+                                            monitoring_page += 1;
+                                        }
+                                    },
+                                    {i18n.t("monitoring.next_page")}
+                                }
+                            }
                         }
                     }
                     MonitoringHealth { data: health.clone() }
                 },
             }
-            match detail() {
+            match detail_value {
                 Some(Some(Ok(ref value))) => rsx! {
                     div { class: "monitoring-detail card",
                         h2 { {i18n.t("monitoring.request_detail")} }
@@ -436,6 +555,7 @@ fn detail_resource_key(request_id: &str, refresh_generation: u64) -> Option<(Str
     (!request_id.is_empty()).then(|| (request_id.to_string(), refresh_generation))
 }
 
+#[allow(dead_code)]
 fn build_query(
     range: &str,
     custom_from: &str,
@@ -444,6 +564,29 @@ fn build_query(
     route: &str,
     cursor: &str,
     relative_to: chrono::DateTime<chrono::Utc>,
+) -> MonitoringQuery {
+    build_query_with_page_size(
+        range,
+        custom_from,
+        custom_to,
+        status,
+        route,
+        cursor,
+        relative_to,
+        50,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_query_with_page_size(
+    range: &str,
+    custom_from: &str,
+    custom_to: &str,
+    status: &str,
+    route: &str,
+    cursor: &str,
+    relative_to: chrono::DateTime<chrono::Utc>,
+    page_size: u32,
 ) -> MonitoringQuery {
     let hours = match range {
         "6h" => 6,
@@ -465,7 +608,7 @@ fn build_query(
         status: (!status.is_empty()).then(|| status.to_string()),
         route_type: (!route.is_empty()).then(|| route.to_string()),
         cursor: (!cursor.is_empty()).then(|| cursor.to_string()),
-        limit: Some(50),
+        limit: Some(page_size.clamp(1, 100) as u64),
         bucket: Some(
             if hours == 24 || range == "custom" {
                 "1h"
@@ -966,14 +1109,30 @@ fn format_duration(ms: Option<i64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MonitoringView, aria_current, build_query, detail_resource_key, format_currency_amounts,
-        refreshed_relative_to,
+        MonitoringRequestKey, MonitoringView, aria_current, build_query, detail_resource_key,
+        format_currency_amounts, refreshed_relative_to, should_show_monitoring_pagination,
     };
+    use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
+    use dioxus::prelude::UseResourceState;
 
     fn timestamp(value: &str) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::parse_from_rfc3339(value)
             .unwrap()
             .with_timezone(&chrono::Utc)
+    }
+
+    fn console_request_key(cursor: &str, page_size: u32) -> MonitoringRequestKey {
+        MonitoringRequestKey {
+            range: "1h".to_string(),
+            custom_from: String::new(),
+            custom_to: String::new(),
+            status: String::new(),
+            route: String::new(),
+            cursor: cursor.to_string(),
+            page_size,
+            relative_to: timestamp("2026-08-23T12:00:00Z"),
+            refresh_revision: 1,
+        }
     }
 
     #[test]
@@ -999,6 +1158,41 @@ mod tests {
             aria_current(MonitoringView::Diagnostics, MonitoringView::Diagnostics),
             "page"
         );
+    }
+
+    #[test]
+    fn cursor_navigation_requires_a_ready_value_for_the_exact_request() {
+        let loaded_key = console_request_key("", 50);
+        let loaded = KeyedResourceValue::new(loaded_key.clone(), ());
+
+        assert_eq!(
+            current_keyed_value(&loaded_key, UseResourceState::Pending, Some(loaded.clone())),
+            None
+        );
+        assert_eq!(
+            current_keyed_value(
+                &console_request_key("next-cursor", 50),
+                UseResourceState::Ready,
+                Some(loaded.clone()),
+            ),
+            None
+        );
+        assert_eq!(
+            current_keyed_value(
+                &console_request_key("", 20),
+                UseResourceState::Ready,
+                Some(loaded),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn page_size_selector_is_visible_for_non_empty_single_page_results() {
+        assert!(should_show_monitoring_pagination(true, false, 1));
+        assert!(should_show_monitoring_pagination(false, true, 1));
+        assert!(should_show_monitoring_pagination(false, false, 2));
+        assert!(!should_show_monitoring_pagination(false, false, 1));
     }
 
     #[test]

@@ -539,16 +539,42 @@
 .pagination {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
-  justify-content: flex-end;
+  gap: var(--space-md);
+  justify-content: space-between;
   padding: var(--space-sm) 0;
+  width: 100%;
 }
 
+.pagination-summary,
 .pagination-info {
   font-size: var(--font-size-sm);
   color: var(--text-secondary);
-  min-width: 60px;
-  text-align: center;
+  white-space: nowrap;
+}
+
+.pagination-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.pagination-page-size {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.pagination-page-size select {
+  min-width: 64px;
+  padding: 5px 24px 5px 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
 }
 
 /* ── Table empty state ───────────────────────── */

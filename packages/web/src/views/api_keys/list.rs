@@ -7,6 +7,7 @@ use crate::services::{api_client::with_auto_refresh, api_key_service, model_serv
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
 use crate::utils::on_copy;
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 use dioxus::prelude::*;
 use ui::{
@@ -43,6 +44,7 @@ pub fn ApiKeyList() -> Element {
     let mut delete_candidate = use_signal(|| Option::<(String, String)>::None);
     let mut delete_modal_open = use_signal(|| false);
     let mut page = use_signal(|| 1u32);
+    let mut page_size = use_signal(|| PAGE_SIZE as u32);
     // 是否显示已撤销的 Key（默认不显示）
     let mut include_revoked = use_signal(|| false);
     // 复制状态
@@ -71,10 +73,12 @@ pub fn ApiKeyList() -> Element {
 
     // 拉取 key 列表
     let mut keys = use_resource(move || async move {
-        with_auto_refresh(auth_store, |token| async move {
-            api_key_service::list(include_revoked(), &token).await
+        let request_key = (include_revoked(), page(), page_size());
+        let result = with_auto_refresh(auth_store, |token| async move {
+            api_key_service::list_page(request_key.0, request_key.1, request_key.2, &token).await
         })
-        .await
+        .await;
+        KeyedResourceValue::new(request_key, result)
     });
 
     let on_create = move |evt: Event<FormData>| {
@@ -442,18 +446,24 @@ pub fn ApiKeyList() -> Element {
                 },
             }
 
-            match keys() {
+            {
+                let request_key = (include_revoked(), page(), page_size());
+                let current_keys = current_keyed_value(
+                    &request_key,
+                    keys.state().cloned(),
+                    keys(),
+                );
+                match current_keys {
                 None => rsx! {
                     div { class: "loading-state", {i18n.t("table.loading")} }
                 },
                 Some(Err(e)) => rsx! {
                     div { class: "alert alert-error", "{i18n.t(\"api_keys.loading_failed\")}：{e}" }
                 },
-                Some(Ok(list)) => {
-                    let total = list.len();
-                    let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
-                    let start = (page() as usize - 1) * PAGE_SIZE;
-                    let paged: Vec<_> = list.iter().skip(start).take(PAGE_SIZE).collect();
+                Some(Ok(result)) => {
+                    let total = result.total.max(0) as usize;
+                    let total_pages = result.total_pages.max(1) as u32;
+                    let paged = &result.keys;
                     if paged.is_empty() && total == 0 {
                         rsx! {
                             div { class: "kc-api-table-panel",
@@ -474,6 +484,29 @@ pub fn ApiKeyList() -> Element {
                                             TableHead { "" }
                                         }
                                     }
+                                }
+                                Pagination {
+                                    current: page(),
+                                    total_pages,
+                                    total: total as u64,
+                                    page_size: page_size(),
+                                    summary: i18n.t_with_args(
+                                        "common.pagination_summary",
+                                        &[
+                                            ("total", &total.to_string()),
+                                            ("current", &page().to_string()),
+                                            ("total_pages", &total_pages.to_string()),
+                                        ],
+                                    ),
+                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                                    previous_label: i18n.t("table.previous").to_string(),
+                                    next_label: i18n.t("table.next").to_string(),
+                                    on_page_change: move |p| page.set(p),
+                                    on_page_size_change: move |size| {
+                                        page_size.set(size);
+                                        page.set(1);
+                                    },
                                 }
                             }
                         }
@@ -539,21 +572,69 @@ pub fn ApiKeyList() -> Element {
                                         }
                                     }
                                 }
-                                div { class: "pagination kc-api-pagination",
-                                    span { class: "pagination-info", "{i18n.t(\"dashboard.total\")} {total}" }
+                                div { class: "kc-api-pagination",
                                     Pagination {
                                         current: page(),
                                         total_pages,
+                                        total: total as u64,
+                                        page_size: page_size(),
+                                        summary: i18n.t_with_args(
+                                            "common.pagination_summary",
+                                            &[
+                                                ("total", &total.to_string()),
+                                                ("current", &page().to_string()),
+                                                ("total_pages", &total_pages.to_string()),
+                                            ],
+                                        ),
+                                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                        page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
                                         previous_label: i18n.t("table.previous").to_string(),
                                         next_label: i18n.t("table.next").to_string(),
                                         on_page_change: move |p| page.set(p),
+                                        on_page_size_change: move |size| {
+                                            page_size.set(size);
+                                            page.set(1);
+                                        },
                                     }
                                 }
                             }
                         }
                     }
                 }
+                }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeyedResourceValue, current_keyed_value};
+    use dioxus::prelude::UseResourceState;
+
+    #[test]
+    fn api_key_rows_are_stale_when_any_list_input_changes() {
+        let loaded = KeyedResourceValue::new((false, 1u32, 20u32), vec!["old row"]);
+
+        assert_eq!(
+            current_keyed_value(
+                &(false, 2u32, 20u32),
+                UseResourceState::Ready,
+                Some(loaded.clone()),
+            ),
+            None
+        );
+        assert_eq!(
+            current_keyed_value(
+                &(false, 1u32, 50u32),
+                UseResourceState::Ready,
+                Some(loaded.clone()),
+            ),
+            None
+        );
+        assert_eq!(
+            current_keyed_value(&(true, 1u32, 20u32), UseResourceState::Ready, Some(loaded),),
+            None
+        );
     }
 }

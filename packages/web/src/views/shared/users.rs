@@ -240,7 +240,7 @@ fn manual_balance_operation_api_namespace(config: &client_api::ClientConfig) -> 
 }
 
 type BalanceDetailsLoadResult = Result<Option<UserBalanceReservationsResponse>, ClientError>;
-type BalanceDetailsRequestKey = (Option<String>, Option<String>);
+type BalanceDetailsRequestKey = (Option<String>, Option<String>, u64);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BalanceReservationPagination {
@@ -324,6 +324,7 @@ fn current_balance_details_result(
 struct UserListQuery {
     search: String,
     page: u32,
+    page_size: u32,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -1139,6 +1140,7 @@ impl Default for UserListQuery {
         Self {
             search: String::new(),
             page: 1,
+            page_size: PAGE_SIZE as u32,
         }
     }
 }
@@ -1148,6 +1150,11 @@ impl UserListQuery {
     /// 被带入新查询。搜索词与页码放在同一状态中也只会触发一次资源重载。
     fn commit_search(&mut self, search: String) {
         self.search = search;
+        self.page = 1;
+    }
+
+    fn set_page_size(&mut self, page_size: u32) {
+        self.page_size = page_size;
         self.page = 1;
     }
 }
@@ -1229,6 +1236,7 @@ fn AdminUsersView() -> Element {
     let mut release_reason = use_signal(String::new);
     let mut release_saving = use_signal(|| false);
     let mut balance_reservation_pagination = use_signal(BalanceReservationPagination::default);
+    let mut balance_reservation_page_size = use_signal(|| BALANCE_RESERVATION_PAGE_SIZE);
 
     use_effect(move || {
         let next_search = search();
@@ -1242,16 +1250,17 @@ fn AdminUsersView() -> Element {
 
     let mut users_resource = use_resource(move || {
         let current_query = query();
+        let request_key = current_query.clone();
         async move {
             let params = UserQueryParams::new()
-                .with_page_size(PAGE_SIZE as i64)
-                .with_page(current_query.page as i64);
-            let params = if !current_query.search.is_empty() {
-                params.with_search(current_query.search)
+                .with_page_size(request_key.page_size as i64)
+                .with_page(request_key.page as i64);
+            let params = if !request_key.search.is_empty() {
+                params.with_search(request_key.search.clone())
             } else {
                 params
             };
-            with_auto_refresh(auth_store, move |token| {
+            let result = with_auto_refresh(auth_store, move |token| {
                 let params = params.clone();
                 async move {
                     let client = get_client();
@@ -1260,18 +1269,38 @@ fn AdminUsersView() -> Element {
                         .await
                 }
             })
-            .await
+            .await;
+            KeyedResourceValue::new(request_key, result)
         }
     });
+
+    let users_request_key = query();
+    let users_result = current_keyed_value(
+        &users_request_key,
+        users_resource.state().cloned(),
+        users_resource(),
+    );
+    let users_response = users_result
+        .as_ref()
+        .and_then(|result| result.as_ref().ok());
+    let paged_users: &[UserDetail] = users_response
+        .map(|response| response.users.as_slice())
+        .unwrap_or_default();
+    let total_items = users_response.map(|response| response.total).unwrap_or(0);
+    let total_pages = users_response
+        .map(|response| response.total_pages.max(1) as u32)
+        .unwrap_or(1);
 
     // 弹窗打开后重新从写库语义的余额服务读取拆分，避免使用用户列表的旧快照。
     let mut balance_details_resource = use_resource(move || {
         let request_key = (
             balance_user().map(|user| user.id),
             balance_reservation_pagination().current_cursor(),
+            balance_reservation_page_size(),
         );
         let selected_user_id = request_key.0.clone();
         let selected_cursor = request_key.1.clone();
+        let reservation_page_size = balance_reservation_page_size();
         let auth = auth_store.clone();
         async move {
             let result = if let Some(user_id) = selected_user_id {
@@ -1284,7 +1313,7 @@ fn AdminUsersView() -> Element {
                             .list_user_balance_reservations_page(
                                 &user_id,
                                 cursor.as_deref(),
-                                Some(BALANCE_RESERVATION_PAGE_SIZE),
+                                Some(reservation_page_size),
                                 &token,
                             )
                             .await
@@ -1299,31 +1328,11 @@ fn AdminUsersView() -> Element {
         }
     });
 
-    let paged_users = move || -> Vec<UserDetail> {
-        match users_resource() {
-            Some(Ok(ref resp)) => resp.users.clone(),
-            _ => vec![],
-        }
-    };
-
-    let total_items = move || -> i64 {
-        match users_resource() {
-            Some(Ok(ref resp)) => resp.total,
-            _ => 0,
-        }
-    };
-
-    let total_pages = move || -> u32 {
-        match users_resource() {
-            Some(Ok(ref resp)) => resp.total_pages.max(1) as u32,
-            _ => 1,
-        }
-    };
-
     let current_balance_details = move || {
         let request_key = (
             balance_user().map(|user| user.id),
             balance_reservation_pagination().current_cursor(),
+            balance_reservation_page_size(),
         );
         current_balance_details_result(
             &request_key,
@@ -1806,10 +1815,10 @@ fn AdminUsersView() -> Element {
 
         div { class: "card",
             {
-                let (is_empty, empty_text) = match users_resource() {
+                let (is_empty, empty_text) = match users_result.as_ref().map(|r| r.as_ref()) {
                     None => (true, i18n.t("table.loading")),
                     Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                    Some(Ok(_)) if paged_users().is_empty() => (true, i18n.t("users.empty")),
+                    Some(Ok(_)) if paged_users.is_empty() => (true, i18n.t("users.empty")),
                     _ => (false, ""),
                 };
                 rsx! {
@@ -1828,7 +1837,7 @@ fn AdminUsersView() -> Element {
                             }
                         }
                         tbody {
-                            for u in paged_users().iter() {
+                            for u in paged_users.iter() {
                                 tr {
                                     td {
                                         div { class: "user-cell",
@@ -1926,17 +1935,29 @@ fn AdminUsersView() -> Element {
             }
         }
 
-        div { class: "pagination",
-            span { class: "pagination-info",
-                "{i18n.t(\"common.total_items\")} {total_items()} {i18n.t(\"pricing.items_suffix\")}"
-            }
-            Pagination {
-                current: query().page,
-                total_pages: total_pages(),
+        {
+            let current_query = query();
+            let total = total_items;
+            rsx! { Pagination {
+                current: current_query.page,
+                total_pages,
+                total: total as u64,
+                page_size: current_query.page_size,
+                summary: i18n.t_with_args(
+                    "common.pagination_summary",
+                    &[
+                        ("total", &total.to_string()),
+                        ("current", &current_query.page.to_string()),
+                        ("total_pages", &total_pages.to_string()),
+                    ],
+                ),
+                page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
                 previous_label: i18n.t("table.previous").to_string(),
                 next_label: i18n.t("table.next").to_string(),
                 on_page_change: move |p| query.write().page = p,
-            }
+                on_page_size_change: move |size| query.write().set_page_size(size),
+            } }
         }
 
         // ── 编辑用户弹窗 ──────────────────────────────────────────
@@ -2260,7 +2281,7 @@ fn AdminUsersView() -> Element {
                                             }
                                         }
                                     }
-                                    if can_go_back || next_cursor.is_some() {
+                                    if can_go_back || next_cursor.is_some() || !details.reservations.is_empty() {
                                         div {
                                             class: "pagination",
                                             style: "margin-top: 12px;",
@@ -2279,11 +2300,26 @@ fn AdminUsersView() -> Element {
                                                 },
                                                 {i18n.t("users.balance_reservations_previous_page")}
                                             }
-                                            span { class: "pagination-info",
+                                            span { class: "pagination-summary",
                                                 {i18n.t_with_args(
                                                     "users.balance_reservations_page",
                                                     &[("page", &reservation_page_number.to_string())],
                                                 )}
+                                            }
+                                            label { class: "pagination-page-size",
+                                                {i18n.t("common.pagination_page_size")}
+                                                select {
+                                                    value: "{balance_reservation_page_size}",
+                                                    onchange: move |event| {
+                                                        if let Ok(size) = event.value().parse::<u64>() {
+                                                            balance_reservation_page_size.set(size);
+                                                            balance_reservation_pagination.write().reset();
+                                                        }
+                                                    },
+                                                    for size in [10u64, 20, 50, 100] {
+                                                        option { value: "{size}", "{size} {i18n.t(\"pricing.items_suffix\")}" }
+                                                    }
+                                                }
                                             }
                                             if let Some(next_cursor) = next_cursor {
                                                 Button {
@@ -2416,11 +2452,12 @@ fn AdminUsersView() -> Element {
 #[cfg(test)]
 mod search_tests {
     use super::{
-        BalanceDetailsLoadResult, BalanceReservationPagination, ManualBalanceBindingState,
-        ManualBalanceOperationIdentity, ManualBalanceOperationPersistence,
-        ManualBalanceOperationScope, ManualBalanceOperationStorageError,
-        ManualBalanceOperationTracker, PersistedManualBalanceBinding, SEARCH_DEBOUNCE_MS,
-        UserListQuery, current_balance_details_result, finalize_manual_balance_binding_in_snapshot,
+        BalanceDetailsLoadResult, BalanceDetailsRequestKey, BalanceReservationPagination,
+        ManualBalanceBindingState, ManualBalanceOperationIdentity,
+        ManualBalanceOperationPersistence, ManualBalanceOperationScope,
+        ManualBalanceOperationStorageError, ManualBalanceOperationTracker, PAGE_SIZE,
+        PersistedManualBalanceBinding, SEARCH_DEBOUNCE_MS, UserListQuery,
+        current_balance_details_result, finalize_manual_balance_binding_in_snapshot,
         is_conflict_error, manual_balance_binding_from_snapshot,
         manual_balance_operation_api_namespace, normalize_manual_balance_reason,
         persist_manual_balance_binding_in_snapshot, rotate_manual_balance_binding_in_snapshot,
@@ -2772,9 +2809,13 @@ mod search_tests {
     fn loaded_balance_details(
         request_user_id: &str,
         response_user_id: &str,
-    ) -> KeyedResourceValue<(Option<String>, Option<String>), BalanceDetailsLoadResult> {
+    ) -> KeyedResourceValue<BalanceDetailsRequestKey, BalanceDetailsLoadResult> {
         KeyedResourceValue::new(
-            (Some(request_user_id.to_string()), None),
+            (
+                Some(request_user_id.to_string()),
+                None,
+                super::BALANCE_RESERVATION_PAGE_SIZE,
+            ),
             Ok(Some(balance_details(response_user_id))),
         )
     }
@@ -3104,6 +3145,7 @@ mod search_tests {
         let mut query = UserListQuery {
             search: "old term".to_string(),
             page: 4,
+            page_size: PAGE_SIZE as u32,
         };
 
         // 模拟用户在防抖计时期间又点击了分页。
@@ -3115,6 +3157,7 @@ mod search_tests {
             UserListQuery {
                 search: "new term".to_string(),
                 page: 1,
+                page_size: PAGE_SIZE as u32,
             }
         );
     }
@@ -3148,7 +3191,11 @@ mod search_tests {
 
     #[test]
     fn pending_balance_resource_does_not_expose_its_retained_value() {
-        let current_request = (Some("user-1".to_string()), None);
+        let current_request = (
+            Some("user-1".to_string()),
+            None,
+            super::BALANCE_RESERVATION_PAGE_SIZE,
+        );
 
         assert!(
             current_balance_details_result(
@@ -3162,7 +3209,11 @@ mod search_tests {
 
     #[test]
     fn balance_resource_rejects_a_previous_or_mismatched_user() {
-        let current_request = (Some("user-2".to_string()), None);
+        let current_request = (
+            Some("user-2".to_string()),
+            None,
+            super::BALANCE_RESERVATION_PAGE_SIZE,
+        );
 
         assert!(
             current_balance_details_result(
@@ -3194,12 +3245,17 @@ mod search_tests {
     #[test]
     fn balance_resource_rejects_the_retained_value_from_another_cursor() {
         let first_page = KeyedResourceValue::new(
-            (Some("user-1".to_string()), None),
+            (
+                Some("user-1".to_string()),
+                None,
+                super::BALANCE_RESERVATION_PAGE_SIZE,
+            ),
             Ok(Some(balance_details("user-1"))),
         );
         let second_page_request = (
             Some("user-1".to_string()),
             Some("opaque-page-2".to_string()),
+            super::BALANCE_RESERVATION_PAGE_SIZE,
         );
 
         assert!(
@@ -3210,6 +3266,26 @@ mod search_tests {
             )
             .is_none(),
             "a cursor change must hide the resource's retained previous page"
+        );
+    }
+
+    #[test]
+    fn balance_resource_rejects_the_retained_value_from_another_page_size() {
+        let first_page = loaded_balance_details("user-1", "user-1");
+        let resized_request = (
+            Some("user-1".to_string()),
+            None,
+            super::BALANCE_RESERVATION_PAGE_SIZE * 2,
+        );
+
+        assert!(
+            current_balance_details_result(
+                &resized_request,
+                UseResourceState::Ready,
+                Some(first_page),
+            )
+            .is_none(),
+            "a page-size change must hide the resource's retained previous page"
         );
     }
 

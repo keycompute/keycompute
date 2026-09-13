@@ -178,6 +178,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.time", "时间");
     m.insert("common.total_items", "共");
     m.insert("common.range", "范围");
+    m.insert(
+        "common.pagination_summary",
+        "共 {total} 条，第 {current}/{total_pages} 页",
+    );
+    m.insert("common.pagination_page_size", "每页");
     m.insert("common.created_at_label", "创建于");
     m.insert("common.load_failed", "加载失败");
     m.insert(
@@ -1191,6 +1196,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.status", "状态");
     m.insert("monitoring.duration_ttft", "总耗时 / TTFT");
     m.insert("monitoring.next_page", "下一页");
+    m.insert("monitoring.page", "第 {page} 页");
     m.insert("monitoring.request_detail", "请求详情");
     m.insert("monitoring.tenant", "租户");
     m.insert("monitoring.user", "用户");

@@ -11,13 +11,15 @@ const PAGE_SIZE: u64 = 20;
 struct NodeGatewayPageKey {
     refresh_revision: u64,
     page: u32,
+    page_size: u64,
 }
 
 impl NodeGatewayPageKey {
-    fn new(refresh_revision: u64, page: u32) -> Self {
+    fn new(refresh_revision: u64, page: u32, page_size: u64) -> Self {
         Self {
             refresh_revision,
             page,
+            page_size,
         }
     }
 }
@@ -52,6 +54,7 @@ pub fn NodeGateway() -> Element {
     let mut token_page = use_signal(|| 1u32);
     let mut node_page = use_signal(|| 1u32);
     let mut task_page = use_signal(|| 1u32);
+    let mut page_size = use_signal(|| PAGE_SIZE);
     // 审批弹窗控制
     let mut modal_open = use_signal(|| false);
     let mut modal_token_id = use_signal(String::new);
@@ -80,11 +83,13 @@ pub fn NodeGateway() -> Element {
     let pending_tokens = use_resource(move || {
         let refresh_revision = tokens_key();
         let current_page = token_page();
+        let current_page_size = page_size();
         async move {
-            let request_key = NodeGatewayPageKey::new(refresh_revision, current_page);
+            let request_key =
+                NodeGatewayPageKey::new(refresh_revision, current_page, current_page_size);
             let params = PendingTokenQueryParams::default()
                 .with_page(current_page as u64)
-                .with_page_size(PAGE_SIZE);
+                .with_page_size(current_page_size);
             let result = with_auto_refresh(auth_store, move |token| {
                 let params = params.clone();
                 async move { node_gateway_service::list_pending_tokens(&params, &token).await }
@@ -97,11 +102,13 @@ pub fn NodeGateway() -> Element {
     let nodes = use_resource(move || {
         let refresh_revision = overview_key();
         let current_page = node_page();
+        let current_page_size = page_size();
         async move {
-            let request_key = NodeGatewayPageKey::new(refresh_revision, current_page);
+            let request_key =
+                NodeGatewayPageKey::new(refresh_revision, current_page, current_page_size);
             let params = NodeGatewayListQueryParams::default()
                 .with_page(current_page as u64)
-                .with_page_size(PAGE_SIZE);
+                .with_page_size(current_page_size);
             let result = with_auto_refresh(auth_store, move |token| {
                 let params = params.clone();
                 async move { node_gateway_service::list_nodes(&params, &token).await }
@@ -114,11 +121,13 @@ pub fn NodeGateway() -> Element {
     let tasks = use_resource(move || {
         let refresh_revision = overview_key();
         let current_page = task_page();
+        let current_page_size = page_size();
         async move {
-            let request_key = NodeGatewayPageKey::new(refresh_revision, current_page);
+            let request_key =
+                NodeGatewayPageKey::new(refresh_revision, current_page, current_page_size);
             let params = NodeGatewayListQueryParams::default()
                 .with_page(current_page as u64)
-                .with_page_size(PAGE_SIZE);
+                .with_page_size(current_page_size);
             let result = with_auto_refresh(auth_store, move |token| {
                 let params = params.clone();
                 async move { node_gateway_service::list_tasks(&params, &token).await }
@@ -238,17 +247,17 @@ pub fn NodeGateway() -> Element {
     };
 
     let pending_tokens_result = current_keyed_value(
-        &NodeGatewayPageKey::new(tokens_key(), token_page()),
+        &NodeGatewayPageKey::new(tokens_key(), token_page(), page_size()),
         pending_tokens.state().cloned(),
         pending_tokens(),
     );
     let nodes_result = current_keyed_value(
-        &NodeGatewayPageKey::new(overview_key(), node_page()),
+        &NodeGatewayPageKey::new(overview_key(), node_page(), page_size()),
         nodes.state().cloned(),
         nodes(),
     );
     let tasks_result = current_keyed_value(
-        &NodeGatewayPageKey::new(overview_key(), task_page()),
+        &NodeGatewayPageKey::new(overview_key(), task_page(), page_size()),
         tasks.state().cloned(),
         tasks(),
     );
@@ -536,9 +545,27 @@ pub fn NodeGateway() -> Element {
                                 Pagination {
                                     current: token_page(),
                                     total_pages: result.total_pages.max(1) as u32,
+                                    total: result.total,
+                                    page_size: page_size() as u32,
+                                    summary: i18n.t_with_args(
+                                        "common.pagination_summary",
+                                        &[
+                                            ("total", &result.total.to_string()),
+                                            ("current", &token_page().to_string()),
+                                            ("total_pages", &result.total_pages.max(1).to_string()),
+                                        ],
+                                    ),
+                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
                                     previous_label: i18n.t("table.previous").to_string(),
                                     next_label: i18n.t("table.next").to_string(),
                                     on_page_change: move |page| token_page.set(page),
+                                    on_page_size_change: move |size| {
+                                        page_size.set(size as u64);
+                                        token_page.set(1);
+                                        node_page.set(1);
+                                        task_page.set(1);
+                                    },
                                 }
                             },
                         }
@@ -658,9 +685,27 @@ pub fn NodeGateway() -> Element {
                                 Pagination {
                                     current: node_page(),
                                     total_pages: result.total_pages.max(1) as u32,
+                                    total: result.total,
+                                    page_size: page_size() as u32,
+                                    summary: i18n.t_with_args(
+                                        "common.pagination_summary",
+                                        &[
+                                            ("total", &result.total.to_string()),
+                                            ("current", &node_page().to_string()),
+                                            ("total_pages", &result.total_pages.max(1).to_string()),
+                                        ],
+                                    ),
+                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
                                     previous_label: i18n.t("table.previous").to_string(),
                                     next_label: i18n.t("table.next").to_string(),
                                     on_page_change: move |page| node_page.set(page),
+                                    on_page_size_change: move |size| {
+                                        page_size.set(size as u64);
+                                        token_page.set(1);
+                                        node_page.set(1);
+                                        task_page.set(1);
+                                    },
                                 }
                             },
                         }
@@ -708,9 +753,27 @@ pub fn NodeGateway() -> Element {
                                 Pagination {
                                     current: task_page(),
                                     total_pages: result.total_pages.max(1) as u32,
+                                    total: result.total,
+                                    page_size: page_size() as u32,
+                                    summary: i18n.t_with_args(
+                                        "common.pagination_summary",
+                                        &[
+                                            ("total", &result.total.to_string()),
+                                            ("current", &task_page().to_string()),
+                                            ("total_pages", &result.total_pages.max(1).to_string()),
+                                        ],
+                                    ),
+                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
                                     previous_label: i18n.t("table.previous").to_string(),
                                     next_label: i18n.t("table.next").to_string(),
                                     on_page_change: move |page| task_page.set(page),
+                                    on_page_size_change: move |size| {
+                                        page_size.set(size as u64);
+                                        token_page.set(1);
+                                        node_page.set(1);
+                                        task_page.set(1);
+                                    },
                                 }
                             },
                         }

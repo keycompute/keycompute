@@ -39,6 +39,21 @@ impl ApiKeyApi {
         self.client.get_json(path, Some(token)).await
     }
 
+    /// 分页获取我的 API Keys。显式传入分页参数时服务端返回分页对象。
+    pub async fn list_my_api_keys_page(
+        &self,
+        params: &ApiKeyQueryParams,
+        token: &str,
+    ) -> Result<ApiKeyPage> {
+        let mut query = params.to_query_string();
+        if !query.is_empty() {
+            query.insert(0, '?');
+        }
+        self.client
+            .get_json(&format!("/api/v1/keys{query}"), Some(token))
+            .await
+    }
+
     /// 创建新的 API Key
     pub async fn create_api_key(
         &self,
@@ -56,6 +71,61 @@ impl ApiKeyApi {
             .delete_json(&format!("/api/v1/keys/{}", id), Some(token))
             .await
     }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ApiKeyQueryParams {
+    pub include_revoked: Option<bool>,
+    pub page: Option<i32>,
+    pub page_size: Option<i32>,
+    pub limit: Option<i32>,
+    pub offset: Option<i32>,
+}
+
+impl ApiKeyQueryParams {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn with_include_revoked(mut self, value: bool) -> Self {
+        self.include_revoked = Some(value);
+        self
+    }
+    pub fn with_page(mut self, value: i32) -> Self {
+        self.page = Some(value);
+        self
+    }
+    pub fn with_page_size(mut self, value: i32) -> Self {
+        self.page_size = Some(value);
+        self
+    }
+    pub fn to_query_string(&self) -> String {
+        let mut values = Vec::new();
+        if let Some(value) = self.include_revoked {
+            values.push(format!("include_revoked={value}"));
+        }
+        if let Some(value) = self.page {
+            values.push(format!("page={value}"));
+        }
+        if let Some(value) = self.page_size {
+            values.push(format!("page_size={value}"));
+        }
+        if let Some(value) = self.limit {
+            values.push(format!("limit={value}"));
+        }
+        if let Some(value) = self.offset {
+            values.push(format!("offset={value}"));
+        }
+        values.join("&")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKeyPage {
+    pub keys: Vec<ApiKeyInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
 }
 
 /// API Key 信息

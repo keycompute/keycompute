@@ -15,6 +15,7 @@ use crate::utils::display::{
     payment_provider_message, payment_provider_status_label, payment_status_label, short_id,
 };
 use crate::utils::format_cny_str;
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
 /// 支付订单页面
@@ -35,39 +36,49 @@ pub fn PaymentOrders() -> Element {
 
     let mut status_filter = use_signal(|| "all".to_string());
     let mut page = use_signal(|| 1u32);
+    let mut page_size = use_signal(|| PAGE_SIZE as u32);
 
     // 普通用户订单
     let my_orders = use_resource(move || async move {
+        let request_key = (status_filter(), page(), page_size());
         if is_admin {
-            return Ok(client_api::api::payment::PaymentOrderPage::default());
+            return KeyedResourceValue::new(
+                request_key,
+                Ok(client_api::api::payment::PaymentOrderPage::default()),
+            );
         }
-        let status = status_filter();
+        let status = request_key.0.clone();
         let mut params = client_api::api::payment::PaymentQueryParams::new()
-            .with_page(page())
-            .with_page_size(PAGE_SIZE as u32);
+            .with_page(request_key.1)
+            .with_page_size(request_key.2);
         if status != "all" {
             params = params.with_status(status.clone());
         }
-        with_auto_refresh(auth_store, |token| {
+        let result = with_auto_refresh(auth_store, |token| {
             let value = params.clone();
             async move { payment_service::list_orders_page(Some(value), &token).await }
         })
-        .await
+        .await;
+        KeyedResourceValue::new(request_key, result)
     });
 
     // Admin 订单
     let admin_orders = use_resource(move || async move {
+        let request_key = (status_filter(), page(), page_size());
         if !is_admin {
-            return Ok(client_api::api::admin::PaymentOrderPage::default());
+            return KeyedResourceValue::new(
+                request_key,
+                Ok(client_api::api::admin::PaymentOrderPage::default()),
+            );
         }
-        let status = status_filter();
+        let status = request_key.0.clone();
         let mut params = AdminPaymentQueryParams::new()
-            .with_page(page())
-            .with_page_size(PAGE_SIZE as u32);
+            .with_page(request_key.1)
+            .with_page_size(request_key.2);
         if status != "all" {
             params = params.with_status(status.clone());
         }
-        with_auto_refresh(auth_store, |token| {
+        let result = with_auto_refresh(auth_store, |token| {
             let value = params.clone();
             async move {
                 let client = get_client();
@@ -76,8 +87,18 @@ pub fn PaymentOrders() -> Element {
                     .await
             }
         })
-        .await
+        .await;
+        KeyedResourceValue::new(request_key, result)
     });
+
+    let orders_request_key = (status_filter(), page(), page_size());
+    let my_orders_result =
+        current_keyed_value(&orders_request_key, my_orders.state().cloned(), my_orders());
+    let admin_orders_result = current_keyed_value(
+        &orders_request_key,
+        admin_orders.state().cloned(),
+        admin_orders(),
+    );
 
     let mut provider_statuses = use_resource(move || async move {
         if !is_admin {
@@ -227,10 +248,10 @@ pub fn PaymentOrders() -> Element {
         div { class: "card",
             if is_admin {
                 {
-                    let (is_empty, empty_text) = match admin_orders() {
+                    let (is_empty, empty_text) = match admin_orders_result.as_ref().map(|r| r.as_ref()) {
                         None => (true, i18n.t("table.loading")),
                         Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                        Some(Ok(ref result)) if result.orders.is_empty() => (true, i18n.t("payment_orders.empty")),
+                        Some(Ok(result)) if result.orders.is_empty() => (true, i18n.t("payment_orders.empty")),
                         _ => (false, ""),
                     };
                     rsx! {
@@ -246,7 +267,7 @@ pub fn PaymentOrders() -> Element {
                                 }
                             }
                             tbody {
-                                if let Some(Ok(ref result)) = admin_orders() {
+                                if let Some(Ok(result)) = admin_orders_result.as_ref().map(|r| r.as_ref()) {
                                     for o in &result.orders {
                                         tr {
                                             td {
@@ -280,10 +301,10 @@ pub fn PaymentOrders() -> Element {
                 }
             } else {
                 {
-                    let (is_empty, empty_text) = match my_orders() {
+                    let (is_empty, empty_text) = match my_orders_result.as_ref().map(|r| r.as_ref()) {
                         None => (true, i18n.t("table.loading")),
                         Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                        Some(Ok(ref result)) if result.orders.is_empty() => (true, i18n.t("payment_orders.empty")),
+                        Some(Ok(result)) if result.orders.is_empty() => (true, i18n.t("payment_orders.empty")),
                         _ => (false, ""),
                     };
                     rsx! {
@@ -298,7 +319,7 @@ pub fn PaymentOrders() -> Element {
                                 }
                             }
                             tbody {
-                                if let Some(Ok(ref result)) = my_orders() {
+                                if let Some(Ok(result)) = my_orders_result.as_ref().map(|r| r.as_ref()) {
                                     for o in &result.orders {
                                         tr {
                                             td {
@@ -322,30 +343,50 @@ pub fn PaymentOrders() -> Element {
 
         {
             let total = if is_admin {
-                admin_orders().and_then(|r| r.ok()).map(|result| result.total as usize).unwrap_or(0)
+                admin_orders_result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .map(|result| result.total as usize)
+                    .unwrap_or(0)
             } else {
-                my_orders().and_then(|r| r.ok()).map(|result| result.total as usize).unwrap_or(0)
+                my_orders_result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .map(|result| result.total as usize)
+                    .unwrap_or(0)
             };
             let total_pages = if is_admin {
-                admin_orders()
-                    .and_then(|result| result.ok())
+                admin_orders_result
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
                     .map(|result| result.total_pages.max(1))
                     .unwrap_or(1)
             } else {
-                total.div_ceil(PAGE_SIZE).max(1) as u32
+                total.div_ceil(page_size() as usize).max(1) as u32
             };
             rsx! {
-                div { class: "pagination",
-                    span { class: "pagination-info",
-                        {i18n.t_with_args("payment_orders.pagination", &[("total", &total.to_string())])}
-                    }
-                    Pagination {
-                        current: page(),
-                        total_pages,
-                        previous_label: i18n.t("table.previous").to_string(),
-                        next_label: i18n.t("table.next").to_string(),
-                        on_page_change: move |p| page.set(p),
-                    }
+                Pagination {
+                    current: page(),
+                    total_pages,
+                    total: total as u64,
+                    page_size: page_size(),
+                    summary: i18n.t_with_args(
+                        "common.pagination_summary",
+                        &[
+                            ("total", &total.to_string()),
+                            ("current", &page().to_string()),
+                            ("total_pages", &total_pages.to_string()),
+                        ],
+                    ),
+                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                    previous_label: i18n.t("table.previous").to_string(),
+                    next_label: i18n.t("table.next").to_string(),
+                    on_page_change: move |p| page.set(p),
+                    on_page_size_change: move |size| {
+                        page_size.set(size);
+                        page.set(1);
+                    },
                 }
             }
         }

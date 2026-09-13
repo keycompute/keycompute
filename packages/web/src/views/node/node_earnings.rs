@@ -1,18 +1,20 @@
 use dioxus::prelude::*;
 use ui::{
-    Alert, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, PageHeader, Table,
-    TableHead,
+    Alert, AlertVariant, Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, PageHeader,
+    Pagination, Table, TableHead,
 };
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::node_tips_service;
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore};
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::{display::short_id, format_precise_cny_str, time::format_time};
 
 const HISTORY_PAGE_SIZE: u32 = 20;
 
 /// 计算简单分页当前页可见的记录范围（1-based，含首尾）。
 /// `offset` 为已跳过的记录数；结束值截断到 total；total 为 0 时返回 (0, 0)。
+#[allow(dead_code)]
 fn visible_range(offset: usize, page_size: usize, total: usize) -> (usize, usize) {
     if total == 0 {
         return (0, 0);
@@ -98,26 +100,35 @@ pub fn NodeEarnings() -> Element {
 
     // 小费历史
     let mut history_offset = use_signal(|| 0u32);
+    let mut history_page_size = use_signal(|| HISTORY_PAGE_SIZE);
     let history_resource = use_resource(move || {
         let auth = auth_store.clone();
         let offset = *history_offset.read();
+        let page_size = history_page_size();
         async move {
             let token = auth.token().unwrap_or_default();
-            node_tips_service::get_my_tips_history(&token, HISTORY_PAGE_SIZE, offset).await
+            let result = node_tips_service::get_my_tips_history(&token, page_size, offset).await;
+            KeyedResourceValue::new((offset, page_size), result)
         }
     });
 
+    let history_request_key = (history_offset(), history_page_size());
+    let history_result = current_keyed_value(
+        &history_request_key,
+        history_resource.state().cloned(),
+        history_resource(),
+    );
+
     // 当前页可见记录范围（供小费历史简单分页展示）；total 为 0 时返回 (0, 0)
-    let history_total = history_resource()
+    let history_total = history_result
         .as_ref()
         .and_then(|r| r.as_ref().ok())
         .map(|resp| resp.total.max(0) as usize)
         .unwrap_or(0);
-    let (range_start, range_end) = visible_range(
-        *history_offset.read() as usize,
-        HISTORY_PAGE_SIZE as usize,
-        history_total,
-    );
+    let current_history_page = (*history_offset.read() / history_page_size().max(1)) + 1;
+    let history_total_pages = history_total
+        .div_ceil(history_page_size().max(1) as usize)
+        .max(1) as u32;
 
     // 提现记录
     let withdrawals_resource = use_resource(move || {
@@ -204,7 +215,7 @@ pub fn NodeEarnings() -> Element {
                     h3 { class: "card-title", {i18n.t("node_earnings.history_title")} }
                 }
                 div { class: "card-body",
-                    match history_resource().as_ref().map(|r| r.as_ref()) {
+                    match history_result.as_ref().map(|r| r.as_ref()) {
                         None => rsx! {
                             div { class: "text-secondary", {i18n.t("table.loading")} }
                         },
@@ -238,32 +249,29 @@ pub fn NodeEarnings() -> Element {
                                 }
                             }
 
-                            // 简单分页
-                            if resp.total > HISTORY_PAGE_SIZE as i64 {
-                                div { class: "pagination-simple",
-                                    Button {
-                                        variant: ButtonVariant::Ghost,
-                                        size: ButtonSize::Small,
-                                        disabled: *history_offset.read() == 0,
-                                        onclick: move |_| {
-                                            let cur = *history_offset.read();
-                                            *history_offset.write() = cur.saturating_sub(HISTORY_PAGE_SIZE);
-                                        },
-                                        {i18n.t("common.back")}
-                                    }
-                                    span { class: "pagination-info",
-                                        "{i18n.t(\"common.range\")} {range_start}-{range_end} / {i18n.t(\"common.total_items\")} {history_total}"
-                                    }
-                                    Button {
-                                        variant: ButtonVariant::Ghost,
-                                        size: ButtonSize::Small,
-                                        disabled: (*history_offset.read() + HISTORY_PAGE_SIZE) as i64 >= resp.total,
-                                        onclick: move |_| {
-                                            let cur = *history_offset.read();
-                                            *history_offset.write() = cur + HISTORY_PAGE_SIZE;
-                                        },
-                                        {i18n.t("common.more")}
-                                    }
+                            Pagination {
+                                current: current_history_page,
+                                total_pages: history_total_pages,
+                                total: history_total as u64,
+                                page_size: history_page_size(),
+                                summary: i18n.t_with_args(
+                                    "common.pagination_summary",
+                                    &[
+                                        ("total", &history_total.to_string()),
+                                        ("current", &current_history_page.to_string()),
+                                        ("total_pages", &history_total_pages.to_string()),
+                                    ],
+                                ),
+                                page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                                previous_label: i18n.t("table.previous").to_string(),
+                                next_label: i18n.t("table.next").to_string(),
+                                on_page_change: move |p: u32| {
+                                    *history_offset.write() = (p.saturating_sub(1)) * history_page_size();
+                                },
+                                on_page_size_change: move |size| {
+                                    history_page_size.set(size);
+                                    history_offset.set(0);
                                 }
                             }
                         },

@@ -4,7 +4,8 @@ use client_api::error::Result;
 use client_api::{
     DistributionApi,
     api::distribution::{
-        DistributionEarnings, InviteLinkResponse, ReferralCodeResponse, ReferralInfo,
+        DistributionEarnings, DistributionQueryParams, DistributionRecordPage, InviteLinkResponse,
+        ReferralCodeResponse, ReferralInfo,
     },
 };
 
@@ -20,6 +21,16 @@ pub async fn get_earnings(token: &str) -> Result<DistributionEarnings> {
 pub async fn get_referrals(token: &str) -> Result<Vec<ReferralInfo>> {
     let client = get_client();
     DistributionApi::new(&client).get_my_referrals(token).await
+}
+
+pub async fn list_records_page(
+    params: &DistributionQueryParams,
+    token: &str,
+) -> Result<DistributionRecordPage> {
+    let client = get_client();
+    DistributionApi::new(&client)
+        .list_distribution_records_page(params, token)
+        .await
 }
 
 pub async fn get_referral_code(token: &str) -> Result<ReferralCodeResponse> {

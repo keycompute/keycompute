@@ -107,53 +107,150 @@ pub fn Pagination(
     current: u32,
     /// 总页数
     total_pages: u32,
+    /// 总条数（用于统一的分页摘要）
+    #[props(default = 0_u64)]
+    total: u64,
+    /// 当前每页条数
+    #[props(default = 20_u32)]
+    page_size: u32,
+    /// 可选的每页条数；为空时使用 10/20/50/100
+    #[props(default)]
+    page_size_options: Vec<u32>,
     /// 页面变更回调
     #[props(default)]
     on_page_change: EventHandler<u32>,
+    /// 每页条数变更回调
+    #[props(default)]
+    on_page_size_change: EventHandler<u32>,
     /// 上一页按钮文案；共享库默认使用语言无关的箭头，业务层应传入本地化文案
     #[props(default = "‹".to_string())]
     previous_label: String,
     /// 下一页按钮文案
     #[props(default = "›".to_string())]
     next_label: String,
+    /// 分页摘要；为空时回退到 `current / total_pages`
+    #[props(default)]
+    summary: String,
+    /// 每页选择器文案
+    #[props(default = "Per page".to_string())]
+    page_size_label: String,
+    /// 每页选择器的单位文案
+    #[props(default = "items".to_string())]
+    page_size_suffix: String,
 ) -> Element {
-    if total_pages <= 1 {
-        return rsx! {};
+    let requested_current = current;
+    let (total_pages, current) = normalized_page(current, total_pages);
+    let previous_page = previous_page_target(requested_current, current, total_pages);
+    let next_page = next_page_target(requested_current, current, total_pages);
+
+    let mut options = if page_size_options.is_empty() {
+        vec![10, 20, 50, 100]
+    } else {
+        page_size_options
+    };
+    if !options.contains(&page_size) {
+        options.push(page_size);
+        options.sort_unstable();
     }
+    // A caller-provided localized summary is based on its requested page. If
+    // the response clamps that page after a deletion, avoid showing a
+    // contradictory "page N of M" until the parent follows the recovery
+    // action exposed by the previous button.
+    let summary = if summary.is_empty() || requested_current != current {
+        format!("{current} / {total_pages}")
+    } else {
+        summary
+    };
 
     rsx! {
         div { class: "pagination",
-            button {
-                class: "btn btn-ghost btn-sm",
-                aria_label: "{previous_label}",
-                disabled: current <= 1,
-                onclick: move |_| {
-                    if current > 1 {
-                        on_page_change.call(current - 1);
+            span { class: "pagination-summary", "{summary}" }
+            div { class: "pagination-actions",
+                button {
+                    class: "btn btn-ghost btn-sm",
+                    aria_label: "{previous_label}",
+                    disabled: previous_page.is_none(),
+                    onclick: move |_| {
+                        if let Some(page) = previous_page {
+                            on_page_change.call(page);
+                        }
+                    },
+                    "{previous_label}"
+                }
+                button {
+                    class: "btn btn-ghost btn-sm",
+                    aria_label: "{next_label}",
+                    disabled: next_page.is_none(),
+                    onclick: move |_| {
+                        if let Some(page) = next_page {
+                            on_page_change.call(page);
+                        }
+                    },
+                    "{next_label}"
+                }
+                label { class: "pagination-page-size",
+                    span { "{page_size_label}" }
+                    select {
+                        aria_label: "{page_size_label}",
+                        value: "{page_size}",
+                        onchange: move |event| {
+                            if let Ok(value) = event.value().parse::<u32>() {
+                                on_page_size_change.call(value);
+                            }
+                        },
+                        for option in options.iter() {
+                            option { value: "{option}", "{option}" }
+                        }
                     }
-                },
-                "{previous_label}"
-            }
-            span { class: "pagination-info",
-                "{current} / {total_pages}"
-            }
-            button {
-                class: "btn btn-ghost btn-sm",
-                aria_label: "{next_label}",
-                disabled: current >= total_pages,
-                onclick: move |_| {
-                    if current < total_pages {
-                        on_page_change.call(current + 1);
-                    }
-                },
-                "{next_label}"
+                    span { "{page_size_suffix}" }
+                }
             }
         }
     }
 }
 
+fn normalized_page(current: u32, total_pages: u32) -> (u32, u32) {
+    let total_pages = total_pages.max(1);
+    let current = current.clamp(1, total_pages);
+    (total_pages, current)
+}
+
+fn previous_page_target(requested_current: u32, current: u32, total_pages: u32) -> Option<u32> {
+    if requested_current <= 1 {
+        None
+    } else if requested_current > total_pages {
+        // The response has fewer pages than the parent requested. Navigate
+        // directly to the displayed/clamped page so the parent can recover.
+        Some(current)
+    } else {
+        Some(current - 1)
+    }
+}
+
+fn next_page_target(requested_current: u32, current: u32, total_pages: u32) -> Option<u32> {
+    (requested_current.max(1) < total_pages).then_some(current + 1)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{next_page_target, normalized_page, previous_page_target};
+
+    #[test]
+    fn out_of_range_pages_are_clamped_to_an_accessible_page() {
+        assert_eq!(normalized_page(2, 1), (1, 1));
+        assert_eq!(normalized_page(99, 3), (3, 3));
+        assert_eq!(normalized_page(0, 0), (1, 1));
+    }
+
+    #[test]
+    fn out_of_range_previous_navigation_recovers_the_parent_page() {
+        assert_eq!(previous_page_target(2, 1, 1), Some(1));
+        assert_eq!(previous_page_target(99, 3, 3), Some(3));
+        assert_eq!(previous_page_target(1, 1, 3), None);
+        assert_eq!(next_page_target(1, 1, 3), Some(2));
+        assert_eq!(next_page_target(3, 3, 3), None);
+    }
+
     #[test]
     fn shared_pagination_has_no_hard_coded_language() {
         let source = include_str!("table.rs");

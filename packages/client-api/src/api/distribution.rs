@@ -72,6 +72,16 @@ impl DistributionApi {
         self.client.get_json(&path, Some(token)).await
     }
 
+    /// 获取一页分销记录（现代分页接口）。
+    pub async fn list_distribution_records_page(
+        &self,
+        params: &DistributionQueryParams,
+        token: &str,
+    ) -> Result<DistributionRecordPage> {
+        let path = format!("/api/v1/distribution/records?{}", params.to_query_string());
+        self.client.get_json(&path, Some(token)).await
+    }
+
     /// 获取分销统计（Admin）
     pub async fn get_distribution_stats(&self, token: &str) -> Result<DistributionStats> {
         self.client
@@ -183,6 +193,8 @@ pub struct DistributionQueryParams {
     pub end_date: Option<String>,
     pub limit: Option<i32>,
     pub offset: Option<i32>,
+    pub page: Option<i32>,
+    pub page_size: Option<i32>,
 }
 
 impl DistributionQueryParams {
@@ -210,6 +222,16 @@ impl DistributionQueryParams {
         self
     }
 
+    pub fn with_page(mut self, page: i32) -> Self {
+        self.page = Some(page);
+        self
+    }
+
+    pub fn with_page_size(mut self, page_size: i32) -> Self {
+        self.page_size = Some(page_size);
+        self
+    }
+
     pub fn to_query_string(&self) -> String {
         let mut params = Vec::new();
         if let Some(ref start) = self.start_date {
@@ -224,8 +246,27 @@ impl DistributionQueryParams {
         if let Some(offset) = self.offset {
             params.push(format!("offset={}", offset));
         }
+        if let Some(page) = self.page {
+            params.push(format!("page={}", page));
+        }
+        if let Some(page_size) = self.page_size {
+            params.push(format!("page_size={}", page_size));
+        }
         params.join("&")
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DistributionRecordPage {
+    pub records: Vec<DistributionRecord>,
+    #[serde(default)]
+    pub total: i64,
+    #[serde(default)]
+    pub page: i64,
+    #[serde(default)]
+    pub page_size: i64,
+    #[serde(default)]
+    pub total_pages: i64,
 }
 
 /// 分销记录

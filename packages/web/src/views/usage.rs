@@ -6,6 +6,7 @@ const PAGE_SIZE: usize = 20;
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, usage_service};
 use crate::stores::auth_store::AuthStore;
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 use std::collections::HashMap;
 
@@ -15,6 +16,7 @@ pub fn Usage() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut page = use_signal(|| 1u32);
+    let mut page_size = use_signal(|| PAGE_SIZE as u32);
 
     // 汇总统计
     let stats = use_resource(move || async move {
@@ -24,11 +26,29 @@ pub fn Usage() -> Element {
         .await
     });
 
-    // 明细记录（最近 50 条）
+    // 明细记录（服务端分页）
     let records = use_resource(move || async move {
+        let request_key = (page(), page_size());
+        let result = with_auto_refresh(auth_store, |token| async move {
+            usage_service::list_page(
+                &client_api::api::usage::UsageQueryParams::new()
+                    .with_page(request_key.0 as i32)
+                    .with_page_size(request_key.1 as i32),
+                &token,
+            )
+            .await
+        })
+        .await;
+        KeyedResourceValue::new(request_key, result)
+    });
+
+    // 趋势图保持展示最近一段窗口，不随表格翻页而改变。
+    let trend_records = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
-            usage_service::list(
-                Some(client_api::api::usage::UsageQueryParams::new().with_limit(50)),
+            usage_service::list_page(
+                &client_api::api::usage::UsageQueryParams::new()
+                    .with_page(1)
+                    .with_page_size(100),
                 &token,
             )
             .await
@@ -37,10 +57,10 @@ pub fn Usage() -> Element {
     });
 
     // 折线图：按日期聚合调用次数
-    let (chart_x, chart_series) = match records() {
-        Some(Ok(ref recs)) => {
+    let (chart_x, chart_series) = match trend_records() {
+        Some(Ok(ref result)) => {
             let mut by_date: HashMap<String, f64> = HashMap::new();
-            for r in recs {
+            for r in &result.records {
                 let date = r.created_at.get(..10).unwrap_or("").to_string();
                 *by_date.entry(date).or_default() += 1.0;
             }
@@ -120,13 +140,40 @@ pub fn Usage() -> Element {
             // 明细记录表格
             div { class: "section",
                 h2 { class: "section-title", {i18n.t("usage.records")} }
-                match records() {
+                {
+                    let request_key = (page(), page_size());
+                    let current_records = current_keyed_value(
+                        &request_key,
+                        records.state().cloned(),
+                        records(),
+                    );
+                    match current_records {
                     None => rsx! { p { class: "loading-text", {i18n.t("table.loading")} } },
                     Some(Err(e)) => rsx! { p { class: "error-text", "{i18n.t(\"common.load_failed\")}：{e}" } },
-                    Some(Ok(recs)) if recs.is_empty() => rsx! {
+                    Some(Ok(result)) if result.records.is_empty() => rsx! {
                         p { class: "empty-text", {i18n.t("usage.no_records")} }
+                        Pagination {
+                            current: page(),
+                            total_pages: result.total_pages.max(1) as u32,
+                            total: result.total.max(0) as u64,
+                            page_size: page_size(),
+                            summary: i18n.t_with_args(
+                                "common.pagination_summary",
+                                &[
+                                    ("total", &result.total.max(0).to_string()),
+                                    ("current", &page().to_string()),
+                                    ("total_pages", &result.total_pages.max(1).to_string()),
+                                ],
+                            ),
+                            page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                            page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                            previous_label: i18n.t("table.previous").to_string(),
+                            next_label: i18n.t("table.next").to_string(),
+                            on_page_change: move |p| page.set(p),
+                            on_page_size_change: move |size| { page_size.set(size); page.set(1); },
+                        }
                     },
-                    Some(Ok(recs)) => rsx! {
+                    Some(Ok(result)) => rsx! {
                         Table {
                             class: "data-table".to_string(),
                             col_count: 6,
@@ -141,10 +188,7 @@ pub fn Usage() -> Element {
                                     }
                                 }
                                 tbody {
-                                    {
-                                        let start = (page() as usize - 1) * PAGE_SIZE;
-                                        rsx! {
-                                            for r in recs.iter().skip(start).take(PAGE_SIZE) {
+                                    for r in result.records.iter() {
                                                 tr {
                                                     td { { format_time(&r.created_at) } }
                                                     td { "{r.model}" }
@@ -162,27 +206,34 @@ pub fn Usage() -> Element {
                                                     }
                                                 }
                                             }
-                                        }
-                                    }
                                 }
                         }
                         {
-                            let total = recs.len();
-                            let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
                             rsx! {
-                                div { class: "pagination",
-                                    span { class: "pagination-info", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
-                                    Pagination {
-                                        current: page(),
-                                        total_pages,
-                                        previous_label: i18n.t("table.previous").to_string(),
-                                        next_label: i18n.t("table.next").to_string(),
-                                        on_page_change: move |p| page.set(p),
-                                    }
+                                Pagination {
+                                    current: page(),
+                                    total_pages: result.total_pages.max(1) as u32,
+                                    total: result.total.max(0) as u64,
+                                    page_size: page_size(),
+                                    summary: i18n.t_with_args(
+                                        "common.pagination_summary",
+                                        &[
+                                            ("total", &result.total.max(0).to_string()),
+                                            ("current", &page().to_string()),
+                                            ("total_pages", &result.total_pages.max(1).to_string()),
+                                        ],
+                                    ),
+                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                                    previous_label: i18n.t("table.previous").to_string(),
+                                    next_label: i18n.t("table.next").to_string(),
+                                    on_page_change: move |p| page.set(p),
+                                    on_page_size_change: move |size| { page_size.set(size); page.set(1); },
                                 }
                             }
                         }
                     },
+                    }
                 }
             }
         }

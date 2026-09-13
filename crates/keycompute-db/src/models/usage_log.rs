@@ -258,7 +258,7 @@ impl UsageLog {
     ) -> Result<Vec<UsageLog>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM usage_logs WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            "SELECT * FROM usage_logs WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
             [tenant_id.into(), limit.into(), offset.into()],
         );
         let logs = UsageLog::find_by_statement(stmt).all(db).await?;
@@ -293,12 +293,26 @@ impl UsageLog {
     ) -> Result<Vec<UsageLog>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM usage_logs WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            "SELECT * FROM usage_logs WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
             [user_id.into(), limit.into(), offset.into()],
         );
         let logs = UsageLog::find_by_statement(stmt).all(db).await?;
 
         Ok(logs)
+    }
+
+    /// 获取用户用量日志总数。
+    pub async fn count_by_user(db: &impl ConnectionTrait, user_id: Uuid) -> Result<i64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*) FROM usage_logs WHERE user_id = $1",
+            [user_id.into()],
+        );
+        let result = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("count query failed".to_string()))?;
+        result.try_get_by_index(0).map_err(DbError::DatabaseError)
     }
 
     /// 获取租户用量统计

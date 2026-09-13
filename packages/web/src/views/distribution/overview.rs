@@ -12,7 +12,7 @@ use crate::stores::{
 };
 use crate::utils::time::format_time;
 use crate::utils::{format_precise_cny_str, on_copy};
-use ui::{PageHeader, icons::IconCopy};
+use ui::{PageHeader, Pagination, icons::IconCopy};
 
 fn is_distribution_disabled_error<T>(result: &Option<Result<T, ClientError>>) -> bool {
     matches!(
@@ -65,6 +65,8 @@ fn DistributionOverviewContent() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();
+    let mut page = use_signal(|| 1u32);
+    let mut page_size = use_signal(|| 20u32);
     // 收益数据
     let earnings = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
@@ -120,6 +122,13 @@ fn DistributionOverviewContent() -> Element {
     let distribution_disabled = is_distribution_disabled_error(&earnings())
         || is_distribution_disabled_error(&referral_code())
         || is_distribution_disabled_error(&referrals());
+    let referral_total = referrals()
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|list| list.len())
+        .unwrap_or(0);
+    let referral_total_pages = referral_total.div_ceil(page_size() as usize).max(1) as u32;
+    let referral_start = (page().saturating_sub(1) as usize) * page_size() as usize;
 
     rsx! {
         div { class: "page-container",
@@ -219,7 +228,7 @@ fn DistributionOverviewContent() -> Element {
                             tbody {
                                 match referrals() {
                                     Some(Ok(ref list)) if !list.is_empty() => rsx! {
-                                        for r in list.iter() {
+                                        for r in list.iter().skip(referral_start).take(page_size() as usize) {
                                             tr {
                                                 td {
                                                     div { class: "user-cell",
@@ -246,6 +255,26 @@ fn DistributionOverviewContent() -> Element {
                                 }
                             }
                         }
+                    }
+                    Pagination {
+                        current: page(),
+                        total_pages: referral_total_pages,
+                        total: referral_total as u64,
+                        page_size: page_size(),
+                        summary: i18n.t_with_args(
+                            "common.pagination_summary",
+                            &[
+                                ("total", &referral_total.to_string()),
+                                ("current", &page().to_string()),
+                                ("total_pages", &referral_total_pages.to_string()),
+                            ],
+                        ),
+                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                        page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                        previous_label: i18n.t("table.previous").to_string(),
+                        next_label: i18n.t("table.next").to_string(),
+                        on_page_change: move |value| page.set(value),
+                        on_page_size_change: move |value| { page_size.set(value); page.set(1); },
                     }
                 }
             }

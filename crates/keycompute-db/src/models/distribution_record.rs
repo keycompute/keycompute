@@ -226,10 +226,28 @@ impl DistributionRecord {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<DistributionRecord>, DbError> {
+        Self::find_by_tenant_filtered(db, tenant_id, None, None, limit, offset).await
+    }
+
+    /// 按租户和可选状态/层级筛选后分页查找分销记录。
+    pub async fn find_by_tenant_filtered(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        status: Option<&str>,
+        level: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DistributionRecord>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM distribution_records WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            [tenant_id.into(), limit.into(), offset.into()],
+            "SELECT * FROM distribution_records WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR level = $3) ORDER BY created_at DESC, id DESC LIMIT $4 OFFSET $5",
+            [
+                tenant_id.into(),
+                status.map(str::to_string).into(),
+                level.map(str::to_string).into(),
+                limit.into(),
+                offset.into(),
+            ],
         );
         let records = DistributionRecord::find_by_statement(stmt).all(db).await?;
 
@@ -243,14 +261,94 @@ impl DistributionRecord {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<DistributionRecord>, DbError> {
+        Self::find_by_beneficiary_filtered(db, beneficiary_id, None, None, limit, offset).await
+    }
+
+    /// 按受益人和可选状态/层级筛选后分页查找分销记录。
+    pub async fn find_by_beneficiary_filtered(
+        db: &impl ConnectionTrait,
+        beneficiary_id: Uuid,
+        status: Option<&str>,
+        level: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DistributionRecord>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM distribution_records WHERE beneficiary_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            [beneficiary_id.into(), limit.into(), offset.into()],
+            "SELECT * FROM distribution_records WHERE beneficiary_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR level = $3) ORDER BY created_at DESC, id DESC LIMIT $4 OFFSET $5",
+            [
+                beneficiary_id.into(),
+                status.map(str::to_string).into(),
+                level.map(str::to_string).into(),
+                limit.into(),
+                offset.into(),
+            ],
         );
         let records = DistributionRecord::find_by_statement(stmt).all(db).await?;
 
         Ok(records)
+    }
+
+    /// 获取租户在筛选条件下的分销记录总数。
+    pub async fn count_by_tenant_filtered(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        status: Option<&str>,
+        level: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*) FROM distribution_records WHERE tenant_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR level = $3)",
+            [
+                tenant_id.into(),
+                status.map(str::to_string).into(),
+                level.map(str::to_string).into(),
+            ],
+        );
+        let row = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("distribution record count query failed".to_string()))?;
+        row.try_get_by_index(0).map_err(DbError::DatabaseError)
+    }
+
+    /// 获取租户的分销记录总数。
+    pub async fn count_by_tenant(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+    ) -> Result<i64, DbError> {
+        Self::count_by_tenant_filtered(db, tenant_id, None, None).await
+    }
+
+    /// 获取受益人的分销记录总数。
+    pub async fn count_by_beneficiary(
+        db: &impl ConnectionTrait,
+        beneficiary_id: Uuid,
+    ) -> Result<i64, DbError> {
+        Self::count_by_beneficiary_filtered(db, beneficiary_id, None, None).await
+    }
+
+    /// 获取受益人在筛选条件下的分销记录总数。
+    pub async fn count_by_beneficiary_filtered(
+        db: &impl ConnectionTrait,
+        beneficiary_id: Uuid,
+        status: Option<&str>,
+        level: Option<&str>,
+    ) -> Result<i64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*) FROM distribution_records WHERE beneficiary_id = $1 AND ($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR level = $3)",
+            [
+                beneficiary_id.into(),
+                status.map(str::to_string).into(),
+                level.map(str::to_string).into(),
+            ],
+        );
+        let row = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("distribution record count query failed".to_string()))?;
+        row.try_get_by_index(0).map_err(DbError::DatabaseError)
     }
 
     /// 结算分销记录

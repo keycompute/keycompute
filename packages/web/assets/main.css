@@ -3895,8 +3895,14 @@ select.form-input:focus {
   padding: 16px 24px;
 }
 
-.pagination-info {
+.pagination-summary {
   color: var(--text-secondary);
+}
+
+.pagination-page-size select {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--border-color);
 }
 
 .modal-backdrop,

@@ -12,6 +12,7 @@ use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
 use crate::utils::display::{distribution_status_label, short_id};
 use crate::utils::format_precise_cny_str;
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
 /// 分销记录页面
@@ -29,6 +30,9 @@ pub fn DistributionRecords() -> Element {
         .as_ref()
         .map(|u| u.is_admin())
         .unwrap_or(false);
+
+    let mut page = use_signal(|| 1u32);
+    let mut page_size = use_signal(|| PAGE_SIZE as u32);
 
     // 收益数据（普通用户）
     let earnings = use_resource(move || async move {
@@ -54,18 +58,27 @@ pub fn DistributionRecords() -> Element {
 
     // Admin：全平台分销记录
     let admin_records = use_resource(move || async move {
+        let request_key = (page(), page_size());
         if !is_admin {
-            return Ok(vec![]);
+            return KeyedResourceValue::new(
+                request_key,
+                Ok(client_api::api::distribution::DistributionRecordPage {
+                    records: vec![],
+                    total: 0,
+                    page: 1,
+                    page_size: PAGE_SIZE as i64,
+                    total_pages: 0,
+                }),
+            );
         }
-        with_auto_refresh(auth_store, |token| async move {
-            use crate::services::api_client::get_client;
-            use client_api::DistributionApi;
-            let client = get_client();
-            DistributionApi::new(&client)
-                .list_distribution_records(None, &token)
-                .await
+        let result = with_auto_refresh(auth_store, |token| {
+            let params = client_api::api::distribution::DistributionQueryParams::new()
+                .with_page(request_key.0 as i32)
+                .with_page_size(request_key.1 as i32);
+            async move { distribution_service::list_records_page(&params, &token).await }
         })
-        .await
+        .await;
+        KeyedResourceValue::new(request_key, result)
     });
 
     // Admin：分销规则列表（只读展示，后端硬编码）
@@ -97,7 +110,6 @@ pub fn DistributionRecords() -> Element {
         _ => "¥0.00".to_string(),
     };
 
-    let mut page = use_signal(|| 1u32);
     let page_desc = if is_admin {
         i18n.t("distribution_records.admin_desc")
     } else {
@@ -187,15 +199,20 @@ pub fn DistributionRecords() -> Element {
         // 表格：admin 视图 / 普通用户视图分别渲染
         if is_admin {
             {
-                let (is_empty, empty_text) = match admin_records() {
+                let request_key = (page(), page_size());
+                let current_admin_records = current_keyed_value(
+                    &request_key,
+                    admin_records.state().cloned(),
+                    admin_records(),
+                );
+                let (is_empty, empty_text) = match &current_admin_records {
                     None => (true, i18n.t("table.loading").to_string()),
-                    Some(Err(ref e)) => (true, user_error_message(e)),
-                    Some(Ok(ref l)) if l.is_empty() => {
+                    Some(Err(e)) => (true, user_error_message(e)),
+                    Some(Ok(result)) if result.records.is_empty() => {
                         (true, i18n.t("distribution_records.empty_admin").to_string())
                     }
                     _ => (false, String::new()),
                 };
-                let admin_start = (page() as usize - 1) * PAGE_SIZE;
                 rsx! {
                     Table {
                         empty: is_empty,
@@ -213,8 +230,8 @@ pub fn DistributionRecords() -> Element {
                             }
                         }
                         tbody {
-                            if let Some(Ok(ref list)) = admin_records() {
-                                for rec in list.iter().skip(admin_start).take(PAGE_SIZE) {
+                            if let Some(Ok(ref result)) = current_admin_records {
+                                for rec in result.records.iter() {
                                     tr {
                                         td { code { title: "{rec.id}", {short_id(&rec.id)} } }
                                         td {
@@ -258,7 +275,7 @@ pub fn DistributionRecords() -> Element {
                     }
                     _ => (false, String::new()),
                 };
-                let ref_start = (page() as usize - 1) * PAGE_SIZE;
+                let ref_start = (page() as usize - 1) * page_size() as usize;
                 rsx! {
                     Table {
                         empty: is_empty,
@@ -274,7 +291,7 @@ pub fn DistributionRecords() -> Element {
                         }
                         tbody {
                             if let Some(Ok(ref list)) = referrals() {
-                                for r in list.iter().skip(ref_start).take(PAGE_SIZE) {
+                                for r in list.iter().skip(ref_start).take(page_size() as usize) {
                                     tr {
                                         td {
                                             div { class: "user-cell",
@@ -297,22 +314,43 @@ pub fn DistributionRecords() -> Element {
         }
 
         {
-            let total = if is_admin {
-                admin_records().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0)
+            let (total, total_pages) = if is_admin {
+                let request_key = (page(), page_size());
+                current_keyed_value(
+                    &request_key,
+                    admin_records.state().cloned(),
+                    admin_records(),
+                )
+                .and_then(|r| r.ok())
+                    .map(|result| (result.total.max(0) as usize, result.total_pages.max(1) as u32))
+                    .unwrap_or((0, 1))
             } else {
-                referrals().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0)
+                let total = referrals().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0);
+                (total, total.div_ceil(page_size() as usize).max(1) as u32)
             };
-            let total_pages = total.div_ceil(PAGE_SIZE).max(1) as u32;
             rsx! {
-                div { class: "pagination",
-                    span { class: "pagination-info", "{i18n.t(\"common.total_items\")} {total} {i18n.t(\"pricing.items_suffix\")}" }
-                    Pagination {
-                        current: page(),
-                        total_pages,
-                        previous_label: i18n.t("table.previous").to_string(),
-                        next_label: i18n.t("table.next").to_string(),
-                        on_page_change: move |p| page.set(p),
-                    }
+                Pagination {
+                    current: page(),
+                    total_pages,
+                    total: total as u64,
+                    page_size: page_size(),
+                    summary: i18n.t_with_args(
+                        "common.pagination_summary",
+                        &[
+                            ("total", &total.to_string()),
+                            ("current", &page().to_string()),
+                            ("total_pages", &total_pages.to_string()),
+                        ],
+                    ),
+                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                    previous_label: i18n.t("table.previous").to_string(),
+                    next_label: i18n.t("table.next").to_string(),
+                    on_page_change: move |p| page.set(p),
+                    on_page_size_change: move |size| {
+                        page_size.set(size);
+                        page.set(1);
+                    },
                 }
             }
         }

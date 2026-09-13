@@ -199,6 +199,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.time", "Time");
     m.insert("common.total_items", "Total");
     m.insert("common.range", "Range");
+    m.insert(
+        "common.pagination_summary",
+        "Total {total} items, Page {current} of {total_pages}",
+    );
+    m.insert("common.pagination_page_size", "Per page");
     m.insert("common.created_at_label", "Created");
     m.insert("common.load_failed", "Load failed");
     m.insert(
@@ -1384,6 +1389,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.status", "Status");
     m.insert("monitoring.duration_ttft", "Duration / TTFT");
     m.insert("monitoring.next_page", "Next page");
+    m.insert("monitoring.page", "Page {page}");
     m.insert("monitoring.request_detail", "Request details");
     m.insert("monitoring.tenant", "Tenant");
     m.insert("monitoring.user", "User");
