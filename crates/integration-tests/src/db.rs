@@ -158,6 +158,54 @@ pub async fn cleanup_test_data(
     Ok(())
 }
 
+/// Owns the data namespace for one integration-test run and cleans it up on
+/// normal completion. The `Drop` fallback schedules best-effort cleanup when a
+/// test panics or is cancelled before reaching its explicit cleanup call.
+pub struct TestDataGuard {
+    pool: DatabaseConnection,
+    run_id: String,
+    cleaned: bool,
+}
+
+impl TestDataGuard {
+    pub fn new(pool: DatabaseConnection, run_id: impl Into<String>) -> Self {
+        Self {
+            pool,
+            run_id: run_id.into(),
+            cleaned: false,
+        }
+    }
+
+    pub async fn cleanup(&mut self) -> Result<(), sea_orm::DbErr> {
+        if self.cleaned {
+            return Ok(());
+        }
+        cleanup_test_data(&self.pool, &self.run_id).await?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+impl Drop for TestDataGuard {
+    fn drop(&mut self) {
+        if self.cleaned {
+            return;
+        }
+
+        let pool = self.pool.clone();
+        let run_id = self.run_id.clone();
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            eprintln!("warning: no Tokio runtime available for test-data cleanup {run_id}");
+            return;
+        };
+        handle.spawn(async move {
+            if let Err(error) = cleanup_test_data(&pool, &run_id).await {
+                eprintln!("warning: failed to clean test data {run_id}: {error}");
+            }
+        });
+    }
+}
+
 /// 创建测试租户
 pub async fn create_test_tenant(pool: &DatabaseConnection, suffix: &str, test_id: &str) -> Tenant {
     Tenant::create(

@@ -345,27 +345,59 @@ pub async fn messages(
         .update_context_pricing(Arc::make_mut(&mut ctx), &primary_provider)
         .await;
 
-    let mut tpm_reservation = match super::reserve_generation_tpm(&state, &ctx).await {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
-                (
-                    ErrorOrigin::Client,
-                    TraceErrorCategory::RateLimit,
-                    "tpm_limit_exceeded",
-                )
-            } else {
-                (
-                    ErrorOrigin::Gateway,
-                    TraceErrorCategory::Internal,
-                    "tpm_reservation_failed",
-                )
-            };
-            finish_anthropic_unexecuted_trace(&mut pre_execution_guard, origin, category, code)
-                .await;
-            return Err(error);
-        }
-    };
+    let generation_rate_limit_config =
+        match crate::middleware::authenticated_rate_limit_config_for_account(
+            &state,
+            auth.tenant_id,
+            Some(primary_account_id),
+        )
+        .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                    (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::RateLimit,
+                        "rpm_limit_exceeded",
+                    )
+                } else {
+                    (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "rate_limit_check_failed",
+                    )
+                };
+                finish_anthropic_unexecuted_trace(&mut pre_execution_guard, origin, category, code)
+                    .await;
+                return Err(error);
+            }
+        };
+
+    let mut tpm_reservation =
+        match super::reserve_generation_tpm(&state, &ctx, generation_rate_limit_config.clone())
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                    (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::RateLimit,
+                        "tpm_limit_exceeded",
+                    )
+                } else {
+                    (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "tpm_reservation_failed",
+                    )
+                };
+                finish_anthropic_unexecuted_trace(&mut pre_execution_guard, origin, category, code)
+                    .await;
+                return Err(error);
+            }
+        };
 
     let mut balance_reservation = match super::reserve_generation_balance(
         &state,
@@ -387,6 +419,32 @@ pub async fn messages(
             return Err(error);
         }
     };
+
+    if let Err(error) = crate::middleware::enforce_authenticated_rate_limit_with_config(
+        &state,
+        &auth,
+        &generation_rate_limit_config,
+    )
+    .await
+    {
+        balance_reservation.release().await;
+        tpm_reservation.release().await;
+        let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+            (
+                ErrorOrigin::Client,
+                TraceErrorCategory::RateLimit,
+                "rpm_limit_exceeded",
+            )
+        } else {
+            (
+                ErrorOrigin::Gateway,
+                TraceErrorCategory::Internal,
+                "rate_limit_check_failed",
+            )
+        };
+        finish_anthropic_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+        return Err(error);
+    }
 
     let timeout_duration = std::time::Duration::from_secs(state.gateway_config.timeout_secs);
     let mut client_response_guard =

@@ -114,4 +114,47 @@ if resolve_database_container >/dev/null 2>&1; then
     exit 1
 fi
 
+if [ "$(normalize_admin_email ' Admin@Example.COM ')" != "admin@example.com" ]; then
+    printf 'administrator email normalization must trim and lowercase values\n' >&2
+    exit 1
+fi
+if normalize_admin_email 'not-an-email' >/dev/null 2>&1; then
+    printf 'invalid administrator email must be rejected before database changes\n' >&2
+    exit 1
+fi
+
+SCRIPT_PATH="${TEST_DIR}/../reset_admin_password.sh"
+if rg -n '(^|[[:space:]])read([[:space:]]|$)' "${SCRIPT_PATH}"; then
+    printf 'reset script must not read a password interactively\n' >&2
+    exit 1
+fi
+for required_text in \
+    'DEFAULT_PASSWORD="12345"' \
+    'KC_RESET_DB_PASSWORD' \
+    'BEGIN;' \
+    'COMMIT;' \
+    'pg_advisory_xact_lock(5421647644090913945)' \
+    'available_balance, frozen_balance' \
+    'VALUES (v_system_tenant_id, v_admin_id, 10000, 0, 10000, 0)' \
+    'SET available_balance = 10000' \
+    'ON CONFLICT (user_id) DO UPDATE SET' \
+    'token_version = token_version + 1' \
+    'active balance reservations exceed frozen balance' \
+    'system admin has a reservation attached to another tenant' \
+    'cannot initialize balance while active reservations exist' \
+    'cannot reset balance while active reservations exist' \
+    'tenant_distribution_rules' \
+    'argon2-cffi==23.1.0' \
+    '"-X", "-w", "-qAt"'; do
+    if ! rg -F -q "${required_text}" "${SCRIPT_PATH}"; then
+        printf 'reset script is missing required invariant: %s\n' "${required_text}" >&2
+        exit 1
+    fi
+done
+
+if rg -n 'info "密码：\$\{DEFAULT_PASSWORD\}"' "${SCRIPT_PATH}"; then
+    printf 'reset script must not print the default password to logs\n' >&2
+    exit 1
+fi
+
 printf 'reset_admin_password helper tests: ok\n'

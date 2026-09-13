@@ -104,6 +104,7 @@ score = 0.30 × Cost Factor + 0.25 × Latency Factor + 0.25 × Success Rate + 0.
 - **Permission separation**: API Key with admin role cannot access management interface
 - **Complete user management**: Registration → Email verification → Login → Password reset → Role management
 - **Group-based rate limiting**: User-level / tenant-level / API Key-level throttling (in-memory / Redis dual backend)
+- **Generation quota semantics**: Generation RPM is charged once per execution on the authenticated tenant/user/API-key bucket; a selected account may tighten the tenant limit, while fallback attempts remain part of the same logical request. Account limits intentionally use that caller-scoped bucket (they are not an aggregate upstream-account bucket). Malformed requests, routing failures, and completed idempotency replays do not consume execution RPM.
 
 ### Observability
 

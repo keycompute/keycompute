@@ -562,7 +562,55 @@ pub(in crate::handlers) async fn responses_inner(
             }
         }
     }
-    let mut tpm_reservation = match crate::handlers::reserve_generation_tpm(&state, &ctx).await {
+    // Load the effective RPM/TPM configuration for the selected primary
+    // account. RPM itself is recorded only after the reversible TPM and
+    // balance reservations below succeed, so rejected pre-dispatch requests
+    // do not consume an execution slot.
+    let generation_rate_limit_config =
+        match crate::middleware::authenticated_rate_limit_config_for_account(
+            &state,
+            auth.tenant_id,
+            Some(primary_account_id),
+        )
+        .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                // Configuration lookup runs after account reservations and
+                // idempotency binding. A rejected request must release both, otherwise the
+                // account remains reserved and retries with the same key are stuck in
+                // "still executing" until the lease expires.
+                reservations.release().await;
+                if let Some(execution) = idempotency_execution.as_ref() {
+                    abandon_unstarted_responses_idempotency_execution(&state, execution).await;
+                }
+                let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                    (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::RateLimit,
+                        "rpm_limit_exceeded",
+                    )
+                } else {
+                    (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "rate_limit_check_failed",
+                    )
+                };
+                pre_execution_guard
+                    .finish_failed(origin, category, code)
+                    .await;
+                return Err(error);
+            }
+        };
+
+    let mut tpm_reservation = match crate::handlers::reserve_generation_tpm(
+        &state,
+        &ctx,
+        generation_rate_limit_config.clone(),
+    )
+    .await
+    {
         Ok(reservation) => reservation,
         Err(error) => {
             reservations.release().await;
@@ -588,6 +636,7 @@ pub(in crate::handlers) async fn responses_inner(
             return Err(error);
         }
     };
+
     let mut balance_reservation = match crate::handlers::reserve_generation_balance(
         &state,
         &ctx,
@@ -612,6 +661,43 @@ pub(in crate::handlers) async fn responses_inner(
             return Err(error);
         }
     };
+
+    // RPM is charged once to the selected primary account. If execution later
+    // fails over, the fallback is part of the same logical request and is not
+    // admitted as an additional request. This is the last reversible
+    // pre-dispatch gate; the idempotency dispatch fence below is irreversible.
+    if let Err(error) = crate::middleware::enforce_authenticated_rate_limit_with_config(
+        &state,
+        &auth,
+        &generation_rate_limit_config,
+    )
+    .await
+    {
+        balance_reservation.release().await;
+        tpm_reservation.release().await;
+        reservations.release().await;
+        if let Some(execution) = idempotency_execution.as_ref() {
+            abandon_unstarted_responses_idempotency_execution(&state, execution).await;
+        }
+        let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+            (
+                ErrorOrigin::Client,
+                TraceErrorCategory::RateLimit,
+                "rpm_limit_exceeded",
+            )
+        } else {
+            (
+                ErrorOrigin::Gateway,
+                TraceErrorCategory::Internal,
+                "rate_limit_check_failed",
+            )
+        };
+        pre_execution_guard
+            .finish_failed(origin, category, code)
+            .await;
+        return Err(error);
+    }
+
     if let Some(execution) = idempotency_execution.as_ref()
         && let Err(error) = mark_responses_idempotency_dispatched(&state, execution).await
     {

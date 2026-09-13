@@ -730,26 +730,90 @@ pub async fn chat_completions(
         tracing::warn!(request_id=%request_id.0, %error, "failed to record request route");
     }
 
-    let mut tpm_reservation = match super::reserve_generation_tpm(&state, &ctx).await {
-        Ok(reservation) => reservation,
-        Err(error) => {
-            let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
-                (
-                    ErrorOrigin::Client,
-                    TraceErrorCategory::RateLimit,
-                    "tpm_limit_exceeded",
-                )
-            } else {
-                (
-                    ErrorOrigin::Gateway,
-                    TraceErrorCategory::Internal,
-                    "tpm_reservation_failed",
-                )
-            };
-            finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
-            return Err(error);
-        }
+    let execution_account_id = match &plan.primary {
+        ExecutionTarget::ProviderAccount { account_id, .. } => Some(*account_id),
+        _ => None,
     };
+
+    // Node tasks have a narrower message protocol than the OpenAI-compatible
+    // provider path. Validate that projection before charging execution RPM;
+    // an unsupported payload is a client error and never reaches an upstream.
+    let node_messages = if matches!(&plan.primary, ExecutionTarget::Node { .. }) {
+        match ctx
+            .native_openai_chat_request
+            .as_deref()
+            .ok_or_else(|| {
+                ApiError::Internal("native Chat request missing for Node route".to_string())
+            })
+            .and_then(node_chat_messages)
+        {
+            Ok(messages) => Some(messages),
+            Err(error) => {
+                finish_unexecuted_trace(
+                    &mut pre_execution_guard,
+                    ErrorOrigin::Client,
+                    TraceErrorCategory::InvalidRequest,
+                    "unsupported_node_chat_payload",
+                )
+                .await;
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
+
+    let generation_rate_limit_config =
+        match crate::middleware::authenticated_rate_limit_config_for_account(
+            &state,
+            auth.tenant_id,
+            execution_account_id,
+        )
+        .await
+        {
+            Ok(config) => config,
+            Err(error) => {
+                let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                    (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::RateLimit,
+                        "rpm_limit_exceeded",
+                    )
+                } else {
+                    (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "rate_limit_check_failed",
+                    )
+                };
+                finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+                return Err(error);
+            }
+        };
+
+    let mut tpm_reservation =
+        match super::reserve_generation_tpm(&state, &ctx, generation_rate_limit_config.clone())
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                    (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::RateLimit,
+                        "tpm_limit_exceeded",
+                    )
+                } else {
+                    (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "tpm_reservation_failed",
+                    )
+                };
+                finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+                return Err(error);
+            }
+        };
 
     // 5. 根据 ExecutionTarget 分流执行路径
     match &plan.primary {
@@ -771,6 +835,7 @@ pub async fn chat_completions(
 
             // 调用 node-gateway 执行
             let Some(node_gateway) = state.node_gateway.as_ref() else {
+                tpm_reservation.release().await;
                 finish_unexecuted_trace(
                     &mut pre_execution_guard,
                     ErrorOrigin::Gateway,
@@ -783,26 +848,7 @@ pub async fn chat_completions(
                 ));
             };
 
-            let node_messages = match ctx
-                .native_openai_chat_request
-                .as_deref()
-                .ok_or_else(|| {
-                    ApiError::Internal("native Chat request missing for Node route".to_string())
-                })
-                .and_then(node_chat_messages)
-            {
-                Ok(messages) => messages,
-                Err(error) => {
-                    finish_unexecuted_trace(
-                        &mut pre_execution_guard,
-                        ErrorOrigin::Client,
-                        TraceErrorCategory::InvalidRequest,
-                        "unsupported_node_chat_payload",
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
+            let node_messages = node_messages.expect("Node payload was validated before admission");
 
             // 构建 NodeTaskPayload
             let payload = keycompute_types::node::NodeTaskPayload {
@@ -823,6 +869,7 @@ pub async fn chat_completions(
 
             // 防御性校验 payload 互斥性
             if let Err(e) = payload.validate() {
+                tpm_reservation.release().await;
                 finish_unexecuted_trace(
                     &mut pre_execution_guard,
                     ErrorOrigin::Gateway,
@@ -836,7 +883,7 @@ pub async fn chat_completions(
                 )));
             }
 
-            let balance_reservation = match super::reserve_generation_balance(
+            let mut balance_reservation = match super::reserve_generation_balance(
                 &state,
                 &ctx,
                 super::GenerationBalanceReservationLifetime::Node(node_gateway.task_deadline()),
@@ -856,6 +903,32 @@ pub async fn chat_completions(
                     return Err(error);
                 }
             };
+
+            if let Err(error) = crate::middleware::enforce_authenticated_rate_limit_with_config(
+                &state,
+                &auth,
+                &generation_rate_limit_config,
+            )
+            .await
+            {
+                balance_reservation.release().await;
+                tpm_reservation.release().await;
+                let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                    (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::RateLimit,
+                        "rpm_limit_exceeded",
+                    )
+                } else {
+                    (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "rate_limit_check_failed",
+                    )
+                };
+                finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+                return Err(error);
+            }
 
             let mut client_response_guard =
                 super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
@@ -1030,6 +1103,32 @@ pub async fn chat_completions(
                     return Err(error);
                 }
             };
+
+            if let Err(error) = crate::middleware::enforce_authenticated_rate_limit_with_config(
+                &state,
+                &auth,
+                &generation_rate_limit_config,
+            )
+            .await
+            {
+                balance_reservation.release().await;
+                tpm_reservation.release().await;
+                let (origin, category, code) = if matches!(error, ApiError::RateLimit(_)) {
+                    (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::RateLimit,
+                        "rpm_limit_exceeded",
+                    )
+                } else {
+                    (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "rate_limit_check_failed",
+                    )
+                };
+                finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+                return Err(error);
+            }
 
             tracing::info!(
                 request_id = %request_id.0,

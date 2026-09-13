@@ -856,6 +856,88 @@ pub(crate) async fn authenticated_rate_limit_config(
     }
 }
 
+/// Load the effective generation limits for a tenant and its selected account.
+///
+/// The tenant limit is always authoritative. An account may further tighten
+/// that limit, but it must never widen it. In a configured deployment, an
+/// account lookup failure is itself a rate-limit dependency failure and is
+/// therefore returned to the caller instead of silently falling back to the
+/// global defaults.
+pub(crate) async fn authenticated_rate_limit_config_for_account(
+    state: &AppState,
+    tenant_id: Uuid,
+    account_id: Option<Uuid>,
+) -> Result<RateLimitConfig> {
+    let tenant_config = authenticated_rate_limit_config(state, tenant_id).await?;
+
+    let Some(account_id) = account_id else {
+        return Ok(tenant_config);
+    };
+    let Some(pool) = state.pool.as_deref() else {
+        // In-memory/test deployments have no authoritative account table.
+        return Ok(tenant_config);
+    };
+
+    let account = match keycompute_db::Account::find_by_id(pool.write_conn(), account_id).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            error!(
+                %account_id,
+                "Selected account not found for rate limiting, denying request"
+            );
+            return Err(ApiError::ServiceUnavailable(
+                "Rate limit configuration is unavailable. Please try again later.".to_string(),
+            ));
+        }
+        Err(error) => {
+            error!(
+                %account_id,
+                %error,
+                "Failed to load selected account for rate limiting, denying request"
+            );
+            return Err(ApiError::ServiceUnavailable(
+                "Rate limit configuration is unavailable. Please try again later.".to_string(),
+            ));
+        }
+    };
+
+    if account.tenant_id != tenant_id && account.visibility != "global" {
+        error!(
+            %account_id,
+            %tenant_id,
+            account_tenant_id = %account.tenant_id,
+            "Selected account is not visible to the authenticated tenant, denying request"
+        );
+        return Err(ApiError::ServiceUnavailable(
+            "Rate limit configuration is unavailable. Please try again later.".to_string(),
+        ));
+    }
+    if !account.enabled {
+        error!(
+            %account_id,
+            "Selected account was disabled before generation admission, denying request"
+        );
+        return Err(ApiError::ServiceUnavailable(
+            "Rate limit configuration is unavailable. Please try again later.".to_string(),
+        ));
+    }
+
+    Ok(stricter_rate_limit_config(
+        tenant_config,
+        RateLimitConfig::from_tenant(account.rpm_limit, account.tpm_limit),
+    ))
+}
+
+fn stricter_rate_limit_config(
+    tenant_config: RateLimitConfig,
+    account_config: RateLimitConfig,
+) -> RateLimitConfig {
+    RateLimitConfig::new(
+        tenant_config.rpm_limit.min(account_config.rpm_limit),
+        tenant_config.tpm_limit.min(account_config.tpm_limit),
+    )
+}
+
 /// 限流中间件
 ///
 /// 基于用户/租户/API Key 进行请求限流
@@ -879,7 +961,6 @@ pub async fn rate_limit_middleware(
     {
         return next.run(req).await;
     }
-
     // Reuse authentication performed by an outer middleware/extractor. Apart
     // from avoiding a redundant database read, this is important for fail
     // closed behavior: a transient failure during a second verification must
@@ -921,6 +1002,21 @@ pub async fn rate_limit_middleware(
         }
     };
 
+    if req.method() == Method::POST
+        && matches!(
+            req.uri().path(),
+            "/v1/chat/completions" | "/v1/messages" | "/v1/responses" | "/v1/responses/compact"
+        )
+    {
+        // Generation RPM is execution-based: route-aware handlers own the
+        // admission because the effective upstream account is only known after
+        // routing and project-level affinity checks. Malformed requests,
+        // routing failures, and completed idempotency replays intentionally do
+        // not consume an execution slot.
+        req.extensions_mut().insert(auth);
+        return next.run(req).await;
+    }
+
     // 使用真实的 user_id, tenant_id, produce_ai_key_id 创建限流键
     let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
     let tenant_id = auth.tenant_id;
@@ -961,27 +1057,44 @@ pub async fn rate_limit_middleware(
     }
 }
 
-/// 对已经完成 API Key 认证的长连接子请求执行与 HTTP 入口相同的限流。
-/// WebSocket 握手本身不消耗一次请求额度；每个 `response.create` 都检查并
-/// 记录 RPM。生成事件的 TPM 预测额度在完整上下文解析后由 Responses
-/// handler 原子预留，避免此处先读后写的并发穿透。
+/// 对已经完成认证的 WebSocket warmup 子请求执行与 HTTP 入口相同的租户
+/// RPM 限流。WebSocket 握手本身不消耗请求额度；生成事件由 Responses
+/// handler 在选定上游账号后加载有效配置并在那里原子检查。
 pub(crate) async fn enforce_authenticated_rate_limit(
     state: &AppState,
     auth: &AuthExtractor,
 ) -> Result<()> {
-    let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
     let config = authenticated_rate_limit_config(state, auth.tenant_id).await?;
+    enforce_authenticated_rate_limit_with_config(state, auth, &config).await
+}
 
+/// Record one generation RPM admission using an already loaded effective
+/// configuration. Callers use this after all other reversible pre-dispatch
+/// checks (for example TPM and balance) have succeeded.
+pub(crate) async fn enforce_authenticated_rate_limit_with_config(
+    state: &AppState,
+    auth: &AuthExtractor,
+    config: &RateLimitConfig,
+) -> Result<()> {
+    let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+    enforce_authenticated_rate_limit_for_key(state, &rate_key, config).await
+}
+
+async fn enforce_authenticated_rate_limit_for_key(
+    state: &AppState,
+    rate_key: &RateLimitKey,
+    config: &RateLimitConfig,
+) -> Result<()> {
     state
         .rate_limiter
-        .check_and_record_with_config(&rate_key, &config)
+        .check_and_record_with_config(rate_key, config)
         .await
         .map_err(|error| match error {
             keycompute_types::KeyComputeError::RateLimitExceeded(_) => {
                 ApiError::RateLimit("Rate limit exceeded. Please try again later.".to_string())
             }
             other => {
-                error!(error = %other, "WebSocket RPM check failed, denying request");
+                error!(error = %other, "Authenticated RPM check failed, denying request");
                 ApiError::ServiceUnavailable(
                     "Rate limit check failed. Please try again later.".to_string(),
                 )
@@ -1955,12 +2068,126 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn account_rate_limit_config_uses_defaults_without_pool() {
+        let state = AppState::new();
+        let default_config = RateLimitConfig::default();
+        let tenant_id = Uuid::new_v4();
+
+        assert_eq!(
+            authenticated_rate_limit_config_for_account(&state, tenant_id, Some(Uuid::new_v4()))
+                .await
+                .unwrap()
+                .rpm_limit,
+            default_config.rpm_limit
+        );
+        assert_eq!(
+            authenticated_rate_limit_config_for_account(&state, tenant_id, Some(Uuid::new_v4()))
+                .await
+                .unwrap()
+                .tpm_limit,
+            default_config.tpm_limit
+        );
+        assert_eq!(
+            authenticated_rate_limit_config_for_account(&state, tenant_id, None)
+                .await
+                .unwrap()
+                .rpm_limit,
+            default_config.rpm_limit
+        );
+        assert_eq!(
+            authenticated_rate_limit_config_for_account(&state, tenant_id, None)
+                .await
+                .unwrap()
+                .tpm_limit,
+            default_config.tpm_limit
+        );
+    }
+
+    #[tokio::test]
+    async fn account_rate_limit_config_denies_when_lookup_fails() {
+        let state = AppState::with_pool(keycompute_db::DbRouter::single(
+            sea_orm::DatabaseConnection::Disconnected,
+        ));
+        let result = authenticated_rate_limit_config_for_account(
+            &state,
+            Uuid::new_v4(),
+            Some(Uuid::new_v4()),
+        )
+        .await;
+
+        assert!(matches!(result, Err(ApiError::ServiceUnavailable(_))));
+    }
+
+    #[tokio::test]
+    async fn enforce_rate_limit_with_config_uses_defaults_without_pool() {
+        let state = AppState::new();
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        let config = authenticated_rate_limit_config_for_account(
+            &state,
+            auth.tenant_id,
+            Some(Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            enforce_authenticated_rate_limit_with_config(&state, &auth, &config)
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn config_lookup_failure_denies_without_recording() {
+        let state = AppState::with_pool(keycompute_db::DbRouter::single(
+            sea_orm::DatabaseConnection::Disconnected,
+        ));
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+
+        let config_result = authenticated_rate_limit_config_for_account(
+            &state,
+            auth.tenant_id,
+            Some(Uuid::new_v4()),
+        )
+        .await;
+
+        assert!(matches!(
+            config_result,
+            Err(ApiError::ServiceUnavailable(_))
+        ));
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn account_limits_can_only_tighten_the_tenant_limit() {
+        let tenant = RateLimitConfig::new(25, 2_000);
+        let account = RateLimitConfig::new(100, 10_000);
+        let effective = stricter_rate_limit_config(tenant, account);
+
+        assert_eq!(effective.rpm_limit, 25);
+        assert_eq!(effective.tpm_limit, 2_000);
+
+        let tighter_account = RateLimitConfig::new(5, 500);
+        let effective = stricter_rate_limit_config(effective, tighter_account);
+        assert_eq!(effective.rpm_limit, 5);
+        assert_eq!(effective.tpm_limit, 500);
+    }
+
+    #[tokio::test]
     async fn rate_limit_middleware_reuses_cached_auth_and_records_rpm() {
         let state = AppState::new();
         let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
         let app = Router::new()
-            .route("/rate-limited", get(|| async { StatusCode::NO_CONTENT }))
+            .route("/rate-limited", post(|| async { StatusCode::NO_CONTENT }))
             .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
             .with_state(state.clone());
 
@@ -1970,6 +2197,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
+                    .method("POST")
                     .uri("/rate-limited")
                     .header("Authorization", "not-a-bearer-header")
                     .extension(auth)
@@ -2015,7 +2243,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_route_rpm_rejection_uses_canonical_openai_rate_limit_response() {
+    async fn chat_route_rpm_is_not_enforced_by_transport_middleware() {
         let state = AppState::new();
         let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
@@ -2033,8 +2261,7 @@ mod tests {
                 post(|| async { StatusCode::NO_CONTENT }),
             )
             .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
-            .layer(from_fn(openai_rate_limit_response_middleware))
-            .with_state(state);
+            .with_state(state.clone());
 
         let response = app
             .oneshot(
@@ -2048,7 +2275,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_canonical_chat_rate_limit_response(response).await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            u64::from(config.rpm_limit)
+        );
     }
 
     #[tokio::test]
@@ -2186,9 +2417,13 @@ mod tests {
                     let state = handler_state.clone();
                     let ctx = ctx.clone();
                     async move {
-                        crate::handlers::reserve_generation_tpm(&state, &ctx)
-                            .await
-                            .map(|_reservation| StatusCode::NO_CONTENT)
+                        crate::handlers::reserve_generation_tpm(
+                            &state,
+                            &ctx,
+                            keycompute_ratelimit::RateLimitConfig::default(),
+                        )
+                        .await
+                        .map(|_reservation| StatusCode::NO_CONTENT)
                     }
                 }),
             )
@@ -2286,7 +2521,7 @@ mod tests {
         assert_eq!(replay_candidate.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
-            1
+            0
         );
 
         let new_request = app
@@ -2303,7 +2538,7 @@ mod tests {
         assert_eq!(new_request.status(), StatusCode::NO_CONTENT);
         assert_eq!(
             state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
-            2
+            0
         );
         assert_eq!(
             state.rate_limiter.get_tpm_count(&rate_key).await.unwrap(),
@@ -3192,7 +3427,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

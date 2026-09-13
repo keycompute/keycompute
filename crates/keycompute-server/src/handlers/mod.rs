@@ -572,8 +572,8 @@ impl Drop for GenerationTpmReservation {
 pub(crate) async fn reserve_generation_tpm(
     state: &crate::state::AppState,
     ctx: &keycompute_types::RequestContext,
+    config: keycompute_ratelimit::RateLimitConfig,
 ) -> crate::error::Result<GenerationTpmReservation> {
-    let config = crate::middleware::authenticated_rate_limit_config(state, ctx.tenant_id).await?;
     let predicted_tokens = generation_tpm_reservation_tokens(ctx, config.tpm_limit);
     ctx.set_tpm_reservation_tokens(predicted_tokens);
     let request_lifetime = ctx.tpm_reservation_lifetime();
@@ -1684,7 +1684,14 @@ mod tests {
         ));
         let ctx = reservation_context(keycompute_types::PricingSnapshot::default());
 
-        let reserve_task = tokio::spawn(async move { reserve_generation_tpm(&state, &ctx).await });
+        let reserve_task = tokio::spawn(async move {
+            reserve_generation_tpm(
+                &state,
+                &ctx,
+                keycompute_ratelimit::RateLimitConfig::default(),
+            )
+            .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while backend
                 .reserve_calls

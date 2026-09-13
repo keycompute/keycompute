@@ -927,7 +927,7 @@ async fn process_response_create(
         .get("previous_response_id")
         .and_then(Value::as_str)
         .map(str::to_string);
-    // Authentication, validation, and rate-limit failures occur before a
+    // Authentication and validation failures occur before a
     // response is started and leave a stateless parent available for retry.
     // Once the Responses pipeline returns an HTTP response, either a non-2xx
     // response or a later SSE failure invalidates a same-lane parent.
@@ -959,10 +959,15 @@ async fn process_response_create(
             .get("generate")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        enforce_authenticated_rate_limit(&state, &auth)
-            .await
-            .map_err(|error| api_error(error, lane.clone()))?;
         let stored = body.get("store").and_then(Value::as_bool).unwrap_or(true);
+        if !generate {
+            // Warmups mutate local continuation state without selecting an
+            // upstream account, so charge the authenticated tenant quota.
+            // This admission must happen before persistence or cache writes.
+            enforce_authenticated_rate_limit(&state, &auth)
+                .await
+                .map_err(|error| api_error(error, lane.clone()))?;
+        }
         let explicit_model = body
             .get("model")
             .and_then(Value::as_str)
@@ -2366,6 +2371,83 @@ mod tests {
         assert_eq!(events[2]["response"]["id"], "resp_ws_test");
         assert_eq!(events[2]["response"]["status"], "completed");
         assert_eq!(events[2]["response"], response);
+    }
+
+    #[tokio::test]
+    async fn websocket_warmup_is_rejected_when_tenant_rpm_is_exhausted() {
+        let state = AppState::new();
+        let auth = AuthExtractor::new(
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            uuid::Uuid::new_v4(),
+            "user",
+        );
+        // JWT-authenticated WebSocket events have no Produce AI key, so the
+        // revalidated event identity uses the nil API-key component.
+        let rate_key = keycompute_ratelimit::RateLimitKey::new(
+            auth.tenant_id,
+            auth.user_id,
+            uuid::Uuid::nil(),
+        );
+        let config = keycompute_ratelimit::RateLimitConfig::default();
+        for _ in 0..config.rpm_limit {
+            state
+                .rate_limiter
+                .check_and_record_with_config(&rate_key, &config)
+                .await
+                .unwrap();
+        }
+
+        let jwt = keycompute_auth::JwtValidator::new("change-me-in-production", "keycompute")
+            .generate_token(auth.user_id, auth.tenant_id, "user")
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {jwt}").parse().unwrap(),
+        );
+        let body = json!({
+            "type": "response.create",
+            "model": "gpt-test",
+            "generate": false,
+            "store": false,
+            "input": "warmup",
+        });
+        let body_bytes = serde_json::to_string(&body).unwrap();
+        let request_slots = Arc::new(Semaphore::new(1));
+        let request_bytes = Arc::new(Semaphore::new(MAX_RESIDENT_REQUEST_BYTES));
+        let budget = try_reserve_request_budget(
+            &request_slots,
+            &request_bytes,
+            MAX_RESIDENT_REQUEST_BYTES,
+            parsed_request_working_set_bytes(body_bytes.len(), &body),
+        )
+        .unwrap();
+        let (outbound, mut events) = OutboundSender::with_byte_limit(4, 4096);
+
+        process_response_create(
+            QueuedCreate {
+                body,
+                lane: None,
+                _budget: budget,
+            },
+            state.clone(),
+            headers,
+            Arc::new(Mutex::new(ConnectionCache::default())),
+            outbound,
+        )
+        .await;
+
+        let Message::Text(text) = events.recv().await.unwrap().message else {
+            panic!("expected rate-limit error event");
+        };
+        let event: Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(event["type"], "error");
+        assert_eq!(event["code"], "rate_limit_exceeded");
+        assert_eq!(
+            state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
+            u64::from(config.rpm_limit)
+        );
     }
 
     #[test]
