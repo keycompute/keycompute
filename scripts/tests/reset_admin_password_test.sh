@@ -124,7 +124,7 @@ if normalize_admin_email 'not-an-email' >/dev/null 2>&1; then
 fi
 
 SCRIPT_PATH="${TEST_DIR}/../reset_admin_password.sh"
-if rg -n '(^|[[:space:]])read([[:space:]]|$)' "${SCRIPT_PATH}"; then
+if grep -En -- '(^|[[:space:]])read([[:space:]]|$)' "${SCRIPT_PATH}"; then
     printf 'reset script must not read a password interactively\n' >&2
     exit 1
 fi
@@ -146,13 +146,13 @@ for required_text in \
     'tenant_distribution_rules' \
     'argon2-cffi==23.1.0' \
     '"-X", "-w", "-qAt"'; do
-    if ! rg -F -q "${required_text}" "${SCRIPT_PATH}"; then
+    if ! grep -Fq -- "${required_text}" "${SCRIPT_PATH}"; then
         printf 'reset script is missing required invariant: %s\n' "${required_text}" >&2
         exit 1
     fi
 done
 
-if rg -n 'info "密码：\$\{DEFAULT_PASSWORD\}"' "${SCRIPT_PATH}"; then
+if grep -Fn -- 'info "密码：${DEFAULT_PASSWORD}"' "${SCRIPT_PATH}"; then
     printf 'reset script must not print the default password to logs\n' >&2
     exit 1
 fi
