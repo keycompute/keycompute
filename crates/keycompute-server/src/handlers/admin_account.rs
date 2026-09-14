@@ -41,6 +41,36 @@ use tracing;
 use uuid::Uuid;
 
 const RESPONSES_PROBE_MAX_OUTPUT_TOKENS: u32 = 16;
+const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
+
+fn validate_account_rate_limits(rpm_limit: Option<i32>, tpm_limit: Option<i32>) -> Result<()> {
+    if let Some(rpm_limit) = rpm_limit
+        && rpm_limit < ACCOUNT_RATE_LIMIT_MIN
+    {
+        return Err(ApiError::BadRequest(format!(
+            "rpm_limit must be at least {ACCOUNT_RATE_LIMIT_MIN}"
+        )));
+    }
+    if let Some(tpm_limit) = tpm_limit
+        && tpm_limit < ACCOUNT_RATE_LIMIT_MIN
+    {
+        return Err(ApiError::BadRequest(format!(
+            "tpm_limit must be at least {ACCOUNT_RATE_LIMIT_MIN}"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_model_list(models: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::with_capacity(models.len());
+    for model in models {
+        let model = model.trim();
+        if !model.is_empty() && !normalized.iter().any(|item| item == model) {
+            normalized.push(model.to_string());
+        }
+    }
+    normalized
+}
 
 fn validate_account_priority(priority: Option<i32>) -> Result<()> {
     if let Some(priority) = priority
@@ -106,6 +136,7 @@ pub struct AccountInfo {
     pub models: Vec<String>,
     pub api_capabilities: Vec<String>,
     pub rpm_limit: i32,
+    pub tpm_limit: i32,
     pub current_rpm: i32,
     pub is_active: bool,
     pub is_healthy: bool,
@@ -226,6 +257,7 @@ pub async fn list_accounts(
                 models: acc.models_supported,
                 api_capabilities: acc.api_capabilities,
                 rpm_limit: acc.rpm_limit,
+                tpm_limit: acc.tpm_limit,
                 current_rpm: if is_cooling { -1 } else { 0 }, // -1 表示冷却中
                 is_active: acc.enabled,
                 is_healthy,
@@ -265,6 +297,7 @@ pub struct CreateAccountRequest {
     /// 账号支持的原生 API 表面；省略时使用协议的安全默认值。
     pub api_capabilities: Option<Vec<String>>,
     pub rpm_limit: Option<i32>,
+    pub tpm_limit: Option<i32>,
     pub priority: Option<i32>,
     /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
     #[serde(default = "default_visibility")]
@@ -338,6 +371,7 @@ pub async fn create_account(
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
     validate_account_priority(req.priority)?;
+    validate_account_rate_limits(req.rpm_limit, req.tpm_limit)?;
 
     let pool = state
         .pool
@@ -362,7 +396,8 @@ pub async fn create_account(
     })?;
 
     // 校验模型列表：必须至少提供一个模型（不再提供默认值）
-    if req.models.is_empty() {
+    let models = normalize_model_list(req.models);
+    if models.is_empty() {
         return Err(ApiError::BadRequest(
             "At least one model must be specified for the channel account".to_string(),
         ));
@@ -408,9 +443,9 @@ pub async fn create_account(
         upstream_api_key_encrypted: encrypted_key,
         upstream_api_key_preview: key_preview,
         rpm_limit: req.rpm_limit,
-        tpm_limit: None,
+        tpm_limit: req.tpm_limit,
         priority: req.priority,
-        models_supported: req.models.clone(),
+        models_supported: models,
         api_capabilities,
         visibility: Some(req.visibility.clone()),
     };
@@ -438,6 +473,7 @@ pub async fn create_account(
         "models": account.models_supported,
         "api_capabilities": account.api_capabilities,
         "rpm_limit": account.rpm_limit,
+        "tpm_limit": account.tpm_limit,
         "current_rpm": 0,
         "is_active": account.enabled,
         "is_healthy": account.health_status == keycompute_routing::ACCOUNT_HEALTHY,
@@ -468,6 +504,7 @@ pub struct UpdateAccountRequest {
     pub models: Option<Vec<String>>,
     pub api_capabilities: Option<Vec<String>>,
     pub rpm_limit: Option<i32>,
+    pub tpm_limit: Option<i32>,
     pub is_active: Option<bool>,
     pub priority: Option<i32>,
     /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
@@ -487,6 +524,7 @@ pub async fn update_account(
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
     validate_account_priority(req.priority)?;
+    validate_account_rate_limits(req.rpm_limit, req.tpm_limit)?;
 
     let pool = state
         .pool
@@ -582,6 +620,7 @@ pub async fn update_account(
         (None, None)
     };
 
+    let models_supported = req.models.map(normalize_model_list);
     let db_req = DbUpdateAccountRequest {
         tenant_id: req.tenant_id,
         name: req.name.clone(),
@@ -589,10 +628,10 @@ pub async fn update_account(
         upstream_api_key_encrypted: encrypted_key,
         upstream_api_key_preview: key_preview,
         rpm_limit: req.rpm_limit,
-        tpm_limit: None,
+        tpm_limit: req.tpm_limit,
         priority: req.priority,
         enabled: req.is_active,
-        models_supported: req.models.clone(),
+        models_supported,
         api_capabilities,
         visibility: req.visibility.clone(),
     };
@@ -636,6 +675,7 @@ pub async fn update_account(
         "models": updated.models_supported,
         "api_capabilities": updated.api_capabilities,
         "rpm_limit": updated.rpm_limit,
+        "tpm_limit": updated.tpm_limit,
         "current_rpm": 0,
         "is_active": updated.enabled,
         "is_healthy": updated.health_status == keycompute_routing::ACCOUNT_HEALTHY,
@@ -1418,6 +1458,35 @@ mod tests {
         ));
         assert!(validate_account_priority(Some(11)).is_err());
     }
+
+    #[test]
+    fn account_rate_limit_validation_requires_positive_values() {
+        assert!(validate_account_rate_limits(None, None).is_ok());
+        assert!(validate_account_rate_limits(Some(1), Some(1)).is_ok());
+        assert!(matches!(
+            validate_account_rate_limits(Some(0), None),
+            Err(ApiError::BadRequest(message)) if message.contains("rpm_limit")
+        ));
+        assert!(matches!(
+            validate_account_rate_limits(None, Some(0)),
+            Err(ApiError::BadRequest(message)) if message.contains("tpm_limit")
+        ));
+    }
+
+    #[test]
+    fn model_list_normalization_trims_deduplicates_and_allows_clear() {
+        assert_eq!(
+            normalize_model_list(vec![
+                " gpt-test ".to_string(),
+                "gpt-test".to_string(),
+                "".to_string(),
+                " claude-test".to_string(),
+            ]),
+            vec!["gpt-test".to_string(), "claude-test".to_string()]
+        );
+        assert!(normalize_model_list(Vec::new()).is_empty());
+    }
+
     use llm_protocol_provider::{
         ByteStream, GetBinaryResponse, UpstreamResponse, UpstreamResponseMeta,
         test_support::RecordingGetTransport,

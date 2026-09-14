@@ -1741,6 +1741,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("accounts.health_penalty", "Dynamic penalty");
     m.insert("accounts.rpm_label", "Current RPM / Limit");
+    m.insert("accounts.tpm_label", "TPM Limit");
     m.insert("accounts.last_used", "Last Used");
     m.insert("accounts.no_usage_record", "No record");
     m.insert("accounts.test_success", "Connection test succeeded");
@@ -1758,6 +1759,16 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "accounts.priority_invalid",
         "Priority must be an integer from 0 to 10",
+    );
+    m.insert("accounts.rpm_limit", "RPM Limit");
+    m.insert("accounts.tpm_limit", "TPM Limit");
+    m.insert(
+        "accounts.rate_limit_hint",
+        "Must be an integer of at least 1; the effective value cannot exceed the tenant limit.",
+    );
+    m.insert(
+        "accounts.rate_limit_invalid",
+        "RPM/TPM limits must be integers of at least 1",
     );
     m.insert(
         "accounts.channel_name_placeholder",
@@ -1786,9 +1797,14 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Ollama (OpenAI Compatible)",
     );
     m.insert("accounts.supported_models", "Supported Models *");
+    m.insert("accounts.supported_models_edit", "Supported Models");
     m.insert(
         "accounts.models_hint",
         "Separate multiple models with commas",
+    );
+    m.insert(
+        "accounts.models_edit_hint",
+        "Separate multiple models with commas; leave blank to keep this account out of model routing.",
     );
     m.insert("accounts.api_mode", "API Capabilities *");
     m.insert(

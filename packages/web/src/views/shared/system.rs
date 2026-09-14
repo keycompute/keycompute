@@ -680,6 +680,7 @@ mod tests {
                 vec!["chat_completions".to_string()]
             },
             rpm_limit: 60,
+            tpm_limit: 100_000,
             current_rpm,
             is_active,
             is_healthy: true,
@@ -774,6 +775,7 @@ mod tests {
             models: many_models,
             api_capabilities: vec!["chat_completions".to_string()],
             rpm_limit: 60,
+            tpm_limit: 100_000,
             current_rpm: 0,
             is_active: true,
             is_healthy: true,

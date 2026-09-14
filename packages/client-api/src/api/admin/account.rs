@@ -107,6 +107,9 @@ pub struct AccountInfo {
     pub models: Vec<String>,
     pub api_capabilities: Vec<String>,
     pub rpm_limit: i32,
+    /// 账号 TPM 上限。旧服务端响应缺少该字段时使用数据库默认值。
+    #[serde(default = "default_tpm_limit")]
+    pub tpm_limit: i32,
     pub current_rpm: i32,
     pub is_active: bool,
     pub is_healthy: bool,
@@ -139,6 +142,10 @@ fn default_tenant_active() -> bool {
     true
 }
 
+fn default_tpm_limit() -> i32 {
+    100_000
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct AccountPage {
     pub accounts: Vec<AccountInfo>,
@@ -163,6 +170,10 @@ pub struct CreateAccountRequest {
     pub api_capabilities: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpm_limit: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tpm_limit: Option<i32>,
 }
 
 impl CreateAccountRequest {
@@ -179,6 +190,8 @@ impl CreateAccountRequest {
             models: Vec::new(),
             api_capabilities: None,
             priority: None,
+            rpm_limit: None,
+            tpm_limit: None,
         }
     }
 
@@ -201,6 +214,16 @@ impl CreateAccountRequest {
         self.priority = Some(priority);
         self
     }
+
+    pub fn with_rpm_limit(mut self, rpm_limit: i32) -> Self {
+        self.rpm_limit = Some(rpm_limit);
+        self
+    }
+
+    pub fn with_tpm_limit(mut self, tpm_limit: i32) -> Self {
+        self.tpm_limit = Some(tpm_limit);
+        self
+    }
 }
 
 /// 更新账号请求
@@ -212,6 +235,12 @@ pub struct UpdateAccountRequest {
     pub api_base: Option<String>,
     pub api_capabilities: Option<Vec<String>>,
     pub is_active: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpm_limit: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tpm_limit: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub priority: Option<i32>,
     /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
@@ -253,6 +282,21 @@ impl UpdateAccountRequest {
         self
     }
 
+    pub fn with_models(mut self, models: Vec<String>) -> Self {
+        self.models = Some(models);
+        self
+    }
+
+    pub fn with_rpm_limit(mut self, rpm_limit: i32) -> Self {
+        self.rpm_limit = Some(rpm_limit);
+        self
+    }
+
+    pub fn with_tpm_limit(mut self, tpm_limit: i32) -> Self {
+        self.tpm_limit = Some(tpm_limit);
+        self
+    }
+
     pub fn with_visibility(mut self, visibility: impl Into<String>) -> Self {
         self.visibility = Some(visibility.into());
         self
@@ -281,7 +325,8 @@ pub struct AccountRefreshResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        AccountQueryParams, AccountRefreshResponse, AccountTestResponse, CreateAccountRequest,
+        AccountInfo, AccountQueryParams, AccountRefreshResponse, AccountTestResponse,
+        CreateAccountRequest, UpdateAccountRequest,
     };
 
     #[test]
@@ -347,5 +392,52 @@ mod tests {
             serde_json::json!(["chat_completions", "responses"])
         );
         assert_eq!(value["priority"], serde_json::json!(10));
+    }
+
+    #[test]
+    fn account_requests_serialize_models_and_rate_limits() {
+        let create = CreateAccountRequest::new("OpenAI", "openai", "sk-test")
+            .with_models(vec!["gpt-test".to_string()])
+            .with_rpm_limit(12)
+            .with_tpm_limit(34);
+        let create_value = serde_json::to_value(create).unwrap();
+        assert_eq!(create_value["rpm_limit"], serde_json::json!(12));
+        assert_eq!(create_value["tpm_limit"], serde_json::json!(34));
+
+        let update = UpdateAccountRequest::new()
+            .with_models(vec!["gpt-test".to_string(), "gpt-mini".to_string()])
+            .with_rpm_limit(56)
+            .with_tpm_limit(78);
+        let update_value = serde_json::to_value(update).unwrap();
+        assert_eq!(
+            update_value["models"],
+            serde_json::json!(["gpt-test", "gpt-mini"])
+        );
+        assert_eq!(update_value["rpm_limit"], serde_json::json!(56));
+        assert_eq!(update_value["tpm_limit"], serde_json::json!(78));
+    }
+
+    #[test]
+    fn account_info_defaults_tpm_for_older_responses() {
+        let value = serde_json::json!({
+            "id": "account_001",
+            "tenant_id": "tenant_001",
+            "name": "OpenAI",
+            "provider": "openai",
+            "api_key_preview": "sk-...",
+            "api_base": null,
+            "models": ["gpt-test"],
+            "api_capabilities": ["chat_completions"],
+            "rpm_limit": 60,
+            "current_rpm": 0,
+            "is_active": true,
+            "is_healthy": true,
+            "priority": 0,
+            "visibility": "tenant",
+            "created_at": "2024-01-01T00:00:00Z",
+            "last_used_at": null
+        });
+        let account: AccountInfo = serde_json::from_value(value).unwrap();
+        assert_eq!(account.tpm_limit, 100_000);
     }
 }

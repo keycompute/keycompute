@@ -1467,6 +1467,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("accounts.health_penalty", "动态惩罚分");
     m.insert("accounts.rpm_label", "当前 RPM / 上限");
+    m.insert("accounts.tpm_label", "TPM 上限");
     m.insert("accounts.last_used", "最近使用");
     m.insert("accounts.no_usage_record", "暂无记录");
     m.insert("accounts.test_success", "连接测试成功");
@@ -1484,6 +1485,16 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "accounts.priority_invalid",
         "静态优先级必须是 0 到 10 的整数",
+    );
+    m.insert("accounts.rpm_limit", "RPM 上限");
+    m.insert("accounts.tpm_limit", "TPM 上限");
+    m.insert(
+        "accounts.rate_limit_hint",
+        "必须是大于等于 1 的整数；实际生效值不会超过所属租户上限。",
+    );
+    m.insert(
+        "accounts.rate_limit_invalid",
+        "RPM/TPM 上限必须是大于等于 1 的整数",
     );
     m.insert("accounts.channel_name_placeholder", "如 OpenAI 官方");
     m.insert("accounts.provider", "Provider *");
@@ -1506,7 +1517,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Ollama（OpenAI 兼容）",
     );
     m.insert("accounts.supported_models", "支持模型 *");
+    m.insert("accounts.supported_models_edit", "支持模型");
     m.insert("accounts.models_hint", "多个模型用逗号分隔");
+    m.insert(
+        "accounts.models_edit_hint",
+        "多个模型用逗号分隔；留空表示该账号暂不参与模型路由。",
+    );
     m.insert("accounts.api_mode", "API 接口能力 *");
     m.insert("accounts.api_mode_chat_completions", "仅 Chat Completions");
     m.insert("accounts.api_mode_responses", "仅 Responses");

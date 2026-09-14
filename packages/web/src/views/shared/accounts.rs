@@ -10,12 +10,32 @@ const PAGE_SIZE: usize = 20;
 const SEARCH_DEBOUNCE_MS: u32 = 300;
 const ACCOUNT_PRIORITY_MIN: i32 = 0;
 const ACCOUNT_PRIORITY_MAX: i32 = 10;
+const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
 
 fn parse_account_priority(value: &str) -> Option<i32> {
     let priority = value.trim().parse::<i32>().ok()?;
     (ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX)
         .contains(&priority)
         .then_some(priority)
+}
+
+fn parse_account_rate_limit(value: &str) -> Option<i32> {
+    let limit = value.trim().parse::<i32>().ok()?;
+    (limit >= ACCOUNT_RATE_LIMIT_MIN).then_some(limit)
+}
+
+fn parse_models_input(value: &str) -> Vec<String> {
+    let mut models = Vec::new();
+    for model in value
+        .split(',')
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        if !models.iter().any(|existing| existing == model) {
+            models.push(model.to_string());
+        }
+    }
+    models
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -272,6 +292,8 @@ fn AdminAccountsView() -> Element {
     let mut create_api_base = use_signal(String::new);
     let mut create_api_mode = use_signal(|| "both".to_string());
     let mut create_models_input = use_signal(String::new); // 逗号分隔的模型列表
+    let mut create_rpm_limit = use_signal(|| "60".to_string());
+    let mut create_tpm_limit = use_signal(|| "100000".to_string());
     let mut create_priority = use_signal(|| "0".to_string());
     let mut saving = use_signal(|| false);
     let mut error_msg = use_signal(String::new);
@@ -288,6 +310,9 @@ fn AdminAccountsView() -> Element {
     let mut edit_api_key = use_signal(String::new);
     let mut edit_api_base = use_signal(String::new);
     let mut edit_api_mode = use_signal(|| "chat_completions".to_string());
+    let mut edit_models_input = use_signal(String::new);
+    let mut edit_rpm_limit = use_signal(|| "60".to_string());
+    let mut edit_tpm_limit = use_signal(|| "100000".to_string());
     let mut edit_reset_api_base = use_signal(|| false);
     let mut edit_is_active = use_signal(|| true);
     let mut edit_visibility = use_signal(|| "tenant".to_string());
@@ -366,18 +391,24 @@ fn AdminAccountsView() -> Element {
         let api_mode = create_api_mode();
         let models_str = create_models_input();
         let priority_input = create_priority();
-        // 解析模型列表（逗号分隔，去空格，去空项）
-        let models: Vec<String> = models_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // 解析模型列表（逗号分隔，去空格、空项和重复项）
+        let models = parse_models_input(&models_str);
+        let rpm_limit_input = create_rpm_limit();
+        let tpm_limit_input = create_tpm_limit();
         if name.is_empty() || provider.is_empty() || api_key_val.is_empty() || models.is_empty() {
             *error_msg.write() = i18n.t("accounts.fill_required").to_string();
             return;
         }
         let Some(priority) = parse_account_priority(&priority_input) else {
             *error_msg.write() = i18n.t("accounts.priority_invalid").to_string();
+            return;
+        };
+        let Some(rpm_limit) = parse_account_rate_limit(&rpm_limit_input) else {
+            *error_msg.write() = i18n.t("accounts.rate_limit_invalid").to_string();
+            return;
+        };
+        let Some(tpm_limit) = parse_account_rate_limit(&tpm_limit_input) else {
+            *error_msg.write() = i18n.t("accounts.rate_limit_invalid").to_string();
             return;
         };
         let token = auth_store.token().unwrap_or_default();
@@ -388,6 +419,8 @@ fn AdminAccountsView() -> Element {
             let mut req = CreateAccountRequest::new(name, provider.clone(), api_key_val)
                 .with_models(models)
                 .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode))
+                .with_rpm_limit(rpm_limit)
+                .with_tpm_limit(tpm_limit)
                 .with_priority(priority);
             if !api_base.is_empty() {
                 req = req.with_api_base(api_base);
@@ -402,6 +435,8 @@ fn AdminAccountsView() -> Element {
                     create_api_base.write().clear();
                     *create_api_mode.write() = "both".to_string();
                     create_models_input.write().clear();
+                    create_rpm_limit.set("60".to_string());
+                    create_tpm_limit.set("100000".to_string());
                     create_priority.set("0".to_string());
                     query.write().reset_page();
                     accounts.restart();
@@ -422,6 +457,9 @@ fn AdminAccountsView() -> Element {
         let key_val = edit_api_key();
         let base_val = edit_api_base();
         let api_mode = edit_api_mode();
+        let models_input = edit_models_input();
+        let rpm_limit_input = edit_rpm_limit();
+        let tpm_limit_input = edit_tpm_limit();
         let provider = edit_provider();
         let reset_base = edit_reset_api_base();
         let active = edit_is_active();
@@ -436,6 +474,15 @@ fn AdminAccountsView() -> Element {
             *edit_error.write() = i18n.t("accounts.priority_invalid").to_string();
             return;
         };
+        let Some(rpm_limit) = parse_account_rate_limit(&rpm_limit_input) else {
+            *edit_error.write() = i18n.t("accounts.rate_limit_invalid").to_string();
+            return;
+        };
+        let Some(tpm_limit) = parse_account_rate_limit(&tpm_limit_input) else {
+            *edit_error.write() = i18n.t("accounts.rate_limit_invalid").to_string();
+            return;
+        };
+        let models = parse_models_input(&models_input);
         let token = auth_store.token().unwrap_or_default();
         edit_saving.set(true);
         *edit_error.write() = String::new();
@@ -446,6 +493,9 @@ fn AdminAccountsView() -> Element {
                 .with_is_active(active)
                 .with_visibility(visibility)
                 .with_priority(priority)
+                .with_models(models)
+                .with_rpm_limit(rpm_limit)
+                .with_tpm_limit(tpm_limit)
                 .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode));
             if !tenant_id.trim().is_empty() {
                 req = req.with_tenant_id(tenant_id);
@@ -717,6 +767,9 @@ fn AdminAccountsView() -> Element {
                                                         span { class: "account-rpm-limit", "{acc.rpm_limit}" }
                                                     }
                                                     p { class: "account-rpm-label", {i18n.t("accounts.rpm_label")} }
+                                                    p { class: "account-rpm-label",
+                                                        "{i18n.t(\"accounts.tpm_label\")}: {acc.tpm_limit}"
+                                                    }
                                                 }
                                             }
                                             td {
@@ -762,8 +815,11 @@ fn AdminAccountsView() -> Element {
                                                                 &acc.api_capabilities,
                                                             )
                                                             .to_string();
+                                                            let models = acc.models.join(", ");
                                                             let active = acc.is_active;
                                                             let priority = acc.priority;
+                                                            let rpm_limit = acc.rpm_limit;
+                                                            let tpm_limit = acc.tpm_limit;
                                                             let visibility = acc.visibility.clone();
                                                             let tenant_id = acc.tenant_id.clone();
                                                             move |_| {
@@ -771,6 +827,9 @@ fn AdminAccountsView() -> Element {
                                                                 edit_name.set(name.clone());
                                                                 edit_provider.set(provider.clone());
                                                                 edit_api_mode.set(api_mode.clone());
+                                                                edit_models_input.set(models.clone());
+                                                                edit_rpm_limit.set(rpm_limit.to_string());
+                                                                edit_tpm_limit.set(tpm_limit.to_string());
                                                                 edit_api_key.set(String::new());
                                                                 edit_api_base.set(String::new());
                                                                 edit_reset_api_base.set(false);
@@ -956,6 +1015,29 @@ fn AdminAccountsView() -> Element {
                                 }
                                 small { class: "form-hint", {i18n.t("accounts.models_hint")} }
                             }
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("accounts.rpm_limit")} }
+                                input {
+                                    class: "input-field",
+                                    r#type: "number",
+                                    min: "1",
+                                    step: "1",
+                                    value: "{create_rpm_limit}",
+                                    oninput: move |e| *create_rpm_limit.write() = e.value(),
+                                }
+                            }
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("accounts.tpm_limit")} }
+                                input {
+                                    class: "input-field",
+                                    r#type: "number",
+                                    min: "1",
+                                    step: "1",
+                                    value: "{create_tpm_limit}",
+                                    oninput: move |e| *create_tpm_limit.write() = e.value(),
+                                }
+                                small { class: "form-hint", {i18n.t("accounts.rate_limit_hint")} }
+                            }
                             if create_provider() == "openai" {
                                 div { class: "form-group",
                                     label { class: "form-label", {i18n.t("accounts.api_mode")} }
@@ -1090,6 +1172,39 @@ fn AdminAccountsView() -> Element {
                                     }
                                     small { class: "form-hint", {i18n.t("accounts.api_mode_hint")} }
                                 }
+                            }
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("accounts.supported_models_edit")} }
+                                input {
+                                    class: "input-field",
+                                    placeholder: "{i18n.t(models_placeholder_key_for(&edit_provider()))}",
+                                    value: "{edit_models_input}",
+                                    oninput: move |e| *edit_models_input.write() = e.value(),
+                                }
+                                small { class: "form-hint", {i18n.t("accounts.models_edit_hint")} }
+                            }
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("accounts.rpm_limit")} }
+                                input {
+                                    class: "input-field",
+                                    r#type: "number",
+                                    min: "1",
+                                    step: "1",
+                                    value: "{edit_rpm_limit}",
+                                    oninput: move |e| *edit_rpm_limit.write() = e.value(),
+                                }
+                            }
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("accounts.tpm_limit")} }
+                                input {
+                                    class: "input-field",
+                                    r#type: "number",
+                                    min: "1",
+                                    step: "1",
+                                    value: "{edit_tpm_limit}",
+                                    oninput: move |e| *edit_tpm_limit.write() = e.value(),
+                                }
+                                small { class: "form-hint", {i18n.t("accounts.rate_limit_hint")} }
                             }
                             div { class: "form-group",
                                 label { class: "form-label",
@@ -1437,5 +1552,23 @@ mod tests {
         assert_eq!(parse_account_priority("-1"), None);
         assert_eq!(parse_account_priority("11"), None);
         assert_eq!(parse_account_priority("1.5"), None);
+    }
+
+    #[test]
+    fn account_rate_limit_parser_requires_positive_integer_values() {
+        assert_eq!(parse_account_rate_limit("1"), Some(1));
+        assert_eq!(parse_account_rate_limit(" 120 "), Some(120));
+        assert_eq!(parse_account_rate_limit("0"), None);
+        assert_eq!(parse_account_rate_limit("-1"), None);
+        assert_eq!(parse_account_rate_limit("1.5"), None);
+    }
+
+    #[test]
+    fn model_input_parser_trims_deduplicates_and_drops_empty_items() {
+        assert_eq!(
+            parse_models_input(" gpt-test, gpt-test, , claude-test "),
+            vec!["gpt-test".to_string(), "claude-test".to_string()]
+        );
+        assert!(parse_models_input(" , ").is_empty());
     }
 }

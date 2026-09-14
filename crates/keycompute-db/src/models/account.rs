@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 pub const ACCOUNT_PRIORITY_MIN: i32 = 0;
 pub const ACCOUNT_PRIORITY_MAX: i32 = 10;
+pub const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
 
 const ACTIVE_ACCOUNT_KEY_SHARE_SQL: &str = "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND tenants.status = 'active' FOR KEY SHARE OF accounts";
 const ACCOUNT_KEY_SHARE_SQL: &str = "SELECT * FROM accounts WHERE id = $1 FOR KEY SHARE";
@@ -17,6 +18,24 @@ fn validate_priority(priority: Option<i32>) -> Result<(), DbError> {
     {
         return Err(DbError::Other(format!(
             "account priority must be between {ACCOUNT_PRIORITY_MIN} and {ACCOUNT_PRIORITY_MAX}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_rate_limits(rpm_limit: Option<i32>, tpm_limit: Option<i32>) -> Result<(), DbError> {
+    if let Some(rpm_limit) = rpm_limit
+        && rpm_limit < ACCOUNT_RATE_LIMIT_MIN
+    {
+        return Err(DbError::Other(format!(
+            "account rpm limit must be at least {ACCOUNT_RATE_LIMIT_MIN}"
+        )));
+    }
+    if let Some(tpm_limit) = tpm_limit
+        && tpm_limit < ACCOUNT_RATE_LIMIT_MIN
+    {
+        return Err(DbError::Other(format!(
+            "account tpm limit must be at least {ACCOUNT_RATE_LIMIT_MIN}"
         )));
     }
     Ok(())
@@ -106,6 +125,7 @@ impl Account {
         req: &CreateAccountRequest,
     ) -> Result<Account, DbError> {
         validate_priority(req.priority)?;
+        validate_rate_limits(req.rpm_limit, req.tpm_limit)?;
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -681,6 +701,7 @@ impl Account {
         req: &UpdateAccountRequest,
     ) -> Result<Account, DbError> {
         validate_priority(req.priority)?;
+        validate_rate_limits(req.rpm_limit, req.tpm_limit)?;
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
