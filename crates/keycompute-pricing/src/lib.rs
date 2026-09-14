@@ -65,6 +65,25 @@ struct SnapshotWithSource {
     source: PricingSource,
 }
 
+fn find_global_default<'a>(
+    defaults: &'a [PricingModel],
+    model_name: &str,
+    provider: &str,
+) -> Option<&'a PricingModel> {
+    defaults
+        .iter()
+        .find(|pricing| {
+            pricing.tenant_id == Uuid::nil()
+                && pricing.model_name == model_name
+                && pricing.billing_dimension.as_str() == provider
+        })
+        .or_else(|| {
+            defaults.iter().find(|pricing| {
+                pricing.tenant_id == Uuid::nil() && pricing.model_name == model_name
+            })
+        })
+}
+
 /// 默认缓存 TTL（5 分钟）
 const DEFAULT_CACHE_TTL_SECS: u64 = 300;
 
@@ -280,7 +299,14 @@ impl PricingService {
 
             // nil_tenant 快速路径：检查 nil 默认定价是否已在 L2 中
             // 必须先确认租户特定 key 不存在（防止自定义定价被覆盖）
-            if dist_key != nil_dist_key
+            if dist_key == nil_dist_key
+                && let Ok(Some(nil_snapshot)) =
+                    dist_cache.get::<PricingSnapshot>(&nil_dist_key).await
+            {
+                let mut cache = self.cache.write().await;
+                cache.put(cache_keys[1].clone(), CacheEntry::new(nil_snapshot.clone()));
+                return Ok(nil_snapshot);
+            } else if dist_key != nil_dist_key
                 && let Ok(Some(cached)) = dist_cache
                     .get::<(PricingSnapshot, PricingSource)>(&dist_key)
                     .await
@@ -313,7 +339,7 @@ impl PricingService {
                     async {
                         let pool = self.pool.as_ref().ok_or_else(|| "No DB pool".to_string())?;
                         let s = self
-                            .load_from_database_with_source(pool.as_ref(), &model, &tid, &prov)
+                            .load_from_database_with_source(pool.write_conn(), &model, &tid, &prov)
                             .await
                             .map_err(|e| e.to_string())?;
                         Ok((s.snapshot, s.source))
@@ -330,7 +356,7 @@ impl PricingService {
                     }
                     //  仅当定价来源是默认（非租户特定）时，写入 nil_tenant key
                     //  避免租户自定义定价泄露给其他租户
-                    if dist_key != nil_dist_key && source != PricingSource::TenantSpecific {
+                    if source != PricingSource::TenantSpecific {
                         let _ = dist_cache
                             .set(
                                 &nil_dist_key,
@@ -373,7 +399,7 @@ impl PricingService {
 
         // 降级路径：直接 DB 查询（分布式缓存不可用或出错时）
         let snapshot_with_source = if let Some(pool) = &self.pool {
-            self.load_from_database_with_source(pool.as_ref(), model_name, tenant_id, provider)
+            self.load_from_database_with_source(pool.write_conn(), model_name, tenant_id, provider)
                 .await?
         } else {
             // 无数据库连接时使用默认价格
@@ -505,7 +531,7 @@ impl PricingService {
         if let Some(p) = pricing {
             // 判断结果是租户特定定价还是全局默认定价
             // find_by_model 可能通过 (tenant_id = nil AND is_default = TRUE) 子句返回默认记录
-            let is_global_default = p.tenant_id.is_none_or(|id| id == Uuid::nil());
+            let is_global_default = p.tenant_id == Uuid::nil();
             let source = if is_global_default {
                 PricingSource::DatabaseDefault
             } else {
@@ -524,44 +550,30 @@ impl PricingService {
         }
 
         // 尝试查找默认定价（按计费维度匹配）
-        let defaults = PricingModel::find_defaults(pool).await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
-        })?;
+        let defaults = PricingModel::find_global_defaults(pool)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
+            })?;
 
-        // 匹配 model_name + billing_dimension（计费维度）
-        for p in &defaults {
-            if p.model_name == model_name && p.billing_dimension.as_str() == provider {
-                return Ok(SnapshotWithSource {
-                    snapshot: PricingSnapshot {
-                        model_name: p.model_name.clone(),
-                        currency: p.currency.clone(),
-                        input_price_per_1k: bigdecimal_to_decimal(&p.input_price_per_1k)?,
-                        output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
-                    },
-                    source: PricingSource::DatabaseDefault,
-                });
-            }
-        }
-
-        // 如果找不到匹配的计费维度，尝试只匹配 model_name（任意 billing_dimension）
-        for p in defaults {
-            if p.model_name == model_name {
+        if let Some(p) = find_global_default(&defaults, model_name, provider) {
+            if p.billing_dimension.as_str() != provider {
                 tracing::debug!(
                     model = %model_name,
                     requested_dimension = %provider,
                     fallback_dimension = %p.billing_dimension,
                     "Using default pricing from different billing dimension"
                 );
-                return Ok(SnapshotWithSource {
-                    snapshot: PricingSnapshot {
-                        model_name: p.model_name.clone(),
-                        currency: p.currency.clone(),
-                        input_price_per_1k: bigdecimal_to_decimal(&p.input_price_per_1k)?,
-                        output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
-                    },
-                    source: PricingSource::DatabaseDefault,
-                });
             }
+            return Ok(SnapshotWithSource {
+                snapshot: PricingSnapshot {
+                    model_name: p.model_name.clone(),
+                    currency: p.currency.clone(),
+                    input_price_per_1k: bigdecimal_to_decimal(&p.input_price_per_1k)?,
+                    output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
+                },
+                source: PricingSource::DatabaseDefault,
+            });
         }
 
         // 未找到，使用硬编码默认价格
@@ -592,6 +604,14 @@ impl PricingService {
 
     /// 清除缓存
     pub async fn clear_cache(&self) {
+        // Invalidate L2 first. If L1 were cleared first, a concurrent request
+        // could read the stale distributed entry and repopulate L1 after this
+        // method had already cleared it.
+        if let Some(dist_cache) = &self.dist_cache
+            && let Err(error) = dist_cache.delete_matching("pricing:").await
+        {
+            tracing::warn!(%error, "Failed to clear distributed pricing cache");
+        }
         let mut cache = self.cache.write().await;
         cache.clear();
         tracing::info!("Pricing cache cleared");
@@ -634,7 +654,7 @@ impl PricingService {
             return Ok(());
         };
 
-        let defaults = PricingModel::find_defaults(pool.as_ref())
+        let defaults = PricingModel::find_global_defaults(pool.write_conn())
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
@@ -665,10 +685,14 @@ impl PricingService {
         output_tokens: u32,
         pricing: &PricingSnapshot,
     ) -> Decimal {
-        let input_cost =
-            Decimal::from(input_tokens) * pricing.input_price_per_1k / Decimal::from(1000);
-        let output_cost =
-            Decimal::from(output_tokens) * pricing.output_price_per_1k / Decimal::from(1000);
+        let input_cost = (Decimal::from(input_tokens) * pricing.input_price_per_1k
+            / Decimal::from(1000))
+        .round_dp(10);
+        let output_cost = (Decimal::from(output_tokens) * pricing.output_price_per_1k
+            / Decimal::from(1000))
+        .round_dp(10);
+        // Keep the service-level result aligned with billing breakdowns: each
+        // displayed line item is rounded to database precision before summing.
         input_cost + output_cost
     }
 
@@ -727,6 +751,28 @@ mod tests {
         assert!(key.starts_with("00000000-0000-0000-0000-000000000000"));
     }
 
+    #[test]
+    fn tenant_defaults_are_never_selected_as_global_fallbacks() {
+        let tenant_default = PricingModel {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            model_name: "gpt-4o".to_string(),
+            billing_dimension:
+                keycompute_db::models::pricing_model::BillingDimension::ProviderAccount,
+            currency: "CNY".to_string(),
+            input_price_per_1k: BigDecimal::from(1),
+            output_price_per_1k: BigDecimal::from(2),
+            is_default: true,
+            version: 1,
+            effective_from: chrono::Utc::now(),
+            effective_until: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        assert!(find_global_default(&[tenant_default], "gpt-4o", "provideraccount").is_none());
+    }
+
     /// 测试成本计算
     #[test]
     fn test_calculate_cost() {
@@ -759,6 +805,21 @@ mod tests {
 
         let cost = service.calculate_cost(0, 0, &snapshot);
         assert_eq!(cost, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_calculate_cost_rounds_line_items_before_total() {
+        let service = PricingService::new();
+        let snapshot = PricingSnapshot {
+            model_name: "tiny".to_string(),
+            currency: "CNY".to_string(),
+            input_price_per_1k: Decimal::new(6, 8),
+            output_price_per_1k: Decimal::new(6, 8),
+        };
+
+        // Each raw line item is 6e-11 and rounds to 1e-10. Summing first would
+        // incorrectly produce only 1e-10 after the final rounding step.
+        assert_eq!(service.calculate_cost(1, 1, &snapshot), Decimal::new(2, 10));
     }
 
     /// 测试默认定价获取 - 统一使用相同默认价格

@@ -322,6 +322,15 @@ mod tests {
             "WHERE consumed_node_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_node_tasks_status_created_at_desc",
             "ON node_tasks(status, created_at DESC, id DESC)",
+            "tenant_id UUID NOT NULL,\n    model_name VARCHAR(100) NOT NULL",
+            "version BIGINT NOT NULL DEFAULT 1",
+            "CONSTRAINT ck_pricing_models_billing_dimension",
+            "CONSTRAINT ck_pricing_models_model_name_nonempty",
+            "CONSTRAINT ck_pricing_models_input_price_nonnegative",
+            "CONSTRAINT ck_pricing_models_effective_window",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uk_pricing_models_default_scope",
+            "CREATE TABLE IF NOT EXISTS pricing_audit_events",
+            "CONSTRAINT ck_pricing_audit_action",
         ] {
             assert!(V0001.contains(expected), "V0001 is missing {expected}");
         }

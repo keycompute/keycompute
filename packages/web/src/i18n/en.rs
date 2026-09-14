@@ -930,6 +930,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.created", "Pricing created successfully");
     m.insert("pricing.updated", "Pricing updated successfully");
     m.insert("pricing.fill_all", "Please fill in all fields");
+    m.insert("pricing.tenant_required", "Please select a tenant");
     m.insert("pricing.invalid_input_price", "Invalid input price format");
     m.insert(
         "pricing.invalid_output_price",

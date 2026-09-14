@@ -325,26 +325,70 @@ CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_recovery
 -- pricing_models: 模型定价表
 CREATE TABLE IF NOT EXISTS pricing_models (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID,
+    -- Global defaults use the nil UUID.  Keeping one non-null representation
+    -- avoids the NULL-vs-nil split that otherwise makes lookup and mutations
+    -- disagree about the global scope.
+    tenant_id UUID NOT NULL,
     model_name VARCHAR(100) NOT NULL,
     billing_dimension VARCHAR(50) NOT NULL,
     currency VARCHAR(10) NOT NULL DEFAULT 'CNY',
     input_price_per_1k DECIMAL(20, 10) NOT NULL,
     output_price_per_1k DECIMAL(20, 10) NOT NULL,
     is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    version BIGINT NOT NULL DEFAULT 1,
     effective_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     effective_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, model_name, billing_dimension)
+    UNIQUE(tenant_id, model_name, billing_dimension),
+    CONSTRAINT ck_pricing_models_billing_dimension CHECK (
+        billing_dimension IN ('node', 'provideraccount')
+    ),
+    CONSTRAINT ck_pricing_models_model_name_nonempty CHECK (BTRIM(model_name) <> ''),
+    CONSTRAINT ck_pricing_models_currency_nonempty CHECK (BTRIM(currency) <> ''),
+    CONSTRAINT ck_pricing_models_input_price_nonnegative CHECK (input_price_per_1k >= 0),
+    CONSTRAINT ck_pricing_models_output_price_nonnegative CHECK (output_price_per_1k >= 0),
+    CONSTRAINT ck_pricing_models_version_positive CHECK (version > 0),
+    CONSTRAINT ck_pricing_models_effective_window CHECK (
+        effective_until IS NULL OR effective_until > effective_from
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_pricing_models_tenant_id ON pricing_models(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_pricing_models_model ON pricing_models(model_name);
 CREATE INDEX IF NOT EXISTS idx_pricing_models_billing_dimension ON pricing_models(billing_dimension);
 CREATE INDEX IF NOT EXISTS idx_pricing_models_default ON pricing_models(is_default) WHERE is_default = TRUE;
+CREATE INDEX IF NOT EXISTS idx_pricing_models_lookup
+    ON pricing_models(model_name, billing_dimension, tenant_id, effective_from, effective_until);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_pricing_models_default_scope
+    ON pricing_models(model_name, billing_dimension, tenant_id)
+    WHERE is_default = TRUE;
 
 COMMENT ON COLUMN pricing_models.billing_dimension IS '计费维度: node 或 provideraccount';
+COMMENT ON COLUMN pricing_models.tenant_id IS '租户范围；全局默认使用 UUID nil，而不是 NULL';
+COMMENT ON COLUMN pricing_models.version IS '管理端乐观并发版本号';
+
+-- 定价管理审计事件。事件表不引用业务行，避免删除定价后丢失变更证据。
+CREATE TABLE IF NOT EXISTS pricing_audit_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_user_id UUID NOT NULL,
+    action VARCHAR(32) NOT NULL,
+    pricing_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
+    model_name VARCHAR(100) NOT NULL,
+    billing_dimension VARCHAR(50) NOT NULL,
+    before_state JSONB,
+    after_state JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_pricing_audit_action CHECK (
+        action IN ('create', 'update', 'delete', 'make_default')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_pricing_audit_pricing_created
+    ON pricing_audit_events(pricing_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_pricing_audit_tenant_created
+    ON pricing_audit_events(tenant_id, created_at DESC);
 -- usage_logs: 计费主账本，不可变
 CREATE TABLE IF NOT EXISTS usage_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

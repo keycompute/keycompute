@@ -63,6 +63,10 @@ pub enum DbError {
     #[error("{resource} limit exceeded: {limit}")]
     ResourceLimitExceeded { resource: String, limit: String },
 
+    /// 乐观并发版本冲突
+    #[error("{entity} changed since it was read: {id}")]
+    OptimisticConflict { entity: String, id: String },
+
     /// 租户仍有租户级定价配置，不能直接删除。
     #[error("tenant has {count} tenant pricing model(s); delete them first")]
     TenantHasPricingModels { count: i64 },
@@ -121,6 +125,11 @@ impl DbError {
         matches!(self, Self::DuplicateKey { .. })
             || matches!(self, Self::DatabaseError(sea_orm::DbErr::Query(e))
                 if e.to_string().contains("duplicate key") || e.to_string().contains("unique constraint"))
+    }
+
+    /// 检查是否为乐观并发冲突。
+    pub fn is_optimistic_conflict(&self) -> bool {
+        matches!(self, Self::OptimisticConflict { .. })
     }
 
     /// 从 sea_orm::DbErr 转换，保留语义

@@ -9,7 +9,7 @@ pub mod usage_log;
 pub mod usage_source;
 
 pub use balance::{BalanceService, min_balance_threshold};
-pub use calculator::calculate_amount;
+pub use calculator::{calculate_amount, calculate_amount_with_prices, calculate_breakdown};
 pub use usage_log::{BillingService, NewUsageLog};
 pub use usage_source::UsageSource;
 
@@ -85,9 +85,12 @@ pub fn compute_user_amount(
     input_price_per_1k: Decimal,
     output_price_per_1k: Decimal,
 ) -> Decimal {
-    let input_cost = Decimal::from(input_tokens) / Decimal::from(1000) * input_price_per_1k;
-    let output_cost = Decimal::from(output_tokens) / Decimal::from(1000) * output_price_per_1k;
-    input_cost + output_cost
+    calculate_amount_with_prices(
+        input_tokens,
+        output_tokens,
+        input_price_per_1k,
+        output_price_per_1k,
+    )
 }
 
 #[cfg(test)]

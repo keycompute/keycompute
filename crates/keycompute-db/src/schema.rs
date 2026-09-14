@@ -9,6 +9,7 @@ pub mod tables {
     pub const PRODUCE_AI_KEYS: &str = "produce_ai_keys";
     pub const ACCOUNTS: &str = "accounts";
     pub const PRICING_MODELS: &str = "pricing_models";
+    pub const PRICING_AUDIT_EVENTS: &str = "pricing_audit_events";
     pub const RESPONSES_IDEMPOTENCY_CLAIMS: &str = "responses_idempotency_claims";
     pub const RESPONSE_AFFINITIES: &str = "response_affinities";
     pub const USAGE_LOGS: &str = "usage_logs";
@@ -121,15 +122,32 @@ pub mod pricing_models {
     pub const ID: &str = "id";
     pub const TENANT_ID: &str = "tenant_id";
     pub const MODEL_NAME: &str = "model_name";
-    pub const PROVIDER: &str = "provider";
+    pub const BILLING_DIMENSION: &str = "billing_dimension";
+    /// Deprecated compatibility alias; use [`BILLING_DIMENSION`].
+    pub const PROVIDER: &str = BILLING_DIMENSION;
     pub const CURRENCY: &str = "currency";
     pub const INPUT_PRICE_PER_1K: &str = "input_price_per_1k";
     pub const OUTPUT_PRICE_PER_1K: &str = "output_price_per_1k";
     pub const IS_DEFAULT: &str = "is_default";
+    pub const VERSION: &str = "version";
     pub const EFFECTIVE_FROM: &str = "effective_from";
     pub const EFFECTIVE_UNTIL: &str = "effective_until";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
+}
+
+/// pricing_audit_events 表列名
+pub mod pricing_audit_events {
+    pub const ID: &str = "id";
+    pub const ACTOR_USER_ID: &str = "actor_user_id";
+    pub const ACTION: &str = "action";
+    pub const PRICING_ID: &str = "pricing_id";
+    pub const TENANT_ID: &str = "tenant_id";
+    pub const MODEL_NAME: &str = "model_name";
+    pub const BILLING_DIMENSION: &str = "billing_dimension";
+    pub const BEFORE_STATE: &str = "before_state";
+    pub const AFTER_STATE: &str = "after_state";
+    pub const CREATED_AT: &str = "created_at";
 }
 
 /// usage_logs 表列名

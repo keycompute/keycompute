@@ -98,8 +98,9 @@ pub use admin_monitoring::{
 
 // 定价管理（admin_pricing）
 pub use admin_pricing::{
-    CreatePricingAdminRequest, PricingInfo, UpdatePricingAdminRequest, create_pricing,
-    delete_pricing, list_pricing, make_pricing_default, update_pricing,
+    CreatePricingAdminRequest, PricingInfo, SetDefaultPricingAdminRequest,
+    UpdatePricingAdminRequest, create_pricing, delete_pricing, list_pricing, make_pricing_default,
+    set_default_pricing, update_pricing,
 };
 
 // 系统设置（admin_settings）

@@ -137,6 +137,7 @@ use crate::{
         retrieve_response,
         revoke_node_token,
         set_account_cooldown,
+        set_default_pricing,
         submit_requirement_handler,
         sync_payment_order,
         test_account,
@@ -377,6 +378,7 @@ pub fn create_router(state: AppState) -> Router {
     // 定价管理（仅 Admin）
     let admin_pricing_routes = Router::new()
         .route("/api/v1/pricing", get(list_pricing).post(create_pricing))
+        .route("/api/v1/pricing/batch-defaults", post(set_default_pricing))
         .route(
             "/api/v1/pricing/{id}",
             put(update_pricing).delete(delete_pricing),

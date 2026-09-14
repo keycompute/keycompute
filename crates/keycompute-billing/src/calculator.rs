@@ -24,11 +24,53 @@ pub fn calculate_amount(
     output_tokens: u32,
     pricing: &PricingSnapshot,
 ) -> Decimal {
-    let input_cost = Decimal::from(input_tokens) / Decimal::from(1000) * pricing.input_price_per_1k;
+    calculate_breakdown(input_tokens, output_tokens, pricing).2
+}
+
+/// Calculate input, output, and total charges using one canonical formula.
+/// Every returned value is aligned to the ten-decimal database precision.
+pub fn calculate_breakdown(
+    input_tokens: u32,
+    output_tokens: u32,
+    pricing: &PricingSnapshot,
+) -> (Decimal, Decimal, Decimal) {
+    calculate_breakdown_from_prices(
+        input_tokens,
+        output_tokens,
+        pricing.input_price_per_1k,
+        pricing.output_price_per_1k,
+    )
+}
+
+/// Calculate a charge from explicit input/output unit prices using the same
+/// rounding contract as [`calculate_breakdown`].
+pub fn calculate_amount_with_prices(
+    input_tokens: u32,
+    output_tokens: u32,
+    input_price_per_1k: Decimal,
+    output_price_per_1k: Decimal,
+) -> Decimal {
+    calculate_breakdown_from_prices(
+        input_tokens,
+        output_tokens,
+        input_price_per_1k,
+        output_price_per_1k,
+    )
+    .2
+}
+
+fn calculate_breakdown_from_prices(
+    input_tokens: u32,
+    output_tokens: u32,
+    input_price_per_1k: Decimal,
+    output_price_per_1k: Decimal,
+) -> (Decimal, Decimal, Decimal) {
+    let input_cost =
+        (Decimal::from(input_tokens) / Decimal::from(1000) * input_price_per_1k).round_dp(10);
     let output_cost =
-        Decimal::from(output_tokens) / Decimal::from(1000) * pricing.output_price_per_1k;
-    // 统一精度 10 位小数，与 usage_logs(user_amount DECIMAL(20,10)) 对齐
-    (input_cost + output_cost).round_dp(10)
+        (Decimal::from(output_tokens) / Decimal::from(1000) * output_price_per_1k).round_dp(10);
+    // 先对各行项目统一精度，再相加，确保 API 展示的明细和总额一致。
+    (input_cost, output_cost, input_cost + output_cost)
 }
 
 /// 计算上游成本（与计算用户金额使用相同公式）
@@ -83,6 +125,28 @@ mod tests {
 
         let amount = calculate_amount(0, 0, &pricing);
         assert_eq!(amount, Decimal::from(0));
+    }
+
+    #[test]
+    fn test_calculate_breakdown_matches_total_formula() {
+        let pricing = create_test_pricing();
+        let (input, output, total) = calculate_breakdown(1_250, 750, &pricing);
+        assert_eq!(input, Decimal::new(125, 2));
+        assert_eq!(output, Decimal::new(15, 1));
+        assert_eq!(total, Decimal::new(275, 2));
+        assert_eq!(total, calculate_amount(1_250, 750, &pricing));
+    }
+
+    #[test]
+    fn test_calculate_breakdown_total_equals_rounded_line_items() {
+        let pricing = PricingSnapshot {
+            model_name: "tiny".to_string(),
+            currency: "CNY".to_string(),
+            input_price_per_1k: Decimal::new(5, 8),
+            output_price_per_1k: Decimal::new(5, 8),
+        };
+        let (input, output, total) = calculate_breakdown(1, 1, &pricing);
+        assert_eq!(total, input + output);
     }
 
     #[test]

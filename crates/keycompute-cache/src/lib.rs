@@ -61,6 +61,10 @@ pub enum CacheError {
     #[error("Cache not available (Redis not configured)")]
     NotAvailable,
 
+    /// Invalid prefix for a scoped bulk operation.
+    #[error("Invalid cache key prefix")]
+    InvalidPrefix,
+
     /// Fallback computation failed.
     #[error("Fallback computation failed: {0}")]
     FallbackFailed(String),
@@ -281,6 +285,50 @@ impl CacheService {
             .query_async::<()>(&mut conn)
             .await?;
 
+        Ok(())
+    }
+
+    /// Delete all keys below a narrowly scoped logical prefix.
+    ///
+    /// Redis has no portable prefix-delete primitive.  Use `SCAN` instead of
+    /// `KEYS` so an admin update cannot block the Redis server, and keep the
+    /// caller-supplied prefix scoped to this cache service's own namespace.
+    pub async fn delete_matching(&self, prefix: &str) -> CacheResult<()> {
+        let has_glob_meta = |value: &str| {
+            value.is_empty()
+                || value
+                    .chars()
+                    .any(|character| matches!(character, '*' | '?' | '[' | ']' | '\\'))
+        };
+        if has_glob_meta(prefix) || has_glob_meta(&self.key_prefix) {
+            return Err(CacheError::InvalidPrefix);
+        }
+        let mut conn = match self.get_conn().await {
+            Some(c) => c,
+            None => return Ok(()),
+        };
+        let pattern = format!("{}*", self.build_key(prefix));
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, keys): (u64, Vec<String>) = deadpool_redis::redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(&pattern)
+                .arg("COUNT")
+                .arg(256)
+                .query_async(&mut conn)
+                .await?;
+            if !keys.is_empty() {
+                deadpool_redis::redis::cmd("DEL")
+                    .arg(keys)
+                    .query_async::<()>(&mut conn)
+                    .await?;
+            }
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -941,5 +989,52 @@ mod tests {
 
         svc_a.delete("shared_key").await.unwrap();
         svc_b.delete("shared_key").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_matching_is_scoped_to_logical_prefix() {
+        let Some(pool) = create_test_pool(15).await else {
+            eprintln!("SKIP: Redis not available");
+            return;
+        };
+        let prefix = format!("test:prefix-delete:{}:", uuid::Uuid::new_v4().simple());
+        let cache = CacheService::with_pool(pool).with_prefix(prefix);
+        cache
+            .set("pricing:a", &1u32, Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache
+            .set("pricing:b", &2u32, Duration::from_secs(60))
+            .await
+            .unwrap();
+        cache
+            .set("routing:a", &3u32, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        cache.delete_matching("pricing:").await.unwrap();
+
+        assert!(!cache.exists("pricing:a").await.unwrap());
+        assert!(!cache.exists("pricing:b").await.unwrap());
+        assert!(cache.exists("routing:a").await.unwrap());
+        cache.delete("routing:a").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_matching_rejects_unbounded_or_wildcard_prefixes() {
+        let cache = CacheService::disabled();
+        assert!(matches!(
+            cache.delete_matching("").await,
+            Err(CacheError::InvalidPrefix)
+        ));
+        assert!(matches!(
+            cache.delete_matching("pricing:*").await,
+            Err(CacheError::InvalidPrefix)
+        ));
+        let wildcard_namespace = cache.with_prefix("tenant*:");
+        assert!(matches!(
+            wildcard_namespace.delete_matching("pricing:").await,
+            Err(CacheError::InvalidPrefix)
+        ));
     }
 }

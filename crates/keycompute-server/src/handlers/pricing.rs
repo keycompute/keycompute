@@ -95,17 +95,11 @@ pub async fn calculate_cost(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to get pricing: {}", e)))?;
 
-    let total_cost =
-        state
-            .pricing
-            .calculate_cost(request.input_tokens, request.output_tokens, &snapshot);
-
-    let input_cost = snapshot.input_price_per_1k
-        * rust_decimal::Decimal::from(request.input_tokens)
-        / rust_decimal::Decimal::from(1000);
-    let output_cost = snapshot.output_price_per_1k
-        * rust_decimal::Decimal::from(request.output_tokens)
-        / rust_decimal::Decimal::from(1000);
+    let (input_cost, output_cost, total_cost) = keycompute_billing::calculate_breakdown(
+        request.input_tokens,
+        request.output_tokens,
+        &snapshot,
+    );
 
     Ok(Json(CostCalculationResponse {
         model: request.model,
@@ -134,5 +128,19 @@ mod tests {
         assert_eq!(req.model, "gpt-4o");
         assert_eq!(req.input_tokens, 1000);
         assert_eq!(req.output_tokens, 500);
+    }
+
+    #[test]
+    fn cost_calculation_response_preserves_decimal_string_wire_values() {
+        let response = CostCalculationResponse {
+            model: "gpt-4o".to_string(),
+            input_cost: "0.01".to_string(),
+            output_cost: "0.02".to_string(),
+            total_cost: "0.03".to_string(),
+            currency: "CNY".to_string(),
+        };
+        let value = serde_json::to_value(response).unwrap();
+        assert!(value["input_cost"].is_string());
+        assert_eq!(value["total_cost"], serde_json::json!("0.03"));
     }
 }

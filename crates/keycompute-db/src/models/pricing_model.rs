@@ -68,13 +68,14 @@ impl sea_orm::TryGetable for BillingDimension {
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct PricingModel {
     pub id: Uuid,
-    pub tenant_id: Option<Uuid>,
+    pub tenant_id: Uuid,
     pub model_name: String,
     pub billing_dimension: BillingDimension,
     pub currency: String,
     pub input_price_per_1k: BigDecimal,
     pub output_price_per_1k: BigDecimal,
     pub is_default: bool,
+    pub version: i64,
     pub effective_from: DateTime<Utc>,
     pub effective_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -106,6 +107,7 @@ pub struct UpdatePricingRequest {
     pub input_price_per_1k: Option<BigDecimal>,
     pub output_price_per_1k: Option<BigDecimal>,
     pub effective_until: Option<DateTime<Utc>>,
+    pub expected_version: i64,
 }
 
 impl PricingModel {
@@ -127,8 +129,8 @@ impl PricingModel {
                OR LOWER(model_name) LIKE $1 ESCAPE '\'
                OR LOWER(billing_dimension) LIKE $1 ESCAPE '\'
                OR LOWER(id::TEXT) LIKE $1 ESCAPE '\'
-               OR LOWER(COALESCE(tenant_id::TEXT, '')) LIKE $1 ESCAPE '\'
-            ORDER BY model_name, tenant_id NULLS LAST, created_at DESC, id
+               OR LOWER(tenant_id::TEXT) LIKE $1 ESCAPE '\'
+            ORDER BY model_name, tenant_id, created_at DESC, id
             LIMIT $2 OFFSET $3
             "#,
             [search_pattern.clone().into(), limit.into(), offset.into()],
@@ -153,7 +155,7 @@ impl PricingModel {
                OR LOWER(model_name) LIKE $1 ESCAPE '\'
                OR LOWER(billing_dimension) LIKE $1 ESCAPE '\'
                OR LOWER(id::TEXT) LIKE $1 ESCAPE '\'
-               OR LOWER(COALESCE(tenant_id::TEXT, '')) LIKE $1 ESCAPE '\'
+               OR LOWER(tenant_id::TEXT) LIKE $1 ESCAPE '\'
             "#,
             [search_pattern.into()],
         );
@@ -169,6 +171,9 @@ impl PricingModel {
         db: &impl ConnectionTrait,
         req: &CreatePricingRequest,
     ) -> Result<PricingModel, DbError> {
+        // A missing tenant in the write DTO means the global scope. Persist it
+        // using the same nil UUID representation used by all lookup paths.
+        let tenant_id = req.tenant_id.unwrap_or(GLOBAL_DEFAULT_TENANT_ID);
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -181,7 +186,7 @@ impl PricingModel {
             RETURNING *
             "#,
             [
-                req.tenant_id.into(),
+                tenant_id.into(),
                 req.model_name.as_str().into(),
                 req.billing_dimension.as_str().into(),
                 req.currency.as_deref().unwrap_or("CNY").into(),
@@ -215,6 +220,19 @@ impl PricingModel {
         Ok(pricing)
     }
 
+    /// 根据 ID 查找并锁定定价，供需要保持默认标记和版本一致性的管理事务使用。
+    pub async fn find_by_id_for_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<PricingModel>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM pricing_models WHERE id = $1 FOR UPDATE",
+            [id.into()],
+        );
+        Ok(PricingModel::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 查找租户的所有定价
     pub async fn find_by_tenant(
         db: &impl ConnectionTrait,
@@ -224,11 +242,11 @@ impl PricingModel {
             DbBackend::Postgres,
             r#"
             SELECT * FROM pricing_models
-            WHERE tenant_id = $1
-               OR (tenant_id IS NULL AND is_default = TRUE)
-            ORDER BY model_name, tenant_id NULLS LAST
+            WHERE (tenant_id = $1 AND $1 <> $2)
+               OR (tenant_id = $2 AND is_default = TRUE)
+            ORDER BY model_name, tenant_id
             "#,
-            [tenant_id.into()],
+            [tenant_id.into(), GLOBAL_DEFAULT_TENANT_ID.into()],
         );
         let pricing = PricingModel::find_by_statement(stmt).all(db).await?;
 
@@ -251,7 +269,7 @@ impl PricingModel {
               AND effective_from <= NOW()
               AND (effective_until IS NULL OR effective_until > NOW())
               AND (
-                  tenant_id = $3
+                  (tenant_id = $3 AND $3 <> $4)
                   OR (tenant_id = $4 AND is_default = TRUE)
               )
             ORDER BY 
@@ -289,6 +307,28 @@ impl PricingModel {
         Ok(pricing)
     }
 
+    /// 查找所有全局默认定价。
+    ///
+    /// 租户级记录也可以被标记为默认，但它们不得参与其它租户的兜底或
+    /// 全局缓存预热；这些场景必须显式限定为 nil UUID 全局作用域。
+    pub async fn find_global_defaults(
+        db: &impl ConnectionTrait,
+    ) -> Result<Vec<PricingModel>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT * FROM pricing_models
+            WHERE tenant_id = $1
+              AND is_default = TRUE
+              AND effective_from <= NOW()
+              AND (effective_until IS NULL OR effective_until > NOW())
+            ORDER BY model_name
+            "#,
+            [GLOBAL_DEFAULT_TENANT_ID.into()],
+        );
+        Ok(PricingModel::find_by_statement(stmt).all(db).await?)
+    }
+
     /// 更新定价
     pub async fn update(
         &self,
@@ -302,8 +342,9 @@ impl PricingModel {
             SET input_price_per_1k = COALESCE($1, input_price_per_1k),
                 output_price_per_1k = COALESCE($2, output_price_per_1k),
                 effective_until = COALESCE($3, effective_until),
+                version = version + 1,
                 updated_at = NOW()
-            WHERE id = $4
+            WHERE id = $4 AND version = $5
             RETURNING *
             "#,
             [
@@ -311,12 +352,16 @@ impl PricingModel {
                 req.output_price_per_1k.clone().into(),
                 req.effective_until.into(),
                 self.id.into(),
+                req.expected_version.into(),
             ],
         );
         let pricing = PricingModel::find_by_statement(stmt)
             .one(db)
             .await?
-            .ok_or_else(|| DbError::Other("update failed to return row".to_string()))?;
+            .ok_or_else(|| DbError::OptimisticConflict {
+                entity: "pricing model".to_string(),
+                id: self.id.to_string(),
+            })?;
 
         Ok(pricing)
     }
@@ -353,59 +398,43 @@ impl PricingModel {
     /// 初始化系统默认定价
     ///
     /// 系统启动时调用，如果 model-empty 模型的全局默认定价不存在则创建。
-    /// 全局默认定价使用 tenant_id = NULL，表示全局级别。
+    /// 全局默认定价使用 tenant_id = nil UUID，表示全局级别。
     pub async fn init_default_pricing(db: &impl ConnectionTrait) -> Result<(), DbError> {
-        // 查询全局默认定价是否已存在（tenant_id = GLOBAL_DEFAULT_TENANT_ID）
-        let existing_stmt = Statement::from_sql_and_values(
+        // 使用字符串解析 BigDecimal
+        let input_price_per_1k: BigDecimal = "0.1".parse().unwrap_or_default();
+        let output_price_per_1k: BigDecimal = "0.3".parse().unwrap_or_default();
+
+        // 单条 INSERT + ON CONFLICT 同时覆盖首次启动、重复启动和多副本并发启动。
+        // 这样初始化不会因两个实例同时发现“尚不存在”而互相报唯一键冲突。
+        let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            SELECT * FROM pricing_models
-            WHERE model_name = $1
-              AND billing_dimension = $2
-              AND tenant_id = $3
+            INSERT INTO pricing_models (
+                tenant_id, model_name, billing_dimension, currency,
+                input_price_per_1k, output_price_per_1k, is_default
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+            ON CONFLICT (tenant_id, model_name, billing_dimension) DO NOTHING
+            RETURNING *
             "#,
             [
+                GLOBAL_DEFAULT_TENANT_ID.into(),
                 "model-empty".into(),
                 BillingDimension::ProviderAccount.as_str().into(),
-                GLOBAL_DEFAULT_TENANT_ID.into(),
+                "CNY".into(),
+                input_price_per_1k.into(),
+                output_price_per_1k.into(),
             ],
         );
-        let existing = PricingModel::find_by_statement(existing_stmt)
-            .one(db)
-            .await?;
-
-        if existing.is_some() {
+        let inserted = PricingModel::find_by_statement(stmt).one(db).await?;
+        if inserted.is_some() {
+            tracing::info!(
+                model_name = "model-empty",
+                "Global default pricing created successfully"
+            );
+        } else {
             tracing::debug!("Default pricing for model-empty already exists, skipping init");
-            return Ok(());
         }
-
-        tracing::info!(
-            model_name = "model-empty",
-            "Creating global default pricing"
-        );
-
-        // 使用字符串解析 BigDecimal
-        let input_price_per_1k = "0.1".parse().unwrap_or_default();
-        let output_price_per_1k = "0.3".parse().unwrap_or_default();
-
-        // 创建 model-empty 模型的全局默认定价（tenant_id = GLOBAL_DEFAULT_TENANT_ID）
-        let db_req = CreatePricingRequest {
-            tenant_id: Some(GLOBAL_DEFAULT_TENANT_ID), // 全局默认：nil UUID
-            model_name: "model-empty".to_string(),
-            billing_dimension: BillingDimension::ProviderAccount,
-            currency: Some("CNY".to_string()),
-            input_price_per_1k,
-            output_price_per_1k,
-            is_default: Some(true),
-            effective_from: None,
-            effective_until: None,
-        };
-
-        Self::create(db, &db_req).await?;
-        tracing::info!(
-            model_name = "model-empty",
-            "Global default pricing created successfully"
-        );
         Ok(())
     }
 }

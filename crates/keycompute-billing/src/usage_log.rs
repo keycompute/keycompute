@@ -3,7 +3,7 @@
 //! 构建并写入 usage_logs 主账本
 
 use crate::balance::BalanceService;
-use crate::calculator::calculate_amount;
+use crate::calculator::{calculate_amount, calculate_amount_with_prices};
 use crate::usage_source::UsageSource;
 use chrono::{DateTime, Utc};
 use keycompute_db::{CreateUsageLogRequest, DbRouter, UsageLog, models::node_tip::NodeTip};
@@ -112,7 +112,22 @@ impl BillingService {
     ) -> Result<NewUsageLog> {
         // 获取用量快照
         let (input_tokens, output_tokens) = ctx.usage_snapshot();
-        let total_tokens = input_tokens + output_tokens;
+        let total_tokens = input_tokens.checked_add(output_tokens).ok_or_else(|| {
+            KeyComputeError::ValidationError("token count exceeds the ledger range".to_string())
+        })?;
+        let input_tokens_i32 = i32::try_from(input_tokens).map_err(|_| {
+            KeyComputeError::ValidationError(
+                "input token count exceeds the ledger range".to_string(),
+            )
+        })?;
+        let output_tokens_i32 = i32::try_from(output_tokens).map_err(|_| {
+            KeyComputeError::ValidationError(
+                "output token count exceeds the ledger range".to_string(),
+            )
+        })?;
+        let total_tokens_i32 = i32::try_from(total_tokens).map_err(|_| {
+            KeyComputeError::ValidationError("token count exceeds the ledger range".to_string())
+        })?;
 
         // 计算用户应付金额。应付金额始终基于请求开始时冻结的定价快照：定价按
         // model + 计费维度（"node"/"provideraccount"）查找，与真实 provider 无关，
@@ -139,9 +154,9 @@ impl BillingService {
             model_name: ctx.model.clone(),
             provider_name: provider_name.to_string(),
             account_id,
-            input_tokens: input_tokens as i32,
-            output_tokens: output_tokens as i32,
-            total_tokens: total_tokens as i32,
+            input_tokens: input_tokens_i32,
+            output_tokens: output_tokens_i32,
+            total_tokens: total_tokens_i32,
             input_unit_price_snapshot: ctx.pricing_snapshot.input_price_per_1k,
             output_unit_price_snapshot: ctx.pricing_snapshot.output_price_per_1k,
             user_amount,
@@ -881,16 +896,24 @@ impl NewUsageLogBuilder {
 
     /// 构建 NewUsageLog
     pub fn build(self) -> Result<NewUsageLog> {
-        let total_tokens = self.input_tokens + self.output_tokens;
+        let total_tokens = self
+            .input_tokens
+            .checked_add(self.output_tokens)
+            .ok_or_else(|| {
+                KeyComputeError::ValidationError("token count exceeds the ledger range".to_string())
+            })?;
+        let input_tokens = u32::try_from(self.input_tokens).map_err(|_| {
+            KeyComputeError::ValidationError("input token count cannot be negative".to_string())
+        })?;
+        let output_tokens = u32::try_from(self.output_tokens).map_err(|_| {
+            KeyComputeError::ValidationError("output token count cannot be negative".to_string())
+        })?;
 
         // 如果没有设置金额，自动计算
         let user_amount = self.user_amount.unwrap_or_else(|| {
             let input_price = self.input_unit_price_snapshot.unwrap_or_default();
             let output_price = self.output_unit_price_snapshot.unwrap_or_default();
-            let input_cost = Decimal::from(self.input_tokens) / Decimal::from(1000) * input_price;
-            let output_cost =
-                Decimal::from(self.output_tokens) / Decimal::from(1000) * output_price;
-            input_cost + output_cost
+            calculate_amount_with_prices(input_tokens, output_tokens, input_price, output_price)
         });
 
         Ok(NewUsageLog {
@@ -1327,6 +1350,23 @@ mod tests {
 
         // 1000/1000*1 + 500/1000*2 = 1 + 1 = 2
         assert_eq!(log.user_amount, Decimal::from(2));
+    }
+
+    #[test]
+    fn test_new_usage_log_builder_uses_canonical_rounded_amount() {
+        let log = NewUsageLog::builder(Uuid::new_v4())
+            .tenant_id(Uuid::new_v4())
+            .user_id(Uuid::new_v4())
+            .produce_ai_key_id(Uuid::new_v4())
+            .model_name("tiny")
+            .provider_name("openai")
+            .account_id(Uuid::new_v4())
+            .tokens(1, 1)
+            .pricing(Decimal::new(6, 8), Decimal::new(6, 8), "CNY")
+            .build()
+            .unwrap();
+
+        assert_eq!(log.user_amount, Decimal::new(2, 10));
     }
 
     /// 验证 trigger_distribution 中默认分成比例的 string-bridge 转换：

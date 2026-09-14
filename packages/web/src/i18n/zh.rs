@@ -819,6 +819,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.created", "定价创建成功");
     m.insert("pricing.updated", "定价更新成功");
     m.insert("pricing.fill_all", "请填写所有字段");
+    m.insert("pricing.tenant_required", "请选择租户");
     m.insert("pricing.invalid_input_price", "输入单价格式不正确");
     m.insert("pricing.invalid_output_price", "输出单价格式不正确");
     m.insert("pricing.negative_input_price", "输入单价不能为负数");

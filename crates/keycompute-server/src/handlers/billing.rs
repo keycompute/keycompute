@@ -236,6 +236,9 @@ pub struct CalculateCostRequest {
     pub input_tokens: u32,
     /// 输出 token 数
     pub output_tokens: u32,
+    /// 可选的预览租户；普通用户只能使用自己的租户。
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
 }
 
 /// 费用计算响应
@@ -257,14 +260,26 @@ pub struct CalculateCostResponse {
     pub currency: String,
 }
 
+fn resolve_preview_tenant(auth: &AuthExtractor, requested_tenant: Option<Uuid>) -> Result<Uuid> {
+    match requested_tenant {
+        Some(tenant_id) if tenant_id != auth.tenant_id && !auth.is_admin() => {
+            Err(crate::error::ApiError::Forbidden(
+                "Cannot calculate pricing for another tenant".to_string(),
+            ))
+        }
+        Some(tenant_id) => Ok(tenant_id),
+        None => Ok(auth.tenant_id),
+    }
+}
+
 /// 计算费用（基于 PricingSnapshot）
 pub async fn calculate_cost(
     State(state): State<AppState>,
-    _auth: AuthExtractor,
+    auth: AuthExtractor,
     Json(request): Json<CalculateCostRequest>,
 ) -> Result<Json<CalculateCostResponse>> {
-    // 使用默认租户 ID 创建价格快照
-    let tenant_id = Uuid::nil();
+    // 预览应按调用方租户解析。管理员可显式指定目标租户，普通用户不能越权。
+    let tenant_id = resolve_preview_tenant(&auth, request.tenant_id)?;
     // Node 模型（node:前缀）使用 empty provider
     let provider = keycompute_pricing::resolve_pricing_provider(&request.model);
     let pricing = state
@@ -274,11 +289,11 @@ pub async fn calculate_cost(
         .map_err(|e| crate::error::ApiError::Internal(format!("Failed to get pricing: {}", e)))?;
 
     // 计算费用
-    let input_cost =
-        Decimal::from(request.input_tokens) / Decimal::from(1000) * pricing.input_price_per_1k;
-    let output_cost =
-        Decimal::from(request.output_tokens) / Decimal::from(1000) * pricing.output_price_per_1k;
-    let total_cost = input_cost + output_cost;
+    let (input_cost, output_cost, total_cost) = keycompute_billing::calculate_breakdown(
+        request.input_tokens,
+        request.output_tokens,
+        &pricing,
+    );
 
     Ok(Json(CalculateCostResponse {
         model: request.model,
@@ -310,5 +325,34 @@ mod tests {
         assert_eq!(req.model, "gpt-4o");
         assert_eq!(req.input_tokens, 1000);
         assert_eq!(req.output_tokens, 500);
+    }
+
+    #[test]
+    fn preview_tenant_cannot_be_overridden_by_regular_users() {
+        let own_tenant = Uuid::new_v4();
+        let other_tenant = Uuid::new_v4();
+        let auth = AuthExtractor::new(Uuid::new_v4(), own_tenant, Uuid::new_v4(), "user");
+
+        assert_eq!(resolve_preview_tenant(&auth, None).unwrap(), own_tenant);
+        assert_eq!(
+            resolve_preview_tenant(&auth, Some(own_tenant)).unwrap(),
+            own_tenant
+        );
+        assert!(matches!(
+            resolve_preview_tenant(&auth, Some(other_tenant)),
+            Err(crate::error::ApiError::Forbidden(_))
+        ));
+    }
+
+    #[test]
+    fn admin_can_preview_an_explicit_tenant() {
+        let target_tenant = Uuid::new_v4();
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
+            .with_permissions(vec![keycompute_auth::Permission::SystemAdmin]);
+
+        assert_eq!(
+            resolve_preview_tenant(&auth, Some(target_tenant)).unwrap(),
+            target_tenant
+        );
     }
 }

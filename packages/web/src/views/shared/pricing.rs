@@ -436,6 +436,7 @@ pub fn Pricing() -> Element {
                     pricing_currency: pricing.currency.clone(),
                     initial_input_price: pricing.input_price_per_1k.clone(),
                     initial_output_price: pricing.output_price_per_1k.clone(),
+                    pricing_version: pricing.version,
                     on_close: move |_| editing_pricing.set(None),
                     on_updated: move |_| {
                         editing_pricing.set(None);
@@ -539,6 +540,10 @@ fn CreatePricingModal(
         // tenant_id 保持原样（None 表示未选择，Some(id) 表示选择了具体租户）
         // 注意：由于已移除“全局默认”选项，用户无法创建全局默认定价
         let tid = tid.filter(|id| !id.is_empty());
+        if tid.is_none() {
+            form_err.set(i18n.t("pricing.tenant_required").to_string());
+            return;
+        }
         if ip_str.parse::<f64>().is_err() {
             form_err.set(i18n.t("pricing.invalid_input_price").to_string());
             return;
@@ -636,6 +641,9 @@ fn CreatePricingModal(
                                 }
                             },
                             // 移除“全局默认”选项，全局默认定价由系统自动管理，不允许手动创建
+                            option { value: "", disabled: true, selected: tenant_id().is_none(),
+                                {i18n.t("pricing.tenant_required")}
+                            }
                             for t in match tenant_list() {
                                 Some(Ok(list)) => list,
                                 _ => vec![],
@@ -713,6 +721,7 @@ fn EditPricingModal(
     pricing_currency: String,
     initial_input_price: String,
     initial_output_price: String,
+    pricing_version: i64,
     on_close: EventHandler,
     on_updated: EventHandler,
 ) -> Element {
@@ -754,7 +763,8 @@ fn EditPricingModal(
         spawn(async move {
             let req = client_api::api::admin::UpdatePricingRequest::new()
                 .with_input_price_per_1k(ip_str)
-                .with_output_price_per_1k(op_str);
+                .with_output_price_per_1k(op_str)
+                .with_expected_version(pricing_version);
             match pricing_service::update(&id, req, &token).await {
                 Ok(_) => {
                     saving.set(false);
