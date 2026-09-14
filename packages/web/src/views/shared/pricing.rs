@@ -516,7 +516,7 @@ fn CreatePricingModal(
     // 获取租户列表
     let tenant_list = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
-            tenant_service::list_all(&token).await
+            tenant_service::list_active(&token).await
         })
         .await
     });

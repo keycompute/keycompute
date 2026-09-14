@@ -4,7 +4,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::NodeSessionAuth,
+    extractors::{NodeSessionAuth, NodeSessionCompletionAuth},
     state::AppState,
 };
 use axum::{
@@ -124,7 +124,7 @@ pub async fn node_poll(
 /// 需要 session token 认证，支持幂等重试
 pub async fn node_complete(
     State(state): State<AppState>,
-    auth: NodeSessionAuth,
+    auth: NodeSessionCompletionAuth,
     Path(task_id): Path<Uuid>,
     Json(body): Json<NodeTaskCompleteRequest>,
 ) -> Result<Json<NodeTaskCompleteResponse>> {

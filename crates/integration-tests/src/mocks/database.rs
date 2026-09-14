@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn test_mock_tenant_status() {
-        let tenant = MockTenant::new("Test", "test").with_status("suspended");
+        let tenant = MockTenant::new("Test", "test").with_status("inactive");
         assert!(!tenant.is_active());
     }
 
@@ -720,9 +720,9 @@ mod tests {
         assert_eq!(users.len(), 2);
 
         // 更新租户状态
-        db.update_tenant_status(tenant.id, "suspended");
+        db.update_tenant_status(tenant.id, "inactive");
         let updated_tenant = db.get_tenant(tenant.id).unwrap();
-        assert_eq!(updated_tenant.status, "suspended");
+        assert_eq!(updated_tenant.status, "inactive");
 
         // 撤销 Produce AI Key
         let (produce_ai_key, _) = db.create_test_produce_ai_key(user1.id, tenant.id);

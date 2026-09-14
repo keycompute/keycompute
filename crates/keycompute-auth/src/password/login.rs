@@ -4,7 +4,7 @@
 
 use crate::jwt::JwtValidator;
 use crate::password::{EmailValidator, PasswordHasher};
-use keycompute_db::{DbRouter, User, UserCredential};
+use keycompute_db::{DbRouter, Tenant, User, UserCredential};
 use keycompute_types::{KeyComputeError, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -112,6 +112,18 @@ impl LoginService {
                 // 用户不存在时返回统一错误，防止邮箱枚举
                 KeyComputeError::AuthError("Email or password is incorrect".to_string())
             })?;
+
+        // Closed tenants must not issue new credentials. This check uses the
+        // writer so lifecycle changes are effective immediately.
+        let tenant = Tenant::find_by_id(self.pool.write_conn(), user.tenant_id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find tenant: {}", e)))?
+            .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
+        if !tenant.is_active() {
+            return Err(KeyComputeError::AuthError(
+                "Email or password is incorrect".to_string(),
+            ));
+        }
 
         // 3. 获取凭证
         let credential = UserCredential::find_by_user_id(self.pool.as_ref(), user.id)
@@ -246,6 +258,16 @@ impl LoginService {
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find user: {}", e)))?
             .ok_or_else(|| KeyComputeError::AuthError("User does not exist".to_string()))?;
+
+        let tenant = Tenant::find_by_id(self.pool.write_conn(), user.tenant_id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find tenant: {}", e)))?
+            .ok_or_else(|| KeyComputeError::AuthError("User tenant does not exist".to_string()))?;
+        if !tenant.is_active() {
+            return Err(KeyComputeError::AuthError(
+                "Tenant is not active".to_string(),
+            ));
+        }
 
         // token_version 失效校验：拒绝刷新已失效的 token（如密码重置后签发的旧 token）。
         // refresh-token 为公开路由、不经过 AuthService::verify_token，故必须在此显式比对，

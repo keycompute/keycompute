@@ -25,6 +25,11 @@ pub struct Tenant {
 }
 
 #[derive(Debug, FromQueryResult)]
+struct EntityCount {
+    total: i64,
+}
+
+#[derive(Debug, FromQueryResult)]
 struct TenantCount {
     total: i64,
 }
@@ -52,6 +57,9 @@ pub struct UpdateTenantRequest {
     pub default_rpm_limit: Option<i32>,
     pub default_tpm_limit: Option<i32>,
 }
+
+const TENANT_PRICING_COUNT_SQL: &str =
+    "SELECT COUNT(*)::BIGINT AS total FROM pricing_models WHERE tenant_id = $1";
 
 impl Tenant {
     /// 创建新租户
@@ -97,6 +105,70 @@ impl Tenant {
         Ok(tenant)
     }
 
+    /// 根据 ID 查找并锁定租户，供租户级别的并发管理操作使用。
+    pub async fn find_by_id_for_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Tenant>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM tenants WHERE id = $1 FOR UPDATE",
+            [id.into()],
+        );
+        Ok(Tenant::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// 统计租户下的用户数。
+    pub async fn count_users(db: &impl ConnectionTrait, tenant_id: Uuid) -> Result<i64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::BIGINT AS total FROM users WHERE tenant_id = $1",
+            [tenant_id.into()],
+        );
+        Ok(EntityCount::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .map(|row| row.total)
+            .unwrap_or(0))
+    }
+
+    /// 统计租户下的渠道账号数。
+    pub async fn count_accounts(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+    ) -> Result<i64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::BIGINT AS total FROM accounts WHERE tenant_id = $1",
+            [tenant_id.into()],
+        );
+        Ok(EntityCount::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .map(|row| row.total)
+            .unwrap_or(0))
+    }
+
+    /// 统计租户下仍在使用的租户级定价配置。
+    ///
+    /// 定价模型不使用级联删除；删除租户前必须显式阻止该操作，避免
+    /// 留下无法归属的配置记录。
+    pub async fn count_pricing_models(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+    ) -> Result<i64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            TENANT_PRICING_COUNT_SQL,
+            [tenant_id.into()],
+        );
+        Ok(EntityCount::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .map(|row| row.total)
+            .unwrap_or(0))
+    }
+
     /// 根据 slug 查找租户
     pub async fn find_by_slug(
         db: &impl ConnectionTrait,
@@ -140,6 +212,7 @@ impl Tenant {
             SELECT * FROM tenants
             WHERE ($1::text IS NULL
                 OR LOWER(name) LIKE '%' || LOWER($1) || '%' ESCAPE '\'
+                OR LOWER(slug) LIKE '%' || LOWER($1) || '%' ESCAPE '\'
                 OR LOWER(id::text) LIKE '%' || LOWER($1) || '%' ESCAPE '\')
             ORDER BY created_at DESC, id DESC
             LIMIT $2 OFFSET $3
@@ -164,6 +237,7 @@ impl Tenant {
             SELECT COUNT(*)::BIGINT AS total FROM tenants
             WHERE ($1::text IS NULL
                 OR LOWER(name) LIKE '%' || LOWER($1) || '%' ESCAPE '\'
+                OR LOWER(slug) LIKE '%' || LOWER($1) || '%' ESCAPE '\'
                 OR LOWER(id::text) LIKE '%' || LOWER($1) || '%' ESCAPE '\')
             "#,
             [search.as_deref().into()],
@@ -224,6 +298,12 @@ impl Tenant {
 
     /// 删除租户
     pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
+        let pricing_count = Self::count_pricing_models(db, self.id).await?;
+        if pricing_count > 0 {
+            return Err(DbError::TenantHasPricingModels {
+                count: pricing_count,
+            });
+        }
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM tenants WHERE id = $1",
@@ -237,5 +317,16 @@ impl Tenant {
     /// 检查租户是否激活
     pub fn is_active(&self) -> bool {
         self.status == "active"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TENANT_PRICING_COUNT_SQL;
+
+    #[test]
+    fn pricing_count_is_scoped_to_the_tenant() {
+        assert!(TENANT_PRICING_COUNT_SQL.contains("pricing_models"));
+        assert!(TENANT_PRICING_COUNT_SQL.contains("tenant_id = $1"));
     }
 }

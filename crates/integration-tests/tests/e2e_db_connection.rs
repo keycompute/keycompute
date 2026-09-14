@@ -84,6 +84,22 @@ mod tests {
         tenant_id
     }
 
+    async fn create_account_test_tenant(pool: &DatabaseConnection, label: &str) -> Uuid {
+        let tenant_id = Uuid::new_v4();
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)",
+            [
+                tenant_id.into(),
+                label.into(),
+                format!("account-test-{}", Uuid::new_v4().simple()).into(),
+            ],
+        ))
+        .await
+        .expect("Account health test tenant should be created");
+        tenant_id
+    }
+
     async fn create_responses_test_account(
         pool: &DatabaseConnection,
         tenant_id: Uuid,
@@ -297,10 +313,11 @@ mod tests {
         keycompute_db::migrations::run_migrations(&pool)
             .await
             .expect("isolated probe race schema should migrate");
+        let tenant_id = create_account_test_tenant(&pool, "probe race").await;
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id: Uuid::new_v4(),
+                tenant_id,
                 provider: "openai".to_string(),
                 name: format!("probe-race-{}", Uuid::new_v4()),
                 endpoint: "https://old.example/v1".to_string(),
@@ -453,10 +470,11 @@ mod tests {
         keycompute_db::migrations::run_migrations(&pool)
             .await
             .expect("isolated runtime health schema should migrate");
+        let tenant_id = create_account_test_tenant(&pool, "runtime health").await;
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id: Uuid::new_v4(),
+                tenant_id,
                 provider: "openai".to_string(),
                 name: format!("runtime-health-{}", Uuid::new_v4()),
                 endpoint: "https://runtime-health.example/v1".to_string(),
@@ -568,10 +586,11 @@ mod tests {
         keycompute_db::migrations::run_migrations(&pool)
             .await
             .expect("isolated configuration fence schema should migrate");
+        let tenant_id = create_account_test_tenant(&pool, "configuration fence").await;
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id: Uuid::new_v4(),
+                tenant_id,
                 provider: "openai".to_string(),
                 name: format!("configuration-fence-{}", Uuid::new_v4()),
                 endpoint: "https://old-config.example/v1".to_string(),
@@ -648,10 +667,11 @@ mod tests {
         keycompute_db::migrations::run_migrations(&pool)
             .await
             .expect("isolated provider health reset schema should migrate");
+        let tenant_id = create_account_test_tenant(&pool, "provider health reset").await;
         let account = keycompute_db::Account::create(
             &pool,
             &keycompute_db::CreateAccountRequest {
-                tenant_id: Uuid::new_v4(),
+                tenant_id,
                 provider: "openai".to_string(),
                 name: format!("provider-health-reset-{}", Uuid::new_v4()),
                 endpoint: "https://provider-health-reset.example/v1".to_string(),

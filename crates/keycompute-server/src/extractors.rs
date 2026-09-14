@@ -19,8 +19,27 @@ use std::future::Future;
 use std::sync::Arc;
 use uuid::Uuid;
 
-const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT node_id, id FROM node_sessions \
-     WHERE session_token_hash = $1 AND revoked_at IS NULL AND expires_at > NOW()";
+const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM node_sessions ns \
+     INNER JOIN nodes n ON n.id = ns.node_id \
+     INNER JOIN users u ON u.id = n.owner_user_id \
+     INNER JOIN tenants t ON t.id = u.tenant_id \
+     WHERE ns.session_token_hash = $1 \
+       AND ns.revoked_at IS NULL \
+       AND ns.expires_at > NOW() \
+       AND t.status = 'active'";
+
+// Completion of a task that was already leased is allowed to drain after an
+// administrator closes the owning tenant.  The task/lease/session checks in
+// NodeGatewayStore still enforce the authenticated node identity and expiry;
+// this query only omits the lifecycle gate that would otherwise reject the
+// in-flight result before the handler can apply those checks.
+const NODE_SESSION_COMPLETION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM node_sessions ns \
+     INNER JOIN nodes n ON n.id = ns.node_id \
+     INNER JOIN users u ON u.id = n.owner_user_id \
+     INNER JOIN tenants t ON t.id = u.tenant_id \
+     WHERE ns.session_token_hash = $1 \
+       AND ns.revoked_at IS NULL \
+       AND ns.expires_at > NOW()";
 
 /// 认证提取器
 ///
@@ -260,54 +279,82 @@ impl FromRequestParts<AppState> for NodeSessionAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> std::result::Result<Self, Self::Rejection> {
-        // 1. 从 Authorization header 提取 token
-        let auth_header = parts
-            .headers
-            .get("Authorization")
-            .ok_or_else(|| ApiError::Auth("Missing authorization header".to_string()))?;
-
-        let token = auth_header
-            .to_str()
-            .map_err(|_| ApiError::Auth("Invalid authorization header".to_string()))?
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| ApiError::Auth("Invalid bearer token".to_string()))?;
-
-        // 2. 计算 token hash (SHA-256)
-        let token_hash = compute_sha256_hash(token);
-
-        // 3. 从 state 获取 pool
-        let pool = state
-            .pool
-            .as_deref()
-            .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
-
-        // 4. 查询 node_sessions, 匹配 session_token_hash
-        // Session validity is security-sensitive and must be writer-fresh.
-        // A lagging replica could otherwise continue accepting a revoked or
-        // expired session (and can also reject a newly issued session).
-        let row = pool
-            .write_conn()
-            .query_one(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                ACTIVE_NODE_SESSION_TOKEN_QUERY,
-                [token_hash.as_str().into()],
-            ))
-            .await
-            .map_err(|e| ApiError::Internal(format!("Database query failed: {}", e)))?
-            .ok_or_else(|| ApiError::Auth("Invalid session token".to_string()))?;
-
-        let node_id: Uuid = row
-            .try_get_by_index(0)
-            .map_err(|e| ApiError::Internal(format!("Failed to parse node_id: {}", e)))?;
-        let session_id: Uuid = row
-            .try_get_by_index(1)
-            .map_err(|e| ApiError::Internal(format!("Failed to parse session_id: {}", e)))?;
-
-        Ok(NodeSessionAuth {
+        let (node_id, session_id) =
+            authenticate_node_session(parts, state, ACTIVE_NODE_SESSION_TOKEN_QUERY).await?;
+        Ok(Self {
             node_id,
             session_id,
         })
     }
+}
+
+/// Authentication extractor for a node submitting a result for an already
+/// leased task.  Unlike [`NodeSessionAuth`], it permits an inactive owning
+/// tenant so in-flight work can be finalized, while retaining session expiry
+/// and revocation checks.
+pub struct NodeSessionCompletionAuth {
+    /// 节点 ID
+    pub node_id: Uuid,
+    /// 会话 ID
+    pub session_id: Uuid,
+}
+
+impl FromRequestParts<AppState> for NodeSessionCompletionAuth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        let (node_id, session_id) =
+            authenticate_node_session(parts, state, NODE_SESSION_COMPLETION_TOKEN_QUERY).await?;
+        Ok(Self {
+            node_id,
+            session_id,
+        })
+    }
+}
+
+async fn authenticate_node_session(
+    parts: &Parts,
+    state: &AppState,
+    query: &str,
+) -> Result<(Uuid, Uuid)> {
+    let auth_header = parts
+        .headers
+        .get("Authorization")
+        .ok_or_else(|| ApiError::Auth("Missing authorization header".to_string()))?;
+    let token = auth_header
+        .to_str()
+        .map_err(|_| ApiError::Auth("Invalid authorization header".to_string()))?
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| ApiError::Auth("Invalid bearer token".to_string()))?;
+    let token_hash = compute_sha256_hash(token);
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database pool not configured".to_string()))?;
+
+    // Session validity is security-sensitive and must be writer-fresh. A
+    // lagging replica could otherwise continue accepting a revoked or expired
+    // session (or reject a newly issued session).
+    let row = pool
+        .write_conn()
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            query,
+            [token_hash.as_str().into()],
+        ))
+        .await
+        .map_err(|e| ApiError::Internal(format!("Database query failed: {e}")))?
+        .ok_or_else(|| ApiError::Auth("Invalid session token".to_string()))?;
+    let node_id: Uuid = row
+        .try_get_by_index(0)
+        .map_err(|e| ApiError::Internal(format!("Failed to parse node_id: {e}")))?;
+    let session_id: Uuid = row
+        .try_get_by_index(1)
+        .map_err(|e| ApiError::Internal(format!("Failed to parse session_id: {e}")))?;
+    Ok((node_id, session_id))
 }
 
 /// 计算 SHA-256 hash
@@ -417,6 +464,14 @@ mod tests {
     fn node_session_token_lookup_rejects_expired_sessions() {
         assert!(ACTIVE_NODE_SESSION_TOKEN_QUERY.contains("revoked_at IS NULL"));
         assert!(ACTIVE_NODE_SESSION_TOKEN_QUERY.contains("expires_at > NOW()"));
+        assert!(ACTIVE_NODE_SESSION_TOKEN_QUERY.contains("t.status = 'active'"));
+    }
+
+    #[test]
+    fn node_completion_lookup_allows_draining_inactive_tenants() {
+        assert!(NODE_SESSION_COMPLETION_TOKEN_QUERY.contains("revoked_at IS NULL"));
+        assert!(NODE_SESSION_COMPLETION_TOKEN_QUERY.contains("expires_at > NOW()"));
+        assert!(!NODE_SESSION_COMPLETION_TOKEN_QUERY.contains("t.status = 'active'"));
     }
 
     #[tokio::test]

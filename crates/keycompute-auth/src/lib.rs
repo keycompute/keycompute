@@ -208,6 +208,11 @@ impl AuthService {
         // 仅在配置了 UserService（含数据库连接）时执行；无连接时保持结构性校验行为。
         if let Some(user_service) = &self.user_service {
             validate_user_token_version(&ctx, user_service.load_token_version(ctx.user_id).await?)?;
+            // A JWT remains structurally valid after a tenant is closed, but
+            // must no longer authorize tenant-scoped work. Reuse the same
+            // authoritative tenant lookup used by API-key authentication so
+            // all request paths observe the lifecycle state consistently.
+            user_service.load_tenant(ctx.tenant_id).await?;
         }
 
         Ok(ctx)

@@ -1,7 +1,12 @@
-use client_api::api::tenant::TenantQueryParams;
+use client_api::api::tenant::{
+    CreateTenantRequest, TenantInfo, TenantQueryParams, UpdateTenantRequest,
+};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
-use ui::{Badge, BadgeVariant, PageHeader, Pagination, Table, TableHead};
+use ui::{
+    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, PageHeader, Pagination,
+    Table, TableHead,
+};
 
 const PAGE_SIZE: usize = 20;
 const SEARCH_DEBOUNCE_MS: u32 = 300;
@@ -34,8 +39,12 @@ impl TenantListQuery {
 }
 
 use crate::hooks::use_i18n::use_i18n;
-use crate::services::{api_client::with_auto_refresh, tenant_service};
+use crate::services::{
+    api_client::{user_error_message, with_auto_refresh},
+    tenant_service,
+};
 use crate::stores::auth_store::AuthStore;
+use crate::stores::ui_store::UiStore;
 use crate::stores::user_store::UserStore;
 use crate::utils::display::short_id;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
@@ -64,6 +73,12 @@ pub fn Tenants() -> Element {
 
     let mut search = use_signal(String::new);
     let mut query = use_signal(TenantListQuery::new);
+    let mut show_create = use_signal(|| false);
+    let mut delete_candidate = use_signal(|| None::<TenantInfo>);
+    let mut delete_modal_open = use_signal(|| false);
+    let mut operation_error = use_signal(String::new);
+    let mut pending_tenant = use_signal(|| None::<String>);
+    let mut ui_store = use_context::<UiStore>();
 
     use_effect(move || {
         let next_search = search();
@@ -75,7 +90,7 @@ pub fn Tenants() -> Element {
         });
     });
 
-    let tenants = use_resource(move || {
+    let mut tenants = use_resource(move || {
         let current_query = query();
         async move {
             let request_key = current_query.clone();
@@ -99,6 +114,16 @@ pub fn Tenants() -> Element {
         PageHeader {
             title: i18n.t("page.tenants").to_string(),
             description: i18n.t("tenants.subtitle").to_string(),
+            actions: rsx! {
+                Button {
+                    variant: ButtonVariant::Primary,
+                    onclick: move |_| {
+                        operation_error.set(String::new());
+                        show_create.set(true);
+                    },
+                    {i18n.t("tenants.create")}
+                }
+            },
         }
 
         div { class: "toolbar",
@@ -149,13 +174,16 @@ pub fn Tenants() -> Element {
                 Table {
                     empty: is_empty,
                     empty_text: empty_text.to_string(),
-                    col_count: 4,
+                    col_count: 7,
                     thead {
                         tr {
                             TableHead { {i18n.t("tenants.tenant_id")} }
                             TableHead { {i18n.t("table.name")} }
+                            TableHead { {i18n.t("tenants.users")} }
+                            TableHead { {i18n.t("tenants.accounts")} }
                             TableHead { {i18n.t("table.status")} }
                             TableHead { {i18n.t("table.created_at")} }
+                            TableHead { {i18n.t("table.actions")} }
                         }
                     }
                     tbody {
@@ -163,6 +191,8 @@ pub fn Tenants() -> Element {
                             tr {
                                 td { code { title: "{t.id}", {short_id(&t.id)} } }
                                 td { "{t.name}" }
+                                td { "{t.user_count}" }
+                                td { "{t.account_count}" }
                                 td {
                                     if t.is_active {
                                         Badge { variant: BadgeVariant::Success, {i18n.t("tenants.active")} }
@@ -171,6 +201,56 @@ pub fn Tenants() -> Element {
                                     }
                                 }
                                 td { { format_time(&t.created_at) } }
+                                td {
+                                    div { class: "table-actions",
+                                        Button {
+                                            variant: if t.is_active { ButtonVariant::Secondary } else { ButtonVariant::Primary },
+                                            size: ButtonSize::Small,
+                                            disabled: pending_tenant().as_deref() == Some(t.id.as_str())
+                                                || (t.slug == "system" && t.is_active),
+                                            onclick: {
+                                                let id = t.id.clone();
+                                                let next_status = if t.is_active { "inactive" } else { "active" }.to_string();
+                                                move |_| {
+                                                    let id = id.clone();
+                                                    pending_tenant.set(Some(id.clone()));
+                                                    let request = UpdateTenantRequest::new().with_status(next_status.clone());
+                                                    let request_auth = auth_store;
+                                                    spawn(async move {
+                                                        let result = with_auto_refresh(request_auth, move |token| {
+                                                            let id = id.clone();
+                                                            let request = request.clone();
+                                                            async move { tenant_service::update(&id, request, &token).await }
+                                                        }).await;
+                                                        match result {
+                                                            Ok(_) => tenants.restart(),
+                                                            Err(error) => operation_error.set(user_error_message(&error)),
+                                                        }
+                                                        pending_tenant.set(None);
+                                                    });
+                                                }
+                                            },
+                                            {if t.is_active { i18n.t("tenants.disable") } else { i18n.t("tenants.enable") }}
+                                        }
+                                        Button {
+                                            variant: ButtonVariant::Danger,
+                                            size: ButtonSize::Small,
+                                            disabled: pending_tenant().as_deref() == Some(t.id.as_str())
+                                                || t.slug == "system"
+                                                || t.user_count > 0
+                                                || t.account_count > 0,
+                                            onclick: {
+                                                let candidate = t.clone();
+                                                move |_| {
+                                                    delete_candidate.set(Some(candidate.clone()));
+                                                    delete_modal_open.set(true);
+                                                    operation_error.set(String::new());
+                                                }
+                                            },
+                                            {i18n.t("form.delete")}
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -197,6 +277,131 @@ pub fn Tenants() -> Element {
                 }
             }
         }
+        if !operation_error().is_empty() {
+            div { class: "alert alert-error", "{operation_error}" }
+        }
+        if show_create() {
+            TenantCreateModal {
+                auth_store,
+                on_close: move |_| show_create.set(false),
+                on_created: move |_| {
+                    show_create.set(false);
+                    query.write().page = 1;
+                    tenants.restart();
+                    ui_store.show_success(i18n.t("tenants.created"));
+                },
+            }
+        }
+        ConfirmModal {
+            open: delete_modal_open,
+            title: i18n.t("tenants.delete_title").to_string(),
+            message: delete_candidate()
+                .map(|tenant| format!("{}: {}", i18n.t("tenants.delete_confirm"), tenant.name))
+                .unwrap_or_default(),
+            confirm_text: i18n.t("form.delete").to_string(),
+            cancel_text: i18n.t("form.cancel").to_string(),
+            danger: true,
+            oncancel: move |_| {
+                delete_modal_open.set(false);
+                delete_candidate.set(None);
+            },
+            onconfirm: move |_| {
+                let Some(candidate) = delete_candidate() else { return; };
+                let id = candidate.id.clone();
+                pending_tenant.set(Some(id.clone()));
+                let request_auth = auth_store;
+                spawn(async move {
+                    let result = with_auto_refresh(request_auth, move |token| {
+                        let id = id.clone();
+                        async move { tenant_service::delete(&id, &token).await }
+                    }).await;
+                    match result {
+                        Ok(_) => {
+                            delete_modal_open.set(false);
+                            delete_candidate.set(None);
+                            tenants.restart();
+                            ui_store.show_success(i18n.t("tenants.deleted"));
+                        }
+                        Err(error) => {
+                            delete_modal_open.set(false);
+                            operation_error.set(user_error_message(&error));
+                        }
+                    }
+                    pending_tenant.set(None);
+                });
+            },
+        }
+        }
+    }
+}
+
+#[component]
+fn TenantCreateModal(
+    auth_store: AuthStore,
+    on_close: EventHandler<()>,
+    on_created: EventHandler<()>,
+) -> Element {
+    let i18n = use_i18n();
+    let mut name = use_signal(String::new);
+    let mut slug = use_signal(String::new);
+    let mut saving = use_signal(|| false);
+    let mut error = use_signal(String::new);
+
+    let on_submit = move |_| {
+        let name_value = name().trim().to_string();
+        let slug_value = slug().trim().to_string();
+        if name_value.is_empty() {
+            error.set(i18n.t("tenants.name_required").to_string());
+            return;
+        }
+        let mut request = CreateTenantRequest::new(name_value);
+        if !slug_value.is_empty() {
+            request = request.with_slug(slug_value);
+        }
+        let request_auth = auth_store;
+        saving.set(true);
+        error.set(String::new());
+        let on_created = on_created.clone();
+        spawn(async move {
+            let result = with_auto_refresh(request_auth, move |token| {
+                let request = request.clone();
+                async move { tenant_service::create(request, &token).await }
+            })
+            .await;
+            match result {
+                Ok(_) => on_created.call(()),
+                Err(value) => error.set(user_error_message(&value)),
+            }
+            saving.set(false);
+        });
+    };
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+            div { class: "modal", role: "dialog", aria_modal: "true", aria_label: i18n.t("tenants.create_title"), onclick: move |event| event.stop_propagation(),
+                div { class: "modal-header",
+                    h2 { class: "modal-title", {i18n.t("tenants.create_title")} }
+                    button { class: "modal-close btn btn-ghost btn-sm", r#type: "button", aria_label: i18n.t("common.close"), onclick: move |_| on_close.call(()), "✕" }
+                }
+                div { class: "modal-body",
+                    if !error().is_empty() {
+                        div { class: "alert alert-error", "{error}" }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("tenants.name")} }
+                        input { class: "input-field", r#type: "text", required: true, maxlength: "255", value: "{name}", placeholder: "{i18n.t(\"tenants.name_placeholder\")}", oninput: move |event| name.set(event.value()) }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("tenants.slug")} }
+                        input { class: "input-field", r#type: "text", maxlength: "100", value: "{slug}", placeholder: "{i18n.t(\"tenants.slug_placeholder\")}", oninput: move |event| slug.set(event.value()) }
+                        small { class: "text-secondary", {i18n.t("tenants.slug_hint")} }
+                    }
+                }
+                div { class: "modal-footer",
+                    Button { variant: ButtonVariant::Ghost, onclick: move |_| on_close.call(()), {i18n.t("form.cancel")} }
+                    Button { variant: ButtonVariant::Primary, loading: saving(), disabled: name().trim().is_empty(), onclick: on_submit, {i18n.t("form.create")} }
+                }
+            }
         }
     }
 }

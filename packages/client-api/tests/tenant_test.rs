@@ -1,8 +1,10 @@
 //! 租户管理模块集成测试
 
-use client_api::api::tenant::{TenantApi, TenantQueryParams};
+use client_api::api::tenant::{
+    CreateTenantRequest, TenantApi, TenantQueryParams, UpdateTenantRequest,
+};
 use client_api::error::ClientError;
-use wiremock::matchers::{method, path, query_param};
+use wiremock::matchers::{body_json, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
 mod common;
@@ -202,4 +204,96 @@ async fn test_list_tenants_forbidden() {
         .await;
 
     assert!(matches!(result.unwrap_err(), ClientError::Forbidden(_)));
+}
+
+#[tokio::test]
+async fn test_create_tenant_serializes_optional_slug_without_description() {
+    let (client, mock_server) = create_test_client().await;
+    let tenant_api = TenantApi::new(&client);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/tenants"))
+        .and(body_json(serde_json::json!({
+            "name": "Research Center",
+            "slug": "research-center"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "tenant_001",
+            "name": "Research Center",
+            "slug": "research-center",
+            "description": null,
+            "user_count": 0,
+            "account_count": 0,
+            "status": "active",
+            "is_active": true,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let tenant = tenant_api
+        .create_tenant(
+            &CreateTenantRequest::new("Research Center").with_slug("research-center"),
+            fixtures::TEST_ACCESS_TOKEN,
+        )
+        .await
+        .unwrap();
+    assert_eq!(tenant.slug, "research-center");
+    assert_eq!(tenant.account_count, 0);
+    assert_eq!(tenant.status, "active");
+}
+
+#[test]
+fn test_create_tenant_without_slug_serializes_only_required_name() {
+    let body = serde_json::to_value(CreateTenantRequest::new("Research Center"))
+        .expect("create tenant request must serialize");
+
+    assert_eq!(body, serde_json::json!({"name": "Research Center"}));
+    assert!(body.get("description").is_none());
+    assert!(body.get("status").is_none());
+}
+
+#[tokio::test]
+async fn test_update_tenant_status_and_delete() {
+    let (client, mock_server) = create_test_client().await;
+    let tenant_api = TenantApi::new(&client);
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/tenants/tenant_001"))
+        .and(body_json(serde_json::json!({"status": "inactive"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "tenant_001",
+            "name": "Research Center",
+            "slug": "research-center",
+            "description": null,
+            "user_count": 0,
+            "account_count": 0,
+            "status": "inactive",
+            "is_active": false,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z"
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api/v1/tenants/tenant_001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "message": "Tenant deleted successfully"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let tenant = tenant_api
+        .update_tenant(
+            "tenant_001",
+            &UpdateTenantRequest::new().with_status("inactive"),
+            fixtures::TEST_ACCESS_TOKEN,
+        )
+        .await
+        .unwrap();
+    assert!(!tenant.is_active);
+    let response = tenant_api
+        .delete_tenant("tenant_001", fixtures::TEST_ACCESS_TOKEN)
+        .await
+        .unwrap();
+    assert_eq!(response.message, "Tenant deleted successfully");
 }

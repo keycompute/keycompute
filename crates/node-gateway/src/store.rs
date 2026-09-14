@@ -7,7 +7,8 @@ use chrono::{DateTime, Utc};
 use keycompute_db::DbError;
 use keycompute_db::DbRouter;
 use keycompute_db::models::{
-    node::*, node_session::*, node_task::*, node_task_submission::*, user_node_gateway_token::*,
+    node::*, node_session::*, node_task::*, node_task_submission::*, tenant::Tenant, user::User,
+    user_node_gateway_token::*,
 };
 use keycompute_types::node::*;
 use sea_orm::{
@@ -20,6 +21,14 @@ use uuid::Uuid;
 
 const ACTIVE_NODE_SESSION_FOR_UPDATE_SQL: &str = "SELECT * FROM node_sessions WHERE id = $1 AND node_id = $2 \
      AND revoked_at IS NULL AND expires_at > NOW() FOR UPDATE";
+
+// Lock the owning tenant before mutating node/session state. Tenant lifecycle
+// updates use the same row lock, so a heartbeat or task claim serializes with
+// deactivation instead of relying on a stale pre-handler authentication read.
+const NODE_TENANT_FOR_UPDATE_SQL: &str = "SELECT t.* FROM nodes n \
+     INNER JOIN users u ON u.id = n.owner_user_id \
+     INNER JOIN tenants t ON t.id = u.tenant_id \
+     WHERE n.id = $1 FOR UPDATE OF t";
 
 /// Node Gateway Store
 #[derive(Clone)]
@@ -192,6 +201,21 @@ impl NodeGatewayStore {
         }
 
         let owner_user_id = token.user_id;
+
+        // A registration token may have been approved before the owner's
+        // tenant was closed. Lock and re-check the tenant on the writer so a
+        // closed tenant cannot create or revive a node session.
+        let owner = User::find_by_id(&tx, owner_user_id)
+            .await?
+            .ok_or_else(|| DbError::Other("Registration token owner not found".to_string()))?;
+        let tenant = Tenant::find_by_id_for_update(&tx, owner.tenant_id)
+            .await?
+            .ok_or_else(|| DbError::Other("Registration token tenant not found".to_string()))?;
+        if !tenant.is_active() {
+            return Err(DbError::Other(
+                "Registration is unavailable because the owner tenant is inactive".to_string(),
+            ));
+        }
 
         // 3. 查找或创建节点(在事务中)
         let existing_node = Node::find_by_statement(Statement::from_sql_and_values(
@@ -392,7 +416,22 @@ impl NodeGatewayStore {
         let now = Utc::now();
         let expires_at = now + self.config.session_ttl();
 
-        // 1. 获取节点和会话(FOR UPDATE)
+        // 1. 锁定节点所属租户，和管理员租户状态更新串行化。
+        let tenant = Tenant::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            NODE_TENANT_FOR_UPDATE_SQL,
+            [node_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
+        if !tenant.is_active() {
+            return Err(DbError::Other(
+                "Tenant is inactive; node heartbeat is not accepted".to_string(),
+            ));
+        }
+
+        // 2. 获取节点和会话(FOR UPDATE)
         let node = Node::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM nodes WHERE id = $1 FOR UPDATE",
@@ -411,12 +450,12 @@ impl NodeGatewayStore {
         .await?
         .ok_or_else(|| DbError::not_found("active session", session_id.to_string()))?;
 
-        // 2. 校验请求体与认证结果一致
+        // 3. 校验请求体与认证结果一致
         if session.node_id != node_id {
             return Err(DbError::Other("Session node_id mismatch".to_string()));
         }
 
-        // 3. 根据节点状态分支处理
+        // 4. 根据节点状态分支处理
         if node.is_excluded() {
             // excluded 节点:只更新会话可见性,不改变节点状态
             tx.execute(Statement::from_sql_and_values(
@@ -558,6 +597,23 @@ impl NodeGatewayStore {
         let lease_id = Uuid::new_v4();
 
         let tx = self.pool.begin().await?;
+
+        // The HTTP extractor checks the tenant before entering the handler,
+        // but polling may wait in Redis for several seconds. Re-check while
+        // holding the tenant row lock so a closure that wins during that wait
+        // prevents a new lease from being created.
+        let tenant = Tenant::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            NODE_TENANT_FOR_UPDATE_SQL,
+            [node_id.into()],
+        ))
+        .one(&tx)
+        .await?;
+        if tenant.as_ref().is_none_or(|tenant| !tenant.is_active()) {
+            tx.commit().await?;
+            return Ok(None);
+        }
+
         let task = NodeTask::claim(&tx, task_id, node_id, session_id, lease_id).await?;
 
         if let Some(task) = task.as_ref() {
@@ -1556,7 +1612,9 @@ fn result_matches_payload(payload: &NodeTaskPayload, result: &NodeTaskResult) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{ACTIVE_NODE_SESSION_FOR_UPDATE_SQL, result_matches_payload};
+    use super::{
+        ACTIVE_NODE_SESSION_FOR_UPDATE_SQL, NODE_TENANT_FOR_UPDATE_SQL, result_matches_payload,
+    };
     use keycompute_types::{ChatCompletionRequest, node::*};
     use uuid::Uuid;
 
@@ -1566,6 +1624,14 @@ mod tests {
         assert!(ACTIVE_NODE_SESSION_FOR_UPDATE_SQL.contains("revoked_at IS NULL"));
         assert!(ACTIVE_NODE_SESSION_FOR_UPDATE_SQL.contains("expires_at > NOW()"));
         assert!(ACTIVE_NODE_SESSION_FOR_UPDATE_SQL.ends_with("FOR UPDATE"));
+    }
+
+    #[test]
+    fn node_mutations_lock_the_owning_tenant_before_state_changes() {
+        assert!(NODE_TENANT_FOR_UPDATE_SQL.contains("INNER JOIN users"));
+        assert!(NODE_TENANT_FOR_UPDATE_SQL.contains("INNER JOIN tenants"));
+        assert!(NODE_TENANT_FOR_UPDATE_SQL.contains("n.id = $1"));
+        assert!(NODE_TENANT_FOR_UPDATE_SQL.ends_with("FOR UPDATE OF t"));
     }
 
     #[test]

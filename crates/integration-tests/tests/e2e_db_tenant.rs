@@ -8,6 +8,12 @@ use keycompute_db::Tenant;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bigdecimal::BigDecimal;
+    use keycompute_db::models::pricing_model::BillingDimension;
+    use keycompute_db::{
+        CreateDistributionRuleRequest, CreatePricingRequest, PricingModel, TenantDistributionRule,
+    };
+    use std::str::FromStr;
 
     #[tokio::test]
     async fn test_tenant_crud() {
@@ -114,6 +120,89 @@ mod tests {
 
         chain.print_report();
         assert!(chain.all_passed(), "Tenant CRUD tests failed");
+    }
+
+    #[tokio::test]
+    async fn test_tenant_delete_rejects_tenant_pricing_models() {
+        let pool = create_test_pool().await;
+        let test_id = generate_test_id();
+        cleanup_test_data(&pool, &test_id)
+            .await
+            .expect("pricing delete guard cleanup should succeed");
+
+        let tenant = create_test_tenant(&pool, "pricing-delete-guard", &test_id).await;
+        let pricing = PricingModel::create(
+            &pool,
+            &CreatePricingRequest {
+                tenant_id: Some(tenant.id),
+                model_name: format!("pricing-delete-guard-{test_id}"),
+                billing_dimension: BillingDimension::ProviderAccount,
+                currency: Some("CNY".to_string()),
+                input_price_per_1k: BigDecimal::from_str("0.1").unwrap(),
+                output_price_per_1k: BigDecimal::from_str("0.3").unwrap(),
+                is_default: Some(false),
+                effective_from: None,
+                effective_until: None,
+            },
+        )
+        .await
+        .expect("tenant pricing model should be created");
+
+        let delete_result = tenant.delete(&pool).await;
+        assert!(delete_result.is_err());
+        assert!(
+            Tenant::find_by_id(&pool, tenant.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        pricing.delete(&pool).await.unwrap();
+        tenant.delete(&pool).await.unwrap();
+        cleanup_test_data(&pool, &test_id)
+            .await
+            .expect("pricing delete guard cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_tenant_delete_cascades_distribution_rules() {
+        let pool = create_test_pool().await;
+        let test_id = generate_test_id();
+        cleanup_test_data(&pool, &test_id)
+            .await
+            .expect("distribution rule cleanup should succeed");
+
+        let tenant = create_test_tenant(&pool, "distribution-delete-cascade", &test_id).await;
+        let rule = TenantDistributionRule::create(
+            &pool,
+            &CreateDistributionRuleRequest {
+                tenant_id: tenant.id,
+                beneficiary_id: uuid::Uuid::nil(),
+                name: format!("distribution-delete-cascade-{test_id}"),
+                description: None,
+                commission_rate: BigDecimal::from_str("0.03").unwrap(),
+                priority: Some(TenantDistributionRule::GLOBAL_OVERRIDE_PRIORITY),
+                effective_from: None,
+                effective_until: None,
+            },
+        )
+        .await
+        .expect("tenant distribution rule should be created");
+
+        tenant
+            .delete(&pool)
+            .await
+            .expect("tenant deletion should cascade tenant distribution rules");
+        assert!(
+            TenantDistributionRule::find_by_id(&pool, rule.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        cleanup_test_data(&pool, &test_id)
+            .await
+            .expect("distribution rule cleanup should succeed");
     }
 
     // ============================================================================

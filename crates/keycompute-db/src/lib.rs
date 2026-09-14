@@ -63,6 +63,10 @@ pub enum DbError {
     #[error("{resource} limit exceeded: {limit}")]
     ResourceLimitExceeded { resource: String, limit: String },
 
+    /// 租户仍有租户级定价配置，不能直接删除。
+    #[error("tenant has {count} tenant pricing model(s); delete them first")]
+    TenantHasPricingModels { count: i64 },
+
     /// 数据库原生错误
     #[error("database error: {0}")]
     DatabaseError(#[from] sea_orm::DbErr),
@@ -457,6 +461,7 @@ mod tests {
         assert!(
             DATABASE_SCHEMA.contains("CONSTRAINT ck_tenants_responses_idempotency_claim_count")
         );
+        assert!(DATABASE_SCHEMA.contains("CONSTRAINT ck_tenants_status CHECK"));
         assert!(
             DATABASE_SCHEMA.contains("CREATE TABLE IF NOT EXISTS responses_idempotency_claims")
         );
@@ -468,6 +473,13 @@ mod tests {
         assert!(DATABASE_SCHEMA.contains("last_probe_status VARCHAR(32)"));
         assert!(DATABASE_SCHEMA.contains("api_capabilities TEXT[] NOT NULL"));
         assert!(DATABASE_SCHEMA.contains("CONSTRAINT ck_accounts_api_capabilities"));
+        assert!(
+            DATABASE_SCHEMA
+                .contains("tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT")
+        );
+        assert!(DATABASE_SCHEMA.contains(
+            "CREATE TABLE IF NOT EXISTS tenant_distribution_rules (\n    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE"
+        ));
         assert!(
             DATABASE_SCHEMA.contains("account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT")
         );

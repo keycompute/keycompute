@@ -4,7 +4,6 @@
 
 use keycompute_db::{DbRouter, ProduceAiKey, User};
 use keycompute_types::{KeyComputeError, Result};
-use sea_orm::ConnectionTrait;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -104,11 +103,7 @@ impl ProduceAiKeyValidator {
     }
 
     /// 从数据库验证 Produce AI Key
-    async fn validate_from_database(
-        &self,
-        pool: &impl ConnectionTrait,
-        key_hash: &str,
-    ) -> Result<AuthContext> {
+    async fn validate_from_database(&self, pool: &DbRouter, key_hash: &str) -> Result<AuthContext> {
         // 查询 Produce AI Key
         let produce_ai_key = ProduceAiKey::find_by_hash(pool, key_hash)
             .await
@@ -161,7 +156,9 @@ impl ProduceAiKeyValidator {
 
         // 查询租户信息并验证状态
         use keycompute_db::Tenant;
-        let tenant = Tenant::find_by_id(pool, user.tenant_id)
+        // Tenant lifecycle is authorization-sensitive; bypass read replicas
+        // so closure takes effect immediately even while replicas catch up.
+        let tenant = Tenant::find_by_id(pool.write_conn(), user.tenant_id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to query tenant: {}", e))

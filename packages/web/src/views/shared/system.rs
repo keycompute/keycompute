@@ -80,7 +80,8 @@ fn routing_probes(accounts: &[AccountInfo], tenant_id: &str) -> Vec<RoutingProbe
     let mut candidates = Vec::new();
 
     for account in accounts.iter().filter(|account| {
-        account.is_active
+        account.tenant_active
+            && account.routing_eligible
             && account.current_rpm >= 0
             && (account.tenant_id == tenant_id || account.visibility == "global")
     }) {
@@ -667,6 +668,7 @@ mod tests {
         AccountInfo {
             id: format!("account-{tenant_id}-{provider}"),
             tenant_id: tenant_id.to_string(),
+            tenant_active: true,
             name: "Test account".to_string(),
             provider: provider.to_string(),
             api_key_preview: "sk-***".to_string(),
@@ -697,6 +699,15 @@ mod tests {
 
     #[test]
     fn probe_catalog_uses_current_tenant_accounts_without_requiring_pricing_rows() {
+        let mut inactive_tenant_account = account(
+            TENANT,
+            "tenant",
+            "openai",
+            true,
+            0,
+            &["inactive-tenant-model"],
+        );
+        inactive_tenant_account.tenant_active = false;
         let accounts = vec![
             account(
                 TENANT,
@@ -725,6 +736,7 @@ mod tests {
             account(TENANT, "tenant", "anthropic", true, 0, &["anthropic-only"]),
             account(TENANT, "tenant", "openai", false, 0, &["disabled"]),
             account(TENANT, "tenant", "openai", true, -1, &["cooling"]),
+            inactive_tenant_account,
         ];
 
         assert_eq!(
@@ -754,6 +766,7 @@ mod tests {
         let accounts = vec![AccountInfo {
             id: "many-models".to_string(),
             tenant_id: TENANT.to_string(),
+            tenant_active: true,
             name: "Many models".to_string(),
             provider: "openai".to_string(),
             api_key_preview: "sk-***".to_string(),

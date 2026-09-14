@@ -115,19 +115,19 @@ impl TenantApi {
 pub struct CreateTenantRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
+    pub slug: Option<String>,
 }
 
 impl CreateTenantRequest {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            status: None,
+            slug: None,
         }
     }
 
-    pub fn with_status(mut self, status: impl Into<String>) -> Self {
-        self.status = Some(status.into());
+    pub fn with_slug(mut self, slug: impl Into<String>) -> Self {
+        self.slug = Some(slug.into());
         self
     }
 }
@@ -233,10 +233,18 @@ impl TenantQueryParams {
 pub struct TenantInfo {
     pub id: String,
     pub name: String,
+    #[serde(default)]
+    pub slug: String,
     pub description: Option<String>,
     pub user_count: i64,
+    #[serde(default)]
+    pub account_count: i64,
+    #[serde(default)]
+    pub status: String,
     pub is_active: bool,
     pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

@@ -19,6 +19,7 @@ use keycompute_db::models::{
         UpdateAccountRequest as DbUpdateAccountRequest,
     },
     response_affinity::ResponseAffinity,
+    tenant::Tenant,
 };
 use keycompute_db::{ACCOUNT_PRIORITY_MAX, ACCOUNT_PRIORITY_MIN};
 use keycompute_types::{AccountApiCapability, SensitiveString};
@@ -26,9 +27,15 @@ use llm_protocol_provider::{
     HttpTransport, NativeResponsesRequest, ProtocolType, UpstreamMessage, UpstreamRequest,
     normalize_base_url,
 };
-use sea_orm::{DatabaseConnection, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Instant,
+};
 use subtle::ConstantTimeEq;
 use tracing;
 use uuid::Uuid;
@@ -46,12 +53,51 @@ fn validate_account_priority(priority: Option<i32>) -> Result<()> {
     Ok(())
 }
 
+async fn ensure_active_tenant(db: &impl ConnectionTrait, tenant_id: Uuid) -> Result<()> {
+    let tenant = Tenant::find_by_id_for_update(db, tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query tenant: {e}")))?
+        .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
+    if !tenant.is_active() {
+        return Err(ApiError::Conflict(
+            "The target tenant is inactive and cannot receive channel accounts".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, FromQueryResult)]
+struct ActiveTenantId {
+    id: Uuid,
+}
+
+async fn load_active_tenant_ids(
+    db: &impl ConnectionTrait,
+    tenant_ids: &[Uuid],
+) -> Result<HashSet<Uuid>> {
+    if tenant_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let rows = ActiveTenantId::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT id FROM tenants WHERE id = ANY($1) AND status = 'active'",
+        [tenant_ids.to_vec().into()],
+    ))
+    .all(db)
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to query tenant statuses: {e}")))?;
+    Ok(rows.into_iter().map(|row| row.id).collect())
+}
+
 /// Provider 账号信息
 #[derive(Debug, Serialize)]
 pub struct AccountInfo {
     pub id: Uuid,
     /// 所属租户 ID
     pub tenant_id: Uuid,
+    /// 所属租户是否处于活跃状态
+    pub tenant_active: bool,
     pub name: String,
     pub provider: String, // openai, anthropic, etc.
     pub api_key_preview: String,
@@ -147,6 +193,12 @@ pub async fn list_accounts(
     .await
     .map_err(|e| ApiError::Internal(format!("Failed to count accounts: {}", e)))?;
 
+    let tenant_ids: Vec<Uuid> = db_accounts
+        .iter()
+        .map(|account| account.tenant_id)
+        .collect();
+    let active_tenant_ids = load_active_tenant_ids(pool.write_conn(), &tenant_ids).await?;
+
     let accounts: Vec<AccountInfo> = db_accounts
         .into_iter()
         .map(|acc| {
@@ -155,11 +207,14 @@ pub async fn list_accounts(
             let is_healthy = health.status == keycompute_routing::ACCOUNT_HEALTHY;
             // 检查账号是否在冷却中
             let is_cooling = state.account_states.is_cooling_down(&acc.id);
-            let routing_eligible = acc.enabled && health.is_routable() && !is_cooling;
+            let tenant_active = active_tenant_ids.contains(&acc.tenant_id);
+            let routing_eligible =
+                tenant_active && acc.enabled && health.is_routable() && !is_cooling;
 
             AccountInfo {
                 id: acc.id,
                 tenant_id: acc.tenant_id,
+                tenant_active,
                 name: acc.name,
                 provider: acc.provider,
                 api_key_preview: acc.upstream_api_key_preview,
@@ -288,6 +343,14 @@ pub async fn create_account(
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    // Keep the tenant row locked through the insert. This closes the race
+    // where a concurrent tenant deactivation could otherwise allow an account
+    // to be attached after the tenant became inactive.
+    let txn = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to begin account creation: {e}")))?;
+    ensure_active_tenant(&txn, auth.tenant_id).await?;
 
     // 校验协议类型：系统仅支持 openai / anthropic 两种协议，
     // 任何厂商（DeepSeek、Ollama、vLLM 等）通过协议 + base_url 接入
@@ -352,14 +415,18 @@ pub async fn create_account(
         visibility: Some(req.visibility.clone()),
     };
 
-    let account = Account::create(pool, &db_req)
+    let account = Account::create(&txn, &db_req)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to create account: {}", e)))?;
+    txn.commit()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to commit account creation: {e}")))?;
 
     // 返回完整的账号信息，与前端 AccountInfo 类型匹配
     Ok(Json(serde_json::json!({
         "id": account.id.to_string(),
         "tenant_id": account.tenant_id.to_string(),
+        "tenant_active": true,
         "name": account.name,
         "provider": account.provider,
         "api_key_preview": account.upstream_api_key_preview,
@@ -434,6 +501,9 @@ pub async fn update_account(
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
+    if let Some(target_tenant_id) = req.tenant_id {
+        ensure_active_tenant(&txn, target_tenant_id).await?;
+    }
     let existing_protocol = ProtocolType::parse(&existing.provider).ok_or_else(|| {
         ApiError::Conflict(format!(
             "Account has unsupported protocol '{}'; please recreate it",
@@ -546,10 +616,15 @@ pub async fn update_account(
             .retain(|_, affinity| affinity.account_id != account_id);
     }
 
+    let tenant_active = load_active_tenant_ids(pool.write_conn(), &[updated.tenant_id])
+        .await?
+        .contains(&updated.tenant_id);
+
     // 返回更新后的账号信息
     Ok(Json(serde_json::json!({
         "id": updated.id.to_string(),
         "tenant_id": updated.tenant_id.to_string(),
+        "tenant_active": tenant_active,
         "name": updated.name,
         "provider": updated.provider,
         "api_key_preview": updated.upstream_api_key_preview,
@@ -567,7 +642,8 @@ pub async fn update_account(
         "health_status": updated.health_status,
         "health_penalty": updated.health_penalty,
         "health_reason": updated.health_reason,
-        "routing_eligible": updated.enabled
+        "routing_eligible": tenant_active
+            && updated.enabled
             && updated.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
             && !state.account_states.is_cooling_down(&updated.id),
         "last_probe_at": updated.last_probe_at.map(|value| value.to_rfc3339()),
@@ -744,7 +820,8 @@ pub async fn probe_account_for_monitoring(
         .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))
 }
 
-/// Probe an account only while it is enabled on the writer.
+/// Probe an account only while its owning tenant is active and, for automatic
+/// jobs, while the account is enabled on the writer.
 ///
 /// Replica reads may still expose an account after it has been disabled or
 /// deleted. Automatic jobs must use this entry point so that a stale candidate
@@ -781,7 +858,10 @@ async fn probe_account_for_monitoring_with_policy(
     // Reload on the writer immediately before the network call. The candidate
     // list may have come from a lagging replica, but account deletion, disable,
     // credentials, endpoint, and model configuration must all be fresh here.
-    let account = Account::find_by_id(writer, account_id)
+    // Require the owning tenant to remain active immediately before making
+    // the upstream request; otherwise a stale monitoring candidate could
+    // continue probing a closed tenant's channel account.
+    let account = Account::find_by_id_for_key_share(writer, account_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
         .and_then(|account| {

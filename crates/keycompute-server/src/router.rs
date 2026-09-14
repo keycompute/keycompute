@@ -46,6 +46,7 @@ use crate::{
         create_payment_order,
         // 定价管理（Admin）
         create_pricing,
+        create_tenant,
         create_tip_withdrawal,
         // 调试接口
         debug_routing,
@@ -56,6 +57,7 @@ use crate::{
         delete_node,
         delete_pricing,
         delete_response,
+        delete_tenant,
         delete_user,
         exclude_node,
         // 认证相关
@@ -145,6 +147,7 @@ use crate::{
         update_profile,
         update_system_setting_by_key,
         update_system_settings,
+        update_tenant,
         update_user,
         update_user_balance,
         verify_reset_token_handler,
@@ -333,7 +336,12 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/accounts/{id}/refresh", post(refresh_account));
 
     // 租户管理（仅 Admin）
-    let admin_tenant_routes = Router::new().route("/api/v1/tenants", get(list_tenants));
+    let admin_tenant_routes = Router::new()
+        .route("/api/v1/tenants", get(list_tenants).post(create_tenant))
+        .route(
+            "/api/v1/tenants/{id}",
+            put(update_tenant).delete(delete_tenant),
+        );
 
     // 系统设置（仅 Admin）
     let admin_settings_routes = Router::new()

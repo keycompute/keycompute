@@ -2536,7 +2536,10 @@ pub async fn list_models(
     // 尝试从数据库获取模型列表
     if let Some(pool) = state.pool.as_deref() {
         // 查询所有启用的账号（不限制 tenant_id，使用系统级查询）
-        if let Ok(accounts) = Account::find_enabled_all(pool).await {
+        // Model discovery is exposed to clients; use the writer so a closed
+        // tenant's accounts disappear immediately instead of waiting for
+        // replica lag.
+        if let Ok(accounts) = Account::find_enabled_all(pool.write_conn()).await {
             (model_set, provider_map) = collect_models_by_protocol(accounts, protocol, capability);
         }
     }
@@ -2583,7 +2586,7 @@ pub async fn retrieve_model(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查询所有启用的账号，找到支持该模型的 Provider
-    let accounts = Account::find_enabled_all(pool)
+    let accounts = Account::find_enabled_all(pool.write_conn())
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
 

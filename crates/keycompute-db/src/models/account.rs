@@ -8,6 +8,9 @@ use uuid::Uuid;
 pub const ACCOUNT_PRIORITY_MIN: i32 = 0;
 pub const ACCOUNT_PRIORITY_MAX: i32 = 10;
 
+const ACTIVE_ACCOUNT_KEY_SHARE_SQL: &str = "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND tenants.status = 'active' FOR KEY SHARE OF accounts";
+const ACCOUNT_KEY_SHARE_SQL: &str = "SELECT * FROM accounts WHERE id = $1 FOR KEY SHARE";
+
 fn validate_priority(priority: Option<i32>) -> Result<(), DbError> {
     if let Some(priority) = priority
         && !(ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX).contains(&priority)
@@ -175,9 +178,24 @@ impl Account {
     ) -> Result<Option<Account>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM accounts WHERE id = $1 FOR KEY SHARE",
+            ACTIVE_ACCOUNT_KEY_SHARE_SQL,
             [id.into()],
         );
+        Ok(Account::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// Load and lock an account for a background settlement that was already
+    /// authorized and dispatched before the owning tenant became inactive.
+    ///
+    /// This deliberately does not apply the active-tenant filter used by
+    /// [`find_by_id_for_key_share`].  The account row is still key-share
+    /// locked so account deletion cannot race with settlement finalization.
+    pub async fn find_by_id_for_key_share_any_tenant(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Account>, DbError> {
+        let stmt =
+            Statement::from_sql_and_values(DbBackend::Postgres, ACCOUNT_KEY_SHARE_SQL, [id.into()]);
         Ok(Account::find_by_statement(stmt).one(db).await?)
     }
 
@@ -216,6 +234,7 @@ impl Account {
             r#"
             SELECT * FROM accounts
             WHERE tenant_id = $1
+              AND EXISTS (SELECT 1 FROM tenants WHERE tenants.id = accounts.tenant_id AND tenants.status = 'active')
               AND visibility = 'tenant'
               AND enabled = TRUE
               AND LOWER(provider) = LOWER($2)
@@ -314,6 +333,37 @@ impl Account {
             .unwrap_or(0))
     }
 
+    /// 批量统计各租户的渠道账号数量，供租户管理列表使用。
+    pub async fn count_by_tenants(
+        db: &impl ConnectionTrait,
+        tenant_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, i64>, DbError> {
+        #[derive(FromQueryResult)]
+        struct TenantAccountCount {
+            tenant_id: Uuid,
+            count: i64,
+        }
+
+        if tenant_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"SELECT tenant_id, COUNT(*)::BIGINT AS count
+               FROM accounts
+               WHERE tenant_id = ANY($1)
+               GROUP BY tenant_id"#,
+            [tenant_ids.to_vec().into()],
+        );
+        let rows: Vec<TenantAccountCount> =
+            TenantAccountCount::find_by_statement(stmt).all(db).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.tenant_id, row.count))
+            .collect())
+    }
+
     /// 查找租户启用的账号（含本租户 + 全局可见）
     pub async fn find_enabled_by_tenant(
         db: &impl ConnectionTrait,
@@ -321,7 +371,7 @@ impl Account {
     ) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM accounts WHERE (tenant_id = $1 OR visibility = 'global') AND enabled = TRUE ORDER BY priority DESC",
+            "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE EXISTS (SELECT 1 FROM tenants AS target_tenant WHERE target_tenant.id = $1 AND target_tenant.status = 'active') AND tenants.status = 'active' AND (accounts.tenant_id = $1 OR accounts.visibility = 'global') AND accounts.enabled = TRUE ORDER BY accounts.priority DESC",
             [tenant_id.into()],
         );
         let accounts = Account::find_by_statement(stmt).all(db).await?;
@@ -333,7 +383,7 @@ impl Account {
     pub async fn find_enabled_all(db: &impl ConnectionTrait) -> Result<Vec<Account>, DbError> {
         let stmt = Statement::from_string(
             DbBackend::Postgres,
-            "SELECT * FROM accounts WHERE enabled = TRUE ORDER BY priority DESC".to_string(),
+            "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE tenants.status = 'active' AND accounts.enabled = TRUE ORDER BY accounts.priority DESC".to_string(),
         );
         let accounts = Account::find_by_statement(stmt).all(db).await?;
 
@@ -607,12 +657,15 @@ impl Account {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            SELECT * FROM accounts
-            WHERE (tenant_id = $1 OR visibility = 'global')
-              AND enabled = TRUE
-              AND $2 = ANY(models_supported)
-              AND api_capabilities @> ARRAY[$3]::TEXT[]
-            ORDER BY priority DESC
+            SELECT accounts.* FROM accounts
+            JOIN tenants ON tenants.id = accounts.tenant_id
+            WHERE EXISTS (SELECT 1 FROM tenants AS target_tenant WHERE target_tenant.id = $1 AND target_tenant.status = 'active')
+              AND tenants.status = 'active'
+              AND (accounts.tenant_id = $1 OR accounts.visibility = 'global')
+              AND accounts.enabled = TRUE
+              AND $2 = ANY(accounts.models_supported)
+              AND accounts.api_capabilities @> ARRAY[$3]::TEXT[]
+            ORDER BY accounts.priority DESC
             "#,
             [tenant_id.into(), model.into(), api_capability.into()],
         );
@@ -701,5 +754,12 @@ mod tests {
         assert!(validate_priority(Some(ACCOUNT_PRIORITY_MAX)).is_ok());
         assert!(validate_priority(Some(-1)).is_err());
         assert!(validate_priority(Some(11)).is_err());
+    }
+
+    #[test]
+    fn background_key_share_lookup_is_not_blocked_by_tenant_status() {
+        assert!(ACTIVE_ACCOUNT_KEY_SHARE_SQL.contains("tenants.status = 'active'"));
+        assert!(!ACCOUNT_KEY_SHARE_SQL.contains("tenants.status"));
+        assert!(ACCOUNT_KEY_SHARE_SQL.contains("FOR KEY SHARE"));
     }
 }

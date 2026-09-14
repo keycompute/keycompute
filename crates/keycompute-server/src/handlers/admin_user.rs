@@ -18,13 +18,18 @@ use keycompute_auth::Permission;
 use keycompute_billing::balance::{
     BalanceReservationPageCursor, MAX_BALANCE_RESERVATION_PAGE_SIZE,
 };
+use keycompute_db::models::account::Account;
 use keycompute_db::models::api_key::ProduceAiKey;
-use keycompute_db::models::tenant::Tenant;
+use keycompute_db::models::tenant::{
+    CreateTenantRequest as DbCreateTenantRequest, Tenant,
+    UpdateTenantRequest as DbUpdateTenantRequest,
+};
 use keycompute_db::models::user::User;
 use keycompute_db::models::user_credential::UserCredential;
 use keycompute_types::{AssignableUserRole, UserRole};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use sea_orm::{ConnectionTrait, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -1026,10 +1031,30 @@ pub async fn list_all_api_keys(
 pub struct TenantInfo {
     pub id: Uuid,
     pub name: String,
+    pub slug: String,
     pub description: Option<String>,
     pub user_count: i64,
+    pub account_count: i64,
+    pub status: String,
     pub is_active: bool,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+/// 创建租户请求（Admin）。新租户始终从 active 状态开始；Slug 可选，
+/// 未提供时由服务端根据名称生成。
+#[derive(Debug, Deserialize)]
+pub struct CreateTenantRequest {
+    pub name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+/// 更新租户请求（Admin）。
+#[derive(Debug, Deserialize)]
+pub struct UpdateTenantRequest {
+    pub name: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1050,6 +1075,275 @@ pub struct TenantListResponse {
     pub total_pages: i64,
 }
 
+fn normalize_tenant_status(status: &str) -> Result<&'static str> {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "active" | "enabled" => Ok("active"),
+        "inactive" | "disabled" => Ok("inactive"),
+        _ => Err(ApiError::BadRequest(
+            "Invalid tenant status, expected active or inactive".to_string(),
+        )),
+    }
+}
+
+fn generated_tenant_slug(name: &str) -> String {
+    let mut slug = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        format!("tenant-{}", Uuid::new_v4().simple())
+    } else {
+        let truncated = slug.chars().take(90).collect::<String>();
+        let truncated = truncated.trim_end_matches('-');
+        if truncated.is_empty() {
+            format!("tenant-{}", Uuid::new_v4().simple())
+        } else {
+            truncated.to_string()
+        }
+    }
+}
+
+fn map_tenant_db_error(error: keycompute_db::DbError, operation: &str) -> ApiError {
+    if operation == "delete"
+        && let keycompute_db::DbError::TenantHasPricingModels { count } = error
+    {
+        return ApiError::Conflict(format!(
+            "Tenant cannot be deleted while it has {count} tenant pricing model(s); delete them first"
+        ));
+    }
+    let message = error.to_string();
+    if is_tenant_unique_error(&message) {
+        ApiError::Conflict("A tenant with the same slug already exists".to_string())
+    } else {
+        ApiError::Internal(format!("Failed to {operation} tenant: {message}"))
+    }
+}
+
+fn is_tenant_unique_error(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("duplicate") || message.contains("unique")
+}
+
+async fn build_tenant_info(db: &impl ConnectionTrait, tenant: Tenant) -> Result<TenantInfo> {
+    let user_count = Tenant::count_users(db, tenant.id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to count tenant users: {e}")))?;
+    let account_count = Tenant::count_accounts(db, tenant.id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to count tenant accounts: {e}")))?;
+    let is_active = tenant.is_active();
+    Ok(TenantInfo {
+        id: tenant.id,
+        name: tenant.name,
+        slug: tenant.slug,
+        description: tenant.description,
+        user_count,
+        account_count,
+        status: tenant.status.clone(),
+        is_active,
+        created_at: tenant.created_at.to_rfc3339(),
+        updated_at: tenant.updated_at.to_rfc3339(),
+    })
+}
+
+/// 创建租户。
+///
+/// POST /api/v1/tenants
+pub async fn create_tenant(
+    auth: AuthExtractor,
+    State(state): State<AppState>,
+    Json(req): Json<CreateTenantRequest>,
+) -> Result<Json<TenantInfo>> {
+    if !auth.is_admin() {
+        return Err(ApiError::Auth("Admin permission required".to_string()));
+    }
+    let name = req.name.trim();
+    if name.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Tenant name cannot be empty".to_string(),
+        ));
+    }
+    if name.chars().count() > 255 {
+        return Err(ApiError::BadRequest("Tenant name is too long".to_string()));
+    }
+    let slug_was_generated = req
+        .slug
+        .as_deref()
+        .is_none_or(|value| value.trim().is_empty());
+    let slug = req
+        .slug
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| generated_tenant_slug(name));
+    if slug.len() > 100
+        || !slug.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+        })
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+    {
+        return Err(ApiError::BadRequest(
+            "Tenant slug must use lowercase letters, digits, and hyphens".to_string(),
+        ));
+    }
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    let writer = pool.write_conn();
+    let slug_base = slug;
+    let mut slug = slug_base.clone();
+    let mut generated_attempts = 0;
+    let tenant = loop {
+        let result = Tenant::create(
+            writer,
+            &DbCreateTenantRequest {
+                name: name.to_string(),
+                slug: slug.clone(),
+                description: None,
+                default_rpm_limit: None,
+                default_tpm_limit: None,
+            },
+        )
+        .await;
+        match result {
+            Ok(tenant) => break tenant,
+            Err(error) if slug_was_generated && is_tenant_unique_error(&error.to_string()) => {
+                generated_attempts += 1;
+                if generated_attempts >= 4 {
+                    return Err(map_tenant_db_error(error, "create"));
+                }
+                let suffix = Uuid::new_v4().simple().to_string();
+                slug = format!("{slug_base}-{}", &suffix[..8]);
+            }
+            Err(error) => return Err(map_tenant_db_error(error, "create")),
+        }
+    };
+    Ok(Json(build_tenant_info(writer, tenant).await?))
+}
+
+/// 更新租户名称或状态。
+///
+/// PUT /api/v1/tenants/{id}
+pub async fn update_tenant(
+    auth: AuthExtractor,
+    Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(req): Json<UpdateTenantRequest>,
+) -> Result<Json<TenantInfo>> {
+    if !auth.is_admin() {
+        return Err(ApiError::Auth("Admin permission required".to_string()));
+    }
+    if let Some(name) = req.name.as_deref()
+        && (name.trim().is_empty() || name.chars().count() > 255)
+    {
+        return Err(ApiError::BadRequest("Invalid tenant name".to_string()));
+    }
+    let status = req
+        .status
+        .as_deref()
+        .map(normalize_tenant_status)
+        .transpose()?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    let txn = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to begin tenant update: {e}")))?;
+    let tenant = Tenant::find_by_id_for_update(&txn, tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to find tenant: {e}")))?
+        .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
+    if tenant.slug == "system" && status == Some("inactive") {
+        return Err(ApiError::Forbidden(
+            "The system tenant cannot be deactivated".to_string(),
+        ));
+    }
+    let tenant = tenant
+        .update(
+            &txn,
+            &DbUpdateTenantRequest {
+                name: req.name.map(|value| value.trim().to_string()),
+                description: None,
+                status: status.map(str::to_string),
+                default_rpm_limit: None,
+                default_tpm_limit: None,
+            },
+        )
+        .await
+        .map_err(|e| map_tenant_db_error(e, "update"))?;
+    let info = build_tenant_info(&txn, tenant).await?;
+    txn.commit()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to commit tenant update: {e}")))?;
+    Ok(Json(info))
+}
+
+/// 删除租户。只有没有用户、渠道账号和租户级定价的租户才允许删除。
+///
+/// DELETE /api/v1/tenants/{id}
+pub async fn delete_tenant(
+    auth: AuthExtractor,
+    Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>> {
+    if !auth.is_admin() {
+        return Err(ApiError::Auth("Admin permission required".to_string()));
+    }
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    let txn = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to begin tenant deletion: {e}")))?;
+    let tenant = Tenant::find_by_id_for_update(&txn, tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to find tenant: {e}")))?
+        .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
+    if tenant.slug == "system" {
+        let _ = txn.rollback().await;
+        return Err(ApiError::Forbidden(
+            "The system tenant cannot be deleted".to_string(),
+        ));
+    }
+    let user_count = Tenant::count_users(&txn, tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to count tenant users: {e}")))?;
+    let account_count = Tenant::count_accounts(&txn, tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to count tenant accounts: {e}")))?;
+    if user_count > 0 || account_count > 0 {
+        let _ = txn.rollback().await;
+        return Err(ApiError::Conflict(format!(
+            "Tenant cannot be deleted while it has {user_count} user(s) and {account_count} channel account(s)"
+        )));
+    }
+    tenant
+        .delete(&txn)
+        .await
+        .map_err(|e| map_tenant_db_error(e, "delete"))?;
+    txn.commit()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to commit tenant deletion: {e}")))?;
+    Ok(Json(serde_json::json!({
+        "message": "Tenant deleted successfully",
+        "tenant_id": tenant_id,
+    })))
+}
+
 /// 列出所有租户
 ///
 /// GET /api/v1/tenants
@@ -1066,21 +1360,28 @@ pub async fn list_tenants(
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    // Tenant lifecycle state and the management counters are read-after-write
+    // sensitive: use the writer so a just-created/closed tenant is reflected
+    // immediately instead of waiting for a replica to catch up.
+    let writer = pool.write_conn();
 
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
-    let tenants = Tenant::find_all_filtered(pool, params.search.as_deref(), page_size, offset)
+    let tenants = Tenant::find_all_filtered(writer, params.search.as_deref(), page_size, offset)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query tenants: {}", e)))?;
-    let total = Tenant::count_all_filtered(pool, params.search.as_deref())
+    let total = Tenant::count_all_filtered(writer, params.search.as_deref())
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to count tenants: {}", e)))?;
 
     // 批量统计各租户用户数量（避免 N+1 查询）
     let tenant_ids: Vec<Uuid> = tenants.iter().map(|t| t.id).collect();
-    let user_counts = User::count_by_tenants(pool, &tenant_ids)
+    let user_counts = User::count_by_tenants(writer, &tenant_ids)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
+    let account_counts = Account::count_by_tenants(writer, &tenant_ids)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to count channel accounts: {}", e)))?;
 
     let result: Vec<TenantInfo> = tenants
         .into_iter()
@@ -1091,10 +1392,14 @@ pub async fn list_tenants(
             TenantInfo {
                 id: tenant.id,
                 name: tenant.name,
+                slug: tenant.slug,
                 description,
                 user_count: user_counts.get(&tenant.id).copied().unwrap_or(0),
+                account_count: account_counts.get(&tenant.id).copied().unwrap_or(0),
+                status: tenant.status.clone(),
                 is_active,
                 created_at: tenant.created_at.to_rfc3339(),
+                updated_at: tenant.updated_at.to_rfc3339(),
             }
         })
         .collect();
@@ -1130,6 +1435,30 @@ mod tests {
 
         let json = serde_json::to_string(&user).unwrap();
         assert!(json.contains("admin@example.com"));
+    }
+
+    #[test]
+    fn tenant_status_normalization_accepts_only_supported_states() {
+        assert_eq!(normalize_tenant_status("active").unwrap(), "active");
+        assert_eq!(normalize_tenant_status("DISABLED").unwrap(), "inactive");
+        assert!(normalize_tenant_status("suspended").is_err());
+    }
+
+    #[test]
+    fn tenant_pricing_delete_error_is_client_visible_as_conflict() {
+        let error = keycompute_db::DbError::TenantHasPricingModels { count: 1 };
+        let mapped = map_tenant_db_error(error, "delete");
+        assert!(matches!(mapped, ApiError::Conflict(message) if message.contains("pricing model")));
+    }
+
+    #[test]
+    fn generated_tenant_slug_is_bounded_and_has_no_trailing_separator() {
+        let slug = generated_tenant_slug(&format!("{} trailing", "a ".repeat(80)));
+        assert!(slug.len() <= 90);
+        assert!(!slug.ends_with('-'));
+        assert!(slug.chars().all(|character| character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || character == '-'));
     }
 
     #[test]

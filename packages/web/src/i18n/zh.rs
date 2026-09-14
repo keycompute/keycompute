@@ -1388,6 +1388,22 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.empty", "暂无租户数据");
     m.insert("tenants.tenant_id", "租户 ID");
     m.insert("tenants.active", "活跃");
+    m.insert("tenants.create", "创建租户");
+    m.insert("tenants.create_title", "创建租户");
+    m.insert("tenants.name", "租户名称");
+    m.insert("tenants.name_placeholder", "例如：研发中心");
+    m.insert("tenants.name_required", "请输入租户名称");
+    m.insert("tenants.slug", "Slug（可选）");
+    m.insert("tenants.slug_placeholder", "例如：research-center");
+    m.insert("tenants.slug_hint", "仅支持小写字母、数字和连字符");
+    m.insert("tenants.users", "用户数");
+    m.insert("tenants.accounts", "渠道账号数");
+    m.insert("tenants.disable", "关闭");
+    m.insert("tenants.enable", "开启");
+    m.insert("tenants.delete_title", "删除租户");
+    m.insert("tenants.delete_confirm", "确定删除租户");
+    m.insert("tenants.created", "租户已创建");
+    m.insert("tenants.deleted", "租户已删除");
     m.insert(
         "distribution_records.admin_desc",
         "查看全平台分销收益记录，及当前生效的分销规则",
@@ -1444,6 +1460,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.route_ready", "可参与正常路由");
     m.insert("accounts.enabled_but_unhealthy", "已启用，但健康状态异常");
     m.insert("accounts.not_routed", "当前不参与路由调度");
+    m.insert(
+        "accounts.tenant_inactive",
+        "所属租户未启用，当前不参与路由调度",
+    );
     m.insert("accounts.health_penalty", "动态惩罚分");
     m.insert("accounts.rpm_label", "当前 RPM / 上限");
     m.insert("accounts.last_used", "最近使用");

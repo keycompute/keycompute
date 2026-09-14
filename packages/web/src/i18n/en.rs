@@ -1644,6 +1644,25 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.empty", "No tenants yet");
     m.insert("tenants.tenant_id", "Tenant ID");
     m.insert("tenants.active", "Active");
+    m.insert("tenants.create", "Create tenant");
+    m.insert("tenants.create_title", "Create tenant");
+    m.insert("tenants.name", "Tenant name");
+    m.insert("tenants.name_placeholder", "e.g. Research Center");
+    m.insert("tenants.name_required", "Tenant name is required");
+    m.insert("tenants.slug", "Slug (optional)");
+    m.insert("tenants.slug_placeholder", "e.g. research-center");
+    m.insert(
+        "tenants.slug_hint",
+        "Lowercase letters, digits, and hyphens only",
+    );
+    m.insert("tenants.users", "Users");
+    m.insert("tenants.accounts", "Channel accounts");
+    m.insert("tenants.disable", "Close");
+    m.insert("tenants.enable", "Open");
+    m.insert("tenants.delete_title", "Delete tenant");
+    m.insert("tenants.delete_confirm", "Delete this tenant");
+    m.insert("tenants.created", "Tenant created");
+    m.insert("tenants.deleted", "Tenant deleted");
     m.insert(
         "distribution_records.admin_desc",
         "Review platform-wide distribution earnings and currently effective rules",
@@ -1715,6 +1734,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Enabled, but health status is abnormal",
     );
     m.insert("accounts.not_routed", "Not participating in routing");
+    m.insert(
+        "accounts.tenant_inactive",
+        "Tenant is inactive; not participating in routing",
+    );
     m.insert("accounts.health_penalty", "Dynamic penalty");
     m.insert("accounts.rpm_label", "Current RPM / Limit");
     m.insert("accounts.last_used", "Last Used");

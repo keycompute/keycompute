@@ -208,7 +208,10 @@ impl UserService {
         tracing::debug!(tenant_id = %tenant_id, "Loading tenant");
 
         if let Some(pool) = self.pool.as_deref() {
-            let tenant = Tenant::find_by_id(pool, tenant_id)
+            // Tenant lifecycle is authorization-sensitive. Read from the
+            // writer so a just-closed tenant cannot remain usable during
+            // replica lag.
+            let tenant = Tenant::find_by_id(pool.write_conn(), tenant_id)
                 .await
                 .map_err(|e| {
                     KeyComputeError::DatabaseError(format!("Failed to load tenant: {}", e))

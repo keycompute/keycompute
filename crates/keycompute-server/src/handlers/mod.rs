@@ -69,9 +69,10 @@ pub use user::{
 
 // 用户管理（admin_user）
 pub use admin_user::{
-    AdminUserInfo, TenantListQueryParams, TenantListResponse, UpdateUserRequest,
-    UserListQueryParams, UserListResponse, delete_user, freeze_user_balance, get_user_by_id,
-    list_all_api_keys, list_all_users, list_tenants, unfreeze_user_balance, update_user,
+    AdminUserInfo, CreateTenantRequest, TenantInfo, TenantListQueryParams, TenantListResponse,
+    UpdateTenantRequest, UpdateUserRequest, UserListQueryParams, UserListResponse, create_tenant,
+    delete_tenant, delete_user, freeze_user_balance, get_user_by_id, list_all_api_keys,
+    list_all_users, list_tenants, unfreeze_user_balance, update_tenant, update_user,
     update_user_balance,
 };
 

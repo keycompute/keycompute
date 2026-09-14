@@ -336,7 +336,7 @@ fn AdminAccountsView() -> Element {
     // 租户列表（编辑弹窗下拉选项）
     let tenants = use_resource(move || async move {
         let token = auth_store.token().unwrap_or_default();
-        tenant_service::list_all(&token).await
+        tenant_service::list_active(&token).await
     });
 
     // 全局重置健康状态处理函数
@@ -658,7 +658,7 @@ fn AdminAccountsView() -> Element {
                                             td {
                                                 div { class: "account-status-stack",
                                                     div { class: "account-status-row",
-                                                        if acc.is_active {
+                                                        if acc.is_active && acc.tenant_active {
                                                             Badge { variant: BadgeVariant::Success,
                                                                 {i18n.t("common.enabled")}
                                                             }
@@ -686,7 +686,9 @@ fn AdminAccountsView() -> Element {
                                                         }
                                                     }
                                                     p { class: "account-status-note",
-                                                        if acc.is_active && acc.routing_eligible {
+                                                        if !acc.tenant_active {
+                                                            {i18n.t("accounts.tenant_inactive")}
+                                                        } else if acc.is_active && acc.routing_eligible {
                                                             {i18n.t("accounts.route_ready")}
                                                         } else if acc.is_active {
                                                             {i18n.t("accounts.enabled_but_unhealthy")}

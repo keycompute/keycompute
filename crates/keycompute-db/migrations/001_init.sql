@@ -16,7 +16,8 @@ CREATE TABLE IF NOT EXISTS tenants (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_tenants_responses_idempotency_claim_count CHECK (
         responses_idempotency_claim_count BETWEEN 0 AND 100000
-    )
+    ),
+    CONSTRAINT ck_tenants_status CHECK (status IN ('active', 'inactive'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
@@ -102,7 +103,7 @@ CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_revoked ON produce_ai_keys(revoke
 -- accounts: 上游 Provider 账号池
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     provider VARCHAR(50) NOT NULL,
     name VARCHAR(255) NOT NULL,
     endpoint VARCHAR(500) NOT NULL,
@@ -511,7 +512,7 @@ COMMENT ON CONSTRAINT uk_distribution_records_unique ON distribution_records IS
 -- tenant_distribution_rules: 租户分销规则
 CREATE TABLE IF NOT EXISTS tenant_distribution_rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     beneficiary_id UUID NOT NULL,
     name VARCHAR(255) NOT NULL DEFAULT '默认分销规则',
     description TEXT,

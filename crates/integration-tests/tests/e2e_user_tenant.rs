@@ -85,14 +85,14 @@ fn test_tenant_status_management() {
         tenant.is_active(),
     );
 
-    // 2. 暂停租户
-    db.update_tenant_status(tenant.id, "suspended");
-    let suspended = db.get_tenant(tenant.id).unwrap();
+    // 2. 关闭租户
+    db.update_tenant_status(tenant.id, "inactive");
+    let inactive = db.get_tenant(tenant.id).unwrap();
     chain.add_step(
         "integration-tests",
-        "tenant_status::suspended",
-        format!("Suspended status: {}", suspended.status),
-        !suspended.is_active(),
+        "tenant_status::inactive",
+        format!("Inactive status: {}", inactive.status),
+        !inactive.is_active(),
     );
 
     // 3. 恢复租户

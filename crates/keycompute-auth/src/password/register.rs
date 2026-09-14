@@ -431,6 +431,15 @@ impl RegistrationService {
                 )
             })?;
 
+        // Registration always lands in the default tenant. If an administrator
+        // has closed it, fail closed instead of creating a user that can never
+        // authenticate or access tenant-scoped resources.
+        if !tenant.is_active() {
+            return Err(KeyComputeError::ServiceUnavailable(
+                "Registration is temporarily unavailable".to_string(),
+            ));
+        }
+
         Ok(tenant)
     }
 

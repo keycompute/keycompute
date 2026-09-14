@@ -238,6 +238,10 @@ impl User {
             count: i64,
         }
 
+        if tenant_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"SELECT tenant_id, COUNT(*) as count FROM users WHERE tenant_id = ANY($1) GROUP BY tenant_id"#,

@@ -1483,7 +1483,7 @@ pub(super) async fn background_poll_account(
     let account_id = affinity.account_id.ok_or_else(|| {
         ApiError::Internal("Background Responses settlement has no owning account".into())
     })?;
-    let account = Account::find_by_id_for_key_share(pool, account_id)
+    let account = Account::find_by_id_for_key_share_any_tenant(pool, account_id)
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to load Responses account: {error}")))?
         .ok_or_else(|| ApiError::NotFound("Responses account not found".into()))?;

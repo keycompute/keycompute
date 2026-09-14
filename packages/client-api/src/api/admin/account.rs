@@ -96,6 +96,9 @@ pub struct AccountInfo {
     pub id: String,
     /// 所属租户 ID
     pub tenant_id: String,
+    /// 所属租户是否处于活跃状态
+    #[serde(default = "default_tenant_active")]
+    pub tenant_active: bool,
     pub name: String,
     pub provider: String,
     pub api_key_preview: String,
@@ -130,6 +133,10 @@ pub struct AccountInfo {
 
 fn default_health_status() -> String {
     "unknown".to_string()
+}
+
+fn default_tenant_active() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

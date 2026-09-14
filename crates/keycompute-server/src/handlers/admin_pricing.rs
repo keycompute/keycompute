@@ -16,7 +16,26 @@ use bigdecimal::BigDecimal;
 use keycompute_db::models::pricing_model::{
     CreatePricingRequest, GLOBAL_DEFAULT_TENANT_ID, PricingModel, UpdatePricingRequest,
 };
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
+use keycompute_db::models::tenant::Tenant;
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+
+fn validate_active_pricing_tenant_status(status: Option<&str>, tenant_id: Uuid) -> Result<()> {
+    match status {
+        Some("active") => Ok(()),
+        Some(_) => Err(ApiError::Conflict(
+            "The target tenant is inactive and cannot receive pricing models".to_string(),
+        )),
+        None => Err(ApiError::NotFound(format!("Tenant not found: {tenant_id}"))),
+    }
+}
+
+async fn ensure_active_pricing_tenant(db: &impl ConnectionTrait, tenant_id: Uuid) -> Result<()> {
+    let tenant = Tenant::find_by_id_for_update(db, tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to find pricing tenant: {e}")))?
+        .map(|tenant| tenant.status);
+    validate_active_pricing_tenant_status(tenant.as_deref(), tenant_id)
+}
 
 /// 将某个定价设为默认
 ///
@@ -307,6 +326,18 @@ pub async fn create_pricing(
         ));
     }
 
+    // Pricing is a tenant-owned configuration resource. Do not allow an
+    // administrator to attach a new pricing model to a closed or missing
+    // tenant, even when the caller itself is the active system tenant.
+    let tenant_id = req
+        .tenant_id
+        .expect("global pricing IDs are rejected immediately above");
+    let txn = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to begin pricing creation: {e}")))?;
+    ensure_active_pricing_tenant(&txn, tenant_id).await?;
+
     let db_req = CreatePricingRequest {
         tenant_id: req.tenant_id, // 使用请求中的 tenant_id，None 表示全局默认
         model_name: req.model_name.clone(),
@@ -327,9 +358,12 @@ pub async fn create_pricing(
         }),
     };
 
-    let pricing = PricingModel::create(pool, &db_req)
+    let pricing = PricingModel::create(&txn, &db_req)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to create pricing: {}", e)))?;
+    txn.commit()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to commit pricing creation: {e}")))?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -534,4 +568,25 @@ pub async fn set_default_pricing(
         "skipped": skipped,
         "set_by": auth.user_id,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_active_pricing_tenant_status;
+    use crate::error::ApiError;
+    use uuid::Uuid;
+
+    #[test]
+    fn pricing_creation_requires_an_existing_active_tenant() {
+        let tenant_id = Uuid::new_v4();
+        assert!(validate_active_pricing_tenant_status(Some("active"), tenant_id).is_ok());
+        assert!(matches!(
+            validate_active_pricing_tenant_status(Some("inactive"), tenant_id),
+            Err(ApiError::Conflict(_))
+        ));
+        assert!(matches!(
+            validate_active_pricing_tenant_status(None, tenant_id),
+            Err(ApiError::NotFound(_))
+        ));
+    }
 }
