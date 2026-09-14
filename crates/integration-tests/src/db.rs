@@ -59,9 +59,7 @@ async fn remove_leftover_system_users(db: &DatabaseConnection) -> Result<(), sea
 }
 
 pub async fn create_test_pool() -> DatabaseConnection {
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://keycompute:change-me-strong-password@localhost:5432/keycompute".to_string()
-    });
+    let database_url = crate::common::resolve_database_url();
 
     use sea_orm::ConnectOptions;
     let mut opt = ConnectOptions::new(&database_url);

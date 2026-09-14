@@ -43,6 +43,32 @@ impl Default for TestContext {
     }
 }
 
+/// 解析数据库连接 URL。
+///
+/// 优先从 DATABASE_URL 读取；若未设置则回退到 KC__DATABASE__URL，
+/// 最后使用本地默认 URL 兜底。该顺序兼容 CI 与本地运行环境。
+pub fn resolve_database_url() -> String {
+    std::env::var("DATABASE_URL")
+        .or_else(|_| std::env::var("KC__DATABASE__URL"))
+        .unwrap_or_else(|_| {
+            "postgres://keycompute:change-me-strong-password@localhost:5432/keycompute".to_string()
+        })
+}
+
+/// 解析 Redis 连接 URL。
+///
+/// 优先从 REDIS_URL 读取；若未设置则回退到 KC__REDIS__URL，
+/// 最后使用 CI workflow 的无密码 redis 默认值进行兜底。
+pub fn resolve_redis_url() -> String {
+    std::env::var("REDIS_URL")
+        .or_else(|_| std::env::var("KC__REDIS__URL"))
+        .or_else(|_| {
+            std::env::var("REDIS_PASSWORD")
+                .map(|password| format!("redis://:{password}@127.0.0.1:6379"))
+        })
+        .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+}
+
 /// 带超时的测试运行器
 pub async fn run_test_with_timeout<F, Fut, T>(f: F) -> anyhow::Result<T>
 where
@@ -161,5 +187,37 @@ mod tests {
         let ctx = TestContext::new();
         assert!(!ctx.test_id.is_empty());
         assert_ne!(ctx.request_id, Uuid::nil());
+    }
+
+    #[test]
+    fn test_resolve_database_url_prefers_explicit_env() {
+        unsafe {
+            std::env::set_var("DATABASE_URL", "postgres://example");
+            std::env::set_var("KC__DATABASE__URL", "postgres://fallback");
+        }
+        assert_eq!(resolve_database_url(), "postgres://example");
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+        }
+        assert_eq!(resolve_database_url(), "postgres://fallback");
+        unsafe {
+            std::env::remove_var("KC__DATABASE__URL");
+        }
+    }
+
+    #[test]
+    fn test_resolve_redis_url_prefers_explicit_env() {
+        unsafe {
+            std::env::set_var("REDIS_URL", "redis://:explicit@127.0.0.1:6379");
+            std::env::set_var("KC__REDIS__URL", "redis://:fallback@127.0.0.1:6379");
+        }
+        assert_eq!(resolve_redis_url(), "redis://:explicit@127.0.0.1:6379");
+        unsafe {
+            std::env::remove_var("REDIS_URL");
+        }
+        assert_eq!(resolve_redis_url(), "redis://:fallback@127.0.0.1:6379");
+        unsafe {
+            std::env::remove_var("KC__REDIS__URL");
+        }
     }
 }

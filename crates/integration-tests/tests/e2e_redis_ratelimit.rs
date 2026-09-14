@@ -6,14 +6,14 @@
 //! - 多实例同步测试
 
 use integration_tests::common::VerificationChain;
+use integration_tests::common::resolve_redis_url;
 use keycompute_ratelimit::{RateLimitConfig, RateLimitKey, RateLimitService};
 use std::sync::Arc;
 use uuid::Uuid;
 
 /// 获取测试用 Redis URL
 fn get_redis_url() -> String {
-    std::env::var("REDIS_URL")
-        .unwrap_or_else(|_| "redis://:change-me-redis-password@127.0.0.1:6379".to_string())
+    resolve_redis_url()
 }
 
 /// 生成唯一的测试标识符

@@ -11,6 +11,7 @@
 
 use deadpool_redis::redis::AsyncCommands;
 use integration_tests::common::VerificationChain;
+use integration_tests::common::resolve_redis_url;
 use keycompute_db::DbRouter;
 use keycompute_db::models::{
     node::*,
@@ -224,8 +225,7 @@ impl NodeTestEnv {
         };
         let store = NodeGatewayStore::new(DbRouter::single(pool.clone()), config.clone());
 
-        let redis_url = std::env::var("REDIS_URL")
-            .unwrap_or_else(|_| "redis://:change-me-redis-password@127.0.0.1:6379".to_string());
+        let redis_url = resolve_redis_url();
         let redis_store = Arc::new(
             keycompute_runtime::redis_store::RedisRuntimeStore::new(&redis_url)
                 .map_err(|e| anyhow::anyhow!("Redis connection failed: {}", e))?,
