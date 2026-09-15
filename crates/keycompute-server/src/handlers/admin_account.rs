@@ -535,12 +535,36 @@ pub async fn update_account(
         .begin()
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to begin account update: {error}")))?;
+
+    // Responses execution reservations establish the tenant -> account lock
+    // order before they insert a route reservation. An account update that
+    // also changes (or explicitly keeps) its tenant must use the same order;
+    // taking the account first and then locking the target tenant would leave
+    // a cycle when a reservation already owns the tenant key-share lock.
+    // Lock/validate the requested tenant before acquiring the account row.
+    let requested_tenant = if let Some(target_tenant_id) = req.tenant_id {
+        Some(
+            Tenant::find_by_id_for_update(&txn, target_tenant_id)
+                .await
+                .map_err(|e| ApiError::Internal(format!("Failed to query tenant: {e}")))?
+                .ok_or_else(|| {
+                    ApiError::NotFound(format!("Tenant not found: {target_tenant_id}"))
+                })?,
+        )
+    } else {
+        None
+    };
+
     let existing = Account::find_by_id_for_update(&txn, account_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
-    if let Some(target_tenant_id) = req.tenant_id {
-        ensure_active_tenant(&txn, target_tenant_id).await?;
+    if let Some(target_tenant) = requested_tenant
+        && !target_tenant.is_active()
+    {
+        return Err(ApiError::Conflict(
+            "The target tenant is inactive and cannot receive channel accounts".to_string(),
+        ));
     }
     let existing_protocol = ProtocolType::parse(&existing.provider).ok_or_else(|| {
         ApiError::Conflict(format!(

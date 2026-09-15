@@ -2,7 +2,7 @@ use super::query::escape_like_pattern;
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use keycompute_types::{AssignableUserRole, UserRole};
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -35,6 +35,7 @@ pub struct CreateUserRequest {
 pub struct UpdateUserRequest {
     pub name: Option<String>,
     pub role: Option<AssignableUserRole>,
+    pub tenant_id: Option<Uuid>,
 }
 
 /// 用户过滤参数
@@ -119,6 +120,42 @@ impl User {
         let user = User::find_by_statement(stmt).one(db).await?;
 
         Ok(user)
+    }
+
+    /// 根据 ID 查找并以最强行锁锁定用户。
+    ///
+    /// 用于不需要与子表外键写入并行的路径；租户迁移等会继续锁定余额
+    /// 或订单的事务应使用 [`Self::find_by_id_for_no_key_update`]，避免与
+    /// PostgreSQL 的外键 `KEY SHARE` 锁形成反向等待。
+    pub async fn find_by_id_for_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<User>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM users WHERE id = $1 FOR UPDATE",
+            [id.into()],
+        );
+        Ok(User::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// 根据 ID 查找并锁定用户，同时允许子表外键校验取得 `KEY SHARE` 锁。
+    ///
+    /// 管理用户租户归属的事务会在持有用户锁后继续锁定订单和余额。余额
+    /// 预留、支付回调等路径则会先锁定这些子表行，再通过 `user_id` 外键
+    /// 取得用户的 `KEY SHARE` 锁。`FOR NO KEY UPDATE` 与 `KEY SHARE`
+    /// 兼容，可以避免这两类路径形成反向锁等待环；它仍会阻止任何会修改
+    /// 用户行或删除用户的事务。
+    pub async fn find_by_id_for_no_key_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<User>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM users WHERE id = $1 FOR NO KEY UPDATE",
+            [id.into()],
+        );
+        Ok(User::find_by_statement(stmt).one(db).await?)
     }
 
     /// 根据邮箱查找用户
@@ -252,8 +289,34 @@ impl User {
         Ok(rows.into_iter().map(|r| (r.tenant_id, r.count)).collect())
     }
 
-    /// 更新用户
+    /// 更新用户的资料或角色。
+    ///
+    /// 租户归属变更必须通过 [`Self::update_in_tx`] 执行，以便调用方在
+    /// 同一协调事务中迁移余额、订单和租户级密钥。拒绝在普通连接上
+    /// 直接更新 `tenant_id`，避免留下跨租户的孤儿财务记录。
     pub async fn update(
+        &self,
+        db: &impl ConnectionTrait,
+        req: &UpdateUserRequest,
+    ) -> Result<User, DbError> {
+        ensure_direct_update_is_scoped(req)?;
+        self.update_inner(db, req).await
+    }
+
+    /// 在调用方持有的协调事务中更新用户。
+    ///
+    /// 当 `req.tenant_id` 非空时，调用方必须先锁定源/目标租户并迁移
+    /// 所有租户级子记录，再调用本方法。Admin 用户更新流程提供了完整
+    /// 的协调实现；此低层接口仅供同一事务中的基础设施和测试使用。
+    pub async fn update_in_tx(
+        &self,
+        db: &DatabaseTransaction,
+        req: &UpdateUserRequest,
+    ) -> Result<User, DbError> {
+        self.update_inner(db, req).await
+    }
+
+    async fn update_inner(
         &self,
         db: &impl ConnectionTrait,
         req: &UpdateUserRequest,
@@ -263,17 +326,20 @@ impl User {
             r#"UPDATE users
                SET name = COALESCE($1, name),
                    role = COALESCE($2, role),
+                   tenant_id = COALESCE($3, tenant_id),
                    token_version = CASE
-                       WHEN $2::text IS NOT NULL AND role IS DISTINCT FROM $2::text
+                       WHEN ($2::text IS NOT NULL AND role IS DISTINCT FROM $2::text)
+                         OR ($3::uuid IS NOT NULL AND tenant_id IS DISTINCT FROM $3::uuid)
                            THEN token_version + 1
                        ELSE token_version
                    END,
                    updated_at = NOW()
-               WHERE id = $3
+               WHERE id = $4
                RETURNING *"#,
             [
                 req.name.clone().into(),
                 req.role.as_ref().map(|role| role.as_str()).into(),
+                req.tenant_id.into(),
                 self.id.into(),
             ],
         );
@@ -340,6 +406,14 @@ impl User {
     }
 }
 
+fn ensure_direct_update_is_scoped(req: &UpdateUserRequest) -> Result<(), DbError> {
+    if req.tenant_id.is_some() {
+        Err(DbError::TenantReassignmentRequiresCoordinator)
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,5 +452,30 @@ mod tests {
     fn test_escape_like_pattern_empty() {
         let result = escape_like_pattern("");
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn direct_update_rejects_tenant_reassignment() {
+        let request = UpdateUserRequest {
+            name: None,
+            role: None,
+            tenant_id: Some(Uuid::new_v4()),
+        };
+
+        assert!(matches!(
+            ensure_direct_update_is_scoped(&request),
+            Err(DbError::TenantReassignmentRequiresCoordinator)
+        ));
+    }
+
+    #[test]
+    fn direct_update_allows_profile_changes_without_tenant() {
+        let request = UpdateUserRequest {
+            name: Some("updated".to_string()),
+            role: Some(AssignableUserRole::Admin),
+            tenant_id: None,
+        };
+
+        assert!(ensure_direct_update_is_scoped(&request).is_ok());
     }
 }

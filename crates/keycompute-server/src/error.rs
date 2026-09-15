@@ -329,6 +329,9 @@ impl From<keycompute_db::DbError> for ApiError {
             keycompute_db::DbError::NotFound { entity, id } => {
                 ApiError::NotFound(format!("{} not found: {}", entity, id))
             }
+            keycompute_db::DbError::UserTenantMismatch { .. } => ApiError::Conflict(
+                "User tenant changed; refresh authentication and retry".to_string(),
+            ),
             keycompute_db::DbError::DatabaseError(_) => ApiError::Internal(err.to_string()),
             keycompute_db::DbError::Other(msg) => {
                 // 节点任务提交相关的冲突错误应该返回 409

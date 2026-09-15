@@ -2,8 +2,9 @@
 //!
 //! 处理 Produce AI Key（用户访问系统的 API Key）的验证和解析。
 
-use keycompute_db::{DbRouter, ProduceAiKey, User};
+use keycompute_db::{DbRouter, ProduceAiKey, Tenant, User};
 use keycompute_types::{KeyComputeError, Result};
+use sea_orm::TransactionTrait;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -104,20 +105,79 @@ impl ProduceAiKeyValidator {
 
     /// 从数据库验证 Produce AI Key
     async fn validate_from_database(&self, pool: &DbRouter, key_hash: &str) -> Result<AuthContext> {
-        // 查询 Produce AI Key
-        let produce_ai_key = ProduceAiKey::find_by_hash(pool, key_hash)
+        // API-key revocation is security-sensitive and must be visible
+        // immediately after a tenant move, so the candidate lookup bypasses
+        // potentially lagging read replicas. The transaction below acquires
+        // locks in parent-first tenant→user→key order, matching tenant
+        // lifecycle operations while retaining the move's user/key order.
+        let writer = pool.write_conn();
+        let candidate = ProduceAiKey::find_by_hash(writer, key_hash)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to query API key: {}", e))
             })?;
 
-        let Some(produce_ai_key) = produce_ai_key else {
+        let Some(candidate) = candidate else {
             tracing::warn!(key_hash = %key_hash, "Produce AI key not found");
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         };
 
-        // 检查是否有效
-        if !produce_ai_key.is_valid() {
+        // Lock the tenant parent before its user/key children. Besides
+        // linearizing lifecycle changes, this parent-first order prevents a
+        // validator from holding a user lock while waiting on a concurrent
+        // tenant deletion (which locks the tenant before cascading users).
+        let tx = pool.begin().await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to begin API key validation: {e}"))
+        })?;
+
+        // Tenant lifecycle is authorization-sensitive. Take a FOR UPDATE lock
+        // in the same transaction so a concurrent status change cannot commit
+        // between the active-state check and validation commit. A KEY SHARE
+        // lock is insufficient here: PostgreSQL permits a regular tenant
+        // UPDATE (which takes NO KEY UPDATE) alongside KEY SHARE. The
+        // parent-first order is unchanged, so create/move/delete paths still
+        // serialize before any user or key lock is acquired.
+        let tenant = Tenant::find_by_id_for_update(&tx, candidate.tenant_id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock tenant: {e}")))?;
+        let Some(tenant) = tenant else {
+            tracing::warn!(tenant_id = %candidate.tenant_id, "Tenant not found for produce AI key");
+            return Err(KeyComputeError::AuthError("Invalid API key".into()));
+        };
+
+        // A move locks the user and then revokes its keys. Lock the user only
+        // after the parent tenant, so tenant deletion and authentication have
+        // the same parent-first ordering. `FOR NO KEY UPDATE` remains
+        // compatible with child-table foreign-key `KEY SHARE` checks.
+        let user = User::find_by_id_for_no_key_update(&tx, candidate.user_id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock user: {e}")))?;
+
+        // 用户已被删除但 key 记录残留（孤儿 key），对外统一返回通用错误，避免泄露内部状态
+        let Some(user) = user else {
+            tracing::warn!(
+                produce_ai_key_id = %candidate.id,
+                user_id = %candidate.user_id,
+                "User not found for produce AI key (orphaned key)"
+            );
+            return Err(KeyComputeError::AuthError("Invalid API key".into()));
+        };
+
+        // Re-read the key under the same transaction after obtaining the
+        // user lock. This is the linearization point for revocation and
+        // tenant reassignment; the initial candidate may have become stale
+        // while the transaction was waiting for the user lock.
+        let Some(produce_ai_key) = ProduceAiKey::find_by_id_for_update(&tx, candidate.id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock API key: {e}")))?
+        else {
+            return Err(KeyComputeError::AuthError("Invalid API key".into()));
+        };
+
+        // Check both the hash and validity from the locked, current row. The
+        // hash is immutable in normal operation, but checking it defensively
+        // also protects against malformed/manual database edits.
+        if produce_ai_key.produce_ai_key_hash != key_hash || !produce_ai_key.is_valid() {
             tracing::warn!(
                 produce_ai_key_id = %produce_ai_key.id,
                 revoked = produce_ai_key.revoked,
@@ -128,20 +188,12 @@ impl ProduceAiKeyValidator {
             ));
         }
 
-        // 查询用户信息
-        let user = User::find_by_id(pool, produce_ai_key.user_id)
-            .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to query user: {}", e)))?;
-
-        // 用户已被删除但 key 记录残留（孤儿 key），对外统一返回通用错误，避免泄露内部状态
-        let Some(user) = user else {
-            tracing::warn!(
-                produce_ai_key_id = %produce_ai_key.id,
-                user_id = %produce_ai_key.user_id,
-                "User not found for produce AI key (orphaned key)"
-            );
+        // A key must remain bound to the currently authoritative user row;
+        // this check also rejects a key that was manually assigned to a
+        // different user while the validator was waiting.
+        if user.id != produce_ai_key.user_id {
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
-        };
+        }
 
         // 验证用户租户 ID 与 Produce AI Key 租户 ID 一致
         if user.tenant_id != produce_ai_key.tenant_id {
@@ -154,20 +206,19 @@ impl ProduceAiKeyValidator {
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         }
 
-        // 查询租户信息并验证状态
-        use keycompute_db::Tenant;
-        // Tenant lifecycle is authorization-sensitive; bypass read replicas
-        // so closure takes effect immediately even while replicas catch up.
-        let tenant = Tenant::find_by_id(pool.write_conn(), user.tenant_id)
-            .await
-            .map_err(|e| {
-                KeyComputeError::DatabaseError(format!("Failed to query tenant: {}", e))
-            })?;
-
-        let Some(tenant) = tenant else {
-            tracing::warn!(tenant_id = %user.tenant_id, "Tenant not found for produce AI key");
+        // The tenant lock was taken from the key's tenant ID. Require both
+        // current bindings to point at that same locked parent before using
+        // its lifecycle state.
+        if user.tenant_id != tenant.id {
+            tracing::warn!(
+                user_id = %user.id,
+                user_tenant_id = %user.tenant_id,
+                key_tenant_id = %produce_ai_key.tenant_id,
+                locked_tenant_id = %tenant.id,
+                "Produce AI key tenant changed while validating"
+            );
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
-        };
+        }
 
         // 检查租户状态：具体状态值属于内部信息只进日志，不对外暴露
         if !tenant.is_active() {
@@ -180,7 +231,11 @@ impl ProduceAiKeyValidator {
         }
 
         // 更新最后使用时间
-        let _ = produce_ai_key.update_last_used(pool).await;
+        let _ = produce_ai_key.update_last_used(&tx).await;
+
+        tx.commit().await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to commit API key validation: {e}"))
+        })?;
 
         tracing::info!(
             user_id = %user.id,

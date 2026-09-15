@@ -92,6 +92,20 @@ impl UserCredential {
         Ok(credential)
     }
 
+    /// 根据用户 ID 查找并锁定凭证，供登录等需要把凭证快照与用户状态
+    /// 一起线性化的事务使用。
+    pub async fn find_by_user_id_for_update(
+        db: &impl ConnectionTrait,
+        user_id: Uuid,
+    ) -> Result<Option<UserCredential>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM user_credentials WHERE user_id = $1 FOR UPDATE",
+            [user_id.into()],
+        );
+        Ok(UserCredential::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 更新凭证
     pub async fn update(
         &self,

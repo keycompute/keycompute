@@ -317,6 +317,9 @@ pub async fn create_payment_order(
             | crate::payment_registry::RegistryError::UnsupportedScene(_) => {
                 ApiError::BadRequest(error.to_string())
             }
+            crate::payment_registry::RegistryError::UserTenantMismatch => {
+                ApiError::Conflict("用户所属租户已变更，请刷新认证后重试".to_string())
+            }
             _ => payment_internal_error("create_order", error),
         })?;
     let qr_code_image_url = created.qr_code.as_deref().and_then(qr_code_data_url);
@@ -989,7 +992,12 @@ pub async fn admin_verify_payment_provider(
     registry
         .verify_provider(method, auth.tenant_id, auth.user_id)
         .await
-        .map_err(|error| payment_internal_error("verify_provider", error))?;
+        .map_err(|error| match error {
+            crate::payment_registry::RegistryError::UserTenantMismatch => {
+                ApiError::Conflict("用户所属租户已变更，请刷新认证后重试".to_string())
+            }
+            other => payment_internal_error("verify_provider", other),
+        })?;
     Ok(Json(serde_json::json!({ "message": "支付渠道验证成功" })))
 }
 

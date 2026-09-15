@@ -11,7 +11,7 @@ use keycompute_db::{
 use keycompute_emailserver::EmailService;
 use keycompute_types::{KeyComputeError, Result};
 use rand::Rng;
-use sea_orm::{ConnectionTrait, DbBackend, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -219,8 +219,9 @@ impl PasswordResetService {
         // 1. 验证密码强度
         self.password_validator.validate(&req.new_password)?;
 
-        // 2. 查找重置令牌
-        let reset = PasswordReset::find_by_token(self.pool.as_ref(), &req.token)
+        // 2. 查找重置令牌。安全敏感的令牌读取走主库，避免读副本延迟让
+        // 已使用的令牌短暂恢复为可用状态。
+        let reset = PasswordReset::find_by_token(self.pool.write_conn(), &req.token)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find reset token: {}", e))
@@ -240,17 +241,48 @@ impl PasswordResetService {
         // 4. 哈希新密码
         let new_hash = self.password_hasher.hash(&req.new_password)?;
 
-        // 5. 更新密码
-        let credential = UserCredential::find_by_user_id(self.pool.as_ref(), reset.user_id)
+        // 5. 在一个事务中按 user → credential → reset 的固定顺序锁定并
+        // 重新校验所有状态。登录成功路径也采用 user → credential，避免
+        // 密码重置和登录并发时形成反向锁等待环。
+        let tx = self.pool.begin().await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to begin password reset: {e}"))
+        })?;
+
+        let current_user = User::find_by_id_for_update(&tx, reset.user_id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock reset user: {e}")))?
+            .ok_or_else(|| KeyComputeError::AuthError("用户不存在".to_string()))?;
+
+        let credential = UserCredential::find_by_user_id_for_update(&tx, current_user.id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock credential: {e}")))?
+            .ok_or_else(|| KeyComputeError::AuthError("用户凭证不存在".to_string()))?;
+
+        // 令牌可能在 Argon2 哈希期间被另一请求使用；必须在取得用户和
+        // 凭证锁后重新读取并检查，不能继续使用初始的非锁定快照。
+        let current_reset = PasswordReset::find_by_token_for_update(&tx, &req.token)
             .await
             .map_err(|e| {
-                KeyComputeError::DatabaseError(format!("Failed to find credential: {}", e))
+                KeyComputeError::DatabaseError(format!("Failed to lock reset token: {e}"))
             })?
-            .ok_or_else(|| KeyComputeError::AuthError("用户凭证不存在".to_string()))?;
+            .ok_or_else(|| KeyComputeError::AuthError("无效的重置链接".to_string()))?;
+
+        if current_reset.user_id != current_user.id {
+            return Err(KeyComputeError::AuthError("无效的重置链接".to_string()));
+        }
+
+        if !current_reset.is_valid() {
+            if current_reset.used {
+                return Err(KeyComputeError::AuthError("该重置链接已使用".to_string()));
+            }
+            return Err(KeyComputeError::AuthError(
+                "重置链接已过期，请重新申请".to_string(),
+            ));
+        }
 
         credential
             .update(
-                self.pool.as_ref(),
+                &tx,
                 &UpdateUserCredentialRequest {
                     password_hash: Some(new_hash),
                     failed_login_attempts: Some(0),
@@ -264,30 +296,31 @@ impl PasswordResetService {
             })?;
 
         // 6. 标记令牌已使用
-        reset.mark_used(self.pool.as_ref()).await.map_err(|e| {
+        current_reset.mark_used(&tx).await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to mark reset token as used: {}", e))
         })?;
 
         // 7. 清除该用户的其他重置令牌
-        PasswordReset::delete_all_by_user(self.pool.as_ref(), reset.user_id)
+        PasswordReset::delete_all_by_user(&tx, current_user.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to cleanup reset tokens: {}", e))
             })?;
 
         // 8. 递增 token_version，使该用户已签发的所有 JWT 立即失效
-        User::increment_token_version(self.pool.as_ref(), reset.user_id)
+        User::increment_token_version(&tx, current_user.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to increment token version: {}", e))
             })?;
 
-        tracing::info!(
-            user_id = %reset.user_id,
-            "Password reset successfully"
-        );
+        tx.commit().await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to commit password reset: {e}"))
+        })?;
 
-        Ok(reset.user_id)
+        tracing::info!(user_id = %current_user.id, "Password reset successfully");
+
+        Ok(current_user.id)
     }
 
     /// 验证重置令牌

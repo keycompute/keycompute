@@ -1,6 +1,7 @@
 //! Resource affinity, account reservations and durable settlement state.
 
 use super::*;
+use keycompute_db::models::tenant::Tenant;
 
 pub(super) fn response_resource_id(body: &Value) -> Option<&str> {
     body.get("id")
@@ -447,6 +448,28 @@ pub(super) async fn reserve_responses_execution_target(
     let txn = pool.begin().await.map_err(|error| {
         responses_state_unavailable("begin a Responses account reservation", error)
     })?;
+    // Tenant deletion locks the parent tenant before it locks response
+    // affinities. Acquire the compatible key-share lock first so this writer
+    // cannot hold an affinity/account row while waiting on the tenant FK.
+    // That lock order is required for affinity-constrained continuation
+    // requests, which inspect an existing affinity before inserting their
+    // short-lived reservation row.
+    match Tenant::find_by_id_for_key_share(&txn, tenant_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let _ = txn.rollback().await;
+            return Err(ApiError::ServiceUnavailable(
+                "The Responses tenant is no longer available".to_string(),
+            ));
+        }
+        Err(error) => {
+            let _ = txn.rollback().await;
+            return Err(responses_state_unavailable(
+                "lock the Responses tenant",
+                error,
+            ));
+        }
+    }
     let account = match Account::find_by_id_for_key_share(&txn, account_id).await {
         Ok(Some(account)) => account,
         Ok(None) => {
@@ -770,8 +793,33 @@ pub(super) async fn save_response_affinity(
             .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
         if let Some(settlement) = settlement {
             let next_poll_at = settlement_next_poll_at(&settlement);
-            ResponseAffinity::upsert_route_with_settlement(
-                pool,
+            // Keep the tenant parent lock through the upsert.  The affinity
+            // row is an existing-row update in the common case, so relying on
+            // the tenant foreign-key check alone would still permit the
+            // upsert to lock affinity first and deadlock with tenant deletion
+            // (tenant -> accounts -> affinities).
+            let txn = pool.begin().await.map_err(|error| {
+                map_response_affinity_write_error(
+                    error.into(),
+                    "begin persisting the Responses route and billing settlement",
+                )
+            })?;
+            Tenant::find_by_id_for_key_share(&txn, affinity.tenant_id)
+                .await
+                .map_err(|error| {
+                    map_response_affinity_write_error(
+                        error,
+                        "lock the Responses tenant before persisting settlement",
+                    )
+                })?
+                .ok_or_else(|| {
+                    map_response_affinity_write_error(
+                        keycompute_db::DbError::not_found("tenant", affinity.tenant_id),
+                        "lock the Responses tenant before persisting settlement",
+                    )
+                })?;
+            ResponseAffinity::upsert_route_with_settlement_in_tx(
+                &txn,
                 affinity.tenant_id,
                 response_id,
                 &affinity.provider,
@@ -788,10 +836,36 @@ pub(super) async fn save_response_affinity(
                     "persist the Responses route and billing settlement",
                 )
             })?;
+            txn.commit().await.map_err(|error| {
+                map_response_affinity_write_error(
+                    error.into(),
+                    "commit the Responses route and billing settlement",
+                )
+            })?;
             true
         } else {
-            ResponseAffinity::upsert_route(
-                pool,
+            let txn = pool.begin().await.map_err(|error| {
+                map_response_affinity_write_error(
+                    error.into(),
+                    "begin persisting Responses resource routing",
+                )
+            })?;
+            Tenant::find_by_id_for_key_share(&txn, affinity.tenant_id)
+                .await
+                .map_err(|error| {
+                    map_response_affinity_write_error(
+                        error,
+                        "lock the Responses tenant before persisting routing",
+                    )
+                })?
+                .ok_or_else(|| {
+                    map_response_affinity_write_error(
+                        keycompute_db::DbError::not_found("tenant", affinity.tenant_id),
+                        "lock the Responses tenant before persisting routing",
+                    )
+                })?;
+            ResponseAffinity::upsert_route_in_tx(
+                &txn,
                 affinity.tenant_id,
                 response_id,
                 &affinity.provider,
@@ -802,6 +876,9 @@ pub(super) async fn save_response_affinity(
             .await
             .map_err(|error| {
                 map_response_affinity_write_error(error, "persist Responses resource routing")
+            })?;
+            txn.commit().await.map_err(|error| {
+                map_response_affinity_write_error(error.into(), "commit Responses resource routing")
             })?;
             false
         }
@@ -838,8 +915,28 @@ pub(super) async fn save_response_affinity_if_stored(
         let expires_at = chrono::DateTime::from_timestamp(expires_at_unix, 0)
             .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
         let next_poll_at = settlement_next_poll_at(&settlement);
-        ResponseAffinity::upsert_hidden_settlement(
-            pool,
+        let txn = pool.begin().await.map_err(|error| {
+            map_response_affinity_write_error(
+                error.into(),
+                "begin persisting background Responses billing settlement",
+            )
+        })?;
+        Tenant::find_by_id_for_key_share(&txn, route.tenant_id)
+            .await
+            .map_err(|error| {
+                map_response_affinity_write_error(
+                    error,
+                    "lock the Responses tenant before persisting background settlement",
+                )
+            })?
+            .ok_or_else(|| {
+                map_response_affinity_write_error(
+                    keycompute_db::DbError::not_found("tenant", route.tenant_id),
+                    "lock the Responses tenant before persisting background settlement",
+                )
+            })?;
+        ResponseAffinity::upsert_hidden_settlement_in_tx(
+            &txn,
             route.tenant_id,
             response_id,
             &route.provider,
@@ -854,6 +951,12 @@ pub(super) async fn save_response_affinity_if_stored(
             map_response_affinity_write_error(
                 error,
                 "persist background Responses billing settlement",
+            )
+        })?;
+        txn.commit().await.map_err(|error| {
+            map_response_affinity_write_error(
+                error.into(),
+                "commit background Responses billing settlement",
             )
         })?;
         return Ok(true);
@@ -988,9 +1091,33 @@ pub(super) async fn persist_immediate_terminal_settlement_outbox_inner(
     );
     let expires_at = chrono::DateTime::from_timestamp(expires_at_unix, 0)
         .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC);
-    match ResponseAffinity::upsert_hidden_settlement(
-        pool,
-        ctx.tenant_id,
+    // Immediate terminal outboxes use the same affinity table as regular
+    // Responses routes. Acquire the tenant parent lock before the upsert so
+    // an existing synthetic row cannot be locked ahead of tenant deletion's
+    // parent -> child cascade.
+    let txn = match pool.begin().await {
+        Ok(txn) => txn,
+        Err(error) => {
+            tracing::error!(request_id = %ctx.request_id, %error, "failed to begin immediate terminal settlement outbox transaction");
+            return false;
+        }
+    };
+    let tenant = match Tenant::find_by_id_for_key_share(&txn, ctx.tenant_id).await {
+        Ok(Some(tenant)) => tenant,
+        Ok(None) => {
+            let _ = txn.rollback().await;
+            tracing::error!(request_id = %ctx.request_id, tenant_id = %ctx.tenant_id, "immediate terminal settlement tenant not found");
+            return false;
+        }
+        Err(error) => {
+            let _ = txn.rollback().await;
+            tracing::error!(request_id = %ctx.request_id, %error, "failed to lock immediate terminal settlement tenant");
+            return false;
+        }
+    };
+    let result = ResponseAffinity::upsert_hidden_settlement_in_tx(
+        &txn,
+        tenant.id,
         &response_id,
         &provider,
         effective_response_affinity_model(None, ctx).as_deref(),
@@ -999,10 +1126,17 @@ pub(super) async fn persist_immediate_terminal_settlement_outbox_inner(
         settlement,
         chrono::Utc::now(),
     )
-    .await
-    {
-        Ok(_) => true,
+    .await;
+    match result {
+        Ok(_) => match txn.commit().await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(request_id = %ctx.request_id, %error, "failed to commit immediate terminal settlement outbox");
+                false
+            }
+        },
         Err(error) => {
+            let _ = txn.rollback().await;
             tracing::error!(request_id = %ctx.request_id, %error, "failed to persist immediate terminal settlement outbox");
             false
         }
@@ -1069,6 +1203,9 @@ pub(super) fn affinity_expiry_unix(resource_kind: ResponsesResourceKind, now: i6
     }
 }
 
+// Kept as the cache-aware helper for stateless paths. Database-backed proxy
+// execution uses `resolve_response_account`, which must hold the account ->
+// affinity lock sequence while it snapshots credentials.
 pub(super) async fn response_affinity(
     state: &AppState,
     response_id: &str,

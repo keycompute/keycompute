@@ -1,6 +1,10 @@
+use super::tenant::Tenant;
 use crate::{DbError, DbRouter};
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, FromQueryResult,
+    Statement, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -161,6 +165,29 @@ impl ResponseAffinity {
         Ok(Self::find_by_statement(stmt).one(db).await?)
     }
 
+    /// Read an active route without retaining a row lock.
+    ///
+    /// Callers that must coordinate the route with its owning account should
+    /// use this only to discover the account ID, then acquire the account lock
+    /// and re-read with [`Self::find_active_for_key_share`]. This two-step
+    /// pattern establishes the account -> affinity lock order used by account
+    /// deletion and connection updates while still closing the ownership race
+    /// before the caller dispatches an upstream request.
+    pub async fn find_active_snapshot(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<Self>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM response_affinities \
+             WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+               AND deleted_at IS NULL AND expires_at > NOW()",
+            [tenant_id.into(), response_id.into()],
+        );
+        Ok(Self::find_by_statement(stmt).one(db).await?)
+    }
+
     /// Report whether a response still owns unfinished durable billing work.
     /// Resource deletion must wait until this becomes false because the
     /// settlement worker retrieves the upstream response to obtain exact usage.
@@ -234,7 +261,47 @@ impl ResponseAffinity {
         Ok(db.execute(stmt).await?.rows_affected())
     }
 
+    /// Upsert a route using a one-shot tenant-scoped transaction.
+    ///
+    /// Code that already owns a broader transaction (for example, the
+    /// Responses request path) must call [`Self::upsert_route_in_tx`] after
+    /// acquiring the tenant parent lock in that transaction.
     pub async fn upsert_route(
+        db: &DatabaseConnection,
+        tenant_id: Uuid,
+        response_id: &str,
+        provider: &str,
+        model: Option<&str>,
+        account_id: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, DbError> {
+        let txn = Self::begin_tenant_scope(db, tenant_id).await?;
+        let result = Self::upsert_route_in_tx(
+            &txn,
+            tenant_id,
+            response_id,
+            provider,
+            model,
+            account_id,
+            expires_at,
+        )
+        .await;
+        match result {
+            Ok(route) => {
+                txn.commit().await?;
+                Ok(route)
+            }
+            Err(error) => {
+                let _ = txn.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Low-level route upsert for a caller-owned transaction that already
+    /// holds the tenant parent lock. Keeping this API explicitly transaction-
+    /// scoped prevents accidental pool writes from bypassing the lock order.
+    pub async fn upsert_route_in_tx(
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
         response_id: &str,
@@ -270,8 +337,48 @@ impl ResponseAffinity {
             .ok_or_else(|| Self::ownership_collision(response_id))
     }
 
+    /// Upsert a settled route using a one-shot tenant-scoped transaction.
     #[allow(clippy::too_many_arguments)]
     pub async fn upsert_route_with_settlement(
+        db: &DatabaseConnection,
+        tenant_id: Uuid,
+        response_id: &str,
+        provider: &str,
+        model: Option<&str>,
+        account_id: Uuid,
+        expires_at: DateTime<Utc>,
+        settlement: Value,
+        next_poll_at: DateTime<Utc>,
+    ) -> Result<Self, DbError> {
+        let txn = Self::begin_tenant_scope(db, tenant_id).await?;
+        let result = Self::upsert_route_with_settlement_in_tx(
+            &txn,
+            tenant_id,
+            response_id,
+            provider,
+            model,
+            account_id,
+            expires_at,
+            settlement,
+            next_poll_at,
+        )
+        .await;
+        match result {
+            Ok(route) => {
+                txn.commit().await?;
+                Ok(route)
+            }
+            Err(error) => {
+                let _ = txn.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Low-level settled-route upsert for a caller-owned transaction holding
+    /// the tenant parent lock.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_route_with_settlement_in_tx(
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
         response_id: &str,
@@ -297,12 +404,52 @@ impl ResponseAffinity {
         .await
     }
 
+    /// Upsert a hidden settlement using a one-shot tenant-scoped transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_hidden_settlement(
+        db: &DatabaseConnection,
+        tenant_id: Uuid,
+        response_id: &str,
+        provider: &str,
+        model: Option<&str>,
+        account_id: Option<Uuid>,
+        expires_at: DateTime<Utc>,
+        settlement: Value,
+        next_poll_at: DateTime<Utc>,
+    ) -> Result<Self, DbError> {
+        let txn = Self::begin_tenant_scope(db, tenant_id).await?;
+        let result = Self::upsert_hidden_settlement_in_tx(
+            &txn,
+            tenant_id,
+            response_id,
+            provider,
+            model,
+            account_id,
+            expires_at,
+            settlement,
+            next_poll_at,
+        )
+        .await;
+        match result {
+            Ok(route) => {
+                txn.commit().await?;
+                Ok(route)
+            }
+            Err(error) => {
+                let _ = txn.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Low-level hidden-settlement upsert for a caller-owned transaction
+    /// holding the tenant parent lock.
     /// Persist billing/TPM work without making it addressable through
     /// KeyCompute's resource endpoints. Background Responses and already-
     /// terminal generation requests share this tombstoned outbox shape;
     /// clearing the settlement deletes the row atomically.
     #[allow(clippy::too_many_arguments)]
-    pub async fn upsert_hidden_settlement(
+    pub async fn upsert_hidden_settlement_in_tx(
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
         response_id: &str,
@@ -326,6 +473,21 @@ impl ResponseAffinity {
             Some(Utc::now()),
         )
         .await
+    }
+
+    async fn begin_tenant_scope(
+        db: &DatabaseConnection,
+        tenant_id: Uuid,
+    ) -> Result<DatabaseTransaction, DbError> {
+        let txn = db.begin().await?;
+        if Tenant::find_by_id_for_key_share(&txn, tenant_id)
+            .await?
+            .is_none()
+        {
+            let _ = txn.rollback().await;
+            return Err(DbError::not_found("Tenant", tenant_id.to_string()));
+        }
+        Ok(txn)
     }
 
     #[allow(clippy::too_many_arguments)]

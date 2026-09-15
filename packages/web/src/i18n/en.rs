@@ -1490,6 +1490,12 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.empty", "No users yet");
     m.insert("users.user", "User");
     m.insert("users.tenant", "Tenant");
+    m.insert("users.tenant_unknown", "Unknown tenant");
+    m.insert("users.tenant_keep", "Keep current tenant");
+    m.insert(
+        "users.tenant_hint",
+        "Only active tenants can be selected; leave unchanged to keep the current tenant. Moving the user revokes all API keys and signs out existing sessions.",
+    );
     m.insert("users.registered_at", "Registered At");
     m.insert("users.updated", "User updated");
     m.insert("users.update_failed", "Update failed");

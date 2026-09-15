@@ -1278,15 +1278,62 @@ async fn resolve_response_account(
     response_id: &str,
     tenant_id: uuid::Uuid,
 ) -> Result<ResolvedResponsesAccount> {
-    let affinity = response_affinity(state, response_id, tenant_id).await?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::ServiceUnavailable("Database not configured".to_string()))?;
-    let account = Account::find_by_id_for_key_share(pool, affinity.account_id)
+    if !valid_affinity_resource_id(response_id) {
+        return Err(ApiError::NotFound(format!(
+            "Responses resource not found: {response_id}"
+        )));
+    }
+    let Some(pool) = state.pool.as_deref() else {
+        // Preserve the cache-only behavior used by installations without a
+        // database: a missing affinity is still a normal 404 (which lets
+        // conversation discovery return its more specific database-required
+        // error), while a cached affinity reaches the same service-unavailable
+        // response as the historical resolver.
+        response_affinity(state, response_id, tenant_id).await?;
+        return Err(ApiError::ServiceUnavailable(
+            "Database not configured".to_string(),
+        ));
+    };
+
+    // Account deletion and connection-material updates lock the account before
+    // they drain its response-affinity rows. Discover the account ID without a
+    // retained row lock, then acquire account -> affinity locks in one writer
+    // transaction and re-read the route. This prevents a concurrent delete or
+    // update from forming the inverse affinity -> account wait cycle and makes
+    // the returned connection snapshot authoritative at dispatch time.
+    let txn = pool.begin().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to begin Responses account lookup: {error}"))
+    })?;
+    let route_snapshot = ResponseAffinity::find_active_snapshot(&txn, tenant_id, response_id)
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "Responses affinity database lookup failed: {error}"
+            ))
+        })?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!("Responses resource not found: {response_id}"))
+        })?;
+    let account_id = route_snapshot.account_id.ok_or_else(|| {
+        ApiError::NotFound(format!("Responses resource not found: {response_id}"))
+    })?;
+    let account = Account::find_by_id_for_key_share(&txn, account_id)
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to load Responses account: {error}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Response not found: {response_id}")))?;
+    let affinity = ResponseAffinity::find_active_for_key_share(&txn, tenant_id, response_id)
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "Responses affinity database lookup failed: {error}"
+            ))
+        })?
+        .ok_or_else(|| ApiError::NotFound(format!("Response not found: {response_id}")))?;
+    if affinity.account_id != Some(account_id) {
+        return Err(ApiError::Conflict(
+            "The Responses resource owner changed before execution".to_string(),
+        ));
+    }
     // Affinity execution intentionally bypasses fresh-account routing so an
     // existing upstream resource remains addressable, but its health events
     // must still continue from the persisted snapshot after a restart.
@@ -1298,7 +1345,7 @@ async fn resolve_response_account(
     }
     if !account.provider.eq_ignore_ascii_case("openai")
         || !affinity.provider.eq_ignore_ascii_case("openai")
-        || account.id != affinity.account_id
+        || affinity.account_id != Some(account.id)
     {
         return Err(ApiError::Conflict(
             "The account owning this response is no longer OpenAI-compatible".to_string(),
@@ -1320,15 +1367,37 @@ async fn resolve_response_account(
     } else {
         account.endpoint
     };
-    Ok(ResolvedResponsesAccount {
+    let resolved = ResolvedResponsesAccount {
         provider: account.provider,
-        model: affinity.model,
+        model: affinity.model.clone(),
         account_id: account.id,
         endpoint,
         api_key: super::admin_account::decrypt_account_api_key(
             &account.upstream_api_key_encrypted,
         )?,
-    })
+    };
+    txn.commit().await.map_err(|error| {
+        ApiError::Internal(format!(
+            "Failed to commit Responses account lookup: {error}"
+        ))
+    })?;
+
+    // Keep the process-local projection warm after the authoritative snapshot
+    // commits. It is only a latency optimization; database-backed lookups do
+    // not trust stale cache entries for ownership decisions.
+    let cached = ResponsesAffinity {
+        tenant_id: affinity.tenant_id,
+        provider: affinity.provider.clone(),
+        model: affinity.model,
+        account_id,
+        expires_at_unix: affinity.expires_at.timestamp(),
+    };
+    if !cache_response_affinity_locally(state, affinity_storage_key(tenant_id, response_id), cached)
+        .await
+    {
+        tracing::warn!("Responses affinity local map is full; skipping local cache entry");
+    }
+    Ok(resolved)
 }
 
 fn responses_account_is_visible_to_tenant(account: &Account, tenant_id: uuid::Uuid) -> bool {

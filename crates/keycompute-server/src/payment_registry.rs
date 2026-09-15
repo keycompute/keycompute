@@ -245,10 +245,11 @@ impl PaymentRegistry {
             subject: PROVIDER_VERIFICATION_SUBJECT.to_string(),
             body: Some("管理员发起的支付能力验证订单".to_string()),
         };
-        let created = match method {
-            PaymentMethod::Alipay => self.create_alipay_order(request).await?,
-            PaymentMethod::WechatPay => self.create_wechat_order(request).await?,
+        let created_result = match method {
+            PaymentMethod::Alipay => self.create_alipay_order(request).await,
+            PaymentMethod::WechatPay => self.create_wechat_order(request).await,
         };
+        let created = created_result.map_err(normalize_user_tenant_mismatch)?;
         match method {
             PaymentMethod::Alipay => {
                 self.alipay
@@ -372,7 +373,8 @@ impl PaymentRegistry {
         let result = match method {
             PaymentMethod::Alipay => self.create_alipay_order(request).await,
             PaymentMethod::WechatPay => self.create_wechat_order(request).await,
-        };
+        }
+        .map_err(normalize_user_tenant_mismatch);
         // Page/WAP 只在本地生成签名 URL，成功不能证明支付宝远端已恢复。
         // 本地签名失败仍应记录；QR 和微信创建都会真实访问渠道。
         if result.is_err() || creation_observes_provider(method, &scene) {
@@ -558,6 +560,7 @@ impl PaymentRegistry {
             Ok(_) => ("available", None, None),
             Err(
                 RegistryError::Database(_)
+                | RegistryError::UserTenantMismatch
                 | RegistryError::SeaOrm(_)
                 | RegistryError::UnsupportedScene(_)
                 | RegistryError::InvalidAmount
@@ -771,6 +774,8 @@ pub enum RegistryError {
     AmountMismatch,
     #[error("provider response identity does not match the local order")]
     ProviderIdentityMismatch,
+    #[error("user tenant changed; refresh authentication and retry")]
+    UserTenantMismatch,
     #[error("provider error: {0}")]
     Provider(String),
     #[error(transparent)]
@@ -781,6 +786,16 @@ pub enum RegistryError {
     Alipay(#[from] keycompute_alipay::PaymentError),
     #[error(transparent)]
     WechatPay(#[from] keycompute_wechatpay::WechatPayError),
+}
+
+fn normalize_user_tenant_mismatch(error: RegistryError) -> RegistryError {
+    match error {
+        RegistryError::Database(keycompute_db::DbError::UserTenantMismatch { .. })
+        | RegistryError::Alipay(keycompute_alipay::PaymentError::UserTenantMismatch) => {
+            RegistryError::UserTenantMismatch
+        }
+        other => other,
+    }
 }
 
 #[cfg(test)]
@@ -809,6 +824,23 @@ mod tests {
         assert!(!is_terminal_provider_error(
             &RegistryError::ProviderIdentityMismatch
         ));
+    }
+
+    #[test]
+    fn stale_user_tenant_errors_are_normalized_without_opening_provider_circuit() {
+        let error = normalize_user_tenant_mismatch(RegistryError::Database(
+            keycompute_db::DbError::UserTenantMismatch {
+                user_id: Uuid::new_v4(),
+                requested_tenant_id: Uuid::new_v4(),
+                actual_tenant_id: Uuid::new_v4(),
+            },
+        ));
+        assert!(matches!(error, RegistryError::UserTenantMismatch));
+
+        let error = normalize_user_tenant_mismatch(RegistryError::Alipay(
+            keycompute_alipay::PaymentError::UserTenantMismatch,
+        ));
+        assert!(matches!(error, RegistryError::UserTenantMismatch));
     }
 
     #[test]

@@ -20,11 +20,13 @@ use keycompute_billing::balance::{
 };
 use keycompute_db::models::account::Account;
 use keycompute_db::models::api_key::ProduceAiKey;
+use keycompute_db::models::payment_order::PaymentOrder;
 use keycompute_db::models::tenant::{
     CreateTenantRequest as DbCreateTenantRequest, Tenant,
     UpdateTenantRequest as DbUpdateTenantRequest,
 };
 use keycompute_db::models::user::User;
+use keycompute_db::models::user_balance::UserBalance;
 use keycompute_db::models::user_credential::UserCredential;
 use keycompute_types::{AssignableUserRole, UserRole};
 use rust_decimal::Decimal;
@@ -136,6 +138,50 @@ fn validate_role_change_request(
     Ok(())
 }
 
+/// 校验租户变更请求的租户管理权限及受保护用户边界。
+///
+/// `None` 表示保持原租户；请求原租户 ID 也视为 no-op，不应要求额外权限。
+fn validate_tenant_change_request(
+    auth: &AuthExtractor,
+    target_user_id: Uuid,
+    target_user: &User,
+    requested_tenant_id: Option<Uuid>,
+) -> Result<bool> {
+    let Some(new_tenant_id) = requested_tenant_id else {
+        return Ok(false);
+    };
+    if new_tenant_id == target_user.tenant_id {
+        return Ok(false);
+    }
+    if !auth.has_permission(&Permission::ManageTenant) {
+        return Err(ApiError::Forbidden(
+            "Tenant management permission required to change user tenant".to_string(),
+        ));
+    }
+    // Admin users are a protected management boundary, just like role edits
+    // and deletes.  Keep tenant reassignment from becoming a privilege
+    // escalation path for callers that only have ordinary tenant-management
+    // permission.
+    if target_user.role == UserRole::Admin.as_str()
+        && !auth.has_permission(&Permission::ManageProtectedUsers)
+    {
+        return Err(ApiError::Forbidden(
+            "Protected user management permission required".to_string(),
+        ));
+    }
+    if target_user_id == auth.user_id {
+        return Err(ApiError::BadRequest(
+            "Cannot change your own tenant".to_string(),
+        ));
+    }
+    if target_user.role == UserRole::System.as_str() {
+        return Err(ApiError::BadRequest(
+            "System user tenant cannot be changed".to_string(),
+        ));
+    }
+    Ok(true)
+}
+
 fn validate_user_delete_request(
     auth: &AuthExtractor,
     target_user_id: Uuid,
@@ -209,8 +255,12 @@ pub async fn list_all_users(
     let role_filter = params.role.as_deref();
     let search_filter = params.search.as_deref();
 
+    // This is a management read immediately adjacent to reassignment writes.
+    // Keep it on the writer so a successful move is visible when the UI
+    // refreshes instead of briefly rendering a replica's old tenant.
+    let writer = pool.write_conn();
     let users = User::find_all_filtered(
-        pool,
+        writer,
         tenant_id_filter,
         role_filter,
         search_filter,
@@ -221,12 +271,12 @@ pub async fn list_all_users(
     .map_err(|e| ApiError::Internal(format!("Failed to query users: {}", e)))?;
 
     // 统计过滤后的用户总数（同样下推到 SQL）
-    let total = User::count_all_filtered(pool, tenant_id_filter, role_filter, search_filter)
+    let total = User::count_all_filtered(writer, tenant_id_filter, role_filter, search_filter)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
 
     // 预加载所有租户到 HashMap（避免 N+1 查询）
-    let tenants = Tenant::find_all(pool)
+    let tenants = Tenant::find_all(writer)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query tenants: {}", e)))?;
     let tenant_map: std::collections::HashMap<Uuid, String> =
@@ -242,7 +292,7 @@ pub async fn list_all_users(
 
     // 批量预加载用户的最后登录时间（避免 N+1 查询）
     let credential_map: std::collections::HashMap<Uuid, UserCredential> =
-        UserCredential::find_by_user_ids(pool, &user_ids)
+        UserCredential::find_by_user_ids(writer, &user_ids)
             .await
             .unwrap_or_default();
 
@@ -307,13 +357,16 @@ pub async fn get_user_by_id(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let user = User::find_by_id(pool, user_id)
+    // Admin detail views are commonly used immediately after an edit; read
+    // the authoritative row from the writer rather than a lagging replica.
+    let writer = pool.write_conn();
+    let user = User::find_by_id(writer, user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query user: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
 
     // 获取租户名称
-    let tenant = Tenant::find_by_id(pool, user.tenant_id)
+    let tenant = Tenant::find_by_id(writer, user.tenant_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query tenant: {}", e)))?;
     let tenant_name = tenant
@@ -328,7 +381,7 @@ pub async fn get_user_by_id(
     };
 
     // 获取用户最后登录时间
-    let last_login = UserCredential::find_by_user_id(pool, user_id)
+    let last_login = UserCredential::find_by_user_id(writer, user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query credentials: {}", e)))?
         .and_then(|c| c.last_login_at.map(|t| t.to_rfc3339()));
@@ -359,6 +412,8 @@ pub async fn get_user_by_id(
 pub struct UpdateUserRequest {
     pub name: Option<String>,
     pub role: Option<AssignableUserRole>,
+    /// 目标租户 ID；省略时保持原租户。
+    pub tenant_id: Option<Uuid>,
 }
 
 /// 更新用户信息
@@ -379,24 +434,183 @@ pub async fn update_user(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let user = User::find_by_id(pool, user_id)
+    // Read the current source tenant from the writer before opening the
+    // mutation transaction.  A tenant reassignment needs both this source
+    // identity and the requested target to establish a deterministic parent
+    // lock order; the locked user is re-read below before any child rows are
+    // changed.
+    let initial_user = User::find_by_id(pool.write_conn(), user_id)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
+        .map_err(|e| ApiError::Internal(format!("Failed to find user: {e}")))?
+        .ok_or_else(|| ApiError::NotFound(format!("User not found: {user_id}")))?;
+    let initial_source_tenant_id = initial_user.tenant_id;
+    let requested_tenant_id = req.tenant_id;
 
-    // 禁止非 system 角色修改 system 用户（包括仅修改名称）
-    validate_not_admin_modifying_system(&auth, &user)?;
-    validate_role_change_request(&auth, user_id, &user, &req.role)?;
+    let txn = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to begin user update: {e}")))?;
+
+    // Tenant deletion and all tenant-scoped child inserts take a parent lock
+    // before touching users.  Acquire the source and requested target locks
+    // in UUID order so two concurrent moves in opposite directions cannot
+    // deadlock while each holds one tenant.  The source uses KEY SHARE (it is
+    // only read during the move); the target uses FOR UPDATE so its active
+    // status cannot change between validation and the user update.
+    let mut locked_target_tenant: Option<Tenant> = None;
+    if let Some(target_tenant_id) = requested_tenant_id {
+        let mut tenant_ids = vec![initial_source_tenant_id, target_tenant_id];
+        tenant_ids.sort_unstable();
+        tenant_ids.dedup();
+
+        for tenant_id in tenant_ids {
+            let is_target =
+                tenant_id == target_tenant_id && target_tenant_id != initial_source_tenant_id;
+            let tenant = if is_target {
+                Tenant::find_by_id_for_update(&txn, tenant_id).await
+            } else {
+                Tenant::find_by_id_for_key_share(&txn, tenant_id).await
+            }
+            .map_err(|e| ApiError::Internal(format!("Failed to lock tenant: {e}")))?;
+
+            let Some(tenant) = tenant else {
+                let _ = txn.rollback().await;
+                if is_target {
+                    return Err(ApiError::NotFound(format!(
+                        "Tenant not found: {target_tenant_id}"
+                    )));
+                }
+                return Err(ApiError::Conflict(
+                    "User tenant changed; refresh and retry".to_string(),
+                ));
+            };
+
+            if is_target {
+                locked_target_tenant = Some(tenant);
+            }
+        }
+    }
+
+    // Keep the user lock compatible with the KEY SHARE lock that PostgreSQL
+    // takes for child-table foreign-key checks. The move subsequently locks
+    // pending orders/balance, so a stronger FOR UPDATE here would create a
+    // U -> child lock order that can deadlock with payment/reservation paths
+    // (child -> KEY SHARE(U)). NO KEY UPDATE still serializes all user-row
+    // updates and deletes.
+    let user = User::find_by_id_for_no_key_update(&txn, user_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to find user: {e}")))?
+        .ok_or_else(|| ApiError::NotFound(format!("User not found: {user_id}")))?;
+
+    // If the source changed after the pre-read, do not apply the request to a
+    // different tenant using locks chosen for the stale source.  Releasing
+    // the transaction before returning also avoids retaining parent locks
+    // while the caller refreshes its view.
+    if requested_tenant_id.is_some() && user.tenant_id != initial_source_tenant_id {
+        let _ = txn.rollback().await;
+        return Err(ApiError::Conflict(
+            "User tenant changed; refresh and retry".to_string(),
+        ));
+    }
+
+    // 禁止非 system 角色修改 system 用户（包括仅修改名称）。这些是
+    // 预期的客户端错误，但事务已经持有租户/用户锁，必须显式回滚后再
+    // 返回，避免连接池暂时保留锁。
+    if let Err(error) = validate_not_admin_modifying_system(&auth, &user) {
+        let _ = txn.rollback().await;
+        return Err(error);
+    }
+    if let Err(error) = validate_role_change_request(&auth, user_id, &user, &req.role) {
+        let _ = txn.rollback().await;
+        return Err(error);
+    }
+    let tenant_changed =
+        match validate_tenant_change_request(&auth, user_id, &user, requested_tenant_id) {
+            Ok(changed) => changed,
+            Err(error) => {
+                let _ = txn.rollback().await;
+                return Err(error);
+            }
+        };
+
+    if tenant_changed {
+        let target_tenant_id = requested_tenant_id.expect("tenant change was validated");
+        let target_tenant = locked_target_tenant
+            .take()
+            .expect("target tenant must be locked before a tenant move");
+        if target_tenant.slug == "system" {
+            let _ = txn.rollback().await;
+            return Err(ApiError::BadRequest(
+                "The system tenant is reserved for the system user".to_string(),
+            ));
+        }
+        if !target_tenant.is_active() {
+            let _ = txn.rollback().await;
+            return Err(ApiError::Conflict(
+                "Cannot move a user to an inactive tenant".to_string(),
+            ));
+        }
+
+        // Payment callbacks lock the order before the balance. Move pending
+        // orders before taking the balance lock to preserve that lock order
+        // and ensure a later source-tenant deletion cannot cascade-delete an
+        // order that the user may already have paid at the provider.
+        if let Err(error) =
+            PaymentOrder::reassign_pending_for_user(&txn, user_id, user.tenant_id, target_tenant_id)
+                .await
+        {
+            let _ = txn.rollback().await;
+            return Err(ApiError::Internal(format!(
+                "Failed to move pending payment orders: {error}"
+            )));
+        }
+
+        if let Err(error) = UserBalance::reassign_tenant(&txn, user_id, target_tenant_id).await {
+            let api_error = match error {
+                keycompute_db::DbError::UserHasActiveBalanceReservations { count } => {
+                    ApiError::Conflict(format!(
+                        "User has {count} active balance reservation(s); wait for them to settle before changing tenant"
+                    ))
+                }
+                other => ApiError::Internal(format!("Failed to move user balance: {other}")),
+            };
+            let _ = txn.rollback().await;
+            return Err(api_error);
+        }
+
+        // A tenant-scoped API key must never remain usable after a move. JWTs
+        // are invalidated by User::update's token_version bump below.
+        if let Err(error) = ProduceAiKey::revoke_all_for_user(&txn, user_id).await {
+            let _ = txn.rollback().await;
+            return Err(ApiError::Internal(format!(
+                "Failed to revoke user API keys: {error}"
+            )));
+        }
+    }
 
     let update_req = keycompute_db::models::user::UpdateUserRequest {
         name: req.name,
         role: req.role,
+        tenant_id: req.tenant_id,
     };
 
     let updated = user
-        .update(pool, &update_req)
+        .update_in_tx(&txn, &update_req)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to update user: {}", e)))?;
+
+    // Resolve the response projection before committing. A post-commit read
+    // failure must not turn an already-applied mutation into a misleading
+    // HTTP 500 that encourages a client retry.
+    let tenant_name = Tenant::find_by_id(&txn, updated.tenant_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query updated tenant: {e}")))?
+        .map(|tenant| tenant.name)
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    txn.commit()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to commit user update: {e}")))?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -405,6 +619,8 @@ pub async fn update_user(
         "email": updated.email,
         "name": updated.name,
         "role": updated.role,
+        "tenant_id": updated.tenant_id,
+        "tenant_name": tenant_name,
     })))
 }
 
@@ -564,7 +780,10 @@ async fn validate_balance_target(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let target_user = User::find_by_id(pool, user_id)
+    // Balance mutations use the user's tenant as part of their transactional
+    // identity. Read it from the writer so a just-committed tenant move does
+    // not produce a transient stale-tenant failure while replicas catch up.
+    let target_user = User::find_by_id(pool.write_conn(), user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
@@ -1118,6 +1337,28 @@ fn map_tenant_db_error(error: keycompute_db::DbError, operation: &str) -> ApiErr
             "Tenant cannot be deleted while it has {count} tenant pricing model(s); delete them first"
         ));
     }
+    if operation == "delete"
+        && let keycompute_db::DbError::TenantHasPendingResponsesWork {
+            pending_settlements,
+            pending_reservations,
+            in_progress_claims,
+        } = error
+    {
+        return ApiError::Conflict(format!(
+            "Tenant cannot be deleted while it has {pending_settlements} pending Responses settlement(s), {pending_reservations} active Responses reservation(s), and {in_progress_claims} in-progress Responses request(s); wait for them to finish"
+        ));
+    }
+    if operation == "delete"
+        && let keycompute_db::DbError::TenantHasFinancialHistory {
+            payment_orders,
+            balance_transactions,
+            balance_reservations,
+        } = error
+    {
+        return ApiError::Conflict(format!(
+            "Tenant cannot be deleted while it retains {payment_orders} payment order(s), {balance_transactions} balance transaction(s), and {balance_reservations} balance reservation(s); preserve or remove the financial history first"
+        ));
+    }
     let message = error.to_string();
     if is_tenant_unique_error(&message) {
         ApiError::Conflict("A tenant with the same slug already exists".to_string())
@@ -1332,7 +1573,7 @@ pub async fn delete_tenant(
         )));
     }
     tenant
-        .delete(&txn)
+        .delete_in_tx(&txn)
         .await
         .map_err(|e| map_tenant_db_error(e, "delete"))?;
     txn.commit()
@@ -1449,6 +1690,32 @@ mod tests {
         let error = keycompute_db::DbError::TenantHasPricingModels { count: 1 };
         let mapped = map_tenant_db_error(error, "delete");
         assert!(matches!(mapped, ApiError::Conflict(message) if message.contains("pricing model")));
+    }
+
+    #[test]
+    fn pending_responses_delete_error_is_client_visible_as_conflict() {
+        let error = keycompute_db::DbError::TenantHasPendingResponsesWork {
+            pending_settlements: 2,
+            pending_reservations: 3,
+            in_progress_claims: 1,
+        };
+        let mapped = map_tenant_db_error(error, "delete");
+        assert!(
+            matches!(mapped, ApiError::Conflict(message) if message.contains("pending Responses") && message.contains("reservation") && message.contains("in-progress"))
+        );
+    }
+
+    #[test]
+    fn financial_history_delete_error_is_client_visible_as_conflict() {
+        let error = keycompute_db::DbError::TenantHasFinancialHistory {
+            payment_orders: 2,
+            balance_transactions: 3,
+            balance_reservations: 1,
+        };
+        let mapped = map_tenant_db_error(error, "delete");
+        assert!(
+            matches!(mapped, ApiError::Conflict(message) if message.contains("payment order") && message.contains("balance transaction") && message.contains("financial history"))
+        );
     }
 
     #[test]
@@ -1721,6 +1988,83 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be modified")));
+    }
+
+    #[test]
+    fn test_validate_tenant_change_request_allows_omitted_or_same_tenant() {
+        let user_id = Uuid::new_v4();
+        let target = make_test_user(user_id, "user");
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system")
+            .with_permissions(vec![Permission::ManageTenant]);
+
+        assert!(!validate_tenant_change_request(&auth, user_id, &target, None).unwrap());
+        assert!(
+            !validate_tenant_change_request(&auth, user_id, &target, Some(target.tenant_id))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_change_request_requires_tenant_permission() {
+        let target = make_test_user(Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
+        let err = validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
+            .unwrap_err();
+        assert!(
+            matches!(err, ApiError::Forbidden(message) if message.contains("Tenant management"))
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_change_request_rejects_self_and_system_user() {
+        let user_id = Uuid::new_v4();
+        let auth = AuthExtractor::new(user_id, Uuid::new_v4(), Uuid::new_v4(), "system")
+            .with_permissions(vec![Permission::ManageTenant]);
+        let target = make_test_user(user_id, "user");
+        let err = validate_tenant_change_request(&auth, user_id, &target, Some(Uuid::new_v4()))
+            .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(message) if message.contains("own tenant")));
+
+        let protected = make_test_user(Uuid::new_v4(), "system");
+        let err =
+            validate_tenant_change_request(&auth, protected.id, &protected, Some(Uuid::new_v4()))
+                .unwrap_err();
+        assert!(matches!(err, ApiError::BadRequest(message) if message.contains("System user")));
+    }
+
+    #[test]
+    fn test_validate_tenant_change_request_accepts_authorized_user_move() {
+        let target = make_test_user(Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
+            .with_permissions(vec![Permission::ManageTenant]);
+        assert!(
+            validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_validate_tenant_change_request_requires_protected_permission_for_admin_target() {
+        let target = make_test_user(Uuid::new_v4(), UserRole::Admin.as_str());
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
+            .with_permissions(vec![Permission::ManageTenant]);
+        let err = validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
+            .unwrap_err();
+        assert!(matches!(err, ApiError::Forbidden(message) if message.contains("Protected user")));
+    }
+
+    #[test]
+    fn test_validate_tenant_change_request_allows_protected_admin_target() {
+        let target = make_test_user(Uuid::new_v4(), UserRole::Admin.as_str());
+        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system")
+            .with_permissions(vec![
+                Permission::ManageTenant,
+                Permission::ManageProtectedUsers,
+            ]);
+        assert!(
+            validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
+                .unwrap()
+        );
     }
 
     #[test]

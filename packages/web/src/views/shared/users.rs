@@ -18,9 +18,10 @@ use ui::{
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::api_client::{get_client, user_error_message, with_auto_refresh};
+use crate::services::tenant_service;
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
-use crate::stores::user_store::UserStore;
+use crate::stores::user_store::{UserInfo, UserStore};
 use crate::utils::display::{short_id, user_role_label};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
@@ -1159,6 +1160,10 @@ impl UserListQuery {
     }
 }
 
+fn user_can_manage_tenants(user: Option<&UserInfo>) -> bool {
+    user.map(UserInfo::is_admin).unwrap_or(false)
+}
+
 #[component]
 pub fn Users() -> Element {
     let user_store = use_context::<UserStore>();
@@ -1191,6 +1196,9 @@ fn AdminUsersView() -> Element {
         .as_ref()
         .map(|u| u.role == UserRole::System.as_str())
         .unwrap_or(false);
+    // Both admin and system JWTs carry tenant:manage. Only system carries
+    // protected_users:manage, which remains required for moving admin users.
+    let can_current_user_manage_tenants = user_can_manage_tenants(current_user.as_ref());
     let current_user_id = current_user
         .as_ref()
         .map(|u| u.id.clone())
@@ -1216,6 +1224,7 @@ fn AdminUsersView() -> Element {
     let mut edit_user = use_signal(|| Option::<UserDetail>::None);
     let mut edit_name = use_signal(String::new);
     let mut edit_role = use_signal(String::new);
+    let mut edit_tenant_id = use_signal(String::new);
     let mut edit_saving = use_signal(|| false);
 
     // 删除确认状态
@@ -1272,6 +1281,17 @@ fn AdminUsersView() -> Element {
             .await;
             KeyedResourceValue::new(request_key, result)
         }
+    });
+
+    // 租户列表仅提供活跃租户，避免把用户迁移到已停用的租户。
+    let mut tenants = use_resource(move || async move {
+        // Tenant selection is an authenticated management action; reuse the
+        // refresh path used by the user list so an expired token does not
+        // silently turn into an empty selector.
+        with_auto_refresh(auth_store, |token| async move {
+            tenant_service::list_active(&token).await
+        })
+        .await
     });
 
     let users_request_key = query();
@@ -1346,6 +1366,7 @@ fn AdminUsersView() -> Element {
         let Some(u) = edit_user() else { return };
         let name_val = edit_name();
         let role_val = edit_role();
+        let tenant_id_val = edit_tenant_id();
         let can_edit_role = can_current_user_manage_roles_for_edit
             && u.id != current_user_id_for_edit
             && u.role != "system";
@@ -1361,26 +1382,43 @@ fn AdminUsersView() -> Element {
             }
         };
         let id = u.id.clone();
+        let tenant_id = if tenant_id_val.trim().is_empty() {
+            None
+        } else {
+            Some(tenant_id_val)
+        };
         edit_saving.set(true);
         spawn(async move {
-            let token = auth_store.token().unwrap_or_default();
             let client = get_client();
-            let req = UpdateUserRequest {
-                name: if name_val.trim().is_empty() {
-                    None
-                } else {
-                    Some(name_val)
-                },
-                role,
-            };
-            match AdminApi::new(&client).update_user(&id, &req, &token).await {
+            let mut req = UpdateUserRequest::new();
+            if !name_val.trim().is_empty() {
+                req = req.with_name(name_val);
+            }
+            if let Some(role) = role {
+                req = req.with_role(role);
+            }
+            if let Some(tenant_id) = tenant_id {
+                req = req.with_tenant_id(tenant_id);
+            }
+            let result = with_auto_refresh(auth_store, move |token| {
+                let id = id.clone();
+                let req = req.clone();
+                let client = client.clone();
+                async move { AdminApi::new(&client).update_user(&id, &req, &token).await }
+            })
+            .await;
+            match result {
                 Ok(_) => {
                     ui_store.show_success(i18n.t("users.updated"));
                     edit_user.set(None);
                     users_resource.restart();
                 }
                 Err(e) => {
-                    ui_store.show_error(format!("{}: {e}", i18n.t("users.update_failed")));
+                    ui_store.show_error(format!(
+                        "{}: {}",
+                        i18n.t("users.update_failed"),
+                        user_error_message(&e)
+                    ));
                 }
             }
             edit_saving.set(false);
@@ -1764,6 +1802,15 @@ fn AdminUsersView() -> Element {
         .as_ref()
         .map(|u| can_current_user_manage_roles && u.id != current_user_id && u.role != "system")
         .unwrap_or(false);
+    let can_edit_selected_tenant = edit_user()
+        .as_ref()
+        .map(|u| {
+            can_current_user_manage_tenants
+                && u.id != current_user_id
+                && u.role != "system"
+                && (u.role != UserRole::Admin.as_str() || can_current_user_manage_roles)
+        })
+        .unwrap_or(false);
     let balance_saving = balance_operation_tracker.read().is_active();
     let balance_repeat_confirmation = balance_operation_tracker.read().has_terminal_confirmation();
     let balance_modal_busy = balance_saving || release_saving();
@@ -1876,6 +1923,7 @@ fn AdminUsersView() -> Element {
                                                         move |_| {
                                                             edit_name.set(uu.name.clone().unwrap_or_default());
                                                             edit_role.set(uu.role.clone());
+                                                            edit_tenant_id.set(String::new());
                                                             edit_user.set(Some(uu.clone()));
                                                         }
                                                     },
@@ -2006,6 +2054,72 @@ fn AdminUsersView() -> Element {
                                     value: "{edit_role}",
                                     readonly: true,
                                 }
+                            }
+                        }
+                        if can_edit_selected_tenant {
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("users.tenant")} }
+                                {
+                                    let tenant_result = tenants();
+                                    let tenant_list = tenant_result
+                                        .as_ref()
+                                        .and_then(|result| result.as_ref().ok())
+                                        .cloned()
+                                        .unwrap_or_default()
+                                        .into_iter()
+                                        .filter(|tenant| tenant.slug != "system")
+                                        .collect::<Vec<_>>();
+                                    // `use_resource` retains its previous value while a
+                                    // restart is pending. Read the state as well so a retry
+                                    // does not keep showing the stale error or an enabled
+                                    // retry button while the new request is running.
+                                    let tenant_loading = tenants.state().cloned()
+                                        == dioxus::prelude::UseResourceState::Pending
+                                        || tenant_result.is_none();
+                                    let tenant_error = if tenant_loading {
+                                        None
+                                    } else {
+                                        tenant_result
+                                            .as_ref()
+                                            .and_then(|result| result.as_ref().err())
+                                            .map(user_error_message)
+                                    };
+                                    let selected_tenant_id = edit_tenant_id();
+                                    let current_tenant_name = edit_user()
+                                        .as_ref()
+                                        .map(|user| user.tenant_name.clone())
+                                        .unwrap_or_else(|| i18n.t("users.tenant_unknown").to_string());
+                                    rsx! {
+                                        select {
+                                            class: "input-field",
+                                            value: "{selected_tenant_id}",
+                                            disabled: tenant_loading || tenant_error.is_some(),
+                                            onchange: move |event| edit_tenant_id.set(event.value()),
+                                            option { value: "", "{i18n.t(\"users.tenant_keep\")} ({current_tenant_name})" }
+                                            for tenant in &tenant_list {
+                                                option {
+                                                    value: "{tenant.id}",
+                                                    "{tenant.name} ({short_id(&tenant.id)})"
+                                                }
+                                            }
+                                        }
+                                        if tenant_loading {
+                                            small { class: "form-hint", {i18n.t("table.loading")} }
+                                        }
+                                        if let Some(ref error) = tenant_error {
+                                            div { class: "form-hint form-hint-error",
+                                                small { class: "text-error", "{i18n.t(\"common.load_failed\")}: {error}" }
+                                                button {
+                                                    class: "btn btn-ghost btn-sm",
+                                                    r#type: "button",
+                                                    onclick: move |_| tenants.restart(),
+                                                    {i18n.t("common.retry")}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                small { class: "form-hint", {i18n.t("users.tenant_hint")} }
                             }
                         }
                     }
@@ -2461,6 +2575,7 @@ mod search_tests {
         is_conflict_error, manual_balance_binding_from_snapshot,
         manual_balance_operation_api_namespace, normalize_manual_balance_reason,
         persist_manual_balance_binding_in_snapshot, rotate_manual_balance_binding_in_snapshot,
+        user_can_manage_tenants,
     };
     use crate::utils::resource::KeyedResourceValue;
     use client_api::{
@@ -2477,6 +2592,28 @@ mod search_tests {
     const TEST_KEY_1: &str = "00000000-0000-4000-8000-000000000001";
     const TEST_KEY_2: &str = "00000000-0000-4000-8000-000000000002";
     const TEST_KEY_3: &str = "00000000-0000-4000-8000-000000000003";
+
+    fn user_with_role(role: &str) -> crate::stores::user_store::UserInfo {
+        crate::stores::user_store::UserInfo {
+            id: "user-1".to_string(),
+            email: "user@example.com".to_string(),
+            name: None,
+            role: role.to_string(),
+            tenant_id: "tenant-1".to_string(),
+        }
+    }
+
+    #[test]
+    fn tenant_management_visibility_matches_admin_roles() {
+        let admin = user_with_role("admin");
+        let system = user_with_role("system");
+        let user = user_with_role("user");
+
+        assert!(user_can_manage_tenants(Some(&admin)));
+        assert!(user_can_manage_tenants(Some(&system)));
+        assert!(!user_can_manage_tenants(Some(&user)));
+        assert!(!user_can_manage_tenants(None));
+    }
 
     #[derive(Default)]
     struct MemoryBalanceOperationStorage {

@@ -83,7 +83,7 @@ impl PaymentService {
             &pay_url,
         )
         .await
-        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+        .map_err(map_payment_order_create_error)?;
 
         Ok(CreateOrderResult {
             order_id: order.id,
@@ -129,7 +129,7 @@ impl PaymentService {
             &pay_url,
         )
         .await
-        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+        .map_err(map_payment_order_create_error)?;
 
         Ok(CreateOrderResult {
             order_id: order.id,
@@ -178,7 +178,7 @@ impl PaymentService {
         let order =
             keycompute_db::PaymentOrder::create(self.pool.as_ref(), &db_req, &out_trade_no, "")
                 .await
-                .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
+                .map_err(map_payment_order_create_error)?;
 
         // 调用支付宝 precreate 接口
         let precreate_result = self
@@ -709,6 +709,13 @@ impl CreateQrOrderResult {
     }
 }
 
+fn map_payment_order_create_error(error: keycompute_db::DbError) -> PaymentError {
+    match error {
+        keycompute_db::DbError::UserTenantMismatch { .. } => PaymentError::UserTenantMismatch,
+        other => PaymentError::DatabaseError(other.to_string()),
+    }
+}
+
 /// 支付错误
 #[derive(Debug, thiserror::Error)]
 pub enum PaymentError {
@@ -725,6 +732,8 @@ pub enum PaymentError {
     ProviderVerification(String),
     #[error("数据库错误: {0}")]
     DatabaseError(String),
+    #[error("用户租户归属已变更，请刷新后重试")]
+    UserTenantMismatch,
     #[error("签名验证失败")]
     InvalidSignature,
     #[error("回调商户身份不匹配")]
@@ -778,6 +787,7 @@ impl PaymentError {
             // 数据库错误通常是可重试的（连接池耗尽、临时网络问题等）
             PaymentError::DatabaseError(_) => true,
             // 以下错误不可重试，重试也无法解决
+            PaymentError::UserTenantMismatch => false,
             PaymentError::ConfigError(_) => false,
             PaymentError::ApiError(_) => false,
             PaymentError::ProviderRejected { .. } => false,
@@ -854,6 +864,11 @@ mod tests {
             PaymentError::ProviderVerification(_)
         ));
         assert!(matches!(networkish, PaymentError::ApiError(_)));
+    }
+
+    #[test]
+    fn tenant_mismatch_is_not_reported_as_a_retryable_provider_failure() {
+        assert!(!PaymentError::UserTenantMismatch.is_retryable());
     }
 
     #[test]

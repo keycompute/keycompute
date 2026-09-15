@@ -67,7 +67,10 @@ pub use system_setting::{
     BatchUpdateSettingsRequest, PublicSettings, SettingValueType, SystemSetting,
     SystemSettingResponse, UpdateSystemSettingRequest,
 };
-pub use tenant::{CreateTenantRequest, Tenant, UpdateTenantRequest};
+pub use tenant::{
+    CreateTenantRequest, Tenant, TenantDeletionBlockers, TenantFinancialDeletionBlockers,
+    UpdateTenantRequest,
+};
 pub use tenant_distribution_rule::{
     CreateDistributionRuleRequest, TenantDistributionRule, UpdateDistributionRuleRequest,
 };

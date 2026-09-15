@@ -1279,6 +1279,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.empty", "暂无用户数据");
     m.insert("users.user", "用户");
     m.insert("users.tenant", "租户");
+    m.insert("users.tenant_unknown", "未知租户");
+    m.insert("users.tenant_keep", "保持当前租户");
+    m.insert(
+        "users.tenant_hint",
+        "仅可选择活跃租户；留空表示保持当前租户。迁移用户会撤销其全部 API Key，并使现有登录会话失效。",
+    );
     m.insert("users.registered_at", "注册时间");
     m.insert("users.updated", "用户信息已更新");
     m.insert("users.update_failed", "更新失败");

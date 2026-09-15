@@ -1,6 +1,6 @@
-use crate::DbError;
+use crate::{DbError, Tenant, User};
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -67,9 +67,29 @@ impl From<ProduceAiKey> for ProduceAiKeyResponse {
 impl ProduceAiKey {
     /// 创建新 Produce AI Key
     pub async fn create(
-        db: &impl ConnectionTrait,
+        db: &(impl ConnectionTrait + TransactionTrait),
         req: &CreateProduceAiKeyRequest,
     ) -> Result<ProduceAiKey, DbError> {
+        // Lock the tenant parent before its user/key children. Besides
+        // preventing a key insert from racing tenant deletion, this keeps
+        // direct model callers on the same parent-first order as lifecycle
+        // operations. The user lock below still serializes reassignment and
+        // lets us re-check the authoritative tenant before inserting.
+        let tx = db.begin().await?;
+        Tenant::find_by_id_for_key_share(&tx, req.tenant_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("tenant", req.tenant_id))?;
+        let user = User::find_by_id_for_update(&tx, req.user_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("user", req.user_id))?;
+        if user.tenant_id != req.tenant_id {
+            return Err(DbError::UserTenantMismatch {
+                user_id: req.user_id,
+                requested_tenant_id: req.tenant_id,
+                actual_tenant_id: user.tenant_id,
+            });
+        }
+
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -87,9 +107,11 @@ impl ProduceAiKey {
             ],
         );
         let key = ProduceAiKey::find_by_statement(stmt)
-            .one(db)
+            .one(&tx)
             .await?
             .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
+
+        tx.commit().await?;
 
         Ok(key)
     }
@@ -107,6 +129,25 @@ impl ProduceAiKey {
         let key = ProduceAiKey::find_by_statement(stmt).one(db).await?;
 
         Ok(key)
+    }
+
+    /// 根据 ID 查找并锁定 Produce AI Key。
+    ///
+    /// API key authentication acquires the owning user lock before this key
+    /// lock.  Keeping the lock-capable lookup in the model makes that order
+    /// explicit and prevents a concurrent tenant move (which revokes keys
+    /// after locking the user) from returning a snapshot that was revoked
+    /// before authentication completed.
+    pub async fn find_by_id_for_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<ProduceAiKey>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM produce_ai_keys WHERE id = $1 FOR UPDATE",
+            [id.into()],
+        );
+        Ok(ProduceAiKey::find_by_statement(stmt).one(db).await?)
     }
 
     /// 根据 produce_ai_key_hash 查找 Produce AI Key
@@ -233,6 +274,21 @@ impl ProduceAiKey {
             .ok_or_else(|| DbError::not_found("ProduceAiKey", self.id.to_string()))?;
 
         Ok(key)
+    }
+
+    /// 租户迁移时撤销用户现有 API Key，避免旧租户凭据继续被展示或使用。
+    pub async fn revoke_all_for_user(
+        db: &impl ConnectionTrait,
+        user_id: Uuid,
+    ) -> Result<u64, DbError> {
+        let result = db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE produce_ai_keys SET revoked = TRUE, revoked_at = COALESCE(revoked_at, NOW()), updated_at = NOW() WHERE user_id = $1 AND revoked = FALSE",
+                [user_id.into()],
+            ))
+            .await?;
+        Ok(result.rows_affected())
     }
 
     /// 物理删除 Produce AI Key

@@ -6,6 +6,7 @@ use crate::jwt::JwtValidator;
 use crate::password::{EmailValidator, PasswordHasher};
 use keycompute_db::{DbRouter, Tenant, User, UserCredential};
 use keycompute_types::{KeyComputeError, Result};
+use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -105,7 +106,10 @@ impl LoginService {
         self.email_validator.validate(&email)?;
 
         // 2. 查找用户
-        let user = User::find_by_email(self.pool.as_ref(), &email)
+        // Login issues a JWT containing the user's tenant and token version.
+        // Read both from the writer so a just-committed tenant move cannot
+        // produce a token from a lagging replica snapshot.
+        let user = User::find_by_email(self.pool.write_conn(), &email)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find user: {}", e)))?
             .ok_or_else(|| {
@@ -126,7 +130,7 @@ impl LoginService {
         }
 
         // 3. 获取凭证
-        let credential = UserCredential::find_by_user_id(self.pool.as_ref(), user.id)
+        let credential = UserCredential::find_by_user_id(self.pool.write_conn(), user.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to find credential: {}", e))
@@ -176,34 +180,79 @@ impl LoginService {
             ));
         }
 
-        // 7. 重置失败计数并更新登录信息
-        let _updated_credential = credential
-            .record_successful_login(self.pool.as_ref(), req.client_ip.clone())
+        // Re-read and lock the user and verified credential after password
+        // verification. A tenant/role move can commit while Argon2 is
+        // running; issuing from the initial snapshot would return a token
+        // that is already stale. The short final locks give login and
+        // reassignment a clear ordering without holding a database lock during
+        // password hashing. Lock the user before the credential, matching the
+        // user-deletion cascade's parent-first order. The password hash is
+        // compared with the hash that was actually verified so a racing reset
+        // cannot turn the old password into a freshly signed token.
+        let tx = self.pool.begin().await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to begin login commit: {e}"))
+        })?;
+        let current_user = User::find_by_id_for_update(&tx, user.id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to refresh user: {e}")))?
+            .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
+        let current_tenant = Tenant::find_by_id(&tx, current_user.tenant_id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to refresh tenant: {e}")))?
+            .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
+        if !current_tenant.is_active() {
+            return Err(KeyComputeError::AuthError(
+                "Email or password is incorrect".to_string(),
+            ));
+        }
+        let current_credential = UserCredential::find_by_user_id_for_update(&tx, current_user.id)
             .await
             .map_err(|e| {
-                KeyComputeError::DatabaseError(format!("Failed to update login info: {}", e))
+                KeyComputeError::DatabaseError(format!("Failed to refresh credential: {e}"))
+            })?
+            .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
+        if current_credential.password_hash != credential.password_hash
+            || current_credential.is_locked()
+            || !current_credential.email_verified
+        {
+            return Err(KeyComputeError::AuthError(
+                "Email or password is incorrect".to_string(),
+            ));
+        }
+
+        // Reset the failure counter only after the verified credential
+        // snapshot has been revalidated under the same transaction lock.
+        current_credential
+            .record_successful_login(&tx, req.client_ip.clone())
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to update login info: {e}"))
             })?;
 
-        // 8. 生成 JWT Token（写入用户当前 token_version，以支持失效校验）
+        // 生成 JWT Token（写入用户当前 token_version，以支持失效校验）
         let token = self.jwt_validator.generate_token_with_version(
-            user.id,
-            user.tenant_id,
-            &user.role,
-            user.token_version,
+            current_user.id,
+            current_user.tenant_id,
+            &current_user.role,
+            current_user.token_version,
         )?;
 
+        tx.commit().await.map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to commit login snapshot: {e}"))
+        })?;
+
         tracing::info!(
-            user_id = %user.id,
-            tenant_id = %user.tenant_id,
+            user_id = %current_user.id,
+            tenant_id = %current_user.tenant_id,
             email = %email,
             "User logged in successfully"
         );
 
         Ok(LoginResponse {
-            user_id: user.id,
-            tenant_id: user.tenant_id,
-            email: user.email.clone(),
-            role: user.role.clone(),
+            user_id: current_user.id,
+            tenant_id: current_user.tenant_id,
+            email: current_user.email.clone(),
+            role: current_user.role.clone(),
             jwt_token: token,
             expires_in: self.jwt_validator.default_expiration(),
         })

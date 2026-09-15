@@ -50,7 +50,10 @@ pub async fn get_current_user(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let user = User::find_by_id(pool, auth.user_id)
+    // This response is also used to refresh the client after an administrator
+    // moves the account. Read the authoritative row so the client does not
+    // immediately overwrite its tenant context with a lagging replica value.
+    let user = User::find_by_id(pool.write_conn(), auth.user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to fetch user: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", auth.user_id)))?;
@@ -85,14 +88,15 @@ pub async fn update_profile(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let user = User::find_by_id(pool, auth.user_id)
+    let user = User::find_by_id(pool.write_conn(), auth.user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to fetch user: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", auth.user_id)))?;
 
     let update_req = keycompute_db::models::user::UpdateUserRequest {
         name: req.name,
-        role: None, // 不允许用户自己修改角色
+        role: None,      // 不允许用户自己修改角色
+        tenant_id: None, // 不允许用户自己修改租户
     };
 
     let updated = user
@@ -140,7 +144,9 @@ pub async fn change_password(
     }
 
     // 2. 获取用户凭证
-    let credential = UserCredential::find_by_user_id(pool, auth.user_id)
+    // Password verification and mutation are security-sensitive; a replica
+    // that has not applied a recent password change must not be consulted.
+    let credential = UserCredential::find_by_user_id(pool.write_conn(), auth.user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query credential: {}", e)))?
         .ok_or_else(|| {
@@ -355,7 +361,12 @@ pub async fn create_api_key(
 
     let saved_key = ProduceAiKey::create(pool, &create_req)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to create API key: {}", e)))?;
+        .map_err(|error| match error {
+            keycompute_db::DbError::UserTenantMismatch { .. } => ApiError::Conflict(
+                "User tenant changed; refresh authentication and retry".to_string(),
+            ),
+            other => ApiError::Internal(format!("Failed to create API key: {}", other)),
+        })?;
 
     Ok(Json(serde_json::json!({
         "success": true,

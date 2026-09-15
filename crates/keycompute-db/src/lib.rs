@@ -67,6 +67,46 @@ pub enum DbError {
     #[error("{entity} changed since it was read: {id}")]
     OptimisticConflict { entity: String, id: String },
 
+    /// 请求携带的租户归属已落后于用户的当前归属。
+    #[error(
+        "user {user_id} belongs to tenant {actual_tenant_id}, not requested tenant {requested_tenant_id}"
+    )]
+    UserTenantMismatch {
+        user_id: uuid::Uuid,
+        requested_tenant_id: uuid::Uuid,
+        actual_tenant_id: uuid::Uuid,
+    },
+
+    /// 租户归属变更必须通过持有协调事务的显式接口执行。
+    #[error("user tenant reassignment requires a coordinated transaction")]
+    TenantReassignmentRequiresCoordinator,
+
+    /// 用户仍有活跃余额预留，不能在预留结算期间切换租户。
+    #[error(
+        "user has {count} active balance reservation(s); wait for them to settle before changing tenant"
+    )]
+    UserHasActiveBalanceReservations { count: i64 },
+
+    /// 租户仍有 Responses 结算、执行预留或正在执行的幂等请求，不能删除。
+    #[error(
+        "tenant has pending Responses work ({pending_settlements} settlement(s), {pending_reservations} reservation(s), {in_progress_claims} in-progress idempotency claim(s)); wait for it to finish before deleting"
+    )]
+    TenantHasPendingResponsesWork {
+        pending_settlements: i64,
+        pending_reservations: i64,
+        in_progress_claims: i64,
+    },
+
+    /// 租户仍有支付订单或余额账本历史，不能通过级联删除清除财务记录。
+    #[error(
+        "tenant retains financial history ({payment_orders} payment order(s), {balance_transactions} balance transaction(s), {balance_reservations} balance reservation(s)); archive or remove it before deleting"
+    )]
+    TenantHasFinancialHistory {
+        payment_orders: i64,
+        balance_transactions: i64,
+        balance_reservations: i64,
+    },
+
     /// 租户仍有租户级定价配置，不能直接删除。
     #[error("tenant has {count} tenant pricing model(s); delete them first")]
     TenantHasPricingModels { count: i64 },

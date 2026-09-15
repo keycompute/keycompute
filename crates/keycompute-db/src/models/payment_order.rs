@@ -1,9 +1,11 @@
 //! 支付订单模型
 
-use crate::DbError;
+use crate::{DbError, Tenant, User};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use sea_orm::{
+    ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -184,11 +186,31 @@ pub struct CreatePaymentOrderRequest {
 impl PaymentOrder {
     /// 创建新订单
     pub async fn create(
-        db: &impl ConnectionTrait,
+        db: &(impl ConnectionTrait + TransactionTrait),
         req: &CreatePaymentOrderRequest,
         out_trade_no: &str,
         pay_url: &str,
     ) -> Result<PaymentOrder, DbError> {
+        // Lock the tenant parent before its user/order children. Besides
+        // preventing a pending order insert from racing tenant deletion, this
+        // keeps direct model callers on the same parent-first order as
+        // lifecycle operations. The user lock below still serializes
+        // reassignment and re-checks the authoritative tenant before insert.
+        let tx = db.begin().await?;
+        Tenant::find_by_id_for_key_share(&tx, req.tenant_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("tenant", req.tenant_id))?;
+        let user = User::find_by_id_for_update(&tx, req.user_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("user", req.user_id))?;
+        if user.tenant_id != req.tenant_id {
+            return Err(DbError::UserTenantMismatch {
+                user_id: req.user_id,
+                requested_tenant_id: req.tenant_id,
+                actual_tenant_id: user.tenant_id,
+            });
+        }
+
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -216,9 +238,11 @@ impl PaymentOrder {
             ],
         );
         let order = PaymentOrder::find_by_statement(stmt)
-            .one(db)
+            .one(&tx)
             .await?
             .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
+
+        tx.commit().await?;
 
         Ok(order)
     }
@@ -265,6 +289,50 @@ impl PaymentOrder {
         Ok(order)
     }
 
+    /// Move a user's still-pending orders to a new tenant.
+    ///
+    /// Pending orders are mutable ownership records: a user can finish
+    /// paying them after an administrator moves the user. Keeping the old
+    /// tenant ID would make the order disappear from the user's new payment
+    /// history and would allow source-tenant deletion to cascade-delete an
+    /// order that may already be paid at the provider. Callers should invoke
+    /// this before locking the user's balance; payment callbacks lock the
+    /// order first and then the balance, so that order avoids a lock cycle.
+    pub async fn reassign_pending_for_user(
+        db: &DatabaseTransaction,
+        user_id: Uuid,
+        source_tenant_id: Uuid,
+        target_tenant_id: Uuid,
+    ) -> Result<u64, DbError> {
+        #[derive(Debug, FromQueryResult)]
+        struct PendingOrderId {
+            id: Uuid,
+        }
+
+        // Lock orders in a stable order before taking the balance lock. This
+        // matches `credit_paid`'s order -> balance lock sequence and keeps a
+        // concurrent callback from forming a cycle while this move waits.
+        let pending = PendingOrderId::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM payment_orders WHERE user_id = $1 AND tenant_id = $2 AND status = 'pending' ORDER BY id FOR UPDATE",
+            [user_id.into(), source_tenant_id.into()],
+        ))
+        .all(db)
+        .await?;
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let order_ids: Vec<Uuid> = pending.into_iter().map(|order| order.id).collect();
+        let result = db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE payment_orders SET tenant_id = $1, updated_at = NOW() WHERE id = ANY($2) AND status = 'pending'",
+                [target_tenant_id.into(), order_ids.into()],
+            ))
+            .await?;
+        Ok(result.rows_affected())
+    }
+
     /// Atomically record a verified provider event, mark the order paid, and credit its balance.
     pub async fn credit_paid(
         db: &(impl ConnectionTrait + TransactionTrait),
@@ -275,6 +343,24 @@ impl PaymentOrder {
         description: &str,
     ) -> Result<bool, CreditPaidOrderError> {
         let tx = db.begin().await.map_err(DbError::from)?;
+        // A payment callback eventually inserts a balance transaction whose
+        // tenant foreign key must acquire a `KEY SHARE` lock on the parent.
+        // Acquire that compatible parent lock before locking the order row so
+        // tenant deletion (tenant -> children) cannot deadlock with the
+        // callback's order/balance work.  Locking through the current join
+        // snapshot also handles a concurrent user move: the move must first
+        // lock its source/target tenants, so this statement either waits for
+        // the move and sees the new owner or prevents it from changing the
+        // order until the callback commits.
+        let order_parent = Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT payment_orders.* FROM payment_orders JOIN tenants ON tenants.id = payment_orders.tenant_id WHERE payment_orders.id = $1 FOR KEY SHARE OF tenants",
+            [order_id.into()],
+        ))
+        .one(&tx)
+        .await
+        .map_err(DbError::from)?
+        .ok_or(CreditPaidOrderError::OrderNotFound)?;
         let locked = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM payment_orders WHERE id = $1 FOR UPDATE",
@@ -284,6 +370,12 @@ impl PaymentOrder {
         .await
         .map_err(DbError::from)?
         .ok_or(CreditPaidOrderError::OrderNotFound)?;
+        // The parent lock above prevents a tenant move/deletion from changing
+        // this relationship while the order is locked. Keep the assertion as
+        // a defensive guard if a future schema or caller bypasses that lock.
+        if locked.tenant_id != order_parent.tenant_id {
+            return Err(CreditPaidOrderError::ConcurrentTransition);
+        }
         let payload_digest = hex::encode(Sha256::digest(
             serde_json::to_vec(&payload).map_err(|error| DbError::Other(error.to_string()))?,
         ));

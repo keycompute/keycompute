@@ -1,7 +1,9 @@
 use super::query::escape_like_pattern;
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
+use sea_orm::{
+    ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -34,6 +36,46 @@ struct TenantCount {
     total: i64,
 }
 
+/// Durable Responses work that must finish before a tenant can be removed.
+///
+/// These rows are intentionally tenant-scoped rather than user-scoped. A
+/// moved user can leave an in-flight Responses request, an execution
+/// reservation, or a terminal billing outbox behind in the source tenant, and
+/// the corresponding foreign keys are cascading by design. Deleting that
+/// tenant while any count is non-zero would silently discard work the
+/// background worker still needs.
+#[derive(Debug, Clone, Copy, FromQueryResult, PartialEq, Eq)]
+pub struct TenantDeletionBlockers {
+    pub pending_response_settlements: i64,
+    pub pending_response_reservations: i64,
+    pub in_progress_response_claims: i64,
+}
+
+impl TenantDeletionBlockers {
+    pub fn blocks_deletion(self) -> bool {
+        self.pending_response_settlements > 0
+            || self.pending_response_reservations > 0
+            || self.in_progress_response_claims > 0
+    }
+}
+
+/// Financial rows that would otherwise be erased by the tenant's cascading
+/// foreign keys. They are retained as historical records when a user moves
+/// between tenants, so deleting the now-empty source tenant must be explicit
+/// rather than silently destroying the audit trail.
+#[derive(Debug, Clone, Copy, FromQueryResult, PartialEq, Eq)]
+pub struct TenantFinancialDeletionBlockers {
+    pub payment_orders: i64,
+    pub balance_transactions: i64,
+    pub balance_reservations: i64,
+}
+
+impl TenantFinancialDeletionBlockers {
+    pub fn blocks_deletion(self) -> bool {
+        self.payment_orders > 0 || self.balance_transactions > 0 || self.balance_reservations > 0
+    }
+}
+
 /// 创建租户请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateTenantRequest {
@@ -60,6 +102,56 @@ pub struct UpdateTenantRequest {
 
 const TENANT_PRICING_COUNT_SQL: &str =
     "SELECT COUNT(*)::BIGINT AS total FROM pricing_models WHERE tenant_id = $1";
+
+// Keep the blocker snapshot and its row locks in one statement.  Locking the
+// tenant row alone prevents new foreign-key inserts, but an existing affinity
+// can still be updated from `settlement IS NULL` to a durable settlement while
+// the delete transaction is checking it.  Materialized CTEs force PostgreSQL
+// to lock every existing child row before the counts are observed; callers
+// hold those locks through the subsequent tenant DELETE.
+const TENANT_DELETION_BLOCKERS_SQL: &str = r#"
+WITH locked_affinities AS MATERIALIZED (
+    SELECT tenant_id, response_id, settlement, is_reservation
+    FROM response_affinities
+    WHERE tenant_id = $1
+    FOR UPDATE
+), locked_claims AS MATERIALIZED (
+    SELECT tenant_id, binding_id, execution_state
+    FROM responses_idempotency_claims
+    WHERE tenant_id = $1
+    FOR UPDATE
+)
+SELECT
+    (SELECT COUNT(*)::BIGINT FROM locked_affinities WHERE settlement IS NOT NULL)
+        AS pending_response_settlements,
+    (SELECT COUNT(*)::BIGINT FROM locked_affinities WHERE is_reservation)
+        AS pending_response_reservations,
+    (SELECT COUNT(*)::BIGINT FROM locked_claims WHERE execution_state = 'in_progress')
+        AS in_progress_response_claims
+"#;
+
+// `delete_in_tx` holds a FOR UPDATE lock on the tenant before running this
+// snapshot. The three tables all carry tenant foreign keys, so that parent
+// lock prevents a new financial row from passing its FK check concurrently;
+// unlike Responses rows, historical financial rows do not need child locks or
+// a second lock order here.
+const TENANT_FINANCIAL_DELETION_BLOCKERS_SQL: &str = r#"
+SELECT
+    (SELECT COUNT(*)::BIGINT FROM payment_orders WHERE tenant_id = $1)
+        AS payment_orders,
+    (SELECT COUNT(*)::BIGINT FROM balance_transactions WHERE tenant_id = $1)
+        AS balance_transactions,
+    (SELECT COUNT(*)::BIGINT FROM balance_reservations WHERE tenant_id = $1)
+        AS balance_reservations
+"#;
+
+// Account rows use `ON DELETE RESTRICT` for their tenant foreign key, so the
+// final tenant DELETE may need a key-share check on every account. Acquire
+// those child locks immediately after the parent lock and before Responses
+// affinity locks; account lifecycle operations use the same tenant -> account
+// -> affinity order.
+const TENANT_ACCOUNT_LOCK_SQL: &str =
+    "SELECT id FROM accounts WHERE tenant_id = $1 ORDER BY id FOR UPDATE";
 
 impl Tenant {
     /// 创建新租户
@@ -118,6 +210,23 @@ impl Tenant {
         Ok(Tenant::find_by_statement(stmt).one(db).await?)
     }
 
+    /// 根据 ID 查找并取得租户外键的 `KEY SHARE` 锁。
+    ///
+    /// Responses 预留和其它租户子表写入必须在锁定账号或 affinity 之前
+    /// 取得该锁；这样租户删除（先锁父行再锁子行）不会与子表写入形成反向
+    /// 等待环。`KEY SHARE` 允许普通租户配置更新，但会与删除冲突。
+    pub async fn find_by_id_for_key_share(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Tenant>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM tenants WHERE id = $1 FOR KEY SHARE",
+            [id.into()],
+        );
+        Ok(Tenant::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 统计租户下的用户数。
     pub async fn count_users(db: &impl ConnectionTrait, tenant_id: Uuid) -> Result<i64, DbError> {
         let stmt = Statement::from_sql_and_values(
@@ -167,6 +276,45 @@ impl Tenant {
             .await?
             .map(|row| row.total)
             .unwrap_or(0))
+    }
+
+    /// Count durable Responses work which would be lost by the tenant's
+    /// cascading foreign keys. Callers that are deciding whether to delete a
+    /// tenant should run this after acquiring a `FOR UPDATE` lock on the
+    /// tenant row so new inserts cannot pass the check concurrently.
+    pub async fn find_deletion_blockers(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+    ) -> Result<TenantDeletionBlockers, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            TENANT_DELETION_BLOCKERS_SQL,
+            [tenant_id.into()],
+        );
+        TenantDeletionBlockers::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::Other("tenant deletion blocker query returned no row".into()))
+    }
+
+    /// Count financial history which would be removed by a cascading tenant
+    /// delete. Callers must already hold the tenant's `FOR UPDATE` lock; that
+    /// parent lock serializes all new rows carrying the tenant foreign key.
+    pub async fn find_financial_deletion_blockers(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+    ) -> Result<TenantFinancialDeletionBlockers, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            TENANT_FINANCIAL_DELETION_BLOCKERS_SQL,
+            [tenant_id.into()],
+        );
+        TenantFinancialDeletionBlockers::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| {
+                DbError::Other("tenant financial deletion blocker query returned no row".into())
+            })
     }
 
     /// 根据 slug 查找租户
@@ -296,12 +444,73 @@ impl Tenant {
         Ok(tenant)
     }
 
-    /// 删除租户
-    pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
+    /// Delete a tenant in its own writer transaction.
+    ///
+    /// The Responses blocker query takes row locks which must remain held
+    /// until the `DELETE` statement. Starting a transaction here keeps direct
+    /// model callers (including `DbRouter` callers) from releasing those locks
+    /// between the check and the cascade. If the caller already owns a
+    /// transaction, use [`Self::delete_in_tx`] so the lock and delete remain in
+    /// that transaction instead of creating an unnecessary savepoint.
+    pub async fn delete(
+        &self,
+        db: &(impl ConnectionTrait + TransactionTrait),
+    ) -> Result<(), DbError> {
+        let tx = db.begin().await?;
+        match self.delete_in_tx(&tx).await {
+            Ok(()) => tx.commit().await.map_err(DbError::from),
+            Err(error) => {
+                // Preserve the domain error (for example a pending-work
+                // blocker) while still releasing locks before returning.
+                let _ = tx.rollback().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Delete a tenant using an already-open transaction.
+    ///
+    /// The transaction must lock the tenant row before calling this method
+    /// when concurrent inserts need to be excluded. This method acquires that
+    /// lock itself, so callers cannot accidentally release the parent lock
+    /// between the blocker check and the cascade. The child-row locks acquired
+    /// by [`Self::find_deletion_blockers`] are then held through the delete.
+    pub async fn delete_in_tx(&self, db: &DatabaseTransaction) -> Result<(), DbError> {
+        // Serialize the existence check, child-row snapshot, and cascade with
+        // tenant-scoped inserts that acquire a foreign-key key-share lock.
+        // Keep the historical no-op behavior when the tenant row is already
+        // absent; the DELETE below will simply affect zero rows.
+        Self::find_by_id_for_update(db, self.id).await?;
+        // Lock account children before the Responses blocker snapshot. An
+        // account update/delete holds the account row before its affinity rows;
+        // taking affinities first here would let the final tenant FK check wait
+        // on the account while that updater waits on the affinity (a cycle).
+        db.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            TENANT_ACCOUNT_LOCK_SQL,
+            [self.id.into()],
+        ))
+        .await?;
         let pricing_count = Self::count_pricing_models(db, self.id).await?;
         if pricing_count > 0 {
             return Err(DbError::TenantHasPricingModels {
                 count: pricing_count,
+            });
+        }
+        let financial = Self::find_financial_deletion_blockers(db, self.id).await?;
+        if financial.blocks_deletion() {
+            return Err(DbError::TenantHasFinancialHistory {
+                payment_orders: financial.payment_orders,
+                balance_transactions: financial.balance_transactions,
+                balance_reservations: financial.balance_reservations,
+            });
+        }
+        let blockers = Self::find_deletion_blockers(db, self.id).await?;
+        if blockers.blocks_deletion() {
+            return Err(DbError::TenantHasPendingResponsesWork {
+                pending_settlements: blockers.pending_response_settlements,
+                pending_reservations: blockers.pending_response_reservations,
+                in_progress_claims: blockers.in_progress_response_claims,
             });
         }
         let stmt = Statement::from_sql_and_values(
@@ -322,11 +531,106 @@ impl Tenant {
 
 #[cfg(test)]
 mod tests {
-    use super::TENANT_PRICING_COUNT_SQL;
+    use super::{
+        TENANT_DELETION_BLOCKERS_SQL, TENANT_FINANCIAL_DELETION_BLOCKERS_SQL,
+        TENANT_PRICING_COUNT_SQL, TenantDeletionBlockers, TenantFinancialDeletionBlockers,
+    };
 
     #[test]
     fn pricing_count_is_scoped_to_the_tenant() {
         assert!(TENANT_PRICING_COUNT_SQL.contains("pricing_models"));
         assert!(TENANT_PRICING_COUNT_SQL.contains("tenant_id = $1"));
+    }
+
+    #[test]
+    fn deletion_blockers_detect_durable_responses_work() {
+        assert!(
+            !TenantDeletionBlockers {
+                pending_response_settlements: 0,
+                pending_response_reservations: 0,
+                in_progress_response_claims: 0,
+            }
+            .blocks_deletion()
+        );
+        assert!(
+            TenantDeletionBlockers {
+                pending_response_settlements: 1,
+                pending_response_reservations: 0,
+                in_progress_response_claims: 0,
+            }
+            .blocks_deletion()
+        );
+        assert!(
+            TenantDeletionBlockers {
+                pending_response_settlements: 0,
+                pending_response_reservations: 1,
+                in_progress_response_claims: 0,
+            }
+            .blocks_deletion()
+        );
+        assert!(
+            TenantDeletionBlockers {
+                pending_response_settlements: 0,
+                pending_response_reservations: 0,
+                in_progress_response_claims: 1,
+            }
+            .blocks_deletion()
+        );
+    }
+
+    #[test]
+    fn financial_deletion_blockers_detect_retained_history() {
+        assert!(
+            !TenantFinancialDeletionBlockers {
+                payment_orders: 0,
+                balance_transactions: 0,
+                balance_reservations: 0,
+            }
+            .blocks_deletion()
+        );
+        assert!(
+            TenantFinancialDeletionBlockers {
+                payment_orders: 1,
+                balance_transactions: 0,
+                balance_reservations: 0,
+            }
+            .blocks_deletion()
+        );
+        assert!(
+            TenantFinancialDeletionBlockers {
+                payment_orders: 0,
+                balance_transactions: 1,
+                balance_reservations: 0,
+            }
+            .blocks_deletion()
+        );
+        assert!(
+            TenantFinancialDeletionBlockers {
+                payment_orders: 0,
+                balance_transactions: 0,
+                balance_reservations: 1,
+            }
+            .blocks_deletion()
+        );
+    }
+
+    #[test]
+    fn financial_deletion_blocker_query_is_parent_lock_scoped() {
+        assert!(TENANT_FINANCIAL_DELETION_BLOCKERS_SQL.contains("payment_orders"));
+        assert!(TENANT_FINANCIAL_DELETION_BLOCKERS_SQL.contains("balance_transactions"));
+        assert!(TENANT_FINANCIAL_DELETION_BLOCKERS_SQL.contains("balance_reservations"));
+        assert!(!TENANT_FINANCIAL_DELETION_BLOCKERS_SQL.contains("FOR UPDATE"));
+    }
+
+    #[test]
+    fn deletion_blocker_query_locks_existing_child_rows() {
+        assert!(TENANT_DELETION_BLOCKERS_SQL.contains("MATERIALIZED"));
+        assert_eq!(
+            TENANT_DELETION_BLOCKERS_SQL.matches("FOR UPDATE").count(),
+            2
+        );
+        assert!(TENANT_DELETION_BLOCKERS_SQL.contains("response_affinities"));
+        assert!(TENANT_DELETION_BLOCKERS_SQL.contains("is_reservation"));
+        assert!(TENANT_DELETION_BLOCKERS_SQL.contains("responses_idempotency_claims"));
     }
 }

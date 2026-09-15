@@ -96,6 +96,24 @@ impl PasswordReset {
         Ok(reset)
     }
 
+    /// 根据令牌查找并锁定重置记录。
+    ///
+    /// 密码重置会在同一事务中先锁定用户和凭证，再锁定令牌。这样并发
+    /// 重置请求可以在重新校验令牌状态后原子地完成，避免重复使用令牌。
+    pub async fn find_by_token_for_update(
+        db: &impl ConnectionTrait,
+        token: &str,
+    ) -> Result<Option<PasswordReset>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id, user_id, token, expires_at, used, used_at, requested_from_ip::TEXT AS requested_from_ip, created_at FROM password_resets WHERE token = $1 FOR UPDATE",
+            [token.into()],
+        );
+        let reset = PasswordReset::find_by_statement(stmt).one(db).await?;
+
+        Ok(reset)
+    }
+
     /// 查找用户的有效重置记录
     pub async fn find_valid_by_user(
         db: &impl ConnectionTrait,

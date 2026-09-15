@@ -155,20 +155,28 @@ async fn test_update_user_success() {
 
     Mock::given(method("PUT"))
         .and(path("/api/v1/users/user_001"))
+        .and(body_json(serde_json::json!({
+            "name": "Updated Name",
+            "role": "admin",
+            "tenant_id": "tenant_002"
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "success": true,
             "message": "User updated successfully",
             "user_id": "user_001",
             "email": "updated@example.com",
             "name": "Updated Name",
-            "role": "admin"
+            "role": "admin",
+            "tenant_id": "tenant_002",
+            "tenant_name": "Target Tenant"
         })))
         .mount(&mock_server)
         .await;
 
     let req = UpdateUserRequest::new()
         .with_name("Updated Name")
-        .with_role(AssignableUserRole::Admin);
+        .with_role(AssignableUserRole::Admin)
+        .with_tenant_id("tenant_002");
     let result = admin_api
         .update_user("user_001", &req, fixtures::TEST_ACCESS_TOKEN)
         .await;
@@ -178,6 +186,8 @@ async fn test_update_user_success() {
     assert!(user.success);
     assert_eq!(user.user_id, "user_001");
     assert_eq!(user.name, Some("Updated Name".to_string()));
+    assert_eq!(user.tenant_id.as_deref(), Some("tenant_002"));
+    assert_eq!(user.tenant_name.as_deref(), Some("Target Tenant"));
 }
 
 #[tokio::test]

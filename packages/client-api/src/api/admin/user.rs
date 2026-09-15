@@ -107,8 +107,13 @@ pub struct UserListResponse {
 /// 更新用户请求
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdateUserRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<AssignableUserRole>,
+    /// 目标租户 ID；省略时保持当前租户。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_id: Option<String>,
 }
 
 impl UpdateUserRequest {
@@ -125,6 +130,11 @@ impl UpdateUserRequest {
         self.role = Some(role);
         self
     }
+
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +145,10 @@ pub struct UpdateUserResponse {
     pub email: String,
     pub name: Option<String>,
     pub role: String,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub tenant_name: Option<String>,
 }
 
 /// 更新余额请求
@@ -321,5 +335,38 @@ mod tests {
         let req = UpdateBalanceRequest::subtract(50.0, "Admin deduction");
         assert_eq!(req.amount, "-50");
         assert_eq!(req.reason, "Admin deduction");
+    }
+
+    #[test]
+    fn update_user_request_serializes_optional_tenant_id() {
+        let request = UpdateUserRequest::new()
+            .with_name("Alice")
+            .with_tenant_id("tenant-2");
+        assert_eq!(
+            serde_json::to_value(request).expect("request should serialize"),
+            serde_json::json!({"name": "Alice", "tenant_id": "tenant-2"})
+        );
+
+        let unchanged = UpdateUserRequest::new();
+        assert_eq!(
+            serde_json::to_value(unchanged).expect("request should serialize"),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn update_user_response_accepts_legacy_payload_without_tenant_fields() {
+        let response: UpdateUserResponse = serde_json::from_value(serde_json::json!({
+            "success": true,
+            "message": "User updated",
+            "user_id": "user-1",
+            "email": "user@example.com",
+            "name": "Alice",
+            "role": "user"
+        }))
+        .expect("legacy update response should remain readable");
+
+        assert_eq!(response.tenant_id, None);
+        assert_eq!(response.tenant_name, None);
     }
 }
