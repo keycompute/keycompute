@@ -167,6 +167,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.confirm_delete", "确定要删除吗？此操作不可撤销。");
     m.insert("common.copied", "已复制到剪贴板");
     m.insert("common.copy", "复制");
+    m.insert("common.copy_model_id", "复制模型 ID");
     m.insert(
         "common.copy_manual_hint",
         "当前页面为非安全上下文（HTTP），请选中文本后右键复制",
@@ -174,6 +175,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.refresh", "刷新");
     m.insert("common.back", "返回");
     m.insert("common.clear", "清空");
+    m.insert("common.default", "默认");
+    m.insert("common.model_search_placeholder", "搜索模型名称或 Provider");
+    m.insert("common.no_matching_models", "没有匹配的模型");
     m.insert("common.close", "关闭");
     m.insert("common.time", "时间");
     m.insert("common.total_items", "共");
@@ -238,6 +242,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.models_desc_suffix", " 参数使用");
     m.insert("api_keys.default_model", "默认");
     m.insert("api_keys.more_models", "个更多模型");
+    m.insert("api_keys.models_more_aria", "查看其余 {count} 个模型");
+    m.insert("api_keys.models_dialog_title", "全部可用模型");
+    m.insert(
+        "api_keys.models_dialog_description",
+        "当前 API Key 可用于请求的模型（共 {count} 个）",
+    );
     m.insert(
         "api_keys.quick_example",
         "2. 快速使用示例（可直接复制使用）",
@@ -1464,6 +1474,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("accounts.key_preview", "密钥预览");
     m.insert("accounts.default_endpoint", "使用 Provider 默认 Endpoint");
     m.insert("accounts.no_models", "未配置模型");
+    m.insert("accounts.models_more_aria", "查看其余 {count} 个模型");
+    m.insert("accounts.models_dialog_title", "支持的模型");
+    m.insert(
+        "accounts.models_dialog_description",
+        "此渠道账号声明的全部模型（共 {count} 个）",
+    );
     m.insert("accounts.route_ready", "可参与正常路由");
     m.insert("accounts.enabled_but_unhealthy", "已启用，但健康状态异常");
     m.insert("accounts.not_routed", "当前不参与路由调度");

@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod distribution_records;
 pub mod loading;
+pub mod model_list;
 pub mod monitoring;
 pub mod node_gateway;
 pub mod payment_orders;

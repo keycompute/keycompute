@@ -188,6 +188,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("common.copied", "Copied to clipboard");
     m.insert("common.copy", "Copy");
+    m.insert("common.copy_model_id", "Copy model ID");
     m.insert(
         "common.copy_manual_hint",
         "Non-HTTPS context, please select text and right-click to copy",
@@ -195,6 +196,12 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.refresh", "Refresh");
     m.insert("common.back", "Back");
     m.insert("common.clear", "Clear");
+    m.insert("common.default", "Default");
+    m.insert(
+        "common.model_search_placeholder",
+        "Search model or provider",
+    );
+    m.insert("common.no_matching_models", "No matching models");
     m.insert("common.close", "Close");
     m.insert("common.time", "Time");
     m.insert("common.total_items", "Total");
@@ -265,6 +272,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("api_keys.models_desc_suffix", " parameter in requests");
     m.insert("api_keys.default_model", "Default");
     m.insert("api_keys.more_models", "more models");
+    m.insert(
+        "api_keys.models_more_aria",
+        "View the remaining {count} models",
+    );
+    m.insert("api_keys.models_dialog_title", "All available models");
+    m.insert(
+        "api_keys.models_dialog_description",
+        "Models available to the current API Key ({count} total)",
+    );
     m.insert(
         "api_keys.quick_example",
         "2. Quick start example, ready to copy",
@@ -1735,6 +1751,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Using provider default endpoint",
     );
     m.insert("accounts.no_models", "No models configured");
+    m.insert(
+        "accounts.models_more_aria",
+        "View the remaining {count} models",
+    );
+    m.insert("accounts.models_dialog_title", "Supported models");
+    m.insert(
+        "accounts.models_dialog_description",
+        "All models declared by this channel account ({count} total)",
+    );
     m.insert("accounts.route_ready", "Available for normal routing");
     m.insert(
         "accounts.enabled_but_unhealthy",

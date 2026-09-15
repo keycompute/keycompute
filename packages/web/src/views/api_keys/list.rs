@@ -9,6 +9,7 @@ use crate::stores::ui_store::UiStore;
 use crate::utils::on_copy;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
+use crate::views::shared::model_list::{ModelListEntry, ModelListModal};
 use dioxus::prelude::*;
 use ui::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, Pagination, Table,
@@ -52,6 +53,9 @@ pub fn ApiKeyList() -> Element {
     let mut example_tab = use_signal(|| "env".to_string());
     // 示例入口（Chat Completions / Responses / Anthropic Messages）
     let mut example_protocol = use_signal(|| "openai".to_string());
+    // 当前 API Key 创建成功面板中打开的完整模型列表。
+    let mut show_model_list = use_signal(|| false);
+    let mut selected_models = use_signal(Vec::<ModelListEntry>::new);
     let create_failed = i18n.t("api_keys.create_failed");
 
     // 获取模型列表（用于显示用法示例）：按当前示例协议拉取，
@@ -117,6 +121,12 @@ pub fn ApiKeyList() -> Element {
             }
         });
     };
+
+    let selected_model_entries = selected_models();
+    let model_list_description = i18n.t_with_args(
+        "api_keys.models_dialog_description",
+        &[("count", &selected_model_entries.len().to_string())],
+    );
 
     rsx! {
         div { class: "page-container kc-api-page",
@@ -266,7 +276,32 @@ pub fn ApiKeyList() -> Element {
                                         }
                                     }
                                     if available_models.len() > 6 {
-                                        p { class: "kc-api-model-more",
+                                        button {
+                                            class: "kc-api-model-more",
+                                            r#type: "button",
+                                            aria_label: {
+                                                i18n.t_with_args(
+                                                    "api_keys.models_more_aria",
+                                                    &[("count", &(available_models.len() - 6).to_string())],
+                                                )
+                                            },
+                                            onclick: {
+                                                let models = available_models
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(idx, model)| {
+                                                        ModelListEntry::new(
+                                                            model.id.clone(),
+                                                            Some(model.owned_by.clone()),
+                                                        )
+                                                        .with_default(idx == 0)
+                                                    })
+                                                    .collect::<Vec<_>>();
+                                                move |_| {
+                                                    selected_models.set(models.clone());
+                                                    show_model_list.set(true);
+                                                }
+                                            },
                                             "+{available_models.len() - 6} {i18n.t(\"api_keys.more_models\")}"
                                         }
                                     }
@@ -444,6 +479,14 @@ pub fn ApiKeyList() -> Element {
                     delete_candidate.set(None);
                     delete_modal_open.set(false);
                 },
+            }
+
+            ModelListModal {
+                open: show_model_list,
+                title: i18n.t("api_keys.models_dialog_title").to_string(),
+                description: model_list_description,
+                models: selected_model_entries,
+                onclose: move |_| show_model_list.set(false),
             }
 
             {

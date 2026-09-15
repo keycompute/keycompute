@@ -1,3 +1,4 @@
+use super::model_list::{ModelListEntry, ModelListModal};
 use client_api::api::admin::AccountTestResponse;
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
@@ -329,6 +330,11 @@ fn AdminAccountsView() -> Element {
     let mut show_delete = use_signal(|| false);
     let mut deleting = use_signal(|| false);
 
+    // 当前查看完整模型列表的渠道账号。
+    let mut show_model_list = use_signal(|| false);
+    let mut selected_model_account = use_signal(String::new);
+    let mut selected_account_models = use_signal(Vec::<ModelListEntry>::new);
+
     use_effect(move || {
         let next_search = search();
         spawn(async move {
@@ -544,6 +550,21 @@ fn AdminAccountsView() -> Element {
     } else {
         i18n.t("accounts.confirm_delete")
     };
+    let selected_account_name = selected_model_account();
+    let selected_models = selected_account_models();
+    let model_list_description = i18n.t_with_args(
+        "accounts.models_dialog_description",
+        &[("count", &selected_models.len().to_string())],
+    );
+    let model_list_title = if selected_account_name.is_empty() {
+        i18n.t("accounts.models_dialog_title").to_string()
+    } else {
+        format!(
+            "{} · {}",
+            selected_account_name,
+            i18n.t("accounts.models_dialog_title")
+        )
+    };
 
     rsx! {
         div { class: "page-container",
@@ -697,7 +718,28 @@ fn AdminAccountsView() -> Element {
                                                                 span { class: "account-model-chip", "{model}" }
                                                             }
                                                             if acc.models.len() > 2 {
-                                                                span { class: "account-model-chip account-model-chip-muted",
+                                                                button {
+                                                                    class: "account-model-chip account-model-chip-muted account-model-chip-more",
+                                                                    r#type: "button",
+                                                                    aria_label: {
+                                                                        i18n.t_with_args(
+                                                                            "accounts.models_more_aria",
+                                                                            &[("count", &(acc.models.len() - 2).to_string())],
+                                                                        )
+                                                                    },
+                                                                    onclick: {
+                                                                        let account_name = acc.name.clone();
+                                                                        let models = acc
+                                                                            .models
+                                                                            .iter()
+                                                                            .map(|model| ModelListEntry::new(model.clone(), None))
+                                                                            .collect::<Vec<_>>();
+                                                                        move |_| {
+                                                                            selected_model_account.set(account_name.clone());
+                                                                            selected_account_models.set(models.clone());
+                                                                            show_model_list.set(true);
+                                                                        }
+                                                                    },
                                                                     "+{acc.models.len() - 2}"
                                                                 }
                                                             }
@@ -1390,6 +1432,14 @@ fn AdminAccountsView() -> Element {
                         }
                     }
                 }
+            }
+
+            ModelListModal {
+                open: show_model_list,
+                title: model_list_title,
+                description: model_list_description,
+                models: selected_models,
+                onclose: move |_| show_model_list.set(false),
             }
         }
     }
