@@ -211,7 +211,7 @@ fn DistributionOverviewContent() -> Element {
                 }
 
                 // 推荐列表
-                div { class: "card",
+                div { class: "card table-pagination-panel",
                     div { class: "card-header",
                         h3 { class: "card-title", {i18n.t("distribution.referral_users")} }
                     }
@@ -270,7 +270,7 @@ fn DistributionOverviewContent() -> Element {
                             ],
                         ),
                         page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                        page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                        page_size_suffix: i18n.t("common.items_suffix").to_string(),
                         previous_label: i18n.t("table.previous").to_string(),
                         next_label: i18n.t("table.next").to_string(),
                         on_page_change: move |value| page.set(value),

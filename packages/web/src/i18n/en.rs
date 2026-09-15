@@ -211,6 +211,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Total {total} items, Page {current} of {total_pages}",
     );
     m.insert("common.pagination_page_size", "Per page");
+    m.insert("common.items_suffix", "items");
     m.insert("common.created_at_label", "Created");
     m.insert("common.load_failed", "Load failed");
     m.insert(

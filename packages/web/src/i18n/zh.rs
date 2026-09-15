@@ -187,6 +187,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "共 {total} 条，第 {current}/{total_pages} 页",
     );
     m.insert("common.pagination_page_size", "每页");
+    m.insert("common.items_suffix", "条");
     m.insert("common.created_at_label", "创建于");
     m.insert("common.load_failed", "加载失败");
     m.insert(

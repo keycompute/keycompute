@@ -138,6 +138,12 @@ pub fn Pagination(
     #[props(default = "items".to_string())]
     page_size_suffix: String,
 ) -> Element {
+    // Keep an empty first page uncluttered, but retain the recovery control
+    // when the parent is still requesting a page that no longer exists.
+    if !should_render_pagination(total, current) {
+        return rsx! {};
+    }
+
     let requested_current = current;
     let (total_pages, current) = normalized_page(current, total_pages);
     let previous_page = previous_page_target(requested_current, current, total_pages);
@@ -215,6 +221,10 @@ fn normalized_page(current: u32, total_pages: u32) -> (u32, u32) {
     (total_pages, current)
 }
 
+fn should_render_pagination(total: u64, current: u32) -> bool {
+    total > 0 || current > 1
+}
+
 fn previous_page_target(requested_current: u32, current: u32, total_pages: u32) -> Option<u32> {
     if requested_current <= 1 {
         None
@@ -233,7 +243,9 @@ fn next_page_target(requested_current: u32, current: u32, total_pages: u32) -> O
 
 #[cfg(test)]
 mod tests {
-    use super::{next_page_target, normalized_page, previous_page_target};
+    use super::{
+        next_page_target, normalized_page, previous_page_target, should_render_pagination,
+    };
 
     #[test]
     fn out_of_range_pages_are_clamped_to_an_accessible_page() {
@@ -249,6 +261,13 @@ mod tests {
         assert_eq!(previous_page_target(1, 1, 3), None);
         assert_eq!(next_page_target(1, 1, 3), Some(2));
         assert_eq!(next_page_target(3, 3, 3), None);
+    }
+
+    #[test]
+    fn empty_first_page_hides_controls_but_stale_page_keeps_recovery() {
+        assert!(!should_render_pagination(0, 1));
+        assert!(should_render_pagination(0, 2));
+        assert!(should_render_pagination(1, 1));
     }
 
     #[test]

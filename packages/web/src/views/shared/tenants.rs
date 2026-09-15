@@ -171,6 +171,7 @@ pub fn Tenants() -> Element {
                 .map(|result| result.tenants.as_slice())
                 .unwrap_or_default();
             rsx! {
+                div { class: "table-pagination-panel table-pagination-frame",
                 Table {
                     empty: is_empty,
                     empty_text: empty_text.to_string(),
@@ -269,11 +270,12 @@ pub fn Tenants() -> Element {
                         ],
                     ),
                     page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
                     previous_label: i18n.t("table.previous").to_string(),
                     next_label: i18n.t("table.next").to_string(),
                     on_page_change: move |page| query.write().page = page,
                     on_page_size_change: move |size| query.write().set_page_size(size),
+                }
                 }
             }
         }

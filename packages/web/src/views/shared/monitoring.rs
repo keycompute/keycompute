@@ -421,6 +421,7 @@ pub fn Monitoring() -> Element {
                     MonitoringTrends { series: summary.series.clone() }
 
                     h2 { class: "monitoring-request-heading", {i18n.t("monitoring.request")} }
+                    div { class: "table-pagination-panel table-pagination-frame monitoring-table-panel",
                     if requests.items.is_empty() {
                         div { class: "empty-state monitoring-request-empty",
                             if status_filter().is_empty() && route_filter().is_empty() {
@@ -463,58 +464,65 @@ pub fn Monitoring() -> Element {
                             span { class: "pagination-summary",
                                 {i18n.t_with_args("monitoring.page", &[("page", &monitoring_page().to_string())])}
                             }
-                            label { class: "pagination-page-size",
-                                {i18n.t("common.pagination_page_size")}
-                                select {
-                                    value: "{monitoring_page_size}",
-                                    onchange: move |event| {
-                                        if let Ok(size) = event.value().parse::<u32>() {
-                                            monitoring_page_size.set(size);
-                                            cursor.set(String::new());
-                                            cursor_history.write().clear();
-                                            monitoring_page.set(1);
-                                        }
-                                    },
-                                    for size in [20u32, 50, 100] {
-                                        option { value: "{size}", "{size} {i18n.t(\"pricing.items_suffix\")}" }
-                                    }
-                                }
-                            }
-                            button {
-                                class: "btn btn-secondary monitoring-prev-page",
-                                r#type: "button",
-                                disabled: console_pending || cursor_history.read().is_empty(),
-                                onclick: move |_| {
-                                    if current_console().is_none() {
-                                        return;
-                                    }
-                                    if let Some(previous) = cursor_history.write().pop() {
-                                        cursor.set(previous);
-                                        monitoring_page.set(monitoring_page().saturating_sub(1));
-                                    }
-                                },
-                                {i18n.t("table.previous")}
-                            }
-                            if let Some(ref next) = requests.next_cursor {
+                            div { class: "pagination-actions",
                                 button {
-                                    class: "btn btn-secondary monitoring-next-page",
+                                    class: "btn btn-ghost btn-sm monitoring-prev-page",
                                     r#type: "button",
-                                    disabled: console_pending,
+                                    disabled: console_pending || cursor_history.read().is_empty(),
                                     onclick: {
-                                        let next = next.clone();
                                         move |_| {
                                             if current_console().is_none() {
                                                 return;
                                             }
-                                            cursor_history.write().push(cursor());
-                                            cursor.set(next.clone());
-                                            monitoring_page += 1;
+                                            if let Some(previous) = cursor_history.write().pop() {
+                                                cursor.set(previous);
+                                                monitoring_page.set(monitoring_page().saturating_sub(1));
+                                            }
                                         }
                                     },
-                                    {i18n.t("monitoring.next_page")}
+                                    {i18n.t("table.previous")}
+                                }
+                                if let Some(ref next) = requests.next_cursor {
+                                    button {
+                                        class: "btn btn-ghost btn-sm monitoring-next-page",
+                                        r#type: "button",
+                                        disabled: console_pending,
+                                        onclick: {
+                                            let next = next.clone();
+                                            move |_| {
+                                                if current_console().is_none() {
+                                                    return;
+                                                }
+                                                cursor_history.write().push(cursor());
+                                                cursor.set(next.clone());
+                                                monitoring_page += 1;
+                                            }
+                                        },
+                                        {i18n.t("monitoring.next_page")}
+                                    }
+                                }
+                                label { class: "pagination-page-size",
+                                    span { {i18n.t("common.pagination_page_size")} }
+                                    select {
+                                        aria_label: i18n.t("common.pagination_page_size"),
+                                        value: "{monitoring_page_size}",
+                                        onchange: move |event| {
+                                            if let Ok(size) = event.value().parse::<u32>() {
+                                                monitoring_page_size.set(size);
+                                                cursor.set(String::new());
+                                                cursor_history.write().clear();
+                                                monitoring_page.set(1);
+                                            }
+                                        },
+                                        for size in [10u32, 20, 50, 100] {
+                                            option { value: "{size}", "{size}" }
+                                        }
+                                    }
+                                    span { {i18n.t("common.items_suffix")} }
                                 }
                             }
                         }
+                    }
                     }
                     MonitoringHealth { data: health.clone() }
                 },

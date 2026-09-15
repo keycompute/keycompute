@@ -206,7 +206,7 @@ pub fn Pricing() -> Element {
                     .map(|result| result.pricing.as_slice())
                     .unwrap_or_default();
                 rsx! {
-                    div { class: "pricing-table-shell",
+                    div { class: "pricing-table-shell table-pagination-panel",
                         div { class: "pricing-table-intro",
                             div {
                                 h2 { class: "pricing-table-title", {i18n.t("pricing.table_title")} }
@@ -399,7 +399,7 @@ pub fn Pricing() -> Element {
                             ],
                         ),
                         page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                        page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                        page_size_suffix: i18n.t("common.items_suffix").to_string(),
                         previous_label: i18n.t("table.previous").to_string(),
                         next_label: i18n.t("table.next").to_string(),
                         on_page_change: move |p| query.write().page = p,

@@ -1860,7 +1860,7 @@ fn AdminUsersView() -> Element {
             }
         }
 
-        div { class: "card",
+        div { class: "card table-pagination-panel",
             {
                 let (is_empty, empty_text) = match users_result.as_ref().map(|r| r.as_ref()) {
                     None => (true, i18n.t("table.loading")),
@@ -1981,9 +1981,7 @@ fn AdminUsersView() -> Element {
                     }
                 }
             }
-        }
-
-        {
+            {
             let current_query = query();
             let total = total_items;
             rsx! { Pagination {
@@ -2000,12 +1998,13 @@ fn AdminUsersView() -> Element {
                     ],
                 ),
                 page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                page_size_suffix: i18n.t("common.items_suffix").to_string(),
                 previous_label: i18n.t("table.previous").to_string(),
                 next_label: i18n.t("table.next").to_string(),
                 on_page_change: move |p| query.write().page = p,
                 on_page_size_change: move |size| query.write().set_page_size(size),
             } }
+        }
         }
 
         // ── 编辑用户弹窗 ──────────────────────────────────────────
@@ -2249,20 +2248,22 @@ fn AdminUsersView() -> Element {
                                     }
                                     if can_go_back {
                                         div { class: "pagination", style: "margin-top: 12px;",
-                                            Button {
-                                                variant: ButtonVariant::Ghost,
-                                                size: ButtonSize::Small,
-                                                disabled: balance_modal_busy,
-                                                onclick: move |_| {
-                                                    release_request_id.set(None);
-                                                    release_expected_version.set(None);
-                                                    release_reason.set(String::new());
-                                                    balance_error.set(String::new());
-                                                    balance_reservation_pagination
-                                                        .write()
-                                                        .go_back(reservation_page_number);
-                                                },
-                                                {i18n.t("users.balance_reservations_previous_page")}
+                                            div { class: "pagination-actions",
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    disabled: balance_modal_busy,
+                                                    onclick: move |_| {
+                                                        release_request_id.set(None);
+                                                        release_expected_version.set(None);
+                                                        release_reason.set(String::new());
+                                                        balance_error.set(String::new());
+                                                        balance_reservation_pagination
+                                                            .write()
+                                                            .go_back(reservation_page_number);
+                                                    },
+                                                    {i18n.t("users.balance_reservations_previous_page")}
+                                                }
                                             }
                                         }
                                     }
@@ -2399,47 +2400,17 @@ fn AdminUsersView() -> Element {
                                         div {
                                             class: "pagination",
                                             style: "margin-top: 12px;",
-                                            Button {
-                                                variant: ButtonVariant::Ghost,
-                                                size: ButtonSize::Small,
-                                                disabled: balance_modal_busy || !can_go_back,
-                                                onclick: move |_| {
-                                                    release_request_id.set(None);
-                                                    release_expected_version.set(None);
-                                                    release_reason.set(String::new());
-                                                    balance_error.set(String::new());
-                                                    balance_reservation_pagination
-                                                        .write()
-                                                        .go_back(reservation_page_number);
-                                                },
-                                                {i18n.t("users.balance_reservations_previous_page")}
-                                            }
                                             span { class: "pagination-summary",
                                                 {i18n.t_with_args(
                                                     "users.balance_reservations_page",
                                                     &[("page", &reservation_page_number.to_string())],
                                                 )}
                                             }
-                                            label { class: "pagination-page-size",
-                                                {i18n.t("common.pagination_page_size")}
-                                                select {
-                                                    value: "{balance_reservation_page_size}",
-                                                    onchange: move |event| {
-                                                        if let Ok(size) = event.value().parse::<u64>() {
-                                                            balance_reservation_page_size.set(size);
-                                                            balance_reservation_pagination.write().reset();
-                                                        }
-                                                    },
-                                                    for size in [10u64, 20, 50, 100] {
-                                                        option { value: "{size}", "{size} {i18n.t(\"pricing.items_suffix\")}" }
-                                                    }
-                                                }
-                                            }
-                                            if let Some(next_cursor) = next_cursor {
+                                            div { class: "pagination-actions",
                                                 Button {
                                                     variant: ButtonVariant::Ghost,
                                                     size: ButtonSize::Small,
-                                                    disabled: balance_modal_busy,
+                                                    disabled: balance_modal_busy || !can_go_back,
                                                     onclick: move |_| {
                                                         release_request_id.set(None);
                                                         release_expected_version.set(None);
@@ -2447,12 +2418,46 @@ fn AdminUsersView() -> Element {
                                                         balance_error.set(String::new());
                                                         balance_reservation_pagination
                                                             .write()
-                                                            .advance(
-                                                                reservation_page_number,
-                                                                next_cursor.clone(),
-                                                            );
+                                                            .go_back(reservation_page_number);
                                                     },
-                                                    {i18n.t("users.balance_reservations_next_page")}
+                                                    {i18n.t("users.balance_reservations_previous_page")}
+                                                }
+                                                label { class: "pagination-page-size",
+                                                    span { {i18n.t("common.pagination_page_size")} }
+                                                    select {
+                                                        aria_label: i18n.t("common.pagination_page_size"),
+                                                        value: "{balance_reservation_page_size}",
+                                                        onchange: move |event| {
+                                                            if let Ok(size) = event.value().parse::<u64>() {
+                                                                balance_reservation_page_size.set(size);
+                                                                balance_reservation_pagination.write().reset();
+                                                            }
+                                                        },
+                                                        for size in [10u64, 20, 50, 100] {
+                                                            option { value: "{size}", "{size}" }
+                                                        }
+                                                    }
+                                                    span { {i18n.t("common.items_suffix")} }
+                                                }
+                                                if let Some(next_cursor) = next_cursor {
+                                                    Button {
+                                                        variant: ButtonVariant::Ghost,
+                                                        size: ButtonSize::Small,
+                                                        disabled: balance_modal_busy,
+                                                        onclick: move |_| {
+                                                            release_request_id.set(None);
+                                                            release_expected_version.set(None);
+                                                            release_reason.set(String::new());
+                                                            balance_error.set(String::new());
+                                                            balance_reservation_pagination
+                                                                .write()
+                                                                .advance(
+                                                                    reservation_page_number,
+                                                                    next_cursor.clone(),
+                                                                );
+                                                        },
+                                                        {i18n.t("users.balance_reservations_next_page")}
+                                                    }
                                                 }
                                             }
                                         }

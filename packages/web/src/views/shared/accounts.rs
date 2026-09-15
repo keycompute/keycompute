@@ -644,7 +644,7 @@ fn AdminAccountsView() -> Element {
                     .map(|result| result.accounts.as_slice())
                     .unwrap_or_default();
                 rsx! {
-                    div { class: "accounts-table-shell",
+                    div { class: "accounts-table-shell table-pagination-panel",
                         div { class: "accounts-table-intro",
                             div {
                                 h2 { class: "accounts-table-title", {i18n.t("accounts.table_title")} }
@@ -976,7 +976,7 @@ fn AdminAccountsView() -> Element {
                                 ],
                             ),
                             page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                            page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                            page_size_suffix: i18n.t("common.items_suffix").to_string(),
                             previous_label: i18n.t("table.previous").to_string(),
                             next_label: i18n.t("table.next").to_string(),
                             on_page_change: move |page| query.write().page = page,

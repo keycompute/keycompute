@@ -1204,7 +1204,7 @@ input, textarea, select {
 }
 
 .kc-api-pagination {
-  padding: 16px 0 0;
+  padding: 0;
 }
 
 @media (max-width: 780px) {
@@ -1925,8 +1925,7 @@ input, textarea, select {
 }
 
 .kc-api-pagination {
-  padding: 16px 24px;
-  border-top: 1px solid var(--border-color);
+  padding: 0;
 }
 
 @media (max-width: 780px) {
@@ -4041,7 +4040,35 @@ select.form-input:focus {
 }
 
 .pagination {
+  box-sizing: border-box;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--border-color);
   padding: 16px 24px;
+}
+
+.table-pagination-panel {
+  overflow: hidden;
+}
+
+.table-pagination-frame {
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.monitoring-table-panel .monitoring-request-table-container {
+  border: 0;
+  border-radius: 0;
+}
+
+.payment-orders-pagination-panel > .card {
+  border: 0;
+  border-radius: 0;
+}
+
+.table-pagination-panel .pagination {
+  margin-top: 0;
 }
 
 .pagination-summary {
@@ -4052,6 +4079,28 @@ select.form-input:focus {
   background: var(--bg-card);
   color: var(--text-primary);
   border-color: var(--border-color);
+}
+
+@media (max-width: 640px) {
+  .pagination {
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 8px 12px;
+    padding: 12px 16px;
+  }
+
+  .pagination-summary {
+    flex: 1 0 100%;
+  }
+
+  .pagination-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .pagination-page-size {
+    margin-left: auto;
+  }
 }
 
 .modal-backdrop,

@@ -54,7 +54,9 @@ pub fn NodeGateway() -> Element {
     let mut token_page = use_signal(|| 1u32);
     let mut node_page = use_signal(|| 1u32);
     let mut task_page = use_signal(|| 1u32);
-    let mut page_size = use_signal(|| PAGE_SIZE);
+    let mut token_page_size = use_signal(|| PAGE_SIZE);
+    let mut node_page_size = use_signal(|| PAGE_SIZE);
+    let mut task_page_size = use_signal(|| PAGE_SIZE);
     // 审批弹窗控制
     let mut modal_open = use_signal(|| false);
     let mut modal_token_id = use_signal(String::new);
@@ -83,7 +85,7 @@ pub fn NodeGateway() -> Element {
     let pending_tokens = use_resource(move || {
         let refresh_revision = tokens_key();
         let current_page = token_page();
-        let current_page_size = page_size();
+        let current_page_size = token_page_size();
         async move {
             let request_key =
                 NodeGatewayPageKey::new(refresh_revision, current_page, current_page_size);
@@ -102,7 +104,7 @@ pub fn NodeGateway() -> Element {
     let nodes = use_resource(move || {
         let refresh_revision = overview_key();
         let current_page = node_page();
-        let current_page_size = page_size();
+        let current_page_size = node_page_size();
         async move {
             let request_key =
                 NodeGatewayPageKey::new(refresh_revision, current_page, current_page_size);
@@ -121,7 +123,7 @@ pub fn NodeGateway() -> Element {
     let tasks = use_resource(move || {
         let refresh_revision = overview_key();
         let current_page = task_page();
-        let current_page_size = page_size();
+        let current_page_size = task_page_size();
         async move {
             let request_key =
                 NodeGatewayPageKey::new(refresh_revision, current_page, current_page_size);
@@ -247,17 +249,17 @@ pub fn NodeGateway() -> Element {
     };
 
     let pending_tokens_result = current_keyed_value(
-        &NodeGatewayPageKey::new(tokens_key(), token_page(), page_size()),
+        &NodeGatewayPageKey::new(tokens_key(), token_page(), token_page_size()),
         pending_tokens.state().cloned(),
         pending_tokens(),
     );
     let nodes_result = current_keyed_value(
-        &NodeGatewayPageKey::new(overview_key(), node_page(), page_size()),
+        &NodeGatewayPageKey::new(overview_key(), node_page(), node_page_size()),
         nodes.state().cloned(),
         nodes(),
     );
     let tasks_result = current_keyed_value(
-        &NodeGatewayPageKey::new(overview_key(), task_page(), page_size()),
+        &NodeGatewayPageKey::new(overview_key(), task_page(), task_page_size()),
         tasks.state().cloned(),
         tasks(),
     );
@@ -448,7 +450,7 @@ pub fn NodeGateway() -> Element {
                     }
 
                     // ── 注册令牌审批（Admin）──────────────────
-                    div { class: "section",
+                    div { class: "section table-pagination-panel",
                         div { class: "node-gateway-status-row",
                             div {
                                 h2 { class: "section-title", {i18n.t("node_gateway.token_approval_title")} }
@@ -546,7 +548,7 @@ pub fn NodeGateway() -> Element {
                                     current: token_page(),
                                     total_pages: result.total_pages.max(1) as u32,
                                     total: result.total,
-                                    page_size: page_size() as u32,
+                                    page_size: token_page_size() as u32,
                                     summary: i18n.t_with_args(
                                         "common.pagination_summary",
                                         &[
@@ -556,22 +558,20 @@ pub fn NodeGateway() -> Element {
                                         ],
                                     ),
                                     page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
                                     previous_label: i18n.t("table.previous").to_string(),
                                     next_label: i18n.t("table.next").to_string(),
                                     on_page_change: move |page| token_page.set(page),
                                     on_page_size_change: move |size| {
-                                        page_size.set(size as u64);
+                                        token_page_size.set(size as u64);
                                         token_page.set(1);
-                                        node_page.set(1);
-                                        task_page.set(1);
                                     },
                                 }
                             },
                         }
                     }
 
-                    div { class: "section",
+                    div { class: "section table-pagination-panel",
                         h2 { class: "section-title", {i18n.t("node_gateway.nodes_title")} }
                         match nodes_result.as_ref() {
                             None => rsx! {
@@ -686,7 +686,7 @@ pub fn NodeGateway() -> Element {
                                     current: node_page(),
                                     total_pages: result.total_pages.max(1) as u32,
                                     total: result.total,
-                                    page_size: page_size() as u32,
+                                    page_size: node_page_size() as u32,
                                     summary: i18n.t_with_args(
                                         "common.pagination_summary",
                                         &[
@@ -696,22 +696,20 @@ pub fn NodeGateway() -> Element {
                                         ],
                                     ),
                                     page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
                                     previous_label: i18n.t("table.previous").to_string(),
                                     next_label: i18n.t("table.next").to_string(),
                                     on_page_change: move |page| node_page.set(page),
                                     on_page_size_change: move |size| {
-                                        page_size.set(size as u64);
-                                        token_page.set(1);
+                                        node_page_size.set(size as u64);
                                         node_page.set(1);
-                                        task_page.set(1);
                                     },
                                 }
                             },
                         }
                     }
 
-                    div { class: "section",
+                    div { class: "section table-pagination-panel",
                         h2 { class: "section-title", {i18n.t("node_gateway.tasks_title")} }
                         match tasks_result.as_ref() {
                             None => rsx! {
@@ -754,7 +752,7 @@ pub fn NodeGateway() -> Element {
                                     current: task_page(),
                                     total_pages: result.total_pages.max(1) as u32,
                                     total: result.total,
-                                    page_size: page_size() as u32,
+                                    page_size: task_page_size() as u32,
                                     summary: i18n.t_with_args(
                                         "common.pagination_summary",
                                         &[
@@ -764,14 +762,12 @@ pub fn NodeGateway() -> Element {
                                         ],
                                     ),
                                     page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("pricing.items_suffix").to_string(),
+                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
                                     previous_label: i18n.t("table.previous").to_string(),
                                     next_label: i18n.t("table.next").to_string(),
                                     on_page_change: move |page| task_page.set(page),
                                     on_page_size_change: move |size| {
-                                        page_size.set(size as u64);
-                                        token_page.set(1);
-                                        node_page.set(1);
+                                        task_page_size.set(size as u64);
                                         task_page.set(1);
                                     },
                                 }
