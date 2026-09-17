@@ -230,7 +230,13 @@ impl NodeTestEnv {
             keycompute_runtime::redis_store::RedisRuntimeStore::new(&redis_url)
                 .map_err(|e| anyhow::anyhow!("Redis connection failed: {}", e))?,
         );
-        let redis = NodeGatewayRedis::new(Arc::clone(&redis_store));
+        let redis = NodeGatewayRedis::new(
+            Arc::clone(&redis_store),
+            &keycompute_config::RedisConfig {
+                url: redis_url.clone(),
+                ..Default::default()
+            },
+        )?;
 
         let service = NodeGatewayService::new(store, redis.clone(), config.clone());
 

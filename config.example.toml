@@ -79,6 +79,12 @@ url = "redis://:change-me-redis-password@127.0.0.1:6379"
 pool_size = 10
 # 连接超时（秒）
 connect_timeout_secs = 5
+# 节点领取和结果等待各有独立阻塞池，不占用上面的快速命令池
+node_poll_pool_size = 10
+node_result_pool_size = 10
+# 所有池的槽位等待/回收探测超时，以及快速命令响应超时（毫秒）
+pool_wait_timeout_ms = 1000
+command_timeout_ms = 5000
 
 # ==================== 认证配置 ====================
 [auth]

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 # 被测试的 crates
+keycompute-config = { path = "../keycompute-config" }
 keycompute-types = { workspace = true }
 keycompute-db = { workspace = true }
 keycompute-auth = { workspace = true }

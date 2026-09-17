@@ -2,13 +2,54 @@
 //!
 //! 负责任务队列管理和结果通知
 
-use deadpool_redis::redis::AsyncCommands;
+use deadpool_redis::{Connection, Pool, redis::AsyncCommands};
+use keycompute_config::RedisConfig;
 use keycompute_runtime::redis_store::RedisRuntimeStore;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+use tokio::time::{Instant, timeout_at};
 use tracing;
 use uuid::Uuid;
 
 const RESULT_NOTIFICATION_TTL_SECS: u64 = 5 * 60;
+// Redis checks blocked-client timeouts on its event loop. Allow finite
+// transport/scheduling grace, without turning a broken socket into an
+// indefinite wait. The caller's outer request deadline still wins.
+const BLOCKING_RESPONSE_GRACE: Duration = Duration::from_millis(250);
+
+/// A pending BRPOP must never return to the pool on task cancellation or a
+/// transport timeout: dropping only its future does not cancel the server-side
+/// command. Detach and drop the last multiplexed connection handle instead,
+/// which aborts redis-rs's canonical connection driver and closes the socket.
+struct BlockingConnection {
+    connection: Option<Connection>,
+}
+
+impl BlockingConnection {
+    fn new(connection: Connection) -> Self {
+        Self {
+            connection: Some(connection),
+        }
+    }
+
+    fn connection(&mut self) -> &mut Connection {
+        self.connection
+            .as_mut()
+            .expect("blocking connection is owned")
+    }
+
+    fn recycle(mut self) {
+        // Only a fully received successful reply makes recycling safe.
+        drop(self.connection.take());
+    }
+}
+
+impl Drop for BlockingConnection {
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            drop(Connection::take(connection));
+        }
+    }
+}
 
 // Keep the existing Redis List representation for deployment compatibility,
 // but make recovery publication idempotent. The script is atomic with BRPOP:
@@ -31,12 +72,73 @@ return 1
 #[derive(Clone)]
 pub struct NodeGatewayRedis {
     redis: Arc<RedisRuntimeStore>,
+    poll_pool: Pool,
+    result_pool: Pool,
+    command_timeout: Duration,
 }
 
 impl NodeGatewayRedis {
-    /// 创建新的 Redis 管理器
-    pub fn new(redis: Arc<RedisRuntimeStore>) -> Self {
-        Self { redis }
+    /// Share only short commands with the application. Construct two new
+    /// pools (not clones of the command pool) for task claims and result waits.
+    /// Both pools use the same configured Redis endpoint/database as producers.
+    pub fn new(redis: Arc<RedisRuntimeStore>, config: &RedisConfig) -> anyhow::Result<Self> {
+        let make_pool = |size| {
+            RedisRuntimeStore::create_pool_with_timeouts(
+                &config.url,
+                size,
+                Duration::from_secs(config.connect_timeout_secs),
+                Duration::from_millis(config.pool_wait_timeout_ms),
+                Duration::from_millis(config.command_timeout_ms),
+            )
+        };
+        Ok(Self {
+            redis,
+            poll_pool: make_pool(config.node_poll_pool_size as usize)?,
+            result_pool: make_pool(config.node_result_pool_size as usize)?,
+            command_timeout: Duration::from_millis(config.command_timeout_ms),
+        })
+    }
+
+    /// A caller's blocking budget includes pool acquisition; pool saturation
+    /// therefore cannot silently extend a Node poll by another full BRPOP.
+    async fn blocking_pop(
+        &self,
+        pool: &Pool,
+        key: &str,
+        blocking_timeout: Duration,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        anyhow::ensure!(
+            !blocking_timeout.is_zero(),
+            "Redis blocking timeout must be positive"
+        );
+        let deadline = Instant::now()
+            .checked_add(blocking_timeout)
+            .ok_or_else(|| anyhow::anyhow!("Redis blocking timeout is out of range"))?;
+        let connection = timeout_at(deadline, pool.get()).await??;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(None);
+        }
+        let response_deadline = deadline
+            .checked_add(BLOCKING_RESPONSE_GRACE)
+            .ok_or_else(|| anyhow::anyhow!("Redis blocking response timeout is out of range"))?;
+        let response_timeout = response_deadline.saturating_duration_since(Instant::now());
+        let mut connection = BlockingConnection::new(connection);
+        connection
+            .connection()
+            .set_response_timeout(response_timeout);
+        let result = timeout_at(
+            response_deadline,
+            connection.connection().brpop(key, remaining.as_secs_f64()),
+        )
+        .await?;
+        if result.is_ok() {
+            connection
+                .connection()
+                .set_response_timeout(self.command_timeout);
+            connection.recycle();
+        }
+        Ok(result?)
     }
 
     fn model_queue_key(model: &str) -> String {
@@ -62,11 +164,20 @@ impl NodeGatewayRedis {
         model: &str,
         timeout_secs: u64,
     ) -> Result<Option<Uuid>, anyhow::Error> {
-        let queue_key = Self::model_queue_key(model);
+        self.pop_from_model_queue_with_timeout(model, Duration::from_secs(timeout_secs))
+            .await
+    }
 
-        let mut conn = self.redis.pool().get().await?;
-        let result: Option<(String, String)> =
-            conn.brpop(&[queue_key], timeout_secs as f64).await?;
+    /// Claim with an exact remaining Node poll budget (including pool admission).
+    pub async fn pop_from_model_queue_with_timeout(
+        &self,
+        model: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Option<Uuid>> {
+        let queue_key = Self::model_queue_key(model);
+        let result = self
+            .blocking_pop(&self.poll_pool, &queue_key, timeout)
+            .await?;
 
         match result {
             Some((_, task_id_str)) => {
@@ -109,9 +220,13 @@ impl NodeGatewayRedis {
     ) -> Result<Option<String>, anyhow::Error> {
         let result_key = format!("task:result:{}", task_id);
 
-        let mut conn = self.redis.pool().get().await?;
-        let result: Option<(String, String)> =
-            conn.brpop(&[result_key], timeout_secs as f64).await?;
+        let result = self
+            .blocking_pop(
+                &self.result_pool,
+                &result_key,
+                Duration::from_secs(timeout_secs),
+            )
+            .await?;
 
         match result {
             Some((_, status)) => Ok(Some(status)),
@@ -163,3 +278,6 @@ impl NodeGatewayRedis {
         Ok(removed)
     }
 }
+
+#[cfg(test)]
+mod tests;

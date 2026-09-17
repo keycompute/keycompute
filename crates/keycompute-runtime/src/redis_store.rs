@@ -41,15 +41,9 @@ impl RedisRuntimeStore {
     /// # 参数
     /// - `redis_url`: Redis 连接 URL
     pub fn new(redis_url: &str) -> Result<Self, RedisStoreError> {
-        let cfg = Config::from_url(redis_url);
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1))
-            .map_err(|e| RedisStoreError::CreatePoolError(e.to_string()))?;
-
-        Ok(Self {
-            pool,
-            key_prefix: "keycompute:runtime".to_string(),
-            default_ttl: Duration::from_secs(300),
+        Self::from_config(&RedisPoolConfig {
+            url: redis_url.to_string(),
+            ..RedisPoolConfig::default()
         })
     }
 
@@ -58,15 +52,10 @@ impl RedisRuntimeStore {
         redis_url: &str,
         prefix: impl Into<String>,
     ) -> Result<Self, RedisStoreError> {
-        let cfg = Config::from_url(redis_url);
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1))
-            .map_err(|e| RedisStoreError::CreatePoolError(e.to_string()))?;
-
-        Ok(Self {
-            pool,
+        Self::from_config(&RedisPoolConfig {
+            url: redis_url.to_string(),
             key_prefix: prefix.into(),
-            default_ttl: Duration::from_secs(300),
+            ..RedisPoolConfig::default()
         })
     }
 
@@ -112,9 +101,8 @@ impl RedisRuntimeStore {
     /// 供 `state.rs` 等调用方获取 Pool 后传递给多个消费者，
     /// 避免外部模块直接依赖 `deadpool_redis::Config`。
     pub fn create_pool(redis_url: &str) -> Result<Pool, RedisStoreError> {
-        let cfg = Config::from_url(redis_url);
-        cfg.create_pool(Some(Runtime::Tokio1))
-            .map_err(|e| RedisStoreError::CreatePoolError(e.to_string()))
+        let defaults = RedisPoolConfig::default();
+        Self::create_pool_with_options(redis_url, defaults.pool_size, defaults.connect_timeout)
     }
 
     /// 从 URL 和连接池参数创建共享连接池。
@@ -123,16 +111,56 @@ impl RedisRuntimeStore {
         pool_size: usize,
         connect_timeout: Duration,
     ) -> Result<Pool, RedisStoreError> {
+        Self::create_pool_with_timeouts(
+            redis_url,
+            pool_size,
+            connect_timeout,
+            Duration::from_secs(1),
+            Duration::from_secs(5),
+        )
+    }
+
+    /// Create a pool for short commands. All admission, connection and recycle
+    /// waits are finite; response timeouts also cover a connected but stalled
+    /// Redis server. Blocking consumers must use a separate pool and override
+    /// the response timeout for the duration of their blocking operation.
+    pub fn create_pool_with_timeouts(
+        redis_url: &str,
+        pool_size: usize,
+        connect_timeout: Duration,
+        wait_timeout: Duration,
+        response_timeout: Duration,
+    ) -> Result<Pool, RedisStoreError> {
+        if pool_size == 0
+            || pool_size > 65_536
+            || connect_timeout.is_zero()
+            || wait_timeout.is_zero()
+            || response_timeout.is_zero()
+            || wait_timeout > Duration::from_secs(60)
+            || response_timeout > Duration::from_secs(60)
+        {
+            return Err(RedisStoreError::CreatePoolError(
+                "invalid Redis pool capacity or timeout".to_string(),
+            ));
+        }
         let mut cfg = Config::from_url(redis_url);
         cfg.pool = Some(deadpool_redis::PoolConfig {
             max_size: pool_size,
             timeouts: Timeouts {
                 create: Some(connect_timeout),
-                ..Timeouts::default()
+                wait: Some(wait_timeout),
+                recycle: Some(wait_timeout),
             },
             ..Default::default()
         });
-        cfg.create_pool(Some(Runtime::Tokio1))
+        cfg.builder()
+            .map_err(|e| RedisStoreError::CreatePoolError(e.to_string()))?
+            .runtime(Runtime::Tokio1)
+            .post_create(deadpool_redis::Hook::sync_fn(move |connection, _| {
+                connection.set_response_timeout(response_timeout);
+                Ok(())
+            }))
+            .build()
             .map_err(|e| RedisStoreError::CreatePoolError(e.to_string()))
     }
 
@@ -296,5 +324,61 @@ mod tests {
         .expect("pool construction should not require a live Redis server");
 
         assert_eq!(pool.status().max_size, 17);
+    }
+
+    #[test]
+    fn every_default_factory_bounds_admission_and_recycling() {
+        let url = "redis://127.0.0.1:6379";
+        let plain = RedisRuntimeStore::new(url).unwrap();
+        let prefixed = RedisRuntimeStore::with_prefix(url, "test:prefix").unwrap();
+        assert_eq!(prefixed.key_prefix, "test:prefix");
+        let direct = RedisRuntimeStore::create_pool(url).unwrap();
+        for pool in [plain.pool(), prefixed.pool(), &direct] {
+            assert_eq!(pool.status().max_size, 10);
+            assert_eq!(pool.timeouts().create, Some(Duration::from_secs(5)));
+            assert_eq!(pool.timeouts().wait, Some(Duration::from_secs(1)));
+            assert_eq!(pool.timeouts().recycle, Some(Duration::from_secs(1)));
+        }
+    }
+
+    #[test]
+    fn configured_pool_preserves_each_timeout_budget() {
+        let pool = RedisRuntimeStore::create_pool_with_timeouts(
+            "redis://127.0.0.1:6379",
+            7,
+            Duration::from_secs(3),
+            Duration::from_millis(123),
+            Duration::from_millis(456),
+        )
+        .unwrap();
+        assert_eq!(pool.status().max_size, 7);
+        assert_eq!(pool.timeouts().create, Some(Duration::from_secs(3)));
+        assert_eq!(pool.timeouts().wait, Some(Duration::from_millis(123)));
+        assert_eq!(pool.timeouts().recycle, Some(Duration::from_millis(123)));
+    }
+
+    #[test]
+    fn invalid_pool_settings_fail_before_connecting() {
+        let second = Duration::from_secs(1);
+        for (size, connect, wait, response) in [
+            (0, second, second, second),
+            (65_537, second, second, second),
+            (1, Duration::ZERO, second, second),
+            (1, second, Duration::ZERO, second),
+            (1, second, second, Duration::ZERO),
+            (1, second, Duration::from_secs(61), second),
+            (1, second, second, Duration::from_secs(61)),
+        ] {
+            assert!(
+                RedisRuntimeStore::create_pool_with_timeouts(
+                    "redis://127.0.0.1:6379",
+                    size,
+                    connect,
+                    wait,
+                    response,
+                )
+                .is_err()
+            );
+        }
     }
 }

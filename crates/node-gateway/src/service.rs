@@ -174,6 +174,9 @@ impl NodeGatewayService {
         let wait_timeout = Duration::from_secs(deadline_secs);
         let result = tokio::time::timeout(wait_timeout, async {
             loop {
+                // A full/unavailable result pool must not turn the database
+                // fallback into a 100 ms busy poll for every waiting task.
+                let retry_at = tokio::time::Instant::now() + Duration::from_secs(1);
                 // 3.1 尝试从 Redis 获取结果通知
                 if let Ok(Some(_status)) = self.redis.wait_for_result(task.id, 1).await {
                     // Redis notification is only a wake-up hint. Reload the
@@ -182,14 +185,14 @@ impl NodeGatewayService {
                 }
 
                 // 3.3 直接查询 Postgres（兜底）
-                if let Ok(Some(task)) = NodeTask::find_by_id(self.store.pool(), task.id).await
+                if let Ok(Some(task)) =
+                    NodeTask::find_by_id(self.store.pool().write_conn(), task.id).await
                     && task.is_terminal()
                 {
                     return self.query_task_result(task.id).await;
                 }
 
-                // 短暂休眠后继续轮询
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep_until(retry_at).await;
             }
         })
         .await;
@@ -439,10 +442,13 @@ impl NodeGatewayService {
                 break; // 超时，不再尝试更多模型
             }
 
-            // 当前模型的等待时间：取剩余时间和单个模型最小等待时间（2秒）的较大值
-            let model_timeout = remaining.as_secs().max(2);
-
-            match self.redis.pop_from_model_queue(&model, model_timeout).await {
+            // Preserve the remaining deadline, including fractional seconds and
+            // pool acquisition. Do not add another minimum two-second wait.
+            match self
+                .redis
+                .pop_from_model_queue_with_timeout(&model, remaining)
+                .await
+            {
                 Ok(Some(task_id)) => {
                     // 3. 原子 claim 任务
                     match self.store.claim_task(task_id, node_id, session_id).await? {
@@ -490,7 +496,7 @@ impl NodeGatewayService {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to pop from queue for model {}: {}", model, e);
-                    continue;
+                    break;
                 }
             }
         }

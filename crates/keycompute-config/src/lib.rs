@@ -462,10 +462,26 @@ impl AppConfig {
                     "Redis URL 不能为空".to_string(),
                 ));
             }
-            if redis_config.pool_size == 0 {
-                return Err(ConfigLoadError::ValidationError(
-                    "Redis 连接池大小不能为 0".to_string(),
-                ));
+            for (name, size) in [
+                ("pool_size", redis_config.pool_size),
+                ("node_poll_pool_size", redis_config.node_poll_pool_size),
+                ("node_result_pool_size", redis_config.node_result_pool_size),
+            ] {
+                if size == 0 || size > 65_536 {
+                    return Err(ConfigLoadError::ValidationError(format!(
+                        "Redis 连接池大小 {name} must be between 1 and 65536"
+                    )));
+                }
+            }
+            for (name, millis) in [
+                ("pool_wait_timeout_ms", redis_config.pool_wait_timeout_ms),
+                ("command_timeout_ms", redis_config.command_timeout_ms),
+            ] {
+                if millis == 0 || millis > 60_000 {
+                    return Err(ConfigLoadError::ValidationError(format!(
+                        "Redis {name} must be between 1 and 60000 ms"
+                    )));
+                }
             }
             if redis_config.connect_timeout_secs == 0 {
                 return Err(ConfigLoadError::ValidationError(
@@ -982,6 +998,10 @@ mod tests {
             ("KC__DATABASE__MAX_LIFETIME_SECS", "1800"),
             ("KC__REDIS__POOL_SIZE", "10"),
             ("KC__REDIS__CONNECT_TIMEOUT_SECS", "5"),
+            ("KC__REDIS__NODE_POLL_POOL_SIZE", "10"),
+            ("KC__REDIS__NODE_RESULT_POOL_SIZE", "10"),
+            ("KC__REDIS__POOL_WAIT_TIMEOUT_MS", "1000"),
+            ("KC__REDIS__COMMAND_TIMEOUT_MS", "5000"),
             ("KC__AUTH__JWT_SECRET", DEFAULT_JWT_SECRET),
             ("KC__AUTH__JWT_ISSUER", "keycompute"),
             ("KC__AUTH__JWT_EXPIRY_SECS", "3600"),
@@ -1209,6 +1229,26 @@ mod tests {
         }
         let config = AppConfig::from_env().expect("空列表环境变量应按未设置处理");
         assert!(config.database_routing.read_weights.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn production_redis_resource_settings_are_not_lost() {
+        let _env = EnvVarGuard::set(&[
+            ("KC__REDIS__URL", "redis://redis.internal:6379/4"),
+            ("KC__REDIS__POOL_SIZE", "23"),
+            ("KC__REDIS__NODE_POLL_POOL_SIZE", "11"),
+            ("KC__REDIS__NODE_RESULT_POOL_SIZE", "13"),
+            ("KC__REDIS__POOL_WAIT_TIMEOUT_MS", "137"),
+            ("KC__REDIS__COMMAND_TIMEOUT_MS", "733"),
+        ]);
+        let config = AppConfig::load_production().unwrap().redis.unwrap();
+        assert_eq!(config.url, "redis://redis.internal:6379/4");
+        assert_eq!(config.pool_size, 23);
+        assert_eq!(config.node_poll_pool_size, 11);
+        assert_eq!(config.node_result_pool_size, 13);
+        assert_eq!(config.pool_wait_timeout_ms, 137);
+        assert_eq!(config.command_timeout_ms, 733);
     }
 
     #[test]
@@ -1737,6 +1777,7 @@ mod tests {
                 url: "".to_string(),
                 pool_size: 10,
                 connect_timeout_secs: 5,
+                ..RedisConfig::default()
             }),
             ..Default::default()
         };
@@ -1747,6 +1788,64 @@ mod tests {
                 assert!(msg.contains("Redis URL"));
             }
             _ => panic!("期望 ValidationError"),
+        }
+    }
+
+    #[test]
+    fn test_validate_redis_resource_boundaries() {
+        for (field, redis) in [
+            (
+                "node_poll_pool_size",
+                RedisConfig {
+                    node_poll_pool_size: 0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "node_result_pool_size",
+                RedisConfig {
+                    node_result_pool_size: 65_537,
+                    ..Default::default()
+                },
+            ),
+            (
+                "pool_wait_timeout_ms",
+                RedisConfig {
+                    pool_wait_timeout_ms: 0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "pool_wait_timeout_ms",
+                RedisConfig {
+                    pool_wait_timeout_ms: 60_001,
+                    ..Default::default()
+                },
+            ),
+            (
+                "command_timeout_ms",
+                RedisConfig {
+                    command_timeout_ms: 0,
+                    ..Default::default()
+                },
+            ),
+            (
+                "command_timeout_ms",
+                RedisConfig {
+                    command_timeout_ms: 60_001,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let config = AppConfig {
+                redis: Some(redis),
+                ..Default::default()
+            };
+            assert!(
+                matches!(config.validate(), Err(ConfigLoadError::ValidationError(message))
+                if message.contains(field)),
+                "invalid Redis {field} accepted"
+            );
         }
     }
 
