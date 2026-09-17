@@ -56,6 +56,9 @@ pub struct AuthExtractor {
     pub role: String,
     /// 用户权限列表
     pub permissions: Vec<Permission>,
+    /// A resource permit, not an authorization decision; never serialized.
+    #[serde(skip)]
+    pub generation_permit: Option<keycompute_runtime::admission::AdmissionPermit>,
 }
 
 impl AuthExtractor {
@@ -72,6 +75,7 @@ impl AuthExtractor {
             produce_ai_key_id,
             role: role.into(),
             permissions: Vec::new(),
+            generation_permit: None,
         }
     }
 
@@ -144,6 +148,7 @@ impl AuthExtractor {
             produce_ai_key_id: ctx.produce_ai_key_id,
             role: ctx.role,
             permissions: ctx.permissions,
+            generation_permit: None,
         }
     }
 

@@ -246,3 +246,13 @@ sweeper_repush_interval_secs = 10
 # KC__PAYMENT__WECHATPAY__PREVIOUS_CALLBACK_KEYS_JSON=[{"public_key_id":"...","public_key":"...","api_v3_key":"..."}]
 # KC__PAYMENT__WECHATPAY__NOTIFY_URL=https://example.com/api/v1/payments/notify/wechatpay
 # KC__PAYMENT__WECHATPAY__TIMEOUT_MINUTES=15
+
+# Process-local resource protection; separate from billable RPM/TPM.
+[gateway.admission]
+global_limit = 256
+tenant_limit = 32
+account_limit = 32
+global_queue = 128
+tenant_queue = 16
+account_queue = 16
+queue_timeout_ms = 1000

@@ -448,6 +448,7 @@ pub struct GatewayExecutor {
     http_proxy: Option<Arc<HttpProxy>>,
     /// 默认 HTTP 传输层（无代理时复用，避免每次请求重建 reqwest::Client 连接池）
     default_transport: Arc<DefaultHttpTransport>,
+    account_admission: Option<Arc<keycompute_runtime::admission::BoundedAdmission>>,
 }
 
 impl GatewayExecutor {
@@ -461,6 +462,7 @@ impl GatewayExecutor {
             providers,
             http_proxy: None,
             default_transport: Arc::new(DefaultHttpTransport::new()),
+            account_admission: None,
         }
     }
 
@@ -475,7 +477,16 @@ impl GatewayExecutor {
             providers,
             http_proxy: Some(http_proxy),
             default_transport: Arc::new(DefaultHttpTransport::new()),
+            account_admission: None,
         }
+    }
+
+    pub fn with_account_admission(
+        mut self,
+        admission: Arc<keycompute_runtime::admission::BoundedAdmission>,
+    ) -> Self {
+        self.account_admission = Some(admission);
+        self
     }
 
     /// 获取 HTTP Proxy
@@ -542,6 +553,7 @@ impl GatewayExecutor {
             providers: self.providers.clone(),
             http_proxy: self.http_proxy.clone(),
             default_transport: Arc::clone(&self.default_transport),
+            account_admission: self.account_admission.clone(),
         };
 
         // 执行超时：防止上游 Provider 无限阻塞导致资源泄漏。
@@ -762,6 +774,37 @@ impl GatewayExecutor {
                 finish_pre_attempt_client_disconnect(&ctx, &lifecycle, billing_status).await;
                 return Err(KeyComputeError::Internal("client disconnected".to_string()));
             }
+            // Local capacity rejection is not an upstream failure. Do not
+            // poison health or retry the same saturated account repeatedly.
+            let _account_permit = if let (
+                Some(admission),
+                ExecutionTarget::ProviderAccount { account_id, .. },
+            ) = (&self.account_admission, &target)
+            {
+                let acquired = tokio::select! {
+                    biased;
+                    _ = tx.closed() => return Err(KeyComputeError::ServiceUnavailable("client disconnected during admission".into())),
+                    _ = ctx.wait_for_client_disconnect() => return Err(KeyComputeError::ServiceUnavailable("client disconnected during admission".into())),
+                    result = admission.acquire(*account_id) => result,
+                };
+                match acquired {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        last_error = Some(KeyComputeError::ServiceUnavailable(
+                            "upstream_capacity_exhausted".into(),
+                        ));
+                        next_eligible_index = targets
+                            .iter()
+                            .enumerate()
+                            .skip(target_index + 1)
+                            .find(|(_, next)| !same_provider_account(&target, &next.target))
+                            .map_or(target_count, |(index, _)| index);
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             let target_start = Instant::now();
             let attempt = match &target {
                 ExecutionTarget::ProviderAccount {
@@ -1036,6 +1079,29 @@ impl GatewayExecutor {
             let _ = tx.send(StreamEvent::Native { event }).await;
         }
 
+        if matches!(&last_error, Some(KeyComputeError::ServiceUnavailable(message)) if message == "upstream_capacity_exhausted")
+        {
+            ctx.set_execution_failure(RequestExecutionFailure {
+                status: RequestStatus::Failed,
+                error: TraceErrorInfo {
+                    origin: ErrorOrigin::Gateway,
+                    category: TraceErrorCategory::RateLimit,
+                    code: "upstream_capacity_exhausted".into(),
+                    summary: None,
+                    retryable: Some(true),
+                },
+                billing_status: BillingStatus::Pending,
+            });
+            ctx.set_client_upstream_response(keycompute_types::ClientUpstreamResponse {
+                status: 503,
+                headers: vec![("retry-after".into(), "1".into())],
+                body: serde_json::json!({"error": {
+                    "type": if ctx.native_anthropic_request.is_some() { "overloaded_error" } else { "server_error" },
+                    "code": "upstream_capacity_exhausted",
+                    "message": "Upstream account capacity is exhausted. Please retry later."
+                }}).to_string(),
+            });
+        }
         // 所有 target 都失败
         Err(last_error.unwrap_or_else(|| KeyComputeError::RoutingFailed(ctx.model.clone())))
     }
@@ -5881,5 +5947,147 @@ mod tests {
             ctx.billing_target("failing", primary_account_id),
             ("mid-stream-fail".to_string(), fallback_account_id)
         );
+    }
+    fn account_limiter(queue: usize) -> Arc<keycompute_runtime::admission::BoundedAdmission> {
+        use keycompute_runtime::admission::{AdmissionLimits, BoundedAdmission};
+        BoundedAdmission::new(AdmissionLimits {
+            total: 4,
+            per_key: 1,
+            queue,
+            queue_per_key: queue,
+            wait: Duration::from_millis(100),
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn account_admission_rejection_does_not_call_upstream_and_returns_503() {
+        let limiter = account_limiter(0);
+        let id = Uuid::new_v4();
+        let held = limiter.acquire(id).await.unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "counting".into(),
+            Arc::new(CountingProvider {
+                calls: calls.clone(),
+                notified: None,
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers)
+            .with_account_admission(limiter.clone());
+        let ctx = Arc::new(create_test_context());
+        let mut rx = executor
+            .execute(
+                ctx.clone(),
+                ExecutionPlan::new(ExecutionTarget::new_provider(
+                    "counting",
+                    id,
+                    "http://mock",
+                    "secret",
+                )),
+                Arc::new(AccountStateStore::new()),
+                None,
+            )
+            .await
+            .unwrap();
+        while tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(ctx.client_upstream_response().unwrap().status, 503);
+        assert_eq!(ctx.usage_snapshot(), (0, 0));
+        drop(held);
+        assert_eq!(limiter.status().active, 0);
+    }
+
+    #[tokio::test]
+    async fn account_admission_fallback_uses_free_account_without_unbounded_retries() {
+        let limiter = account_limiter(0);
+        let busy = Uuid::new_v4();
+        let free = Uuid::new_v4();
+        let held = limiter.acquire(busy).await.unwrap();
+        let mut providers = HashMap::new();
+        providers.insert(
+            "many-chunks".into(),
+            Arc::new(ManyChunksProvider { chunks: 1 }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers)
+            .with_account_admission(limiter.clone());
+        let ctx = Arc::new(create_test_context());
+        let plan = ExecutionPlan::new(ExecutionTarget::new_provider(
+            "many-chunks",
+            busy,
+            "http://mock",
+            "secret",
+        ))
+        .with_fallback(ExecutionTarget::new_provider(
+            "many-chunks",
+            free,
+            "http://mock",
+            "secret",
+        ));
+        let mut rx = executor
+            .execute(ctx.clone(), plan, Arc::new(AccountStateStore::new()), None)
+            .await
+            .unwrap();
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+        {
+            if matches!(event, StreamEvent::Done) {
+                break;
+            }
+        }
+        assert_eq!(ctx.executed_provider_account().unwrap().account_id, free);
+        drop((rx, held));
+    }
+
+    #[tokio::test]
+    async fn account_admission_holds_stream_slot_and_releases_on_disconnect() {
+        let limiter = account_limiter(1);
+        let id = Uuid::new_v4();
+        let started = Arc::new(Notify::new());
+        let (_send, receive) = mpsc::channel(2);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "pending-stream".into(),
+            Arc::new(PendingStreamProvider {
+                receiver: Mutex::new(Some(receive)),
+                started: started.clone(),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers)
+            .with_account_admission(limiter.clone());
+        let ctx = Arc::new(create_test_context());
+        let rx = executor
+            .execute(
+                ctx.clone(),
+                ExecutionPlan::new(ExecutionTarget::new_provider(
+                    "pending-stream",
+                    id,
+                    "http://mock",
+                    "secret",
+                )),
+                Arc::new(AccountStateStore::new()),
+                None,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        assert_eq!(limiter.active_for(id), 1);
+        ctx.mark_client_disconnected();
+        drop(rx);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while limiter.status().active != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disconnected stream leaked account capacity");
     }
 }

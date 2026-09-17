@@ -48,6 +48,9 @@ impl fmt::Debug for ClientUpstreamResponse {
 /// - `provider` 字段在路由确定后被设置，用于精确的定价查询
 #[derive(Clone)]
 pub struct RequestContext {
+    /// Shared ownership of ingress resource slots across streaming, executor and
+    /// settlement clones. This is runtime-only and never part of an API payload.
+    pub resource_guard: Option<Arc<dyn std::any::Any + Send + Sync>>,
     pub request_id: Uuid,
     /// Stable identity used by the immutable billing ledger and TPM
     /// deduplication. It normally equals `request_id`; an ingress that offers
@@ -261,6 +264,7 @@ impl RequestContext {
     ) -> Self {
         let (client_response_outcome, _) = watch::channel(None);
         Self {
+            resource_guard: None,
             request_id,
             billing_request_id: request_id,
             user_id,
@@ -305,6 +309,7 @@ impl RequestContext {
     /// the lifetime of the worker.
     pub fn clone_without_request_payloads(&self) -> Self {
         Self {
+            resource_guard: self.resource_guard.clone(),
             request_id: self.request_id,
             billing_request_id: self.billing_request_id,
             user_id: self.user_id,

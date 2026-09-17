@@ -88,10 +88,18 @@ pub async fn generation_http_body_admission_middleware(
     // deliberately lets invalid credentials reach the normal auth path, so
     // this middleware must not rely on rate limiting as an auth boundary.
     let (mut parts, body) = req.into_parts();
-    let auth = match AuthExtractor::from_request_parts(&mut parts, &state).await {
+    let mut auth = match AuthExtractor::from_request_parts(&mut parts, &state).await {
         Ok(auth) => auth,
         Err(error) => return error.into_response(),
     };
+    if let Err(error) = crate::admission::ensure_generation(&state, &mut auth).await {
+        let mut response = error.into_response();
+        response
+            .headers_mut()
+            .insert("retry-after", HeaderValue::from_static("1"));
+        return response;
+    }
+    let generation_permit = auth.generation_permit.clone();
     parts.extensions.insert(auth);
 
     let content_length = parts
@@ -166,7 +174,7 @@ pub async fn generation_http_body_admission_middleware(
     if let Some(permit) = permit {
         req.extensions_mut().insert(permit);
     }
-    next.run(req).await
+    crate::admission::retain_response(next.run(req).await, generation_permit)
 }
 
 #[derive(Clone, Copy)]

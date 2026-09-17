@@ -261,6 +261,10 @@ impl AppConfig {
     /// - Gateway 超时配置警告
     /// - Gateway 最大重试次数警告
     pub fn validate(&self) -> Result<(), ConfigLoadError> {
+        self.gateway
+            .admission
+            .validate()
+            .map_err(|message| ConfigLoadError::ValidationError(message.to_string()))?;
         // 验证服务器配置
         if self.server.bind_addr.is_empty() {
             return Err(ConfigLoadError::ValidationError(
@@ -2000,5 +2004,29 @@ mod tests {
 
         let result = config.validate();
         assert!(result.is_ok());
+    }
+    #[test]
+    #[serial]
+    fn generation_admission_settings_survive_environment_parsing() {
+        let _env = EnvVarGuard::set(&[
+            ("KC__GATEWAY__ADMISSION__GLOBAL_LIMIT", "17"),
+            ("KC__GATEWAY__ADMISSION__TENANT_LIMIT", "3"),
+            ("KC__GATEWAY__ADMISSION__ACCOUNT_LIMIT", "5"),
+            ("KC__GATEWAY__ADMISSION__GLOBAL_QUEUE", "11"),
+            ("KC__GATEWAY__ADMISSION__TENANT_QUEUE", "2"),
+            ("KC__GATEWAY__ADMISSION__ACCOUNT_QUEUE", "4"),
+            ("KC__GATEWAY__ADMISSION__QUEUE_TIMEOUT_MS", "123"),
+        ]);
+        let a = AppConfig::from_env().unwrap().gateway.admission;
+        assert_eq!(
+            (a.global_limit, a.tenant_limit, a.account_limit),
+            (17, 3, 5)
+        );
+        assert_eq!(
+            (a.global_queue, a.tenant_queue, a.account_queue),
+            (11, 2, 4)
+        );
+        assert_eq!(a.queue_timeout_ms, 123);
+        assert!(a.validate().is_ok());
     }
 }

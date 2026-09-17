@@ -3,6 +3,7 @@
 //! API Gateway Layer：主 Axum 服务器，OpenAI-compatible API 入口。
 //! 负责 HTTP 路由、中间件编排、SSE 输出，不含业务逻辑。
 
+pub mod admission;
 pub mod error;
 pub mod extractors;
 pub mod handlers;

@@ -218,6 +218,10 @@ pub fn create_router(state: AppState) -> Router {
             generation_http_body_admission_middleware,
         ))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::admission::ingress_middleware,
+        ))
         .layer(axum::middleware::from_fn(
             openai_rate_limit_response_middleware,
         ));
@@ -243,7 +247,11 @@ pub fn create_router(state: AppState) -> Router {
             state.clone(),
             generation_http_body_admission_middleware,
         ))
-        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::admission::ingress_middleware,
+        ));
 
     let anthropic_routes = Router::new()
         .route("/v1/messages", post(messages))
@@ -252,7 +260,11 @@ pub fn create_router(state: AppState) -> Router {
             state.clone(),
             generation_http_body_admission_middleware,
         ))
-        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::admission::ingress_middleware,
+        ));
 
     // ==================== 4. 用户自服务 API（需要认证 + 限流） ====================
     // 用户管理自己的资源，Admin 也可以访问（根据业务逻辑返回不同范围的数据）

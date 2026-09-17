@@ -6,6 +6,9 @@ use std::collections::HashMap;
 /// Gateway 配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct GatewayConfig {
+    /// Process-local generation resource budgets, independent of business RPM/TPM.
+    #[serde(default)]
+    pub admission: GenerationAdmissionConfig,
     /// Maximum raw monitoring query range in hours.
     #[serde(default = "default_monitoring_raw_max_hours")]
     pub monitoring_raw_max_hours: u32,
@@ -46,6 +49,7 @@ pub struct ProxyConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            admission: GenerationAdmissionConfig::default(),
             monitoring_raw_max_hours: default_monitoring_raw_max_hours(),
             account_probe_interval_secs: 0,
             account_probe_concurrency: default_account_probe_concurrency(),
@@ -108,5 +112,92 @@ mod tests {
         assert!(proxy.providers.contains_key("openai"));
         assert!(proxy.patterns.is_some());
         assert!(proxy.accounts.is_some());
+    }
+}
+
+/// Hard bounds per application instance. Zero queue capacity selects fail-fast.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct GenerationAdmissionConfig {
+    pub global_limit: usize,
+    pub tenant_limit: usize,
+    pub account_limit: usize,
+    pub global_queue: usize,
+    pub tenant_queue: usize,
+    pub account_queue: usize,
+    pub queue_timeout_ms: u64,
+}
+impl Default for GenerationAdmissionConfig {
+    fn default() -> Self {
+        Self {
+            global_limit: 256,
+            tenant_limit: 32,
+            account_limit: 32,
+            global_queue: 128,
+            tenant_queue: 16,
+            account_queue: 16,
+            queue_timeout_ms: 1_000,
+        }
+    }
+}
+impl GenerationAdmissionConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.global_limit == 0
+            || self.global_limit > 65_536
+            || self.tenant_limit == 0
+            || self.tenant_limit > self.global_limit
+            || self.account_limit == 0
+            || self.account_limit > self.global_limit
+            || self.global_queue > 65_536
+            || self.tenant_queue > self.global_queue
+            || self.account_queue > self.global_queue
+            || self.queue_timeout_ms == 0
+            || self.queue_timeout_ms > 60_000
+        {
+            Err("invalid generation admission limits or queue timeout")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn invalid_admission_config_is_rejected_before_serving() {
+        let valid = GenerationAdmissionConfig::default();
+        for invalid in [
+            GenerationAdmissionConfig {
+                global_limit: 0,
+                ..valid.clone()
+            },
+            GenerationAdmissionConfig {
+                tenant_limit: 0,
+                ..valid.clone()
+            },
+            GenerationAdmissionConfig {
+                account_limit: 65_537,
+                ..valid.clone()
+            },
+            GenerationAdmissionConfig {
+                tenant_queue: 129,
+                ..valid.clone()
+            },
+            GenerationAdmissionConfig {
+                account_queue: 129,
+                ..valid.clone()
+            },
+            GenerationAdmissionConfig {
+                queue_timeout_ms: 0,
+                ..valid.clone()
+            },
+            GenerationAdmissionConfig {
+                queue_timeout_ms: 60_001,
+                ..valid.clone()
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
     }
 }

@@ -57,7 +57,7 @@ pub async fn compact_response(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::handlers) async fn responses_inner(
     state: AppState,
-    auth: AuthExtractor,
+    mut auth: AuthExtractor,
     request_id: RequestId,
     client_request_id: ClientRequestId,
     received_at: RequestReceivedAt,
@@ -68,6 +68,7 @@ pub(in crate::handlers) async fn responses_inner(
     upstream_path: &'static str,
     supports_streaming: bool,
 ) -> Result<axum::response::Response> {
+    crate::admission::ensure_generation(&state, &mut auth).await?;
     let mut routing = ResponsesRoutingFields::parse(&body)?;
     let idempotency = responses_idempotency(&headers, request_path, auth.tenant_id, &body)?;
     let forwarded_headers = forwarded_responses_headers(&headers, auth.tenant_id)?;
@@ -337,6 +338,7 @@ pub(in crate::handlers) async fn responses_inner(
         routing.stream,
         pricing,
     );
+    crate::admission::bind_context(&auth, &mut request_ctx);
     request_ctx.max_tokens = routing.max_output_tokens;
     request_ctx.temperature = routing.temperature;
     request_ctx.top_p = routing.top_p;

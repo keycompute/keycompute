@@ -594,7 +594,7 @@ where
 /// 注意：限流已在中间件层统一处理，此处直接开始业务逻辑
 pub async fn chat_completions(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    mut auth: AuthExtractor,
     request_id: RequestId,
     client_request_id: ClientRequestId,
     received_at: RequestReceivedAt,
@@ -603,6 +603,7 @@ pub async fn chat_completions(
         Json<Value>,
     ),
 ) -> Result<axum::response::Response> {
+    crate::admission::ensure_generation(&state, &mut auth).await?;
     let request = parse_chat_completion_request(&body)?;
     let native_chat_request = Arc::new(body);
     let mut lifecycle: Arc<dyn RequestLifecycleRecorder> = Arc::clone(&state.lifecycle);
@@ -700,6 +701,7 @@ pub async fn chat_completions(
         request.stream,
         pricing,
     );
+    crate::admission::bind_context(&auth, &mut request_ctx);
     // 仅投影客户端显式提供的采样参数。缺省或显式 null 时保持 None，
     // 且原生 OpenAI JSON 不被改写；余额预留默认值只属于内部风控。
     request_ctx.max_tokens = request.effective_max_tokens();

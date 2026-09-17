@@ -148,7 +148,7 @@ async fn finish_anthropic_unexecuted_trace(
 /// POST /v1/messages
 pub async fn messages(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    mut auth: AuthExtractor,
     request_id: RequestId,
     client_request_id: ClientRequestId,
     received_at: RequestReceivedAt,
@@ -158,6 +158,7 @@ pub async fn messages(
         Json<AnthropicMessagesRequest>,
     ),
 ) -> Result<axum::response::Response> {
+    crate::admission::ensure_generation(&state, &mut auth).await?;
     let mut lifecycle: Arc<dyn RequestLifecycleRecorder> = Arc::clone(&state.lifecycle);
     let mut pre_execution_guard =
         super::PreExecutionTraceGuard::new(Arc::clone(&lifecycle), request_id.0);
@@ -271,6 +272,7 @@ pub async fn messages(
         stream,
         pricing,
     );
+    crate::admission::bind_context(&auth, &mut request_ctx);
     request_ctx.max_tokens = Some(max_tokens);
     request_ctx.temperature = temperature;
     request_ctx.top_p = top_p;

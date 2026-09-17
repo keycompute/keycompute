@@ -252,6 +252,7 @@ pub fn init_global_crypto(
 /// 应用状态
 #[derive(Clone)]
 pub struct AppState {
+    pub generation_admission: Arc<crate::admission::GenerationAdmission>,
     /// 对外公开的前端应用基础 URL（可选）
     pub app_base_url: Option<String>,
     /// 数据库连接池（可选）
@@ -350,6 +351,10 @@ impl AppState {
     /// Panics when an explicitly selected backend cannot be initialized. The
     /// production entry point uses the asynchronous fallible constructor.
     pub fn with_config(config: AppStateConfig) -> Self {
+        let generation_admission = Arc::new(
+            crate::admission::GenerationAdmission::new(&config.gateway.admission)
+                .expect("valid generation admission configuration"),
+        );
         // 创建 API Key 验证器
         let api_key_validator = ProduceAiKeyValidator::new();
         // 创建 JWT 验证器
@@ -388,7 +393,11 @@ impl AppState {
         for (name, adapter) in crate::providers::get_provider_adapters() {
             gateway_builder = gateway_builder.add_provider(name, adapter);
         }
-        let gateway = Arc::new(gateway_builder.build());
+        let gateway = Arc::new(
+            gateway_builder
+                .build()
+                .with_account_admission(Arc::clone(&generation_admission.accounts)),
+        );
 
         // 创建计费服务
         let billing = Arc::new(BillingService::new());
@@ -428,6 +437,7 @@ impl AppState {
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
+            generation_admission,
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }
@@ -633,6 +643,9 @@ impl AppState {
         pool: Arc<DbRouter>,
         config: AppStateConfig,
     ) -> crate::error::Result<Self> {
+        let generation_admission = Arc::new(crate::admission::GenerationAdmission::new(
+            &config.gateway.admission,
+        )?);
         // 创建带数据库连接的 API Key 验证器
         let api_key_validator = ProduceAiKeyValidator::with_pool(Arc::clone(&pool));
         // 创建 JWT 验证器
@@ -681,7 +694,11 @@ impl AppState {
         for (name, adapter) in crate::providers::get_provider_adapters() {
             gateway_builder = gateway_builder.add_provider(name, adapter);
         }
-        let gateway = Arc::new(gateway_builder.build());
+        let gateway = Arc::new(
+            gateway_builder
+                .build()
+                .with_account_admission(Arc::clone(&generation_admission.accounts)),
+        );
 
         // 创建带数据库连接的计费服务
         let billing = Arc::new(BillingService::with_pool(Arc::clone(&pool)));
@@ -799,6 +816,7 @@ impl AppState {
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
+            generation_admission,
             gateway_config: config.gateway,
             lifecycle,
         })
@@ -818,6 +836,10 @@ impl AppState {
         config: AppStateConfig,
     ) -> Self {
         // 创建 API Key 验证器
+        let generation_admission = Arc::new(
+            crate::admission::GenerationAdmission::new(&config.gateway.admission)
+                .expect("valid generation admission configuration"),
+        );
         let api_key_validator = ProduceAiKeyValidator::new();
         // 创建 JWT 验证器
         let jwt_validator = JwtValidator::new(&config.jwt.secret, &config.jwt.issuer)
@@ -855,7 +877,11 @@ impl AppState {
         for (name, provider) in providers {
             builder = builder.add_provider(name, provider);
         }
-        let gateway = Arc::new(builder.build());
+        let gateway = Arc::new(
+            builder
+                .build()
+                .with_account_admission(Arc::clone(&generation_admission.accounts)),
+        );
 
         // 创建计费服务
         let billing = Arc::new(BillingService::new());
@@ -895,6 +921,7 @@ impl AppState {
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
+            generation_admission,
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }

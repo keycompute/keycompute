@@ -938,7 +938,7 @@ async fn process_response_create(
         // original credential for every response.create so revocation, expiry,
         // user disablement and tenant changes take effect during a 60-minute
         // connection.
-        let auth = AuthExtractor::from_header_with_auth(&headers, state.auth.as_ref())
+        let mut auth = AuthExtractor::from_header_with_auth(&headers, state.auth.as_ref())
             .await
             .map_err(|error| api_error(error, lane.clone()))?;
         if !auth.has_permission(&Permission::UseApi) {
@@ -949,6 +949,9 @@ async fn process_response_create(
                 lane.clone(),
             ));
         }
+        crate::admission::ensure_generation(&state, &mut auth)
+            .await
+            .map_err(|error| api_error(error, lane.clone()))?;
         enforce_authenticated_maintenance_mode(&state, &auth)
             .await
             .map_err(|error| api_error(error, lane.clone()))?;
