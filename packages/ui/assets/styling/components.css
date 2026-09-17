@@ -537,18 +537,34 @@
 
 /* ── Pagination ──────────────────────────────── */
 .pagination {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: var(--space-md);
   justify-content: space-between;
-  padding: var(--space-sm) 0;
+  flex-wrap: wrap;
+  min-height: 56px;
+  padding: 12px 0;
   width: 100%;
 }
 
-.pagination-summary,
-.pagination-info {
+/* Keep the footer visually distinct from the table content; it is rendered
+   as a sibling of the table panel so it sits on the page background. */
+.pagination-footer {
+  margin-top: var(--space-md);
+  min-height: 40px;
+  padding: 0;
+  border-top: 0;
+  background: transparent;
+}
+
+.pagination-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
   font-size: var(--font-size-sm);
   color: var(--text-secondary);
+  line-height: var(--line-height-base);
   white-space: nowrap;
 }
 
@@ -556,12 +572,24 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-sm);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pagination-button {
+  min-height: 32px;
+}
+
+.pagination .btn:disabled {
+  color: var(--text-tertiary);
+  opacity: 0.65;
 }
 
 .pagination-page-size {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  min-height: 32px;
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
   white-space: nowrap;
@@ -569,12 +597,20 @@
 
 .pagination-page-size select {
   min-width: 64px;
-  padding: 5px 24px 5px 8px;
+  min-height: 32px;
+  padding: 5px 28px 5px 10px;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-card);
   color: var(--text-primary);
   font-size: var(--font-size-sm);
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.pagination-page-size select:focus-visible {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
 }
 
 /* ── Table empty state ───────────────────────── */

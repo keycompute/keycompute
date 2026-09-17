@@ -290,11 +290,8 @@ pub fn ApiKeyList() -> Element {
                                                     .iter()
                                                     .enumerate()
                                                     .map(|(idx, model)| {
-                                                        ModelListEntry::new(
-                                                            model.id.clone(),
-                                                            Some(model.owned_by.clone()),
-                                                        )
-                                                        .with_default(idx == 0)
+                                                        ModelListEntry::new(model.id.clone(), Some(model.owned_by.clone()))
+                                                            .with_default(idx == 0)
                                                     })
                                                     .collect::<Vec<_>>();
                                                 move |_| {
@@ -357,15 +354,15 @@ pub fn ApiKeyList() -> Element {
                                             ]
                                             {
                                                 if value != "websocket" || is_responses {
-                                                button {
-                                                    class: if selected_tab == value { "kc-api-example-tab active" } else { "kc-api-example-tab" },
-                                                    r#type: "button",
-                                                    onclick: move |_| {
-                                                        example_tab.set(value.to_string());
-                                                        copied.set(false);
-                                                    },
-                                                    "{label}"
-                                                }
+                                                    button {
+                                                        class: if selected_tab == value { "kc-api-example-tab active" } else { "kc-api-example-tab" },
+                                                        r#type: "button",
+                                                        onclick: move |_| {
+                                                            example_tab.set(value.to_string());
+                                                            copied.set(false);
+                                                        },
+                                                        "{label}"
+                                                    }
                                                 }
                                             }
                                         }
@@ -418,7 +415,11 @@ pub fn ApiKeyList() -> Element {
             // 创建弹窗
             if show_create() {
                 div { class: "modal-overlay",
-                    div { class: "modal", role: "dialog", aria_modal: "true", aria_label: i18n.t("api_keys.create_title"),
+                    div {
+                        class: "modal",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_label: i18n.t("api_keys.create_title"),
                         h2 { class: "modal-title", {i18n.t("api_keys.create_title")} }
                         if let Some(err) = create_error() {
                             div { class: "alert alert-error", "{err}" }
@@ -462,7 +463,9 @@ pub fn ApiKeyList() -> Element {
                 title: i18n.t("api_keys.delete_confirm_title").to_string(),
                 message: delete_candidate()
                     .as_ref()
-                    .map(|(_, name)| i18n.t_with_args("api_keys.delete_confirm_message", &[("name", name)]))
+                    .map(|(_, name)| {
+                        i18n.t_with_args("api_keys.delete_confirm_message", &[("name", name)])
+                    })
                     .unwrap_or_default(),
                 confirm_text: i18n.t("form.delete").to_string(),
                 cancel_text: i18n.t("form.cancel").to_string(),
@@ -497,63 +500,18 @@ pub fn ApiKeyList() -> Element {
                     keys(),
                 );
                 match current_keys {
-                None => rsx! {
-                    div { class: "loading-state", {i18n.t("table.loading")} }
-                },
-                Some(Err(e)) => rsx! {
-                    div { class: "alert alert-error", "{i18n.t(\"api_keys.loading_failed\")}：{e}" }
-                },
-                Some(Ok(result)) => {
-                    let total = result.total.max(0) as usize;
-                    let total_pages = result.total_pages.max(1) as u32;
-                    let paged = &result.keys;
-                    if paged.is_empty() && total == 0 {
-                        rsx! {
-                            div { class: "kc-api-table-panel table-pagination-panel",
-                                div { class: "kc-api-table-meta",
-                                    div {
-                                        span { {i18n.t("api_keys.registry")} }
-                                        strong { "0" }
-                                    }
-                                    p { {i18n.t("api_keys.empty_meta")} }
-                                }
-                                Table {
-                                    class: "kc-api-table".to_string(),
-                                    col_count: 5,
-                                    empty: true,
-                                    empty_text: i18n.t("api_keys.empty").to_string(),
-                                    thead {
-                                        tr {
-                                            TableHead { "" }
-                                        }
-                                    }
-                                }
-                                Pagination {
-                                    current: page(),
-                                    total_pages,
-                                    total: total as u64,
-                                    page_size: page_size(),
-                                    summary: i18n.t_with_args(
-                                        "common.pagination_summary",
-                                        &[
-                                            ("total", &total.to_string()),
-                                            ("current", &page().to_string()),
-                                            ("total_pages", &total_pages.to_string()),
-                                        ],
-                                    ),
-                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                                    previous_label: i18n.t("table.previous").to_string(),
-                                    next_label: i18n.t("table.next").to_string(),
-                                    on_page_change: move |p| page.set(p),
-                                    on_page_size_change: move |size| {
-                                        page_size.set(size);
-                                        page.set(1);
-                                    },
-                                }
-                            }
-                        }
-                    } else {
+                    None => rsx! {
+                        div { class: "loading-state", {i18n.t("table.loading")} }
+                    },
+                    Some(Err(e)) => rsx! {
+                        div { class: "alert alert-error", "{i18n.t(\"api_keys.loading_failed\")}：{e}" }
+                    },
+                    Some(Ok(result)) => {
+                        let total = result.total.max(0) as usize;
+                        let total_pages = result.total_pages.max(1) as u32;
+                        let paged = &result.keys;
+                        // 空态与非空态共用同一面板结构，仅 meta 文案与表格空态不同。
+                        let registry_empty = paged.is_empty() && total == 0;
                         rsx! {
                             div { class: "kc-api-table-panel table-pagination-panel",
                                 div { class: "kc-api-table-meta",
@@ -562,14 +520,20 @@ pub fn ApiKeyList() -> Element {
                                         strong { "{total}" }
                                     }
                                     p {
-                                        if include_revoked() {
+                                        if registry_empty {
+                                            {i18n.t("api_keys.empty_meta")}
+                                        } else if include_revoked() {
                                             {i18n.t("api_keys.all_meta")}
                                         } else {
                                             {i18n.t("api_keys.active_meta")}
                                         }
                                     }
                                 }
-                                Table { class: "kc-api-table".to_string(), col_count: 5,
+                                Table {
+                                    class: "kc-api-table".to_string(),
+                                    col_count: 5,
+                                    empty: registry_empty,
+                                    empty_text: i18n.t("api_keys.empty").to_string(),
                                     thead {
                                         tr {
                                             TableHead { {i18n.t("table.name")} }
@@ -615,35 +579,33 @@ pub fn ApiKeyList() -> Element {
                                         }
                                     }
                                 }
-                                div { class: "kc-api-pagination",
-                                    Pagination {
-                                        current: page(),
-                                        total_pages,
-                                        total: total as u64,
-                                        page_size: page_size(),
-                                        summary: i18n.t_with_args(
-                                            "common.pagination_summary",
-                                            &[
-                                                ("total", &total.to_string()),
-                                                ("current", &page().to_string()),
-                                                ("total_pages", &total_pages.to_string()),
-                                            ],
-                                        ),
-                                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                        page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                                        previous_label: i18n.t("table.previous").to_string(),
-                                        next_label: i18n.t("table.next").to_string(),
-                                        on_page_change: move |p| page.set(p),
-                                        on_page_size_change: move |size| {
-                                            page_size.set(size);
-                                            page.set(1);
-                                        },
-                                    }
-                                }
+                            }
+                            // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+                            Pagination {
+                                current: page(),
+                                total_pages,
+                                total: total as u64,
+                                page_size: page_size(),
+                                summary: i18n.t_with_args(
+                                    "common.pagination_summary",
+                                    &[
+                                        ("total", &total.to_string()),
+                                        ("current", &page().to_string()),
+                                        ("total_pages", &total_pages.to_string()),
+                                    ],
+                                ),
+                                page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                                previous_label: i18n.t("table.previous").to_string(),
+                                next_label: i18n.t("table.next").to_string(),
+                                on_page_change: move |p| page.set(p),
+                                on_page_size_change: move |size| {
+                                    page_size.set(size);
+                                    page.set(1);
+                                },
                             }
                         }
                     }
-                }
                 }
             }
         }
@@ -678,6 +640,28 @@ mod tests {
         assert_eq!(
             current_keyed_value(&(true, 1u32, 20u32), UseResourceState::Ready, Some(loaded),),
             None
+        );
+    }
+
+    #[test]
+    fn empty_and_non_empty_states_share_one_panel_and_pagination_block() {
+        let source = include_str!("list.rs");
+        let component_source = source.split("#[cfg(test)]").next().unwrap_or(source);
+
+        assert_eq!(
+            component_source.matches("kc-api-table-panel").count(),
+            1,
+            "空态与非空态应共用同一表格面板"
+        );
+        // 分页页脚脱离面板独立渲染（对齐定价页的页脚结构），且只渲染一次。
+        assert_eq!(
+            component_source.matches("Pagination {").count(),
+            1,
+            "分页页脚应只渲染一次"
+        );
+        assert!(
+            !component_source.contains("kc-api-pagination"),
+            "分页页脚不应再有额外包裹容器"
         );
     }
 }

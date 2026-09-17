@@ -3,7 +3,7 @@ use client_api::api::admin::{
     MonitoringTargetHealthResponse,
 };
 use dioxus::prelude::*;
-use ui::{Badge, BadgeVariant, ConfirmModal, PageHeader};
+use ui::{Badge, BadgeVariant, ConfirmModal, CursorPagination, PageHeader};
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::i18n::I18n;
@@ -102,7 +102,9 @@ pub fn MonitoringDiagnostics() -> Element {
         .map(|user| user.is_admin())
         .unwrap_or(false)
     {
-        return rsx! { NoPermissionView { resource: i18n.t("page.monitoring").to_string() } };
+        return rsx! {
+            NoPermissionView { resource: i18n.t("page.monitoring").to_string() }
+        };
     }
 
     rsx! {
@@ -132,7 +134,9 @@ pub fn Monitoring() -> Element {
         .map(|user| user.is_admin())
         .unwrap_or(false)
     {
-        return rsx! { NoPermissionView { resource: i18n.t("page.monitoring").to_string() } };
+        return rsx! {
+            NoPermissionView { resource: i18n.t("page.monitoring").to_string() }
+        };
     }
 
     let mut range = use_signal(|| "1h".to_string());
@@ -370,7 +374,11 @@ pub fn Monitoring() -> Element {
                     class: "btn btn-secondary",
                     r#type: "button",
                     onclick: move |_| paused.toggle(),
-                    if paused() { {i18n.t("monitoring.resume_auto_refresh")} } else { {i18n.t("monitoring.pause_auto_refresh")} }
+                    if paused() {
+                        {i18n.t("monitoring.resume_auto_refresh")}
+                    } else {
+                        {i18n.t("monitoring.pause_auto_refresh")}
+                    }
                 }
                 button {
                     class: "btn btn-primary",
@@ -394,7 +402,11 @@ pub fn Monitoring() -> Element {
                     {i18n.t("monitoring.probe_all_accounts")}
                 }
                 if !probe_message().is_empty() {
-                    span { class: "text-secondary monitoring-probe-state", role: "status", "{probe_message}" }
+                    span {
+                        class: "text-secondary monitoring-probe-state",
+                        role: "status",
+                        "{probe_message}"
+                    }
                 }
             }
 
@@ -413,42 +425,62 @@ pub fn Monitoring() -> Element {
             }
 
             match console_value {
-                None => rsx! { p { class: "text-secondary monitoring-load-state", {i18n.t("table.loading")} } },
-                Some(Err(ref error)) => rsx! { div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}: {error}" } },
-                Some(Ok(MonitoringData::Unified { ref summary, ref requests, ref health, ref updated_at })) => rsx! {
-                    p { class: "text-secondary monitoring-updated-at", "{i18n.t(\"monitoring.last_updated\")}: {format_time(updated_at)}" }
+                None => rsx! {
+                    p { class: "text-secondary monitoring-load-state", {i18n.t("table.loading")} }
+                },
+                Some(Err(ref error)) => rsx! {
+                    div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}: {error}" }
+                },
+                Some(
+                    Ok(
+                        MonitoringData::Unified {
+                            ref summary,
+                            ref requests,
+                            ref health,
+                            ref updated_at,
+                        },
+                    ),
+                ) => rsx! {
+                    p { class: "text-secondary monitoring-updated-at",
+                        "{i18n.t(\"monitoring.last_updated\")}: {format_time(updated_at)}"
+                    }
                     MonitoringSummaryCards { data: summary.clone() }
                     MonitoringTrends { series: summary.series.clone() }
 
                     h2 { class: "monitoring-request-heading", {i18n.t("monitoring.request")} }
                     div { class: "table-pagination-panel table-pagination-frame monitoring-table-panel",
-                    if requests.items.is_empty() {
-                        div { class: "empty-state monitoring-request-empty",
-                            if status_filter().is_empty() && route_filter().is_empty() {
-                                {i18n.t("monitoring.empty_range")}
-                            } else {
-                                {i18n.t("monitoring.empty_filtered")}
+                        if requests.items.is_empty() {
+                            div { class: "empty-state monitoring-request-empty",
+                                if status_filter().is_empty() && route_filter().is_empty() {
+                                    {i18n.t("monitoring.empty_range")}
+                                } else {
+                                    {i18n.t("monitoring.empty_filtered")}
+                                }
                             }
-                        }
-                    } else {
-                        div { class: "table-container monitoring-request-table-container",
-                            table { class: "data-table monitoring-request-table", aria_label: i18n.t("monitoring.request_list"),
-                                thead { tr {
-                                    th { {i18n.t("monitoring.time")} }
-                                    th { {i18n.t("monitoring.request_id")} }
-                                    th { {i18n.t("monitoring.protocol_model")} }
-                                    th { {i18n.t("monitoring.execution_route")} }
-                                    th { {i18n.t("monitoring.status")} }
-                                    th { {i18n.t("monitoring.duration_ttft")} }
-                                    th { {i18n.t("monitoring.tokens")} }
-                                    th { {i18n.t("monitoring.amount")} }
-                                } }
-                                tbody {
-                                    for item in requests.items.iter() {
-                                        MonitoringRequestRow {
-                                            item: item.clone(),
-                                            selected: selected_request() == item.request_id,
-                                            on_select: move |id| selected_request.set(id),
+                        } else {
+                            div { class: "table-container monitoring-request-table-container",
+                                table {
+                                    class: "data-table monitoring-request-table",
+                                    aria_label: i18n.t("monitoring.request_list"),
+                                    thead {
+                                        tr {
+                                            th { {i18n.t("monitoring.time")} }
+                                            th { {i18n.t("monitoring.request_id")} }
+                                            th { {i18n.t("monitoring.protocol_model")} }
+                                            th { {i18n.t("monitoring.execution_route")} }
+                                            th { {i18n.t("monitoring.status")} }
+                                            th { {i18n.t("monitoring.duration_ttft")} }
+                                            th { {i18n.t("monitoring.tokens")} }
+                                            th { {i18n.t("monitoring.amount")} }
+                                        }
+                                    }
+                                    tbody {
+                                        for item in requests.items.iter() {
+                                            MonitoringRequestRow {
+                                                item: item.clone(),
+                                                selected: selected_request() == item.request_id,
+                                                on_select: move |id| selected_request.set(id),
+                                            }
                                         }
                                     }
                                 }
@@ -459,70 +491,50 @@ pub fn Monitoring() -> Element {
                         !requests.items.is_empty(),
                         requests.next_cursor.is_some(),
                         monitoring_page(),
-                    ) {
-                        div { class: "pagination monitoring-pagination",
-                            span { class: "pagination-summary",
-                                {i18n.t_with_args("monitoring.page", &[("page", &monitoring_page().to_string())])}
-                            }
-                            div { class: "pagination-actions",
-                                button {
-                                    class: "btn btn-ghost btn-sm monitoring-prev-page",
-                                    r#type: "button",
-                                    disabled: console_pending || cursor_history.read().is_empty(),
-                                    onclick: {
-                                        move |_| {
-                                            if current_console().is_none() {
-                                                return;
-                                            }
-                                            if let Some(previous) = cursor_history.write().pop() {
-                                                cursor.set(previous);
-                                                monitoring_page.set(monitoring_page().saturating_sub(1));
-                                            }
-                                        }
-                                    },
-                                    {i18n.t("table.previous")}
+                    )
+                    {
+                        CursorPagination {
+                            current: monitoring_page(),
+                            has_previous: !cursor_history.read().is_empty(),
+                            has_next: requests.next_cursor.is_some(),
+                            page_size: monitoring_page_size(),
+                            class: "monitoring-pagination".to_string(),
+                            disabled: console_pending,
+                            page_size_options: vec![10, 20, 50, 100],
+                            summary: i18n.t_with_args("monitoring.page", &[("page", &monitoring_page().to_string())]),
+                            page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                            page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                            previous_label: i18n.t("table.previous").to_string(),
+                            next_label: i18n.t("table.next").to_string(),
+                            on_previous: move |_| {
+                                if current_console().is_none() {
+                                    return;
                                 }
-                                if let Some(ref next) = requests.next_cursor {
-                                    button {
-                                        class: "btn btn-ghost btn-sm monitoring-next-page",
-                                        r#type: "button",
-                                        disabled: console_pending,
-                                        onclick: {
-                                            let next = next.clone();
-                                            move |_| {
-                                                if current_console().is_none() {
-                                                    return;
-                                                }
-                                                cursor_history.write().push(cursor());
-                                                cursor.set(next.clone());
-                                                monitoring_page += 1;
-                                            }
-                                        },
-                                        {i18n.t("monitoring.next_page")}
+                                if let Some(previous) = cursor_history.write().pop() {
+                                    cursor.set(previous);
+                                    monitoring_page.set(monitoring_page().saturating_sub(1));
+                                }
+                            },
+                            on_next: {
+                                let next = requests.next_cursor.clone();
+                                move |_| {
+                                    if current_console().is_none() {
+                                        return;
+                                    }
+                                    if let Some(next) = next.clone() {
+                                        cursor_history.write().push(cursor());
+                                        cursor.set(next);
+                                        monitoring_page += 1;
                                     }
                                 }
-                                label { class: "pagination-page-size",
-                                    span { {i18n.t("common.pagination_page_size")} }
-                                    select {
-                                        aria_label: i18n.t("common.pagination_page_size"),
-                                        value: "{monitoring_page_size}",
-                                        onchange: move |event| {
-                                            if let Ok(size) = event.value().parse::<u32>() {
-                                                monitoring_page_size.set(size);
-                                                cursor.set(String::new());
-                                                cursor_history.write().clear();
-                                                monitoring_page.set(1);
-                                            }
-                                        },
-                                        for size in [10u32, 20, 50, 100] {
-                                            option { value: "{size}", "{size}" }
-                                        }
-                                    }
-                                    span { {i18n.t("common.items_suffix")} }
-                                }
-                            }
+                            },
+                            on_page_size_change: move |size| {
+                                monitoring_page_size.set(size);
+                                cursor.set(String::new());
+                                cursor_history.write().clear();
+                                monitoring_page.set(1);
+                            },
                         }
-                    }
                     }
                     MonitoringHealth { data: health.clone() }
                 },
@@ -532,11 +544,21 @@ pub fn Monitoring() -> Element {
                     div { class: "monitoring-detail card",
                         h2 { {i18n.t("monitoring.request_detail")} }
                         p { class: "mono monitoring-detail-request-id", "{value.request.request_id}" }
-                        p { "{i18n.t(\"monitoring.tenant\")}: {value.request.tenant_id} · {i18n.t(\"monitoring.user\")}: {value.request.user_id} · {i18n.t(\"monitoring.key\")}: {value.request.produce_ai_key_id}" }
-                        p { "{i18n.t(\"monitoring.status\")}: {status_label(i18n, &value.request.status)} · {i18n.t(\"monitoring.billing\")}: {value.request.billing_status} · {i18n.t(\"monitoring.trace_quality\")}: {quality_label(i18n, &value.request.trace_quality)}" }
+                        p {
+                            "{i18n.t(\"monitoring.tenant\")}: {value.request.tenant_id} · {i18n.t(\"monitoring.user\")}: {value.request.user_id} · {i18n.t(\"monitoring.key\")}: {value.request.produce_ai_key_id}"
+                        }
+                        p {
+                            "{i18n.t(\"monitoring.status\")}: {status_label(i18n, &value.request.status)} · {i18n.t(\"monitoring.billing\")}: {value.request.billing_status} · {i18n.t(\"monitoring.trace_quality\")}: {quality_label(i18n, &value.request.trace_quality)}"
+                        }
                         p {
                             "{i18n.t(\"monitoring.client_first_content\")}: "
-                            {value.request.client_first_content_at.clone().unwrap_or_else(|| i18n.t("monitoring.not_collected").to_string())}
+                            {
+                                value
+                                    .request
+                                    .client_first_content_at
+                                    .clone()
+                                    .unwrap_or_else(|| i18n.t("monitoring.not_collected").to_string())
+                            }
                         }
                         h3 { {i18n.t("monitoring.attempts")} }
                         for attempt in value.attempts.iter() {
@@ -552,7 +574,9 @@ pub fn Monitoring() -> Element {
                         }
                     }
                 },
-                Some(Some(Err(ref error))) => rsx! { div { class: "alert alert-error", "{i18n.t(\"monitoring.detail_load_failed\")}: {error}" } },
+                Some(Some(Err(ref error))) => rsx! {
+                    div { class: "alert alert-error", "{i18n.t(\"monitoring.detail_load_failed\")}: {error}" }
+                },
                 _ => rsx! {},
             }
         }
@@ -644,16 +668,74 @@ fn MonitoringSummaryCards(data: MonitoringSummaryResponse) -> Element {
     let queued = data.summary.queued_count.to_string();
     let attempt_count = data.summary.attempt_count.to_string();
     let fallback_count = data.summary.fallback_request_count.to_string();
-    rsx! { div { class:"monitoring-stat-grid",
-        StatCard { label:i18n.t("monitoring.request_count").to_string(),value:data.summary.request_count.to_string(),meta:i18n.t_with_args("monitoring.active_queued",&[("active",&active),("queued",&queued)]) }
-        StatCard { label:i18n.t("monitoring.success_rate").to_string(),value:format_rate(i18n,data.success_rate),meta:i18n.t_with_args("monitoring.error_rate_value",&[("rate",&format_rate(i18n,data.error_rate))]) }
-        StatCard { label:i18n.t("monitoring.attempt_success_rate").to_string(),value:format_rate(i18n,data.attempt_success_rate),meta:i18n.t_with_args("monitoring.attempt_count",&[("count",&attempt_count)]) }
-        StatCard { label:i18n.t("monitoring.fallback_rate").to_string(),value:format_rate(i18n,data.fallback_rate),meta:i18n.t_with_args("monitoring.request_count_meta",&[("count",&fallback_count)]) }
-        StatCard { label:i18n.t("monitoring.total_duration_percentiles").to_string(),value:format!("{} / {}",format_ms_f64(i18n,data.summary.p50_duration_ms),format_ms_f64(i18n,data.summary.p95_duration_ms)),meta:format!("P99 {}",format_ms_f64(i18n,data.summary.p99_duration_ms)) }
-        StatCard { label:i18n.t("monitoring.provider_ttft").to_string(),value:format!("{} / {}",format_ms_f64(i18n,data.summary.p50_provider_ttft_ms),format_ms_f64(i18n,data.summary.p95_provider_ttft_ms)),meta:i18n.t("monitoring.p50_p95").to_string() }
-        StatCard { label:i18n.t("monitoring.node_queue_execution").to_string(),value:format!("{} / {}",format_ms_f64(i18n,data.summary.p50_node_queue_ms),format_ms_f64(i18n,data.summary.p50_node_execution_ms)),meta:i18n.t("monitoring.node_no_ttft").to_string() }
-        StatCard { label:i18n.t("monitoring.tokens_amount").to_string(),value:data.summary.total_tokens.map(|v|v.to_string()).unwrap_or_else(||i18n.t("monitoring.not_collected").to_string()),meta:format_currency_amounts(&data.summary.amounts_by_currency,i18n.t("monitoring.not_collected")) }
-    } }
+    rsx! {
+        div { class: "monitoring-stat-grid",
+            StatCard {
+                label: i18n.t("monitoring.request_count").to_string(),
+                value: data.summary.request_count.to_string(),
+                meta: i18n.t_with_args(
+                    "monitoring.active_queued",
+                    &[("active", &active), ("queued", &queued)],
+                ),
+            }
+            StatCard {
+                label: i18n.t("monitoring.success_rate").to_string(),
+                value: format_rate(i18n, data.success_rate),
+                meta: i18n.t_with_args(
+                    "monitoring.error_rate_value",
+                    &[("rate", &format_rate(i18n, data.error_rate))],
+                ),
+            }
+            StatCard {
+                label: i18n.t("monitoring.attempt_success_rate").to_string(),
+                value: format_rate(i18n, data.attempt_success_rate),
+                meta: i18n.t_with_args("monitoring.attempt_count", &[("count", &attempt_count)]),
+            }
+            StatCard {
+                label: i18n.t("monitoring.fallback_rate").to_string(),
+                value: format_rate(i18n, data.fallback_rate),
+                meta: i18n.t_with_args("monitoring.request_count_meta", &[("count", &fallback_count)]),
+            }
+            StatCard {
+                label: i18n.t("monitoring.total_duration_percentiles").to_string(),
+                value: format!(
+                    "{} / {}",
+                    format_ms_f64(i18n, data.summary.p50_duration_ms),
+                    format_ms_f64(i18n, data.summary.p95_duration_ms),
+                ),
+                meta: format!("P99 {}", format_ms_f64(i18n, data.summary.p99_duration_ms)),
+            }
+            StatCard {
+                label: i18n.t("monitoring.provider_ttft").to_string(),
+                value: format!(
+                    "{} / {}",
+                    format_ms_f64(i18n, data.summary.p50_provider_ttft_ms),
+                    format_ms_f64(i18n, data.summary.p95_provider_ttft_ms),
+                ),
+                meta: i18n.t("monitoring.p50_p95").to_string(),
+            }
+            StatCard {
+                label: i18n.t("monitoring.node_queue_execution").to_string(),
+                value: format!(
+                    "{} / {}",
+                    format_ms_f64(i18n, data.summary.p50_node_queue_ms),
+                    format_ms_f64(i18n, data.summary.p50_node_execution_ms),
+                ),
+                meta: i18n.t("monitoring.node_no_ttft").to_string(),
+            }
+            StatCard {
+                label: i18n.t("monitoring.tokens_amount").to_string(),
+                value: data.summary
+                    .total_tokens
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| i18n.t("monitoring.not_collected").to_string()),
+                meta: format_currency_amounts(
+                    &data.summary.amounts_by_currency,
+                    i18n.t("monitoring.not_collected"),
+                ),
+            }
+        }
+    }
 }
 
 #[component]
@@ -663,17 +745,23 @@ fn MonitoringTrends(series: Vec<serde_json::Value>) -> Element {
         section { class: "monitoring-trends",
             h2 { {i18n.t("monitoring.trends")} }
             if series.is_empty() {
-                p { class: "text-secondary monitoring-section-empty", {i18n.t("monitoring.no_trends")} }
+                p { class: "text-secondary monitoring-section-empty",
+                    {i18n.t("monitoring.no_trends")}
+                }
             } else {
                 div { class: "table-container",
-                    table { class: "data-table", aria_label: i18n.t("monitoring.trends"),
-                        thead { tr {
-                            th { {i18n.t("monitoring.utc_time")} }
-                            th { {i18n.t("monitoring.request")} }
-                            th { {i18n.t("monitoring.succeeded")} }
-                            th { {i18n.t("monitoring.tokens")} }
-                            th { {i18n.t("monitoring.amount")} }
-                        } }
+                    table {
+                        class: "data-table",
+                        aria_label: i18n.t("monitoring.trends"),
+                        thead {
+                            tr {
+                                th { {i18n.t("monitoring.utc_time")} }
+                                th { {i18n.t("monitoring.request")} }
+                                th { {i18n.t("monitoring.succeeded")} }
+                                th { {i18n.t("monitoring.tokens")} }
+                                th { {i18n.t("monitoring.amount")} }
+                            }
+                        }
                         tbody {
                             for point in series.iter() {
                                 tr {
@@ -681,7 +769,14 @@ fn MonitoringTrends(series: Vec<serde_json::Value>) -> Element {
                                     td { {json_text(i18n, point, "requests")} }
                                     td { {json_text(i18n, point, "succeeded")} }
                                     td { {json_text(i18n, point, "tokens")} }
-                                    td { {format_currency_amounts(&point["amounts_by_currency"], i18n.t("monitoring.not_collected"))} }
+                                    td {
+                                        {
+                                            format_currency_amounts(
+                                                &point["amounts_by_currency"],
+                                                i18n.t("monitoring.not_collected"),
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -750,12 +845,18 @@ fn MonitoringRequestRow(
                 _ => {}
             },
             td { "data-label": i18n.t("monitoring.time"), "{item.received_at}" }
-            td { class: "mono", "data-label": i18n.t("monitoring.request_id"), "{short_request_id(&item.request_id)}" }
-            td { "data-label": i18n.t("monitoring.protocol_model"), "{item.protocol} / {item.requested_model}" }
+            td { class: "mono", "data-label": i18n.t("monitoring.request_id"),
+                "{short_request_id(&item.request_id)}"
+            }
+            td { "data-label": i18n.t("monitoring.protocol_model"),
+                "{item.protocol} / {item.requested_model}"
+            }
             td { "data-label": i18n.t("monitoring.execution_route"), "{route}" }
             td { "data-label": i18n.t("monitoring.status"),
                 Badge { variant: status_variant(&item.status), "{status_label(i18n, &item.status)}" }
-                if item.trace_quality != "actual" { span { class: "text-secondary", " · {quality_label(i18n, &item.trace_quality)}" } }
+                if item.trace_quality != "actual" {
+                    span { class: "text-secondary", " · {quality_label(i18n, &item.trace_quality)}" }
+                }
             }
             td { "data-label": i18n.t("monitoring.duration_ttft"), "{timing}" }
             td { "data-label": i18n.t("monitoring.tokens"), "{tokens}" }
@@ -773,7 +874,9 @@ fn MonitoringHealth(data: MonitoringTargetHealthResponse) -> Element {
                 h2 { {i18n.t("monitoring.provider_health")} }
                 a { href: "/admin/accounts", {i18n.t("monitoring.account_probe_link")} }
                 if data.providers.is_empty() {
-                    p { class: "text-secondary monitoring-section-empty", {i18n.t("monitoring.no_accounts")} }
+                    p { class: "text-secondary monitoring-section-empty",
+                        {i18n.t("monitoring.no_accounts")}
+                    }
                 }
                 for provider in data.providers.iter() {
                     ProviderHealthRow { value: provider.clone() }
@@ -783,7 +886,9 @@ fn MonitoringHealth(data: MonitoringTargetHealthResponse) -> Element {
                 h2 { {i18n.t("monitoring.node_health")} }
                 a { href: "/admin/node-gateway", {i18n.t("monitoring.node_gateway_link")} }
                 if data.nodes.is_empty() {
-                    p { class: "text-secondary monitoring-section-empty", {i18n.t("monitoring.no_nodes")} }
+                    p { class: "text-secondary monitoring-section-empty",
+                        {i18n.t("monitoring.no_nodes")}
+                    }
                 }
                 for node in data.nodes.iter() {
                     NodeHealthRow { value: node.clone() }
@@ -856,14 +961,20 @@ fn MonitoringAttemptRow(attempt: MonitoringAttemptDetail) -> Element {
         "monitoring.attempt_provider_timing",
         &[("headers", &headers), ("first", &first), ("ttft", &ttft)],
     );
-    rsx! { div { class:"monitoring-stage",
-        strong { "{attempt_title}" }
-        p { "{target_line}" }
-        p { "{timing_line}" }
-        p { "{http_line}" }
-        if attempt.route_type=="provider_account" { p { "{provider_timing_line}" } }
-        if let Some(error)=error { p { class:"text-secondary", "{i18n.t(\"monitoring.error\")}: {error}" } }
-    } }
+    rsx! {
+        div { class: "monitoring-stage",
+            strong { "{attempt_title}" }
+            p { "{target_line}" }
+            p { "{timing_line}" }
+            p { "{http_line}" }
+            if attempt.route_type == "provider_account" {
+                p { "{provider_timing_line}" }
+            }
+            if let Some(error) = error {
+                p { class: "text-secondary", "{i18n.t(\"monitoring.error\")}: {error}" }
+            }
+        }
+    }
 }
 
 #[component]
@@ -931,7 +1042,14 @@ fn ProviderHealthRow(value: serde_json::Value) -> Element {
             ("failures", &failures.to_string()),
         ],
     );
-    rsx! { div { class:"monitoring-node-row", strong { "{name}" } span { " {enabled_label}" } span { " · {health_line}" } span { " · {probe_line}" } } }
+    rsx! {
+        div { class: "monitoring-node-row",
+            strong { "{name}" }
+            span { " {enabled_label}" }
+            span { " · {health_line}" }
+            span { " · {probe_line}" }
+        }
+    }
 }
 
 #[component]
@@ -1007,7 +1125,14 @@ fn NodeHealthRow(value: serde_json::Value) -> Element {
             ("models", &models),
         ],
     );
-    rsx! { div { class:"monitoring-node-row", strong { "{name}" } span { " {status_label(i18n, &status)}" } span { " · {counts}" } span { " · {runtime}" } } }
+    rsx! {
+        div { class: "monitoring-node-row",
+            strong { "{name}" }
+            span { " {status_label(i18n, &status)}" }
+            span { " · {counts}" }
+            span { " · {runtime}" }
+        }
+    }
 }
 
 fn format_rate(i18n: I18n, value: Option<f64>) -> String {

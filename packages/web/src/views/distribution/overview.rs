@@ -256,26 +256,30 @@ fn DistributionOverviewContent() -> Element {
                             }
                         }
                     }
-                    Pagination {
-                        current: page(),
-                        total_pages: referral_total_pages,
-                        total: referral_total as u64,
-                        page_size: page_size(),
-                        summary: i18n.t_with_args(
-                            "common.pagination_summary",
-                            &[
-                                ("total", &referral_total.to_string()),
-                                ("current", &page().to_string()),
-                                ("total_pages", &referral_total_pages.to_string()),
-                            ],
-                        ),
-                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                        page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                        previous_label: i18n.t("table.previous").to_string(),
-                        next_label: i18n.t("table.next").to_string(),
-                        on_page_change: move |value| page.set(value),
-                        on_page_size_change: move |value| { page_size.set(value); page.set(1); },
-                    }
+                }
+                // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+                Pagination {
+                    current: page(),
+                    total_pages: referral_total_pages,
+                    total: referral_total as u64,
+                    page_size: page_size(),
+                    summary: i18n.t_with_args(
+                        "common.pagination_summary",
+                        &[
+                            ("total", &referral_total.to_string()),
+                            ("current", &page().to_string()),
+                            ("total_pages", &referral_total_pages.to_string()),
+                        ],
+                    ),
+                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                    previous_label: i18n.t("table.previous").to_string(),
+                    next_label: i18n.t("table.next").to_string(),
+                    on_page_change: move |value| page.set(value),
+                    on_page_size_change: move |value| {
+                        page_size.set(value);
+                        page.set(1);
+                    },
                 }
             }
         }

@@ -1406,7 +1406,6 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.route_node", "Node");
     m.insert("monitoring.status", "Status");
     m.insert("monitoring.duration_ttft", "Duration / TTFT");
-    m.insert("monitoring.next_page", "Next page");
     m.insert("monitoring.page", "Page {page}");
     m.insert("monitoring.request_detail", "Request details");
     m.insert("monitoring.tenant", "Tenant");
@@ -1570,9 +1569,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Release only after confirming that the request failed or is stuck. A late usage settlement may still deduct the final charge from available balance.",
     );
     m.insert("users.balance_reservation_expires", "Expires");
-    m.insert("users.balance_reservations_previous_page", "Previous page");
     m.insert("users.balance_reservations_page", "Page {page}");
-    m.insert("users.balance_reservations_next_page", "Next page");
     m.insert("users.balance_release_reservation", "Release Reservation");
     m.insert("users.balance_release_reason", "Release Reason");
     m.insert(

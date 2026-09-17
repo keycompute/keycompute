@@ -127,7 +127,7 @@ pub fn PaymentOrders() -> Element {
     };
 
     rsx! {
-            div { class: "page-container payment-orders-page",
+        div { class: "page-container payment-orders-page",
             PageHeader {
                 title: i18n.t("page.payment_orders").to_string(),
                 description: page_description.to_string(),
@@ -139,7 +139,9 @@ pub fn PaymentOrders() -> Element {
                 }
                 div { class: "payment-provider-grid",
                     match provider_statuses() {
-                        None => rsx! { div { class: "loading-state", {i18n.t("table.loading")} } },
+                        None => rsx! {
+                            div { class: "loading-state", {i18n.t("table.loading")} }
+                        },
                         Some(Err(error)) => rsx! {
                             div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}：{error}" }
                         },
@@ -159,17 +161,30 @@ pub fn PaymentOrders() -> Element {
                                             }
                                             p { class: "payment-provider-scenes", {provider.scenes.join(" · ")} }
                                         }
-                                        Badge {
-                                            variant: status_to_variant(&provider.status),
+                                        Badge { variant: status_to_variant(&provider.status),
                                             {payment_provider_status_label(&provider.status, &i18n)}
                                         }
                                     }
                                     div { class: "payment-provider-meta",
-                                        span { "{i18n.t(\"payment_orders.provider_switch\")}: "
-                                            strong { if provider.enabled { {i18n.t("common.enabled")} } else { {i18n.t("common.disabled")} } }
+                                        span {
+                                            "{i18n.t(\"payment_orders.provider_switch\")}: "
+                                            strong {
+                                                if provider.enabled {
+                                                    {i18n.t("common.enabled")}
+                                                } else {
+                                                    {i18n.t("common.disabled")}
+                                                }
+                                            }
                                         }
-                                        span { "{i18n.t(\"payment_orders.provider_config\")}: "
-                                            strong { if provider.configured { {i18n.t("common.configured")} } else { {i18n.t("common.not_configured")} } }
+                                        span {
+                                            "{i18n.t(\"payment_orders.provider_config\")}: "
+                                            strong {
+                                                if provider.configured {
+                                                    {i18n.t("common.configured")}
+                                                } else {
+                                                    {i18n.t("common.not_configured")}
+                                                }
+                                            }
                                         }
                                     }
                                     if let Some(message) = payment_provider_message(&provider.status, &i18n) {
@@ -189,16 +204,19 @@ pub fn PaymentOrders() -> Element {
                                                         verifying_provider.set(Some(method.clone()));
                                                         provider_action_error.set(None);
                                                         spawn(async move {
-                                                            let result = with_auto_refresh(auth_store, |token| {
-                                                                let method = method.clone();
-                                                                async move {
-                                                                    let client = get_client();
-                                                                    AdminApi::new(&client)
-                                                                        .verify_payment_provider(&method, &token)
-                                                                        .await
-                                                                }
-                                                            })
-                                                            .await;
+                                                            let result = with_auto_refresh(
+                                                                    auth_store,
+                                                                    |token| {
+                                                                        let method = method.clone();
+                                                                        async move {
+                                                                            let client = get_client();
+                                                                            AdminApi::new(&client)
+                                                                                .verify_payment_provider(&method, &token)
+                                                                                .await
+                                                                        }
+                                                                    },
+                                                                )
+                                                                .await;
                                                             if let Err(error) = result {
                                                                 provider_action_error.set(Some(error.to_string()));
                                                             } else {
@@ -245,93 +263,106 @@ pub fn PaymentOrders() -> Element {
                 }
             }
 
-        div { class: "table-pagination-panel table-pagination-frame payment-orders-pagination-panel",
-            div { class: "card",
-                if is_admin {
-                    {
-                        let (is_empty, empty_text) = match admin_orders_result.as_ref().map(|r| r.as_ref()) {
-                            None => (true, i18n.t("table.loading")),
-                            Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                            Some(Ok(result)) if result.orders.is_empty() => (true, i18n.t("payment_orders.empty")),
-                            _ => (false, ""),
-                        };
-                        rsx! {
-                            Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 6,
-                                thead {
-                                    tr {
-                                        TableHead { {i18n.t("payments.order_no")} }
-                                        TableHead { {i18n.t("payment_orders.col_user")} }
-                                        TableHead { {i18n.t("recharge.payment_method")} }
-                                        TableHead { {i18n.t("common.amount")} }
-                                        TableHead { {i18n.t("table.status")} }
-                                        TableHead { {i18n.t("table.created_at")} }
-                                    }
+            div { class: "table-pagination-panel table-pagination-frame payment-orders-pagination-panel",
+                div { class: "card",
+                    if is_admin {
+                        {
+                            let (is_empty, empty_text) = match admin_orders_result
+                                .as_ref()
+                                .map(|r| r.as_ref())
+                            {
+                                None => (true, i18n.t("table.loading")),
+                                Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                                Some(Ok(result)) if result.orders.is_empty() => {
+                                    (true, i18n.t("payment_orders.empty"))
                                 }
-                                tbody {
-                                    if let Some(Ok(result)) = admin_orders_result.as_ref().map(|r| r.as_ref()) {
-                                        for o in &result.orders {
-                                            tr {
-                                                td {
-                                                    code { "{o.out_trade_no}" }
-                                                }
-                                                td {
-                                                    {
-                                                        let uid = o.user_id.clone();
-                                                        let short = short_id(&uid);
-                                                        rsx! {
-                                                            span {
-                                                                title: "{uid}",
-                                                                style: "cursor:help;font-family:monospace;font-size:13px;",
-                                                                "{short}"
+                                _ => (false, ""),
+                            };
+                            rsx! {
+                                Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 6,
+                                    thead {
+                                        tr {
+                                            TableHead { {i18n.t("payments.order_no")} }
+                                            TableHead { {i18n.t("payment_orders.col_user")} }
+                                            TableHead { {i18n.t("recharge.payment_method")} }
+                                            TableHead { {i18n.t("common.amount")} }
+                                            TableHead { {i18n.t("table.status")} }
+                                            TableHead { {i18n.t("table.created_at")} }
+                                        }
+                                    }
+                                    tbody {
+                                        if let Some(Ok(result)) = admin_orders_result.as_ref().map(|r| r.as_ref()) {
+                                            for o in &result.orders {
+                                                tr {
+                                                    td {
+                                                        code { "{o.out_trade_no}" }
+                                                    }
+                                                    td {
+                                                        {
+                                                            let uid = o.user_id.clone();
+                                                            let short = short_id(&uid);
+                                                            rsx! {
+                                                                span {
+                                                                    title: "{uid}",
+                                                                    style: "cursor:help;font-family:monospace;font-size:13px;",
+                                                                    "{short}"
+                                                                }
                                                             }
                                                         }
                                                     }
+                                                    td { "{o.payment_method}" }
+                                                    td { {format_cny_str(&o.amount)} }
+                                                    td {
+                                                        Badge { variant: status_to_variant(&o.status),
+                                                            {payment_status_label(&o.status, &i18n)}
+                                                        }
+                                                    }
+                                                    td { {format_time(&o.created_at)} }
                                                 }
-                                                td { "{o.payment_method}" }
-                                                td { {format_cny_str(&o.amount)} }
-                                                td {
-                                                    Badge { variant: status_to_variant(&o.status), {payment_status_label(&o.status, &i18n)} }
-                                                }
-                                                td { {format_time(&o.created_at)} }
                                             }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                } else {
-                    {
-                        let (is_empty, empty_text) = match my_orders_result.as_ref().map(|r| r.as_ref()) {
-                            None => (true, i18n.t("table.loading")),
-                            Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                            Some(Ok(result)) if result.orders.is_empty() => (true, i18n.t("payment_orders.empty")),
-                            _ => (false, ""),
-                        };
-                        rsx! {
-                            Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 5,
-                                thead {
-                                    tr {
-                                        TableHead { {i18n.t("payments.order_no")} }
-                                        TableHead { {i18n.t("common.amount")} }
-                                        TableHead { {i18n.t("payments.subject")} }
-                                        TableHead { {i18n.t("table.status")} }
-                                        TableHead { {i18n.t("table.created_at")} }
-                                    }
+                    } else {
+                        {
+                            let (is_empty, empty_text) = match my_orders_result.as_ref().map(|r| r.as_ref())
+                            {
+                                None => (true, i18n.t("table.loading")),
+                                Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                                Some(Ok(result)) if result.orders.is_empty() => {
+                                    (true, i18n.t("payment_orders.empty"))
                                 }
-                                tbody {
-                                    if let Some(Ok(result)) = my_orders_result.as_ref().map(|r| r.as_ref()) {
-                                        for o in &result.orders {
-                                            tr {
-                                                td {
-                                                    code { "{o.out_trade_no}" }
+                                _ => (false, ""),
+                            };
+                            rsx! {
+                                Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 5,
+                                    thead {
+                                        tr {
+                                            TableHead { {i18n.t("payments.order_no")} }
+                                            TableHead { {i18n.t("common.amount")} }
+                                            TableHead { {i18n.t("payments.subject")} }
+                                            TableHead { {i18n.t("table.status")} }
+                                            TableHead { {i18n.t("table.created_at")} }
+                                        }
+                                    }
+                                    tbody {
+                                        if let Some(Ok(result)) = my_orders_result.as_ref().map(|r| r.as_ref()) {
+                                            for o in &result.orders {
+                                                tr {
+                                                    td {
+                                                        code { "{o.out_trade_no}" }
+                                                    }
+                                                    td { {format_cny_str(&o.amount)} }
+                                                    td { "{o.subject}" }
+                                                    td {
+                                                        Badge { variant: status_to_variant(&o.status),
+                                                            {payment_status_label(&o.status, &i18n)}
+                                                        }
+                                                    }
+                                                    td { {format_time(&o.created_at)} }
                                                 }
-                                                td { {format_cny_str(&o.amount)} }
-                                                td { "{o.subject}" }
-                                                td {
-                                                    Badge { variant: status_to_variant(&o.status), {payment_status_label(&o.status, &i18n)} }
-                                                }
-                                                td { {format_time(&o.created_at)} }
                                             }
                                         }
                                     }
@@ -340,9 +371,11 @@ pub fn PaymentOrders() -> Element {
                         }
                     }
                 }
+
             }
 
-                {
+            // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+            {
                 let total = if is_admin {
                     admin_orders_result
                         .as_ref()
@@ -389,7 +422,6 @@ pub fn PaymentOrders() -> Element {
                             page.set(1);
                         },
                     }
-                }
                 }
             }
         }

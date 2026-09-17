@@ -118,244 +118,249 @@ pub fn DistributionRecords() -> Element {
 
     rsx! {
         div { class: "page-container distribution-records-page",
-        PageHeader {
-            title: i18n.t("page.distribution_records").to_string(),
-            description: page_desc.to_string(),
-        }
+            PageHeader {
+                title: i18n.t("page.distribution_records").to_string(),
+                description: page_desc.to_string(),
+            }
 
-        // 收益统计只属于个人视图；管理员页不混入当前管理员的个人收益。
-        if !is_admin { div { class: "stats-grid",
-            div { class: "stat-card card",
-                div { class: "card-body",
-                    p { class: "stat-label", {i18n.t("distribution.total_earnings")} }
-                    p { class: "stat-value", "{total_earnings}" }
-                }
-            }
-            div { class: "stat-card card",
-                div { class: "card-body",
-                    p { class: "stat-label", {i18n.t("distribution.available_balance")} }
-                    p { class: "stat-value", "{available}" }
-                }
-            }
-            div { class: "stat-card card",
-                div { class: "card-body",
-                    p { class: "stat-label", {i18n.t("distribution.pending")} }
-                    p { class: "stat-value", "{pending}" }
-                }
-            }
-        } }
-
-        // 分销规则只读展示（Admin 可见）
-        if is_admin {
-            div { class: "section",
-                h2 { class: "section-title", {i18n.t("distribution_records.rules_title")} }
-                div { class: "alert alert-info", style: "margin-bottom: 12px",
-                    span { class: "alert-icon", "ℹ" }
-                    div { class: "alert-content",
-                        p { class: "alert-body",
-                            {i18n.t("distribution_records.rules_hint")}
+            // 收益统计只属于个人视图；管理员页不混入当前管理员的个人收益。
+            if !is_admin {
+                div { class: "stats-grid",
+                    div { class: "stat-card card",
+                        div { class: "card-body",
+                            p { class: "stat-label", {i18n.t("distribution.total_earnings")} }
+                            p { class: "stat-value", "{total_earnings}" }
+                        }
+                    }
+                    div { class: "stat-card card",
+                        div { class: "card-body",
+                            p { class: "stat-label", {i18n.t("distribution.available_balance")} }
+                            p { class: "stat-value", "{available}" }
+                        }
+                    }
+                    div { class: "stat-card card",
+                        div { class: "card-body",
+                            p { class: "stat-label", {i18n.t("distribution.pending")} }
+                            p { class: "stat-value", "{pending}" }
                         }
                     }
                 }
-                match rules() {
-                    None => rsx! { p { class: "text-secondary", {i18n.t("table.loading")} } },
-                    Some(Err(ref e)) => rsx! { p { class: "text-secondary", {user_error_message(e)} } },
-                    Some(Ok(ref list)) if list.is_empty() => rsx! {
-                        p { class: "text-secondary", {i18n.t("distribution_records.no_rules")} }
-                    },
-                    Some(Ok(ref list)) => rsx! {
-                        Table {
-                            col_count: 4,
-                            thead {
-                                tr {
-                                    TableHead { {i18n.t("distribution_records.rule_name")} }
-                                    TableHead { {i18n.t("distribution_records.commission_rate")} }
-                                    TableHead { {i18n.t("table.status")} }
-                                    TableHead { {i18n.t("table.created_at")} }
-                                }
-                            }
-                            tbody {
-                                for r in list.iter() {
+            }
+
+            // 分销规则只读展示（Admin 可见）
+            if is_admin {
+                div { class: "section",
+                    h2 { class: "section-title", {i18n.t("distribution_records.rules_title")} }
+                    div {
+                        class: "alert alert-info",
+                        style: "margin-bottom: 12px",
+                        span { class: "alert-icon", "ℹ" }
+                        div { class: "alert-content",
+                            p { class: "alert-body", {i18n.t("distribution_records.rules_hint")} }
+                        }
+                    }
+                    match rules() {
+                        None => rsx! {
+                            p { class: "text-secondary", {i18n.t("table.loading")} }
+                        },
+                        Some(Err(ref e)) => rsx! {
+                            p { class: "text-secondary", {user_error_message(e)} }
+                        },
+                        Some(Ok(ref list)) if list.is_empty() => rsx! {
+                            p { class: "text-secondary", {i18n.t("distribution_records.no_rules")} }
+                        },
+                        Some(Ok(ref list)) => rsx! {
+                            Table { col_count: 4,
+                                thead {
                                     tr {
-                                        td { "{r.name}" }
-                                        td { { format!("{:.1}%", r.commission_rate * 100.0) } }
-                                        td {
-                                            if r.is_active {
-                                                Badge { variant: BadgeVariant::Success, {i18n.t("common.enabled")} }
-                                            } else {
-                                                Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
-                                            }
-                                        }
-                                        td { { format_time(&r.created_at) } }
+                                        TableHead { {i18n.t("distribution_records.rule_name")} }
+                                        TableHead { {i18n.t("distribution_records.commission_rate")} }
+                                        TableHead { {i18n.t("table.status")} }
+                                        TableHead { {i18n.t("table.created_at")} }
                                     }
                                 }
-                            }
-                        }
-                    },
-                }
-            }
-        }
-
-        // 表格：admin 视图 / 普通用户视图分别渲染
-        div { class: "table-pagination-panel table-pagination-frame",
-        if is_admin {
-            {
-                let request_key = (page(), page_size());
-                let current_admin_records = current_keyed_value(
-                    &request_key,
-                    admin_records.state().cloned(),
-                    admin_records(),
-                );
-                let (is_empty, empty_text) = match &current_admin_records {
-                    None => (true, i18n.t("table.loading").to_string()),
-                    Some(Err(e)) => (true, user_error_message(e)),
-                    Some(Ok(result)) if result.records.is_empty() => {
-                        (true, i18n.t("distribution_records.empty_admin").to_string())
-                    }
-                    _ => (false, String::new()),
-                };
-                rsx! {
-                    Table {
-                        empty: is_empty,
-                        empty_text,
-                        col_count: 7u32,
-                        thead {
-                            tr {
-                                TableHead { {i18n.t("distribution_records.record_id")} }
-                                TableHead { {i18n.t("distribution_records.source_user_id")} }
-                                TableHead { {i18n.t("distribution_records.amount_spent")} }
-                                TableHead { {i18n.t("distribution_records.commission_amount")} }
-                                TableHead { {i18n.t("table.status")} }
-                                TableHead { {i18n.t("table.created_at")} }
-                                TableHead { {i18n.t("distribution_records.referrer_id")} }
-                            }
-                        }
-                        tbody {
-                            if let Some(Ok(ref result)) = current_admin_records {
-                                for rec in result.records.iter() {
-                                    tr {
-                                        td { code { title: "{rec.id}", {short_id(&rec.id)} } }
-                                        td {
-                                            // 截取 UUID 前 8 位＋全量 tooltip
-                                            span {
-                                                title: "{rec.referred_id}",
-                                                style: "cursor: help; font-family: monospace; font-size: 13px;",
-                                                {short_id(&rec.referred_id)}
-                                            }
-                                        }
-                                        td { {format_precise_cny_str(&rec.amount)} }
-                                        td { {format_precise_cny_str(&rec.commission)} }
-                                        td {
-                                            Badge {
-                                                variant: dist_status_variant(&rec.status),
-                                                {distribution_status_label(&rec.status, &i18n)}
-                                            }
-                                        }
-                                        td { { format_time(&rec.created_at) } }
-                                        td {
-                                            span {
-                                                title: "{rec.referrer_id}",
-                                                style: "cursor: help; font-family: monospace; font-size: 13px;",
-                                                {short_id(&rec.referrer_id)}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            {
-                let (is_empty, empty_text) = match referrals() {
-                    None => (true, i18n.t("table.loading").to_string()),
-                    Some(Err(ref e)) => (true, user_error_message(e)),
-                    Some(Ok(ref l)) if l.is_empty() => {
-                        (true, i18n.t("distribution_records.empty_user").to_string())
-                    }
-                    _ => (false, String::new()),
-                };
-                let ref_start = (page() as usize - 1) * page_size() as usize;
-                rsx! {
-                    Table {
-                        empty: is_empty,
-                        empty_text,
-                        col_count: 4u32,
-                        thead {
-                            tr {
-                                TableHead { {i18n.t("distribution_records.referred_user")} }
-                                TableHead { {i18n.t("distribution.joined_at")} }
-                                TableHead { {i18n.t("distribution.total_spent")} }
-                                TableHead { {i18n.t("distribution.my_earnings")} }
-                            }
-                        }
-                        tbody {
-                            if let Some(Ok(ref list)) = referrals() {
-                                for r in list.iter().skip(ref_start).take(page_size() as usize) {
-                                    tr {
-                                        td {
-                                            div { class: "user-cell",
-                                                span { class: "user-name",
-                                                    { r.name.clone().unwrap_or_else(|| r.email.clone()) }
+                                tbody {
+                                    for r in list.iter() {
+                                        tr {
+                                            td { "{r.name}" }
+                                            td { {format!("{:.1}%", r.commission_rate * 100.0)} }
+                                            td {
+                                                if r.is_active {
+                                                    Badge { variant: BadgeVariant::Success, {i18n.t("common.enabled")} }
+                                                } else {
+                                                    Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
                                                 }
-                                                span { class: "user-email text-secondary", "{r.email}" }
+                                            }
+                                            td { {format_time(&r.created_at)} }
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+
+            // 表格：admin 视图 / 普通用户视图分别渲染
+            div { class: "table-pagination-panel table-pagination-frame",
+                if is_admin {
+                    {
+                        let request_key = (page(), page_size());
+                        let current_admin_records = current_keyed_value(
+                            &request_key,
+                            admin_records.state().cloned(),
+                            admin_records(),
+                        );
+                        let (is_empty, empty_text) = match &current_admin_records {
+                            None => (true, i18n.t("table.loading").to_string()),
+                            Some(Err(e)) => (true, user_error_message(e)),
+                            Some(Ok(result)) if result.records.is_empty() => {
+                                (true, i18n.t("distribution_records.empty_admin").to_string())
+                            }
+                            _ => (false, String::new()),
+                        };
+                        rsx! {
+                            Table { empty: is_empty, empty_text, col_count: 7u32,
+                                thead {
+                                    tr {
+                                        TableHead { {i18n.t("distribution_records.record_id")} }
+                                        TableHead { {i18n.t("distribution_records.source_user_id")} }
+                                        TableHead { {i18n.t("distribution_records.amount_spent")} }
+                                        TableHead { {i18n.t("distribution_records.commission_amount")} }
+                                        TableHead { {i18n.t("table.status")} }
+                                        TableHead { {i18n.t("table.created_at")} }
+                                        TableHead { {i18n.t("distribution_records.referrer_id")} }
+                                    }
+                                }
+                                tbody {
+                                    if let Some(Ok(ref result)) = current_admin_records {
+                                        for rec in result.records.iter() {
+                                            tr {
+                                                td {
+                                                    code { title: "{rec.id}", {short_id(&rec.id)} } // 截取 UUID 前 8 位＋全量 tooltip
+                                                }
+                                                td {
+                                                    // 截取 UUID 前 8 位＋全量 tooltip
+                                                    span {
+                                                        title: "{rec.referred_id}",
+                                                        style: "cursor: help; font-family: monospace; font-size: 13px;",
+                                                        {short_id(&rec.referred_id)}
+                                                    }
+                                                }
+                                                td { {format_precise_cny_str(&rec.amount)} }
+                                                td { {format_precise_cny_str(&rec.commission)} }
+                                                td {
+                                                    Badge { variant: dist_status_variant(&rec.status),
+                                                        {distribution_status_label(&rec.status, &i18n)}
+                                                    }
+                                                }
+                                                td { {format_time(&rec.created_at)} }
+                                                td {
+                                                    span {
+                                                        title: "{rec.referrer_id}",
+                                                        style: "cursor: help; font-family: monospace; font-size: 13px;",
+                                                        {short_id(&rec.referrer_id)}
+                                                    }
+                                                }
                                             }
                                         }
-                                        td { { format_time(&r.joined_at) } }
-                                        td { {format_precise_cny_str(&r.total_spent)} }
-                                        td { {format_precise_cny_str(&r.earnings_from_referral)} }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    {
+                        let (is_empty, empty_text) = match referrals() {
+                            None => (true, i18n.t("table.loading").to_string()),
+                            Some(Err(ref e)) => (true, user_error_message(e)),
+                            Some(Ok(ref l)) if l.is_empty() => {
+                                (true, i18n.t("distribution_records.empty_user").to_string())
+                            }
+                            _ => (false, String::new()),
+                        };
+                        let ref_start = (page() as usize - 1) * page_size() as usize;
+                        rsx! {
+                            Table { empty: is_empty, empty_text, col_count: 4u32,
+                                thead {
+                                    tr {
+                                        TableHead { {i18n.t("distribution_records.referred_user")} }
+                                        TableHead { {i18n.t("distribution.joined_at")} }
+                                        TableHead { {i18n.t("distribution.total_spent")} }
+                                        TableHead { {i18n.t("distribution.my_earnings")} }
+                                    }
+                                }
+                                tbody {
+                                    if let Some(Ok(ref list)) = referrals() {
+                                        for r in list.iter().skip(ref_start).take(page_size() as usize) {
+                                            tr {
+                                                td {
+                                                    div { class: "user-cell",
+                                                        span { class: "user-name",
+                                                            {r.name.clone().unwrap_or_else(|| r.email.clone())}
+                                                        }
+                                                        span { class: "user-email text-secondary", "{r.email}" }
+                                                    }
+                                                }
+                                                td { {format_time(&r.joined_at)} }
+                                                td { {format_precise_cny_str(&r.total_spent)} }
+                                                td { {format_precise_cny_str(&r.earnings_from_referral)} }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-        }
 
-        {
-            let (total, total_pages) = if is_admin {
-                let request_key = (page(), page_size());
-                current_keyed_value(
-                    &request_key,
-                    admin_records.state().cloned(),
-                    admin_records(),
-                )
-                .and_then(|r| r.ok())
-                    .map(|result| (result.total.max(0) as usize, result.total_pages.max(1) as u32))
-                    .unwrap_or((0, 1))
-            } else {
-                let total = referrals().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0);
-                (total, total.div_ceil(page_size() as usize).max(1) as u32)
-            };
-            rsx! {
-                Pagination {
-                    current: page(),
-                    total_pages,
-                    total: total as u64,
-                    page_size: page_size(),
-                    summary: i18n.t_with_args(
-                        "common.pagination_summary",
-                        &[
-                            ("total", &total.to_string()),
-                            ("current", &page().to_string()),
-                            ("total_pages", &total_pages.to_string()),
-                        ],
-                    ),
-                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                    previous_label: i18n.t("table.previous").to_string(),
-                    next_label: i18n.t("table.next").to_string(),
-                    on_page_change: move |p| page.set(p),
-                    on_page_size_change: move |size| {
-                        page_size.set(size);
-                        page.set(1);
-                    },
+            }
+
+            // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+            {
+                let (total, total_pages) = if is_admin {
+                    let request_key = (page(), page_size());
+                    current_keyed_value(
+                            &request_key,
+                            admin_records.state().cloned(),
+                            admin_records(),
+                        )
+                        .and_then(|r| r.ok())
+                        .map(|result| (
+                            result.total.max(0) as usize,
+                            result.total_pages.max(1) as u32,
+                        ))
+                        .unwrap_or((0, 1))
+                } else {
+                    let total = referrals().and_then(|r| r.ok()).map(|l| l.len()).unwrap_or(0);
+                    (total, total.div_ceil(page_size() as usize).max(1) as u32)
+                };
+                rsx! {
+                    Pagination {
+                        current: page(),
+                        total_pages,
+                        total: total as u64,
+                        page_size: page_size(),
+                        summary: i18n.t_with_args(
+                            "common.pagination_summary",
+                            &[
+                                ("total", &total.to_string()),
+                                ("current", &page().to_string()),
+                                ("total_pages", &total_pages.to_string()),
+                            ],
+                        ),
+                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                        page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                        previous_label: i18n.t("table.previous").to_string(),
+                        next_label: i18n.t("table.next").to_string(),
+                        on_page_change: move |p| page.set(p),
+                        on_page_size_change: move |size| {
+                            page_size.set(size);
+                            page.set(1);
+                        },
+                    }
                 }
             }
-        }
-        }
         }
     }
 }

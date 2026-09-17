@@ -80,8 +80,7 @@ pub fn Usage() -> Element {
     };
 
     rsx! {
-        div {
-            class: "page-container",
+        div { class: "page-container",
             PageHeader {
                 title: i18n.t("page.usage").to_string(),
                 description: i18n.t("usage.subtitle").to_string(),
@@ -90,8 +89,12 @@ pub fn Usage() -> Element {
             // 汇总卡片
             div { class: "stats-grid",
                 match stats() {
-                    None => rsx! { p { {i18n.t("table.loading")} } },
-                    Some(Err(e)) => rsx! { p { "{i18n.t(\"common.load_failed\")}：{e}" } },
+                    None => rsx! {
+                        p { {i18n.t("table.loading")} }
+                    },
+                    Some(Err(e)) => rsx! {
+                        p { "{i18n.t(\"common.load_failed\")}：{e}" }
+                    },
                     Some(Ok(s)) => rsx! {
                         div { class: "stat-card",
                             div { class: "stat-body",
@@ -138,31 +141,74 @@ pub fn Usage() -> Element {
             }
 
             // 明细记录表格
-            div { class: "section table-pagination-panel",
-                h2 { class: "section-title", {i18n.t("usage.records")} }
-                {
-                    let request_key = (page(), page_size());
-                    let current_records = current_keyed_value(
-                        &request_key,
-                        records.state().cloned(),
-                        records(),
-                    );
-                    match current_records {
-                    None => rsx! { p { class: "loading-text", {i18n.t("table.loading")} } },
-                    Some(Err(e)) => rsx! { p { class: "error-text", "{i18n.t(\"common.load_failed\")}：{e}" } },
-                    Some(Ok(result)) if result.records.is_empty() => rsx! {
-                        p { class: "empty-text", {i18n.t("usage.no_records")} }
+            {
+                let request_key = (page(), page_size());
+                let current_records = current_keyed_value(
+                    &request_key,
+                    records.state().cloned(),
+                    records(),
+                );
+                // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+                let footer_totals = current_records
+                    .as_ref()
+                    .and_then(|result| result.as_ref().ok())
+                    .map(|result| (
+                        result.total.max(0) as u64,
+                        result.total_pages.max(1) as u32,
+                    ));
+                rsx! {
+                    div { class: "section table-pagination-panel",
+                        h2 { class: "section-title", {i18n.t("usage.records")} }
+                        match current_records {
+                            None => rsx! {
+                                p { class: "loading-text", {i18n.t("table.loading")} }
+                            },
+                            Some(Err(e)) => rsx! {
+                                p { class: "error-text", "{i18n.t(\"common.load_failed\")}：{e}" }
+                            },
+                            Some(Ok(result)) if result.records.is_empty() => rsx! {
+                                p { class: "empty-text", {i18n.t("usage.no_records")} }
+                            },
+                            Some(Ok(result)) => rsx! {
+                                Table { class: "data-table".to_string(), col_count: 6,
+                                    thead {
+                                        tr {
+                                            TableHead { {i18n.t("common.time")} }
+                                            TableHead { {i18n.t("usage.model")} }
+                                            TableHead { {i18n.t("usage.prompt_tokens")} }
+                                            TableHead { {i18n.t("usage.completion_tokens")} }
+                                            TableHead { {i18n.t("usage.total_token")} }
+                                            TableHead { {i18n.t("common.cost")} }
+                                        }
+                                    }
+                                    tbody {
+                                        for r in result.records.iter() {
+                                            tr {
+                                                td { {format_time(&r.created_at)} }
+                                                td { "{r.model}" }
+                                                td { "{r.prompt_tokens}" }
+                                                td { "{r.completion_tokens}" }
+                                                td { "{r.total_tokens}" }
+                                                td { {if r.cost > 0.0 { format!("¥{:.6}", r.cost) } else { "—".to_string() }} }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    }
+                    if let Some((total, total_pages)) = footer_totals {
                         Pagination {
                             current: page(),
-                            total_pages: result.total_pages.max(1) as u32,
-                            total: result.total.max(0) as u64,
+                            total_pages,
+                            total,
                             page_size: page_size(),
                             summary: i18n.t_with_args(
                                 "common.pagination_summary",
                                 &[
-                                    ("total", &result.total.max(0).to_string()),
+                                    ("total", &total.to_string()),
                                     ("current", &page().to_string()),
-                                    ("total_pages", &result.total_pages.max(1).to_string()),
+                                    ("total_pages", &total_pages.to_string()),
                                 ],
                             ),
                             page_size_label: i18n.t("common.pagination_page_size").to_string(),
@@ -170,69 +216,11 @@ pub fn Usage() -> Element {
                             previous_label: i18n.t("table.previous").to_string(),
                             next_label: i18n.t("table.next").to_string(),
                             on_page_change: move |p| page.set(p),
-                            on_page_size_change: move |size| { page_size.set(size); page.set(1); },
+                            on_page_size_change: move |size| {
+                                page_size.set(size);
+                                page.set(1);
+                            },
                         }
-                    },
-                    Some(Ok(result)) => rsx! {
-                        Table {
-                            class: "data-table".to_string(),
-                            col_count: 6,
-                                thead {
-                                    tr {
-                                        TableHead { {i18n.t("common.time")} }
-                                        TableHead { {i18n.t("usage.model")} }
-                                        TableHead { {i18n.t("usage.prompt_tokens")} }
-                                        TableHead { {i18n.t("usage.completion_tokens")} }
-                                        TableHead { {i18n.t("usage.total_token")} }
-                                        TableHead { {i18n.t("common.cost")} }
-                                    }
-                                }
-                                tbody {
-                                    for r in result.records.iter() {
-                                                tr {
-                                                    td { { format_time(&r.created_at) } }
-                                                    td { "{r.model}" }
-                                                    td { "{r.prompt_tokens}" }
-                                                    td { "{r.completion_tokens}" }
-                                                    td { "{r.total_tokens}" }
-                                                    td {
-                                                        {
-                                                            if r.cost > 0.0 {
-                                                                format!("¥{:.6}", r.cost)
-                                                            } else {
-                                                                "—".to_string()
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                }
-                        }
-                        {
-                            rsx! {
-                                Pagination {
-                                    current: page(),
-                                    total_pages: result.total_pages.max(1) as u32,
-                                    total: result.total.max(0) as u64,
-                                    page_size: page_size(),
-                                    summary: i18n.t_with_args(
-                                        "common.pagination_summary",
-                                        &[
-                                            ("total", &result.total.max(0).to_string()),
-                                            ("current", &page().to_string()),
-                                            ("total_pages", &result.total_pages.max(1).to_string()),
-                                        ],
-                                    ),
-                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                                    previous_label: i18n.t("table.previous").to_string(),
-                                    next_label: i18n.t("table.next").to_string(),
-                                    on_page_change: move |p| page.set(p),
-                                    on_page_size_change: move |size| { page_size.set(size); page.set(1); },
-                                }
-                            }
-                        }
-                    },
                     }
                 }
             }

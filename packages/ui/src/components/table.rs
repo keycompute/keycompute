@@ -113,6 +113,15 @@ pub fn Pagination(
     /// 当前每页条数
     #[props(default = 20_u32)]
     page_size: u32,
+    /// 额外 CSS 类名（作用于分页导航容器）
+    #[props(default)]
+    class: String,
+    /// 分页导航的无障碍标签
+    #[props(default)]
+    aria_label: String,
+    /// 是否暂时禁用所有分页控件（例如请求正在进行时）
+    #[props(default = false)]
+    disabled: bool,
     /// 可选的每页条数；为空时使用 10/20/50/100
     #[props(default)]
     page_size_options: Vec<u32>,
@@ -149,15 +158,8 @@ pub fn Pagination(
     let previous_page = previous_page_target(requested_current, current, total_pages);
     let next_page = next_page_target(requested_current, current, total_pages);
 
-    let mut options = if page_size_options.is_empty() {
-        vec![10, 20, 50, 100]
-    } else {
-        page_size_options
-    };
-    if !options.contains(&page_size) {
-        options.push(page_size);
-        options.sort_unstable();
-    }
+    let page_size = page_size.max(1);
+    let options = normalized_page_size_options(page_size_options, page_size);
     // A caller-provided localized summary is based on its requested page. If
     // the response clamps that page after a deletion, avoid showing a
     // contradictory "page N of M" until the parent follows the recovery
@@ -167,28 +169,45 @@ pub fn Pagination(
     } else {
         summary
     };
+    let aria_label = if aria_label.trim().is_empty() {
+        summary.clone()
+    } else {
+        aria_label
+    };
+
+    let class = class.trim();
+    let pagination_class = if class.is_empty() {
+        "pagination pagination-footer".to_string()
+    } else {
+        format!("pagination pagination-footer {class}")
+    };
 
     rsx! {
-        div { class: "pagination",
+        nav {
+            class: "{pagination_class}",
+            aria_label: "{aria_label}",
+            aria_live: "polite",
             span { class: "pagination-summary", "{summary}" }
             div { class: "pagination-actions",
                 button {
-                    class: "btn btn-ghost btn-sm",
+                    class: "btn btn-ghost btn-sm pagination-button pagination-previous",
+                    r#type: "button",
                     aria_label: "{previous_label}",
-                    disabled: previous_page.is_none(),
+                    disabled: disabled || previous_page.is_none(),
                     onclick: move |_| {
-                        if let Some(page) = previous_page {
+                        if !disabled && let Some(page) = previous_page {
                             on_page_change.call(page);
                         }
                     },
                     "{previous_label}"
                 }
                 button {
-                    class: "btn btn-ghost btn-sm",
+                    class: "btn btn-ghost btn-sm pagination-button pagination-next",
+                    r#type: "button",
                     aria_label: "{next_label}",
-                    disabled: next_page.is_none(),
+                    disabled: disabled || next_page.is_none(),
                     onclick: move |_| {
-                        if let Some(page) = next_page {
+                        if !disabled && let Some(page) = next_page {
                             on_page_change.call(page);
                         }
                     },
@@ -198,9 +217,136 @@ pub fn Pagination(
                     span { "{page_size_label}" }
                     select {
                         aria_label: "{page_size_label}",
+                        disabled,
                         value: "{page_size}",
                         onchange: move |event| {
-                            if let Ok(value) = event.value().parse::<u32>() {
+                            if !disabled && let Ok(value) = event.value().parse::<u32>() {
+                                on_page_size_change.call(value);
+                            }
+                        },
+                        for option in options.iter() {
+                            option { value: "{option}", "{option}" }
+                        }
+                    }
+                    span { "{page_size_suffix}" }
+                }
+            }
+        }
+    }
+}
+
+/// 基于游标（而非总页数）的分页控件。
+///
+/// 适合 API 只返回 `next_cursor`、无法提前知道总页数的列表。调用方负责
+/// 维护上一页游标历史，并通过 `has_previous` / `has_next` 告知控件可用方向。
+/// 视觉结构、每页条数选择器和无障碍行为与 [`Pagination`] 保持一致。
+#[component]
+pub fn CursorPagination(
+    /// 当前页（1 起）
+    current: u32,
+    /// 是否存在上一页
+    has_previous: bool,
+    /// 是否存在下一页
+    has_next: bool,
+    /// 当前每页条数
+    #[props(default = 20_u32)]
+    page_size: u32,
+    /// 额外 CSS 类名（作用于分页导航容器）
+    #[props(default)]
+    class: String,
+    /// 分页导航的无障碍标签
+    #[props(default)]
+    aria_label: String,
+    /// 是否暂时禁用所有分页控件（例如请求正在进行时）
+    #[props(default = false)]
+    disabled: bool,
+    /// 可选的每页条数；为空时使用 10/20/50/100
+    #[props(default)]
+    page_size_options: Vec<u32>,
+    /// 上一页回调
+    #[props(default)]
+    on_previous: EventHandler<()>,
+    /// 下一页回调
+    #[props(default)]
+    on_next: EventHandler<()>,
+    /// 每页条数变更回调
+    #[props(default)]
+    on_page_size_change: EventHandler<u32>,
+    /// 上一页按钮文案；业务层应传入本地化文案
+    #[props(default = "‹".to_string())]
+    previous_label: String,
+    /// 下一页按钮文案
+    #[props(default = "›".to_string())]
+    next_label: String,
+    /// 分页摘要；为空时仅显示当前页码，业务层应传入本地化文案
+    #[props(default)]
+    summary: String,
+    /// 每页选择器文案
+    #[props(default = "Per page".to_string())]
+    page_size_label: String,
+    /// 每页选择器的单位文案
+    #[props(default = "items".to_string())]
+    page_size_suffix: String,
+) -> Element {
+    let current = current.max(1);
+    let page_size = page_size.max(1);
+    let options = normalized_page_size_options(page_size_options, page_size);
+    let summary = if summary.is_empty() {
+        current.to_string()
+    } else {
+        summary
+    };
+    let aria_label = if aria_label.trim().is_empty() {
+        summary.clone()
+    } else {
+        aria_label
+    };
+    let class = class.trim();
+    let pagination_class = if class.is_empty() {
+        "pagination pagination-footer".to_string()
+    } else {
+        format!("pagination pagination-footer {class}")
+    };
+
+    rsx! {
+        nav {
+            class: "{pagination_class}",
+            aria_label: "{aria_label}",
+            aria_live: "polite",
+            span { class: "pagination-summary", "{summary}" }
+            div { class: "pagination-actions",
+                button {
+                    class: "btn btn-ghost btn-sm pagination-button pagination-previous",
+                    r#type: "button",
+                    aria_label: "{previous_label}",
+                    disabled: disabled || !has_previous,
+                    onclick: move |_| {
+                        if !disabled && has_previous {
+                            on_previous.call(());
+                        }
+                    },
+                    "{previous_label}"
+                }
+                button {
+                    class: "btn btn-ghost btn-sm pagination-button pagination-next",
+                    r#type: "button",
+                    aria_label: "{next_label}",
+                    disabled: disabled || !has_next,
+                    onclick: move |_| {
+                        if !disabled && has_next {
+                            on_next.call(());
+                        }
+                    },
+                    "{next_label}"
+                }
+                label { class: "pagination-page-size",
+                    span { "{page_size_label}" }
+                    select {
+                        aria_label: "{page_size_label}",
+                        disabled,
+                        value: "{page_size}",
+                        onchange: move |event| {
+                            if !disabled && let Ok(value) = event.value().parse::<u32>() {
                                 on_page_size_change.call(value);
                             }
                         },
@@ -219,6 +365,21 @@ fn normalized_page(current: u32, total_pages: u32) -> (u32, u32) {
     let total_pages = total_pages.max(1);
     let current = current.clamp(1, total_pages);
     (total_pages, current)
+}
+
+fn normalized_page_size_options(mut options: Vec<u32>, page_size: u32) -> Vec<u32> {
+    if options.is_empty() {
+        options = vec![10, 20, 50, 100];
+    }
+
+    options.retain(|option| *option > 0);
+    let page_size = page_size.max(1);
+    if !options.contains(&page_size) {
+        options.push(page_size);
+    }
+    options.sort_unstable();
+    options.dedup();
+    options
 }
 
 fn should_render_pagination(total: u64, current: u32) -> bool {
@@ -244,7 +405,8 @@ fn next_page_target(requested_current: u32, current: u32, total_pages: u32) -> O
 #[cfg(test)]
 mod tests {
     use super::{
-        next_page_target, normalized_page, previous_page_target, should_render_pagination,
+        next_page_target, normalized_page, normalized_page_size_options, previous_page_target,
+        should_render_pagination,
     };
 
     #[test]
@@ -268,6 +430,18 @@ mod tests {
         assert!(!should_render_pagination(0, 1));
         assert!(should_render_pagination(0, 2));
         assert!(should_render_pagination(1, 1));
+    }
+
+    #[test]
+    fn page_size_options_are_positive_sorted_unique_and_keep_the_current_size() {
+        assert_eq!(
+            normalized_page_size_options(vec![0, 50, 20, 20], 30),
+            vec![20, 30, 50]
+        );
+        assert_eq!(
+            normalized_page_size_options(Vec::new(), 0),
+            vec![1, 10, 20, 50, 100]
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! - [`Card`]     — 内容卡片（含 header / body / footer 插槽）
 //! - [`Modal`]    — 对话框（受控 open 状态）
 //! - [`Table`]    — 数据表格容器（thead + tbody 插槽）
+//! - [`Pagination`] / [`CursorPagination`] — 统一的页脚分页控件
 //! - [`LoadingSpinner`] — 旋转加载指示器
 //! - [`Skeleton`] — 骨架屏占位动画
 //! - [`Alert`]    — 内联提示横幅（info / success / warning / error）
@@ -31,5 +32,5 @@ pub use input::{Input, Textarea};
 pub use loading::{LoadingSpinner, Skeleton};
 pub use modal::Modal;
 pub use page_header::PageHeader;
-pub use table::Table;
+pub use table::{CursorPagination, Pagination, Table, TableCell, TableHead};
 pub use toast::{Toast, ToastKind, ToastMsg};

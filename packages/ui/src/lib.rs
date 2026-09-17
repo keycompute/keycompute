@@ -2,7 +2,7 @@
 //!
 //! # 模块结构
 //! - `layout`     — 应用布局（AppShell、Sidebar、Header、Footer）
-//! - `components` — 通用原子组件（Button、Input、Badge、Card、Modal、Table、Loading、Alert）
+//! - `components` — 通用原子组件（Button、Input、Badge、Card、Modal、Table、Pagination、Loading、Alert）
 //! - `charts`     — 图表组件（LineChart、BarChart、PieChart，通过 JS 互调直接使用 ECharts）
 //! - `icons`      — 内联 SVG 图标组件
 
@@ -27,7 +27,7 @@ pub use components::input::{Input, Textarea};
 pub use components::loading::{CardSkeleton, LoadingOverlay, LoadingSpinner, Skeleton};
 pub use components::modal::{ConfirmModal, Modal};
 pub use components::page_header::PageHeader;
-pub use components::table::{Pagination, Table, TableCell, TableHead};
+pub use components::table::{CursorPagination, Pagination, Table, TableCell, TableHead};
 pub use components::toast::{Toast, ToastKind, ToastMsg};
 
 // Re-export 图表组件及数据类型

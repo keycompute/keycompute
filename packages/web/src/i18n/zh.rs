@@ -1207,7 +1207,6 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.route_node", "节点");
     m.insert("monitoring.status", "状态");
     m.insert("monitoring.duration_ttft", "总耗时 / TTFT");
-    m.insert("monitoring.next_page", "下一页");
     m.insert("monitoring.page", "第 {page} 页");
     m.insert("monitoring.request_detail", "请求详情");
     m.insert("monitoring.tenant", "租户");
@@ -1335,9 +1334,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "仅在确认请求已失败或卡死时释放。释放后若迟到的用量结算到达，最终费用仍可能从可用余额扣除。",
     );
     m.insert("users.balance_reservation_expires", "到期时间");
-    m.insert("users.balance_reservations_previous_page", "上一页");
     m.insert("users.balance_reservations_page", "第 {page} 页");
-    m.insert("users.balance_reservations_next_page", "下一页");
     m.insert("users.balance_release_reservation", "释放预留");
     m.insert("users.balance_release_reason", "释放原因");
     m.insert(

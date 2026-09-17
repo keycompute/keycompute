@@ -155,6 +155,12 @@ pub fn NodeEarnings() -> Element {
 
     let show_modal = matches!(*withdraw_modal.read(), WithdrawModalState::Open);
 
+    // 小费历史分页页脚仅在数据加载成功后渲染（与面板内表格的数据来源保持一致）
+    let show_history_pagination = history_result
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .is_some();
+
     rsx! {
         div { class: "page-container node-earnings-page",
             PageHeader {
@@ -248,34 +254,37 @@ pub fn NodeEarnings() -> Element {
                                     }
                                 }
                             }
-
-                            Pagination {
-                                current: current_history_page,
-                                total_pages: history_total_pages,
-                                total: history_total as u64,
-                                page_size: history_page_size(),
-                                summary: i18n.t_with_args(
-                                    "common.pagination_summary",
-                                    &[
-                                        ("total", &history_total.to_string()),
-                                        ("current", &current_history_page.to_string()),
-                                        ("total_pages", &history_total_pages.to_string()),
-                                    ],
-                                ),
-                                page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                                previous_label: i18n.t("table.previous").to_string(),
-                                next_label: i18n.t("table.next").to_string(),
-                                on_page_change: move |p: u32| {
-                                    *history_offset.write() = (p.saturating_sub(1)) * history_page_size();
-                                },
-                                on_page_size_change: move |size| {
-                                    history_page_size.set(size);
-                                    history_offset.set(0);
-                                }
-                            }
                         },
                     }
+                }
+            }
+
+            // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+            if show_history_pagination {
+                Pagination {
+                    current: current_history_page,
+                    total_pages: history_total_pages,
+                    total: history_total as u64,
+                    page_size: history_page_size(),
+                    summary: i18n.t_with_args(
+                        "common.pagination_summary",
+                        &[
+                            ("total", &history_total.to_string()),
+                            ("current", &current_history_page.to_string()),
+                            ("total_pages", &history_total_pages.to_string()),
+                        ],
+                    ),
+                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                    previous_label: i18n.t("table.previous").to_string(),
+                    next_label: i18n.t("table.next").to_string(),
+                    on_page_change: move |p: u32| {
+                        *history_offset.write() = (p.saturating_sub(1)) * history_page_size();
+                    },
+                    on_page_size_change: move |size| {
+                        history_page_size.set(size);
+                        history_offset.set(0);
+                    },
                 }
             }
 

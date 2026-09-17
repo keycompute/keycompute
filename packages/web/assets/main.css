@@ -1203,10 +1203,6 @@ input, textarea, select {
   border-radius: 8px;
 }
 
-.kc-api-pagination {
-  padding: 0;
-}
-
 @media (max-width: 780px) {
   .kc-api-header,
   .kc-api-actions,
@@ -1922,10 +1918,6 @@ input, textarea, select {
   background: rgba(0, 0, 0, 0.2);
   border: 0;
   border-radius: 4px;
-}
-
-.kc-api-pagination {
-  padding: 0;
 }
 
 @media (max-width: 780px) {
@@ -3426,7 +3418,7 @@ select.form-input:focus {
   min-height: 112px;
 }
 
-.monitoring-next-page {
+.monitoring-pagination .pagination-next {
   align-self: flex-start;
 }
 
@@ -3661,7 +3653,7 @@ select.form-input:focus {
     font-weight: 600;
   }
 
-  .monitoring-next-page {
+  .monitoring-pagination .pagination-next {
     width: 100%;
     min-height: 44px;
   }
@@ -4041,9 +4033,11 @@ select.form-input:focus {
 
 .pagination {
   box-sizing: border-box;
+  align-items: center;
+  min-height: 56px;
   flex-wrap: wrap;
   border-top: 1px solid var(--border-color);
-  padding: 16px 24px;
+  padding: 12px 24px;
 }
 
 .table-pagination-panel {
@@ -4067,18 +4061,51 @@ select.form-input:focus {
   border-radius: 0;
 }
 
-.table-pagination-panel .pagination {
-  margin-top: 0;
+/* The pagination row reads as a page footer rather than a second table row.
+   The footer is rendered as a sibling of the table panel (outside it), so it
+   floats on the page background separated by whitespace. */
+.pagination.pagination-footer {
+  margin-top: 16px;
+  min-height: 40px;
+  padding: 0;
+  border-top: 0;
+  background: transparent;
 }
 
 .pagination-summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
   color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.pagination-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pagination-button {
+  min-height: 32px;
+}
+
+.pagination .btn:disabled {
+  color: var(--text-tertiary);
+  opacity: 0.65;
 }
 
 .pagination-page-size select {
   background: var(--bg-card);
   color: var(--text-primary);
   border-color: var(--border-color);
+  min-height: 32px;
+  outline: none;
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.pagination-page-size select:focus-visible {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-accent-glow);
 }
 
 @media (max-width: 640px) {
@@ -4086,11 +4113,20 @@ select.form-input:focus {
     align-items: flex-start;
     justify-content: flex-start;
     gap: 8px 12px;
+    min-height: 0;
     padding: 12px 16px;
+  }
+
+  .pagination.pagination-footer {
+    margin-top: 12px;
+    min-height: 0;
+    padding: 0;
   }
 
   .pagination-summary {
     flex: 1 0 100%;
+    min-width: 0;
+    white-space: normal;
   }
 
   .pagination-actions {

@@ -572,9 +572,7 @@ fn AdminAccountsView() -> Element {
                 title: i18n.t("page.accounts").to_string(),
                 description: i18n.t("accounts.subtitle").to_string(),
                 actions: rsx! {
-                    button {
-                        class: "btn btn-primary",
-                        onclick: move |_| *show_create.write() = true,
+                    button { class: "btn btn-primary", onclick: move |_| *show_create.write() = true,
                         {i18n.t("accounts.add_channel")}
                     }
                 },
@@ -625,7 +623,9 @@ fn AdminAccountsView() -> Element {
                 let (is_empty, empty_text) = match &result {
                     None => (true, i18n.t("table.loading")),
                     Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                    Some(Ok(result)) if result.accounts.is_empty() => (true, i18n.t("accounts.empty")),
+                    Some(Ok(result)) if result.accounts.is_empty() => {
+                        (true, i18n.t("accounts.empty"))
+                    }
                     _ => (false, ""),
                 };
                 let total = result
@@ -672,316 +672,305 @@ fn AdminAccountsView() -> Element {
                             }
                             tbody {
                                 for acc in paged_list.iter() {
-                                        tr {
-                                            td {
-                                                div { class: "account-cell-main",
-                                                    div { class: "account-name-row",
-                                                        span { class: "account-name", "{acc.name}" }
-                                                        span { class: "account-id",
-                                                            "#{acc.id.chars().take(8).collect::<String>()}"
-                                                        }
-                                                    }
-                                                    div { class: "account-subline",
-                                                        span { class: "account-secret-label",
-                                                            {i18n.t("accounts.key_preview")}
-                                                        }
-                                                        code { class: "account-key-preview", "{acc.api_key_preview}" }
-                                                    }
-                                                    if let Some(api_base) = &acc.api_base {
-                                                        p { class: "account-endpoint", "{api_base}" }
-                                                    } else {
-                                                        p { class: "account-endpoint account-endpoint-muted",
-                                                            {i18n.t("accounts.default_endpoint")}
-                                                        }
+                                    tr {
+                                        td {
+                                            div { class: "account-cell-main",
+                                                div { class: "account-name-row",
+                                                    span { class: "account-name", "{acc.name}" }
+                                                    span { class: "account-id",
+                                                        "#{acc.id.chars().take(8).collect::<String>()}"
                                                     }
                                                 }
-                                            }
-                                            td {
-                                                div { class: "account-provider-cell",
-                                                    span { class: "account-provider-badge account-provider-{acc.provider}",
-                                                        "{provider_label(&acc.provider, i18n)}"
-                                                    }
-                                                    p { class: "account-provider-code", "{acc.provider}" }
-                                                    p { class: "account-provider-code",
-                                                        {i18n.t(api_mode_label_key(api_mode_for_capabilities(
-                                                            &acc.provider,
-                                                            &acc.api_capabilities,
-                                                        )))}
-                                                    }
-                                                    div { class: "account-models",
-                                                        if acc.models.is_empty() {
-                                                            span { class: "account-model-chip account-model-chip-muted",
-                                                                {i18n.t("accounts.no_models")}
-                                                            }
-                                                        } else {
-                                                            for model in acc.models.iter().take(2) {
-                                                                span { class: "account-model-chip", "{model}" }
-                                                            }
-                                                            if acc.models.len() > 2 {
-                                                                button {
-                                                                    class: "account-model-chip account-model-chip-muted account-model-chip-more",
-                                                                    r#type: "button",
-                                                                    aria_label: {
-                                                                        i18n.t_with_args(
-                                                                            "accounts.models_more_aria",
-                                                                            &[("count", &(acc.models.len() - 2).to_string())],
-                                                                        )
-                                                                    },
-                                                                    onclick: {
-                                                                        let account_name = acc.name.clone();
-                                                                        let models = acc
-                                                                            .models
-                                                                            .iter()
-                                                                            .map(|model| ModelListEntry::new(model.clone(), None))
-                                                                            .collect::<Vec<_>>();
-                                                                        move |_| {
-                                                                            selected_model_account.set(account_name.clone());
-                                                                            selected_account_models.set(models.clone());
-                                                                            show_model_list.set(true);
-                                                                        }
-                                                                    },
-                                                                    "+{acc.models.len() - 2}"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
+                                                div { class: "account-subline",
+                                                    span { class: "account-secret-label", {i18n.t("accounts.key_preview")} }
+                                                    code { class: "account-key-preview", "{acc.api_key_preview}" }
                                                 }
-                                            }
-                                            td {
-                                                div { class: "account-status-stack",
-                                                    div { class: "account-status-row",
-                                                        if acc.is_active && acc.tenant_active {
-                                                            Badge { variant: BadgeVariant::Success,
-                                                                {i18n.t("common.enabled")}
-                                                            }
-                                                        } else {
-                                                            Badge { variant: BadgeVariant::Neutral,
-                                                                {i18n.t("common.disabled")}
-                                                            }
-                                                        }
-                                                        if acc.health_status == "healthy" {
-                                                            Badge { variant: BadgeVariant::Success,
-                                                                {i18n.t("system.healthy")}
-                                                            }
-                                                        } else if acc.health_status == "unhealthy" {
-                                                            Badge { variant: BadgeVariant::Error,
-                                                                {i18n.t("system.unhealthy")}
-                                                            }
-                                                        } else if acc.health_status == "degraded" {
-                                                            Badge { variant: BadgeVariant::Warning,
-                                                                {i18n.t("system.degraded")}
-                                                            }
-                                                        } else {
-                                                            Badge { variant: BadgeVariant::Warning,
-                                                                {i18n.t("dashboard.pending_check")}
-                                                            }
-                                                        }
-                                                    }
-                                                    p { class: "account-status-note",
-                                                        if !acc.tenant_active {
-                                                            {i18n.t("accounts.tenant_inactive")}
-                                                        } else if acc.is_active && acc.routing_eligible {
-                                                            {i18n.t("accounts.route_ready")}
-                                                        } else if acc.is_active {
-                                                            {i18n.t("accounts.enabled_but_unhealthy")}
-                                                        } else {
-                                                            {i18n.t("accounts.not_routed")}
-                                                        }
-                                                    }
-                                                    p { class: "account-status-note",
-                                                        "{i18n.t(\"accounts.priority\")}: {acc.priority}"
-                                                    }
-                                                    if acc.health_penalty > 0 {
-                                                        p { class: "account-status-note",
-                                                            "{i18n.t(\"accounts.health_penalty\")}: {acc.health_penalty}"
-                                                        }
-                                                    }
-                                                    if let Some(reason) = &acc.health_reason {
-                                                        p { class: "account-status-note", "{reason}" }
-                                                    }
-                                                }
-                                            }
-                                            td {
-                                                div { class: "account-rpm-cell",
-                                                    div { class: "account-rpm-metric",
-                                                        span { class: "account-rpm-current", "{acc.current_rpm}" }
-                                                        span { class: "account-rpm-divider", "/" }
-                                                        span { class: "account-rpm-limit", "{acc.rpm_limit}" }
-                                                    }
-                                                    p { class: "account-rpm-label", {i18n.t("accounts.rpm_label")} }
-                                                    p { class: "account-rpm-label",
-                                                        "{i18n.t(\"accounts.tpm_label\")}: {acc.tpm_limit}"
-                                                    }
-                                                }
-                                            }
-                                            td {
-                                                div { class: "account-tenant-cell",
-                                                    span { class: "account-tenant-id",
-                                                        "{acc.tenant_id.chars().take(8).collect::<String>()}"
-                                                    }
-                                                }
-                                            }
-                                            td {
-                                                div { class: "account-time-cell",
-                                                    div { class: "account-time-block",
-                                                        span { class: "account-time-label",
-                                                            {i18n.t("common.created_at_label")}
-                                                        }
-                                                        span { class: "account-time-value", {format_time(&acc.created_at)} }
-                                                    }
-                                                    div { class: "account-time-block",
-                                                        span { class: "account-time-label", {i18n.t("accounts.last_used")} }
-                                                        span { class: "account-time-value",
-                                                            {
-                                                                if let Some(last_used) = &acc.last_used_at {
-                                                                    format_time(last_used)
-                                                                } else {
-                                                                    i18n.t("accounts.no_usage_record").to_string()
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            td {
-                                                div { class: "accounts-actions",
-                                                    Button {
-                                                        variant: ButtonVariant::Ghost,
-                                                        size: ButtonSize::Small,
-                                                        onclick: {
-                                                            let id = acc.id.clone();
-                                                            let name = acc.name.clone();
-                                                            let provider = acc.provider.clone();
-                                                            let api_mode = api_mode_for_capabilities(
-                                                                &acc.provider,
-                                                                &acc.api_capabilities,
-                                                            )
-                                                            .to_string();
-                                                            let models = acc.models.join(", ");
-                                                            let active = acc.is_active;
-                                                            let priority = acc.priority;
-                                                            let rpm_limit = acc.rpm_limit;
-                                                            let tpm_limit = acc.tpm_limit;
-                                                            let visibility = acc.visibility.clone();
-                                                            let tenant_id = acc.tenant_id.clone();
-                                                            move |_| {
-                                                                edit_id.set(id.clone());
-                                                                edit_name.set(name.clone());
-                                                                edit_provider.set(provider.clone());
-                                                                edit_api_mode.set(api_mode.clone());
-                                                                edit_models_input.set(models.clone());
-                                                                edit_rpm_limit.set(rpm_limit.to_string());
-                                                                edit_tpm_limit.set(tpm_limit.to_string());
-                                                                edit_api_key.set(String::new());
-                                                                edit_api_base.set(String::new());
-                                                                edit_reset_api_base.set(false);
-                                                                edit_is_active.set(active);
-                                                                edit_priority.set(priority.to_string());
-                                                                edit_visibility.set(visibility.clone());
-                                                                edit_tenant_id.set(tenant_id.clone());
-                                                                *edit_error.write() = String::new();
-                                                                show_edit.set(true);
-                                                            }
-                                                        },
-                                                        {i18n.t("form.edit")}
-                                                    }
-                                                    Button {
-                                                        variant: ButtonVariant::Ghost,
-                                                        size: ButtonSize::Small,
-                                                        onclick: {
-                                                            let id = acc.id.clone();
-                                                            move |_| {
-                                                                let token = auth_store.token().unwrap_or_default();
-                                                                let id = id.clone();
-                                                                spawn(async move {
-                                                                    match account_service::test(&id, &token).await {
-                                                                        Ok(response) => {
-                                                                            match account_test_outcome(response) {
-                                                                                AccountTestOutcome::Success => {
-                                                                                    ui_store.show_success(i18n.t("accounts.test_success"));
-                                                                                }
-                                                                                AccountTestOutcome::Failure => {
-                                                                                    ui_store.show_error(i18n.t("accounts.test_failed"));
-                                                                                }
-                                                                            }
-                                                                        }
-                                                                        Err(e) => {
-                                                                            ui_store
-                                                                                .show_error(
-                                                                                    format!("{}: {}", i18n.t("accounts.test_failed"), e),
-                                                                                )
-                                                                        }
-                                                                    }
-                                                                    accounts.restart();
-                                                                });
-                                                            }
-                                                        },
-                                                        {i18n.t("accounts.test")}
-                                                    }
-                                                    Button {
-                                                        variant: ButtonVariant::Ghost,
-                                                        size: ButtonSize::Small,
-                                                        onclick: {
-                                                            let id = acc.id.clone();
-                                                            move |_| {
-                                                                let token = auth_store.token().unwrap_or_default();
-                                                                let id = id.clone();
-                                                                spawn(async move {
-                                                                    match account_service::refresh(&id, &token).await {
-                                                                        Ok(_) => ui_store.show_success(i18n.t("accounts.refresh_success")),
-                                                                        Err(e) => {
-                                                                            ui_store
-                                                                                .show_error(
-                                                                                    format!("{}: {}", i18n.t("accounts.refresh_failed"), e),
-                                                                                )
-                                                                        }
-                                                                    }
-                                                                    accounts.restart();
-                                                                });
-                                                            }
-                                                        },
-                                                        {i18n.t("common.refresh")}
-                                                    }
-                                                    Button {
-                                                        variant: ButtonVariant::Danger,
-                                                        size: ButtonSize::Small,
-                                                        onclick: {
-                                                            let id = acc.id.clone();
-                                                            let name = acc.name.clone();
-                                                            move |_| {
-                                                                delete_id.set(id.clone());
-                                                                delete_name.set(name.clone());
-                                                                show_delete.set(true);
-                                                            }
-                                                        },
-                                                        {i18n.t("form.delete")}
+                                                if let Some(api_base) = &acc.api_base {
+                                                    p { class: "account-endpoint", "{api_base}" }
+                                                } else {
+                                                    p { class: "account-endpoint account-endpoint-muted",
+                                                        {i18n.t("accounts.default_endpoint")}
                                                     }
                                                 }
                                             }
                                         }
+                                        td {
+                                            div { class: "account-provider-cell",
+                                                span { class: "account-provider-badge account-provider-{acc.provider}",
+                                                    "{provider_label(&acc.provider, i18n)}"
+                                                }
+                                                p { class: "account-provider-code", "{acc.provider}" }
+                                                p { class: "account-provider-code",
+                                                    {
+                                                        i18n.t(
+                                                            api_mode_label_key(
+                                                                api_mode_for_capabilities(&acc.provider, &acc.api_capabilities),
+                                                            ),
+                                                        )
+                                                    }
+                                                }
+                                                div { class: "account-models",
+                                                    if acc.models.is_empty() {
+                                                        span { class: "account-model-chip account-model-chip-muted",
+                                                            {i18n.t("accounts.no_models")}
+                                                        }
+                                                    } else {
+                                                        for model in acc.models.iter().take(2) {
+                                                            span { class: "account-model-chip", "{model}" }
+                                                        }
+                                                        if acc.models.len() > 2 {
+                                                            button {
+                                                                class: "account-model-chip account-model-chip-muted account-model-chip-more",
+                                                                r#type: "button",
+                                                                aria_label: {
+                                                                    i18n.t_with_args(
+                                                                        "accounts.models_more_aria",
+                                                                        &[("count", &(acc.models.len() - 2).to_string())],
+                                                                    )
+                                                                },
+                                                                onclick: {
+                                                                    let account_name = acc.name.clone();
+                                                                    let models = acc
+                                                                        .models
+                                                                        .iter()
+                                                                        .map(|model| ModelListEntry::new(model.clone(), None))
+                                                                        .collect::<Vec<_>>();
+                                                                    move |_| {
+                                                                        selected_model_account.set(account_name.clone());
+                                                                        selected_account_models.set(models.clone());
+                                                                        show_model_list.set(true);
+                                                                    }
+                                                                },
+                                                                "+{acc.models.len() - 2}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div { class: "account-status-stack",
+                                                div { class: "account-status-row",
+                                                    if acc.is_active && acc.tenant_active {
+                                                        Badge { variant: BadgeVariant::Success, {i18n.t("common.enabled")} }
+                                                    } else {
+                                                        Badge { variant: BadgeVariant::Neutral, {i18n.t("common.disabled")} }
+                                                    }
+                                                    if acc.health_status == "healthy" {
+                                                        Badge { variant: BadgeVariant::Success, {i18n.t("system.healthy")} }
+                                                    } else if acc.health_status == "unhealthy" {
+                                                        Badge { variant: BadgeVariant::Error, {i18n.t("system.unhealthy")} }
+                                                    } else if acc.health_status == "degraded" {
+                                                        Badge { variant: BadgeVariant::Warning, {i18n.t("system.degraded")} }
+                                                    } else {
+                                                        Badge { variant: BadgeVariant::Warning,
+                                                            {i18n.t("dashboard.pending_check")}
+                                                        }
+                                                    }
+                                                }
+                                                p { class: "account-status-note",
+                                                    if !acc.tenant_active {
+                                                        {i18n.t("accounts.tenant_inactive")}
+                                                    } else if acc.is_active && acc.routing_eligible {
+                                                        {i18n.t("accounts.route_ready")}
+                                                    } else if acc.is_active {
+                                                        {i18n.t("accounts.enabled_but_unhealthy")}
+                                                    } else {
+                                                        {i18n.t("accounts.not_routed")}
+                                                    }
+                                                }
+                                                p { class: "account-status-note",
+                                                    "{i18n.t(\"accounts.priority\")}: {acc.priority}"
+                                                }
+                                                if acc.health_penalty > 0 {
+                                                    p { class: "account-status-note",
+                                                        "{i18n.t(\"accounts.health_penalty\")}: {acc.health_penalty}"
+                                                    }
+                                                }
+                                                if let Some(reason) = &acc.health_reason {
+                                                    p { class: "account-status-note", "{reason}" }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div { class: "account-rpm-cell",
+                                                div { class: "account-rpm-metric",
+                                                    span { class: "account-rpm-current", "{acc.current_rpm}" }
+                                                    span { class: "account-rpm-divider", "/" }
+                                                    span { class: "account-rpm-limit", "{acc.rpm_limit}" }
+                                                }
+                                                p { class: "account-rpm-label", {i18n.t("accounts.rpm_label")} }
+                                                p { class: "account-rpm-label",
+                                                    "{i18n.t(\"accounts.tpm_label\")}: {acc.tpm_limit}"
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div { class: "account-tenant-cell",
+                                                span { class: "account-tenant-id",
+                                                    "{acc.tenant_id.chars().take(8).collect::<String>()}"
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div { class: "account-time-cell",
+                                                div { class: "account-time-block",
+                                                    span { class: "account-time-label",
+                                                        {i18n.t("common.created_at_label")}
+                                                    }
+                                                    span { class: "account-time-value", {format_time(&acc.created_at)} }
+                                                }
+                                                div { class: "account-time-block",
+                                                    span { class: "account-time-label", {i18n.t("accounts.last_used")} }
+                                                    span { class: "account-time-value",
+                                                        {
+                                                            if let Some(last_used) = &acc.last_used_at {
+                                                                format_time(last_used)
+                                                            } else {
+                                                                i18n.t("accounts.no_usage_record").to_string()
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        td {
+                                            div { class: "accounts-actions",
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let id = acc.id.clone();
+                                                        let name = acc.name.clone();
+                                                        let provider = acc.provider.clone();
+                                                        let api_mode = api_mode_for_capabilities(&acc.provider, &acc.api_capabilities)
+                                                            .to_string();
+                                                        let models = acc.models.join(", ");
+                                                        let active = acc.is_active;
+                                                        let priority = acc.priority;
+                                                        let rpm_limit = acc.rpm_limit;
+                                                        let tpm_limit = acc.tpm_limit;
+                                                        let visibility = acc.visibility.clone();
+                                                        let tenant_id = acc.tenant_id.clone();
+                                                        move |_| {
+                                                            edit_id.set(id.clone());
+                                                            edit_name.set(name.clone());
+                                                            edit_provider.set(provider.clone());
+                                                            edit_api_mode.set(api_mode.clone());
+                                                            edit_models_input.set(models.clone());
+                                                            edit_rpm_limit.set(rpm_limit.to_string());
+                                                            edit_tpm_limit.set(tpm_limit.to_string());
+                                                            edit_api_key.set(String::new());
+                                                            edit_api_base.set(String::new());
+                                                            edit_reset_api_base.set(false);
+                                                            edit_is_active.set(active);
+                                                            edit_priority.set(priority.to_string());
+                                                            edit_visibility.set(visibility.clone());
+                                                            edit_tenant_id.set(tenant_id.clone());
+                                                            *edit_error.write() = String::new();
+                                                            show_edit.set(true);
+                                                        }
+                                                    },
+                                                    {i18n.t("form.edit")}
+                                                }
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let id = acc.id.clone();
+                                                        move |_| {
+                                                            let token = auth_store.token().unwrap_or_default();
+                                                            let id = id.clone();
+                                                            spawn(async move {
+                                                                match account_service::test(&id, &token).await {
+                                                                    Ok(response) => {
+                                                                        match account_test_outcome(response) {
+                                                                            AccountTestOutcome::Success => {
+                                                                                ui_store.show_success(i18n.t("accounts.test_success"));
+                                                                            }
+                                                                            AccountTestOutcome::Failure => {
+                                                                                ui_store.show_error(i18n.t("accounts.test_failed"));
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    Err(e) => {
+                                                                        ui_store
+                                                                            .show_error(
+                                                                                format!("{}: {}", i18n.t("accounts.test_failed"), e),
+                                                                            )
+                                                                    }
+                                                                }
+                                                                accounts.restart();
+                                                            });
+                                                        }
+                                                    },
+                                                    {i18n.t("accounts.test")}
+                                                }
+                                                Button {
+                                                    variant: ButtonVariant::Ghost,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let id = acc.id.clone();
+                                                        move |_| {
+                                                            let token = auth_store.token().unwrap_or_default();
+                                                            let id = id.clone();
+                                                            spawn(async move {
+                                                                match account_service::refresh(&id, &token).await {
+                                                                    Ok(_) => ui_store.show_success(i18n.t("accounts.refresh_success")),
+                                                                    Err(e) => {
+                                                                        ui_store
+                                                                            .show_error(
+                                                                                format!("{}: {}", i18n.t("accounts.refresh_failed"), e),
+                                                                            )
+                                                                    }
+                                                                }
+                                                                accounts.restart();
+                                                            });
+                                                        }
+                                                    },
+                                                    {i18n.t("common.refresh")}
+                                                }
+                                                Button {
+                                                    variant: ButtonVariant::Danger,
+                                                    size: ButtonSize::Small,
+                                                    onclick: {
+                                                        let id = acc.id.clone();
+                                                        let name = acc.name.clone();
+                                                        move |_| {
+                                                            delete_id.set(id.clone());
+                                                            delete_name.set(name.clone());
+                                                            show_delete.set(true);
+                                                        }
+                                                    },
+                                                    {i18n.t("form.delete")}
+                                                }
+                                            }
+                                        }
                                     }
+                                }
                             }
                         }
-                        Pagination {
-                            current: current_query.page,
-                            total_pages,
-                            total,
-                            page_size: current_query.page_size,
-                            summary: i18n.t_with_args(
-                                "common.pagination_summary",
-                                &[
-                                    ("total", &total.to_string()),
-                                    ("current", &current_query.page.to_string()),
-                                    ("total_pages", &total_pages.to_string()),
-                                ],
-                            ),
-                            page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                            page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                            previous_label: i18n.t("table.previous").to_string(),
-                            next_label: i18n.t("table.next").to_string(),
-                            on_page_change: move |page| query.write().page = page,
-                            on_page_size_change: move |size| query.write().set_page_size(size),
-                        }
+                    }
+                    // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+                    Pagination {
+                        current: current_query.page,
+                        total_pages,
+                        total,
+                        page_size: current_query.page_size,
+                        summary: i18n.t_with_args(
+                            "common.pagination_summary",
+                            &[
+                                ("total", &total.to_string()),
+                                ("current", &current_query.page.to_string()),
+                                ("total_pages", &total_pages.to_string()),
+                            ],
+                        ),
+                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                        page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                        previous_label: i18n.t("table.previous").to_string(),
+                        next_label: i18n.t("table.next").to_string(),
+                        on_page_change: move |page| query.write().page = page,
+                        on_page_size_change: move |size| query.write().set_page_size(size),
                     }
                 }
             }
@@ -1087,8 +1076,12 @@ fn AdminAccountsView() -> Element {
                                         class: "input-field",
                                         value: "{create_api_mode}",
                                         onchange: move |e| *create_api_mode.write() = e.value(),
-                                        option { value: "chat_completions", {i18n.t("accounts.api_mode_chat_completions")} }
-                                        option { value: "responses", {i18n.t("accounts.api_mode_responses")} }
+                                        option { value: "chat_completions",
+                                            {i18n.t("accounts.api_mode_chat_completions")}
+                                        }
+                                        option { value: "responses",
+                                            {i18n.t("accounts.api_mode_responses")}
+                                        }
                                         option { value: "both", {i18n.t("accounts.api_mode_both")} }
                                     }
                                     small { class: "form-hint", {i18n.t("accounts.api_mode_hint")} }
@@ -1208,8 +1201,12 @@ fn AdminAccountsView() -> Element {
                                         class: "input-field",
                                         value: "{edit_api_mode}",
                                         onchange: move |e| edit_api_mode.set(e.value()),
-                                        option { value: "chat_completions", {i18n.t("accounts.api_mode_chat_completions")} }
-                                        option { value: "responses", {i18n.t("accounts.api_mode_responses")} }
+                                        option { value: "chat_completions",
+                                            {i18n.t("accounts.api_mode_chat_completions")}
+                                        }
+                                        option { value: "responses",
+                                            {i18n.t("accounts.api_mode_responses")}
+                                        }
                                         option { value: "both", {i18n.t("accounts.api_mode_both")} }
                                     }
                                     small { class: "form-hint", {i18n.t("accounts.api_mode_hint")} }

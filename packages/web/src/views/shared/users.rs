@@ -11,8 +11,8 @@ use gloo_timers::future::TimeoutFuture;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ui::{
-    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, PageHeader, Pagination, Table,
-    TableHead,
+    Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, CursorPagination, PageHeader,
+    Pagination, Table, TableHead,
 };
 
 use crate::hooks::use_i18n::use_i18n;
@@ -1175,9 +1175,13 @@ pub fn Users() -> Element {
         .unwrap_or(false);
 
     if is_admin {
-        rsx! { AdminUsersView {} }
+        rsx! {
+            AdminUsersView {}
+        }
     } else {
-        rsx! { UserSelfView {} }
+        rsx! {
+            UserSelfView {}
+        }
     }
 }
 
@@ -1826,151 +1830,147 @@ fn AdminUsersView() -> Element {
 
     rsx! {
         div { class: "page-container users-page",
-        PageHeader {
-            title: i18n.t("page.users").to_string(),
-            description: i18n.t("users.subtitle").to_string(),
-        }
+            PageHeader {
+                title: i18n.t("page.users").to_string(),
+                description: i18n.t("users.subtitle").to_string(),
+            }
 
-        div { class: "toolbar",
-            div { class: "toolbar-left",
-                div { class: "input-wrapper search-input-wrapper",
-                    input {
-                        class: "input-field",
-                        r#type: "search",
-                        aria_label: i18n.t("users.search_placeholder"),
-                        placeholder: "{i18n.t(\"users.search_placeholder\")}",
-                        value: "{search}",
-                        oninput: move |e| {
-                            *search.write() = e.value();
-                        },
-                    }
-                    if !search().is_empty() {
-                        button {
-                            class: "btn btn-ghost btn-sm input-clear-button",
-                            r#type: "button",
-                            aria_label: i18n.t("common.clear"),
-                            onclick: move |_| {
-                                search.set(String::new());
-                                query.write().commit_search(String::new());
+            div { class: "toolbar",
+                div { class: "toolbar-left",
+                    div { class: "input-wrapper search-input-wrapper",
+                        input {
+                            class: "input-field",
+                            r#type: "search",
+                            aria_label: i18n.t("users.search_placeholder"),
+                            placeholder: "{i18n.t(\"users.search_placeholder\")}",
+                            value: "{search}",
+                            oninput: move |e| {
+                                *search.write() = e.value();
                             },
-                            "×"
+                        }
+                        if !search().is_empty() {
+                            button {
+                                class: "btn btn-ghost btn-sm input-clear-button",
+                                r#type: "button",
+                                aria_label: i18n.t("common.clear"),
+                                onclick: move |_| {
+                                    search.set(String::new());
+                                    query.write().commit_search(String::new());
+                                },
+                                "×"
+                            }
                         }
                     }
                 }
             }
-        }
 
-        div { class: "card table-pagination-panel",
-            {
-                let (is_empty, empty_text) = match users_result.as_ref().map(|r| r.as_ref()) {
-                    None => (true, i18n.t("table.loading")),
-                    Some(Err(_)) => (true, i18n.t("common.load_failed")),
-                    Some(Ok(_)) if paged_users.is_empty() => (true, i18n.t("users.empty")),
-                    _ => (false, ""),
-                };
-                rsx! {
-                    Table {
-                        empty: is_empty,
-                        empty_text: empty_text.to_string(),
-                        col_count: 6,
-                        thead {
-                            tr {
-                                TableHead { {i18n.t("users.user")} }
-                                TableHead { {i18n.t("table.role")} }
-                                TableHead { {i18n.t("users.tenant")} }
-                                TableHead { {i18n.t("users.balance")} }
-                                TableHead { {i18n.t("users.registered_at")} }
-                                TableHead { {i18n.t("table.actions")} }
-                            }
-                        }
-                        tbody {
-                            for u in paged_users.iter() {
+            div { class: "card table-pagination-panel",
+                {
+                    let (is_empty, empty_text) = match users_result.as_ref().map(|r| r.as_ref()) {
+                        None => (true, i18n.t("table.loading")),
+                        Some(Err(_)) => (true, i18n.t("common.load_failed")),
+                        Some(Ok(_)) if paged_users.is_empty() => (true, i18n.t("users.empty")),
+                        _ => (false, ""),
+                    };
+                    rsx! {
+                        Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 6,
+                            thead {
                                 tr {
-                                    td {
-                                        div { class: "user-cell",
-                                            span { class: "user-name",
-                                                { u.name.clone().unwrap_or_else(|| u.email.clone()) }
+                                    TableHead { {i18n.t("users.user")} }
+                                    TableHead { {i18n.t("table.role")} }
+                                    TableHead { {i18n.t("users.tenant")} }
+                                    TableHead { {i18n.t("users.balance")} }
+                                    TableHead { {i18n.t("users.registered_at")} }
+                                    TableHead { {i18n.t("table.actions")} }
+                                }
+                            }
+                            tbody {
+                                for u in paged_users.iter() {
+                                    tr {
+                                        td {
+                                            div { class: "user-cell",
+                                                span { class: "user-name", {u.name.clone().unwrap_or_else(|| u.email.clone())} }
+                                                span { class: "user-email text-secondary", "{u.email}" }
                                             }
-                                            span { class: "user-email text-secondary", "{u.email}" }
                                         }
-                                    }
-                                    td {
-                                        Badge { variant: BadgeVariant::Info, {user_role_label(&u.role, &i18n)} }
-                                    }
-                                    td { code { title: "{u.tenant_id}", {short_id(&u.tenant_id)} } }
-                                    td {
-                                        div { class: "balance-cell",
-                                            span { class: "balance-available",
-                                                "{fmt_balance(u.balance)}"
-                                            }
-                                            if u.frozen_balance > 0.0 {
-                                                span { class: "balance-frozen text-secondary",
-                                                    "({i18n.t(\"users.frozen_short\")} {fmt_balance(u.frozen_balance)})"
+                                        td {
+                                            Badge { variant: BadgeVariant::Info, {user_role_label(&u.role, &i18n)} }
+                                        }
+                                        td {
+                                            code { title: "{u.tenant_id}", {short_id(&u.tenant_id)} }
+                                        }
+                                        td {
+                                            div { class: "balance-cell",
+                                                span { class: "balance-available", "{fmt_balance(u.balance)}" }
+                                                if u.frozen_balance > 0.0 {
+                                                    span { class: "balance-frozen text-secondary",
+                                                        "({i18n.t(\"users.frozen_short\")} {fmt_balance(u.frozen_balance)})"
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                    td { { format_time(&u.created_at) } }
-                                    td {
-                                        div { class: "btn-group",
-                                            // 仅 system 角色可编辑 system 用户；admin 可编辑其他用户
-                                            if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
-                                                Button {
-                                                    variant: ButtonVariant::Ghost,
-                                                    size: ButtonSize::Small,
-                                                    onclick: {
-                                                        let uu = u.clone();
-                                                        move |_| {
-                                                            edit_name.set(uu.name.clone().unwrap_or_default());
-                                                            edit_role.set(uu.role.clone());
-                                                            edit_tenant_id.set(String::new());
-                                                            edit_user.set(Some(uu.clone()));
-                                                        }
-                                                    },
-                                                    {i18n.t("form.edit")}
-                                                }
-                                            }
-                                            // 仅 system 角色可管理 system 用户的余额；admin 可管理其他用户
-                                            if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
-                                                Button {
-                                                    variant: ButtonVariant::Ghost,
-                                                    size: ButtonSize::Small,
-                                                    onclick: {
-                                                        let uu = u.clone();
-                                                        move |_| {
-                                                            if balance_operation_tracker
-                                                                .read()
-                                                                .is_active()
-                                                                || release_saving()
-                                                            {
-                                                                return;
+                                        td { {format_time(&u.created_at)} }
+                                        td {
+                                            div { class: "btn-group",
+                                                // 仅 system 角色可编辑 system 用户；admin 可编辑其他用户
+                                                if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
+                                                    Button {
+                                                        variant: ButtonVariant::Ghost,
+                                                        size: ButtonSize::Small,
+                                                        onclick: {
+                                                            let uu = u.clone();
+                                                            move |_| {
+                                                                edit_name.set(uu.name.clone().unwrap_or_default());
+                                                                edit_role.set(uu.role.clone());
+                                                                edit_tenant_id.set(String::new());
+                                                                edit_user.set(Some(uu.clone()));
                                                             }
-                                                            balance_action.set("recharge".to_string());
-                                                            balance_amount.set(String::new());
-                                                            balance_reason.set(String::new());
-                                                            balance_error.set(String::new());
-                                                            release_request_id.set(None);
-                                                            release_expected_version.set(None);
-                                                            release_reason.set(String::new());
-                                                            balance_operation_tracker.write().advance_modal();
-                                                            balance_reservation_pagination.write().reset();
-                                                            balance_user.set(Some(uu.clone()));
-                                                        }
-                                                    },
-                                                    {i18n.t("users.balance_manage")}
+                                                        },
+                                                        {i18n.t("form.edit")}
+                                                    }
                                                 }
-                                            }
-                                            if u.id != current_user_id
-                                                && u.role != UserRole::System.as_str()
-                                                && (u.role != UserRole::Admin.as_str() || can_current_user_manage_roles) {
-                                                Button {
-                                                    variant: ButtonVariant::Danger,
-                                                    size: ButtonSize::Small,
-                                                    onclick: {
-                                                        let uu = u.clone();
-                                                        move |_| delete_user.set(Some(uu.clone()))
-                                                    },
-                                                    {i18n.t("form.delete")}
+                                                // 仅 system 角色可管理 system 用户的余额；admin 可管理其他用户
+                                                if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
+                                                    Button {
+                                                        variant: ButtonVariant::Ghost,
+                                                        size: ButtonSize::Small,
+                                                        onclick: {
+                                                            let uu = u.clone();
+                                                            move |_| {
+                                                                if balance_operation_tracker
+                                                                    .read()
+                                                                    .is_active()
+                                                                    || release_saving()
+                                                                {
+                                                                    return;
+                                                                }
+                                                                balance_action.set("recharge".to_string());
+                                                                balance_amount.set(String::new());
+                                                                balance_reason.set(String::new());
+                                                                balance_error.set(String::new());
+                                                                release_request_id.set(None);
+                                                                release_expected_version.set(None);
+                                                                release_reason.set(String::new());
+                                                                balance_operation_tracker.write().advance_modal();
+                                                                balance_reservation_pagination.write().reset();
+                                                                balance_user.set(Some(uu.clone()));
+                                                            }
+                                                        },
+                                                        {i18n.t("users.balance_manage")}
+                                                    }
+                                                }
+                                                if u.id != current_user_id && u.role != UserRole::System.as_str()
+                                                    && (u.role != UserRole::Admin.as_str() || can_current_user_manage_roles)
+                                                {
+                                                    Button {
+                                                        variant: ButtonVariant::Danger,
+                                                        size: ButtonSize::Small,
+                                                        onclick: {
+                                                            let uu = u.clone();
+                                                            move |_| delete_user.set(Some(uu.clone()))
+                                                        },
+                                                        {i18n.t("form.delete")}
+                                                    }
                                                 }
                                             }
                                         }
@@ -1981,279 +1981,288 @@ fn AdminUsersView() -> Element {
                     }
                 }
             }
+            // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
             {
-            let current_query = query();
-            let total = total_items;
-            rsx! { Pagination {
-                current: current_query.page,
-                total_pages,
-                total: total as u64,
-                page_size: current_query.page_size,
-                summary: i18n.t_with_args(
-                    "common.pagination_summary",
-                    &[
-                        ("total", &total.to_string()),
-                        ("current", &current_query.page.to_string()),
-                        ("total_pages", &total_pages.to_string()),
-                    ],
-                ),
-                page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                previous_label: i18n.t("table.previous").to_string(),
-                next_label: i18n.t("table.next").to_string(),
-                on_page_change: move |p| query.write().page = p,
-                on_page_size_change: move |size| query.write().set_page_size(size),
-            } }
-        }
-        }
-
-        // ── 编辑用户弹窗 ──────────────────────────────────────────
-        if edit_user().is_some() {
-            div { class: "modal-backdrop",
-                onclick: move |_| edit_user.set(None),
-                div {
-                    class: "modal",
-                    role: "dialog",
-                    aria_modal: "true",
-                    aria_label: i18n.t("users.edit_title"),
-                    onclick: move |e| e.stop_propagation(),
-                    div { class: "modal-header",
-                        h2 { class: "modal-title", {i18n.t("users.edit_title")} }
-                        button {
-                            class: "btn btn-ghost btn-sm",
-                            r#type: "button",
-                            aria_label: i18n.t("common.close"),
-                            onclick: move |_| edit_user.set(None),
-                            "✕"
-                        }
+                let current_query = query();
+                let total = total_items;
+                rsx! {
+                    Pagination {
+                        current: current_query.page,
+                        total_pages,
+                        total: total as u64,
+                        page_size: current_query.page_size,
+                        summary: i18n.t_with_args(
+                            "common.pagination_summary",
+                            &[
+                                ("total", &total.to_string()),
+                                ("current", &current_query.page.to_string()),
+                                ("total_pages", &total_pages.to_string()),
+                            ],
+                        ),
+                        page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                        page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                        previous_label: i18n.t("table.previous").to_string(),
+                        next_label: i18n.t("table.next").to_string(),
+                        on_page_change: move |p| query.write().page = p,
+                        on_page_size_change: move |size| query.write().set_page_size(size),
                     }
-                    div { class: "modal-body",
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("users.display_name")} }
-                            input {
-                                class: "input-field",
-                                placeholder: "{i18n.t(\"users.display_name_placeholder\")}",
-                                value: "{edit_name}",
-                                oninput: move |e| *edit_name.write() = e.value(),
+                }
+            }
+
+            // ── 编辑用户弹窗 ──────────────────────────────────────────
+            if edit_user().is_some() {
+                div {
+                    class: "modal-backdrop",
+                    onclick: move |_| edit_user.set(None),
+                    div {
+                        class: "modal",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_label: i18n.t("users.edit_title"),
+                        onclick: move |e| e.stop_propagation(),
+                        div { class: "modal-header",
+                            h2 { class: "modal-title", {i18n.t("users.edit_title")} }
+                            button {
+                                class: "btn btn-ghost btn-sm",
+                                r#type: "button",
+                                aria_label: i18n.t("common.close"),
+                                onclick: move |_| edit_user.set(None),
+                                "✕"
                             }
                         }
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("table.role")} }
-                            if can_edit_selected_role {
-                                select {
-                                    class: "input-field",
-                                    value: "{edit_role}",
-                                    onchange: move |e| *edit_role.write() = e.value(),
-                                    option { value: "user", "{i18n.t(\"users.role_user\")}" }
-                                    option { value: "admin", "{i18n.t(\"users.role_admin\")}" }
-                                }
-                            } else {
+                        div { class: "modal-body",
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("users.display_name")} }
                                 input {
                                     class: "input-field",
-                                    value: "{edit_role}",
-                                    readonly: true,
+                                    placeholder: "{i18n.t(\"users.display_name_placeholder\")}",
+                                    value: "{edit_name}",
+                                    oninput: move |e| *edit_name.write() = e.value(),
                                 }
                             }
-                        }
-                        if can_edit_selected_tenant {
                             div { class: "form-group",
-                                label { class: "form-label", {i18n.t("users.tenant")} }
-                                {
-                                    let tenant_result = tenants();
-                                    let tenant_list = tenant_result
-                                        .as_ref()
-                                        .and_then(|result| result.as_ref().ok())
-                                        .cloned()
-                                        .unwrap_or_default()
-                                        .into_iter()
-                                        .filter(|tenant| tenant.slug != "system")
-                                        .collect::<Vec<_>>();
-                                    // `use_resource` retains its previous value while a
-                                    // restart is pending. Read the state as well so a retry
-                                    // does not keep showing the stale error or an enabled
-                                    // retry button while the new request is running.
-                                    let tenant_loading = tenants.state().cloned()
-                                        == dioxus::prelude::UseResourceState::Pending
-                                        || tenant_result.is_none();
-                                    let tenant_error = if tenant_loading {
-                                        None
-                                    } else {
-                                        tenant_result
+                                label { class: "form-label", {i18n.t("table.role")} }
+                                if can_edit_selected_role {
+                                    select {
+                                        class: "input-field",
+                                        value: "{edit_role}",
+                                        onchange: move |e| *edit_role.write() = e.value(),
+                                        option { value: "user", "{i18n.t(\"users.role_user\")}" }
+                                        option { value: "admin", "{i18n.t(\"users.role_admin\")}" }
+                                    }
+                                } else {
+                                    input {
+                                        class: "input-field",
+                                        value: "{edit_role}",
+                                        readonly: true,
+                                    }
+                                }
+                            }
+                            if can_edit_selected_tenant {
+                                div { class: "form-group",
+                                    label { class: "form-label", {i18n.t("users.tenant")} }
+                                    {
+                                        let tenant_result = tenants();
+                                        let tenant_list = tenant_result
                                             .as_ref()
-                                            .and_then(|result| result.as_ref().err())
-                                            .map(user_error_message)
-                                    };
-                                    let selected_tenant_id = edit_tenant_id();
-                                    let current_tenant_name = edit_user()
-                                        .as_ref()
-                                        .map(|user| user.tenant_name.clone())
-                                        .unwrap_or_else(|| i18n.t("users.tenant_unknown").to_string());
+                                            .and_then(|result| result.as_ref().ok())
+                                            .cloned()
+                                            .unwrap_or_default()
+                                            .into_iter()
+                                            .filter(|tenant| tenant.slug != "system")
+                                            .collect::<Vec<_>>();
+                                        // `use_resource` retains its previous value while a
+                                        // restart is pending. Read the state as well so a retry
+                                        // does not keep showing the stale error or an enabled
+                                        // retry button while the new request is running.
+                                        let tenant_loading = tenants.state().cloned()
+                                            == dioxus::prelude::UseResourceState::Pending
+                                            || tenant_result.is_none();
+                                        let tenant_error = if tenant_loading {
+                                            None
+                                        } else {
+                                            tenant_result
+                                                .as_ref()
+                                                .and_then(|result| result.as_ref().err())
+                                                .map(user_error_message)
+                                        };
+                                        let selected_tenant_id = edit_tenant_id();
+                                        let current_tenant_name = edit_user()
+                                            .as_ref()
+                                            .map(|user| user.tenant_name.clone())
+                                            .unwrap_or_else(|| i18n.t("users.tenant_unknown").to_string());
+                                        rsx! {
+                                            select {
+                                                class: "input-field",
+                                                value: "{selected_tenant_id}",
+                                                disabled: tenant_loading || tenant_error.is_some(),
+                                                onchange: move |event| edit_tenant_id.set(event.value()),
+                                                option { value: "", "{i18n.t(\"users.tenant_keep\")} ({current_tenant_name})" }
+                                                for tenant in &tenant_list {
+                                                    option { value: "{tenant.id}", "{tenant.name} ({short_id(&tenant.id)})" }
+                                                }
+                                            }
+                                            if tenant_loading {
+                                                small { class: "form-hint", {i18n.t("table.loading")} }
+                                            }
+                                            if let Some(ref error) = tenant_error {
+                                                div { class: "form-hint form-hint-error",
+                                                    small { class: "text-error", "{i18n.t(\"common.load_failed\")}: {error}" }
+                                                    button {
+                                                        class: "btn btn-ghost btn-sm",
+                                                        r#type: "button",
+                                                        onclick: move |_| tenants.restart(),
+                                                        {i18n.t("common.retry")}
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    small { class: "form-hint", {i18n.t("users.tenant_hint")} }
+                                }
+                            }
+                        }
+                        div { class: "modal-footer",
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                onclick: move |_| edit_user.set(None),
+                                {i18n.t("form.cancel")}
+                            }
+                            Button {
+                                variant: ButtonVariant::Primary,
+                                loading: edit_saving(),
+                                onclick: on_edit_save,
+                                "{edit_save_label}"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 删除确认弹窗 ──────────────────────────────────────────
+            if let Some(ref du) = delete_user() {
+                div {
+                    class: "modal-backdrop",
+                    onclick: move |_| delete_user.set(None),
+                    div {
+                        class: "modal",
+                        role: "alertdialog",
+                        aria_modal: "true",
+                        aria_label: i18n.t("users.delete_confirm_title"),
+                        onclick: move |e| e.stop_propagation(),
+                        div { class: "modal-header",
+                            h2 { class: "modal-title", {i18n.t("users.delete_confirm_title")} }
+                        }
+                        div { class: "modal-body",
+                            p {
+                                "{i18n.t(\"users.delete_confirm_prefix\")} "
+                                strong { {du.name.clone().unwrap_or_else(|| du.email.clone())} }
+                                " ({du.email}) {i18n.t(\"users.delete_confirm_suffix\")}"
+                            }
+                        }
+                        div { class: "modal-footer",
+                            Button {
+                                variant: ButtonVariant::Ghost,
+                                onclick: move |_| delete_user.set(None),
+                                {i18n.t("form.cancel")}
+                            }
+                            Button {
+                                variant: ButtonVariant::Danger,
+                                loading: delete_saving(),
+                                onclick: on_delete_confirm,
+                                "{delete_button_label}"
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 余额管理弹窗 ──────────────────────────────────────────
+            if let Some(ref bu) = balance_user() {
+                div {
+                    class: "modal-backdrop",
+                    onclick: move |_| {
+                        if balance_operation_tracker.read().is_active() || release_saving() {
+                            return;
+                        }
+                        balance_error.set(String::new());
+                        release_request_id.set(None);
+                        release_expected_version.set(None);
+                        release_reason.set(String::new());
+                        balance_operation_tracker.write().advance_modal();
+                        balance_reservation_pagination.write().reset();
+                        balance_user.set(None);
+                    },
+                    div {
+                        class: "modal",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_label: i18n.t("users.balance_title"),
+                        onclick: move |e| e.stop_propagation(),
+                        div { class: "modal-header",
+                            h2 { class: "modal-title",
+                                "{i18n.t(\"users.balance_title\")} - {bu.name.clone().unwrap_or_else(|| bu.email.clone())}"
+                            }
+                            button {
+                                class: "btn btn-ghost btn-sm",
+                                r#type: "button",
+                                aria_label: i18n.t("common.close"),
+                                disabled: balance_modal_busy,
+                                onclick: move |_| {
+                                    if balance_operation_tracker.read().is_active() || release_saving() {
+                                        return;
+                                    }
+                                    balance_error.set(String::new());
+                                    release_request_id.set(None);
+                                    release_expected_version.set(None);
+                                    release_reason.set(String::new());
+                                    balance_operation_tracker.write().advance_modal();
+                                    balance_reservation_pagination.write().reset();
+                                    balance_user.set(None);
+                                },
+                                "✕"
+                            }
+                        }
+                        div { class: "modal-body",
+                            // 弹窗内联错误提示
+                            if !balance_error().is_empty() {
+                                div { class: "modal-inline-error", "{balance_error}" }
+                            }
+                            if balance_repeat_confirmation {
+                                div { class: "alert alert-warning",
+                                    {i18n.t("users.balance_repeat_operation_warning")}
+                                }
+                            }
+                            // 每次打开弹窗都实时读取余额拆分，避免把总冻结误认为可人工解冻余额。
+                            match displayed_balance_details {
+                                None => rsx! {
+                                    p { class: "text-secondary", {i18n.t("table.loading")} }
+                                },
+                                Some(Err(ref e)) => {
+                                    let message = user_error_message(e);
+                                    let reservation_page_number =
+                                        balance_reservation_pagination.read().page_number();
+                                    let can_go_back = balance_reservation_pagination.read().can_go_back();
                                     rsx! {
-                                        select {
-                                            class: "input-field",
-                                            value: "{selected_tenant_id}",
-                                            disabled: tenant_loading || tenant_error.is_some(),
-                                            onchange: move |event| edit_tenant_id.set(event.value()),
-                                            option { value: "", "{i18n.t(\"users.tenant_keep\")} ({current_tenant_name})" }
-                                            for tenant in &tenant_list {
-                                                option {
-                                                    value: "{tenant.id}",
-                                                    "{tenant.name} ({short_id(&tenant.id)})"
-                                                }
-                                            }
-                                        }
-                                        if tenant_loading {
-                                            small { class: "form-hint", {i18n.t("table.loading")} }
-                                        }
-                                        if let Some(ref error) = tenant_error {
-                                            div { class: "form-hint form-hint-error",
-                                                small { class: "text-error", "{i18n.t(\"common.load_failed\")}: {error}" }
-                                                button {
-                                                    class: "btn btn-ghost btn-sm",
-                                                    r#type: "button",
-                                                    onclick: move |_| tenants.restart(),
-                                                    {i18n.t("common.retry")}
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                small { class: "form-hint", {i18n.t("users.tenant_hint")} }
-                            }
-                        }
-                    }
-                    div { class: "modal-footer",
-                        Button {
-                            variant: ButtonVariant::Ghost,
-                            onclick: move |_| edit_user.set(None),
-                            {i18n.t("form.cancel")}
-                        }
-                        Button {
-                            variant: ButtonVariant::Primary,
-                            loading: edit_saving(),
-                            onclick: on_edit_save,
-                            "{edit_save_label}"
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── 删除确认弹窗 ──────────────────────────────────────────
-        if let Some(ref du) = delete_user() {
-            div { class: "modal-backdrop",
-                onclick: move |_| delete_user.set(None),
-                div {
-                    class: "modal",
-                    role: "alertdialog",
-                    aria_modal: "true",
-                    aria_label: i18n.t("users.delete_confirm_title"),
-                    onclick: move |e| e.stop_propagation(),
-                    div { class: "modal-header",
-                        h2 { class: "modal-title", {i18n.t("users.delete_confirm_title")} }
-                    }
-                    div { class: "modal-body",
-                        p {
-                            "{i18n.t(\"users.delete_confirm_prefix\")} "
-                            strong { { du.name.clone().unwrap_or_else(|| du.email.clone()) } }
-                            " ({du.email}) {i18n.t(\"users.delete_confirm_suffix\")}"
-                        }
-                    }
-                    div { class: "modal-footer",
-                        Button {
-                            variant: ButtonVariant::Ghost,
-                            onclick: move |_| delete_user.set(None),
-                            {i18n.t("form.cancel")}
-                        }
-                        Button {
-                            variant: ButtonVariant::Danger,
-                            loading: delete_saving(),
-                            onclick: on_delete_confirm,
-                            "{delete_button_label}"
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── 余额管理弹窗 ──────────────────────────────────────────
-        if let Some(ref bu) = balance_user() {
-            div { class: "modal-backdrop",
-                onclick: move |_| {
-                    if balance_operation_tracker.read().is_active() || release_saving() {
-                        return;
-                    }
-                    balance_error.set(String::new());
-                    release_request_id.set(None);
-                    release_expected_version.set(None);
-                    release_reason.set(String::new());
-                    balance_operation_tracker.write().advance_modal();
-                    balance_reservation_pagination.write().reset();
-                    balance_user.set(None);
-                },
-                div {
-                    class: "modal",
-                    role: "dialog",
-                    aria_modal: "true",
-                    aria_label: i18n.t("users.balance_title"),
-                    onclick: move |e| e.stop_propagation(),
-                    div { class: "modal-header",
-                        h2 { class: "modal-title",
-                            "{i18n.t(\"users.balance_title\")} - {bu.name.clone().unwrap_or_else(|| bu.email.clone())}"
-                        }
-                        button {
-                            class: "btn btn-ghost btn-sm",
-                            r#type: "button",
-                            aria_label: i18n.t("common.close"),
-                            disabled: balance_modal_busy,
-                            onclick: move |_| {
-                                if balance_operation_tracker.read().is_active() || release_saving() {
-                                    return;
-                                }
-                                balance_error.set(String::new());
-                                release_request_id.set(None);
-                                release_expected_version.set(None);
-                                release_reason.set(String::new());
-                                balance_operation_tracker.write().advance_modal();
-                                balance_reservation_pagination.write().reset();
-                                balance_user.set(None);
-                            },
-                            "✕"
-                        }
-                    }
-                    div { class: "modal-body",
-                        // 弹窗内联错误提示
-                        if !balance_error().is_empty() {
-                            div { class: "modal-inline-error", "{balance_error}" }
-                        }
-                        if balance_repeat_confirmation {
-                            div { class: "alert alert-warning",
-                                {i18n.t("users.balance_repeat_operation_warning")}
-                            }
-                        }
-                        // 每次打开弹窗都实时读取余额拆分，避免把总冻结误认为可人工解冻余额。
-                        match displayed_balance_details {
-                            None => rsx! {
-                                p { class: "text-secondary", {i18n.t("table.loading")} }
-                            },
-                            Some(Err(ref e)) => {
-                                let message = user_error_message(e);
-                                let reservation_page_number =
-                                    balance_reservation_pagination.read().page_number();
-                                let can_go_back =
-                                    balance_reservation_pagination.read().can_go_back();
-                                rsx! {
-                                    div { class: "alert alert-warning",
-                                        "{i18n.t(\"users.balance_details_load_failed\")}: {message}"
-                                    }
-                                    if can_go_back {
-                                        div { class: "pagination", style: "margin-top: 12px;",
-                                            div { class: "pagination-actions",
-                                                Button {
-                                                    variant: ButtonVariant::Ghost,
-                                                    size: ButtonSize::Small,
+                                        div { class: "alert alert-warning", "{i18n.t(\"users.balance_details_load_failed\")}: {message}" }
+                                        if can_go_back {
+                                            div { style: "margin-top: 12px;",
+                                                CursorPagination {
+                                                    current: reservation_page_number as u32,
+                                                    has_previous: can_go_back,
+                                                    has_next: false,
+                                                    page_size: balance_reservation_page_size() as u32,
                                                     disabled: balance_modal_busy,
-                                                    onclick: move |_| {
+                                                    page_size_options: vec![10, 20, 50, 100],
+                                                    summary: i18n.t_with_args(
+                                                        "users.balance_reservations_page",
+                                                        &[("page", &reservation_page_number.to_string())],
+                                                    ),
+                                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                                                    previous_label: i18n.t("table.previous").to_string(),
+                                                    next_label: i18n.t("table.next").to_string(),
+                                                    on_previous: move |_| {
                                                         release_request_id.set(None);
                                                         release_expected_version.set(None);
                                                         release_reason.set(String::new());
@@ -2262,132 +2271,127 @@ fn AdminUsersView() -> Element {
                                                             .write()
                                                             .go_back(reservation_page_number);
                                                     },
-                                                    {i18n.t("users.balance_reservations_previous_page")}
+                                                    on_page_size_change: move |size| {
+                                                        balance_reservation_page_size.set(size as u64);
+                                                        balance_reservation_pagination.write().reset();
+                                                    },
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            },
-                            Some(Ok(ref details)) => {
-                                let available = crate::utils::format_precise_money_str(
-                                    &details.available_balance,
-                                );
-                                let total_frozen = crate::utils::format_precise_money_str(
-                                    &details.total_frozen_balance,
-                                );
-                                let request_reserved = crate::utils::format_precise_money_str(
-                                    &details.request_reserved_balance,
-                                );
-                                let manually_frozen = crate::utils::format_precise_money_str(
-                                    &details.manually_frozen_balance,
-                                );
-                                let reservation_page_number =
-                                    balance_reservation_pagination.read().page_number();
-                                let can_go_back =
-                                    balance_reservation_pagination.read().can_go_back();
-                                let next_cursor = details.next_cursor.clone();
-                                rsx! {
-                                    div { class: "balance-info",
-                                        div { class: "balance-row",
-                                            span { class: "balance-label", {i18n.t("users.balance_available")} }
-                                            span { class: "balance-value", "{available}" }
+                                Some(Ok(ref details)) => {
+                                    let available = crate::utils::format_precise_money_str(
+                                        &details.available_balance,
+                                    );
+                                    let total_frozen = crate::utils::format_precise_money_str(
+                                        &details.total_frozen_balance,
+                                    );
+                                    let request_reserved = crate::utils::format_precise_money_str(
+                                        &details.request_reserved_balance,
+                                    );
+                                    let manually_frozen = crate::utils::format_precise_money_str(
+                                        &details.manually_frozen_balance,
+                                    );
+                                    let reservation_page_number = balance_reservation_pagination
+                                        .read()
+                                        .page_number();
+                                    let can_go_back = balance_reservation_pagination.read().can_go_back();
+                                    let next_cursor = details.next_cursor.clone();
+                                    rsx! {
+                                        div { class: "balance-info",
+                                            div { class: "balance-row",
+                                                span { class: "balance-label", {i18n.t("users.balance_available")} }
+                                                span { class: "balance-value", "{available}" }
+                                            }
+                                            div { class: "balance-row",
+                                                span { class: "balance-label", {i18n.t("users.balance_total_frozen")} }
+                                                span { class: "balance-value", "{total_frozen}" }
+                                            }
+                                            div { class: "balance-row",
+                                                span { class: "balance-label", {i18n.t("users.balance_request_reserved")} }
+                                                span { class: "balance-value", "{request_reserved}" }
+                                            }
+                                            div { class: "balance-row",
+                                                span { class: "balance-label", {i18n.t("users.balance_manually_frozen")} }
+                                                span { class: "balance-value", "{manually_frozen}" }
+                                            }
                                         }
-                                        div { class: "balance-row",
-                                            span { class: "balance-label", {i18n.t("users.balance_total_frozen")} }
-                                            span { class: "balance-value", "{total_frozen}" }
-                                        }
-                                        div { class: "balance-row",
-                                            span { class: "balance-label", {i18n.t("users.balance_request_reserved")} }
-                                            span { class: "balance-value", "{request_reserved}" }
-                                        }
-                                        div { class: "balance-row",
-                                            span { class: "balance-label", {i18n.t("users.balance_manually_frozen")} }
-                                            span { class: "balance-value", "{manually_frozen}" }
-                                        }
-                                    }
 
-                                    if !details.reservations.is_empty() {
-                                        div {
-                                            style: "margin: 16px 0; display: flex; flex-direction: column; gap: 10px;",
-                                            h3 { style: "margin: 0; font-size: 14px;",
-                                                {i18n.t("users.balance_active_reservations")}
-                                            }
-                                            div { class: "alert alert-warning",
-                                                {i18n.t("users.balance_release_warning")}
-                                            }
-                                            for reservation in details.reservations.iter() {
-                                                div {
-                                                    key: "{reservation.request_id}",
-                                                    style: "border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px;",
-                                                    div { style: "display: flex; justify-content: space-between; gap: 12px; align-items: center;",
-                                                        div { style: "min-width: 0;",
-                                                            code {
-                                                                title: "{reservation.request_id}",
-                                                                "{short_id(&reservation.request_id)}"
+                                        if !details.reservations.is_empty() {
+                                            div { style: "margin: 16px 0; display: flex; flex-direction: column; gap: 10px;",
+                                                h3 { style: "margin: 0; font-size: 14px;", {i18n.t("users.balance_active_reservations")} }
+                                                div { class: "alert alert-warning", {i18n.t("users.balance_release_warning")} }
+                                                for reservation in details.reservations.iter() {
+                                                    div {
+                                                        key: "{reservation.request_id}",
+                                                        style: "border: 1px solid var(--border-color); border-radius: 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px;",
+                                                        div { style: "display: flex; justify-content: space-between; gap: 12px; align-items: center;",
+                                                            div { style: "min-width: 0;",
+                                                                code { title: "{reservation.request_id}", "{short_id(&reservation.request_id)}" }
+                                                                div {
+                                                                    class: "text-secondary",
+                                                                    style: "font-size: 12px;",
+                                                                    "{i18n.t(\"users.balance_reservation_expires\")}: {format_time(&reservation.expires_at)}"
+                                                                }
                                                             }
-                                                            div { class: "text-secondary", style: "font-size: 12px;",
-                                                                "{i18n.t(\"users.balance_reservation_expires\")}: {format_time(&reservation.expires_at)}"
-                                                            }
-                                                        }
-                                                        div { style: "display: flex; gap: 8px; align-items: center;",
-                                                            span { class: "balance-value",
-                                                                "{crate::utils::format_precise_money_str(&reservation.amount)}"
-                                                            }
-                                                            Button {
-                                                                variant: ButtonVariant::Danger,
-                                                                size: ButtonSize::Small,
-                                                                disabled: balance_modal_busy,
-                                                                onclick: {
-                                                                    let request_id = reservation.request_id.clone();
-                                                                    let version = reservation.version.clone();
-                                                                    move |_| {
-                                                                        release_request_id.set(Some(request_id.clone()));
-                                                                        release_expected_version.set(Some(version.clone()));
-                                                                        release_reason.set(String::new());
-                                                                        balance_error.set(String::new());
-                                                                    }
-                                                                },
-                                                                {i18n.t("users.balance_release_reservation")}
-                                                            }
-                                                        }
-                                                    }
-                                                    if release_request_id().as_deref()
-                                                        == Some(reservation.request_id.as_str())
-                                                    {
-                                                        div { class: "form-group", style: "margin: 0;",
-                                                            label { class: "form-label",
-                                                                {i18n.t("users.balance_release_reason")}
-                                                                span { class: "required-mark", " *" }
-                                                            }
-                                                            input {
-                                                                class: "input-field",
-                                                                maxlength: "1000",
-                                                                placeholder: "{i18n.t(\"users.balance_release_reason_placeholder\")}",
-                                                                value: "{release_reason}",
-                                                                oninput: move |e| {
-                                                                    *release_reason.write() = e.value();
-                                                                    balance_error.set(String::new());
-                                                                },
-                                                            }
-                                                            div { style: "display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px;",
-                                                                Button {
-                                                                    variant: ButtonVariant::Ghost,
-                                                                    size: ButtonSize::Small,
-                                                                    disabled: balance_modal_busy,
-                                                                    onclick: move |_| {
-                                                                        release_request_id.set(None);
-                                                                        release_expected_version.set(None);
-                                                                        release_reason.set(String::new());
-                                                                    },
-                                                                    {i18n.t("form.cancel")}
+                                                            div { style: "display: flex; gap: 8px; align-items: center;",
+                                                                span { class: "balance-value",
+                                                                    "{crate::utils::format_precise_money_str(&reservation.amount)}"
                                                                 }
                                                                 Button {
                                                                     variant: ButtonVariant::Danger,
                                                                     size: ButtonSize::Small,
-                                                                    loading: release_saving(),
-                                                                    onclick: on_release_reservation,
-                                                                    {i18n.t("users.balance_confirm_release")}
+                                                                    disabled: balance_modal_busy,
+                                                                    onclick: {
+                                                                        let request_id = reservation.request_id.clone();
+                                                                        let version = reservation.version.clone();
+                                                                        move |_| {
+                                                                            release_request_id.set(Some(request_id.clone()));
+                                                                            release_expected_version.set(Some(version.clone()));
+                                                                            release_reason.set(String::new());
+                                                                            balance_error.set(String::new());
+                                                                        }
+                                                                    },
+                                                                    {i18n.t("users.balance_release_reservation")}
+                                                                }
+                                                            }
+                                                        }
+                                                        if release_request_id().as_deref() == Some(reservation.request_id.as_str()) {
+                                                            div { class: "form-group", style: "margin: 0;",
+                                                                label { class: "form-label",
+                                                                    {i18n.t("users.balance_release_reason")}
+                                                                    span { class: "required-mark", " *" }
+                                                                }
+                                                                input {
+                                                                    class: "input-field",
+                                                                    maxlength: "1000",
+                                                                    placeholder: "{i18n.t(\"users.balance_release_reason_placeholder\")}",
+                                                                    value: "{release_reason}",
+                                                                    oninput: move |e| {
+                                                                        *release_reason.write() = e.value();
+                                                                        balance_error.set(String::new());
+                                                                    },
+                                                                }
+                                                                div { style: "display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px;",
+                                                                    Button {
+                                                                        variant: ButtonVariant::Ghost,
+                                                                        size: ButtonSize::Small,
+                                                                        disabled: balance_modal_busy,
+                                                                        onclick: move |_| {
+                                                                            release_request_id.set(None);
+                                                                            release_expected_version.set(None);
+                                                                            release_reason.set(String::new());
+                                                                        },
+                                                                        {i18n.t("form.cancel")}
+                                                                    }
+                                                                    Button {
+                                                                        variant: ButtonVariant::Danger,
+                                                                        size: ButtonSize::Small,
+                                                                        loading: release_saving(),
+                                                                        onclick: on_release_reservation,
+                                                                        {i18n.t("users.balance_confirm_release")}
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -2395,23 +2399,24 @@ fn AdminUsersView() -> Element {
                                                 }
                                             }
                                         }
-                                    }
-                                    if can_go_back || next_cursor.is_some() || !details.reservations.is_empty() {
-                                        div {
-                                            class: "pagination",
-                                            style: "margin-top: 12px;",
-                                            span { class: "pagination-summary",
-                                                {i18n.t_with_args(
-                                                    "users.balance_reservations_page",
-                                                    &[("page", &reservation_page_number.to_string())],
-                                                )}
-                                            }
-                                            div { class: "pagination-actions",
-                                                Button {
-                                                    variant: ButtonVariant::Ghost,
-                                                    size: ButtonSize::Small,
-                                                    disabled: balance_modal_busy || !can_go_back,
-                                                    onclick: move |_| {
+                                        if can_go_back || next_cursor.is_some() || !details.reservations.is_empty() {
+                                            div { style: "margin-top: 12px;",
+                                                CursorPagination {
+                                                    current: reservation_page_number as u32,
+                                                    has_previous: can_go_back,
+                                                    has_next: next_cursor.is_some(),
+                                                    page_size: balance_reservation_page_size() as u32,
+                                                    disabled: balance_modal_busy,
+                                                    page_size_options: vec![10, 20, 50, 100],
+                                                    summary: i18n.t_with_args(
+                                                        "users.balance_reservations_page",
+                                                        &[("page", &reservation_page_number.to_string())],
+                                                    ),
+                                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                                                    previous_label: i18n.t("table.previous").to_string(),
+                                                    next_label: i18n.t("table.next").to_string(),
+                                                    on_previous: move |_| {
                                                         release_request_id.set(None);
                                                         release_expected_version.set(None);
                                                         release_reason.set(String::new());
@@ -2420,150 +2425,128 @@ fn AdminUsersView() -> Element {
                                                             .write()
                                                             .go_back(reservation_page_number);
                                                     },
-                                                    {i18n.t("users.balance_reservations_previous_page")}
-                                                }
-                                                label { class: "pagination-page-size",
-                                                    span { {i18n.t("common.pagination_page_size")} }
-                                                    select {
-                                                        aria_label: i18n.t("common.pagination_page_size"),
-                                                        value: "{balance_reservation_page_size}",
-                                                        onchange: move |event| {
-                                                            if let Ok(size) = event.value().parse::<u64>() {
-                                                                balance_reservation_page_size.set(size);
-                                                                balance_reservation_pagination.write().reset();
-                                                            }
-                                                        },
-                                                        for size in [10u64, 20, 50, 100] {
-                                                            option { value: "{size}", "{size}" }
-                                                        }
-                                                    }
-                                                    span { {i18n.t("common.items_suffix")} }
-                                                }
-                                                if let Some(next_cursor) = next_cursor {
-                                                    Button {
-                                                        variant: ButtonVariant::Ghost,
-                                                        size: ButtonSize::Small,
-                                                        disabled: balance_modal_busy,
-                                                        onclick: move |_| {
+                                                    on_next: {
+                                                        let next_cursor = next_cursor.clone();
+                                                        move |_| {
+                                                            let Some(next_cursor) = next_cursor.clone() else {
+                                                                return;
+                                                            };
                                                             release_request_id.set(None);
                                                             release_expected_version.set(None);
                                                             release_reason.set(String::new());
                                                             balance_error.set(String::new());
                                                             balance_reservation_pagination
                                                                 .write()
-                                                                .advance(
-                                                                    reservation_page_number,
-                                                                    next_cursor.clone(),
-                                                                );
-                                                        },
-                                                        {i18n.t("users.balance_reservations_next_page")}
-                                                    }
+                                                                .advance(reservation_page_number, next_cursor);
+                                                        }
+                                                    },
+                                                    on_page_size_change: move |size| {
+                                                        balance_reservation_page_size.set(size as u64);
+                                                        balance_reservation_pagination.write().reset();
+                                                    },
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            },
-                        }
-                        // 操作选择
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("users.balance_action")} }
-                            select {
-                                class: "input-field",
-                                disabled: balance_modal_busy,
-                                value: "{balance_action}",
-                                onchange: move |e| {
-                                    *balance_action.write() = e.value();
-                                    balance_operation_tracker
-                                        .write()
-                                        .clear_terminal_confirmation();
-                                    balance_error.set(String::new());
-                                },
-                                option { value: "recharge", {i18n.t("users.balance_recharge")} }
-                                option { value: "deduct", {i18n.t("users.balance_deduct")} }
-                                option { value: "freeze", {i18n.t("users.balance_freeze")} }
-                                option { value: "unfreeze", {i18n.t("users.balance_unfreeze")} }
                             }
-                            if balance_action() == "unfreeze" {
-                                p { class: "text-secondary", style: "margin: 6px 0 0; font-size: 12px;",
-                                    {i18n.t("users.balance_unfreeze_hint")}
+                            // 操作选择
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("users.balance_action")} }
+                                select {
+                                    class: "input-field",
+                                    disabled: balance_modal_busy,
+                                    value: "{balance_action}",
+                                    onchange: move |e| {
+                                        *balance_action.write() = e.value();
+                                        balance_operation_tracker
+                                            .write()
+                                            .clear_terminal_confirmation();
+                                        balance_error.set(String::new());
+                                    },
+                                    option { value: "recharge", {i18n.t("users.balance_recharge")} }
+                                    option { value: "deduct", {i18n.t("users.balance_deduct")} }
+                                    option { value: "freeze", {i18n.t("users.balance_freeze")} }
+                                    option { value: "unfreeze", {i18n.t("users.balance_unfreeze")} }
+                                }
+                                if balance_action() == "unfreeze" {
+                                    p {
+                                        class: "text-secondary",
+                                        style: "margin: 6px 0 0; font-size: 12px;",
+                                        {i18n.t("users.balance_unfreeze_hint")}
+                                    }
+                                }
+                            }
+                            // 金额输入
+                            div { class: "form-group",
+                                label { class: "form-label", {i18n.t("users.balance_amount")} }
+                                input {
+                                    class: "input-field",
+                                    r#type: "number",
+                                    step: "0.01",
+                                    min: "0",
+                                    disabled: balance_modal_busy,
+                                    placeholder: "{i18n.t(\"users.balance_amount_placeholder\")}",
+                                    value: "{balance_amount}",
+                                    oninput: move |e| {
+                                        *balance_amount.write() = e.value();
+                                        balance_operation_tracker
+                                            .write()
+                                            .clear_terminal_confirmation();
+                                        balance_error.set(String::new());
+                                    },
+                                }
+                            }
+                            // 原因输入
+                            div { class: "form-group",
+                                label { class: "form-label",
+                                    {i18n.t("users.balance_reason")}
+                                    span { class: "required-mark", " *" }
+                                }
+                                input {
+                                    class: "input-field",
+                                    disabled: balance_modal_busy,
+                                    placeholder: "{i18n.t(\"users.balance_reason_placeholder\")}",
+                                    maxlength: "1000",
+                                    value: "{balance_reason}",
+                                    oninput: move |e| {
+                                        *balance_reason.write() = e.value();
+                                        balance_operation_tracker
+                                            .write()
+                                            .clear_terminal_confirmation();
+                                        balance_error.set(String::new());
+                                    },
                                 }
                             }
                         }
-                        // 金额输入
-                        div { class: "form-group",
-                            label { class: "form-label", {i18n.t("users.balance_amount")} }
-                            input {
-                                class: "input-field",
-                                r#type: "number",
-                                step: "0.01",
-                                min: "0",
+                        div { class: "modal-footer",
+                            Button {
+                                variant: ButtonVariant::Ghost,
                                 disabled: balance_modal_busy,
-                                placeholder: "{i18n.t(\"users.balance_amount_placeholder\")}",
-                                value: "{balance_amount}",
-                                oninput: move |e| {
-                                    *balance_amount.write() = e.value();
-                                    balance_operation_tracker
-                                        .write()
-                                        .clear_terminal_confirmation();
-                                    balance_error.set(String::new());
+                                onclick: move |_| {
+                                    if balance_operation_tracker.read().is_active() || release_saving() {
+                                        return;
+                                    }
+                                    release_request_id.set(None);
+                                    release_expected_version.set(None);
+                                    release_reason.set(String::new());
+                                    balance_operation_tracker.write().advance_modal();
+                                    balance_reservation_pagination.write().reset();
+                                    balance_user.set(None);
                                 },
+                                {i18n.t("form.cancel")}
                             }
-                        }
-                        // 原因输入
-                        div { class: "form-group",
-                            label { class: "form-label",
-                                {i18n.t("users.balance_reason")}
-                                span { class: "required-mark", " *" }
+                            Button {
+                                variant: if balance_repeat_confirmation { ButtonVariant::Danger } else { ButtonVariant::Primary },
+                                disabled: release_saving(),
+                                loading: balance_saving,
+                                onclick: on_balance_save,
+                                "{balance_save_label}"
                             }
-                            input {
-                                class: "input-field",
-                                disabled: balance_modal_busy,
-                                placeholder: "{i18n.t(\"users.balance_reason_placeholder\")}",
-                                maxlength: "1000",
-                                value: "{balance_reason}",
-                                oninput: move |e| {
-                                    *balance_reason.write() = e.value();
-                                    balance_operation_tracker
-                                        .write()
-                                        .clear_terminal_confirmation();
-                                    balance_error.set(String::new());
-                                },
-                            }
-                        }
-                    }
-                    div { class: "modal-footer",
-                        Button {
-                            variant: ButtonVariant::Ghost,
-                            disabled: balance_modal_busy,
-                            onclick: move |_| {
-                                if balance_operation_tracker.read().is_active() || release_saving() {
-                                    return;
-                                }
-                                release_request_id.set(None);
-                                release_expected_version.set(None);
-                                release_reason.set(String::new());
-                                balance_operation_tracker.write().advance_modal();
-                                balance_reservation_pagination.write().reset();
-                                balance_user.set(None);
-                            },
-                            {i18n.t("form.cancel")}
-                        }
-                        Button {
-                            variant: if balance_repeat_confirmation {
-                                ButtonVariant::Danger
-                            } else {
-                                ButtonVariant::Primary
-                            },
-                            disabled: release_saving(),
-                            loading: balance_saving,
-                            onclick: on_balance_save,
-                            "{balance_save_label}"
                         }
                     }
                 }
             }
-        }
         }
     }
 }
@@ -4149,38 +4132,40 @@ fn UserSelfView() -> Element {
 
     rsx! {
         div { class: "page-container",
-        PageHeader {
-            title: i18n.t("users.self_title").to_string(),
-            description: i18n.t("users.self_desc").to_string(),
-        }
+            PageHeader {
+                title: i18n.t("users.self_title").to_string(),
+                description: i18n.t("users.self_desc").to_string(),
+            }
 
-        div { class: "card",
-            div { class: "card-header",
-                h3 { class: "card-title", {i18n.t("users.account_info")} }
-                Button {
-                    variant: ButtonVariant::Secondary,
-                    size: ButtonSize::Small,
-                    onclick: move |_| { nav.push(Route::UserProfile {}); },
-                    {i18n.t("profile.edit")}
-                }
-            }
-            div { class: "card-body",
-                div { class: "info-grid",
-                    div { class: "info-item",
-                        span { class: "info-label", {i18n.t("users.display_name")} }
-                        span { class: "info-value", "{display_name}" }
-                    }
-                    div { class: "info-item",
-                        span { class: "info-label", {i18n.t("table.email")} }
-                        span { class: "info-value", "{email}" }
-                    }
-                    div { class: "info-item",
-                        span { class: "info-label", {i18n.t("table.role")} }
-                        Badge { variant: BadgeVariant::Info, "{role}" }
+            div { class: "card",
+                div { class: "card-header",
+                    h3 { class: "card-title", {i18n.t("users.account_info")} }
+                    Button {
+                        variant: ButtonVariant::Secondary,
+                        size: ButtonSize::Small,
+                        onclick: move |_| {
+                            nav.push(Route::UserProfile {});
+                        },
+                        {i18n.t("profile.edit")}
                     }
                 }
+                div { class: "card-body",
+                    div { class: "info-grid",
+                        div { class: "info-item",
+                            span { class: "info-label", {i18n.t("users.display_name")} }
+                            span { class: "info-value", "{display_name}" }
+                        }
+                        div { class: "info-item",
+                            span { class: "info-label", {i18n.t("table.email")} }
+                            span { class: "info-value", "{email}" }
+                        }
+                        div { class: "info-item",
+                            span { class: "info-label", {i18n.t("table.role")} }
+                            Badge { variant: BadgeVariant::Info, "{role}" }
+                        }
+                    }
+                }
             }
-        }
         }
     }
 }

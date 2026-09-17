@@ -45,7 +45,9 @@ pub fn NodeGateway() -> Element {
         .unwrap_or(false);
 
     if !is_admin {
-        return rsx! { NoPermissionView { resource: i18n.t("page.node_gateway").to_string() } };
+        return rsx! {
+            NoPermissionView { resource: i18n.t("page.node_gateway").to_string() }
+        };
     }
 
     // 触发刷新
@@ -264,25 +266,27 @@ pub fn NodeGateway() -> Element {
         tasks(),
     );
 
+    // 各分页页脚数据（仅在对应数据加载成功后渲染，与面板内表格的数据来源保持一致）
+    let token_footer = pending_tokens_result
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|result| (result.total, result.total_pages.max(1) as u32));
+    let node_footer = nodes_result
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|result| (result.total, result.total_pages.max(1) as u32));
+    let task_footer = tasks_result
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .map(|result| (result.total, result.total_pages.max(1) as u32));
+
     rsx! {
         // 审批确认弹窗
         ConfirmModal {
             open: modal_open,
-            title: if modal_action() == "approve" {
-                i18n.t("node_gateway.approve_confirm_title")
-            } else {
-                i18n.t("node_gateway.reject_confirm_title")
-            },
-            message: if modal_action() == "approve" {
-                i18n.t("node_gateway.approve_confirm_msg")
-            } else {
-                i18n.t("node_gateway.reject_confirm_msg")
-            },
-            confirm_text: if modal_action() == "approve" {
-                i18n.t("node_gateway.approve")
-            } else {
-                i18n.t("node_gateway.reject")
-            },
+            title: if modal_action() == "approve" { i18n.t("node_gateway.approve_confirm_title") } else { i18n.t("node_gateway.reject_confirm_title") },
+            message: if modal_action() == "approve" { i18n.t("node_gateway.approve_confirm_msg") } else { i18n.t("node_gateway.reject_confirm_msg") },
+            confirm_text: if modal_action() == "approve" { i18n.t("node_gateway.approve") } else { i18n.t("node_gateway.reject") },
             cancel_text: i18n.t("form.cancel"),
             close_label: i18n.t("common.close"),
             danger: modal_action() == "reject",
@@ -299,7 +303,8 @@ pub fn NodeGateway() -> Element {
 
         // 吊销节点弹窗（自定义，含原因输入框）
         if revoke_modal_open() {
-            div { class: "modal-backdrop",
+            div {
+                class: "modal-backdrop",
                 onclick: move |_| {
                     revoke_modal_open.set(false);
                     revoke_reason.set(String::new());
@@ -412,7 +417,9 @@ pub fn NodeGateway() -> Element {
             }
 
             match overview() {
-                None => rsx! { p { class: "text-secondary", {i18n.t("table.loading")} } },
+                None => rsx! {
+                    p { class: "text-secondary", {i18n.t("table.loading")} }
+                },
                 Some(Err(ref e)) => rsx! {
                     div { class: "alert alert-error",
                         p { "{i18n.t(\"common.load_failed\")}: {e}" }
@@ -432,20 +439,52 @@ pub fn NodeGateway() -> Element {
                             }
                         }
                         div { class: "stats-grid",
-                            StatCard { label: i18n.t("node_gateway.nodes_total").to_string(), value: data.node_stats.total.to_string(), meta: i18n.t("node_gateway.nodes_total_desc").to_string() }
-                            StatCard { label: i18n.t("node_gateway.nodes_online").to_string(), value: data.node_stats.online.to_string(), meta: i18n.t("node_gateway.nodes_online_desc").to_string() }
-                            StatCard { label: i18n.t("node_gateway.tasks_active").to_string(), value: (data.task_stats.queued + data.task_stats.leased).to_string(), meta: i18n.t("node_gateway.tasks_active_desc").to_string() }
-                            StatCard { label: i18n.t("node_gateway.tasks_done").to_string(), value: data.task_stats.succeeded.to_string(), meta: i18n.t("node_gateway.tasks_done_desc").to_string() }
+                            StatCard {
+                                label: i18n.t("node_gateway.nodes_total").to_string(),
+                                value: data.node_stats.total.to_string(),
+                                meta: i18n.t("node_gateway.nodes_total_desc").to_string(),
+                            }
+                            StatCard {
+                                label: i18n.t("node_gateway.nodes_online").to_string(),
+                                value: data.node_stats.online.to_string(),
+                                meta: i18n.t("node_gateway.nodes_online_desc").to_string(),
+                            }
+                            StatCard {
+                                label: i18n.t("node_gateway.tasks_active").to_string(),
+                                value: (data.task_stats.queued + data.task_stats.leased).to_string(),
+                                meta: i18n.t("node_gateway.tasks_active_desc").to_string(),
+                            }
+                            StatCard {
+                                label: i18n.t("node_gateway.tasks_done").to_string(),
+                                value: data.task_stats.succeeded.to_string(),
+                                meta: i18n.t("node_gateway.tasks_done_desc").to_string(),
+                            }
                         }
                     }
 
                     div { class: "section",
                         h2 { class: "section-title", {i18n.t("node_gateway.protocol_title")} }
                         div { class: "node-gateway-protocol-grid",
-                            ProtocolItem { method: "POST".to_string(), path: "/node/v1/register".to_string(), desc: i18n.t("node_gateway.protocol_register").to_string() }
-                            ProtocolItem { method: "POST".to_string(), path: "/node/v1/heartbeat".to_string(), desc: i18n.t("node_gateway.protocol_heartbeat").to_string() }
-                            ProtocolItem { method: "POST".to_string(), path: "/node/v1/tasks/poll".to_string(), desc: i18n.t("node_gateway.protocol_poll").to_string() }
-                            ProtocolItem { method: "POST".to_string(), path: "/node/v1/tasks/{task_id}/complete".to_string(), desc: i18n.t("node_gateway.protocol_complete").to_string() }
+                            ProtocolItem {
+                                method: "POST".to_string(),
+                                path: "/node/v1/register".to_string(),
+                                desc: i18n.t("node_gateway.protocol_register").to_string(),
+                            }
+                            ProtocolItem {
+                                method: "POST".to_string(),
+                                path: "/node/v1/heartbeat".to_string(),
+                                desc: i18n.t("node_gateway.protocol_heartbeat").to_string(),
+                            }
+                            ProtocolItem {
+                                method: "POST".to_string(),
+                                path: "/node/v1/tasks/poll".to_string(),
+                                desc: i18n.t("node_gateway.protocol_poll").to_string(),
+                            }
+                            ProtocolItem {
+                                method: "POST".to_string(),
+                                path: "/node/v1/tasks/{task_id}/complete".to_string(),
+                                desc: i18n.t("node_gateway.protocol_complete").to_string(),
+                            }
                         }
                     }
 
@@ -460,7 +499,10 @@ pub fn NodeGateway() -> Element {
                                 match pending_tokens_result.as_ref() {
                                     Some(Ok(result)) if !result.tokens.is_empty() => rsx! {
                                         Badge { variant: BadgeVariant::Warning,
-                                            {i18n.t("node_gateway.token_approval_pending_count").replace("{count}", &result.total.to_string())}
+                                            {
+                                                i18n.t("node_gateway.token_approval_pending_count")
+                                                    .replace("{count}", &result.total.to_string())
+                                            }
                                         }
                                     },
                                     _ => rsx! {},
@@ -506,7 +548,9 @@ pub fn NodeGateway() -> Element {
                                                     span { class: "account-time-value", "{t.issued_at}" }
                                                 }
                                                 td {
-                                                    Badge { variant: BadgeVariant::Warning, {i18n.t("node_gateway.token_status_pending")} }
+                                                    Badge { variant: BadgeVariant::Warning,
+                                                        {i18n.t("node_gateway.token_status_pending")}
+                                                    }
                                                 }
                                                 td {
                                                     div { style: "display: flex; gap: 8px; align-items: center;",
@@ -544,29 +588,33 @@ pub fn NodeGateway() -> Element {
                                         }
                                     }
                                 }
-                                Pagination {
-                                    current: token_page(),
-                                    total_pages: result.total_pages.max(1) as u32,
-                                    total: result.total,
-                                    page_size: token_page_size() as u32,
-                                    summary: i18n.t_with_args(
-                                        "common.pagination_summary",
-                                        &[
-                                            ("total", &result.total.to_string()),
-                                            ("current", &token_page().to_string()),
-                                            ("total_pages", &result.total_pages.max(1).to_string()),
-                                        ],
-                                    ),
-                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                                    previous_label: i18n.t("table.previous").to_string(),
-                                    next_label: i18n.t("table.next").to_string(),
-                                    on_page_change: move |page| token_page.set(page),
-                                    on_page_size_change: move |size| {
-                                        token_page_size.set(size as u64);
-                                        token_page.set(1);
-                                    },
-                                }
+                            },
+                        }
+                    }
+
+                    // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+                    if let Some((footer_total, footer_total_pages)) = token_footer {
+                        Pagination {
+                            current: token_page(),
+                            total_pages: footer_total_pages,
+                            total: footer_total,
+                            page_size: token_page_size() as u32,
+                            summary: i18n.t_with_args(
+                                "common.pagination_summary",
+                                &[
+                                    ("total", &footer_total.to_string()),
+                                    ("current", &token_page().to_string()),
+                                    ("total_pages", &footer_total_pages.to_string()),
+                                ],
+                            ),
+                            page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                            page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                            previous_label: i18n.t("table.previous").to_string(),
+                            next_label: i18n.t("table.next").to_string(),
+                            on_page_change: move |page| token_page.set(page),
+                            on_page_size_change: move |size| {
+                                token_page_size.set(size as u64);
+                                token_page.set(1);
                             },
                         }
                     }
@@ -610,19 +658,27 @@ pub fn NodeGateway() -> Element {
                                                         div { class: "account-subline", "{node.client_instance_id}" }
                                                     }
                                                 }
-                                                td { NodeStatusBadge { status: node.status.clone() } }
+                                                td {
+                                                    NodeStatusBadge { status: node.status.clone() }
+                                                }
                                                 td {
                                                     div { class: "account-models",
                                                         for model in accepted_models(&node.accepted_models_json).iter() {
                                                             span { class: "account-model-chip", "{model}" }
                                                         }
                                                         if accepted_models(&node.accepted_models_json).is_empty() {
-                                                            span { class: "account-model-chip account-model-chip-muted", {i18n.t("node_gateway.no_models")} }
+                                                            span { class: "account-model-chip account-model-chip-muted",
+                                                                {i18n.t("node_gateway.no_models")}
+                                                            }
                                                         }
                                                     }
                                                 }
                                                 td { "{node.consecutive_failure_count}/{node.failure_threshold}" }
-                                                td { span { class: "account-time-value", {format_time_opt(node.last_heartbeat_at.as_deref())} } }
+                                                td {
+                                                    span { class: "account-time-value",
+                                                        {format_time_opt(node.last_heartbeat_at.as_deref())}
+                                                    }
+                                                }
                                                 td {
                                                     if let Some(ref preview) = node.token_preview {
                                                         code { "{preview}" }
@@ -630,7 +686,9 @@ pub fn NodeGateway() -> Element {
                                                         span { class: "text-secondary", "—" }
                                                     }
                                                 }
-                                                td { span { class: "account-id", "{short_id(&node.id)}" } }
+                                                td {
+                                                    span { class: "account-id", "{short_id(&node.id)}" }
+                                                }
                                                 td {
                                                     div { class: "accounts-actions",
                                                         if node.status == "excluded" {
@@ -682,29 +740,33 @@ pub fn NodeGateway() -> Element {
                                         }
                                     }
                                 }
-                                Pagination {
-                                    current: node_page(),
-                                    total_pages: result.total_pages.max(1) as u32,
-                                    total: result.total,
-                                    page_size: node_page_size() as u32,
-                                    summary: i18n.t_with_args(
-                                        "common.pagination_summary",
-                                        &[
-                                            ("total", &result.total.to_string()),
-                                            ("current", &node_page().to_string()),
-                                            ("total_pages", &result.total_pages.max(1).to_string()),
-                                        ],
-                                    ),
-                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                                    previous_label: i18n.t("table.previous").to_string(),
-                                    next_label: i18n.t("table.next").to_string(),
-                                    on_page_change: move |page| node_page.set(page),
-                                    on_page_size_change: move |size| {
-                                        node_page_size.set(size as u64);
-                                        node_page.set(1);
-                                    },
-                                }
+                            },
+                        }
+                    }
+
+                    // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+                    if let Some((footer_total, footer_total_pages)) = node_footer {
+                        Pagination {
+                            current: node_page(),
+                            total_pages: footer_total_pages,
+                            total: footer_total,
+                            page_size: node_page_size() as u32,
+                            summary: i18n.t_with_args(
+                                "common.pagination_summary",
+                                &[
+                                    ("total", &footer_total.to_string()),
+                                    ("current", &node_page().to_string()),
+                                    ("total_pages", &footer_total_pages.to_string()),
+                                ],
+                            ),
+                            page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                            page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                            previous_label: i18n.t("table.previous").to_string(),
+                            next_label: i18n.t("table.next").to_string(),
+                            on_page_change: move |page| node_page.set(page),
+                            on_page_size_change: move |size| {
+                                node_page_size.set(size as u64);
+                                node_page.set(1);
                             },
                         }
                     }
@@ -739,38 +801,50 @@ pub fn NodeGateway() -> Element {
                                         for task in result.tasks.iter() {
                                             tr {
                                                 td { "{task.model}" }
-                                                td { TaskStatusBadge { status: task.status.clone() } }
-                                                td { "{task.assigned_node_id.as_deref().map(short_id).unwrap_or_else(|| \"—\".to_string())}" }
+                                                td {
+                                                    TaskStatusBadge { status: task.status.clone() }
+                                                }
+                                                td {
+                                                    "{task.assigned_node_id.as_deref().map(short_id).unwrap_or_else(|| \"—\".to_string())}"
+                                                }
                                                 td { "{task.failure_count}/{task.failure_threshold}" }
-                                                td { span { class: "account-time-value", {format_time(&task.deadline_at)} } }
-                                                td { span { class: "account-id", "{short_id(&task.id)}" } }
+                                                td {
+                                                    span { class: "account-time-value", {format_time(&task.deadline_at)} }
+                                                }
+                                                td {
+                                                    span { class: "account-id", "{short_id(&task.id)}" }
+                                                }
                                             }
                                         }
                                     }
                                 }
-                                Pagination {
-                                    current: task_page(),
-                                    total_pages: result.total_pages.max(1) as u32,
-                                    total: result.total,
-                                    page_size: task_page_size() as u32,
-                                    summary: i18n.t_with_args(
-                                        "common.pagination_summary",
-                                        &[
-                                            ("total", &result.total.to_string()),
-                                            ("current", &task_page().to_string()),
-                                            ("total_pages", &result.total_pages.max(1).to_string()),
-                                        ],
-                                    ),
-                                    page_size_label: i18n.t("common.pagination_page_size").to_string(),
-                                    page_size_suffix: i18n.t("common.items_suffix").to_string(),
-                                    previous_label: i18n.t("table.previous").to_string(),
-                                    next_label: i18n.t("table.next").to_string(),
-                                    on_page_change: move |page| task_page.set(page),
-                                    on_page_size_change: move |size| {
-                                        task_page_size.set(size as u64);
-                                        task_page.set(1);
-                                    },
-                                }
+                            },
+                        }
+                    }
+
+                    // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
+                    if let Some((footer_total, footer_total_pages)) = task_footer {
+                        Pagination {
+                            current: task_page(),
+                            total_pages: footer_total_pages,
+                            total: footer_total,
+                            page_size: task_page_size() as u32,
+                            summary: i18n.t_with_args(
+                                "common.pagination_summary",
+                                &[
+                                    ("total", &footer_total.to_string()),
+                                    ("current", &task_page().to_string()),
+                                    ("total_pages", &footer_total_pages.to_string()),
+                                ],
+                            ),
+                            page_size_label: i18n.t("common.pagination_page_size").to_string(),
+                            page_size_suffix: i18n.t("common.items_suffix").to_string(),
+                            previous_label: i18n.t("table.previous").to_string(),
+                            next_label: i18n.t("table.next").to_string(),
+                            on_page_change: move |page| task_page.set(page),
+                            on_page_size_change: move |size| {
+                                task_page_size.set(size as u64);
+                                task_page.set(1);
                             },
                         }
                     }
@@ -819,7 +893,9 @@ fn NodeStatusBadge(status: String) -> Element {
         "excluded" => i18n.t("node_gateway.status_excluded"),
         _ => status.as_str(),
     };
-    rsx! { Badge { variant, "{label}" } }
+    rsx! {
+        Badge { variant, "{label}" }
+    }
 }
 
 #[component]
@@ -840,7 +916,9 @@ fn TaskStatusBadge(status: String) -> Element {
         "expired" => i18n.t("node_gateway.task_expired"),
         _ => status.as_str(),
     };
-    rsx! { Badge { variant, "{label}" } }
+    rsx! {
+        Badge { variant, "{label}" }
+    }
 }
 
 fn accepted_models(value: &serde_json::Value) -> Vec<String> {
