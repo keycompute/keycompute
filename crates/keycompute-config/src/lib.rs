@@ -510,6 +510,17 @@ impl AppConfig {
             }
         }
 
+        if self
+            .gateway
+            .timeout_secs
+            .max(self.gateway.stream_timeout_secs)
+            > 86_280
+        {
+            return Err(ConfigLoadError::ValidationError(
+                "Gateway execution timeout exceeds bounded account lease horizon (86280 seconds)"
+                    .into(),
+            ));
+        }
         if self.gateway.max_retries == 0 {
             tracing::warn!("⚠️  Gateway 最大重试次数设置为 0，请求失败时将不会重试");
         }

@@ -3849,6 +3849,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "dashmap",
+ "futures",
  "keycompute-db",
  "keycompute-runtime",
  "keycompute-types",

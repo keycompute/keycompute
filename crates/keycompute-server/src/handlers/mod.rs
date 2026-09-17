@@ -842,7 +842,7 @@ struct ConservativeGenerationTokenBudget {
     output_tokens: u32,
 }
 
-fn generation_tpm_reservation_tokens(
+pub(crate) fn generation_tpm_reservation_tokens(
     ctx: &keycompute_types::RequestContext,
     tpm_limit: u32,
 ) -> u32 {

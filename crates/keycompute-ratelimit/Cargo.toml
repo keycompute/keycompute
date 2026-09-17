@@ -18,3 +18,6 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [features]
 default = []
 redis = ["dep:redis", "dep:deadpool-redis"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

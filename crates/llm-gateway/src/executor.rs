@@ -449,6 +449,7 @@ pub struct GatewayExecutor {
     /// 默认 HTTP 传输层（无代理时复用，避免每次请求重建 reqwest::Client 连接池）
     default_transport: Arc<DefaultHttpTransport>,
     account_admission: Option<Arc<keycompute_runtime::admission::BoundedAdmission>>,
+    account_capacity: Option<Arc<dyn keycompute_types::AccountCapacityPolicy>>,
 }
 
 impl GatewayExecutor {
@@ -463,6 +464,7 @@ impl GatewayExecutor {
             http_proxy: None,
             default_transport: Arc::new(DefaultHttpTransport::new()),
             account_admission: None,
+            account_capacity: None,
         }
     }
 
@@ -478,7 +480,16 @@ impl GatewayExecutor {
             http_proxy: Some(http_proxy),
             default_transport: Arc::new(DefaultHttpTransport::new()),
             account_admission: None,
+            account_capacity: None,
         }
+    }
+
+    pub fn with_account_capacity(
+        mut self,
+        capacity: Arc<dyn keycompute_types::AccountCapacityPolicy>,
+    ) -> Self {
+        self.account_capacity = Some(capacity);
+        self
     }
 
     pub fn with_account_admission(
@@ -554,6 +565,7 @@ impl GatewayExecutor {
             http_proxy: self.http_proxy.clone(),
             default_transport: Arc::clone(&self.default_transport),
             account_admission: self.account_admission.clone(),
+            account_capacity: self.account_capacity.clone(),
         };
 
         // 执行超时：防止上游 Provider 无限阻塞导致资源泄漏。
@@ -805,6 +817,41 @@ impl GatewayExecutor {
             } else {
                 None
             };
+            let mut quota_lease = if let Some(capacity) = &self.account_capacity {
+                let admitted = tokio::select! {
+                    biased;
+                    _ = tx.closed() => return Err(KeyComputeError::ServiceUnavailable("client disconnected during account quota admission".into())),
+                    _ = ctx.wait_for_client_disconnect() => return Err(KeyComputeError::ServiceUnavailable("client disconnected during account quota admission".into())),
+                    result = capacity.admit(&ctx, &target) => result,
+                };
+                match admitted {
+                    Ok(lease) => Some(lease),
+                    Err(
+                        KeyComputeError::RateLimitExceeded(_)
+                        | KeyComputeError::PermissionDenied(_),
+                    ) => {
+                        last_error = Some(KeyComputeError::ServiceUnavailable(
+                            "upstream_capacity_exhausted".into(),
+                        ));
+                        next_eligible_index = targets
+                            .iter()
+                            .enumerate()
+                            .skip(target_index + 1)
+                            .find(|(_, next)| !same_provider_account(&target, &next.target))
+                            .map_or(target_count, |(index, _)| index);
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(request_id=%ctx.request_id, %error, "account quota dependency unavailable; not dispatching");
+                        last_error = Some(KeyComputeError::ServiceUnavailable(
+                            "upstream_capacity_exhausted".into(),
+                        ));
+                        break;
+                    }
+                }
+            } else {
+                None
+            };
             let target_start = Instant::now();
             let attempt = match &target {
                 ExecutionTarget::ProviderAccount {
@@ -841,8 +888,9 @@ impl GatewayExecutor {
             *active_attempt
                 .lock()
                 .expect("active attempt state poisoned") = attempt;
-            match self
-                .try_execute(
+            let mut quota_lost = false;
+            let result = {
+                let execution = self.try_execute(
                     &ctx,
                     &target,
                     TargetRunContext {
@@ -859,9 +907,90 @@ impl GatewayExecutor {
                             ExecutionTarget::Node { .. } => true,
                         },
                     },
-                )
-                .await
-            {
+                );
+                if let Some(lease) = &quota_lease {
+                    tokio::select! {
+                        biased;
+                        error = lease.keep_alive() => {
+                            quota_lost = true;
+                            Err(error.err().unwrap_or_else(|| KeyComputeError::ServiceUnavailable("account quota renewal ended".into())))
+                        }
+                        result = execution => result,
+                    }
+                } else {
+                    execution.await
+                }
+            };
+            if let Some(lease) = &mut quota_lease {
+                let exact = (result.is_ok() && ctx.is_usage_finalized()).then(|| {
+                    let (input, output) = ctx.usage_snapshot();
+                    input.saturating_add(output)
+                });
+                let release = result.is_ok()
+                    || matches!(&result,
+                    Err(KeyComputeError::UpstreamFailure { status:Some(status), .. }) if *status >= 400);
+                if let Err(error) = lease.finish(exact, release).await {
+                    // Upstream may already have delivered its terminal event.
+                    // Preserve success, retain conservative quota and report the
+                    // accounting dependency error rather than blindly retrying.
+                    tracing::error!(request_id=%ctx.request_id, %error, "account quota settlement incomplete");
+                }
+            }
+            if quota_lost {
+                ctx.set_client_upstream_response(ClientUpstreamResponse {
+                    status: 503,
+                    headers: vec![("retry-after".into(), "1".into())],
+                    body: serde_json::json!({"error": {
+                        "type": if ctx.native_anthropic_request.is_some() { "overloaded_error" } else { "server_error" },
+                        "code": "account_quota_lease_lost",
+                        "message": "Account quota service is temporarily unavailable"
+                    }}).to_string(),
+                });
+                ctx.set_execution_failure(RequestExecutionFailure {
+                    status: RequestStatus::Failed,
+                    error: TraceErrorInfo {
+                        origin: ErrorOrigin::Gateway,
+                        category: TraceErrorCategory::RateLimit,
+                        code: "account_quota_lease_lost".into(),
+                        summary: None,
+                        retryable: Some(true),
+                    },
+                    billing_status: BillingStatus::Pending,
+                });
+                if let Some(attempt) = attempt {
+                    let error = ctx
+                        .execution_failure()
+                        .expect("quota failure recorded")
+                        .error;
+                    finish_attempt_trace_or_degrade(
+                        &ctx,
+                        &lifecycle,
+                        AttemptTraceFinish {
+                            attempt_id: attempt.id,
+                            request_id: ctx.request_id,
+                            attempt_status: AttemptStatus::Failed,
+                            request_status: RequestStatus::Running,
+                            is_final: true,
+                            stream_end_reason: Some(StreamEndReason::Cancelled),
+                            stream_error_count: Some(1),
+                            error: Some(error),
+                            billing_status: BillingStatus::Pending,
+                            finished_at: chrono::Utc::now(),
+                        },
+                    )
+                    .await;
+                }
+                active_attempt
+                    .lock()
+                    .expect("active attempt state poisoned")
+                    .take();
+                // A local lease outage is not evidence that an upstream account
+                // is unhealthy, and must not launch a fallback after ambiguity.
+                return Err(KeyComputeError::ServiceUnavailable(
+                    "account_quota_lease_lost".into(),
+                ));
+            }
+            match result {
                 Ok(()) => {
                     // 成功：标记账号状态
                     if let ExecutionTarget::ProviderAccount { account_id, .. } = &target {
@@ -6089,5 +6218,228 @@ mod tests {
         })
         .await
         .expect("disconnected stream leaked account capacity");
+    }
+    type TestQuotaSettlements = Arc<Mutex<Vec<(Option<u32>, bool)>>>;
+
+    #[derive(Debug)]
+    struct TestQuotaPolicy {
+        denied: Option<Uuid>,
+        dependency_error: bool,
+        admissions: Arc<Mutex<Vec<Uuid>>>,
+        settlements: TestQuotaSettlements,
+        lost: Arc<Notify>,
+    }
+    #[derive(Debug)]
+    struct TestQuotaLease {
+        settlements: TestQuotaSettlements,
+        lost: Arc<Notify>,
+    }
+    #[async_trait]
+    impl keycompute_types::AccountCapacityPolicy for TestQuotaPolicy {
+        async fn snapshot(&self, _: Uuid) -> Result<keycompute_types::AccountCapacitySnapshot> {
+            unreachable!()
+        }
+        async fn admit(
+            &self,
+            _: &RequestContext,
+            target: &ExecutionTarget,
+        ) -> Result<Box<dyn keycompute_types::AccountAttemptLease>> {
+            let ExecutionTarget::ProviderAccount { account_id, .. } = target else {
+                unreachable!()
+            };
+            self.admissions.lock().unwrap().push(*account_id);
+            if self.dependency_error {
+                return Err(KeyComputeError::Internal(
+                    "quota backend unavailable".into(),
+                ));
+            }
+            if self.denied == Some(*account_id) {
+                return Err(KeyComputeError::RateLimitExceeded(
+                    "shared quota exhausted".into(),
+                ));
+            }
+            Ok(Box::new(TestQuotaLease {
+                settlements: self.settlements.clone(),
+                lost: self.lost.clone(),
+            }))
+        }
+    }
+    #[async_trait]
+    impl keycompute_types::AccountAttemptLease for TestQuotaLease {
+        async fn keep_alive(&self) -> Result<()> {
+            self.lost.notified().await;
+            Err(KeyComputeError::ServiceUnavailable(
+                "quota lease lost".into(),
+            ))
+        }
+        async fn finish(&mut self, tokens: Option<u32>, release: bool) -> Result<()> {
+            self.settlements.lock().unwrap().push((tokens, release));
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn shared_account_quota_denial_falls_back_without_debiting_tenant_identity() {
+        let busy = Uuid::new_v4();
+        let free = Uuid::new_v4();
+        let admissions = Arc::new(Mutex::new(Vec::new()));
+        let settlements = Arc::new(Mutex::new(Vec::new()));
+        let policy = Arc::new(TestQuotaPolicy {
+            denied: Some(busy),
+            dependency_error: false,
+            admissions: admissions.clone(),
+            settlements: settlements.clone(),
+            lost: Arc::new(Notify::new()),
+        });
+        let mut providers = HashMap::new();
+        providers.insert(
+            "many-chunks".into(),
+            Arc::new(ManyChunksProvider { chunks: 1 }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor =
+            GatewayExecutor::new(GatewayConfig::default(), providers).with_account_capacity(policy);
+        let ctx = Arc::new(create_test_context());
+        let plan = ExecutionPlan::new(ExecutionTarget::new_provider(
+            "many-chunks",
+            busy,
+            "http://mock",
+            "key",
+        ))
+        .with_fallback(ExecutionTarget::new_provider(
+            "many-chunks",
+            free,
+            "http://mock",
+            "key",
+        ));
+        let mut rx = executor
+            .execute(ctx.clone(), plan, Arc::new(AccountStateStore::new()), None)
+            .await
+            .unwrap();
+        while tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        assert_eq!(*admissions.lock().unwrap(), vec![busy, free]);
+        assert_eq!(ctx.executed_provider_account().unwrap().account_id, free);
+        assert_eq!(settlements.lock().unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn shared_account_quota_outage_never_invokes_upstream_or_fallback() {
+        let admissions = Arc::new(Mutex::new(Vec::new()));
+        let policy = Arc::new(TestQuotaPolicy {
+            denied: None,
+            dependency_error: true,
+            admissions: admissions.clone(),
+            settlements: Arc::new(Mutex::new(Vec::new())),
+            lost: Arc::new(Notify::new()),
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "counting".into(),
+            Arc::new(CountingProvider {
+                calls: calls.clone(),
+                notified: None,
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor =
+            GatewayExecutor::new(GatewayConfig::default(), providers).with_account_capacity(policy);
+        let ctx = Arc::new(create_test_context());
+        let plan = ExecutionPlan::new(ExecutionTarget::new_provider(
+            "counting",
+            Uuid::new_v4(),
+            "http://mock",
+            "key",
+        ))
+        .with_fallback(ExecutionTarget::new_provider(
+            "counting",
+            Uuid::new_v4(),
+            "http://mock",
+            "key",
+        ));
+        let mut rx = executor
+            .execute(ctx.clone(), plan, Arc::new(AccountStateStore::new()), None)
+            .await
+            .unwrap();
+        while tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(admissions.lock().unwrap().len(), 1);
+        assert_eq!(ctx.client_upstream_response().unwrap().status, 503);
+    }
+    #[tokio::test]
+    async fn shared_account_quota_loss_cancels_stream_without_fallback() {
+        let admissions = Arc::new(Mutex::new(Vec::new()));
+        let lost = Arc::new(Notify::new());
+        let policy = Arc::new(TestQuotaPolicy {
+            denied: None,
+            dependency_error: false,
+            admissions: admissions.clone(),
+            settlements: Arc::new(Mutex::new(Vec::new())),
+            lost: lost.clone(),
+        });
+        let started = Arc::new(Notify::new());
+        let (sender, receiver) = mpsc::channel(2);
+        let mut providers = HashMap::new();
+        providers.insert(
+            "pending-stream".into(),
+            Arc::new(PendingStreamProvider {
+                receiver: Mutex::new(Some(receiver)),
+                started: started.clone(),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor =
+            GatewayExecutor::new(GatewayConfig::default(), providers).with_account_capacity(policy);
+        let ctx = Arc::new(create_test_context());
+        let plan = ExecutionPlan::new(ExecutionTarget::new_provider(
+            "pending-stream",
+            Uuid::new_v4(),
+            "http://mock",
+            "key",
+        ))
+        .with_fallback(ExecutionTarget::new_provider(
+            "pending-stream",
+            Uuid::new_v4(),
+            "http://mock",
+            "key",
+        ));
+        let recorder = Arc::new(keycompute_types::TestRequestLifecycleRecorder::default());
+        let mut rx = executor
+            .execute_with_recorder(
+                ctx.clone(),
+                plan,
+                Arc::new(AccountStateStore::new()),
+                None,
+                recorder.clone() as Arc<dyn RequestLifecycleRecorder>,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        lost.notify_one();
+        while tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        let finishes = recorder.attempt_finishes();
+        assert_eq!(finishes.len(), 1);
+        assert!(finishes[0].is_final);
+        assert_eq!(finishes[0].attempt_status, AttemptStatus::Failed);
+        assert_eq!(
+            finishes[0].error.as_ref().unwrap().origin,
+            ErrorOrigin::Gateway
+        );
+        assert_eq!(ctx.client_upstream_response().unwrap().status, 503);
+        assert!(sender.is_closed());
+        assert_eq!(admissions.lock().unwrap().len(), 1);
+        assert_eq!(
+            ctx.execution_failure().unwrap().error.code,
+            "account_quota_lease_lost"
+        );
     }
 }

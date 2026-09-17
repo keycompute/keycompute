@@ -540,6 +540,19 @@ pub trait RateLimiter: Send + Sync + std::fmt::Debug {
             .await
     }
 
+    /// Reconcile new terminal usage at the backend's own clock. Redis overrides
+    /// this to avoid replica clock skew; historical replay still uses explicit time.
+    async fn reconcile_tokens_now(
+        &self,
+        key: &RateLimitKey,
+        reservation_id: Uuid,
+        terminal_id: Uuid,
+        tokens: u32,
+    ) -> Result<()> {
+        self.reconcile_tokens_once_at(key, reservation_id, terminal_id, tokens, SystemTime::now())
+            .await
+    }
+
     /// Atomically remove one physical attempt's prediction and record terminal
     /// usage once under the stable logical billing identity.
     async fn reconcile_tokens_once_at(
@@ -977,6 +990,18 @@ impl RateLimitService {
     ) -> Result<()> {
         self.limiter
             .record_tokens_once_at(key, request_id, tokens, occurred_at)
+            .await
+    }
+
+    pub async fn reconcile_token_usage_now(
+        &self,
+        key: &RateLimitKey,
+        reservation_id: Uuid,
+        terminal_id: Uuid,
+        tokens: u32,
+    ) -> Result<()> {
+        self.limiter
+            .reconcile_tokens_now(key, reservation_id, terminal_id, tokens)
             .await
     }
 
@@ -1588,3 +1613,5 @@ mod tests {
         );
     }
 }
+
+pub mod account;

@@ -673,13 +673,13 @@ impl AppState {
         let node_index = Arc::new(PostgresNodeIndex::new(Arc::clone(&pool)));
 
         // 创建带数据库连接和 Node 能力索引的路由引擎
-        let routing_engine = Arc::new(RoutingEngine::with_node_index(
+        let routing_engine = RoutingEngine::with_node_index(
             Arc::clone(&account_states),
             Arc::clone(&provider_health),
             Arc::clone(&pool),
             provider_names,
             node_index,
-        ));
+        );
 
         // 创建 Internal HTTP Proxy（统一上游连接管理，支持配置）
         let http_proxy = Arc::new(Self::create_http_proxy(
@@ -694,10 +694,18 @@ impl AppState {
         for (name, adapter) in crate::providers::get_provider_adapters() {
             gateway_builder = gateway_builder.add_provider(name, adapter);
         }
-        let gateway = Arc::new(
-            gateway_builder
-                .build()
-                .with_account_admission(Arc::clone(&generation_admission.accounts)),
+        let gateway = gateway_builder
+            .build()
+            .with_account_admission(Arc::clone(&generation_admission.accounts));
+        let account_lease_window = Duration::from_secs(
+            config
+                .gateway
+                .timeout_secs
+                .max(config.gateway.stream_timeout_secs)
+                .checked_add(120)
+                .ok_or_else(|| {
+                    crate::error::ApiError::Config("account lease duration overflow".into())
+                })?,
         );
 
         // 创建带数据库连接的计费服务
@@ -710,7 +718,7 @@ impl AppState {
             Arc::new(crate::lifecycle_metrics::MetricsRequestLifecycleRecorder::new(database));
 
         #[cfg(feature = "redis")]
-        let (rate_limiter, node_gateway, cache) = {
+        let (rate_limiter, node_gateway, cache, account_quotas) = {
             let shared_redis_pool = match &config.rate_limit {
                 RateLimitBackendConfig::Redis(redis) => {
                     Some(Self::create_redis_command_pool(redis).map_err(|error| {
@@ -762,13 +770,25 @@ impl AppState {
                 }
             };
 
+            let account_quotas = match &shared_redis_pool {
+                Some(pool) => keycompute_ratelimit::account::AccountQuotaService::redis(
+                    pool.clone(),
+                    config.gateway.admission.account_limit as u32,
+                    account_lease_window,
+                ),
+                None => keycompute_ratelimit::account::AccountQuotaService::memory(
+                    config.gateway.admission.account_limit as u32,
+                    account_lease_window,
+                ),
+            }
+            .map_err(crate::error::ApiError::from)?;
             let cache = Self::create_cache_service(shared_redis_pool);
 
-            (rate_limiter, node_gateway, cache)
+            (rate_limiter, node_gateway, cache, account_quotas)
         };
 
         #[cfg(not(feature = "redis"))]
-        let (rate_limiter, node_gateway, cache) = {
+        let (rate_limiter, node_gateway, cache, account_quotas) = {
             if matches!(&config.rate_limit, RateLimitBackendConfig::Redis(_)) {
                 return Err(crate::error::ApiError::Config(
                     "Redis rate limiter is configured, but this server was built without Redis support"
@@ -780,8 +800,22 @@ impl AppState {
                 keycompute_ratelimit::RateLimitService::default_memory(),
                 None,
                 Self::create_disabled_cache(),
+                keycompute_ratelimit::account::AccountQuotaService::memory(
+                    config.gateway.admission.account_limit as u32,
+                    account_lease_window,
+                )
+                .map_err(crate::error::ApiError::from)?,
             )
         };
+
+        let account_capacity: Arc<dyn keycompute_types::AccountCapacityPolicy> =
+            Arc::new(crate::account_capacity::ServerAccountCapacity {
+                db: Arc::clone(&pool),
+                quotas: account_quotas,
+            });
+        let routing_engine =
+            Arc::new(routing_engine.with_account_capacity(Arc::clone(&account_capacity)));
+        let gateway = Arc::new(gateway.with_account_capacity(account_capacity));
 
         // 将 PricingService 接入分布式缓存（L2 防击穿）
         let pricing_service = pricing_service.with_dist_cache(Arc::clone(&cache));

@@ -38,6 +38,38 @@ pub struct RedisRateLimiter {
 }
 
 impl RedisRateLimiter {
+    async fn reconcile_at_unix(
+        &self,
+        key: &RateLimitKey,
+        reservation_id: Uuid,
+        terminal_id: Uuid,
+        tokens: u32,
+        occurred_at: i64,
+    ) -> Result<()> {
+        let mut invocation = self.prepare_tpm_script(key, Self::reconcile_tokens_script());
+        invocation
+            .arg(occurred_at)
+            .arg(self.window_size.as_secs() as i64)
+            .arg(reservation_id.to_string())
+            .arg(terminal_id.to_string())
+            .arg(tokens as i64)
+            .arg(self.expire_secs());
+        let result = self.invoke_script(invocation).await?;
+        match result {
+            -1 => Err(KeyComputeError::Internal(format!(
+                "TPM terminal identity {terminal_id} conflicts with an active reservation"
+            ))),
+            -2 => Err(KeyComputeError::Internal(format!(
+                "Redis TPM state is inconsistent for tenant {}",
+                key.tenant_id
+            ))),
+            0 | 1 => Ok(()),
+            other => Err(KeyComputeError::Internal(format!(
+                "Unexpected Redis TPM reconciliation result: {other}"
+            ))),
+        }
+    }
+
     /// 使用已有连接池创建 Redis 限流器
     pub fn new(pool: deadpool_redis::Pool) -> Self {
         Self {
@@ -54,6 +86,13 @@ impl RedisRateLimiter {
             window_size: Duration::from_secs(WINDOW_SECS),
             key_prefix: prefix.into(),
         }
+    }
+
+    /// Long-lived resource reservations use a separate namespace/window from
+    /// one-minute RPM/TPM. Only the account-capacity owner constructs this.
+    pub(crate) fn with_reservation_window(mut self, window: Duration) -> Self {
+        self.window_size = window;
+        self
     }
 
     /// 构建限流 Redis Key
@@ -179,6 +218,7 @@ impl RedisRateLimiter {
     }
 
     /// 获取当前 Unix 时间戳（秒）
+    #[cfg(test)]
     fn now_timestamp() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -192,20 +232,24 @@ impl RedisRateLimiter {
         redis_key: &str,
         window_size: Duration,
     ) -> Result<u64> {
-        let now = Self::now_timestamp();
-        let window_start = now - window_size.as_secs() as i64;
-
-        let _: () = conn
-            .zrembyscore(redis_key, 0, window_start)
+        static SCRIPT: std::sync::OnceLock<deadpool_redis::redis::Script> =
+            std::sync::OnceLock::new();
+        let script = SCRIPT.get_or_init(|| {
+            deadpool_redis::redis::Script::new(
+                r#"
+            local clock = redis.call('TIME')
+            local now = tonumber(clock[1])
+            redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now-tonumber(ARGV[1]))
+            return redis.call('ZCARD',KEYS[1])
+        "#,
+            )
+        });
+        script
+            .key(redis_key)
+            .arg(window_size.as_secs())
+            .invoke_async(conn)
             .await
-            .map_err(|e| KeyComputeError::Internal(format!("Redis error: {}", e)))?;
-
-        let count: u64 = conn
-            .zcard(redis_key)
-            .await
-            .map_err(|e| KeyComputeError::Internal(format!("Redis error: {}", e)))?;
-
-        Ok(count)
+            .map_err(|error| KeyComputeError::Internal(format!("Redis error: {error}")))
     }
 
     /// 获取过期时间（窗口大小的 2 倍，确保滑动窗口安全）
@@ -217,11 +261,12 @@ impl RedisRateLimiter {
     /// 返回 1 表示成功，0 表示限流
     const CHECK_AND_RECORD_SCRIPT: &str = r#"
         local key = KEYS[1]
-        local now = tonumber(ARGV[1])
-        local window_start = tonumber(ARGV[2])
-        local limit = tonumber(ARGV[3])
-        local member = ARGV[4]
-        local expire_secs = tonumber(ARGV[5])
+        local clock = redis.call('TIME')
+        local now = tonumber(clock[1])
+        local window_start = now - tonumber(ARGV[1])
+        local limit = tonumber(ARGV[2])
+        local member = ARGV[3]
+        local expire_secs = tonumber(ARGV[4])
 
         -- 清理过期条目
         redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
@@ -403,7 +448,8 @@ impl RedisRateLimiter {
         local total_key = KEYS[3]
         local redis_time = redis.call('TIME')
         local now = tonumber(redis_time[1])
-        local occurred_at = math.min(tonumber(ARGV[1]), now)
+        local raw_occurred_at = tonumber(ARGV[1])
+        local occurred_at = raw_occurred_at < 0 and now or math.min(raw_occurred_at, now)
         local window_secs = tonumber(ARGV[2])
         local window_start = now - window_secs
         local reservation_id = ARGV[3]
@@ -813,25 +859,8 @@ impl RateLimiter for RedisRateLimiter {
     }
 
     async fn record(&self, key: &RateLimitKey) -> Result<()> {
-        let mut conn = self.get_conn().await?;
-        let redis_key = self.build_rpm_key(key);
-
-        let now = Self::now_timestamp();
-
-        // 使用 UUID 作为唯一成员，避免同一秒内的请求被去重
-        let unique_member = format!("{}:{}", now, Uuid::new_v4().simple());
-
-        let _: () = conn
-            .zadd(&redis_key, &unique_member, now)
+        self.check_and_record_with_config(key, &crate::RateLimitConfig::new(u32::MAX, u32::MAX))
             .await
-            .map_err(|e| KeyComputeError::Internal(format!("Redis error: {}", e)))?;
-
-        let _: () = conn
-            .expire(&redis_key, self.expire_secs())
-            .await
-            .map_err(|e| KeyComputeError::Internal(format!("Redis error: {}", e)))?;
-
-        Ok(())
     }
 
     async fn check_and_record_with_config(
@@ -841,19 +870,13 @@ impl RateLimiter for RedisRateLimiter {
     ) -> Result<()> {
         let redis_key = self.build_rpm_key(key);
 
-        let now = Self::now_timestamp();
-
-        let window_start = now - self.window_size.as_secs() as i64;
-        let unique_member = format!("{}:{}", now, Uuid::new_v4().simple());
-
-        // 使用 Lua 脚本原子执行检查和记录
+        let unique_member = Uuid::new_v4().to_string();
         let mut invocation = Self::check_and_record_script().prepare_invoke();
         invocation
             .key(redis_key)
-            .arg(now)
-            .arg(window_start)
-            .arg(config.rpm_limit as i64)
-            .arg(&unique_member)
+            .arg(self.window_size.as_secs())
+            .arg(config.rpm_limit)
+            .arg(unique_member)
             .arg(self.expire_secs());
         let result = self.invoke_script(invocation).await?;
 
@@ -1012,28 +1035,19 @@ impl RateLimiter for RedisRateLimiter {
             .as_secs()
             .try_into()
             .unwrap_or(i64::MAX);
-        let mut invocation = self.prepare_tpm_script(key, Self::reconcile_tokens_script());
-        invocation
-            .arg(occurred_at)
-            .arg(self.window_size.as_secs() as i64)
-            .arg(reservation_id.to_string())
-            .arg(terminal_id.to_string())
-            .arg(tokens as i64)
-            .arg(self.expire_secs());
-        let result = self.invoke_script(invocation).await?;
-        match result {
-            -1 => Err(KeyComputeError::Internal(format!(
-                "TPM terminal identity {terminal_id} conflicts with an active reservation"
-            ))),
-            -2 => Err(KeyComputeError::Internal(format!(
-                "Redis TPM state is inconsistent for tenant {}",
-                key.tenant_id
-            ))),
-            0 | 1 => Ok(()),
-            other => Err(KeyComputeError::Internal(format!(
-                "Unexpected Redis TPM reconciliation result: {other}"
-            ))),
-        }
+        self.reconcile_at_unix(key, reservation_id, terminal_id, tokens, occurred_at)
+            .await
+    }
+
+    async fn reconcile_tokens_now(
+        &self,
+        key: &RateLimitKey,
+        reservation_id: Uuid,
+        terminal_id: Uuid,
+        tokens: u32,
+    ) -> Result<()> {
+        self.reconcile_at_unix(key, reservation_id, terminal_id, tokens, -1)
+            .await
     }
 
     async fn get_count(&self, key: &RateLimitKey) -> Result<u64> {
@@ -1094,6 +1108,40 @@ impl RedisRateLimiter {
 
 #[cfg(test)]
 mod tests {
+    async fn server_clock(limiter: &super::RedisRateLimiter) -> i64 {
+        let mut conn = limiter.pool.get().await.unwrap();
+        let (seconds, _): (i64, i64) = deadpool_redis::redis::cmd("TIME")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        seconds
+    }
+
+    async fn assert_record_horizon_then_expire(
+        limiter: &super::RedisRateLimiter,
+        key: &crate::RateLimitKey,
+        id: uuid::Uuid,
+        expected: i64,
+    ) {
+        let (_, expirations, _) = limiter.build_tpm_keys(key);
+        let mut conn = limiter.pool.get().await.unwrap();
+        let expiry: i64 = deadpool_redis::redis::cmd("ZSCORE")
+            .arg(&expirations)
+            .arg(id.to_string())
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            expiry, expected,
+            "terminal replay must preserve occurrence horizon"
+        );
+        // Expire exactly this record using Redis TIME. This proves the cleanup
+        // transition without depending on a one-second CI scheduling window.
+        let _: i64 = deadpool_redis::redis::Script::new(
+            "local now=redis.call('TIME'); return redis.call('ZADD',KEYS[1],tonumber(now[1])-1,ARGV[1])"
+        ).key(expirations).arg(id.to_string()).invoke_async(&mut conn).await.unwrap();
+    }
+
     use super::*;
     use uuid::Uuid;
 
@@ -1370,9 +1418,8 @@ mod tests {
         let _ = limiter.flush_all().await;
         let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let request_id = Uuid::new_v4();
-        let occurred_at = SystemTime::now()
-            .checked_sub(Duration::from_secs(WINDOW_SECS - 1))
-            .unwrap();
+        let occurred_seconds = server_clock(&limiter).await - (WINDOW_SECS as i64 - 30);
+        let occurred_at = SystemTime::UNIX_EPOCH + Duration::from_secs(occurred_seconds as u64);
 
         limiter
             .record_tokens_once_at(&key, request_id, 100, occurred_at)
@@ -1380,7 +1427,13 @@ mod tests {
             .unwrap();
         assert_eq!(limiter.get_token_count(&key).await.unwrap(), 100);
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_record_horizon_then_expire(
+            &limiter,
+            &key,
+            request_id,
+            occurred_seconds + WINDOW_SECS as i64,
+        )
+        .await;
         assert_eq!(limiter.get_token_count(&key).await.unwrap(), 0);
     }
 
@@ -1393,9 +1446,8 @@ mod tests {
         let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let reservation_id = Uuid::new_v4();
         let terminal_id = Uuid::new_v4();
-        let occurred_at = SystemTime::now()
-            .checked_sub(Duration::from_secs(WINDOW_SECS - 1))
-            .unwrap();
+        let occurred_seconds = server_clock(&limiter).await - (WINDOW_SECS as i64 - 30);
+        let occurred_at = SystemTime::UNIX_EPOCH + Duration::from_secs(occurred_seconds as u64);
 
         limiter
             .reserve_tokens(&key, reservation_id, terminal_id, 80, 100)
@@ -1418,7 +1470,13 @@ mod tests {
             "the terminal record must fence a restore inside its original window"
         );
 
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_record_horizon_then_expire(
+            &limiter,
+            &key,
+            terminal_id,
+            occurred_seconds + WINDOW_SECS as i64,
+        )
+        .await;
         assert_eq!(
             limiter.get_token_count(&key).await.unwrap(),
             0,
@@ -1787,7 +1845,7 @@ mod tests {
             .unwrap();
 
         let (_, expirations_key, _) = limiter.build_tpm_keys(&key);
-        let short_expiry = RedisRateLimiter::now_timestamp() + 1;
+        let short_expiry = server_clock(&limiter).await + 30;
         {
             let mut conn = limiter.pool.get().await.unwrap();
             let _: () = deadpool_redis::redis::cmd("ZADD")
@@ -1817,6 +1875,7 @@ mod tests {
             assert_eq!(expiry, short_expiry, "mismatch must not refresh the lease");
         }
 
+        let before_renew = server_clock(&limiter).await;
         assert!(
             limiter
                 .renew_token_reservation(&key, physical_id, logical_id, 20)
@@ -1832,8 +1891,7 @@ mod tests {
                 .await
                 .unwrap();
             assert!(
-                expiry
-                    >= RedisRateLimiter::now_timestamp() + i64::try_from(WINDOW_SECS).unwrap() - 1,
+                expiry >= before_renew + i64::try_from(WINDOW_SECS).unwrap(),
                 "matching heartbeat did not restore a full lease"
             );
         }

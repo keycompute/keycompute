@@ -66,6 +66,8 @@ fn required_api_capability(ctx: &RequestContext) -> AccountApiCapability {
 /// 集成 NodeCapabilityIndex 进行 Node 路由支持
 #[derive(Clone)]
 pub struct RoutingEngine {
+    account_capacity: Option<Arc<dyn keycompute_types::AccountCapacityPolicy>>,
+    rotation: Arc<std::sync::atomic::AtomicU64>,
     /// 账号状态存储（只读）
     account_states: Arc<AccountStateStore>,
     /// 账号健康状态存储（类型名保留以兼容现有调用方）
@@ -94,6 +96,14 @@ impl std::fmt::Debug for RoutingEngine {
 }
 
 impl RoutingEngine {
+    pub fn with_account_capacity(
+        mut self,
+        capacity: Arc<dyn keycompute_types::AccountCapacityPolicy>,
+    ) -> Self {
+        self.account_capacity = Some(capacity);
+        self
+    }
+
     /// 创建新的路由引擎（无数据库连接）
     ///
     /// # 参数
@@ -106,6 +116,8 @@ impl RoutingEngine {
         providers: Vec<String>,
     ) -> Self {
         Self {
+            account_capacity: None,
+            rotation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             account_states,
             provider_health,
             pool: None,
@@ -128,6 +140,8 @@ impl RoutingEngine {
         providers: Vec<String>,
     ) -> Self {
         Self {
+            account_capacity: None,
+            rotation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             account_states,
             provider_health,
             pool: Some(pool),
@@ -152,6 +166,8 @@ impl RoutingEngine {
         node_index: Arc<dyn NodeCapabilityIndex>,
     ) -> Self {
         Self {
+            account_capacity: None,
+            rotation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             account_states,
             provider_health,
             pool: Some(pool),
@@ -505,14 +521,56 @@ impl RoutingEngine {
             .into_iter()
             .filter(|account| self.provider_health.account_is_routable(account))
             .collect();
+        // Bounded fan-out, not one unbounded Redis task per account. Snapshot
+        // failure is fail-closed; never reinterpret a backend outage as zero load.
+        let mut loads = std::collections::HashMap::new();
+        if let Some(capacity) = &self.account_capacity {
+            use futures::StreamExt;
+            let capacity = Arc::clone(capacity);
+            let ids: Vec<Uuid> = sorted_accounts.iter().map(|account| account.id).collect();
+            let mut snapshots = futures::stream::iter(ids.into_iter().map(move |id| {
+                let capacity = Arc::clone(&capacity);
+                async move { capacity.snapshot(id).await.map(|load| (id, load)) }
+            }))
+            .buffer_unordered(8);
+            while let Some(snapshot) = snapshots.next().await {
+                let (id, load) = snapshot?;
+                loads.insert(id, load);
+            }
+        }
+        let sequence = self
+            .rotation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut identities: Vec<_> = sorted_accounts.iter().map(|a| a.id).collect();
+        identities.sort_unstable();
+        let rotate = if identities.is_empty() {
+            0
+        } else {
+            sequence as usize % identities.len()
+        };
+        identities.rotate_left(rotate);
+        let tie_order: std::collections::HashMap<_, _> = identities
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| (id, i))
+            .collect();
+        let score = |account: &Account| account_capacity_score(account, loads.get(&account.id));
         sorted_accounts.sort_by(|a, b| {
             let a_health = self.provider_health.account_health_for(a);
             let b_health = self.provider_health.account_health_for(b);
-            a_health
-                .penalty
-                .cmp(&b_health.penalty)
+            score(a)
+                .0
+                .cmp(&score(b).0) // available accounts before exhausted ones
+                .then_with(|| a_health.penalty.cmp(&b_health.penalty))
+                .then_with(|| score(a).1.cmp(&score(b).1))
                 .then_with(|| b.priority.cmp(&a.priority))
-                .then_with(|| a.id.cmp(&b.id))
+                .then_with(|| {
+                    if self.account_capacity.is_some() {
+                        tie_order[&a.id].cmp(&tie_order[&b.id])
+                    } else {
+                        a.id.cmp(&b.id)
+                    }
+                })
         });
 
         let mut targets = Vec::new();
@@ -695,6 +753,25 @@ impl RoutingEngine {
     pub fn remove_provider(&mut self, provider: &str) {
         self.providers.retain(|p| p != provider);
     }
+}
+
+/// Fixed-point pressure avoids floating NaN ordering and compares heterogeneous
+/// RPM/TPM capacities fairly. It is advisory; execution atomically rechecks.
+fn account_capacity_score(
+    account: &Account,
+    load: Option<&keycompute_types::AccountCapacitySnapshot>,
+) -> (bool, u64) {
+    let Some(load) = load else { return (false, 0) };
+    let rpm = account.rpm_limit.max(1) as u64;
+    let tpm = account.tpm_limit.max(1) as u64;
+    let active = (load.in_flight_limit as u64).max(1);
+    let exhausted = load.rpm >= rpm || load.tpm >= tpm || load.in_flight >= active;
+    let pressure = [(load.rpm, rpm), (load.tpm, tpm), (load.in_flight, active)]
+        .into_iter()
+        .map(|(used, limit)| used.saturating_mul(1_000_000) / limit)
+        .max()
+        .unwrap_or(0);
+    (exhausted, pressure)
 }
 
 #[cfg(test)]
@@ -1562,5 +1639,133 @@ mod tests {
                 panic!("Expected ProviderAccount variant for non-node prefix");
             }
         }
+    }
+    #[derive(Debug, Default)]
+    struct SnapshotPolicy {
+        loads: std::collections::HashMap<Uuid, keycompute_types::AccountCapacitySnapshot>,
+        unavailable: bool,
+    }
+    #[async_trait::async_trait]
+    impl keycompute_types::AccountCapacityPolicy for SnapshotPolicy {
+        async fn snapshot(&self, id: Uuid) -> Result<keycompute_types::AccountCapacitySnapshot> {
+            if self.unavailable {
+                return Err(KeyComputeError::ServiceUnavailable("quota offline".into()));
+            }
+            Ok(self
+                .loads
+                .get(&id)
+                .copied()
+                .unwrap_or(keycompute_types::AccountCapacitySnapshot {
+                    in_flight_limit: 32,
+                    ..Default::default()
+                }))
+        }
+        async fn admit(
+            &self,
+            _: &RequestContext,
+            _: &ExecutionTarget,
+        ) -> Result<Box<dyn keycompute_types::AccountAttemptLease>> {
+            panic!("routing snapshots must never reserve or debit quotas")
+        }
+    }
+    fn target_id(target: &ExecutionTarget) -> Uuid {
+        match target {
+            ExecutionTarget::ProviderAccount { account_id, .. } => *account_id,
+            _ => panic!("expected account"),
+        }
+    }
+    #[tokio::test]
+    async fn capacity_scheduler_rotates_all_equal_accounts_before_fallback_truncation() {
+        let engine =
+            create_test_engine().with_account_capacity(Arc::new(SnapshotPolicy::default()));
+        let accounts: Vec<_> = (0..6)
+            .map(|i| create_test_account("openai", &format!("http://mock-{i}"), 10))
+            .collect();
+        let mut primary_counts = std::collections::HashMap::new();
+        for _ in 0..36 {
+            let targets = engine
+                .select_best_accounts(
+                    "openai",
+                    accounts.clone(),
+                    AccountApiCapability::ChatCompletions,
+                )
+                .await
+                .unwrap();
+            assert_eq!(targets.len(), 3);
+            *primary_counts.entry(target_id(&targets[0])).or_insert(0) += 1;
+        }
+        assert_eq!(primary_counts.len(), 6);
+        assert!(primary_counts.values().all(|count| *count == 6));
+    }
+    #[tokio::test]
+    async fn capacity_scheduler_prefers_available_lower_priority_account() {
+        let busy = create_test_account("openai", "http://busy", 1000);
+        let free = create_test_account("openai", "http://free", 1);
+        let mut policy = SnapshotPolicy::default();
+        policy.loads.insert(
+            busy.id,
+            keycompute_types::AccountCapacitySnapshot {
+                rpm: 60,
+                tpm: 0,
+                in_flight: 0,
+                in_flight_limit: 32,
+            },
+        );
+        let engine = create_test_engine().with_account_capacity(Arc::new(policy));
+        let targets = engine
+            .select_best_accounts(
+                "openai",
+                vec![busy, free.clone()],
+                AccountApiCapability::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        assert_eq!(target_id(&targets[0]), free.id);
+    }
+    #[tokio::test]
+    async fn capacity_scheduler_compares_normalized_not_absolute_usage() {
+        let mut big = create_test_account("openai", "http://big", 1);
+        big.tpm_limit = 10_000;
+        let mut small = create_test_account("openai", "http://small", 1000);
+        small.tpm_limit = 100;
+        let mut policy = SnapshotPolicy::default();
+        for (id, tpm) in [(big.id, 5000), (small.id, 80)] {
+            policy.loads.insert(
+                id,
+                keycompute_types::AccountCapacitySnapshot {
+                    tpm,
+                    in_flight_limit: 32,
+                    ..Default::default()
+                },
+            );
+        }
+        let engine = create_test_engine().with_account_capacity(Arc::new(policy));
+        let targets = engine
+            .select_best_accounts(
+                "openai",
+                vec![small, big.clone()],
+                AccountApiCapability::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        assert_eq!(target_id(&targets[0]), big.id);
+    }
+    #[tokio::test]
+    async fn capacity_scheduler_dependency_failure_is_not_treated_as_zero_load() {
+        let engine = create_test_engine().with_account_capacity(Arc::new(SnapshotPolicy {
+            unavailable: true,
+            ..Default::default()
+        }));
+        let result = engine
+            .select_best_accounts(
+                "openai",
+                vec![create_test_account("openai", "http://mock", 10)],
+                AccountApiCapability::ChatCompletions,
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(KeyComputeError::ServiceUnavailable(_))
+        ));
     }
 }
