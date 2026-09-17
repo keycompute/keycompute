@@ -15,7 +15,7 @@ jsonwebtoken = "9"
 serde = { version = "1", features = ["derive"] }
 sea-orm = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 rust_decimal = "1"
 # 密码哈希

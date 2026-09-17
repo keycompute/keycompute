@@ -4,13 +4,15 @@
 
 use keycompute_db::{DbRouter, ProduceAiKey, Tenant, User};
 use keycompute_types::{KeyComputeError, Result};
-use sea_orm::TransactionTrait;
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AuthContext;
 use crate::permission::{AuthType, build_permissions};
+
+mod last_used;
 
 /// Produce AI Key 验证器
 #[derive(Clone)]
@@ -48,7 +50,7 @@ impl ProduceAiKeyValidator {
     /// 3. 验证 key 有效性（未撤销、未过期）
     /// 4. 加载用户和租户信息
     /// 5. 验证租户状态
-    /// 6. 更新最后使用时间
+    /// 6. 提交鉴权事务后尽力采样记录最后使用时间（不参与授权判定）
     pub async fn validate(&self, key: &str) -> Result<AuthContext> {
         // 检查格式
         if !Self::is_valid_format(key) {
@@ -60,7 +62,7 @@ impl ProduceAiKeyValidator {
 
         // 从数据库验证
         match &self.pool {
-            Some(pool) => self.validate_from_database(pool.as_ref(), &key_hash).await,
+            Some(pool) => self.validate_from_database(pool, &key_hash).await,
             None => {
                 // 无数据库连接时返回错误，不使用不安全的 fallback
                 tracing::error!(
@@ -104,7 +106,11 @@ impl ProduceAiKeyValidator {
     }
 
     /// 从数据库验证 Produce AI Key
-    async fn validate_from_database(&self, pool: &DbRouter, key_hash: &str) -> Result<AuthContext> {
+    async fn validate_from_database(
+        &self,
+        pool: &Arc<DbRouter>,
+        key_hash: &str,
+    ) -> Result<AuthContext> {
         // API-key revocation is security-sensitive and must be visible
         // immediately after a tenant move, so the candidate lookup bypasses
         // potentially lagging read replicas. The transaction below acquires
@@ -130,28 +136,48 @@ impl ProduceAiKeyValidator {
             KeyComputeError::DatabaseError(format!("Failed to begin API key validation: {e}"))
         })?;
 
-        // Tenant lifecycle is authorization-sensitive. Take a FOR UPDATE lock
-        // in the same transaction so a concurrent status change cannot commit
-        // between the active-state check and validation commit. A KEY SHARE
-        // lock is insufficient here: PostgreSQL permits a regular tenant
-        // UPDATE (which takes NO KEY UPDATE) alongside KEY SHARE. The
-        // parent-first order is unchanged, so create/move/delete paths still
-        // serialize before any user or key lock is acquired.
-        let tenant = Tenant::find_by_id_for_update(&tx, candidate.tenant_id)
+        // Dropping an async query queues rollback but need not cancel the
+        // statement already running on PostgreSQL. Bound that statement on
+        // the server, too, so a cancelled reader cannot retain parent locks
+        // indefinitely while waiting for a child row. SET LOCAL cannot leak
+        // these auth-only limits into the pooled connection's next request.
+        tx.execute_unprepared("SET LOCAL lock_timeout = '3s'; SET LOCAL statement_timeout = '5s'")
             .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock tenant: {e}")))?;
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!(
+                    "Failed to set API key validation timeout: {e}"
+                ))
+            })?;
+
+        // SHARE locks let validators overlap while still conflicting with
+        // ordinary lifecycle UPDATEs (NO KEY UPDATE), not just deletion. KEY
+        // SHARE would be too weak. Keep the parent-first tenant -> user -> key
+        // order and never upgrade these locks to write usage metadata: two
+        // readers upgrading the same row can deadlock. Lifecycle writers keep
+        // their existing exclusive locks; only authentication uses SHARE.
+        let tenant = Tenant::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM tenants WHERE id = $1 FOR SHARE",
+            [candidate.tenant_id.into()],
+        ))
+        .one(&tx)
+        .await
+        .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock tenant: {e}")))?;
         let Some(tenant) = tenant else {
             tracing::warn!(tenant_id = %candidate.tenant_id, "Tenant not found for produce AI key");
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         };
 
-        // A move locks the user and then revokes its keys. Lock the user only
-        // after the parent tenant, so tenant deletion and authentication have
-        // the same parent-first ordering. `FOR NO KEY UPDATE` remains
-        // compatible with child-table foreign-key `KEY SHARE` checks.
-        let user = User::find_by_id_for_no_key_update(&tx, candidate.user_id)
-            .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock user: {e}")))?;
+        // SHARE also protects user ownership/role from ordinary UPDATEs and
+        // remains compatible with child-table foreign-key KEY SHARE checks.
+        let user = User::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM users WHERE id = $1 FOR SHARE",
+            [candidate.user_id.into()],
+        ))
+        .one(&tx)
+        .await
+        .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock user: {e}")))?;
 
         // 用户已被删除但 key 记录残留（孤儿 key），对外统一返回通用错误，避免泄露内部状态
         let Some(user) = user else {
@@ -167,10 +193,15 @@ impl ProduceAiKeyValidator {
         // user lock. This is the linearization point for revocation and
         // tenant reassignment; the initial candidate may have become stale
         // while the transaction was waiting for the user lock.
-        let Some(produce_ai_key) = ProduceAiKey::find_by_id_for_update(&tx, candidate.id)
-            .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock API key: {e}")))?
-        else {
+        let produce_ai_key = ProduceAiKey::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM produce_ai_keys WHERE id = $1 FOR SHARE",
+            [candidate.id.into()],
+        ))
+        .one(&tx)
+        .await
+        .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock API key: {e}")))?;
+        let Some(produce_ai_key) = produce_ai_key else {
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         };
 
@@ -230,12 +261,13 @@ impl ProduceAiKeyValidator {
             return Err(KeyComputeError::AuthError("Tenant is not active".into()));
         }
 
-        // 更新最后使用时间
-        let _ = produce_ai_key.update_last_used(&tx).await;
-
         tx.commit().await.map_err(|e| {
             KeyComputeError::DatabaseError(format!("Failed to commit API key validation: {e}"))
         })?;
+
+        // Observability only: admission, pool waits, failures and shutdown of
+        // this bounded writer must never change an authorization decision.
+        last_used::record(Arc::clone(pool), &produce_ai_key);
 
         tracing::info!(
             user_id = %user.id,

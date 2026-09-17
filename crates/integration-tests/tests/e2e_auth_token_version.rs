@@ -408,6 +408,17 @@ async fn test_api_key_validation_rejects_revocation_while_waiting_for_user_lock(
         .expect("user lock should succeed")
         .expect("user should exist");
 
+    let gate_pid: i32 = gate
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_backend_pid()".to_string(),
+        ))
+        .await
+        .expect("gate PID query should succeed")
+        .expect("gate PID query should return a row")
+        .try_get_by_index(0)
+        .expect("gate PID should decode");
+
     let router = DbRouter::single(pool.clone());
     let validator = ProduceAiKeyValidator::with_pool(Arc::clone(&router));
     let key_for_task = api_key.clone();
@@ -420,9 +431,10 @@ async fn test_api_key_validation_rejects_revocation_while_waiting_for_user_lock(
     let mut validator_is_waiting = false;
     for _ in 0..300 {
         let row = pool
-            .query_one(Statement::from_string(
+            .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%FROM users WHERE id = $1 FOR NO KEY UPDATE%') AS waiting".to_string(),
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM users WHERE id = $1 FOR SHARE%') AS waiting",
+                [gate_pid.into()],
             ))
             .await
             .expect("lock wait probe should succeed")
@@ -512,6 +524,17 @@ async fn test_api_key_validation_does_not_deadlock_with_tenant_delete() {
         .expect("tenant lock should succeed")
         .expect("tenant should exist");
 
+    let gate_pid: i32 = delete_tx
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_backend_pid()".to_string(),
+        ))
+        .await
+        .expect("gate PID query should succeed")
+        .expect("gate PID query should return a row")
+        .try_get_by_index(0)
+        .expect("gate PID should decode");
+
     let router = DbRouter::single(pool.clone());
     let validator = ProduceAiKeyValidator::with_pool(Arc::clone(&router));
     let key_for_task = api_key.clone();
@@ -524,9 +547,10 @@ async fn test_api_key_validation_does_not_deadlock_with_tenant_delete() {
     let mut validator_is_waiting = false;
     for _ in 0..300 {
         let row = pool
-            .query_one(Statement::from_string(
+            .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%FROM tenants WHERE id = $1 FOR UPDATE%') AS waiting".to_string(),
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM tenants WHERE id = $1 FOR SHARE%') AS waiting",
+                [gate_pid.into()],
             ))
             .await
             .expect("lock wait probe should succeed")
@@ -611,8 +635,8 @@ async fn test_api_key_validation_serializes_with_tenant_deactivation() {
 
     // Leave a regular UPDATE uncommitted.  It holds NO KEY UPDATE on the
     // tenant, which is intentionally compatible with FOR KEY SHARE (the
-    // pre-fix validator lock) but conflicts with FOR UPDATE (the required
-    // authorization lock).
+    // historical weak lock) but conflicts with FOR SHARE, which protects
+    // authorization without serializing concurrent validators.
     let deactivate_tx = pool
         .begin()
         .await
@@ -626,6 +650,17 @@ async fn test_api_key_validation_serializes_with_tenant_deactivation() {
         .await
         .expect("tenant deactivation should execute");
 
+    let gate_pid: i32 = deactivate_tx
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_backend_pid()".to_string(),
+        ))
+        .await
+        .expect("gate PID query should succeed")
+        .expect("gate PID query should return a row")
+        .try_get_by_index(0)
+        .expect("gate PID should decode");
+
     let router = DbRouter::single(pool.clone());
     let validator = ProduceAiKeyValidator::with_pool(Arc::clone(&router));
     let key_for_task = api_key.clone();
@@ -638,9 +673,10 @@ async fn test_api_key_validation_serializes_with_tenant_deactivation() {
     let mut validator_is_waiting = false;
     for _ in 0..300 {
         let row = pool
-            .query_one(Statement::from_string(
+            .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%FROM tenants WHERE id = $1 FOR UPDATE%') AS waiting".to_string(),
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FROM tenants WHERE id = $1 FOR SHARE%') AS waiting",
+                [gate_pid.into()],
             ))
             .await
             .expect("tenant lock wait probe should succeed")
