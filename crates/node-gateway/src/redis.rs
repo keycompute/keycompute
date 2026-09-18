@@ -78,6 +78,10 @@ pub struct NodeGatewayRedis {
 }
 
 impl NodeGatewayRedis {
+    pub fn blocking_pool_status(&self) -> (deadpool_redis::Status, deadpool_redis::Status) {
+        (self.poll_pool.status(), self.result_pool.status())
+    }
+
     /// Share only short commands with the application. Construct two new
     /// pools (not clones of the command pool) for task claims and result waits.
     /// Both pools use the same configured Redis endpoint/database as producers.

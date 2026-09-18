@@ -324,6 +324,23 @@ jobs:
       - name: Run Integration Tests
         run: cargo test --package integration-tests --verbose
 
+      - name: Full-chain HTTP load harness smoke
+        env:
+          KC_LOAD_ACK_ISOLATED: "1"
+          KC_LOAD_SECONDS: "3"
+          KC_LOAD_RATE: "5"
+          KC_LOAD_MODE: "sse"
+          KC_LOAD_STREAM_MS: "100"
+          DATABASE_URL: postgres://postgres:devpassword@127.0.0.1:5432/kc_load_ci
+          KC__DATABASE__URL: postgres://postgres:devpassword@127.0.0.1:5432/kc_load_ci
+        run: |
+          set -euo pipefail
+          # Only the disposable CI services are used; no external model calls.
+          docker exec "${{ job.services.postgres.id }}" createdb -U postgres kc_load_ci
+          docker exec "${{ job.services.redis.id }}" redis-cli \
+            SET keycompute:test:load-instance disposable-load-v1
+          cargo test --package integration-tests --test e2e_full_chain_load -- --ignored --nocapture
+
       # ── Step: Cleanup Docker volumes ─────────────────────────────────────────
       # Prevent volume accumulation on self-hosted runners.
       - name: Cleanup Docker volumes

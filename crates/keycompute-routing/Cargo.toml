@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+keycompute-observability = { workspace = true }
 keycompute-config = { workspace = true }
 futures = "0.3"
 keycompute-types = { workspace = true }

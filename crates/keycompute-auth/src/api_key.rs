@@ -52,6 +52,14 @@ impl ProduceAiKeyValidator {
     /// 5. 验证租户状态
     /// 6. 提交鉴权事务后尽力采样记录最后使用时间（不参与授权判定）
     pub async fn validate(&self, key: &str) -> Result<AuthContext> {
+        keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::Authentication,
+            self.validate_inner(key),
+        )
+        .await
+    }
+
+    async fn validate_inner(&self, key: &str) -> Result<AuthContext> {
         // 检查格式
         if !Self::is_valid_format(key) {
             return Err(KeyComputeError::AuthError("Invalid API key format".into()));

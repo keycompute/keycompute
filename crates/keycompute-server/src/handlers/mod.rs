@@ -4,6 +4,7 @@
 
 // 管理功能（拆分为多个模块）
 pub mod admin_account;
+pub mod admin_capacity;
 pub mod admin_monitoring;
 pub mod admin_node_gateway;
 pub mod admin_pricing;
@@ -1118,6 +1119,28 @@ pub(crate) async fn record_terminal_token_usage(
 /// durably deferred. A `false` result is logged as an operator-visible failure;
 /// this can only occur without a database or when the outbox write also fails.
 pub(crate) async fn finalize_immediate_settlement_logged(
+    settlement: &ImmediateSettlementServices,
+    ctx: &keycompute_types::RequestContext,
+    primary_provider: &str,
+    primary_account_id: uuid::Uuid,
+    status: &str,
+    protocol: &'static str,
+) -> bool {
+    keycompute_observability::capacity::measure_bool(
+        keycompute_observability::capacity::Stage::Settlement,
+        finalize_immediate_settlement_logged_inner(
+            settlement,
+            ctx,
+            primary_provider,
+            primary_account_id,
+            status,
+            protocol,
+        ),
+    )
+    .await
+}
+
+pub(crate) async fn finalize_immediate_settlement_logged_inner(
     settlement: &ImmediateSettlementServices,
     ctx: &keycompute_types::RequestContext,
     primary_provider: &str,

@@ -454,6 +454,10 @@ pub fn create_router(state: AppState) -> Router {
     // 监控追踪（仅 Admin）
     let admin_monitoring_routes = Router::new()
         .route(
+            "/api/v1/admin/monitoring/capacity",
+            get(crate::handlers::admin_capacity::capacity),
+        )
+        .route(
             "/api/v1/admin/monitoring/overview",
             get(get_monitoring_overview),
         )

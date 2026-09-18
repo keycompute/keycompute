@@ -72,6 +72,10 @@ impl BalanceService {
         Self { pool }
     }
 
+    pub fn request_reservation_status() -> keycompute_runtime::admission::AdmissionStatus {
+        request_reservation_admission().status()
+    }
+
     /// 获取或创建用户余额记录
     ///
     /// 如果记录不存在，会自动创建
@@ -189,14 +193,16 @@ impl BalanceService {
                 "Balance reservation TTL is out of range: {error}"
             ))
         })?;
-        let _local_slot = request_reservation_admission()
-            .acquire(user_id)
-            .await
-            .map_err(|_| {
-                KeyComputeError::ServiceUnavailable(
-                    "Balance reservation capacity is exhausted; retry later".into(),
-                )
-            })?;
+        let _local_slot = keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::BalanceQueue,
+            request_reservation_admission().acquire(user_id),
+        )
+        .await
+        .map_err(|_| {
+            KeyComputeError::ServiceUnavailable(
+                "Balance reservation capacity is exhausted; retry later".into(),
+            )
+        })?;
         let expires_at = chrono::Utc::now()
             .checked_add_signed(reservation_ttl)
             .ok_or_else(|| {
@@ -206,15 +212,18 @@ impl BalanceService {
             })?;
         // Preserve the detached worker's COMMIT handoff. PostgreSQL applies
         // transaction-local deadlines; do not interrupt ownership transfer here.
-        BalanceReservation::reserve(
-            self.pool.as_ref(),
-            tenant_id,
-            user_id,
-            request_id,
-            owner_token,
-            amount,
-            min_balance_threshold(),
-            expires_at,
+        keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::BalanceReserve,
+            BalanceReservation::reserve(
+                self.pool.as_ref(),
+                tenant_id,
+                user_id,
+                request_id,
+                owner_token,
+                amount,
+                min_balance_threshold(),
+                expires_at,
+            ),
         )
         .await
         .map_err(|error| {

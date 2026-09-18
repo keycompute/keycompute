@@ -60,11 +60,14 @@ pub async fn ingress_middleware(
     if !generation {
         return next.run(request).await;
     }
-    let Ok(_permit) = state
-        .generation_admission
-        .ingress
-        .acquire(uuid::Uuid::nil())
-        .await
+    let Ok(_permit) = keycompute_observability::capacity::measure(
+        keycompute_observability::capacity::Stage::Ingress,
+        state
+            .generation_admission
+            .ingress
+            .acquire(uuid::Uuid::nil()),
+    )
+    .await
     else {
         let mut response =
             ApiError::ServiceUnavailable("Generation ingress capacity is exhausted".into())
@@ -79,7 +82,10 @@ pub async fn ingress_middleware(
 
 pub async fn ensure_generation(state: &AppState, auth: &mut AuthExtractor) -> Result<(), ApiError> {
     if auth.generation_permit.is_none() {
-        let permit = state.generation_admission.requests.acquire(auth.tenant_id).await
+        let permit = keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::GenerationQueue,
+            state.generation_admission.requests.acquire(auth.tenant_id),
+        ).await
             .map_err(|error| {
                 tracing::debug!(tenant_id=%auth.tenant_id, %error, "generation resource admission rejected");
                 ApiError::ServiceUnavailable("Generation capacity is exhausted. Please retry later.".to_string())

@@ -829,7 +829,10 @@ impl GatewayExecutor {
                     biased;
                     _ = tx.closed() => return Err(KeyComputeError::ServiceUnavailable("client disconnected during account quota admission".into())),
                     _ = ctx.wait_for_client_disconnect() => return Err(KeyComputeError::ServiceUnavailable("client disconnected during account quota admission".into())),
-                    result = capacity.admit(&ctx, &target) => result,
+                    result = keycompute_observability::capacity::measure(
+                        keycompute_observability::capacity::Stage::AccountAdmission,
+                        capacity.admit(&ctx, &target),
+                    ) => result,
                 };
                 match admitted {
                     Ok(lease) => Some(lease),
@@ -897,23 +900,26 @@ impl GatewayExecutor {
                 .expect("active attempt state poisoned") = attempt;
             let mut quota_lost = false;
             let result = {
-                let execution = self.try_execute(
-                    &ctx,
-                    &target,
-                    TargetRunContext {
-                        tx: tx.clone(),
-                        sent_content: &mut sent_content,
-                        deferred_native_error: &mut deferred_native_error,
-                        attempt,
-                        lifecycle: Arc::clone(&lifecycle),
-                        execution_completed: Arc::clone(&execution_completed),
-                        include_stream_usage: match &target {
-                            ExecutionTarget::ProviderAccount { account_id, .. } => {
-                                !stream_usage_unsupported.contains(account_id)
-                            }
-                            ExecutionTarget::Node { .. } => true,
+                let execution = keycompute_observability::capacity::measure(
+                    keycompute_observability::capacity::Stage::Upstream,
+                    self.try_execute(
+                        &ctx,
+                        &target,
+                        TargetRunContext {
+                            tx: tx.clone(),
+                            sent_content: &mut sent_content,
+                            deferred_native_error: &mut deferred_native_error,
+                            attempt,
+                            lifecycle: Arc::clone(&lifecycle),
+                            execution_completed: Arc::clone(&execution_completed),
+                            include_stream_usage: match &target {
+                                ExecutionTarget::ProviderAccount { account_id, .. } => {
+                                    !stream_usage_unsupported.contains(account_id)
+                                }
+                                ExecutionTarget::Node { .. } => true,
+                            },
                         },
-                    },
+                    ),
                 );
                 if let Some(lease) = &quota_lease {
                     tokio::select! {

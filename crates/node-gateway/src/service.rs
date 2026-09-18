@@ -101,6 +101,10 @@ pub struct NodeGatewayService {
 }
 
 impl NodeGatewayService {
+    pub fn blocking_pool_status(&self) -> (deadpool_redis::Status, deadpool_redis::Status) {
+        self.redis.blocking_pool_status()
+    }
+
     /// 创建新的 Service 实例
     pub fn new(
         store: NodeGatewayStore,
