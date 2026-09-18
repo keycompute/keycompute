@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+keycompute-observability = { workspace = true }
 keycompute-types = { workspace = true }
 async-trait = "0.1"
 dashmap = "6"

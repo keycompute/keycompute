@@ -31,7 +31,7 @@ pub fn process_snapshot(state: &AppState) -> Value {
         json!({"claims":redis_status!(poll),"results":redis_status!(result)})
     });
     json!({
-        "scope":"application_process", "managed_payload_bytes":{"limit":memory.limit,"used":memory.used,"peak":memory.peak},
+        "scope":"application_process", "shutdown":state.shutdown.snapshot(), "managed_payload_bytes":{"limit":memory.limit,"used":memory.used,"peak":memory.peak},
         "ingress":admission(state.generation_admission.ingress.status()),
         "generation":admission(state.generation_admission.requests.status()),
         "accounts_local":admission(state.generation_admission.accounts.status()),
@@ -40,6 +40,7 @@ pub fn process_snapshot(state: &AppState) -> Value {
         "redis_commands":state.runtime_state.pool().map(|pool|redis_status!(pool.status())),
         "redis_cache":state.cache.pool().map(|pool|redis_status!(pool.status())),
         "redis_blocking":blocked,
+        "account_lease_owners":keycompute_observability::account_leases::snapshot(),
         "stages":keycompute_observability::capacity::snapshot(),
     })
 }

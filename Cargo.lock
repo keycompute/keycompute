@@ -3839,6 +3839,7 @@ dependencies = [
  "async-trait",
  "dashmap",
  "deadpool-redis",
+ "keycompute-observability",
  "keycompute-types",
  "redis",
  "serde",

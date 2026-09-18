@@ -3,6 +3,7 @@
 //! Reuse the existing atomic reservation scripts, terminal fencing and bounded
 //! expiry cleanup rather than introducing a second non-atomic counter protocol.
 use crate::{MemoryRateLimiter, RateLimitBackend, RateLimitConfig, RateLimitKey, RateLimitService};
+use keycompute_observability::account_leases::{self, LeaseEvent, LeaseOwner};
 use keycompute_types::{AccountAttemptLease, AccountCapacitySnapshot, KeyComputeError, Result};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
@@ -126,6 +127,7 @@ impl AccountQuotaService {
             attempt_id: Uuid::new_v4(),
             predicted_tokens,
             finished: false,
+            telemetry: None,
         };
         // Distinct attempt IDs count every retry/fallback against the account.
         // Reservations precede RPM debit; a rejected stage never contacts upstream.
@@ -158,11 +160,17 @@ impl AccountQuotaService {
         })
         .and_then(|result| result);
         if let Err(error) = result {
+            account_leases::record(if matches!(error, KeyComputeError::RateLimitExceeded(_)) {
+                LeaseEvent::Rejected
+            } else {
+                LeaseEvent::AdmissionError
+            });
             // Safe before dispatch. An ambiguous late backend write can retain
             // capacity until expiry, but cannot permit an unmetered dispatch.
             lease.release_unstarted().await;
             return Err(error);
         }
+        lease.telemetry = Some(LeaseOwner::admitted());
         Ok(lease)
     }
 }
@@ -176,6 +184,7 @@ pub struct AccountQuotaLease {
     attempt_id: Uuid,
     predicted_tokens: u32,
     finished: bool,
+    telemetry: Option<LeaseOwner>,
 }
 impl AccountQuotaLease {
     async fn release_unstarted(&mut self) {
@@ -218,8 +227,11 @@ impl AccountAttemptLease for AccountQuotaLease {
             .await
             .map_err(|_| {
                 KeyComputeError::ServiceUnavailable("account quota renewal timed out".into())
-            })??;
+            })
+            .and_then(|result| result)
+            .inspect_err(|_| account_leases::record(LeaseEvent::RenewalLost))?;
             if !tokens_live || !slot_live {
+                account_leases::record(LeaseEvent::RenewalLost);
                 return Err(KeyComputeError::ServiceUnavailable(
                     "account quota lease was lost".into(),
                 ));
@@ -254,9 +266,15 @@ impl AccountAttemptLease for AccountQuotaLease {
         .await
         .map_err(|_| {
             KeyComputeError::ServiceUnavailable("account quota settlement timed out".into())
-        })?;
+        })
+        .and_then(|result| result);
         if result.is_ok() {
             self.finished = true;
+            if let Some(telemetry) = self.telemetry.as_mut() {
+                telemetry.finish(release_in_flight);
+            }
+        } else {
+            account_leases::record(LeaseEvent::SettlementError);
         }
         result
     }

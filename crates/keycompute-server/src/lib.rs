@@ -13,6 +13,7 @@ pub mod middleware;
 pub mod payment_registry;
 pub mod providers;
 pub mod router;
+pub mod shutdown;
 pub mod state;
 
 pub use error::{ApiError, Result};
@@ -27,24 +28,33 @@ use tracing::info;
 pub use keycompute_config::ServerConfig;
 
 /// 运行服务器
-pub async fn run(config: ServerConfig, state: AppState) -> crate::error::Result<()> {
+pub async fn run(config: ServerConfig, state: AppState) -> crate::Result<()> {
+    run_with_shutdown(config, state, std::future::pending()).await
+}
+
+pub async fn run_with_shutdown(
+    config: ServerConfig,
+    state: AppState,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> crate::Result<()> {
+    if !(1..=3600).contains(&config.shutdown_timeout_secs) {
+        return Err(ApiError::Config("invalid server shutdown timeout".into()));
+    }
     let addr: SocketAddr = format!("{}:{}", config.bind_addr, config.port)
         .parse()
-        .map_err(|e| crate::error::ApiError::Config(format!("Invalid address: {}", e)))?;
-
-    let app = create_router(state);
-
-    info!("KeyCompute server starting on {}", addr);
-
+        .map_err(|error| ApiError::Config(format!("Invalid address: {error}")))?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .map_err(|e| crate::error::ApiError::Internal(format!("Failed to bind: {}", e)))?;
-
-    axum::serve(listener, app)
-        .await
-        .map_err(|e| crate::error::ApiError::Internal(format!("Server error: {}", e)))?;
-
-    Ok(())
+        .map_err(|error| ApiError::Internal(format!("Failed to bind: {error}")))?;
+    info!("KeyCompute server starting on {}", addr);
+    shutdown::serve_router_with_shutdown(
+        listener,
+        create_router(state.clone()),
+        state,
+        shutdown,
+        std::time::Duration::from_secs(config.shutdown_timeout_secs),
+    )
+    .await
 }
 
 #[cfg(test)]

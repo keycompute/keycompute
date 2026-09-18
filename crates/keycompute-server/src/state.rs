@@ -270,6 +270,7 @@ pub fn init_global_crypto(
 /// 应用状态
 #[derive(Clone)]
 pub struct AppState {
+    pub shutdown: Arc<crate::shutdown::ShutdownState>,
     pub generation_admission: Arc<crate::admission::GenerationAdmission>,
     /// 对外公开的前端应用基础 URL（可选）
     pub app_base_url: Option<String>,
@@ -361,6 +362,12 @@ impl std::fmt::Debug for AppState {
 }
 
 impl AppState {
+    pub fn begin_draining(&self) {
+        self.shutdown.begin();
+        self.generation_admission.ingress.close();
+        self.generation_admission.requests.close();
+    }
+
     fn configure_memory(gateway: &keycompute_config::GatewayConfig) -> crate::error::Result<()> {
         let bytes = gateway
             .managed_memory_mib
@@ -473,6 +480,7 @@ impl AppState {
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             generation_admission,
+            shutdown: Arc::new(crate::shutdown::ShutdownState::default()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }
@@ -977,6 +985,7 @@ impl AppState {
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             generation_admission,
+            shutdown: Arc::new(crate::shutdown::ShutdownState::default()),
             gateway_config: config.gateway,
             lifecycle,
         })
@@ -1083,6 +1092,7 @@ impl AppState {
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             generation_admission,
+            shutdown: Arc::new(crate::shutdown::ShutdownState::default()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
         }

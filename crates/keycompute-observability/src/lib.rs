@@ -3,6 +3,7 @@
 //! 本 crate 提供日志、指标、追踪和主机监控功能，
 //! 被所有需要可观测性的后端 crate 依赖。
 
+pub mod account_leases;
 pub mod capacity;
 pub mod host_monitor;
 pub mod logger;

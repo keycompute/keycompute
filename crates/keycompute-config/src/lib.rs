@@ -458,6 +458,12 @@ impl AppConfig {
             );
         }
 
+        if !(1..=3600).contains(&self.server.shutdown_timeout_secs) {
+            return Err(ConfigLoadError::ValidationError(
+                "server shutdown timeout must be between 1 and 3600 seconds".into(),
+            ));
+        }
+
         if !(64..=16_384).contains(&self.gateway.managed_memory_mib)
             || self
                 .gateway

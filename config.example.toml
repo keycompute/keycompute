@@ -20,6 +20,8 @@ database_read_urls = []
 
 # ==================== 服务器配置 ====================
 [server]
+# Two-phase drain deadline; process supervisor must allow additional grace.
+shutdown_timeout_secs = 120
 # 服务器绑定地址
 bind_addr = "0.0.0.0"
 # 服务器监听端口

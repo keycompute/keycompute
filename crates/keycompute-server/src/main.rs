@@ -17,7 +17,7 @@ use keycompute_db::{
     TenantDistributionRule, User,
 };
 use keycompute_observability::{init_dev_observability, init_observability};
-use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run};
+use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run_with_shutdown};
 use keycompute_types::UserRole;
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
@@ -288,18 +288,11 @@ async fn main() -> anyhow::Result<()> {
         server_config.bind_addr, server_config.port
     );
 
-    // 启动服务器（带优雅关闭支持）
-    tokio::select! {
-        result = run(server_config, app_state) => {
-            if let Err(e) = result {
-                error!("服务器运行错误: {}", e);
-                std::process::exit(1);
-            }
-        }
-        _ = shutdown => {
-            info!("收到关闭信号，正在优雅关闭...");
-        }
-    }
+    // Drive the staged drain instead of dropping Serve on the first signal.
+    run_with_shutdown(server_config, app_state, async {
+        let _ = shutdown.await;
+    })
+    .await?;
 
     info!("KeyCompute 服务器已停止");
     Ok(())

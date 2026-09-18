@@ -128,6 +128,8 @@ services:
     image: keycompute-server:latest
     container_name: keycompute-server
     restart: unless-stopped
+    # Must exceed the application drain timeout plus final IO cleanup.
+    stop_grace_period: ${KC_SERVER_STOP_GRACE_PERIOD:-130s}
     depends_on:
       postgres:
         condition: service_healthy
@@ -225,6 +227,7 @@ services:
       # 服务器配置
       KC__SERVER__BIND_ADDR: "0.0.0.0"
       KC__SERVER__PORT: "3000"
+      KC__SERVER__SHUTDOWN_TIMEOUT_SECS: ${KC__SERVER__SHUTDOWN_TIMEOUT_SECS:-120}
 
       # 默认系统管理员配置（仅首次创建 system 管理员时使用；创建后可删除密码变量）
       KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
@@ -252,7 +255,7 @@ services:
     # ports:
     #   - "3000:3000"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/health"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:3000/ready"]
       interval: 30s
       timeout: 10s
       retries: 3

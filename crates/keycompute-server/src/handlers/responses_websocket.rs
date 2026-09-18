@@ -45,6 +45,13 @@ use std::{
 };
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
 
+struct AbortTask(tokio::task::JoinHandle<()>);
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 const MAX_ACTIVE_RESPONSES: usize = 16;
 const MAX_NAMED_STREAMS: usize = 32;
 const MAX_CACHED_RESPONSES: usize = 128;
@@ -492,6 +499,9 @@ pub async fn responses_websocket(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    let Some(socket_work) = state.shutdown.socket() else {
+        return crate::shutdown::unavailable();
+    };
     let Some(connection_permit) = state
         .responses_websocket_admission
         .try_acquire(auth.tenant_id)
@@ -516,6 +526,7 @@ pub async fn responses_websocket(
         .max_frame_size(OPENAI_RESPONSES_BODY_LIMIT_BYTES)
         .on_upgrade(move |socket| async move {
             let _connection_permit = connection_permit;
+            let _socket_work = socket_work;
             let _wire_memory = wire_memory;
             serve_connection(socket, state, auth, headers).await;
         })
@@ -543,7 +554,7 @@ async fn serve_connection_parts<S, R, E>(
     E: std::fmt::Display,
 {
     let (outbound_tx, mut outbound_rx) = OutboundSender::new(OUTBOUND_QUEUE_CAPACITY);
-    let mut writer = tokio::spawn(async move {
+    let mut writer = AbortTask(tokio::spawn(async move {
         while let Some(message) = outbound_rx.recv().await {
             if !matches!(
                 tokio::time::timeout(OUTBOUND_SEND_TIMEOUT, sink.send(message.message)).await,
@@ -552,7 +563,7 @@ async fn serve_connection_parts<S, R, E>(
                 break;
             }
         }
-    });
+    }));
 
     let cache = Arc::new(Mutex::new(ConnectionCache::default()));
     let active = Arc::new(Semaphore::new(MAX_ACTIVE_RESPONSES));
@@ -563,11 +574,13 @@ async fn serve_connection_parts<S, R, E>(
     let connection_limit = tokio::time::sleep(CONNECTION_LIMIT);
     tokio::pin!(connection_limit);
     let mut writer_finished = false;
+    let mut draining = false;
 
     loop {
         tokio::select! {
             biased;
-            result = &mut writer => {
+            _ = state.shutdown.draining() => { draining = true; break; }
+            result = &mut writer.0 => {
                 writer_finished = true;
                 if let Err(error) = result {
                     tracing::debug!(%error, "Responses WebSocket writer task failed");
@@ -690,7 +703,7 @@ async fn serve_connection_parts<S, R, E>(
                                 outbound_tx.clone(),
                             ));
                             lanes.insert(queued.lane.clone(), lane_tx.clone());
-                            lane_workers.push(worker);
+                            lane_workers.push(AbortTask(worker));
                             lane_tx
                         };
                         match lane_sender.try_send(queued) {
@@ -730,12 +743,29 @@ async fn serve_connection_parts<S, R, E>(
     }
 
     lanes.clear();
+    if draining {
+        // Already admitted lane work may finish. Queued-but-unadmitted events
+        // hit the closed generation gate; no new upstream work is started.
+        for worker in &mut lane_workers {
+            tokio::select! { biased;
+                _ = state.shutdown.forced() => break,
+                _ = &mut worker.0 => {},
+            }
+        }
+        tokio::select! { biased;
+            _ = state.shutdown.forced() => {},
+            _ = outbound_tx.send(Message::Close(Some(CloseFrame { code:1001, reason:"Server draining".into() })),64) => {},
+        }
+    }
     for worker in lane_workers {
-        worker.abort();
+        worker.0.abort();
     }
     drop(outbound_tx);
     if !writer_finished {
-        let _ = writer.await;
+        tokio::select! { biased;
+            _ = state.shutdown.forced() => { writer.0.abort(); },
+            _ = &mut writer.0 => {},
+        }
     }
 }
 
@@ -3315,5 +3345,104 @@ mod tests {
 
         client.close(None).await.unwrap();
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    #[tokio::test]
+    async fn drain_flushes_accepted_response_events_before_close() {
+        let state = AppState::new();
+        let copy = state.clone();
+        let (sink, mut messages) = futures::channel::mpsc::channel::<Message>(8);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let notify = entered.clone();
+        let gate = release.clone();
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sink = sink.with(move |message| {
+            let notify = notify.clone();
+            let gate = gate.clone();
+            let first = first.clone();
+            async move {
+                if matches!(message, Message::Text(_))
+                    && first.swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    notify.notify_one();
+                    gate.notified().await;
+                }
+                Ok::<_, futures::channel::mpsc::SendError>(message)
+            }
+        });
+        let sink = Box::pin(sink);
+        let jwt = keycompute_auth::JwtValidator::new("change-me-in-production", "keycompute")
+            .generate_token(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), "user")
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {jwt}").parse().unwrap());
+        let source=futures::stream::once(async {Ok::<_,std::io::Error>(Message::Text(json!({"type":"response.create","model":"gpt-test","generate":false,"store":false,"input":"hello"}).to_string().into()))}).chain(futures::stream::pending());
+        let tracked = state.shutdown.socket().unwrap();
+        let task = tokio::spawn(async move {
+            let _tracked = tracked;
+            serve_connection_parts(sink, Box::pin(source), copy, headers).await;
+        });
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        state.begin_draining();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!task.is_finished());
+        assert_eq!(state.shutdown.snapshot().websockets, 1);
+        release.notify_one();
+        let mut types = Vec::new();
+        while let Some(message) = tokio::time::timeout(Duration::from_secs(2), messages.next())
+            .await
+            .unwrap()
+        {
+            match message {
+                Message::Text(text) => types.push(
+                    serde_json::from_str::<Value>(text.as_str()).unwrap()["type"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                ),
+                Message::Close(Some(frame)) => {
+                    assert_eq!(frame.code, 1001);
+                    break;
+                }
+                _ => panic!("unexpected drain event"),
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(types.last().map(String::as_str), Some("response.completed"));
+        assert_eq!(state.shutdown.snapshot().websockets, 0);
+    }
+    #[tokio::test]
+    async fn idle_response_socket_closes_on_drain_without_waiting_an_hour() {
+        let state = AppState::new();
+        let copy = state.clone();
+        let (sink, mut messages) = futures::channel::mpsc::channel::<Message>(8);
+        let source = futures::stream::pending::<Result<Message, std::io::Error>>();
+        let tracked = state.shutdown.socket().unwrap();
+        let task = tokio::spawn(async move {
+            let _tracked = tracked;
+            serve_connection_parts(sink, source, copy, HeaderMap::new()).await;
+        });
+        state.begin_draining();
+        let close = tokio::time::timeout(Duration::from_secs(2), messages.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(close,Message::Close(Some(frame)) if frame.code==1001));
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.shutdown.snapshot().websockets, 0);
+        assert!(!state.shutdown.is_forced());
     }
 }

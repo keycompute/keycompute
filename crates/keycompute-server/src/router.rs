@@ -572,7 +572,9 @@ pub fn create_router(state: AppState) -> Router {
         .layer(from_fn_with_state(state.clone(), admin_auth_middleware));
 
     // ==================== 9. 健康检查（公开） ====================
-    let health_routes = Router::new().route("/health", get(health_check));
+    let health_routes = Router::new()
+        .route("/health", get(health_check))
+        .route("/ready", get(crate::shutdown::readiness));
 
     // ==================== 10. 节点网关 API（使用 session token 认证） ====================
     let node_routes = Router::new()
@@ -602,6 +604,10 @@ pub fn create_router(state: AppState) -> Router {
         .layer(from_fn_with_state(
             state.clone(),
             maintenance_mode_middleware,
+        ))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::shutdown::middleware,
         ))
         // 仅 `/v1/messages` 的非 2xx 响应会被转换，其他 API 保持既有错误格式。
         // 放在维护模式之外，以覆盖全局维护拒绝。

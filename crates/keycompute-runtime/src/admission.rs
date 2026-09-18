@@ -25,6 +25,8 @@ pub struct AdmissionLimits {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AdmissionError {
+    #[error("resource admission is draining")]
+    Closed,
     #[error("resource admission queue is full")]
     Full,
     #[error("resource admission deadline exceeded")]
@@ -38,6 +40,7 @@ struct Counts {
 }
 #[derive(Debug, Default)]
 struct State {
+    closed: bool,
     active: usize,
     keys: HashMap<Uuid, Counts>,
     queue: VecDeque<(Uuid, Uuid)>, // ticket, scope
@@ -164,6 +167,9 @@ impl BoundedAdmission {
             changed.as_mut().enable(); // register before inspecting shared state
             {
                 let mut state = self.state.lock().expect("admission lock poisoned");
+                if state.closed {
+                    return Err(AdmissionError::Closed);
+                }
                 let eligible_ticket = state
                     .queue
                     .iter()
@@ -209,6 +215,12 @@ impl BoundedAdmission {
                 .await
                 .map_err(|_| AdmissionError::Timeout)?;
         }
+    }
+
+    /// Close new grants and wake queued tickets without revoking active work.
+    pub fn close(&self) {
+        self.state.lock().expect("admission lock poisoned").closed = true;
+        self.changed.notify_waiters();
     }
 
     pub fn status(&self) -> AdmissionStatus {
@@ -346,5 +358,50 @@ mod tests {
                 keys: 0
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod drain_tests {
+    use super::*;
+    #[tokio::test]
+    async fn close_wakes_tickets_without_revoking_paid_work() {
+        let pool = BoundedAdmission::new(AdmissionLimits {
+            total: 1,
+            per_key: 1,
+            queue: 2,
+            queue_per_key: 2,
+            wait: Duration::from_secs(5),
+        })
+        .unwrap();
+        let key = Uuid::new_v4();
+        let permit = pool.acquire(key).await.unwrap();
+        let copy = pool.clone();
+        let task = tokio::spawn(async move { copy.acquire(key).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pool.status().queued != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pool.close();
+        pool.close();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err(),
+            AdmissionError::Closed
+        );
+        assert_eq!(
+            pool.acquire(Uuid::new_v4()).await.unwrap_err(),
+            AdmissionError::Closed
+        );
+        assert_eq!(pool.status().active, 1);
+        assert_eq!(pool.status().queued, 0);
+        drop(permit);
+        assert_eq!(pool.status().keys, 0);
     }
 }
