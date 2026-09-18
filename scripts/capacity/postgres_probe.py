@@ -18,7 +18,7 @@ SELECT json_build_object(
    'track_wal_io_timing',current_setting('track_wal_io_timing')),
  'statements_info',(SELECT row_to_json(i) FROM pg_stat_statements_info i),
  'statements',(SELECT coalesce(json_agg(s),'[]'::json) FROM (
-   SELECT queryid::text, toplevel, query, calls, total_exec_time, rows,
+   SELECT userid::text, queryid::text, toplevel, query, calls, total_exec_time, rows,
     shared_blks_hit,shared_blks_read,blk_read_time,blk_write_time,wal_records,wal_bytes
    FROM pg_stat_statements WHERE dbid=(SELECT oid FROM pg_database WHERE datname=current_database())
  ) s));
@@ -88,14 +88,14 @@ def difference(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
         if any(v < 0 for v in delta.values()):
             issues.append('counter_decreased')
         return delta
-    previous = {(s['queryid'], s['toplevel']): s for s in before['statements']}
+    previous = {(s.get('userid'), s['queryid'], s['toplevel']): s for s in before['statements']}
     statements = []
     seen = set()
     for item in after['statements']:
-        key = (item['queryid'], item['toplevel']); seen.add(key)
+        key = (item.get('userid'), item['queryid'], item['toplevel']); seen.add(key)
         delta = numeric_delta(previous.get(key, {}), item)
         if delta.get('calls', 0):
-            statements.append({'queryid': key[0], 'toplevel': key[1], 'class': item['class'], **delta})
+            statements.append({'userid': key[0], 'queryid': key[1], 'toplevel': key[2], 'class': item['class'], **delta})
     if set(previous) - seen:
         issues.append('statement_entries_disappeared')
     wal = numeric_delta(before['wal'], after['wal'])

@@ -21,6 +21,12 @@ class ProbeTest(unittest.TestCase):
             if mode=='missing':after['statements']=[]
             if mode=='decreased':after['statements'][0]['calls']=0
             self.assertFalse(difference(before,after)['valid_interval'])
+    def test_same_query_by_different_roles_is_not_collapsed(self):
+        before=self.fixture();before['statements'][0]['userid']='1'
+        before['statements'].append(dict(before['statements'][0],userid='2',calls=20))
+        after=copy.deepcopy(before);after['statements'][0]['calls']+=2;after['statements'][1]['calls']+=5
+        out=difference(before,after)
+        self.assertEqual({s['userid']:s['calls'] for s in out['statements_delta']},{'1':2,'2':5})
     def test_query_text_and_wrong_owners_are_not_accepted(self):
         secret="SELECT * FROM usage_logs WHERE secret='private-token'"
         self.assertEqual(classify(secret),'select:usage_logs')
