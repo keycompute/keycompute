@@ -49,6 +49,8 @@ pub fn parse_anthropic_stream_with_raw(
         // 个多字节字符；若对每个 chunk 使用 from_utf8_lossy，会把合法内容
         // 永久替换为 U+FFFD。
         let mut buffer = Vec::new();
+        let parser_memory =
+            keycompute_types::memory::reserve_process_memory(0).expect("zero claim");
         let mut stream = stream;
         let mut state = StreamState::default();
         let mut event_name: Option<String> = None;
@@ -67,6 +69,24 @@ pub fn parse_anthropic_stream_with_raw(
             };
             match chunk_result {
                 Ok(chunk) => {
+                    let pending_data = data_lines
+                        .iter()
+                        .map(|line: &String| line.len().saturating_add(32))
+                        .fold(0usize, usize::saturating_add);
+                    let pending = buffer
+                        .len()
+                        .saturating_add(pending_data)
+                        .saturating_add(chunk.len());
+                    if pending > llm_protocol_provider::MAX_JSON_PASSTHROUGH_BODY_BYTES
+                        || parser_memory.grow_to(pending.saturating_mul(6)).is_err()
+                    {
+                        let _ = tx
+                            .send(Err(KeyComputeError::ServiceUnavailable(
+                                "process_payload_memory_exhausted".into(),
+                            )))
+                            .await;
+                        return;
+                    }
                     buffer.extend_from_slice(&chunk);
 
                     // 处理缓冲区中的完整行
@@ -108,7 +128,9 @@ pub fn parse_anthropic_stream_with_raw(
                     // Preserve structured transport/body-read failures. The
                     // executor separately normalizes parser-generated legacy
                     // ProviderError values as non-retryable protocol failures.
-                    let _ = tx.send(Err(e)).await;
+                    let _ = tx
+                        .send(Err(llm_protocol_provider::bounded_stream_error(e)))
+                        .await;
                     return;
                 }
             }
@@ -233,11 +255,29 @@ async fn dispatch_anthropic_event(
     preserve_raw: bool,
     state: &mut StreamState,
 ) -> bool {
+    let working = llm_protocol_provider::estimated_json_parse_working_set_bytes(data.as_bytes());
+    let mut admission = None;
+    if working > llm_protocol_provider::MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES
+        || !llm_protocol_provider::admit_payload(
+            &mut admission,
+            working.saturating_mul(3),
+            working > llm_protocol_provider::LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+        )
+    {
+        let _ = tx
+            .send(Err(KeyComputeError::ServiceUnavailable(
+                "process_payload_memory_exhausted".into(),
+            )))
+            .await;
+        return false;
+    }
     let mut events = if preserve_raw {
         match raw_anthropic_event(data, event_name) {
             Ok(event) => vec![event],
             Err(error) => {
-                let _ = tx.send(Err(error)).await;
+                let _ = tx
+                    .send(Err(llm_protocol_provider::bounded_stream_error(error)))
+                    .await;
                 return false;
             }
         }
@@ -248,11 +288,14 @@ async fn dispatch_anthropic_event(
     match parse_anthropic_event(data, state) {
         Ok(parsed_events) => events.extend(parsed_events),
         Err(error) => {
-            let _ = tx.send(Err(error)).await;
+            let _ = tx
+                .send(Err(llm_protocol_provider::bounded_stream_error(error)))
+                .await;
             return false;
         }
     }
     for event in events {
+        let event = event.with_admission(admission.as_ref().expect("admitted event").clone());
         if tx.send(Ok(event)).await.is_err() {
             return false;
         }
@@ -328,6 +371,7 @@ fn parse_anthropic_event(data: &str, state: &mut StreamState) -> Result<Vec<Stre
                 events.push(StreamEvent::Delta {
                     content: String::new(),
                     finish_reason: delta.stop_reason,
+                    admission: None,
                 });
             }
 
@@ -575,7 +619,7 @@ mod tests {
         ))]);
         let mut parsed = parse_anthropic_stream_with_raw(Box::pin(source), true);
         let raw = parsed.next().await.unwrap().unwrap();
-        let StreamEvent::Raw { data } = raw else {
+        let StreamEvent::Raw { data, .. } = raw else {
             panic!("first event must preserve the native SSE event");
         };
         let envelope: serde_json::Value = serde_json::from_str(&data).unwrap();
@@ -593,7 +637,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert_eq!(events.len(), 2);
-        let StreamEvent::Raw { data } = events[0].as_ref().unwrap() else {
+        let StreamEvent::Raw { data, .. } = events[0].as_ref().unwrap() else {
             panic!("first event must be raw");
         };
         let envelope: serde_json::Value = serde_json::from_str(data).unwrap();
@@ -633,7 +677,7 @@ mod tests {
         let events = parse_anthropic_stream_with_raw(Box::pin(source), true)
             .collect::<Vec<_>>()
             .await;
-        let StreamEvent::Raw { data } = events[0].as_ref().unwrap() else {
+        let StreamEvent::Raw { data, .. } = events[0].as_ref().unwrap() else {
             panic!("first event must preserve the data frame");
         };
         let envelope: serde_json::Value = serde_json::from_str(data).unwrap();
@@ -651,7 +695,7 @@ mod tests {
         let events = parse_anthropic_stream_with_raw(Box::pin(source), true)
             .collect::<Vec<_>>()
             .await;
-        let StreamEvent::Raw { data } = events[0].as_ref().unwrap() else {
+        let StreamEvent::Raw { data, .. } = events[0].as_ref().unwrap() else {
             panic!("first event must preserve the native SSE event");
         };
         let envelope: serde_json::Value = serde_json::from_str(data).unwrap();
@@ -697,7 +741,7 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         assert_eq!(events.len(), 2);
-        let StreamEvent::Raw { data } = events[0].as_ref().unwrap() else {
+        let StreamEvent::Raw { data, .. } = events[0].as_ref().unwrap() else {
             panic!("first event must preserve the native SSE event");
         };
         let envelope: serde_json::Value = serde_json::from_str(data).unwrap();

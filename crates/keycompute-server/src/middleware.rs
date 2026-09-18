@@ -49,19 +49,70 @@ const GENERATION_HTTP_BODY_READ_TIMEOUT: Duration = Duration::from_secs(10 * 60)
 #[derive(Debug, PartialEq, Eq)]
 enum GenerationHttpBodyReadError {
     InvalidOrTooLarge,
+    MemoryCapacity,
     Timeout,
 }
 
+#[cfg(test)]
 async fn read_generation_http_body(
     body: Body,
     limit: usize,
     timeout: Duration,
 ) -> std::result::Result<bytes::Bytes, GenerationHttpBodyReadError> {
-    match tokio::time::timeout(timeout, to_bytes(body, limit)).await {
-        Ok(Ok(body)) => Ok(body),
-        Ok(Err(_)) => Err(GenerationHttpBodyReadError::InvalidOrTooLarge),
-        Err(_) => Err(GenerationHttpBodyReadError::Timeout),
+    read_budgeted_generation_http_body(body, limit, timeout)
+        .await
+        .map(|(body, _)| body)
+}
+
+struct BudgetedInputBytes {
+    bytes: bytes::Bytes,
+    _memory: keycompute_types::memory::MemoryPermit,
+}
+impl AsRef<[u8]> for BudgetedInputBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
     }
+}
+async fn read_budgeted_generation_http_body(
+    body: Body,
+    limit: usize,
+    timeout: Duration,
+) -> std::result::Result<
+    (bytes::Bytes, keycompute_types::memory::MemoryPermit),
+    GenerationHttpBodyReadError,
+> {
+    use futures::StreamExt;
+    let memory = keycompute_types::memory::reserve_process_memory(0)
+        .map_err(|_| GenerationHttpBodyReadError::MemoryCapacity)?;
+    let operation = async {
+        let mut chunks = body.into_data_stream();
+        let mut retained = Vec::new();
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|_| GenerationHttpBodyReadError::InvalidOrTooLarge)?;
+            let next = retained
+                .len()
+                .checked_add(chunk.len())
+                .filter(|n| *n <= limit)
+                .ok_or(GenerationHttpBodyReadError::InvalidOrTooLarge)?;
+            // Vec replacement + the incoming frame may coexist briefly.
+            memory
+                .grow_to(next.saturating_mul(3))
+                .map_err(|_| GenerationHttpBodyReadError::MemoryCapacity)?;
+            retained
+                .try_reserve(chunk.len())
+                .map_err(|_| GenerationHttpBodyReadError::MemoryCapacity)?;
+            retained.extend_from_slice(&chunk);
+        }
+        retained.shrink_to_fit();
+        let bytes = bytes::Bytes::from_owner(BudgetedInputBytes {
+            bytes: bytes::Bytes::from(retained),
+            _memory: memory.clone(),
+        });
+        Ok((bytes, memory))
+    };
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| GenerationHttpBodyReadError::Timeout)?
 }
 
 /// Marks a maintenance response whose administrator-configured message is
@@ -128,7 +179,7 @@ pub async fn generation_http_body_admission_middleware(
     // Inspect the serialized representation before Axum's JSON extractor
     // builds a potentially much larger Value tree. Rebuild the body from
     // Bytes so the extractor retains its normal content-type/error behavior.
-    let body = match read_generation_http_body(
+    let (body, memory) = match read_budgeted_generation_http_body(
         body,
         policy.body_limit_bytes,
         GENERATION_HTTP_BODY_READ_TIMEOUT,
@@ -142,7 +193,21 @@ pub async fn generation_http_body_admission_middleware(
         Err(GenerationHttpBodyReadError::Timeout) => {
             return StatusCode::REQUEST_TIMEOUT.into_response();
         }
+        Err(GenerationHttpBodyReadError::MemoryCapacity) => {
+            return ApiError::ServiceUnavailable(
+                "Process payload memory capacity exhausted".into(),
+            )
+            .into_response();
+        }
     };
+    // Retain room for JSON text/tree and the native/context projection copies.
+    if memory
+        .grow_to(estimated_json_parse_working_set_bytes(&body).saturating_mul(2))
+        .is_err()
+    {
+        return ApiError::ServiceUnavailable("Process payload memory capacity exhausted".into())
+            .into_response();
+    }
     let needs_working_set_admission = match generation_json_body_needs_working_set_admission(
         &body,
         policy.working_set_limit_bytes,
@@ -170,11 +235,15 @@ pub async fn generation_http_body_admission_middleware(
         permit = Some(acquired);
     }
 
+    let memory_lifetime = memory.clone();
+    let permit = match permit {
+        Some(permit) => permit.with_memory(memory),
+        None => crate::state::GenerationHttpBodyPermit::memory_only(memory),
+    };
     let mut req = Request::from_parts(parts, Body::from(body));
-    if let Some(permit) = permit {
-        req.extensions_mut().insert(permit);
-    }
-    crate::admission::retain_response(next.run(req).await, generation_permit)
+    req.extensions_mut().insert(permit);
+    let response = crate::admission::retain_response(next.run(req).await, generation_permit);
+    crate::admission::retain_memory(response, memory_lifetime)
 }
 
 #[derive(Clone, Copy)]
@@ -1914,8 +1983,8 @@ mod tests {
                         let barrier = Arc::clone(&handler_barrier);
                         async move {
                             assert!(
-                                permit.is_none(),
-                                "a small buffered body must release its provisional permit"
+                                permit.as_ref().is_some_and(|guard| !guard.0.owns_large_slot()),
+                                "a small body keeps its byte claim but releases the provisional large-object slot"
                             );
                             barrier.wait().await;
                             StatusCode::NO_CONTENT

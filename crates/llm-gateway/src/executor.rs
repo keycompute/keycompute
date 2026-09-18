@@ -116,6 +116,13 @@ fn provider_declared_stream_error() -> KeyComputeError {
     }
 }
 
+fn is_payload_capacity_error(error: &KeyComputeError) -> bool {
+    matches!(error,
+        KeyComputeError::ServiceUnavailable(code) if code == "process_payload_memory_exhausted")
+        || matches!(error, KeyComputeError::UpstreamFailure { stable_code, .. }
+            if matches!(stable_code.as_str(), "upstream_body_capacity_exhausted" | "upstream_json_capacity_exhausted"))
+}
+
 fn classify_execution_error(error: &KeyComputeError) -> (TraceErrorCategory, String, bool) {
     match error {
         KeyComputeError::UpstreamFailure {
@@ -936,14 +943,20 @@ impl GatewayExecutor {
                     tracing::error!(request_id=%ctx.request_id, %error, "account quota settlement incomplete");
                 }
             }
-            if quota_lost {
+            let payload_exhausted = result.as_ref().err().is_some_and(is_payload_capacity_error);
+            if quota_lost || payload_exhausted {
+                let failure_code = if payload_exhausted {
+                    "process_payload_memory_exhausted"
+                } else {
+                    "account_quota_lease_lost"
+                };
                 ctx.set_client_upstream_response(ClientUpstreamResponse {
                     status: 503,
                     headers: vec![("retry-after".into(), "1".into())],
                     body: serde_json::json!({"error": {
                         "type": if ctx.native_anthropic_request.is_some() { "overloaded_error" } else { "server_error" },
-                        "code": "account_quota_lease_lost",
-                        "message": "Account quota service is temporarily unavailable"
+                        "code": failure_code,
+                        "message": "Execution capacity is temporarily unavailable"
                     }}).to_string(),
                 });
                 ctx.set_execution_failure(RequestExecutionFailure {
@@ -951,7 +964,7 @@ impl GatewayExecutor {
                     error: TraceErrorInfo {
                         origin: ErrorOrigin::Gateway,
                         category: TraceErrorCategory::RateLimit,
-                        code: "account_quota_lease_lost".into(),
+                        code: failure_code.into(),
                         summary: None,
                         retryable: Some(true),
                     },
@@ -986,9 +999,7 @@ impl GatewayExecutor {
                     .take();
                 // A local lease outage is not evidence that an upstream account
                 // is unhealthy, and must not launch a fallback after ambiguity.
-                return Err(KeyComputeError::ServiceUnavailable(
-                    "account_quota_lease_lost".into(),
-                ));
+                return Err(KeyComputeError::ServiceUnavailable(failure_code.into()));
             }
             match result {
                 Ok(()) => {
@@ -1482,6 +1493,7 @@ impl GatewayExecutor {
                 StreamEvent::Delta {
                     content,
                     finish_reason,
+                    admission,
                 } => {
                     if !recorded_first_content && !content.is_empty() {
                         if let Some(attempt) = attempt {
@@ -1508,6 +1520,7 @@ impl GatewayExecutor {
                     let event = StreamEvent::Delta {
                         content,
                         finish_reason: finish_reason.clone(),
+                        admission,
                     };
                     pipeline.process_event(&event);
                     tx.send(event)
@@ -1589,7 +1602,7 @@ impl GatewayExecutor {
                 // 原生协议入站会用 Raw 承载未经降级的 SSE 事件。它们不参与
                 // 通用 token 计算，但必须穿过执行器才能由对应的入站 handler
                 // 按原协议回写给客户端。
-                StreamEvent::Raw { data } => {
+                StreamEvent::Raw { data, admission } => {
                     let commits_response = raw_event_commits_response(&data);
                     if commits_response && !recorded_first_content {
                         if let Some(attempt) = attempt {
@@ -1603,7 +1616,7 @@ impl GatewayExecutor {
                         }
                         recorded_first_content = true;
                     }
-                    tx.send(StreamEvent::Raw { data })
+                    tx.send(StreamEvent::Raw { data, admission })
                         .await
                         .map_err(|_| KeyComputeError::Internal("Send error".into()))?;
                     // 原生 SSE 的 `message_start` 等事件一旦对客户端可见，就不能
@@ -2346,6 +2359,7 @@ mod tests {
                     Ok(StreamEvent::Delta {
                         content: "x".to_string(),
                         finish_reason: None,
+                        admission: None,
                     })
                 })
                 .collect();
@@ -2445,6 +2459,7 @@ mod tests {
                 Ok(StreamEvent::Delta {
                     content: "hello".to_string(),
                     finish_reason: None,
+                    admission: None,
                 }),
                 Ok(StreamEvent::Done),
             ])))
@@ -2571,6 +2586,7 @@ mod tests {
                 Ok(StreamEvent::Delta {
                     content: "tail-after-usage".to_string(),
                     finish_reason: None,
+                    admission: None,
                 }),
                 Ok(StreamEvent::Done),
             ])))
@@ -2607,6 +2623,7 @@ mod tests {
                 Ok(StreamEvent::Delta {
                     content: "more".to_string(),
                     finish_reason: None,
+                    admission: None,
                 }),
                 Ok(StreamEvent::Done),
             ])))
@@ -3094,6 +3111,7 @@ mod tests {
                 Ok(StreamEvent::Delta {
                     content: String::new(),
                     finish_reason: Some("end_turn".to_string()),
+                    admission: None,
                 }),
             ])))
         }
@@ -3268,6 +3286,7 @@ mod tests {
                     Ok(StreamEvent::Delta {
                         content: "ok".to_string(),
                         finish_reason: Some("stop".to_string()),
+                        admission: None,
                     }),
                     Ok(StreamEvent::Done),
                 ])),
@@ -3301,6 +3320,7 @@ mod tests {
                     Ok(StreamEvent::Delta {
                         content: "partial".to_string(),
                         finish_reason: None,
+                        admission: None,
                     })
                 })
                 .collect();
@@ -4021,7 +4041,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-event")
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data , ..}) if data == "native-event")
         );
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
     }
@@ -4066,7 +4086,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data , ..}) if data == "native-response")
         );
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
         assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
@@ -4214,7 +4234,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data , ..}) if data == "native-response")
         );
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
         assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
@@ -4326,7 +4346,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data , ..}) if data == "native-response")
         );
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
         assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
@@ -4450,7 +4470,7 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(rx.recv().await, Some(StreamEvent::Raw { data }) if data == "native-response")
+            matches!(rx.recv().await, Some(StreamEvent::Raw { data , ..}) if data == "native-response")
         );
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
         assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
@@ -5036,7 +5056,7 @@ mod tests {
 
         assert!(matches!(
             rx.recv().await,
-            Some(StreamEvent::Raw { data }) if data.contains("message_start")
+            Some(StreamEvent::Raw { data , ..}) if data.contains("message_start")
         ));
         assert!(matches!(
             rx.recv().await,
@@ -6440,6 +6460,90 @@ mod tests {
         assert_eq!(
             ctx.execution_failure().unwrap().error.code,
             "account_quota_lease_lost"
+        );
+    }
+    #[derive(Debug)]
+    struct MemoryLimitedProvider {
+        calls: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl ProviderAdapter for MemoryLimitedProvider {
+        fn name(&self) -> &'static str {
+            "memory-limited"
+        }
+        fn supported_models(&self) -> Vec<&'static str> {
+            vec![]
+        }
+        async fn stream_chat(
+            &self,
+            _: &dyn HttpTransport,
+            _: UpstreamRequest,
+        ) -> Result<llm_protocol_provider::StreamBox> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(futures::stream::iter(vec![Err(
+                KeyComputeError::ServiceUnavailable("process_payload_memory_exhausted".into()),
+            )])))
+        }
+    }
+    #[tokio::test]
+    async fn payload_memory_failure_does_not_retry_or_poison_upstream_health() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut providers = HashMap::new();
+        providers.insert(
+            "memory-limited".into(),
+            Arc::new(MemoryLimitedProvider {
+                calls: calls.clone(),
+            }) as Arc<dyn ProviderAdapter>,
+        );
+        let executor = GatewayExecutor::new(GatewayConfig::default(), providers);
+        let ctx = Arc::new(create_test_context());
+        let health = Arc::new(ProviderHealthStore::new());
+        let account = Uuid::new_v4();
+        let plan = ExecutionPlan::new(ExecutionTarget::new_provider(
+            "memory-limited",
+            account,
+            "http://mock",
+            "test",
+        ))
+        .with_fallback(ExecutionTarget::new_provider(
+            "memory-limited",
+            Uuid::new_v4(),
+            "http://mock",
+            "test",
+        ));
+        let mut rx = executor
+            .execute(
+                ctx.clone(),
+                plan,
+                Arc::new(AccountStateStore::new()),
+                Some(health.clone()),
+            )
+            .await
+            .unwrap();
+        while tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .is_some()
+        {}
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(ctx.client_upstream_response().unwrap().status, 503);
+        assert_eq!(
+            ctx.execution_failure().unwrap().error.code,
+            "process_payload_memory_exhausted"
+        );
+        assert_eq!(
+            ctx.execution_failure().unwrap().error.origin,
+            ErrorOrigin::Gateway
+        );
+        assert!(
+            health
+                .account_health(&account)
+                .is_none_or(|h| h.failure_count == 0)
+        );
+        assert!(
+            health
+                .get_health("memory-limited")
+                .is_none_or(|h| h.failed_requests == 0)
         );
     }
 }

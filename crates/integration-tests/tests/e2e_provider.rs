@@ -56,6 +56,7 @@ fn test_provider_stream_events() {
     let delta = StreamEvent::Delta {
         content: "Hello".to_string(),
         finish_reason: None,
+        admission: None,
     };
     chain.add_step(
         "llm-protocol-provider",

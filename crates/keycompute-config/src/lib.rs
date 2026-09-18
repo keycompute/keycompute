@@ -458,6 +458,17 @@ impl AppConfig {
             );
         }
 
+        if !(64..=16_384).contains(&self.gateway.managed_memory_mib)
+            || self
+                .gateway
+                .managed_memory_mib
+                .checked_mul(1024 * 1024)
+                .is_none()
+        {
+            return Err(ConfigLoadError::ValidationError(
+                "invalid process memory budget".into(),
+            ));
+        }
         self.gateway
             .routing_capacity
             .validate()

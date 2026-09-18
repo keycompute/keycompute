@@ -391,19 +391,13 @@ impl HttpTransport for HttpClient {
         if !response.status().is_success() {
             return Err(Self::http_failure(response, meta).await);
         }
-        let body = response.text().await.map_err(|error| UpstreamFailure {
-            kind: UpstreamFailureKind::BodyRead,
-            status: Some(meta.status),
-            headers_received_at: Some(meta.headers_received_at),
-            upstream_request_id: meta.upstream_request_id.clone(),
-            client_response: None,
-            // A successful status proves that the paid POST reached the
-            // provider. Reissuing it without provider idempotency could charge
-            // the request twice even though no body reached the client.
-            retryable: false,
-            stable_error_code: "upstream_body_read".to_string(),
-            sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
-        })?;
+        let body = collect_bounded_response_text(
+            response,
+            &meta,
+            llm_protocol_provider::MAX_JSON_PASSTHROUGH_BODY_BYTES,
+        )
+        .await?
+        .into_string();
         Ok(UpstreamResponse { meta, body })
     }
 

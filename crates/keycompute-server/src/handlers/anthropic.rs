@@ -19,7 +19,9 @@ use axum::{
         sse::{Event, Sse},
     },
 };
-use futures::{Stream, StreamExt};
+use futures::Stream;
+#[cfg(test)]
+use futures::StreamExt;
 use keycompute_auth::Permission;
 use keycompute_types::{
     ClientResponseOutcome, ErrorOrigin, ExecutionTarget, Message, MessageContent, MessageRole,
@@ -30,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
 /// Bound inline image/document payloads while admitting only a small number
 /// of large decoded JSON trees at once.
@@ -546,7 +547,7 @@ pub async fn messages(
             body_permit.map(|Extension(permit)| permit),
         )
         .await?;
-        Ok(Json(response).into_response())
+        crate::admission::json_with_admission(response.0, response.1)
     }
 }
 
@@ -581,6 +582,7 @@ async fn create_anthropic_response(
         None,
     )
     .await
+    .map(|response| response.0)
 }
 
 async fn create_anthropic_response_with_lifecycle(
@@ -591,7 +593,7 @@ async fn create_anthropic_response_with_lifecycle(
     settlement: super::ImmediateSettlementServices,
     lifecycle: Arc<dyn keycompute_types::RequestLifecycleRecorder>,
     body_permit: Option<crate::state::GenerationHttpBodyPermit>,
-) -> Result<Value> {
+) -> Result<(Value, Option<llm_protocol_provider::LargeBodyPermit>)> {
     let mut client_response_guard =
         super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
     let (mut response_tx, response_rx) = tokio::sync::oneshot::channel();
@@ -600,6 +602,7 @@ async fn create_anthropic_response_with_lifecycle(
         let _body_permit = body_permit;
         let mut complete = false;
         let mut native_response = None;
+        let mut native_admission = None;
         let mut status = "success";
         let mut handler_connected = true;
         let mut terminal_error = None;
@@ -614,9 +617,10 @@ async fn create_anthropic_response_with_lifecycle(
                 event = rx.recv() => {
                     let Some(event) = event else { break };
                     match event {
-                        llm_protocol_provider::StreamEvent::Raw { data } => {
+                        llm_protocol_provider::StreamEvent::Raw { data, admission } => {
                             if let Some(body) = raw_message_body(&data) {
                                 native_response = Some(body);
+                                native_admission = admission;
                             }
                         }
                         llm_protocol_provider::StreamEvent::Done => {
@@ -674,7 +678,7 @@ async fn create_anthropic_response_with_lifecycle(
         .await;
         let result = match (terminal_error, native_response) {
             (Some(error), _) => Err(error),
-            (None, Some(response)) => Ok(response),
+            (None, Some(response)) => Ok((response, native_admission)),
             (None, None) => Err(ApiError::Internal(
                 "Anthropic response validation state was inconsistent".to_string(),
             )),
@@ -727,18 +731,31 @@ const SSE_SEND_TIMEOUT: Duration = Duration::from_secs(30);
 /// executor 的 receiver 由结算任务持有直到 Done/Error，`tx.is_closed()` 不会
 /// 生效，因此必须显式标记断开，让 executor 在 primary 失败后中止 fallback。
 async fn forward_sse_event(
-    sse_tx: &mpsc::Sender<Event>,
+    sse_tx: &mpsc::Sender<crate::admission::ResidentSseEvent>,
     ctx: &RequestContext,
     client_connected: &mut bool,
     event: Event,
 ) -> bool {
+    forward_admitted_sse_event(sse_tx, ctx, client_connected, event, None).await
+}
+
+async fn forward_admitted_sse_event(
+    sse_tx: &mpsc::Sender<crate::admission::ResidentSseEvent>,
+    ctx: &RequestContext,
+    client_connected: &mut bool,
+    event: Event,
+    admission: Option<llm_protocol_provider::LargeBodyPermit>,
+) -> bool {
     if !*client_connected {
         return false;
     }
-    let sent = tokio::time::timeout(SSE_SEND_TIMEOUT, sse_tx.send(event))
-        .await
-        .map(|result| result.is_ok())
-        .unwrap_or(false);
+    let sent = tokio::time::timeout(
+        SSE_SEND_TIMEOUT,
+        sse_tx.send(crate::admission::ResidentSseEvent { event, admission }),
+    )
+    .await
+    .map(|result| result.is_ok())
+    .unwrap_or(false);
     if !sent {
         *client_connected = false;
         ctx.mark_client_disconnected();
@@ -838,7 +855,7 @@ fn create_anthropic_stream_with_lifecycle(
                     super::report_initial_stream_status(&mut initial_status, event.as_ref());
                     let Some(event) = event else { break };
                     match event {
-                        llm_protocol_provider::StreamEvent::Raw { data } => {
+                        llm_protocol_provider::StreamEvent::Raw { data, admission } => {
                             if let Some((event_name, body)) = raw_sse_event(&data) {
                                 // 错误由随后的标准化 StreamEvent::Error 统一输出，避免
                                 // 将上游响应体或传输层细节直接暴露给客户端。
@@ -851,11 +868,12 @@ fn create_anthropic_stream_with_lifecycle(
                                     raw_sse_event_commits_response(&event_name, &body);
                                 let completes_response =
                                     raw_sse_event_completes_response(&event_name, &body);
-                                let sent = forward_sse_event(
+                                let sent = forward_admitted_sse_event(
                                     &sse_tx,
                                     &ctx,
                                     &mut client_connected,
                                     Event::default().event(event_name).data(body.to_string()),
+                                    admission,
                                 )
                                 .await;
                                 if sent && commits_response && !client_first_content_recorded
@@ -963,7 +981,7 @@ fn create_anthropic_stream_with_lifecycle(
         }
     });
 
-    ReceiverStream::new(sse_rx).map(Ok)
+    crate::admission::resident_sse_stream(sse_rx)
 }
 
 #[cfg(test)]

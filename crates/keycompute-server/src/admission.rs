@@ -98,6 +98,16 @@ pub fn bind_context(auth: &AuthExtractor, ctx: &mut keycompute_types::RequestCon
 
 /// Preserve frames/trailers and retain admission through actual body delivery,
 /// not merely until the handler returns its HTTP response headers.
+struct ResidentFrameBytes {
+    bytes: bytes::Bytes,
+    _memory: keycompute_types::memory::MemoryPermit,
+}
+impl AsRef<[u8]> for ResidentFrameBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.bytes.as_ref()
+    }
+}
+
 struct AdmittedBody {
     inner: Body,
     permit: Option<AdmissionPermit>,
@@ -113,7 +123,24 @@ impl http_body::Body for AdmittedBody {
         if matches!(polled, Poll::Ready(None) | Poll::Ready(Some(Err(_)))) {
             self.permit = None;
         }
-        polled
+        match polled {
+            Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                Ok(bytes) => match keycompute_types::memory::reserve_process_memory(bytes.len()) {
+                    Ok(memory) => Poll::Ready(Some(Ok(http_body::Frame::data(
+                        bytes::Bytes::from_owner(ResidentFrameBytes {
+                            bytes,
+                            _memory: memory,
+                        }),
+                    )))),
+                    Err(error) => {
+                        self.permit = None;
+                        Poll::Ready(Some(Err(axum::Error::new(error))))
+                    }
+                },
+                Err(trailers) => Poll::Ready(Some(Ok(trailers))),
+            },
+            other => other,
+        }
     }
     fn is_end_stream(&self) -> bool {
         self.inner.is_end_stream()
@@ -125,6 +152,85 @@ impl http_body::Body for AdmittedBody {
 pub fn retain_response(response: Response, permit: Option<AdmissionPermit>) -> Response {
     let (parts, inner) = response.into_parts();
     Response::from_parts(parts, Body::new(AdmittedBody { inner, permit }))
+}
+
+struct MemoryBody {
+    inner: Body,
+    _memory: keycompute_types::memory::MemoryPermit,
+}
+impl http_body::Body for MemoryBody {
+    type Data = bytes::Bytes;
+    type Error = axum::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.inner).poll_frame(cx)
+    }
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+pub(crate) fn retain_memory(
+    response: Response,
+    memory: keycompute_types::memory::MemoryPermit,
+) -> Response {
+    let (parts, inner) = response.into_parts();
+    Response::from_parts(
+        parts,
+        Body::new(MemoryBody {
+            inner,
+            _memory: memory,
+        }),
+    )
+}
+
+struct OwnedJsonBytes {
+    bytes: Vec<u8>,
+    _admission: Option<llm_protocol_provider::LargeBodyPermit>,
+}
+impl AsRef<[u8]> for OwnedJsonBytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+pub(crate) fn json_with_admission(
+    body: serde_json::Value,
+    admission: Option<llm_protocol_provider::LargeBodyPermit>,
+) -> Result<Response, ApiError> {
+    use axum::response::IntoResponse;
+    let bytes = serde_json::to_vec(&body)
+        .map_err(|_| ApiError::Internal("JSON serialization failed".into()))?;
+    let bytes = bytes::Bytes::from_owner(OwnedJsonBytes {
+        bytes,
+        _admission: admission,
+    });
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        bytes,
+    )
+        .into_response())
+}
+
+pub(crate) struct ResidentSseEvent {
+    pub event: axum::response::sse::Event,
+    pub admission: Option<llm_protocol_provider::LargeBodyPermit>,
+}
+pub(crate) fn resident_sse_stream(
+    rx: tokio::sync::mpsc::Receiver<ResidentSseEvent>,
+) -> impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>> {
+    futures::stream::unfold(
+        (rx, None::<llm_protocol_provider::LargeBodyPermit>),
+        |(mut rx, previous)| async move {
+            drop(previous);
+            rx.recv()
+                .await
+                .map(|item| (Ok(item.event), (rx, item.admission)))
+        },
+    )
 }
 
 #[cfg(test)]

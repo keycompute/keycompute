@@ -100,6 +100,7 @@ impl SseEncoder {
             StreamEvent::Delta {
                 content,
                 finish_reason,
+                ..
             } => {
                 let data = serde_json::json!({
                     "content": content,
@@ -140,6 +141,7 @@ mod tests {
         let event = StreamEvent::Delta {
             content: "Hello".to_string(),
             finish_reason: None,
+            admission: None,
         };
         pipeline.process_event(&event);
 
@@ -151,6 +153,7 @@ mod tests {
         let event = StreamEvent::Delta {
             content: "Hello".to_string(),
             finish_reason: None,
+            admission: None,
         };
         let encoded = SseEncoder::encode(&event);
         assert!(encoded.starts_with("data: "));

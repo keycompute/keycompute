@@ -102,6 +102,7 @@ jwt_expiry_secs = 3600
 
 # ==================== Gateway 配置 ====================
 [gateway]
+managed_memory_mib = 512
 # 管理端原始追踪查询允许的最大时间范围（小时）
 monitoring_raw_max_hours = 24
 # 自动真实推理探测间隔（秒）；默认 0 表示禁用，启用后会产生上游调用与费用

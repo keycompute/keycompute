@@ -6,6 +6,9 @@ use std::collections::HashMap;
 /// Gateway 配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct GatewayConfig {
+    /// Shared retained-payload budget; keep OS/runtime/DB headroom outside it.
+    #[serde(default = "default_managed_memory_mib")]
+    pub managed_memory_mib: usize,
     #[serde(default)]
     pub routing_capacity: RoutingCapacityConfig,
     /// Process-local generation resource budgets, independent of business RPM/TPM.
@@ -51,6 +54,7 @@ pub struct ProxyConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            managed_memory_mib: default_managed_memory_mib(),
             routing_capacity: RoutingCapacityConfig::default(),
             admission: GenerationAdmissionConfig::default(),
             monitoring_raw_max_hours: default_monitoring_raw_max_hours(),
@@ -272,5 +276,18 @@ mod capacity_config_tests {
             assert!(invalid.validate().is_err());
         }
         assert!(defaults.validate().is_ok());
+    }
+}
+
+fn default_managed_memory_mib() -> usize {
+    512
+}
+
+#[cfg(test)]
+mod memory_config_tests {
+    use super::*;
+    #[test]
+    fn payload_budget_defaults_leave_container_headroom() {
+        assert_eq!(GatewayConfig::default().managed_memory_mib, 512);
     }
 }

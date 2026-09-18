@@ -327,7 +327,13 @@ impl AnthropicProvider {
         &self,
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
-    ) -> Result<(String, Option<(u32, u32)>, Option<String>, Option<String>)> {
+    ) -> Result<(
+        String,
+        Option<(u32, u32)>,
+        Option<String>,
+        Option<String>,
+        Option<llm_protocol_provider::LargeBodyPermit>,
+    )> {
         self.chat_internal_with_meta(transport, request)
             .await
             .map(|response| response.body)
@@ -339,7 +345,13 @@ impl AnthropicProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> std::result::Result<
-        UpstreamResponse<(String, Option<(u32, u32)>, Option<String>, Option<String>)>,
+        UpstreamResponse<(
+            String,
+            Option<(u32, u32)>,
+            Option<String>,
+            Option<String>,
+            Option<llm_protocol_provider::LargeBodyPermit>,
+        )>,
         UpstreamFailure,
     > {
         let native = self
@@ -358,11 +370,47 @@ impl AnthropicProvider {
 
         let headers = self.build_request_headers(&request);
 
-        let response = transport.post_json_response(&url, headers, body).await?;
-        let UpstreamResponse {
-            meta,
-            body: response_text,
-        } = response;
+        let response = transport
+            .post_json_passthrough_response(&url, headers, body)
+            .await?;
+        let meta = response.meta;
+        if !(200..300).contains(&meta.status) {
+            let mut end = response.body.len().min(8192);
+            while !response.body.is_char_boundary(end) {
+                end -= 1;
+            }
+            return Err(UpstreamFailure {
+                kind: UpstreamFailureKind::HttpStatus,
+                status: Some(meta.status),
+                headers_received_at: Some(meta.headers_received_at),
+                upstream_request_id: meta.upstream_request_id.clone(),
+                client_response: Some(Box::new(keycompute_types::ClientUpstreamResponse {
+                    status: meta.status,
+                    headers: meta.headers,
+                    body: response.body[..end].to_string(),
+                })),
+                retryable: llm_protocol_provider::http_status_is_retryable(meta.status),
+                stable_error_code: format!("upstream_http_{}", meta.status),
+                sanitized_summary: format!("Upstream returned HTTP {}", meta.status),
+            });
+        }
+        let (response_text, mut admission) = response.body.into_parts();
+        let working =
+            llm_protocol_provider::estimated_json_parse_working_set_bytes(response_text.as_bytes());
+        if response_text.len() > llm_protocol_provider::MAX_JSON_PASSTHROUGH_BODY_BYTES
+            || working > llm_protocol_provider::MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES
+            || !llm_protocol_provider::admit_payload(
+                &mut admission,
+                working.saturating_mul(3),
+                working > llm_protocol_provider::LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+            )
+        {
+            return Err(llm_protocol_provider::body_read_failure(
+                &meta,
+                "upstream_body_capacity_exhausted",
+                "Process Anthropic response memory capacity exhausted",
+            ));
+        }
 
         if native.is_some() {
             let response: serde_json::Value = serde_json::from_str(&response_text)
@@ -386,6 +434,7 @@ impl AnthropicProvider {
                     usage,
                     stop_reason,
                     Some(response_text),
+                    admission,
                 ),
             });
         }
@@ -404,7 +453,13 @@ impl AnthropicProvider {
 
         Ok(UpstreamResponse {
             meta,
-            body: (content, usage, anthropic_response.stop_reason, None),
+            body: (
+                content,
+                usage,
+                anthropic_response.stop_reason,
+                None,
+                admission,
+            ),
         })
     }
 
@@ -474,13 +529,18 @@ impl ProviderAdapter for AnthropicProvider {
                 .map_err(|error| KeyComputeError::ProviderError(error.to_string()))
         } else {
             // 非流式请求，包装为单事件流
-            let (content, usage, finish_reason, native_response) =
+            let (content, usage, finish_reason, native_response, admission) =
                 self.chat_internal(transport, request).await?;
 
             if let Some(native_response) = native_response {
-                let mut events: Vec<Result<StreamEvent>> = vec![Ok(StreamEvent::raw(
+                let event = StreamEvent::raw(
                     serde_json::json!({"kind": "anthropic_message", "body": serde_json::from_str::<serde_json::Value>(&native_response).unwrap_or(serde_json::Value::Null)}).to_string(),
-                ))];
+                );
+                let event = match admission {
+                    Some(guard) => event.with_admission(guard),
+                    None => event,
+                };
+                let mut events: Vec<Result<StreamEvent>> = vec![Ok(event)];
                 if let Some((input_tokens, output_tokens)) = usage {
                     events.push(Ok(StreamEvent::Usage {
                         input_tokens,
@@ -495,6 +555,7 @@ impl ProviderAdapter for AnthropicProvider {
                 content,
                 // 非流式响应有 finish_reason，未提供时回退为 "stop"
                 finish_reason: Some(finish_reason.unwrap_or_else(|| "stop".to_string())),
+                admission,
             };
 
             let mut events: Vec<Result<StreamEvent>> = vec![Ok(event)];
@@ -524,7 +585,7 @@ impl ProviderAdapter for AnthropicProvider {
                 .await
         } else {
             let response = self.chat_internal_with_meta(transport, request).await?;
-            let (content, usage, finish_reason, native_response) = response.body;
+            let (content, usage, finish_reason, native_response, admission) = response.body;
             let mut events: Vec<Result<StreamEvent>> = if let Some(native_response) =
                 native_response
             {
@@ -535,8 +596,15 @@ impl ProviderAdapter for AnthropicProvider {
                 vec![Ok(StreamEvent::Delta {
                     content,
                     finish_reason: Some(finish_reason.unwrap_or_else(|| "stop".to_string())),
+                    admission: None,
                 })]
             };
+            if let Some(guard) = admission {
+                events = events
+                    .into_iter()
+                    .map(|event| event.map(|value| value.with_admission(guard.clone())))
+                    .collect();
+            }
             if let Some((input_tokens, output_tokens)) = usage {
                 events.push(Ok(StreamEvent::Usage {
                     input_tokens,
@@ -556,7 +624,7 @@ impl ProviderAdapter for AnthropicProvider {
         transport: &dyn HttpTransport,
         request: UpstreamRequest,
     ) -> Result<String> {
-        let (content, _usage, _finish_reason, _native_response) =
+        let (content, _usage, _finish_reason, _native_response, _admission) =
             self.chat_internal(transport, request).await?;
         Ok(content)
     }
@@ -952,7 +1020,7 @@ mod tests {
         };
         let request = UpstreamRequest::new("https://provider.example/v1", "sk-test", "claude-test");
 
-        let (content, usage, _, _) = provider.chat_internal(&transport, request).await.unwrap();
+        let (content, usage, _, _, _) = provider.chat_internal(&transport, request).await.unwrap();
         assert_eq!(content, "reply");
         assert_eq!(usage, Some((15, 2)));
     }

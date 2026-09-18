@@ -197,7 +197,42 @@ fn large_json_body_slots() -> Arc<Semaphore> {
 /// carry this guard until their resident JSON/SSE bytes leave the gateway.
 #[derive(Debug, Clone)]
 pub struct LargeBodyPermit {
-    _permit: Arc<OwnedSemaphorePermit>,
+    _permit: Option<Arc<OwnedSemaphorePermit>>,
+    memory: keycompute_types::memory::MemoryPermit,
+}
+impl LargeBodyPermit {
+    pub fn has_large_slot(&self) -> bool {
+        self._permit.is_some()
+    }
+    pub fn reserve(bytes: usize) -> Option<Self> {
+        Some(Self {
+            _permit: None,
+            memory: keycompute_types::memory::reserve_process_memory(bytes).ok()?,
+        })
+    }
+    pub fn grow_to(&self, bytes: usize) -> bool {
+        self.memory.grow_to(bytes).is_ok()
+    }
+}
+/// Small and large payloads share the process byte budget. A large-count slot
+/// is an additional constraint, not a substitute for aggregate memory control.
+pub fn admit_payload(permit: &mut Option<LargeBodyPermit>, bytes: usize, large: bool) -> bool {
+    if permit.is_none() {
+        *permit = LargeBodyPermit::reserve(bytes);
+    }
+    let Some(guard) = permit.as_mut() else {
+        return false;
+    };
+    if !guard.grow_to(bytes) {
+        return false;
+    }
+    if large && !guard.has_large_slot() {
+        let Ok(slot) = large_json_body_slots().try_acquire_owned() else {
+            return false;
+        };
+        guard._permit = Some(Arc::new(slot));
+    }
+    true
 }
 
 /// Attempt to reserve a process-wide large-response slot without joining an
@@ -205,10 +240,9 @@ pub struct LargeBodyPermit {
 /// allowance so overload cannot multiply that retained memory by the number of
 /// concurrent requests.
 pub fn try_acquire_large_body_permit() -> Option<LargeBodyPermit> {
-    let permit = large_json_body_slots().try_acquire_owned().ok()?;
-    Some(LargeBodyPermit {
-        _permit: Arc::new(permit),
-    })
+    let mut permit = None;
+    admit_payload(&mut permit, MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, true).then_some(())?;
+    permit
 }
 
 /// A collected response body paired with the admission slot protecting its
@@ -400,6 +434,18 @@ pub async fn collect_bounded_response_text(
             try_acquire_large_body_permit,
             meta,
         )?;
+        let retained = body.len().saturating_add(chunk.len());
+        if !admit_payload(
+            &mut permit,
+            retained.saturating_mul(3),
+            retained > LARGE_JSON_BODY_ADMISSION_BYTES,
+        ) {
+            return Err(body_read_failure(
+                meta,
+                "upstream_body_capacity_exhausted",
+                "Process payload memory budget exhausted",
+            ));
+        }
         append_bounded_body(&mut body, &chunk, max_bytes, meta)?;
     }
     finish_bounded_response_text(body, permit, meta)
@@ -779,18 +825,9 @@ impl HttpTransport for DefaultHttpTransport {
         if !response.status().is_success() {
             return Err(http_failure(response, meta).await);
         }
-        let body = response.text().await.map_err(|error| UpstreamFailure {
-            kind: UpstreamFailureKind::BodyRead,
-            status: Some(meta.status),
-            headers_received_at: Some(meta.headers_received_at),
-            upstream_request_id: meta.upstream_request_id.clone(),
-            client_response: None,
-            // Headers from a successful paid POST make the outcome ambiguous:
-            // the provider may have completed and charged the inference.
-            retryable: false,
-            stable_error_code: "upstream_body_read".to_string(),
-            sanitized_summary: keycompute_types::sanitize_error_summary(&error.to_string()),
-        })?;
+        let body = collect_bounded_response_text(response, &meta, MAX_JSON_PASSTHROUGH_BODY_BYTES)
+            .await?
+            .into_string();
         Ok(UpstreamResponse { meta, body })
     }
 
@@ -1038,12 +1075,13 @@ mod tests {
     async fn admitted_response_retains_its_slot_through_json_ownership_transfer() {
         let slots = Arc::new(Semaphore::new(1));
         let permit = LargeBodyPermit {
-            _permit: Arc::new(
+            _permit: Some(Arc::new(
                 Arc::clone(&slots)
                     .acquire_owned()
                     .await
                     .expect("test semaphore remains open"),
-            ),
+            )),
+            memory: keycompute_types::memory::reserve_process_memory(0).unwrap(),
         };
         let admitted = AdmittedResponseText {
             text: "{}".to_string(),

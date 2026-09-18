@@ -24,7 +24,11 @@ pub enum NativeStreamEvent {
         admission: Option<LargeBodyPermit>,
     },
     /// One OpenAI Chat Completions SSE data payload.
-    OpenAiChatSse { data: Value },
+    OpenAiChatSse {
+        data: Value,
+        #[serde(skip)]
+        admission: Option<LargeBodyPermit>,
+    },
     /// Complete non-streaming OpenAI Responses body.
     OpenAiResponsesJson {
         body: Value,
@@ -59,6 +63,8 @@ pub enum StreamEvent {
         content: String,
         /// 结束原因（可选）
         finish_reason: Option<String>,
+        #[serde(skip)]
+        admission: Option<LargeBodyPermit>,
     },
     /// Provider 报告的用量（流结束时）
     Usage {
@@ -86,6 +92,8 @@ pub enum StreamEvent {
     Raw {
         /// 原始事件数据
         data: String,
+        #[serde(skip)]
+        admission: Option<LargeBodyPermit>,
     },
     /// Structured protocol-native event. Unlike `Raw`, large JSON bodies stay
     /// owned values and do not need an internal serialize/parse round trip.
@@ -100,6 +108,7 @@ impl StreamEvent {
     pub fn delta(content: impl Into<String>) -> Self {
         Self::Delta {
             content: content.into(),
+            admission: None,
             finish_reason: None,
         }
     }
@@ -108,8 +117,25 @@ impl StreamEvent {
     pub fn delta_with_finish(content: impl Into<String>, finish_reason: impl Into<String>) -> Self {
         Self::Delta {
             content: content.into(),
+            admission: None,
             finish_reason: Some(finish_reason.into()),
         }
+    }
+
+    /// Transfer an existing working-set claim with each queued payload.
+    pub fn with_admission(mut self, guard: LargeBodyPermit) -> Self {
+        match &mut self {
+            Self::Delta { admission, .. } | Self::Raw { admission, .. } => *admission = Some(guard),
+            Self::Native {
+                event:
+                    NativeStreamEvent::OpenAiChatSse { admission, .. }
+                    | NativeStreamEvent::OpenAiChatJson { admission, .. }
+                    | NativeStreamEvent::OpenAiResponsesSse { admission, .. }
+                    | NativeStreamEvent::OpenAiResponsesJson { admission, .. },
+            } => *admission = Some(guard),
+            _ => {}
+        }
+        self
     }
 
     /// 创建 Usage 事件
@@ -133,13 +159,16 @@ impl StreamEvent {
     /// 创建 Error 事件
     pub fn error(message: impl Into<String>) -> Self {
         Self::Error {
-            message: message.into(),
+            message: keycompute_types::sanitize_error_summary(&message.into()),
         }
     }
 
     /// 创建 Raw 事件
     pub fn raw(data: impl Into<String>) -> Self {
-        Self::Raw { data: data.into() }
+        Self::Raw {
+            data: data.into(),
+            admission: None,
+        }
     }
 
     /// Create a structured provider-native event.
@@ -202,6 +231,20 @@ pub mod sse {
     /// 检查是否是流结束标记
     pub fn is_done_marker(data: &str) -> bool {
         data.trim() == "[DONE]"
+    }
+}
+
+/// Parser errors carry diagnostics, not unbounded provider response payloads.
+pub fn bounded_stream_error(
+    error: keycompute_types::KeyComputeError,
+) -> keycompute_types::KeyComputeError {
+    match error {
+        keycompute_types::KeyComputeError::ProviderError(message) => {
+            keycompute_types::KeyComputeError::ProviderError(
+                keycompute_types::sanitize_error_summary(&message),
+            )
+        }
+        other => other,
     }
 }
 

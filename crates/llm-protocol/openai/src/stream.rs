@@ -53,6 +53,8 @@ fn parse_chat_stream(
         // with `from_utf8_lossy` would permanently replace such characters
         // with U+FFFD before the next chunk arrives.
         let mut buffer = Vec::new();
+        let parser_memory =
+            keycompute_types::memory::reserve_process_memory(0).expect("zero claim");
         let mut stream = stream;
 
         loop {
@@ -69,6 +71,17 @@ fn parse_chat_stream(
             };
             match chunk_result {
                 Ok(chunk) => {
+                    let pending = buffer.len().saturating_add(chunk.len());
+                    if pending > llm_protocol_provider::MAX_JSON_PASSTHROUGH_BODY_BYTES
+                        || parser_memory.grow_to(pending.saturating_mul(6)).is_err()
+                    {
+                        let _ = tx
+                            .send(Err(KeyComputeError::ServiceUnavailable(
+                                "process_payload_memory_exhausted".into(),
+                            )))
+                            .await;
+                        return;
+                    }
                     buffer.extend_from_slice(&chunk);
 
                     // 处理缓冲区中的完整行
@@ -101,7 +114,9 @@ fn parse_chat_stream(
                     // Preserve structured transport/body-read failures. The
                     // executor separately normalizes parser-generated legacy
                     // ProviderError values as non-retryable protocol failures.
-                    let _ = tx.send(Err(e)).await;
+                    let _ = tx
+                        .send(Err(llm_protocol_provider::bounded_stream_error(e)))
+                        .await;
                     return;
                 }
             }
@@ -159,10 +174,28 @@ async fn handle_sse_line(
         return false;
     }
 
-    // 解析 JSON 数据（一条上游事件可能产生多个 StreamEvent）
+    let working = llm_protocol_provider::estimated_json_parse_working_set_bytes(data.as_bytes());
+    let mut admission = None;
+    if working > llm_protocol_provider::MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES
+        || !llm_protocol_provider::admit_payload(
+            &mut admission,
+            working.saturating_mul(2),
+            working > llm_protocol_provider::LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+        )
+    {
+        let _ = tx
+            .send(Err(KeyComputeError::ServiceUnavailable(
+                "process_payload_memory_exhausted".into(),
+            )))
+            .await;
+        return false;
+    }
+    // Reserve before Value allocation, and pass ownership through every queue.
     match parse_openai_event_with_mode(&data, mode) {
         Ok(events) => {
             for event in events {
+                let event =
+                    event.with_admission(admission.as_ref().expect("admitted event").clone());
                 if tx.send(Ok(event)).await.is_err() {
                     // 接收端已关闭（客户端断开），停止解析
                     return false;
@@ -171,7 +204,9 @@ async fn handle_sse_line(
             true
         }
         Err(e) => {
-            let _ = tx.send(Err(e)).await;
+            let _ = tx
+                .send(Err(llm_protocol_provider::bounded_stream_error(e)))
+                .await;
             false
         }
     }
@@ -217,11 +252,13 @@ fn parse_openai_event_with_mode(data: &str, mode: ChatStreamMode) -> Result<Vec<
             events.push(StreamEvent::Delta {
                 content: content.clone(),
                 finish_reason: choice.finish_reason.clone(),
+                admission: None,
             });
         } else if choice.finish_reason.is_some() {
             events.push(StreamEvent::Delta {
                 content: String::new(),
                 finish_reason: choice.finish_reason.clone(),
+                admission: None,
             });
         }
         // 纯角色消息（首条 role-only delta）不产生事件
@@ -265,6 +302,7 @@ fn parse_native_openai_event(
     if forward_usage || usage.is_none() || !choices_are_empty {
         events.push(StreamEvent::native(NativeStreamEvent::OpenAiChatSse {
             data: value,
+            admission: None,
         }));
     }
     if let Some((input_tokens, output_tokens)) = usage {
@@ -491,7 +529,7 @@ mod tests {
         let events = parse_openai_event(data).unwrap();
         assert_eq!(events.len(), 1);
         assert!(
-            matches!(&events[0], StreamEvent::Delta { content, finish_reason: Some(reason) }
+            matches!(&events[0], StreamEvent::Delta { content, finish_reason: Some(reason) , ..}
             if content.is_empty() && reason == "stop")
         );
     }

@@ -50,7 +50,24 @@ pub(crate) const GENERATION_LARGE_HTTP_BODY_BYTES: u64 = 4 * 1024 * 1024;
 /// which retains it while the large request body remains resident.
 #[derive(Debug, Clone)]
 pub struct GenerationHttpBodyPermit {
-    _permit: Arc<OwnedSemaphorePermit>,
+    _permit: Option<Arc<OwnedSemaphorePermit>>,
+    _memory: Option<keycompute_types::memory::MemoryPermit>,
+}
+impl GenerationHttpBodyPermit {
+    #[cfg(test)]
+    pub(crate) fn owns_large_slot(&self) -> bool {
+        self._permit.is_some()
+    }
+    pub(crate) fn memory_only(memory: keycompute_types::memory::MemoryPermit) -> Self {
+        Self {
+            _permit: None,
+            _memory: Some(memory),
+        }
+    }
+    pub(crate) fn with_memory(mut self, memory: keycompute_types::memory::MemoryPermit) -> Self {
+        self._memory = Some(memory);
+        self
+    }
 }
 
 #[derive(Debug)]
@@ -70,7 +87,8 @@ impl GenerationHttpBodyAdmission {
             .try_acquire_owned()
             .ok()
             .map(|permit| GenerationHttpBodyPermit {
-                _permit: Arc::new(permit),
+                _permit: Some(Arc::new(permit)),
+                _memory: None,
             })
     }
 }
@@ -343,6 +361,18 @@ impl std::fmt::Debug for AppState {
 }
 
 impl AppState {
+    fn configure_memory(gateway: &keycompute_config::GatewayConfig) -> crate::error::Result<()> {
+        let bytes = gateway
+            .managed_memory_mib
+            .checked_mul(1024 * 1024)
+            .filter(|_| (64..=16_384).contains(&gateway.managed_memory_mib))
+            .ok_or_else(|| {
+                crate::error::ApiError::Config("invalid process memory budget".into())
+            })?;
+        keycompute_types::memory::configure_process_memory_budget(bytes)
+            .map_err(|m| crate::error::ApiError::Config(m.into()))
+    }
+
     /// 创建新的应用状态（无数据库连接，使用默认配置）
     pub fn new() -> Self {
         Self::with_config(AppStateConfig::default())
@@ -354,6 +384,7 @@ impl AppState {
     /// Panics when an explicitly selected backend cannot be initialized. The
     /// production entry point uses the asynchronous fallible constructor.
     pub fn with_config(config: AppStateConfig) -> Self {
+        Self::configure_memory(&config.gateway).expect("valid process memory configuration");
         let generation_admission = Arc::new(
             crate::admission::GenerationAdmission::new(&config.gateway.admission)
                 .expect("valid generation admission configuration"),
@@ -724,6 +755,7 @@ impl AppState {
         pool: Arc<DbRouter>,
         config: AppStateConfig,
     ) -> crate::error::Result<Self> {
+        Self::configure_memory(&config.gateway)?;
         let generation_admission = Arc::new(crate::admission::GenerationAdmission::new(
             &config.gateway.admission,
         )?);

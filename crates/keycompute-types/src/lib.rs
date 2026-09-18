@@ -6,6 +6,7 @@
 pub mod account;
 pub mod error;
 pub mod execution_plan;
+pub mod memory;
 pub mod monitoring;
 pub mod node;
 pub mod pricing;

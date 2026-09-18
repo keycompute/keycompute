@@ -19,7 +19,7 @@ use axum::{
         sse::{Event, Sse},
     },
 };
-use futures::{StreamExt, stream::Stream};
+use futures::stream::Stream;
 use keycompute_auth::Permission;
 use keycompute_db::models::account::Account;
 use keycompute_types::{
@@ -35,7 +35,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{convert::Infallible, sync::Arc, time::Duration};
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
 // ==================== Chat Completions ====================
 
@@ -996,15 +995,41 @@ pub async fn chat_completions(
                 }
             };
 
+            let output_bytes = response
+                .choices
+                .iter()
+                .map(|choice| {
+                    choice
+                        .message
+                        .content
+                        .len()
+                        .saturating_mul(8)
+                        .saturating_add(1024)
+                })
+                .fold(0usize, usize::saturating_add);
+            let mut node_admission = None;
+            if !llm_protocol_provider::admit_payload(
+                &mut node_admission,
+                output_bytes,
+                output_bytes > llm_protocol_provider::LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+            ) {
+                client_response_guard
+                    .finish_with_outcome(ClientResponseOutcome::ResponseFailed)
+                    .await;
+                return Err(ApiError::ServiceUnavailable(
+                    "Process Node response memory capacity exhausted".into(),
+                ));
+            }
             if request.stream {
                 // 流式路径：获取完整响应后模拟流式输出
                 // 将完整响应转换为模拟流式输出
-                let stream = simulate_node_stream(
+                let stream = simulate_node_stream_with_admission(
                     response,
                     Arc::new(ctx.clone_without_request_payloads()),
                     model.clone(),
                     request.stream_options,
                     Arc::clone(&lifecycle),
+                    node_admission,
                 );
                 // The spawned stream task now owns client-delivery completion.
                 client_response_guard.disarm();
@@ -1065,7 +1090,9 @@ pub async fn chat_completions(
                 .await;
 
                 client_response_guard.disarm();
-                Ok(Json(openai_response).into_response())
+                let body = serde_json::to_value(openai_response)
+                    .map_err(|_| ApiError::Internal("Node response serialization failed".into()))?;
+                crate::admission::json_with_admission(body, node_admission)
             }
         }
         ExecutionTarget::ProviderAccount {
@@ -1429,7 +1456,7 @@ async fn create_openai_response_with_lifecycle(
                 ))
                 .map(|body| OpenAiJsonResponse {
                     body,
-                    admission: None,
+                    admission: collector.memory.take(),
                 })
                 .map_err(|error| {
                     ApiError::Internal(format!(
@@ -1590,6 +1617,7 @@ fn build_chat_completion_response(
 ///
 /// 封装非流式响应路径的事件处理状态与逻辑。
 struct StreamCollector {
+    memory: Option<LargeBodyPermit>,
     content: String,
     finish_reason: Option<String>,
     native_chat_response: Option<OpenAiJsonResponse>,
@@ -1600,6 +1628,7 @@ struct StreamCollector {
 impl StreamCollector {
     fn new() -> Self {
         Self {
+            memory: None,
             content: String::new(),
             finish_reason: None,
             native_chat_response: None,
@@ -1622,7 +1651,17 @@ impl StreamCollector {
             llm_protocol_provider::StreamEvent::Delta {
                 content: delta,
                 finish_reason: reason,
+                ..
             } => {
+                let next = self.content.len().saturating_add(delta.len());
+                if !llm_protocol_provider::admit_payload(
+                    &mut self.memory,
+                    next.saturating_mul(4),
+                    next > llm_protocol_provider::LARGE_JSON_BODY_ADMISSION_BYTES,
+                ) {
+                    self.status = "error".into();
+                    return Err("Process completion memory capacity exhausted".into());
+                }
                 self.content.push_str(&delta);
                 if reason.is_some() {
                     self.finish_reason = reason;
@@ -1872,18 +1911,31 @@ fn openai_sse_channel_capacity(ctx: &RequestContext) -> usize {
 }
 
 async fn forward_openai_sse_event(
-    sse_tx: &mpsc::Sender<Event>,
+    sse_tx: &mpsc::Sender<crate::admission::ResidentSseEvent>,
     ctx: &RequestContext,
     client_connected: &mut bool,
     event: Event,
 ) -> bool {
+    forward_admitted_openai_sse_event(sse_tx, ctx, client_connected, event, None).await
+}
+
+async fn forward_admitted_openai_sse_event(
+    sse_tx: &mpsc::Sender<crate::admission::ResidentSseEvent>,
+    ctx: &RequestContext,
+    client_connected: &mut bool,
+    event: Event,
+    admission: Option<LargeBodyPermit>,
+) -> bool {
     if !*client_connected {
         return false;
     }
-    let sent = tokio::time::timeout(OPENAI_SSE_SEND_TIMEOUT, sse_tx.send(event))
-        .await
-        .map(|result| result.is_ok())
-        .unwrap_or(false);
+    let sent = tokio::time::timeout(
+        OPENAI_SSE_SEND_TIMEOUT,
+        sse_tx.send(crate::admission::ResidentSseEvent { event, admission }),
+    )
+    .await
+    .map(|result| result.is_ok())
+    .unwrap_or(false);
     if !sent {
         *client_connected = false;
         ctx.mark_client_disconnected();
@@ -1966,17 +2018,18 @@ fn create_openai_stream_with_lifecycle(
                     super::report_initial_stream_status(&mut initial_status, event.as_ref());
                     let Some(event) = event else { break };
                     match event {
-                        llm_protocol_provider::StreamEvent::Delta { content, finish_reason } => {
+                        llm_protocol_provider::StreamEvent::Delta { content, finish_reason, admission } => {
                             let has_content = !content.is_empty();
                             let data = make_delta_chunk_data(
                                 content, &finish_reason, &mut first_chunk,
                                 &completion_id, created, &model, &provider_name,
                             );
-                            let sent = forward_openai_sse_event(
+                            let sent = forward_admitted_openai_sse_event(
                                 &sse_tx,
                                 &ctx,
                                 &mut client_connected,
                                 Event::default().data(data),
+                                admission,
                             )
                             .await;
                             if sent && has_content && !client_first_content_recorded {
@@ -2063,15 +2116,16 @@ fn create_openai_stream_with_lifecycle(
                             break;
                         }
                         llm_protocol_provider::StreamEvent::Native {
-                            event: NativeStreamEvent::OpenAiChatSse { data },
+                            event: NativeStreamEvent::OpenAiChatSse { data, admission },
                         } => {
                             let has_content = native_chat_chunk_has_content(&data);
                             native_usage_forwarded |= native_chat_chunk_has_usage(&data);
-                            let sent = forward_openai_sse_event(
+                            let sent = forward_admitted_openai_sse_event(
                                 &sse_tx,
                                 &ctx,
                                 &mut client_connected,
                                 Event::default().data(data.to_string()),
+                                admission,
                             )
                             .await;
                             if sent && has_content && !client_first_content_recorded {
@@ -2127,7 +2181,7 @@ fn create_openai_stream_with_lifecycle(
         }
     });
 
-    ReceiverStream::new(sse_rx).map(Ok)
+    crate::admission::resident_sse_stream(sse_rx)
 }
 
 /// 创建带 keepalive 的 SSE 流式响应（多模态专用）。
@@ -2229,15 +2283,16 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                     super::report_initial_stream_status(&mut initial_status, event.as_ref());
                     match event {
                         Some(event) => match event {
-                            llm_protocol_provider::StreamEvent::Delta { content, finish_reason } => {
+                            llm_protocol_provider::StreamEvent::Delta { content, finish_reason, admission } => {
                                 let has_content = !content.is_empty();
                                 let data = make_delta_chunk_data(
                                     content, &finish_reason, &mut first_chunk,
                                     &completion_id, created, &model, &provider_name,
                                 );
-                                let sent = forward_openai_sse_event(
+                                let sent = forward_admitted_openai_sse_event(
                                     &sse_tx, &ctx, &mut client_connected,
                                     Event::default().data(data),
+                                    admission,
                                 )
                                 .await;
                                 if sent && has_content && !client_first_content_recorded {
@@ -2325,15 +2380,16 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
                                 return;
                             }
                             llm_protocol_provider::StreamEvent::Native {
-                                event: NativeStreamEvent::OpenAiChatSse { data },
+                                event: NativeStreamEvent::OpenAiChatSse { data, admission },
                             } => {
                                 let has_content = native_chat_chunk_has_content(&data);
                                 native_usage_forwarded |= native_chat_chunk_has_usage(&data);
-                                let sent = forward_openai_sse_event(
+                                let sent = forward_admitted_openai_sse_event(
                                     &sse_tx,
                                     &ctx,
                                     &mut client_connected,
                                     Event::default().data(data.to_string()),
+                                    admission,
                                 )
                                 .await;
                                 if sent && has_content && !client_first_content_recorded {
@@ -2398,7 +2454,7 @@ fn create_openai_stream_with_keepalive_and_lifecycle(
         .await;
     });
 
-    ReceiverStream::new(sse_rx).map(Ok)
+    crate::admission::resident_sse_stream(sse_rx)
 }
 
 // ==================== Models ====================
@@ -2611,12 +2667,24 @@ pub async fn retrieve_model(
 ///
 /// 该函数接收节点返回的完整 ChatCompletionResponse，
 /// 将其内容拆分为多个 SSE chunk，模拟 token 级流式输出。
+#[cfg(test)]
 fn simulate_node_stream(
     response: keycompute_types::ChatCompletionResponse,
     ctx: Arc<RequestContext>,
     model: String,
     stream_options: Option<StreamOptions>,
     lifecycle: Arc<dyn RequestLifecycleRecorder>,
+) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
+    simulate_node_stream_with_admission(response, ctx, model, stream_options, lifecycle, None)
+}
+
+fn simulate_node_stream_with_admission(
+    response: keycompute_types::ChatCompletionResponse,
+    ctx: Arc<RequestContext>,
+    model: String,
+    stream_options: Option<StreamOptions>,
+    lifecycle: Arc<dyn RequestLifecycleRecorder>,
+    admission: Option<LargeBodyPermit>,
 ) -> impl Stream<Item = std::result::Result<Event, Infallible>> {
     // 伪流式（simulated streaming）：
     // - Node 路径先通过 enqueue_and_wait() 获取完整响应
@@ -2670,11 +2738,12 @@ fn simulate_node_stream(
                         "finish_reason": null
                     }]
                 });
-                let sent = forward_openai_sse_event(
+                let sent = forward_admitted_openai_sse_event(
                     &sse_tx,
                     &ctx,
                     &mut client_connected,
                     Event::default().data(data.to_string()),
+                    admission.clone(),
                 )
                 .await;
                 if sent && !client_first_content_recorded {
@@ -2711,11 +2780,12 @@ fn simulate_node_stream(
                     "finish_reason": finish_reason
                 }]
             });
-            let _sent = forward_openai_sse_event(
+            let _sent = forward_admitted_openai_sse_event(
                 &sse_tx,
                 &ctx,
                 &mut client_connected,
                 Event::default().data(data.to_string()),
+                admission.clone(),
             )
             .await;
             if !client_connected {
@@ -2740,11 +2810,12 @@ fn simulate_node_stream(
                         "total_tokens": response.usage.total_tokens
                     }
                 });
-                if !forward_openai_sse_event(
+                if !forward_admitted_openai_sse_event(
                     &sse_tx,
                     &ctx,
                     &mut client_connected,
                     Event::default().data(data.to_string()),
+                    admission.clone(),
                 )
                 .await
                 {
@@ -2753,11 +2824,12 @@ fn simulate_node_stream(
             }
 
             // 发送 [DONE] 标记，声明流式传输结束（OpenAI SSE 协议要求）
-            if forward_openai_sse_event(
+            if forward_admitted_openai_sse_event(
                 &sse_tx,
                 &ctx,
                 &mut client_connected,
                 Event::default().data("[DONE]"),
+                admission.clone(),
             )
             .await
             {
@@ -2769,7 +2841,7 @@ fn simulate_node_stream(
         super::finish_client_response_trace(&lifecycle, &ctx, outcome).await;
     });
 
-    ReceiverStream::new(sse_rx).map(Ok)
+    crate::admission::resident_sse_stream(sse_rx)
 }
 
 #[cfg(test)]
@@ -3429,6 +3501,7 @@ mod tests {
         tx.send(llm_protocol_provider::StreamEvent::Delta {
             content: String::new(),
             finish_reason: Some("stop".to_string()),
+            admission: None,
         })
         .await
         .unwrap();
@@ -3446,6 +3519,7 @@ mod tests {
         tx.send(llm_protocol_provider::StreamEvent::Delta {
             content: "tail".to_string(),
             finish_reason: None,
+            admission: None,
         })
         .await
         .unwrap();
@@ -3869,6 +3943,7 @@ mod tests {
         tx.send(llm_protocol_provider::StreamEvent::Delta {
             content: "not delivered".to_string(),
             finish_reason: None,
+            admission: None,
         })
         .await
         .unwrap();

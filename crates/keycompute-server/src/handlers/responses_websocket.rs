@@ -79,6 +79,7 @@ struct ParsedCreate {
 
 #[derive(Debug)]
 struct RequestBudget {
+    memory: keycompute_types::memory::MemoryPermit,
     _request_permit: OwnedSemaphorePermit,
     _byte_permits: Vec<OwnedSemaphorePermit>,
     byte_slots: Arc<Semaphore>,
@@ -94,7 +95,11 @@ enum RequestBudgetExtensionError {
 
 struct OutboundMessage {
     message: Message,
-    _byte_permit: OwnedSemaphorePermit,
+    _byte_permit: OutboundBudget,
+}
+struct OutboundBudget {
+    _local: OwnedSemaphorePermit,
+    _memory: keycompute_types::memory::MemoryPermit,
 }
 
 #[derive(Clone)]
@@ -129,24 +134,30 @@ impl OutboundSender {
         self.send_reserved(message, permit).await
     }
 
-    async fn reserve(&self, bytes: usize) -> std::result::Result<OwnedSemaphorePermit, ()> {
+    async fn reserve(&self, bytes: usize) -> std::result::Result<OutboundBudget, ()> {
         let bytes = u32::try_from(bytes.max(1)).map_err(|_| ())?;
         if bytes as usize > self.max_bytes {
             return Err(());
         }
-        tokio::time::timeout(
+        let local = tokio::time::timeout(
             OUTBOUND_SEND_TIMEOUT,
             Arc::clone(&self.byte_slots).acquire_many_owned(bytes),
         )
         .await
         .map_err(|_| ())?
-        .map_err(|_| ())
+        .map_err(|_| ())?;
+        let memory =
+            keycompute_types::memory::reserve_process_memory(bytes as usize).map_err(|_| ())?;
+        Ok(OutboundBudget {
+            _local: local,
+            _memory: memory,
+        })
     }
 
     async fn send_reserved(
         &self,
         message: Message,
-        permit: OwnedSemaphorePermit,
+        permit: OutboundBudget,
     ) -> std::result::Result<(), ()> {
         tokio::time::timeout(
             OUTBOUND_SEND_TIMEOUT,
@@ -170,6 +181,7 @@ struct QueuedCreate {
 
 #[derive(Clone, Debug)]
 struct CachedResponse {
+    memory: Option<keycompute_types::memory::MemoryPermit>,
     model: Option<String>,
     context_items: Vec<Value>,
     warmup_request_state: serde_json::Map<String, Value>,
@@ -200,6 +212,7 @@ impl CachedResponse {
             .saturating_add(lane.as_ref().map_or(0, |id| id.len().saturating_add(24)))
             .saturating_add(64);
         Self {
+            memory: None,
             model,
             context_items,
             warmup_request_state,
@@ -292,7 +305,7 @@ impl ConnectionCache {
     fn replace_lane_with_limits(
         &mut self,
         response_id: String,
-        response: CachedResponse,
+        mut response: CachedResponse,
         max_entries: usize,
         max_bytes: usize,
     ) -> bool {
@@ -300,6 +313,14 @@ impl ConnectionCache {
         // current lane. A failed replacement must leave its parent retryable.
         if max_entries == 0 || cache_entry_bytes(&response_id, &response) > max_bytes {
             return false;
+        }
+        if response.memory.is_none() {
+            let Ok(memory) = keycompute_types::memory::reserve_process_memory(
+                cache_entry_bytes(&response_id, &response).saturating_mul(2),
+            ) else {
+                return false;
+            };
+            response.memory = Some(memory);
         }
         let lane = response.lane.clone();
         self.evict_lane(&lane);
@@ -311,12 +332,20 @@ impl ConnectionCache {
     fn insert_with_limits(
         &mut self,
         response_id: String,
-        response: CachedResponse,
+        mut response: CachedResponse,
         max_entries: usize,
         max_bytes: usize,
     ) -> bool {
-        self.remove(&response_id);
         let entry_bytes = cache_entry_bytes(&response_id, &response);
+        if response.memory.is_none() {
+            let Ok(memory) =
+                keycompute_types::memory::reserve_process_memory(entry_bytes.saturating_mul(2))
+            else {
+                return false;
+            };
+            response.memory = Some(memory);
+        }
+        self.remove(&response_id);
         if max_entries == 0 || entry_bytes > max_bytes {
             return false;
         }
@@ -471,6 +500,14 @@ pub async fn responses_websocket(
         return ApiError::RateLimit("Too many active Responses WebSocket connections".to_string())
             .into_response();
     };
+    // Tungstenite allocates an incoming frame before the application can
+    // inspect it. Reserve that maximum wire window for the connection lifetime.
+    let Ok(wire_memory) =
+        keycompute_types::memory::reserve_process_memory(OPENAI_RESPONSES_BODY_LIMIT_BYTES)
+    else {
+        return ApiError::ServiceUnavailable("Process WebSocket memory capacity exhausted".into())
+            .into_response();
+    };
     upgrade
         .max_message_size(OPENAI_RESPONSES_BODY_LIMIT_BYTES)
         // Tungstenite otherwise keeps its 16 MiB single-frame default. Standard
@@ -479,6 +516,7 @@ pub async fn responses_websocket(
         .max_frame_size(OPENAI_RESPONSES_BODY_LIMIT_BYTES)
         .on_upgrade(move |socket| async move {
             let _connection_permit = connection_permit;
+            let _wire_memory = wire_memory;
             serve_connection(socket, state, auth, headers).await;
         })
 }
@@ -746,7 +784,11 @@ fn try_reserve_request_budget(
     let byte_permit = Arc::clone(byte_slots)
         .try_acquire_many_owned(body_bytes)
         .map_err(|_| RequestBudgetExtensionError::ConnectionCapacity)?;
+    let memory =
+        keycompute_types::memory::reserve_process_memory((body_bytes as usize).saturating_mul(2))
+            .map_err(|_| RequestBudgetExtensionError::ConnectionCapacity)?;
     Ok(RequestBudget {
+        memory,
         _request_permit: request_permit,
         _byte_permits: vec![byte_permit],
         byte_slots: Arc::clone(byte_slots),
@@ -794,6 +836,15 @@ fn try_extend_request_budget(
     // lanes usable, and the client may retry after in-flight work completes.
     let permit = Arc::clone(&budget.byte_slots)
         .try_acquire_many_owned(additional_bytes)
+        .map_err(|_| RequestBudgetExtensionError::ConnectionCapacity)?;
+    budget
+        .memory
+        .grow_to(
+            budget
+                .reserved_bytes
+                .saturating_add(additional_bytes as usize)
+                .saturating_mul(2),
+        )
         .map_err(|_| RequestBudgetExtensionError::ConnectionCapacity)?;
     budget._byte_permits.push(permit);
     budget.reserved_bytes = budget
@@ -980,11 +1031,23 @@ async fn process_response_create(
 
         let (cached_parent, cached_parent_budget) = {
             let guard = cache.lock().await;
-            snapshot_cached_parent(
+            if let Some(parent) = previous_response_id.as_deref().and_then(|id| guard.get(id))
+                && !parent.stored
+            {
+                try_extend_request_budget(
+                    &mut request_budget,
+                    parent
+                        .estimated_bytes
+                        .saturating_mul(continuation_context_copies),
+                )
+                .map_err(|error| request_budget_protocol_error(error, lane.clone()))?;
+            }
+            let (parent, _) = snapshot_cached_parent(
                 &guard,
                 previous_response_id.as_deref(),
                 continuation_context_copies,
-            )
+            );
+            (parent, None::<usize>)
         };
         if let Some(additional_bytes) = cached_parent_budget {
             try_extend_request_budget(&mut request_budget, additional_bytes)
@@ -1181,7 +1244,9 @@ async fn process_response_create(
             RequestReceivedAt(chrono::Utc::now()),
             websocket_event_headers(&headers),
             body,
-            None,
+            Some(crate::state::GenerationHttpBodyPermit::memory_only(
+                request_budget.memory.clone(),
+            )),
             "/v1/responses",
             "/responses",
             true,
@@ -1804,6 +1869,7 @@ fn protocol_error_from_http(status: u16, body: &[u8], lane: LaneId) -> ProtocolE
 }
 
 struct SseJsonDecoder {
+    memory: keycompute_types::memory::MemoryPermit,
     buffer: Vec<u8>,
     data_lines: Vec<String>,
     data_bytes: usize,
@@ -1820,6 +1886,7 @@ impl Default for SseJsonDecoder {
 impl SseJsonDecoder {
     fn with_limits(max_line_bytes: usize, max_event_bytes: usize) -> Self {
         Self {
+            memory: keycompute_types::memory::reserve_process_memory(0).expect("zero claim"),
             buffer: Vec::new(),
             data_lines: Vec::new(),
             data_bytes: 0,
@@ -1829,6 +1896,16 @@ impl SseJsonDecoder {
     }
 
     fn push(&mut self, chunk: &[u8]) -> Result<Vec<Value>, ProtocolError> {
+        let pending = self
+            .buffer
+            .len()
+            .saturating_add(self.data_bytes)
+            .saturating_add(chunk.len());
+        self.memory
+            .grow_to(pending.saturating_mul(3))
+            .map_err(|_| {
+                ProtocolError::server("Process WebSocket decoder memory capacity exhausted.", None)
+            })?;
         self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
         while let Some(position) = self.buffer.iter().position(|byte| *byte == b'\n') {
@@ -1903,6 +1980,19 @@ impl SseJsonDecoder {
         if data.trim() == "[DONE]" {
             return Ok(());
         }
+        let retained_events = events
+            .iter()
+            .map(estimated_json_bytes)
+            .fold(0usize, usize::saturating_add);
+        self.memory
+            .grow_to(
+                retained_events
+                    .saturating_add(estimated_json_parse_working_set_bytes(data.as_bytes()))
+                    .saturating_mul(2),
+            )
+            .map_err(|_| {
+                ProtocolError::server("Process WebSocket JSON memory capacity exhausted.", None)
+            })?;
         let event = serde_json::from_str(&data).map_err(|_| {
             ProtocolError::server("Responses stream contained an invalid JSON event.", None)
         })?;

@@ -255,6 +255,7 @@ impl ProviderAdapter for MockProvider {
                 let event = StreamEvent::Delta {
                     content,
                     finish_reason: None,
+                    admission: None,
                 };
 
                 Some((

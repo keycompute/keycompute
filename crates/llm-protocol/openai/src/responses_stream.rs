@@ -155,6 +155,8 @@ fn parse_responses_stream_with_limits_and_empty_eof(
     tokio::spawn(async move {
         let mut stream = stream;
         let mut buffer = Vec::new();
+        let parser_memory =
+            keycompute_types::memory::reserve_process_memory(0).expect("zero claim");
         let mut state = ResponsesStreamState::default();
 
         loop {
@@ -175,10 +177,20 @@ fn parse_responses_stream_with_limits_and_empty_eof(
                             // allowance per request and turn the semaphore into
                             // an unbounded memory queue. Load-shed before adding
                             // the chunk to the parser buffer instead.
-                            send_error(&tx, LARGE_RESPONSES_SSE_CAPACITY_ERROR).await;
+                            send_capacity_error(&tx, LARGE_RESPONSES_SSE_CAPACITY_ERROR).await;
                             return;
                         };
                         state.event_admission = Some(admission);
+                    }
+                    // Account for network, line, accumulated data and drain copies
+                    // before adding bytes; keep a high-water claim until parser exit.
+                    let pending = pending_sse_bytes(&buffer, &state).saturating_add(chunk.len());
+                    if pending > max_line_bytes.saturating_add(max_event_bytes)
+                        || parser_memory.grow_to(pending.saturating_mul(6)).is_err()
+                    {
+                        send_capacity_error(&tx, "Process SSE parser memory budget exhausted")
+                            .await;
+                        return;
                     }
                     buffer.extend_from_slice(&chunk);
                     while let Some(line) = take_next_sse_line(&mut buffer, false) {
@@ -427,7 +439,7 @@ async fn handle_line(
         }
         if state.event_admission.is_none() && next_bytes > admission_threshold {
             let Some(admission) = try_acquire_large_body_permit() else {
-                send_error(tx, LARGE_RESPONSES_SSE_CAPACITY_ERROR).await;
+                send_capacity_error(tx, LARGE_RESPONSES_SSE_CAPACITY_ERROR).await;
                 return false;
             };
             state.event_admission = Some(admission);
@@ -467,10 +479,19 @@ async fn dispatch_event(
     }
     if admission.is_none() && working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES {
         let Some(acquired) = try_acquire_large_body_permit() else {
-            send_error(tx, LARGE_RESPONSES_SSE_CAPACITY_ERROR).await;
+            send_capacity_error(tx, LARGE_RESPONSES_SSE_CAPACITY_ERROR).await;
             return false;
         };
         admission = Some(acquired);
+    }
+    if !llm_protocol_provider::admit_payload(
+        &mut admission,
+        working_set_bytes.saturating_mul(2),
+        data.len() > LARGE_JSON_BODY_ADMISSION_BYTES
+            || working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+    ) {
+        send_capacity_error(tx, "Process payload memory budget exhausted").await;
+        return false;
     }
     let body: Value = match serde_json::from_str(data) {
         Ok(body) => body,
@@ -594,6 +615,14 @@ pub(crate) fn response_usage(value: &Value) -> Result<Option<(u32, u32)>> {
         })
     };
     Ok(Some((tokens("input_tokens")?, tokens("output_tokens")?)))
+}
+
+async fn send_capacity_error(tx: &mpsc::Sender<Result<StreamEvent>>, _detail: impl Into<String>) {
+    let _ = tx
+        .send(Err(KeyComputeError::ServiceUnavailable(
+            "process_payload_memory_exhausted".into(),
+        )))
+        .await;
 }
 
 async fn send_error(tx: &mpsc::Sender<Result<StreamEvent>>, message: impl Into<String>) {
@@ -756,8 +785,8 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), third.next())
                 .await
                 .expect("an over-capacity parser must not wait while retaining its buffer"),
-            Some(Err(KeyComputeError::ProviderError(message)))
-                if message.contains("capacity is exhausted")
+            Some(Err(KeyComputeError::ServiceUnavailable(message)))
+                if message == "process_payload_memory_exhausted"
         ));
 
         let mut fragmented = parse(fragmented_large_event());
@@ -765,8 +794,8 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), fragmented.next())
                 .await
                 .expect("a fragmented over-capacity event must not wait while retaining data"),
-            Some(Err(KeyComputeError::ProviderError(message)))
-                if message.contains("capacity is exhausted")
+            Some(Err(KeyComputeError::ServiceUnavailable(message)))
+                if message == "process_payload_memory_exhausted"
         ));
 
         drop(first_event);
@@ -808,8 +837,8 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(1), over_capacity.next())
                 .await
                 .expect("a large partial tail must continue to consume admission"),
-            Some(Err(KeyComputeError::ProviderError(message)))
-                if message.contains("capacity is exhausted")
+            Some(Err(KeyComputeError::ServiceUnavailable(message)))
+                if message == "process_payload_memory_exhausted"
         ));
         drop(retained_first);
         drop(retained_second);

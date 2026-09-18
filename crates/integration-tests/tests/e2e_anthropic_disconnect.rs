@@ -181,7 +181,7 @@ async fn anthropic_stream_disconnect_aborts_fallback_and_billing_stays_on_primar
         .expect("stream should produce the message_start event")
         .expect("channel should stay open");
     assert!(
-        matches!(first, StreamEvent::Raw { data } if data.contains("message_start")),
+        matches!(first, StreamEvent::Raw { data , ..} if data.contains("message_start")),
         "client should receive the native message_start event first"
     );
 
@@ -303,7 +303,7 @@ async fn anthropic_stream_ping_disconnect_aborts_fallback_via_disconnect_flag() 
         .await
         .expect("ping should arrive")
         .expect("channel open");
-    assert!(matches!(first, StreamEvent::Raw { data } if data.contains("ping")));
+    assert!(matches!(first, StreamEvent::Raw { data , ..} if data.contains("ping")));
     ctx.mark_client_disconnected();
 
     // 没有断开标志时 fallback 是合法的（sent_content=false）；断开标志必须阻止它
@@ -387,7 +387,7 @@ async fn anthropic_stream_fallback_still_works_when_client_stays_connected() {
         .await
         .expect("ping should arrive")
         .expect("channel open");
-    assert!(matches!(first, StreamEvent::Raw { data } if data.contains("ping")));
+    assert!(matches!(first, StreamEvent::Raw { data , ..} if data.contains("ping")));
     fail.notify_one();
 
     // fallback 内容（"Hello from OpenAI" chunks）应到达，并以 Done 结束

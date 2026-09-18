@@ -22,7 +22,7 @@ pub use http::{
     LARGE_JSON_BODY_ADMISSION_BYTES, LARGE_JSON_WORKING_SET_ADMISSION_BYTES, LargeBodyPermit,
     MAX_JSON_PASSTHROUGH_BODY_BYTES, MAX_JSON_PASSTHROUGH_ERROR_BODY_BYTES,
     MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, UpstreamFailure, UpstreamFailureKind, UpstreamResponse,
-    UpstreamResponseMeta, body_read_failure, capture_http_failure_response,
+    UpstreamResponseMeta, admit_payload, body_read_failure, capture_http_failure_response,
     collect_bounded_response_text, estimated_json_parse_working_set_bytes,
     http_status_is_retryable, json_passthrough_body_limit, summarize_http_failure_response,
     try_acquire_large_body_permit,
@@ -221,6 +221,8 @@ pub fn parse_models_response(body: &[u8]) -> Result<Vec<String>> {
 /// 流返回类型
 pub type StreamBox = Pin<Box<dyn Stream<Item = Result<StreamEvent>> + Send>>;
 
+pub use stream::bounded_stream_error;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +305,7 @@ mod tests {
         let event = StreamEvent::Delta {
             content: "Hello".to_string(),
             finish_reason: None,
+            admission: None,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("Hello"));

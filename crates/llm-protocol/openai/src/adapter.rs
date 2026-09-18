@@ -440,6 +440,18 @@ impl OpenAIProvider {
                 )
             })?);
         }
+        if !llm_protocol_provider::admit_payload(
+            &mut admission,
+            working_set_bytes.saturating_mul(2),
+            body.len() > LARGE_JSON_BODY_ADMISSION_BYTES
+                || working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+        ) {
+            return Err(body_read_failure(
+                &response.meta,
+                "upstream_json_capacity_exhausted",
+                "Process payload memory budget exhausted",
+            ));
+        }
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
         drop(body);
@@ -665,6 +677,18 @@ impl OpenAIProvider {
                     "Responses upstream JSON working-set capacity is exhausted",
                 )
             })?);
+        }
+        if !llm_protocol_provider::admit_payload(
+            &mut admission,
+            working_set_bytes.saturating_mul(2),
+            body.len() > LARGE_JSON_BODY_ADMISSION_BYTES
+                || working_set_bytes > LARGE_JSON_WORKING_SET_ADMISSION_BYTES,
+        ) {
+            return Err(body_read_failure(
+                &response.meta,
+                "upstream_json_capacity_exhausted",
+                "Process payload memory budget exhausted",
+            ));
         }
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| Self::protocol_failure_with_meta(&response.meta, error))?;
@@ -1251,6 +1275,7 @@ impl ProviderAdapter for OpenAIProvider {
                 content,
                 // 非流式响应有finish_reason，设为Some
                 finish_reason: Some(finish_reason.unwrap_or_else(|| "stop".to_string())),
+                admission: None,
             };
 
             let mut events: Vec<Result<StreamEvent>> = vec![Ok(event)];
@@ -1287,6 +1312,7 @@ impl ProviderAdapter for OpenAIProvider {
             let mut events: Vec<Result<StreamEvent>> = vec![Ok(StreamEvent::Delta {
                 content,
                 finish_reason: Some(finish_reason.unwrap_or_else(|| "stop".to_string())),
+                admission: None,
             })];
             if let Some((input_tokens, output_tokens)) = usage {
                 events.push(Ok(StreamEvent::Usage {
