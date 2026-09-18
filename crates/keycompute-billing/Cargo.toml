@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 keycompute-types = { workspace = true }
+keycompute-runtime = { workspace = true }
 keycompute-db = { workspace = true }
 keycompute-distribution = { workspace = true }
 keycompute-config = { workspace = true }

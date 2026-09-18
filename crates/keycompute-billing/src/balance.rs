@@ -19,6 +19,26 @@ use rust_decimal::Decimal;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
+// Database row locks still authorize every monetary mutation. This local
+// queue only prevents many reservations for one user from consuming the writer
+// pool while waiting for that same row. It does not cache balances or relax
+// cross-process transaction isolation; cancelled tickets are removed on Drop.
+fn request_reservation_admission() -> &'static Arc<keycompute_runtime::admission::BoundedAdmission>
+{
+    use keycompute_runtime::admission::{AdmissionLimits, BoundedAdmission};
+    static ADMISSION: std::sync::OnceLock<Arc<BoundedAdmission>> = std::sync::OnceLock::new();
+    ADMISSION.get_or_init(|| {
+        BoundedAdmission::new(AdmissionLimits {
+            total: 64,
+            per_key: 1,
+            queue: 256,
+            queue_per_key: 32,
+            wait: Duration::from_secs(1),
+        })
+        .expect("valid balance request admission")
+    })
+}
+
 /// 余额不足阈值（元）
 /// 当用户余额低于此值时，拒绝请求
 pub fn min_balance_threshold() -> Decimal {
@@ -169,6 +189,14 @@ impl BalanceService {
                 "Balance reservation TTL is out of range: {error}"
             ))
         })?;
+        let _local_slot = request_reservation_admission()
+            .acquire(user_id)
+            .await
+            .map_err(|_| {
+                KeyComputeError::ServiceUnavailable(
+                    "Balance reservation capacity is exhausted; retry later".into(),
+                )
+            })?;
         let expires_at = chrono::Utc::now()
             .checked_add_signed(reservation_ttl)
             .ok_or_else(|| {
@@ -176,6 +204,8 @@ impl BalanceService {
                     "Balance reservation expiry is out of range".to_string(),
                 )
             })?;
+        // Preserve the detached worker's COMMIT handoff. PostgreSQL applies
+        // transaction-local deadlines; do not interrupt ownership transfer here.
         BalanceReservation::reserve(
             self.pool.as_ref(),
             tenant_id,

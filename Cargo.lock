@@ -3701,6 +3701,7 @@ dependencies = [
  "keycompute-db",
  "keycompute-distribution",
  "keycompute-observability",
+ "keycompute-runtime",
  "keycompute-types",
  "rust_decimal",
  "sea-orm",

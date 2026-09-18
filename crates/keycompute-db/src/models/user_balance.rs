@@ -826,6 +826,10 @@ impl BalanceReservation {
             ));
         }
         let tx = db.begin().await?;
+        // Bounds are transaction-local and cannot leak into the next pool user.
+        // Dropping a Rust future is not proof that PostgreSQL stopped the query.
+        tx.execute_unprepared("SET LOCAL lock_timeout = '1s'; SET LOCAL statement_timeout = '2s'; SET LOCAL idle_in_transaction_session_timeout = '5s'")
+            .await?;
         // Tenant deletion locks the parent before cascading balance rows. A
         // reservation insert carries the same tenant foreign key, so acquire
         // the compatible parent lock before taking the balance lock to avoid
@@ -895,6 +899,42 @@ impl BalanceReservation {
         let reservable_balance = balance.available_balance + replaced_active_amount;
         let amount = Self::amount_to_reserve(reservable_balance, amount, minimum_available)?;
         let balance_delta = amount - replaced_active_amount;
+        if reusable_request.is_none() && balance_delta != Decimal::ZERO {
+            // Common first-admission path: the parent/balance locks, exact
+            // active-sum invariant and expiry reclamation above remain intact.
+            // Reference the data-modifying CTE so the balance move and the
+            // reservation insert (including its audit trigger) use one roundtrip.
+            // An insert conflict rolls back BOTH mutations, never just one.
+            let statement = Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"WITH moved AS (
+                    UPDATE user_balances
+                    SET available_balance = available_balance - $1,
+                        frozen_balance = frozen_balance + $1, updated_at = NOW()
+                    WHERE user_id = $2
+                    RETURNING user_id
+                )
+                INSERT INTO balance_reservations
+                    (request_id, owner_token, tenant_id, user_id, amount, expires_at)
+                SELECT $3, $4, $5, moved.user_id, $6, $7 FROM moved
+                RETURNING *"#,
+                [
+                    balance_delta.into(),
+                    user_id.into(),
+                    request_id.into(),
+                    owner_token.into(),
+                    tenant_id.into(),
+                    amount.into(),
+                    expires_at.into(),
+                ],
+            );
+            let reservation = Self::find_by_statement(statement)
+                .one(&tx)
+                .await?
+                .ok_or_else(|| DbError::Other("create balance reservation failed".into()))?;
+            tx.commit().await?;
+            return Ok(reservation);
+        }
         if balance_delta != Decimal::ZERO {
             let update_stmt = Statement::from_sql_and_values(
                 DbBackend::Postgres,
