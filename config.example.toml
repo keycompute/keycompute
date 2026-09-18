@@ -261,3 +261,10 @@ global_queue = 128
 tenant_queue = 16
 account_queue = 16
 queue_timeout_ms = 1000
+
+[gateway.routing_capacity]
+candidate_limit = 32
+cache_entries = 4096
+ttl_ms = 100
+concurrency = 16
+timeout_ms = 1000

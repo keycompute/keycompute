@@ -217,6 +217,41 @@ impl RedisRateLimiter {
         self.invoke_script(invocation).await
     }
 
+    /// Read three advisory counters through ONE role-checked checkout. Reuse
+    /// existing Lua and hash tags; this is not a cross-slot Lua transaction.
+    pub(crate) async fn account_snapshot(
+        &self,
+        slots: &Self,
+        key: &RateLimitKey,
+        limit: u32,
+    ) -> Result<keycompute_types::AccountCapacitySnapshot> {
+        let mut conn = self.get_conn().await?;
+        let rpm = Self::window_count(&mut conn, &self.build_rpm_key(key), self.window_size).await?;
+        let mut read = self.prepare_tpm_script(key, Self::get_token_count_script());
+        read.arg(self.expire_secs());
+        let tpm: i64 = read
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| KeyComputeError::Internal(format!("Redis snapshot error: {e}")))?;
+        let mut read = slots.prepare_tpm_script(key, Self::get_token_count_script());
+        read.arg(slots.expire_secs());
+        let in_flight: i64 = read
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| KeyComputeError::Internal(format!("Redis snapshot error: {e}")))?;
+        if tpm < 0 || in_flight < 0 {
+            return Err(KeyComputeError::Internal(
+                "inconsistent account snapshot state".into(),
+            ));
+        }
+        Ok(keycompute_types::AccountCapacitySnapshot {
+            rpm,
+            tpm: tpm as u64,
+            in_flight: in_flight as u64,
+            in_flight_limit: limit,
+        })
+    }
+
     /// 获取当前 Unix 时间戳（秒）
     #[cfg(test)]
     fn now_timestamp() -> i64 {

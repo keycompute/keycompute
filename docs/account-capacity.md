@@ -64,8 +64,28 @@ Redis RPM pruning/debit and current account completion accounting use Redis TIME
 not each application replica's wall clock. Explicit historical caller settlement
 keeps its original occurrence timestamp and horizon.
 
-Routing collects account load snapshots with at most eight concurrent queries
-per route. Available accounts rank before exhausted accounts, then by existing
+Routing samples at most 32 eligible candidates per route by default: static
+leaders plus rotating exploration. This bounds quota-read work even for a much
+larger account pool. Selection is approximate, not a promise of the globally
+least-loaded account. Writer-side discovery remains fresh and may still read
+all matching account metadata; credentials, health and visibility are not cached.
+
+Advisory snapshots live at most 100 ms from refresh start in a bounded 4096-entry
+cache shared by clones of one routing engine. Per-account locks collapse
+concurrent refreshes, with at most 16 backend refreshes across the engine and
+8 consumers per route. The 1000 ms per-refresh deadline includes lock and global
+slot waits. Cancellation releases all slots. Errors are not cached and expired
+hints are never served on error. Authoritative per-attempt admission is uncached.
+
+A Redis snapshot reads three counters on ONE role-checked connection instead
+of three. Existing Lua, hash tags and corruption checks remain unchanged; this
+is an advisory snapshot, not an atomic cross-counter transaction.
+
+`gateway.routing_capacity` (and `KC__GATEWAY__ROUTING_CAPACITY__*`) configures
+`candidate_limit`, `cache_entries`, `ttl_ms`, `concurrency`, and `timeout_ms`.
+Zero TTL disables reuse. The maximum candidate cap is 256 and maximum TTL is
+1000 ms. Rotating exploration prevents large equal pools from being excluded
+permanently by truncation. Available accounts rank before exhausted accounts, then by existing
 health penalty, maximum normalized RPM/TPM/in-flight utilization, static priority
 and rotating equal-capacity tie order. Rotation runs before the three-account
 fallback-plan limit, so an equal pool larger than three accounts can all become

@@ -3852,6 +3852,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "futures",
+ "keycompute-config",
  "keycompute-db",
  "keycompute-runtime",
  "keycompute-types",

@@ -225,3 +225,48 @@ async fn account_policy_snapshot_outage_and_configuration_failure_are_fail_close
         0
     );
 }
+
+#[tokio::test]
+async fn account_snapshot_uses_one_checkout_without_changing_quota_semantics() {
+    use keycompute_ratelimit::RateLimitConfig;
+    use keycompute_types::AccountAttemptLease;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let checkouts = Arc::new(AtomicUsize::new(0));
+    let created = checkouts.clone();
+    let recycled = checkouts.clone();
+    let mut config =
+        deadpool_redis::Config::from_url(integration_tests::common::resolve_redis_url());
+    config.pool = Some(deadpool_redis::PoolConfig::new(1));
+    let pool = config
+        .builder()
+        .unwrap()
+        .runtime(deadpool_redis::Runtime::Tokio1)
+        .post_create(deadpool_redis::Hook::sync_fn(move |_, _| {
+            created.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }))
+        .post_recycle(deadpool_redis::Hook::sync_fn(move |_, _| {
+            recycled.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }))
+        .build()
+        .unwrap();
+    let service = AccountQuotaService::redis(pool, 2, Duration::from_secs(180)).unwrap();
+    let id = Uuid::new_v4();
+    let mut lease = service
+        .admit(id, 70, RateLimitConfig::new(10, 100))
+        .await
+        .unwrap();
+    checkouts.store(0, Ordering::SeqCst);
+    let loaded = service.snapshot(id).await.unwrap();
+    assert_eq!((loaded.rpm, loaded.tpm, loaded.in_flight), (1, 70, 1));
+    assert_eq!(checkouts.load(Ordering::SeqCst), 1);
+    lease.finish(Some(30), true).await.unwrap();
+    checkouts.store(0, Ordering::SeqCst);
+    let loaded = service.snapshot(id).await.unwrap();
+    assert_eq!((loaded.rpm, loaded.tpm, loaded.in_flight), (1, 30, 0));
+    assert_eq!(checkouts.load(Ordering::SeqCst), 1);
+}

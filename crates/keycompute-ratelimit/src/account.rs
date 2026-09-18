@@ -15,6 +15,8 @@ pub struct AccountQuotaService {
     quota: Arc<RateLimitService>,
     slots: Arc<RateLimitService>,
     in_flight_limit: u32,
+    #[cfg(feature = "redis")]
+    redis_readers: Option<(crate::RedisRateLimiter, crate::RedisRateLimiter)>,
 }
 
 impl AccountQuotaService {
@@ -37,6 +39,8 @@ impl AccountQuotaService {
         let mut slots = MemoryRateLimiter::new();
         slots.window_size = lease_window;
         Ok(Arc::new(Self {
+            #[cfg(feature = "redis")]
+            redis_readers: None,
             quota: Arc::new(RateLimitService::default_memory()),
             slots: Arc::new(RateLimitService::new(
                 Arc::new(slots),
@@ -57,9 +61,12 @@ impl AccountQuotaService {
             pool.clone(),
             "keycompute:account-quota:v1",
         );
+        let quota_reader =
+            crate::RedisRateLimiter::with_prefix(pool.clone(), "keycompute:account-quota:v1");
         let slots = crate::RedisRateLimiter::with_prefix(pool, "keycompute:account-inflight:v1")
             .with_reservation_window(lease_window);
         Ok(Arc::new(Self {
+            redis_readers: Some((quota_reader, slots.clone())),
             quota: Arc::new(quota),
             slots: Arc::new(RateLimitService::new(
                 Arc::new(slots),
@@ -77,6 +84,17 @@ impl AccountQuotaService {
 
     pub async fn snapshot(&self, account_id: Uuid) -> Result<AccountCapacitySnapshot> {
         let key = Self::key(account_id);
+        #[cfg(feature = "redis")]
+        if let Some((quota, slots)) = &self.redis_readers {
+            return tokio::time::timeout(
+                IO_BUDGET,
+                quota.account_snapshot(slots, &key, self.in_flight_limit),
+            )
+            .await
+            .map_err(|_| {
+                KeyComputeError::ServiceUnavailable("account snapshot timed out".into())
+            })?;
+        }
         let (rpm, tpm, in_flight) = tokio::time::timeout(IO_BUDGET, async {
             tokio::try_join!(
                 self.quota.get_rpm_count(&key),

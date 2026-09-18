@@ -458,6 +458,11 @@ impl AppConfig {
             );
         }
 
+        self.gateway
+            .routing_capacity
+            .validate()
+            .map_err(|message| ConfigLoadError::ValidationError(message.into()))?;
+
         // Redis 配置检查
         if let Some(ref redis_config) = self.redis {
             redis_config
@@ -2073,5 +2078,31 @@ mod tests {
         ]);
         let redis = AppConfig::load_production().unwrap().redis.unwrap();
         assert!(redis.cache_url.is_none());
+    }
+    #[test]
+    #[serial]
+    fn production_routing_capacity_budgets_are_parsed() {
+        let _env = EnvVarGuard::set(&[
+            ("KC__GATEWAY__ROUTING_CAPACITY__CANDIDATE_LIMIT", "12"),
+            ("KC__GATEWAY__ROUTING_CAPACITY__CACHE_ENTRIES", "200"),
+            ("KC__GATEWAY__ROUTING_CAPACITY__TTL_MS", "75"),
+            ("KC__GATEWAY__ROUTING_CAPACITY__CONCURRENCY", "4"),
+            ("KC__GATEWAY__ROUTING_CAPACITY__TIMEOUT_MS", "250"),
+        ]);
+        let c = AppConfig::load_production()
+            .unwrap()
+            .gateway
+            .routing_capacity;
+        assert_eq!(
+            (
+                c.candidate_limit,
+                c.cache_entries,
+                c.ttl_ms,
+                c.concurrency,
+                c.timeout_ms
+            ),
+            (12, 200, 75, 4, 250)
+        );
+        assert!(c.validate().is_ok());
     }
 }

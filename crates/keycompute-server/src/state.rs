@@ -902,8 +902,12 @@ impl AppState {
                 db: Arc::clone(&pool),
                 quotas: account_quotas,
             });
-        let routing_engine =
-            Arc::new(routing_engine.with_account_capacity(Arc::clone(&account_capacity)));
+        let routing_engine = Arc::new(
+            routing_engine
+                .with_account_capacity(Arc::clone(&account_capacity))
+                .with_capacity_snapshot_config(config.gateway.routing_capacity.clone())
+                .map_err(crate::error::ApiError::from)?,
+        );
         let gateway = Arc::new(gateway.with_account_capacity(account_capacity));
 
         // 将 PricingService 接入分布式缓存（L2 防击穿）

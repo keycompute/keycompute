@@ -6,6 +6,8 @@ use std::collections::HashMap;
 /// Gateway 配置
 #[derive(Debug, Deserialize, Clone)]
 pub struct GatewayConfig {
+    #[serde(default)]
+    pub routing_capacity: RoutingCapacityConfig,
     /// Process-local generation resource budgets, independent of business RPM/TPM.
     #[serde(default)]
     pub admission: GenerationAdmissionConfig,
@@ -49,6 +51,7 @@ pub struct ProxyConfig {
 impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
+            routing_capacity: RoutingCapacityConfig::default(),
             admission: GenerationAdmissionConfig::default(),
             monitoring_raw_max_hours: default_monitoring_raw_max_hours(),
             account_probe_interval_secs: 0,
@@ -199,5 +202,75 @@ mod admission_tests {
         ] {
             assert!(invalid.validate().is_err());
         }
+    }
+}
+
+/// Advisory load sampling only. These values never authorize an upstream call.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct RoutingCapacityConfig {
+    pub candidate_limit: usize,
+    pub cache_entries: usize,
+    pub ttl_ms: u64,
+    pub concurrency: usize,
+    pub timeout_ms: u64,
+}
+impl Default for RoutingCapacityConfig {
+    fn default() -> Self {
+        Self {
+            candidate_limit: 32,
+            cache_entries: 4096,
+            ttl_ms: 100,
+            concurrency: 16,
+            timeout_ms: 1000,
+        }
+    }
+}
+impl RoutingCapacityConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(4..=256).contains(&self.candidate_limit)
+            || !(self.candidate_limit..=65_536).contains(&self.cache_entries)
+            || self.ttl_ms > 1000
+            || !(1..=64).contains(&self.concurrency)
+            || !(1..=5000).contains(&self.timeout_ms)
+        {
+            Err("invalid routing capacity snapshot budgets")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod capacity_config_tests {
+    use super::*;
+    #[test]
+    fn snapshot_settings_reject_unbounded_or_inconsistent_limits() {
+        let defaults = RoutingCapacityConfig::default();
+        for invalid in [
+            RoutingCapacityConfig {
+                candidate_limit: 0,
+                ..defaults.clone()
+            },
+            RoutingCapacityConfig {
+                cache_entries: 31,
+                ..defaults.clone()
+            },
+            RoutingCapacityConfig {
+                ttl_ms: 1001,
+                ..defaults.clone()
+            },
+            RoutingCapacityConfig {
+                concurrency: 0,
+                ..defaults.clone()
+            },
+            RoutingCapacityConfig {
+                timeout_ms: 0,
+                ..defaults.clone()
+            },
+        ] {
+            assert!(invalid.validate().is_err());
+        }
+        assert!(defaults.validate().is_ok());
     }
 }

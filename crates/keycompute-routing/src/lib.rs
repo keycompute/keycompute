@@ -5,6 +5,7 @@
 //! 包含 Provider 健康状态管理和账号状态管理。
 
 pub mod account_state;
+mod capacity_cache;
 pub mod provider_health;
 
 pub use account_state::{AccountState, AccountStateStore};
@@ -67,6 +68,7 @@ fn required_api_capability(ctx: &RequestContext) -> AccountApiCapability {
 #[derive(Clone)]
 pub struct RoutingEngine {
     account_capacity: Option<Arc<dyn keycompute_types::AccountCapacityPolicy>>,
+    capacity_cache: Arc<capacity_cache::CapacityCache>,
     rotation: Arc<std::sync::atomic::AtomicU64>,
     /// 账号状态存储（只读）
     account_states: Arc<AccountStateStore>,
@@ -100,8 +102,17 @@ impl RoutingEngine {
         mut self,
         capacity: Arc<dyn keycompute_types::AccountCapacityPolicy>,
     ) -> Self {
+        self.capacity_cache = Arc::new(self.capacity_cache.cleared());
         self.account_capacity = Some(capacity);
         self
+    }
+
+    pub fn with_capacity_snapshot_config(
+        mut self,
+        config: keycompute_config::gateway::RoutingCapacityConfig,
+    ) -> Result<Self> {
+        self.capacity_cache = Arc::new(capacity_cache::CapacityCache::new(config)?);
+        Ok(self)
     }
 
     /// 创建新的路由引擎（无数据库连接）
@@ -117,6 +128,10 @@ impl RoutingEngine {
     ) -> Self {
         Self {
             account_capacity: None,
+            capacity_cache: Arc::new(
+                capacity_cache::CapacityCache::new(Default::default())
+                    .expect("default snapshot config"),
+            ),
             rotation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             account_states,
             provider_health,
@@ -141,6 +156,10 @@ impl RoutingEngine {
     ) -> Self {
         Self {
             account_capacity: None,
+            capacity_cache: Arc::new(
+                capacity_cache::CapacityCache::new(Default::default())
+                    .expect("default snapshot config"),
+            ),
             rotation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             account_states,
             provider_health,
@@ -167,6 +186,10 @@ impl RoutingEngine {
     ) -> Self {
         Self {
             account_capacity: None,
+            capacity_cache: Arc::new(
+                capacity_cache::CapacityCache::new(Default::default())
+                    .expect("default snapshot config"),
+            ),
             rotation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             account_states,
             provider_health,
@@ -521,23 +544,6 @@ impl RoutingEngine {
             .into_iter()
             .filter(|account| self.provider_health.account_is_routable(account))
             .collect();
-        // Bounded fan-out, not one unbounded Redis task per account. Snapshot
-        // failure is fail-closed; never reinterpret a backend outage as zero load.
-        let mut loads = std::collections::HashMap::new();
-        if let Some(capacity) = &self.account_capacity {
-            use futures::StreamExt;
-            let capacity = Arc::clone(capacity);
-            let ids: Vec<Uuid> = sorted_accounts.iter().map(|account| account.id).collect();
-            let mut snapshots = futures::stream::iter(ids.into_iter().map(move |id| {
-                let capacity = Arc::clone(&capacity);
-                async move { capacity.snapshot(id).await.map(|load| (id, load)) }
-            }))
-            .buffer_unordered(8);
-            while let Some(snapshot) = snapshots.next().await {
-                let (id, load) = snapshot?;
-                loads.insert(id, load);
-            }
-        }
         let sequence = self
             .rotation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -554,6 +560,56 @@ impl RoutingEngine {
             .enumerate()
             .map(|(i, id)| (id, i))
             .collect();
+        // Bound the expensive load reads. Retain static leaders plus rotating
+        // exploration, then rank using hints. Execution revalidates current
+        // eligibility and quota; a shortlist is not an authorization cache.
+        let mut loads = std::collections::HashMap::new();
+        if let Some(capacity) = &self.account_capacity {
+            sorted_accounts.retain(|a| !self.account_states.is_cooling_down(&a.id));
+            if sorted_accounts.len() > self.capacity_cache.candidate_limit() {
+                sorted_accounts.sort_by(|a, b| {
+                    self.provider_health
+                        .account_health_for(a)
+                        .penalty
+                        .cmp(&self.provider_health.account_health_for(b).penalty)
+                        .then_with(|| b.priority.cmp(&a.priority))
+                        .then_with(|| a.id.cmp(&b.id))
+                });
+                let mut selected: std::collections::HashSet<_> = sorted_accounts
+                    .iter()
+                    .take(MAX_ACCOUNTS_PER_PROVIDER)
+                    .map(|a| a.id)
+                    .collect();
+                let mut exploration: Vec<_> = sorted_accounts.iter().map(|a| a.id).collect();
+                exploration.sort_by_key(|id| tie_order[id]);
+                for id in exploration {
+                    if selected.len() >= self.capacity_cache.candidate_limit() {
+                        break;
+                    }
+                    selected.insert(id);
+                }
+                sorted_accounts.retain(|a| selected.contains(&a.id));
+            }
+            use futures::StreamExt;
+            let ids: Vec<_> = sorted_accounts.iter().map(|a| a.id).collect();
+            let capacity = Arc::clone(capacity);
+            let cache = Arc::clone(&self.capacity_cache);
+            let mut snapshots = futures::stream::iter(ids.into_iter().map(move |id| {
+                let capacity = Arc::clone(&capacity);
+                let cache = Arc::clone(&cache);
+                async move {
+                    cache
+                        .snapshot(capacity.as_ref(), id)
+                        .await
+                        .map(|load| (id, load))
+                }
+            }))
+            .buffer_unordered(8);
+            while let Some(snapshot) = snapshots.next().await {
+                let (id, load) = snapshot?;
+                loads.insert(id, load);
+            }
+        }
         let score = |account: &Account| account_capacity_score(account, loads.get(&account.id));
         sorted_accounts.sort_by(|a, b| {
             let a_health = self.provider_health.account_health_for(a);
@@ -1767,5 +1823,56 @@ mod tests {
             result,
             Err(KeyComputeError::ServiceUnavailable(_))
         ));
+    }
+    #[derive(Debug, Default)]
+    struct CountingCapacity(std::sync::atomic::AtomicUsize);
+    #[async_trait::async_trait]
+    impl keycompute_types::AccountCapacityPolicy for CountingCapacity {
+        async fn snapshot(&self, _: Uuid) -> Result<keycompute_types::AccountCapacitySnapshot> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(keycompute_types::AccountCapacitySnapshot {
+                in_flight_limit: 32,
+                ..Default::default()
+            })
+        }
+        async fn admit(
+            &self,
+            _: &RequestContext,
+            _: &ExecutionTarget,
+        ) -> Result<Box<dyn keycompute_types::AccountAttemptLease>> {
+            panic!("no admission while routing")
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn capacity_sampler_bounds_cold_work_and_visits_all_accounts() {
+        let policy = Arc::new(CountingCapacity::default());
+        let engine = create_test_engine().with_account_capacity(policy.clone());
+        let accounts: Vec<_> = (0..100)
+            .map(|_| create_test_account("openai", "http://mock", 10))
+            .collect();
+        let first = engine
+            .select_best_accounts(
+                "openai",
+                accounts.clone(),
+                AccountApiCapability::ChatCompletions,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 3);
+        assert_eq!(policy.0.load(std::sync::atomic::Ordering::SeqCst), 32);
+        let mut chosen = std::collections::HashSet::from([target_id(&first[0])]);
+        for _ in 1..100 {
+            let result = engine
+                .select_best_accounts(
+                    "openai",
+                    accounts.clone(),
+                    AccountApiCapability::ChatCompletions,
+                )
+                .await
+                .unwrap();
+            chosen.insert(target_id(&result[0]));
+        }
+        assert_eq!(chosen.len(), 100);
+        assert_eq!(policy.0.load(std::sync::atomic::Ordering::SeqCst), 100);
     }
 }
