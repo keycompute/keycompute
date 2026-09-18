@@ -160,9 +160,10 @@ COPY --from=wasm-builder /app/target/dx/web/release/web/public /usr/share/nginx/
 # Nginx 默认端口
 EXPOSE 80
 
-# 健康检查
+# Local liveness must bypass runtime proxies, including with BusyBox wget.
+# Keep the exec-form probe aligned with both production Compose layouts.
+# Discard the body, but preserve HTTP/connection failures and stderr diagnostics.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -qO- http://127.0.0.1/health.txt 2>/dev/null || \
-        wget -qO- http://127.0.0.1/ 2>/dev/null | grep -q "html" || exit 1
+    CMD ["wget", "-Y", "off", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
 
 CMD ["nginx", "-g", "daemon off;"]

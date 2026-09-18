@@ -392,6 +392,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test proxy-independent Web healthchecks
+        run: python3 scripts/tests/web_healthcheck_test.py
+
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: "web"

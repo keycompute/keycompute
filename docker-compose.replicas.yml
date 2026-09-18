@@ -523,7 +523,9 @@ services:
       - keycompute-public
       - keycompute-internal
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      # Local liveness must not depend on runtime HTTP(S)_PROXY/NO_PROXY.
+      # Keep this probe aligned with Dockerfile.web and the other Compose layout.
+      test: ["CMD", "wget", "-Y", "off", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
       interval: 30s
       timeout: 5s
       retries: 3
