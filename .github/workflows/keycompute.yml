@@ -59,6 +59,7 @@ env:
   # ── Redis (CI runs without password auth) ─────────────────────────────────
   KC__REDIS__URL: redis://127.0.0.1:6379
   REDIS_URL: redis://127.0.0.1:6379
+  CACHE_REDIS_URL: redis://127.0.0.1:6380
 
   # ── Auth ──────────────────────────────────────────────────────────────────
   KC__AUTH__JWT_SECRET: ci-test-jwt-secret-key-at-least-32-chars-long
@@ -82,6 +83,8 @@ jobs:
   # ============================================================================
   server:
     runs-on: ubuntu-latest
+    env:
+      FAULT_REDIS_URL: redis://127.0.0.1:6381
 
     services:
       # Primary PostgreSQL (configured for streaming replication in setup step)
@@ -111,8 +114,38 @@ jobs:
           --health-timeout 5s
           --health-retries 5
 
+      fault_redis:
+        image: redis:7-alpine
+        ports:
+          - 6381:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      cache_redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Mark isolated fault-injection Redis
+        run: |
+          docker exec "${{ job.services.fault_redis.id }}" redis-cli SET keycompute:test:fault-instance disposable-redis-v1
+
+      - name: Configure isolated disposable cache Redis
+        run: |
+          # Only CI's explicitly named cache container is modified.
+          docker exec "${{ job.services.cache_redis.id }}" redis-cli \
+            CONFIG SET maxmemory 8mb maxmemory-policy allkeys-lru
 
       - name: Validate Compose configurations
         run: |

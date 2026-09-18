@@ -555,7 +555,18 @@ async fn unresponsive_brpop_peer(
             assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
             return;
         }
-        let response = if args[0].eq_ignore_ascii_case(b"PING") {
+        let response = if args[0].eq_ignore_ascii_case(b"INFO") {
+            let section = args.get(1).expect("INFO section");
+            let value = if section.eq_ignore_ascii_case(b"server") {
+                format!("redis_version:7.0.0\r\nrun_id:{}\r\n", "a".repeat(40))
+            } else if section.eq_ignore_ascii_case(b"memory") {
+                "maxmemory:1048576\r\nmaxmemory_policy:noeviction\r\n".into()
+            } else {
+                assert!(section.eq_ignore_ascii_case(b"replication"));
+                "role:master\r\n".into()
+            };
+            format!("${}\r\n{}\r\n", value.len(), value)
+        } else if args[0].eq_ignore_ascii_case(b"PING") {
             args.get(1).map_or_else(
                 || "+PONG\r\n".to_string(),
                 |value| format!("${}\r\n{}\r\n", value.len(), String::from_utf8_lossy(value)),

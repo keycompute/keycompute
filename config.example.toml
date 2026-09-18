@@ -72,6 +72,11 @@ max_lifetime_secs = 1800
 
 # ==================== Redis 配置（可选）====================
 [redis]
+# Critical state endpoint must use maxmemory-policy noeviction.
+# Cache must be a different Redis server, not just another logical database.
+cache_url = "redis://:change-me-cache-redis-password@127.0.0.1:6380"
+cache_pool_size = 10
+cache_timeout_ms = 500
 # Redis 连接 URL（注意：需要包含密码，格式：redis://:password@host:port）
 # 生产模式通过 KC__REDIS__URL 提供对应配置
 url = "redis://:change-me-redis-password@127.0.0.1:6379"

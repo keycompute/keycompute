@@ -236,7 +236,7 @@ impl RedisRateLimiter {
             std::sync::OnceLock::new();
         let script = SCRIPT.get_or_init(|| {
             deadpool_redis::redis::Script::new(
-                r#"
+                r#"#!lua flags=allow-oom
             local clock = redis.call('TIME')
             local now = tonumber(clock[1])
             redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now-tonumber(ARGV[1]))
@@ -259,7 +259,7 @@ impl RedisRateLimiter {
 
     /// Lua 脚本：原子地检查并记录请求
     /// 返回 1 表示成功，0 表示限流
-    const CHECK_AND_RECORD_SCRIPT: &str = r#"
+    const CHECK_AND_RECORD_SCRIPT: &str = r#"#!lua
         local key = KEYS[1]
         local clock = redis.call('TIME')
         local now = tonumber(clock[1])
@@ -291,7 +291,7 @@ impl RedisRateLimiter {
     /// encoded as `kind:tokens`, where kind is `r` (reserved) or `t`
     /// (terminal). Expiry lives in a separate sorted set and the aggregate is
     /// maintained incrementally, so cleanup is O(number of expired records).
-    const RESERVE_TOKENS_SCRIPT: &str = r#"
+    const RESERVE_TOKENS_SCRIPT: &str = r#"#!lua
         local records_key = KEYS[1]
         local expirations_key = KEYS[2]
         local total_key = KEYS[3]
@@ -442,7 +442,7 @@ impl RedisRateLimiter {
     /// Atomically replace a pending reservation with actual terminal usage, or
     /// insert terminal usage when no reservation exists. A repeated terminal
     /// replay is a no-op, including the zero-token case.
-    const RECONCILE_TOKENS_SCRIPT: &str = r#"
+    const RECONCILE_TOKENS_SCRIPT: &str = r#"#!lua
         local records_key = KEYS[1]
         local expirations_key = KEYS[2]
         local total_key = KEYS[3]
@@ -626,7 +626,7 @@ impl RedisRateLimiter {
 
     /// Idempotently release a still-pending reservation. Terminal usage is an
     /// immutable dedupe tombstone for the remainder of its TPM window.
-    const RELEASE_TOKENS_SCRIPT: &str = r#"
+    const RELEASE_TOKENS_SCRIPT: &str = r#"#!lua flags=allow-oom
         local records_key = KEYS[1]
         local expirations_key = KEYS[2]
         local total_key = KEYS[3]
@@ -701,7 +701,7 @@ impl RedisRateLimiter {
                 end
                 redis.call('DEL', records_key, expirations_key, total_key)
             else
-                redis.call('SET', total_key, tostring(total))
+                redis.call('SET', total_key, tostring(total), 'XX', 'KEEPTTL')
                 redis.call('EXPIRE', records_key, expire_secs)
                 redis.call('EXPIRE', expirations_key, expire_secs)
                 redis.call('EXPIRE', total_key, expire_secs)
@@ -745,7 +745,7 @@ impl RedisRateLimiter {
             end
             redis.call('DEL', records_key, expirations_key, total_key)
         else
-            redis.call('SET', total_key, tostring(total))
+            redis.call('SET', total_key, tostring(total), 'XX', 'KEEPTTL')
             redis.call('EXPIRE', records_key, expire_secs)
             redis.call('EXPIRE', expirations_key, expire_secs)
             redis.call('EXPIRE', total_key, expire_secs)
@@ -755,7 +755,7 @@ impl RedisRateLimiter {
 
     /// Lua 脚本：获取当前窗口 Token 总和
     /// Prune only expired request records and return the maintained aggregate.
-    const GET_TOKEN_COUNT_SCRIPT: &str = r#"
+    const GET_TOKEN_COUNT_SCRIPT: &str = r#"#!lua flags=allow-oom
         local records_key = KEYS[1]
         local expirations_key = KEYS[2]
         local total_key = KEYS[3]
@@ -828,7 +828,7 @@ impl RedisRateLimiter {
             end
             redis.call('DEL', records_key, expirations_key, total_key)
         else
-            redis.call('SET', total_key, tostring(total))
+            redis.call('SET', total_key, tostring(total), 'XX', 'KEEPTTL')
             redis.call('EXPIRE', records_key, expire_secs)
             redis.call('EXPIRE', expirations_key, expire_secs)
             redis.call('EXPIRE', total_key, expire_secs)
@@ -1230,6 +1230,32 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(exists, 0, "empty TPM state left key {redis_key} behind");
+        }
+    }
+
+    #[test]
+    fn redis_growth_scripts_reject_oom_before_mutating_and_cleanup_adds_no_records() {
+        for script in [
+            RedisRateLimiter::CHECK_AND_RECORD_SCRIPT,
+            RedisRateLimiter::RESERVE_TOKENS_SCRIPT,
+            RedisRateLimiter::RECONCILE_TOKENS_SCRIPT,
+        ] {
+            assert_eq!(script.lines().next(), Some("#!lua"));
+            assert!(!script.contains("allow-oom"));
+        }
+        for script in [
+            RedisRateLimiter::RELEASE_TOKENS_SCRIPT,
+            RedisRateLimiter::GET_TOKEN_COUNT_SCRIPT,
+        ] {
+            assert_eq!(script.lines().next(), Some("#!lua flags=allow-oom"));
+            assert!(!script.contains("redis.call('HSET'"));
+            assert!(!script.contains("redis.call('ZADD'"));
+            for line in script
+                .lines()
+                .filter(|line| line.contains("redis.call('SET'"))
+            {
+                assert!(line.contains("'XX', 'KEEPTTL'"));
+            }
         }
     }
 

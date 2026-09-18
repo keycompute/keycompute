@@ -8,3 +8,7 @@ services:
   redis:
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+
+  redis-cache:
+    ports:
+      - "127.0.0.1:${CACHE_REDIS_PORT:-6380}:6379"

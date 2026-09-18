@@ -61,7 +61,7 @@ pub type LockResult<T> = std::result::Result<T, LockError>;
 /// KEYS[1] = lock key
 /// ARGV[1] = expected lock value (UUID)
 /// Returns: 1 if deleted, 0 if value mismatch (lock already expired or re-acquired)
-const SAFE_RELEASE_SCRIPT: &str = r#"
+const SAFE_RELEASE_SCRIPT: &str = r#"#!lua flags=allow-oom
 if redis.call("GET", KEYS[1]) == ARGV[1] then
     return redis.call("DEL", KEYS[1])
 else

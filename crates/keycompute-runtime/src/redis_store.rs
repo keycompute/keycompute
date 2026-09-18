@@ -27,6 +27,33 @@ pub enum RedisStoreError {
     CreatePoolError(String),
 }
 
+fn storage_role_hook(
+    role: crate::redis_roles::RedisConnectionRole,
+    budget: Duration,
+    response_timeout: Duration,
+) -> deadpool_redis::Hook {
+    deadpool_redis::Hook::async_fn(move |connection, _| {
+        let role = role.clone();
+        Box::pin(async move {
+            if matches!(role, crate::redis_roles::RedisConnectionRole::Unrestricted) {
+                return Ok(());
+            }
+            connection.set_response_timeout(budget);
+            let result = tokio::time::timeout(
+                budget,
+                crate::redis_roles::validate_connection(connection, &role),
+            )
+            .await;
+            connection.set_response_timeout(response_timeout);
+            result
+                .map_err(|_| {
+                    deadpool_redis::HookError::message("Redis storage-role verification timed out")
+                })?
+                .map_err(deadpool_redis::HookError::Backend)
+        })
+    })
+}
+
 /// Redis 运行时存储
 #[derive(Debug, Clone)]
 pub struct RedisRuntimeStore {
@@ -131,6 +158,27 @@ impl RedisRuntimeStore {
         wait_timeout: Duration,
         response_timeout: Duration,
     ) -> Result<Pool, RedisStoreError> {
+        Self::create_pool_with_role(
+            redis_url,
+            pool_size,
+            connect_timeout,
+            wait_timeout,
+            response_timeout,
+            crate::redis_roles::RedisConnectionRole::Unrestricted,
+        )
+    }
+
+    /// Role checks run on creation AND every pooled checkout. Invalid idle
+    /// sockets are discarded, not silently reused after policy/role drift.
+    /// Already checked-out commands still require restrictive production ACLs.
+    pub fn create_pool_with_role(
+        redis_url: &str,
+        pool_size: usize,
+        connect_timeout: Duration,
+        wait_timeout: Duration,
+        response_timeout: Duration,
+        role: crate::redis_roles::RedisConnectionRole,
+    ) -> Result<Pool, RedisStoreError> {
         if pool_size == 0
             || pool_size > 65_536
             || connect_timeout.is_zero()
@@ -160,6 +208,16 @@ impl RedisRuntimeStore {
                 connection.set_response_timeout(response_timeout);
                 Ok(())
             }))
+            .post_create(storage_role_hook(
+                role.clone(),
+                connect_timeout.min(Duration::from_secs(5)),
+                response_timeout,
+            ))
+            .post_recycle(storage_role_hook(
+                role,
+                wait_timeout.min(Duration::from_secs(5)),
+                response_timeout,
+            ))
             .build()
             .map_err(|e| RedisStoreError::CreatePoolError(e.to_string()))
     }

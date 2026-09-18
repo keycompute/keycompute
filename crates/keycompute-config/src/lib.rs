@@ -460,6 +460,10 @@ impl AppConfig {
 
         // Redis 配置检查
         if let Some(ref redis_config) = self.redis {
+            redis_config
+                .validate_cache_endpoint()
+                .map_err(|message| ConfigLoadError::ValidationError(message.into()))?;
+
             // Redis 已配置，验证配置有效性
             if redis_config.url.is_empty() {
                 return Err(ConfigLoadError::ValidationError(
@@ -468,6 +472,7 @@ impl AppConfig {
             }
             for (name, size) in [
                 ("pool_size", redis_config.pool_size),
+                ("cache_pool_size", redis_config.cache_pool_size),
                 ("node_poll_pool_size", redis_config.node_poll_pool_size),
                 ("node_result_pool_size", redis_config.node_result_pool_size),
             ] {
@@ -480,6 +485,7 @@ impl AppConfig {
             for (name, millis) in [
                 ("pool_wait_timeout_ms", redis_config.pool_wait_timeout_ms),
                 ("command_timeout_ms", redis_config.command_timeout_ms),
+                ("cache_timeout_ms", redis_config.cache_timeout_ms),
             ] {
                 if millis == 0 || millis > 60_000 {
                     return Err(ConfigLoadError::ValidationError(format!(
@@ -2039,5 +2045,33 @@ mod tests {
         );
         assert_eq!(a.queue_timeout_ms, 123);
         assert!(a.validate().is_ok());
+    }
+    #[test]
+    #[serial]
+    fn production_cache_endpoint_is_optional_and_parses_distinct_budgets() {
+        let _env = EnvVarGuard::set(&[
+            ("KC__REDIS__URL", "redis://critical.internal:6379"),
+            ("KC__REDIS__CACHE_URL", "redis://cache.internal:6379"),
+            ("KC__REDIS__CACHE_POOL_SIZE", "7"),
+            ("KC__REDIS__CACHE_TIMEOUT_MS", "123"),
+        ]);
+        let redis = AppConfig::load_production().unwrap().redis.unwrap();
+        assert_eq!(
+            redis.cache_url.as_deref(),
+            Some("redis://cache.internal:6379")
+        );
+        assert_eq!(redis.cache_pool_size, 7);
+        assert_eq!(redis.cache_timeout_ms, 123);
+        assert!(redis.validate_cache_endpoint().is_ok());
+    }
+    #[test]
+    #[serial]
+    fn explicitly_empty_cache_environment_disables_optional_cache() {
+        let _env = EnvVarGuard::set(&[
+            ("KC__REDIS__URL", "redis://critical.internal:6379"),
+            ("KC__REDIS__CACHE_URL", ""),
+        ]);
+        let redis = AppConfig::load_production().unwrap().redis.unwrap();
+        assert!(redis.cache_url.is_none());
     }
 }

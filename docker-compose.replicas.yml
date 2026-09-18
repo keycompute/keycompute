@@ -269,7 +269,7 @@ services:
       - postgres-replica2-data:/var/lib/postgresql/data
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Redis — 缓存与限流存储
+  # Redis — 关键状态（限流、账号配额、节点队列、亲和性）
   # ─────────────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
@@ -279,9 +279,10 @@ services:
       redis-server
       --requirepass ${REDIS_PASSWORD:-change-me-redis-password}
       --maxmemory 256mb
-      --maxmemory-policy allkeys-lru
+      --maxmemory-policy noeviction
       --save 60 1000
       --appendonly yes
+      --appendfsync everysec
     volumes:
       - redis_data:/data
     networks:
@@ -295,7 +296,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256m
+          memory: 768m
           cpus: "0.5"
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -304,6 +305,37 @@ services:
   # 通过 KC__DATABASE_READ_URLS 将 SELECT 查询路由到两个从库，
   # 写操作（INSERT/UPDATE/DELETE）自动走主库。
   # ─────────────────────────────────────────────────────────────────────────
+  # Disposable cache: no persistent state, finite evictable budget, own process.
+  # It is deliberately not a mandatory backend startup dependency.
+  redis-cache:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${CACHE_REDIS_PASSWORD:-change-me-cache-redis-password}
+      - --maxmemory
+      - 128mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    networks:
+      - keycompute-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${CACHE_REDIS_PASSWORD:-change-me-cache-redis-password}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+          cpus: "0.5"
+
   keycompute-server:
     build:
       context: .
@@ -363,6 +395,10 @@ services:
       KC__REDIS__NODE_RESULT_POOL_SIZE: ${KC__REDIS__NODE_RESULT_POOL_SIZE:-10}
       KC__REDIS__POOL_WAIT_TIMEOUT_MS: ${KC__REDIS__POOL_WAIT_TIMEOUT_MS:-1000}
       KC__REDIS__COMMAND_TIMEOUT_MS: ${KC__REDIS__COMMAND_TIMEOUT_MS:-5000}
+      # An explicitly empty override disables L2 caching; never use critical Redis as fallback.
+      KC__REDIS__CACHE_URL: "${KC__REDIS__CACHE_URL-redis://:${CACHE_REDIS_PASSWORD:-change-me-cache-redis-password}@redis-cache:6379}"
+      KC__REDIS__CACHE_POOL_SIZE: ${KC__REDIS__CACHE_POOL_SIZE:-10}
+      KC__REDIS__CACHE_TIMEOUT_MS: ${KC__REDIS__CACHE_TIMEOUT_MS:-500}
       KC__GATEWAY__ADMISSION__GLOBAL_LIMIT: ${KC__GATEWAY__ADMISSION__GLOBAL_LIMIT:-256}
       KC__GATEWAY__ADMISSION__TENANT_LIMIT: ${KC__GATEWAY__ADMISSION__TENANT_LIMIT:-32}
       KC__GATEWAY__ADMISSION__ACCOUNT_LIMIT: ${KC__GATEWAY__ADMISSION__ACCOUNT_LIMIT:-32}

@@ -16,3 +16,6 @@ pub use crypto::{
 pub use redis_store::{RedisPoolConfig, RedisRuntimeStore, RedisStoreError};
 
 pub mod admission;
+
+#[cfg(feature = "redis")]
+pub mod redis_roles;

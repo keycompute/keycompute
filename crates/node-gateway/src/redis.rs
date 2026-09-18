@@ -55,13 +55,13 @@ impl Drop for BlockingConnection {
 // but make recovery publication idempotent. The script is atomic with BRPOP:
 // it publishes one fresh occurrence after removing every stale queued copy
 // (a blocked consumer may take that occurrence immediately).
-const REPLACE_MODEL_QUEUE_ENTRY_SCRIPT: &str = r#"
+const REPLACE_MODEL_QUEUE_ENTRY_SCRIPT: &str = r#"#!lua
 local removed = redis.call('LREM', KEYS[1], 0, ARGV[1])
 redis.call('LPUSH', KEYS[1], ARGV[1])
 return removed
 "#;
 
-const PUSH_RESULT_NOTIFICATION_SCRIPT: &str = r#"
+const PUSH_RESULT_NOTIFICATION_SCRIPT: &str = r#"#!lua
 redis.call('DEL', KEYS[1])
 redis.call('LPUSH', KEYS[1], ARGV[1])
 redis.call('EXPIRE', KEYS[1], ARGV[2])
@@ -83,12 +83,13 @@ impl NodeGatewayRedis {
     /// Both pools use the same configured Redis endpoint/database as producers.
     pub fn new(redis: Arc<RedisRuntimeStore>, config: &RedisConfig) -> anyhow::Result<Self> {
         let make_pool = |size| {
-            RedisRuntimeStore::create_pool_with_timeouts(
+            RedisRuntimeStore::create_pool_with_role(
                 &config.url,
                 size,
                 Duration::from_secs(config.connect_timeout_secs),
                 Duration::from_millis(config.pool_wait_timeout_ms),
                 Duration::from_millis(config.command_timeout_ms),
+                keycompute_runtime::redis_roles::RedisConnectionRole::CriticalState,
             )
         };
         Ok(Self {

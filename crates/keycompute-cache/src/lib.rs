@@ -18,6 +18,7 @@
 //! to callers in normal operations.
 
 pub mod lock;
+mod recovery;
 
 use serde::{Serialize, de::DeserializeOwned};
 use std::time::Duration;
@@ -84,6 +85,8 @@ pub type CacheResult<T> = std::result::Result<T, CacheError>;
 pub struct CacheService {
     pool: Option<RedisPool>,
     key_prefix: String,
+    recovery: Option<std::sync::Arc<recovery::RecoveryGate>>,
+    checkout_timeout: Option<Duration>,
 }
 
 impl std::fmt::Debug for CacheService {
@@ -149,6 +152,8 @@ impl CacheService {
         Self {
             pool: Some(pool),
             key_prefix: DEFAULT_KEY_PREFIX.to_string(),
+            recovery: None,
+            checkout_timeout: None,
         }
     }
 
@@ -160,7 +165,27 @@ impl CacheService {
         Self {
             pool: Some(pool),
             key_prefix: DEFAULT_KEY_PREFIX.to_string(),
+            recovery: None,
+            checkout_timeout: None,
         }
+    }
+
+    /// Retain a role-validated optional pool through startup/runtime outages.
+    /// Actual requests trigger single-flight probes with bounded backoff; there
+    /// is no background task, unbounded queue or fallback to critical Redis.
+    pub fn with_recovering_pool(pool: RedisPool, checkout_timeout: Duration) -> Self {
+        Self {
+            pool: Some(pool),
+            key_prefix: DEFAULT_KEY_PREFIX.to_string(),
+            recovery: Some(std::sync::Arc::new(recovery::RecoveryGate::new())),
+            checkout_timeout: Some(checkout_timeout),
+        }
+    }
+
+    /// Try one bounded checkout, respecting recovery backoff. Unlike
+    /// is_available (configuration only), this actually checks connectivity.
+    pub async fn probe(&self) -> bool {
+        self.get_conn().await.is_some()
     }
 
     /// Create a cache service with a custom key prefix.
@@ -176,6 +201,8 @@ impl CacheService {
         Self {
             pool: None,
             key_prefix: DEFAULT_KEY_PREFIX.to_string(),
+            recovery: None,
+            checkout_timeout: None,
         }
     }
 
@@ -461,7 +488,7 @@ impl CacheService {
         // 1c. If cache is not available, skip lock entirely and recompute directly.
         //     This avoids the costly spin-wait and unnecessary lock_key computation
         //     when Redis is intentionally disabled (no-op mode).
-        if !self.is_available() {
+        if !self.is_available() || self.recovery.as_ref().is_some_and(|gate| gate.is_blocked()) {
             let val = f
                 .await
                 .map_err(|e| CacheError::FallbackFailed(format!("Fallback failed: {}", e)))?;
@@ -470,15 +497,25 @@ impl CacheService {
 
         // 2. Try to acquire distributed lock
         let lock_key = format!("{}lock:{}", self.key_prefix, key);
-        let _guard: Option<lock::LockGuard> = match lock::LockGuard::acquire(
+        let acquisition = lock::LockGuard::acquire(
             self.pool.as_ref(),
             &lock_key,
             lock_ttl_secs,
             max_retries,
             retry_delay,
-        )
-        .await
-        {
+        );
+        let acquired = if let Some(budget) = self.checkout_timeout {
+            tokio::time::timeout(budget, acquisition)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(lock::LockError::LockFailed(
+                        "optional cache lock deadline exceeded".into(),
+                    ))
+                })
+        } else {
+            acquisition.await
+        };
+        let _guard: Option<lock::LockGuard> = match acquired {
             Ok(Some(lock::AcquireResult::Acquired(guard))) => {
                 // Lock acquired — only this request will recompute.
 
@@ -603,9 +640,28 @@ impl CacheService {
 
     /// Get a Redis connection from the pool, or `None` in no-op mode.
     async fn get_conn(&self) -> Option<deadpool_redis::Connection> {
+        let probe = match self.recovery.as_ref() {
+            Some(gate) => Some(gate.begin()?),
+            None => None,
+        };
         match self.pool.as_ref() {
-            Some(pool) => match pool.get().await {
-                Ok(conn) => Some(conn),
+            Some(pool) => match if let Some(budget) = self.checkout_timeout {
+                match tokio::time::timeout(budget, pool.get()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::warn!("Optional cache checkout exceeded its total deadline");
+                        return None;
+                    }
+                }
+            } else {
+                pool.get().await
+            } {
+                Ok(conn) => {
+                    if let Some(probe) = probe {
+                        probe.succeeded();
+                    }
+                    Some(conn)
+                }
                 Err(e) => {
                     tracing::warn!("CacheService: failed to get connection from pool: {:?}", e);
                     None
@@ -631,24 +687,36 @@ mod tests {
     // ── helpers ────────────────────────────────────────────────────────
 
     async fn create_test_pool(db: u8) -> Option<deadpool_redis::Pool> {
-        let url = format!("redis://127.0.0.1:6379/{}", db);
-        let mut cfg = deadpool_redis::Config::from_url(&url);
-        cfg.pool = Some(deadpool_redis::PoolConfig {
-            max_size: 2,
-            ..Default::default()
-        });
-        let pool = cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
-        // Validate connection by sending PING
-        let mut conn = pool.get().await.ok()?;
-        let pong: Result<String, _> = deadpool_redis::redis::cmd("PING")
-            .query_async(&mut conn)
-            .await;
-        if pong.is_err() {
-            return None;
+        let base = std::env::var("REDIS_URL")
+            .or_else(|_| std::env::var("KC__REDIS__URL"))
+            .unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
+        let mut url = url::Url::parse(&base).expect("valid test Redis URL");
+        url.set_path(&format!("/{db}"));
+        let pool = async {
+            let mut cfg = deadpool_redis::Config::from_url(url.to_string());
+            cfg.pool = Some(deadpool_redis::PoolConfig {
+                max_size: 2,
+                ..Default::default()
+            });
+            let pool = cfg
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .ok()?;
+            // Validate connection by sending PING
+            let mut conn = pool.get().await.ok()?;
+            let pong: Result<String, _> = deadpool_redis::redis::cmd("PING")
+                .query_async(&mut conn)
+                .await;
+            if pong.is_err() {
+                return None;
+            }
+            Some(pool)
         }
-        Some(pool)
+        .await;
+        assert!(
+            pool.is_some() || std::env::var_os("CI").is_none(),
+            "configured test Redis is required in CI for cache tests"
+        );
+        pool
     }
 
     // ── no-op mode: CacheService::disabled ─────────────────────────────

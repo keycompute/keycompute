@@ -757,7 +757,7 @@ pub(super) async fn cache_response_affinity_best_effort(
         tracing::warn!("Responses affinity local map is full; skipping local cache entry");
     }
     if let Err(error) = state
-        .cache
+        .runtime_state
         .set(
             &affinity_cache_key(affinity.tenant_id, response_id),
             &affinity,
@@ -1255,7 +1255,7 @@ pub(super) async fn response_affinity(
             affinity
         } else {
             state
-                .cache
+                .runtime_state
                 .get::<ResponsesAffinity>(&affinity_cache_key(tenant_id, response_id))
                 .await
                 .map_err(|error| {
@@ -1328,7 +1328,7 @@ pub(super) async fn delete_response_affinity(
         .await
         .remove(&affinity_storage_key(tenant_id, response_id));
     if let Err(error) = state
-        .cache
+        .runtime_state
         .delete(&affinity_cache_key(tenant_id, response_id))
         .await
     {

@@ -285,6 +285,8 @@ pub struct AppState {
     pub node_gateway: Option<Arc<NodeGatewayService>>,
     /// 统一缓存服务（Redis 不可用时自动降级为 no-op）
     pub cache: Arc<CacheService>,
+    /// Critical Redis state (for example Responses affinity), never evictable cache.
+    pub runtime_state: Arc<CacheService>,
     /// Process-local fallback for Responses resource affinity. Redis mirrors
     /// these entries when configured; the local map keeps the API functional
     /// in installations intentionally running without Redis.
@@ -323,7 +325,8 @@ impl std::fmt::Debug for AppState {
                 "node_gateway",
                 &self.node_gateway.as_ref().map(|_| "<NodeGatewayService>"),
             )
-            .field("cache", &"<CacheService>")
+            .field("cache", &"<DisposableCache>")
+            .field("runtime_state", &"<CriticalStateStore>")
             .field("responses_affinity", &"<ResponsesAffinityMap>")
             .field(
                 "responses_websocket_admission",
@@ -434,6 +437,7 @@ impl AppState {
             payment: None,      // 支付服务需要数据库连接
             node_gateway: None, // 节点网关需要数据库连接和 Redis
             cache,
+            runtime_state: Self::create_disabled_cache(),
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
@@ -449,12 +453,12 @@ impl AppState {
         Arc::new(CacheService::disabled())
     }
 
-    /// 创建缓存服务（Redis pool available 时使用共享连接池，否则 no-op 降级）
+    /// Wrap the critical state pool. Price caches are initialized separately only after role verification.
     #[cfg(feature = "redis")]
-    fn create_cache_service(pool: Option<deadpool_redis::Pool>) -> Arc<CacheService> {
+    fn create_runtime_state_store(pool: Option<deadpool_redis::Pool>) -> Arc<CacheService> {
         match pool {
             Some(pool) => {
-                tracing::info!("Cache service using shared Redis backend");
+                tracing::info!("Critical runtime state using non-evictable Redis backend");
                 Arc::new(CacheService::with_pool(pool))
             }
             None => {
@@ -499,12 +503,16 @@ impl AppState {
     fn create_redis_command_pool(
         redis: &keycompute_config::RedisConfig,
     ) -> Result<deadpool_redis::Pool, keycompute_runtime::redis_store::RedisStoreError> {
-        keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_timeouts(
+        redis.validate_cache_endpoint().map_err(|message| {
+            keycompute_runtime::redis_store::RedisStoreError::CreatePoolError(message.into())
+        })?;
+        keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_role(
             &redis.url,
             redis.pool_size as usize,
             Duration::from_secs(redis.connect_timeout_secs),
             Duration::from_millis(redis.pool_wait_timeout_ms),
             Duration::from_millis(redis.command_timeout_ms),
+            keycompute_runtime::redis_roles::RedisConnectionRole::CriticalState,
         )
     }
 
@@ -605,7 +613,13 @@ impl AppState {
         config: AppStateConfig,
     ) -> crate::error::Result<Self> {
         let requires_redis = matches!(&config.rate_limit, RateLimitBackendConfig::Redis(_));
-        let state = Self::build_with_pool_and_config(pool, config)?;
+        #[cfg(feature = "redis")]
+        let redis_config = match &config.rate_limit {
+            RateLimitBackendConfig::Redis(redis) => Some(redis.clone()),
+            _ => None,
+        };
+        #[cfg_attr(not(feature = "redis"), allow(unused_mut))]
+        let mut state = Self::build_with_pool_and_config(pool, config)?;
         if requires_redis {
             if state.rate_limiter.backend() != keycompute_ratelimit::RateLimitBackend::Redis {
                 return Err(crate::error::ApiError::Config(
@@ -636,7 +650,74 @@ impl AppState {
                     ))
                 })?;
         }
+        #[cfg(feature = "redis")]
+        if let Some(redis) = redis_config {
+            state.initialize_optional_cache(&redis).await?;
+        }
         Ok(state)
+    }
+
+    #[cfg(feature = "redis")]
+    async fn initialize_optional_cache(
+        &mut self,
+        config: &keycompute_config::RedisConfig,
+    ) -> crate::error::Result<()> {
+        let Some(url) = config.cache_url.as_deref() else {
+            tracing::info!(
+                "Disposable Redis cache is disabled; critical Redis is not a fallback cache"
+            );
+            return Ok(());
+        };
+        // Cache verification has its OWN one-connection metadata pool. Cache
+        // reconnect storms must not borrow the limiter/producer command slots.
+        let budget = Duration::from_millis(config.cache_timeout_ms);
+        let critical_pool =
+            keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_role(
+                &config.url,
+                1,
+                budget,
+                budget,
+                budget,
+                keycompute_runtime::redis_roles::RedisConnectionRole::CriticalState,
+            )
+            .map_err(|error| {
+                crate::error::ApiError::Config(format!(
+                    "cache identity verification pool could not initialize: {error}"
+                ))
+            })?;
+        let pool = keycompute_runtime::redis_store::RedisRuntimeStore::create_pool_with_role(
+            url,
+            config.cache_pool_size as usize,
+            budget,
+            budget,
+            budget,
+            keycompute_runtime::redis_roles::RedisConnectionRole::EvictableCache { critical_pool },
+        )
+        .map_err(|error| {
+            crate::error::ApiError::Config(format!(
+                "configured cache Redis pool could not initialize: {error}"
+            ))
+        })?;
+        let cache = Arc::new(CacheService::with_recovering_pool(pool, budget));
+        match tokio::time::timeout(budget.saturating_mul(3), cache.probe()).await {
+            Ok(true) => {
+                tracing::info!("Disposable cache Redis verified as a distinct evictable server")
+            }
+            _ => tracing::warn!(
+                "Optional cache Redis unavailable or unsafe; requests use bounded recovery probes, never critical Redis"
+            ),
+        }
+        // Keep the configured pool even after a failed first probe. Shared
+        // cache clones resume automatically once a later checkout verifies it.
+        self.pricing = Arc::new(
+            self.pricing
+                .as_ref()
+                .clone()
+                .with_dist_cache(Arc::clone(&cache)),
+        );
+        self.cache = cache;
+
+        Ok(())
     }
 
     fn build_with_pool_and_config(
@@ -718,7 +799,7 @@ impl AppState {
             Arc::new(crate::lifecycle_metrics::MetricsRequestLifecycleRecorder::new(database));
 
         #[cfg(feature = "redis")]
-        let (rate_limiter, node_gateway, cache, account_quotas) = {
+        let (rate_limiter, node_gateway, cache, account_quotas, runtime_state) = {
             let shared_redis_pool = match &config.rate_limit {
                 RateLimitBackendConfig::Redis(redis) => {
                     Some(Self::create_redis_command_pool(redis).map_err(|error| {
@@ -782,13 +863,20 @@ impl AppState {
                 ),
             }
             .map_err(crate::error::ApiError::from)?;
-            let cache = Self::create_cache_service(shared_redis_pool);
+            let runtime_state = Self::create_runtime_state_store(shared_redis_pool);
+            let cache = Self::create_disabled_cache();
 
-            (rate_limiter, node_gateway, cache, account_quotas)
+            (
+                rate_limiter,
+                node_gateway,
+                cache,
+                account_quotas,
+                runtime_state,
+            )
         };
 
         #[cfg(not(feature = "redis"))]
-        let (rate_limiter, node_gateway, cache, account_quotas) = {
+        let (rate_limiter, node_gateway, cache, account_quotas, runtime_state) = {
             if matches!(&config.rate_limit, RateLimitBackendConfig::Redis(_)) {
                 return Err(crate::error::ApiError::Config(
                     "Redis rate limiter is configured, but this server was built without Redis support"
@@ -805,6 +893,7 @@ impl AppState {
                     account_lease_window,
                 )
                 .map_err(crate::error::ApiError::from)?,
+                Self::create_disabled_cache(),
             )
         };
 
@@ -847,6 +936,7 @@ impl AppState {
             payment,
             node_gateway,
             cache,
+            runtime_state,
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
@@ -952,6 +1042,7 @@ impl AppState {
             payment: None,      // 测试环境不需要支付服务
             node_gateway: None, // 测试环境不需要节点网关
             cache,
+            runtime_state: Self::create_disabled_cache(),
             responses_affinity: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
@@ -1072,6 +1163,7 @@ mod tests {
                 node_result_pool_size: 13,
                 pool_wait_timeout_ms: 200,
                 command_timeout_ms: 400,
+                ..keycompute_config::RedisConfig::default()
             }),
             ..keycompute_config::AppConfig::default()
         };
