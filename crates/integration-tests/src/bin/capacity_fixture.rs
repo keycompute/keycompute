@@ -74,6 +74,17 @@ async fn main() -> anyhow::Result<()> {
             let tenants = setting("KC_LAB_TENANTS", 4, 32)?;
             let users = setting("KC_LAB_USERS", 2, 16)?;
             let accounts = setting("KC_LAB_ACCOUNTS", 8, 128)?;
+            let protocol = env::var("KC_LAB_PROTOCOL").unwrap_or_else(|_| "chat".into());
+            ensure!(
+                ["chat", "responses", "anthropic", "websocket", "node"]
+                    .contains(&protocol.as_str()),
+                "unsupported lab protocol"
+            );
+            let model = if protocol == "anthropic" {
+                "claude-3-5-sonnet"
+            } else {
+                "gpt-4o"
+            };
             let balance = BalanceService::new(DbRouter::single(db.clone()));
             let mut tids = Vec::new();
             let mut keys = Vec::new();
@@ -122,12 +133,51 @@ async fn main() -> anyhow::Result<()> {
                 "capacity-lab",
             );
             let token = jwt.generate_token(admin.id, tids[0], "admin")?;
-            for n in 0..accounts {
+            let node_fixture = if protocol == "node" {
+                let owner = create_test_user(&db, tids[0], "node-owner", &run).await;
+                let node = keycompute_db::models::node::Node::create(
+                    &db,
+                    &keycompute_db::models::node::CreateNodeRequest {
+                        owner_user_id: owner.id,
+                        client_instance_id: format!("lab-{id}"),
+                        display_name: "Disposable capacity node".into(),
+                        capabilities_json: json!({"runtime":"ollama","models":[{"model":model}]}),
+                    },
+                )
+                .await?;
+                let session_token =
+                    format!("lab-{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+                let session = keycompute_db::models::node_session::NodeSession::create(
+                    &db,
+                    &keycompute_db::models::node_session::CreateNodeSessionRequest {
+                        node_id: node.id,
+                        session_token_hash: hex::encode(Sha256::digest(session_token.as_bytes())),
+                        expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
+                        accepted_models_json: json!([model]),
+                    },
+                )
+                .await?;
+                db.execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "UPDATE nodes SET status='online',last_heartbeat_at=NOW() WHERE id=$1",
+                    [node.id.into()],
+                ))
+                .await?;
+                json!({"node_id":node.id,"session_id":session.id,"session_token":session_token,"model":model})
+            } else {
+                Value::Null
+            };
+            for n in 0..if protocol == "node" { 0 } else { accounts } {
                 Account::create(
                     &db,
                     &CreateAccountRequest {
                         tenant_id: tids[0],
-                        provider: "openai".into(),
+                        provider: if protocol == "anthropic" {
+                            "anthropic"
+                        } else {
+                            "openai"
+                        }
+                        .into(),
                         name: format!("lab-{n}"),
                         endpoint: "http://model:8080/v1".into(),
                         upstream_api_key_encrypted: keycompute_runtime::encrypt_api_key(
@@ -138,8 +188,15 @@ async fn main() -> anyhow::Result<()> {
                         rpm_limit: Some(1_000_000),
                         tpm_limit: Some(1_000_000_000),
                         priority: Some(0),
-                        models_supported: vec!["gpt-4o".into()],
-                        api_capabilities: vec!["chat_completions".into()],
+                        models_supported: vec![model.into()],
+                        api_capabilities: vec![
+                            match protocol.as_str() {
+                                "anthropic" => "messages",
+                                "responses" | "websocket" => "responses",
+                                _ => "chat_completions",
+                            }
+                            .into(),
+                        ],
                         visibility: Some("global".into()),
                     },
                 )
@@ -147,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
             }
             write_new(
                 &path,
-                &json!({"run":run,"tenant_ids":tids,"keys":keys,"admin_token":token,"model":"gpt-4o"}),
+                &json!({"run":run,"tenant_ids":tids,"keys":keys,"admin_token":token,"model":model,"node":node_fixture}),
             )?;
             println!("Disposable fixture written; credentials are not printed");
         }
@@ -159,10 +216,10 @@ async fn main() -> anyhow::Result<()> {
             );
             let tids: Vec<Uuid> = serde_json::from_value(fixture["tenant_ids"].clone())?;
             let row=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-   "SELECT (SELECT COUNT(*) FROM usage_logs WHERE tenant_id=ANY($1))::BIGINT AS ledger, (SELECT COUNT(*) FROM balance_reservations WHERE tenant_id=ANY($1) AND status='active')::BIGINT AS active, (SELECT COUNT(*) FROM balance_reservations WHERE tenant_id=ANY($1) AND status='settled')::BIGINT AS settled, (SELECT COUNT(*) FROM user_balances WHERE tenant_id=ANY($1) AND (available_balance+frozen_balance+total_consumed<>total_recharged OR frozen_balance<>0))::BIGINT AS inconsistent",[tids.into()])).await?.context("verification row missing")?;
+   "SELECT (SELECT COUNT(*) FROM usage_logs WHERE tenant_id=ANY($1))::BIGINT AS ledger, (SELECT COUNT(*) FROM balance_reservations WHERE tenant_id=ANY($1) AND status='active')::BIGINT AS active, (SELECT COUNT(*) FROM balance_reservations WHERE tenant_id=ANY($1) AND status='settled')::BIGINT AS settled, (SELECT COUNT(*) FROM usage_logs WHERE tenant_id=ANY($1) AND (input_tokens<>8 OR output_tokens<>8))::BIGINT AS invalid_usage, (SELECT COUNT(*) FROM user_balances WHERE tenant_id=ANY($1) AND (available_balance+frozen_balance+total_consumed<>total_recharged OR frozen_balance<>0))::BIGINT AS inconsistent",[tids.into()])).await?.context("verification row missing")?;
             println!(
                 "{}",
-                json!({"ledger":row.try_get::<i64>("","ledger")?,"active":row.try_get::<i64>("","active")?,"settled":row.try_get::<i64>("","settled")?,"inconsistent":row.try_get::<i64>("","inconsistent")?})
+                json!({"ledger":row.try_get::<i64>("","ledger")?,"active":row.try_get::<i64>("","active")?,"settled":row.try_get::<i64>("","settled")?,"inconsistent":row.try_get::<i64>("","inconsistent")?,"invalid_usage":row.try_get::<i64>("","invalid_usage")?})
             );
         }
         _ => anyhow::bail!("expected seed or verify"),

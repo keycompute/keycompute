@@ -3854,7 +3854,12 @@ mod tests {
     async fn repeated_terminal_completion_is_idempotent() {
         let pool = create_test_pool().await;
         let router = keycompute_db::DbRouter::single(pool.clone());
-        let recorder = keycompute_db::PostgresRequestLifecycleRecorder::new(router);
+        // This test checks persistent idempotency, not the production 250 ms
+        // tracing latency budget. Concurrent schema tests can exceed that
+        // budget on shared CI. Keep a finite test deadline; timeout semantics
+        // are independently covered by synchronous_trace_writes_are_time_bounded.
+        let recorder = keycompute_db::PostgresRequestLifecycleRecorder::new(router)
+            .with_synchronous_write_timeout(std::time::Duration::from_secs(5));
         let request_id = Uuid::new_v4();
         let received_at = chrono::Utc::now();
         recorder
@@ -3880,20 +3885,28 @@ mod tests {
             )
             .await
             .expect("request route should be recorded");
+        // PostgreSQL timestamps retain microseconds; use the same precision
+        // for the exact first-terminal timestamp assertion below.
+        let first_finished_at = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros(),
+        )
+        .expect("current timestamp is representable");
         let finish = RequestTraceFinish {
             request_id,
             status: RequestStatus::Succeeded,
             error: None,
             billing_status: BillingStatus::Pending,
-            finished_at: chrono::Utc::now(),
+            finished_at: first_finished_at,
         };
 
         recorder
             .finish_request_without_attempt(finish.clone())
             .await
             .expect("the first terminal completion should succeed");
+        let mut replay = finish;
+        replay.finished_at += chrono::Duration::seconds(1);
         recorder
-            .finish_request_without_attempt(finish)
+            .finish_request_without_attempt(replay)
             .await
             .expect("the repeated terminal completion should be idempotent");
 
@@ -3910,11 +3923,12 @@ mod tests {
             request.try_get::<String>("", "status").unwrap(),
             "succeeded"
         );
-        assert!(
+        assert_eq!(
             request
                 .try_get::<Option<chrono::DateTime<chrono::Utc>>>("", "finished_at")
-                .unwrap()
-                .is_some()
+                .unwrap(),
+            Some(first_finished_at),
+            "replaying a completion must not replace the first terminal timestamp"
         );
 
         delete_gateway_trace(&pool, request_id).await;

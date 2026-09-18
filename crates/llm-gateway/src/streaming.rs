@@ -80,13 +80,9 @@ impl StreamPipeline {
         &self.context
     }
 
-    /// 精确计算 token 数（使用 tiktoken-rs）
+    /// Bounded provisional estimate, replaced by final provider accounting.
     fn estimate_tokens(content: &str) -> u32 {
-        if content.is_empty() {
-            return 0;
-        }
-        let bpe = tiktoken_rs::o200k_base_singleton();
-        bpe.encode_with_special_tokens(content).len() as u32
+        crate::token_estimate::estimate_tokens(content)
     }
 }
 

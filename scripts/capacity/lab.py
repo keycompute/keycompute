@@ -18,6 +18,7 @@ import threading
 import time
 import uuid
 from postgres_probe import PostgresProbe, difference, check_owner
+from protocols import PROTOCOLS
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
@@ -38,6 +39,14 @@ def bounded(value,minimum,maximum,name):
     if not minimum<=value<=maximum:raise ValueError(f'{name} must be {minimum}..{maximum}')
 
 def settings_from_args(args):
+    if not hasattr(args,'fault'):args.fault='none'
+    if args.fault not in ('none','drain-rejoin'):raise ValueError('unsupported lab fault')
+    if args.fault=='drain-rejoin' and (args.replicas<2 or args.seconds<20):raise ValueError('drain-rejoin requires >=2 disposable replicas and >=20 seconds')
+    if not hasattr(args,'protocol'):args.protocol='chat'
+    if not hasattr(args,'response_bytes'):args.response_bytes=0
+    if args.protocol not in PROTOCOLS:raise ValueError('unsupported protocol')
+    if args.protocol=='websocket' and not getattr(args,'websocket_bin',None):raise ValueError('websocket protocol requires a freshly built client binary')
+    bounded(args.response_bytes,0,8*1024*1024,'response_bytes')
     for name,lo,hi in [('rate',1,1000),('seconds',1,3600),('tenants',1,32),('users',1,16),
                       ('accounts',1,128),('replicas',1,4),('client_workers',1,256),('stream_ms',10,60000),
                       ('payload_bytes',0,8*1024*1024),('writer_connections',2,64),
@@ -47,7 +56,7 @@ def settings_from_args(args):
     if args.tenant_limit>args.global_limit or args.account_limit>args.global_limit or args.tenant_queue>args.global_queue:
         raise ValueError('scope limits exceed global limits')
     if args.rate*args.seconds>200000:raise ValueError('bounded lab request budget exceeded')
-    return {k:getattr(args,k) for k in ('rate','seconds','tenants','users','accounts','mode','replicas','client_workers',
+    return {k:getattr(args,k) for k in ('fault','protocol','response_bytes','rate','seconds','tenants','users','accounts','mode','replicas','client_workers',
         'stream_ms','payload_bytes','writer_connections','global_limit','tenant_limit','account_limit','global_queue','tenant_queue','queue_ms')}
 
 def nginx_config(source,replicas):
@@ -58,6 +67,13 @@ def nginx_config(source,replicas):
     # Retain the internal port 80 health check inherited from the web image.
     # Only 443 is published and the load client always verifies and uses TLS.
     return source.replace('listen       80;', 'listen       80;\n        listen 443 ssl;\n        ssl_certificate /cert/cert.pem;\n        ssl_certificate_key /cert/key.pem;',1)
+
+def wait_for_load_start(path,stop,timeout):
+    deadline=time.monotonic()+timeout
+    while not path.is_file():
+        if time.monotonic()>=deadline:raise TimeoutError('load client did not finish warmup')
+        if stop.wait(.05):return False
+    return not stop.is_set()
 
 class Lab:
     def __init__(self,args):
@@ -70,7 +86,7 @@ class Lab:
         self.results=self.out/'results';self.results.mkdir(mode=0o700)
         self.logs=self.out/'logs';self.logs.mkdir(mode=0o700)
         self.created=[];self.network_created=False;self.images={};self.names={}
-        self.stop=threading.Event();self.stats=[];self.activities=[];self.monitor=None
+        self.stop=threading.Event();self.stats=[];self.activities=[];self.monitor=None;self.fault_thread=None;self.fault_error=None
         self.manifest={'run':str(self.id),'nonce':self.tag,'settings':self.settings,
             'scope':'isolated production server processes + TLS/Nginx + persistent Redis + PostgreSQL; local synthetic model',
             'limitations':['single host with unrelated host activity','local model is not real inference',
@@ -105,7 +121,7 @@ class Lab:
             if ',' in str(source):raise ValueError('mount paths may not contain commas')
             args+=['--mount',f'type=bind,src={source},dst={destination}'+(',readonly' if read_only else '')]
         for port in ports:args+=['-p','127.0.0.1::'+str(port)]
-        if role.startswith('gw') or role.startswith('fixture'):
+        if role.startswith('gw') or role.startswith('fixture') or role=='websocket-client':
             args+=['--user','0:0','--workdir','/lab','--entrypoint',command[0]];command=command[1:]
         run(args+[image]+command)
         self.created.append(name);self.names[role]=name
@@ -130,7 +146,9 @@ class Lab:
         self.manifest['tracked_diff_sha256']=hashlib.sha256(run(['git','-C',str(ROOT),'diff','HEAD','--binary']).stdout.encode()).hexdigest()
         untracked=run(['git','-C',str(ROOT),'ls-files','--others','--exclude-standard','-z']).stdout.split('\0')
         self.manifest['untracked_hashes']={p:hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in untracked if p and (ROOT/p).is_file()}
-        for role,path in [('server',self.args.server_bin),('fixture',self.args.fixture_bin)]:
+        binaries=[('server',self.args.server_bin),('fixture',self.args.fixture_bin)]
+        if self.args.protocol=='websocket':binaries.append(('websocket',self.args.websocket_bin))
+        for role,path in binaries:
             source=Path(path).resolve()
             if not source.is_file():raise ValueError('binary missing: '+role)
             self.manifest[role+'_sha256']=hashlib.sha256(source.read_bytes()).hexdigest()
@@ -151,7 +169,7 @@ class Lab:
         else:raise TimeoutError('PostgreSQL did not start')
         self.exec('redis',['redis-cli','SET','keycompute:capacity:run',str(self.id)])
         self.container('model',self.images['python'],['python','/tool/workload.py','model'],
-            env={'KC_LAB_STREAM_MS':str(self.args.stream_ms)},cpu=1,memory='256m',mounts=[(HERE,'/tool',True)])
+            env={'KC_LAB_STREAM_MS':str(self.args.stream_ms),'KC_LAB_RESPONSE_BYTES':str(self.args.response_bytes)},cpu=1,memory='256m',mounts=[(HERE,'/tool',True)])
         self.common={'DATABASE_URL':f'postgres://postgres:{self.db_password}@postgres:5432/{self.database}',
             'KC__DATABASE__URL':f'postgres://postgres:{self.db_password}@postgres:5432/{self.database}',
             'REDIS_URL':'redis://redis:6379','KC__REDIS__URL':'redis://redis:6379','KC__REDIS__CACHE_URL':'redis://cache:6379',
@@ -168,7 +186,7 @@ class Lab:
             'KC__GATEWAY__ADMISSION__ACCOUNT_QUEUE':str(min(16,self.args.global_queue)),
             'KC__GATEWAY__ADMISSION__QUEUE_TIMEOUT_MS':str(self.args.queue_ms),
             'KC_LAB_ACK':'1','KC_LAB_RUN':str(self.id),'KC_LAB_FIXTURE':'/lab/private/fixture.json',
-            'KC_LAB_TENANTS':str(self.args.tenants),'KC_LAB_USERS':str(self.args.users),'KC_LAB_ACCOUNTS':str(self.args.accounts)}
+            'KC_LAB_PROTOCOL':self.args.protocol,'KC_LAB_TENANTS':str(self.args.tenants),'KC_LAB_USERS':str(self.args.users),'KC_LAB_ACCOUNTS':str(self.args.accounts)}
         self.container('fixture-seed',self.images['runtime'],['/lab/private/fixture','seed'],env=self.common,cpu=1,memory='512m',mounts=[(self.private,'/lab/private',False)])
         if self.wait('fixture-seed')!=0:raise RuntimeError('fixture seed failed; see private logs')
         # Schema initialization intentionally precedes extension installation.
@@ -188,6 +206,9 @@ class Lab:
             (self.private/'nginx.conf','/etc/nginx/nginx.conf',True),(self.private/'cert.pem','/cert/cert.pem',True),(self.private/'key.pem','/cert/key.pem',True)],ports=[443])
         self.exec('nginx',['nginx','-t'])
         (self.private/'settings.json').write_text(json.dumps(self.settings))
+        if self.args.protocol=='node':
+            self.container('node',self.images['python'],['python','/tool/node_worker.py'],cpu=1,memory='256m',mounts=[(HERE,'/tool',True),*[(self.private/('ca.pem' if n=='cert.pem' else n),'/lab/private/'+n,True) for n in ('fixture.json','settings.json','cert.pem')]])
+
         self.probe=PostgresProbe(self.names['postgres'],self.tag,self.database)
         self.manifest['actual_settings']=json.loads(self.exec('postgres',['psql','-X','-U','postgres','-d',self.database,'-At','-c',
             "SELECT json_build_object('fsync',current_setting('fsync'),'synchronous_commit',current_setting('synchronous_commit'),'version',current_setting('server_version'))"]).stdout)
@@ -199,9 +220,24 @@ class Lab:
         if self.manifest['actual_settings']['fsync']!='on' or self.manifest['actual_settings']['synchronous_commit']!='on':raise RuntimeError('durable PostgreSQL settings required')
         self.manifest['state']='ready'
     def certificate(self):
-        run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-keyout',str(self.private/'key.pem'),
-            '-out',str(self.private/'cert.pem'),'-subj','/CN=nginx','-addext','subjectAltName=DNS:nginx,DNS:localhost,IP:127.0.0.1'])
-        (self.private/'key.pem').chmod(0o600)
+        # A real CA/leaf chain is required by strict Rustls clients; the server
+        # certificate must not also be used as a CA. All material is lab-local.
+        request_config=self.private/'request.cnf'
+        request_config.write_text('[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=KeyCompute lab\n')
+        run(['openssl','req','-config',str(request_config),'-x509','-newkey','rsa:2048','-nodes','-days','1',
+            '-keyout',str(self.private/'ca-key.pem'),'-out',str(self.private/'ca.pem'),
+            '-subj','/CN=KeyCompute disposable lab CA',
+            '-addext','basicConstraints=critical,CA:TRUE',
+            '-addext','keyUsage=critical,keyCertSign,cRLSign'])
+        run(['openssl','req','-config',str(request_config),'-new','-newkey','rsa:2048','-nodes',
+            '-keyout',str(self.private/'key.pem'),'-out',str(self.private/'server.csr'),'-subj','/CN=nginx'])
+        extension=self.private/'server.ext'
+        extension.write_text('basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=DNS:nginx,DNS:localhost,IP:127.0.0.1\n')
+        run(['openssl','x509','-req','-in',str(self.private/'server.csr'),'-CA',str(self.private/'ca.pem'),
+            '-CAkey',str(self.private/'ca-key.pem'),'-set_serial','0x'+secrets.token_hex(8),
+            '-days','1','-extfile',str(extension),'-out',str(self.private/'cert.pem')])
+        for name in ('key.pem','ca-key.pem'):(self.private/name).chmod(0o600)
+        run(['openssl','verify','-CAfile',str(self.private/'ca.pem'),str(self.private/'cert.pem')])
     def sample(self):
         start=time.monotonic()
         while not self.stop.is_set():
@@ -217,12 +253,61 @@ class Lab:
         if self.wait('fixture-verify',20)!=0:raise RuntimeError('durable verification failed')
         raw=run(['docker','logs',self.names['fixture-verify']]).stdout
         return json.loads(raw.strip().splitlines()[-1])
+    def drain_rejoin(self):
+        """Only this run's replica may be drained. No production identifiers accepted."""
+        events=[]
+        try:
+            warmup_budget=2*max(30,self.args.stream_ms/1000+20)+10*self.args.replicas+10
+            if not wait_for_load_start(self.results/'load-started',self.stop,warmup_budget):return
+            self.manifest['fault_after_load_start']=True
+            if self.stop.wait(3):return
+            gateway=self.names['gw0'];self.owned('container',gateway)
+            original=(self.private/'nginx.conf').read_text()
+            if original.count('server gw0:3000;')!=1:raise RuntimeError('unexpected lab upstream')
+            # The exact mounted config is private to this lab. Existing streams
+            # retain their old Nginx worker while new connections use survivors.
+            (self.private/'nginx.conf').write_text(original.replace('server gw0:3000;',''))
+            self.exec('nginx',['nginx','-t']);self.exec('nginx',['nginx','-s','reload'])
+            events.append({'event':'removed_from_new_upstreams','at':time.time()})
+            self.owned('container',gateway)
+            run(['docker','stop','--time','130',gateway],timeout=140)
+            stopped=self.owned('container',gateway)
+            if stopped['State'].get('OOMKilled') or stopped['State']['ExitCode']!=0:raise RuntimeError('replica did not drain cleanly')
+            events.append({'event':'drained','exit_code':stopped['State']['ExitCode'],'at':time.time()})
+            self.owned('container',gateway);run(['docker','start',gateway])
+            deadline=time.monotonic()+60
+            while time.monotonic()<deadline:
+                if self.exec('gw0',['curl','--max-time','1','--silent','--fail','http://127.0.0.1:3000/ready'],check=False).returncode==0:break
+                if self.stop.wait(.25):raise RuntimeError('lab stopped during recovery')
+            else:raise TimeoutError('restarted lab replica did not become ready')
+            (self.private/'nginx.conf').write_text(original)
+            self.exec('nginx',['nginx','-t']);self.exec('nginx',['nginx','-s','reload'])
+            events.append({'event':'ready_and_rejoined','at':time.time()})
+        except (OSError,ValueError,RuntimeError,subprocess.SubprocessError) as error:
+            self.fault_error=type(error).__name__
+        finally:self.manifest['recovery_events']=events
+
     def execute(self):
         before=self.probe.snapshot();save(self.results/'postgres-before.json',before)
         self.monitor=threading.Thread(target=self.sample,daemon=True);self.monitor.start()
-        self.container('client',self.images['python'],['python','/tool/workload.py','client'],cpu=2,memory='512m',mounts=[(HERE,'/tool',True),*[(self.private/n,'/lab/private/'+n,True) for n in ('cert.pem','settings.json','fixture.json')],(self.results,'/lab/results',False)])
-        status=self.wait('client',self.args.seconds+self.args.stream_ms/1000+120)
-        if not (self.results/'client.json').exists():raise RuntimeError('client failed without a report')
+        client_mounts=[(HERE,'/tool',True),*[(self.private/('ca.pem' if n=='cert.pem' else n),'/lab/private/'+n,True) for n in ('cert.pem','settings.json','fixture.json')],(self.results,'/lab/results',False)]
+        client_role='client'
+        if self.args.protocol=='websocket':
+            client_role='websocket-client'
+            self.container(client_role,self.images['runtime'],['/lab/private/websocket'],
+                env={'KC_LAB_ACK':'1','KC_LAB_RUN':str(self.id)},cpu=2,memory='512m',
+                mounts=client_mounts+[(self.private/'websocket','/lab/private/websocket',True)])
+        else:
+            self.container(client_role,self.images['python'],['python','/tool/workload.py','client'],cpu=2,memory='512m',mounts=client_mounts)
+        if self.args.fault=='drain-rejoin':
+            self.fault_thread=threading.Thread(target=self.drain_rejoin,daemon=True);self.fault_thread.start()
+        status=self.wait(client_role,self.args.seconds+self.args.stream_ms/1000+120)
+        if not (self.results/'client.json').exists():
+            self.stop.set()
+            raise RuntimeError('client failed without a report')
+        if self.fault_thread:
+            self.fault_thread.join(210)
+            if self.fault_thread.is_alive() or self.fault_error:raise RuntimeError('disposable replica recovery failed')
         client=json.loads((self.results/'client.json').read_text());verified=None
         # Reuse ONLY this run's verifier container after the previous invocation
         # exited. It rechecks the private run marker and produces no mutations.
@@ -232,18 +317,19 @@ class Lab:
                 if self.wait('fixture-verify',20)!=0:raise RuntimeError('durable verification retry failed')
                 verified=json.loads(run(['docker','logs',self.names['fixture-verify']]).stdout.strip().splitlines()[-1])
             else:verified=self.verify()
-            if verified['active']==0 and verified['inconsistent']==0 and verified['ledger']==verified['settled']==client['model']['completed']:break
+            if verified['active']==0 and verified['inconsistent']==0 and verified['invalid_usage']==0 and verified['ledger']==verified['settled']==client['model']['completed']:break
             time.sleep(2)
         after=self.probe.snapshot();save(self.results/'postgres-after.json',after)
         delta=difference(before,after);save(self.results/'postgres-delta.json',delta)
         self.manifest['postgres_interval_valid']=delta['valid_interval']
         self.manifest.update({'client_exit':status,'client_completed':client['completed_success'],'planned':client['planned'],
             'verification':verified,'model':client['model'],
-            'pass':status==0 and verified['active']==0 and verified['inconsistent']==0 and verified['ledger']==verified['settled']==client['model']['completed'],
+            'pass':status==0 and verified['active']==0 and verified['inconsistent']==0 and verified['invalid_usage']==0 and verified['ledger']==verified['settled']==client['model']['completed'],
             'state':'completed'})
         return self.manifest['pass']
     def close(self):
         self.stop.set()
+        if self.fault_thread:self.fault_thread.join(210)
         if self.monitor:self.monitor.join(25)
         save(self.results/'activity.json',self.activities);save(self.results/'container-samples.json',self.stats)
         for name in reversed(self.created):
@@ -269,6 +355,10 @@ def main():
     parser.add_argument('--server-bin',required=True);parser.add_argument('--fixture-bin',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--runtime-image',default='keycompute-server:latest');parser.add_argument('--web-image',default='keycompute-web:latest');parser.add_argument('--python-image',default='python:3.12-alpine')
     parser.add_argument('--mode',choices=['json','sse'],default='json')
+    parser.add_argument('--protocol',choices=PROTOCOLS,default='chat')
+    parser.add_argument('--response-bytes',type=int,default=0)
+    parser.add_argument('--websocket-bin')
+    parser.add_argument('--fault',choices=['none','drain-rejoin'],default='none')
     for name,default in [('rate',20),('seconds',30),('tenants',4),('users',2),('accounts',8),('replicas',1),('client-workers',128),('stream-ms',1000),('payload-bytes',0),('writer-connections',10),('global-limit',256),('tenant-limit',32),('account-limit',32),('global-queue',128),('tenant-queue',16),('queue-ms',1000)]:
         parser.add_argument('--'+name,type=int,default=default)
     args=parser.parse_args();lab=Lab(args);passed=False

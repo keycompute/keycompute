@@ -2,13 +2,14 @@
 import json
 from pathlib import Path
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import lab
 from workload import Reader, complete_json, percentiles
 
-DEFAULTS=dict(rate=20,seconds=30,tenants=4,users=2,accounts=8,mode='json',replicas=1,
+DEFAULTS=dict(fault='none',protocol='chat',response_bytes=0,rate=20,seconds=30,tenants=4,users=2,accounts=8,mode='json',replicas=1,
               client_workers=128,stream_ms=1000,payload_bytes=0,writer_connections=10,
               global_limit=256,tenant_limit=32,account_limit=32,global_queue=128,
               tenant_queue=16,queue_ms=1000)
@@ -30,6 +31,27 @@ class SettingsTests(unittest.TestCase):
             self.assertIn(value,out)
         with self.assertRaises(ValueError):lab.nginx_config(out,2)
         with self.assertRaises(ValueError):lab.nginx_config(text,5)
+    def test_recovery_only_accepts_multi_replica_disposable_profiles(self):
+        with self.assertRaises(ValueError):lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{'fault':'drain-rejoin'})))
+        with self.assertRaises(ValueError):lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{'fault':'drain-rejoin','replicas':2,'seconds':5})))
+        value=lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{'fault':'drain-rejoin','replicas':2})))
+        self.assertEqual(value['fault'],'drain-rejoin')
+    def test_generated_certificate_has_a_separate_verifiable_ca(self):
+        with tempfile.TemporaryDirectory() as directory:
+            instance=lab.Lab(SimpleNamespace(**DEFAULTS,output=str(Path(directory)/'new')))
+            instance.certificate()
+            self.assertNotEqual((instance.private/'ca.pem').read_bytes(),(instance.private/'cert.pem').read_bytes())
+            self.assertEqual((instance.private/'ca-key.pem').stat().st_mode&0o777,0o600)
+            output=lab.run(['openssl','x509','-in',str(instance.private/'cert.pem'),'-noout','-ext','basicConstraints']).stdout
+            self.assertIn('CA:FALSE',output)
+    def test_fault_waits_for_actual_load_start_and_is_cancellable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            marker=Path(directory)/'started';stop=threading.Event()
+            with self.assertRaises(TimeoutError):lab.wait_for_load_start(marker,stop,0)
+            marker.touch()
+            self.assertTrue(lab.wait_for_load_start(marker,stop,.1))
+            marker.unlink();stop.set()
+            self.assertFalse(lab.wait_for_load_start(marker,stop,10))
     def test_output_is_never_overwritten(self):
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaises(ValueError):

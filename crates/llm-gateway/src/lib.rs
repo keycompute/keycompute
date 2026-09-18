@@ -15,6 +15,7 @@ pub mod failover;
 pub mod proxy;
 pub mod retry;
 pub mod streaming;
+mod token_estimate;
 
 pub use executor::{GatewayExecutor, estimate_responses_output_tokens};
 pub use failover::FailoverManager;

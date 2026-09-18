@@ -3419,6 +3419,7 @@ dependencies = [
  "sha2",
  "tiktoken-rs",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-test",
  "tokio-tungstenite",

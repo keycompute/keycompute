@@ -1010,7 +1010,17 @@ mod tests {
 
     #[tokio::test]
     async fn synchronous_trace_writes_are_time_bounded() {
+        let recorder = super::PostgresRequestLifecycleRecorder::new(crate::DbRouter::single(
+            sea_orm::DatabaseConnection::Disconnected,
+        ));
+        assert_eq!(
+            recorder.synchronous_write_timeout,
+            Duration::from_millis(250)
+        );
         for operation in [
+            "start_request",
+            "set_route",
+            "start_attempt",
             "finish_attempt_and_request",
             "finish_request_without_attempt",
             "mark_billing_succeeded",

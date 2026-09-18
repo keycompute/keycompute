@@ -1734,22 +1734,11 @@ impl GatewayExecutor {
         Ok(())
     }
 
-    /// 估算 token 数（使用 tiktoken-rs）
-    ///
-    /// 使用 tiktoken-rs 库的 o200k_base tokenizer（支持 GPT-4o, o1, o3 等模型）
-    /// 提供与 OpenAI API 完全一致的 token 计数
-    ///
-    /// 注意：这是估算值，用于流式场景的实时反馈
-    /// 最终计费会使用 API Response 中的精确 usage 值进行覆盖
+    /// Provisional usage: exact o200k tokenization for small strings, bounded
+    /// conservative UTF-8 byte estimates for large strings. This is not an
+    /// exact provider token count; final upstream usage still replaces it.
     fn estimate_tokens(content: &str) -> u32 {
-        if content.is_empty() {
-            return 0;
-        }
-
-        // 使用 o200k_base tokenizer (GPT-4o, o1, o3 等模型)
-        // singleton 模式避免重复加载词表
-        let bpe = tiktoken_rs::o200k_base_singleton();
-        bpe.encode_with_special_tokens(content).len() as u32
+        crate::token_estimate::estimate_tokens(content)
     }
 
     /// 估算输入 messages 的 token 数（使用 tiktoken-rs）
