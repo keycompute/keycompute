@@ -187,6 +187,20 @@ impl BillingService {
         account_id: Uuid,
         status: &str,
     ) -> Result<UsageLog> {
+        keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::LedgerWrite,
+            self.finalize_and_save_inner(ctx, provider_name, account_id, status),
+        )
+        .await
+    }
+
+    async fn finalize_and_save_inner(
+        &self,
+        ctx: &RequestContext,
+        provider_name: &str,
+        account_id: Uuid,
+        status: &str,
+    ) -> Result<UsageLog> {
         // 先执行结算
         let new_log = self
             .finalize(ctx, provider_name, account_id, status)
@@ -354,8 +368,9 @@ impl BillingService {
         let user_amount = bigdecimal_to_decimal(&usage_log.user_amount)?;
 
         // 扣除用户余额。瞬时错误返回给 durable settlement 重试。
-        let balance_result = self
-            .deduct_balance_if_configured(
+        let balance_result = keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::BalanceSettlement,
+            self.deduct_balance_if_configured(
                 ctx.request_id,
                 ctx.billing_request_id,
                 ctx.balance_reservation_owner_token(),
@@ -363,16 +378,23 @@ impl BillingService {
                 user_amount,
                 usage_log.id,
                 &ctx.model,
-            )
-            .await;
+            ),
+        )
+        .await;
 
         // 触发分销处理。瞬时错误返回给 durable settlement 重试。
-        let distribution_result = self
-            .process_distribution_if_configured(ctx, usage_log, user_id, user_amount)
-            .await;
+        let distribution_result = keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::Distribution,
+            self.process_distribution_if_configured(ctx, usage_log, user_id, user_amount),
+        )
+        .await;
 
         // 触发节点租赁小费。瞬时错误返回给 durable settlement 重试。
-        let tips_result = self.process_tips_if_configured(usage_log.id).await;
+        let tips_result = keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::NodeTips,
+            self.process_tips_if_configured(usage_log.id),
+        )
+        .await;
 
         balance_result?;
         distribution_result?;
@@ -404,6 +426,10 @@ impl BillingService {
             return Ok(());
         };
 
+        // Do not let many settlement workers for one user exhaust the shared
+        // writer pool while waiting on the same row. Keep the permit across
+        // reservation settlement and its ownership-checked consume fallback.
+        let _turn = balance.settlement_turn(user_id).await?;
         let description = format!("API调用: {model_name}");
         let reserved = balance
             .settle_request_reservation(
@@ -653,7 +679,7 @@ impl BillingService {
             return Ok(());
         };
 
-        match NodeTip::create_from_usage_log(pool.as_ref(), usage_log_id).await {
+        match NodeTip::create_from_usage_log(pool.write_conn(), usage_log_id).await {
             Ok(Some(tip)) => {
                 tracing::info!(
                     %usage_log_id,

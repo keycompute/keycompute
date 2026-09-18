@@ -16,9 +16,17 @@ pub enum Stage {
     AccountAdmission,
     Upstream,
     Settlement,
+    WriterBegin,
+    BalanceRowLock,
+    SettlementQueue,
+    LedgerWrite,
+    BalanceSettlement,
+    Distribution,
+    NodeTips,
+    OutboxPersist,
 }
 impl Stage {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 17] = [
         Self::Ingress,
         Self::GenerationQueue,
         Self::Authentication,
@@ -28,6 +36,14 @@ impl Stage {
         Self::AccountAdmission,
         Self::Upstream,
         Self::Settlement,
+        Self::WriterBegin,
+        Self::BalanceRowLock,
+        Self::SettlementQueue,
+        Self::LedgerWrite,
+        Self::BalanceSettlement,
+        Self::Distribution,
+        Self::NodeTips,
+        Self::OutboxPersist,
     ];
     fn label(self) -> &'static str {
         match self {
@@ -40,6 +56,14 @@ impl Stage {
             Self::AccountAdmission => "account_admission",
             Self::Upstream => "upstream_attempt",
             Self::Settlement => "immediate_settlement",
+            Self::WriterBegin => "writer_transaction_begin",
+            Self::BalanceRowLock => "balance_row_lock_query",
+            Self::SettlementQueue => "settlement_balance_queue",
+            Self::LedgerWrite => "usage_ledger_write",
+            Self::BalanceSettlement => "balance_settlement",
+            Self::Distribution => "distribution_effect",
+            Self::NodeTips => "node_tip_effect",
+            Self::OutboxPersist => "settlement_outbox_write",
         }
     }
 }
@@ -165,6 +189,6 @@ mod tests {
             [count("ok"), count("error"), count("cancelled")],
             before.map(|n| n + 1)
         );
-        assert_eq!(snapshot().len(), 27);
+        assert_eq!(snapshot().len(), Stage::ALL.len() * 3);
     }
 }

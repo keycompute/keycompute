@@ -39,6 +39,24 @@ fn request_reservation_admission() -> &'static Arc<keycompute_runtime::admission
     })
 }
 
+// Settlements need their own completion lane. Sharing reservation tickets
+// caused fresh work to delay already accepted completions under writer load.
+// Database row locks still serialize actual money changes across both lanes.
+fn settlement_admission() -> &'static Arc<keycompute_runtime::admission::BoundedAdmission> {
+    use keycompute_runtime::admission::{AdmissionLimits, BoundedAdmission};
+    static ADMISSION: std::sync::OnceLock<Arc<BoundedAdmission>> = std::sync::OnceLock::new();
+    ADMISSION.get_or_init(|| {
+        BoundedAdmission::new(AdmissionLimits {
+            total: 64,
+            per_key: 1,
+            queue: 256,
+            queue_per_key: 32,
+            wait: Duration::from_secs(1),
+        })
+        .expect("valid settlement admission")
+    })
+}
+
 /// 余额不足阈值（元）
 /// 当用户余额低于此值时，拒绝请求
 pub fn min_balance_threshold() -> Decimal {
@@ -74,6 +92,29 @@ impl BalanceService {
 
     pub fn request_reservation_status() -> keycompute_runtime::admission::AdmissionStatus {
         request_reservation_admission().status()
+    }
+
+    pub fn settlement_status() -> keycompute_runtime::admission::AdmissionStatus {
+        settlement_admission().status()
+    }
+
+    /// Bound post-ledger mutation waiters before borrowing a DB connection.
+    /// This lane is independent of admission for new balance reservations. This is a bounded local queue, never a monetary
+    /// authorization lock. Timeout must propagate to the durable outbox caller.
+    pub(crate) async fn settlement_turn(
+        &self,
+        user_id: Uuid,
+    ) -> Result<keycompute_runtime::admission::AdmissionPermit> {
+        keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::SettlementQueue,
+            settlement_admission().acquire(user_id),
+        )
+        .await
+        .map_err(|_| {
+            KeyComputeError::ServiceUnavailable(
+                "Balance settlement capacity exhausted; durable retry required".into(),
+            )
+        })
     }
 
     /// 获取或创建用户余额记录
@@ -624,5 +665,29 @@ mod tests {
     fn test_balance_service_creation() {
         // 仅测试类型是否正确导出
         fn _assert_balance_service(_: BalanceService) {}
+    }
+    #[tokio::test]
+    async fn settlement_lane_is_independent_and_cancellation_safe() {
+        let service =
+            BalanceService::new(DbRouter::single(sea_orm::DatabaseConnection::Disconnected));
+        let user = Uuid::new_v4();
+        let owner = service.settlement_turn(user).await.unwrap();
+        // A completion cannot retain the admission turn for new reservations.
+        let reservation = request_reservation_admission().acquire(user).await.unwrap();
+        let other = service.clone();
+        let waiter = tokio::spawn(async move { other.settlement_turn(user).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while settlement_admission().status().queued == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!waiter.is_finished());
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        drop((owner, reservation));
+        assert_eq!(settlement_admission().active_for(user), 0);
+        assert!(service.settlement_turn(user).await.is_ok());
     }
 }

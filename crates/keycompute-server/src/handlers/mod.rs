@@ -1150,13 +1150,16 @@ pub(crate) async fn finalize_immediate_settlement_logged_inner(
 ) -> bool {
     let terminal_at = chrono::Utc::now();
     let durable = if let Some(state) = settlement.durable_state.as_ref() {
-        responses::persist_immediate_terminal_settlement_outbox(
-            state,
-            ctx,
-            primary_provider,
-            primary_account_id,
-            status,
-            terminal_at,
+        keycompute_observability::capacity::measure_bool(
+            keycompute_observability::capacity::Stage::OutboxPersist,
+            responses::persist_immediate_terminal_settlement_outbox(
+                state,
+                ctx,
+                primary_provider,
+                primary_account_id,
+                status,
+                terminal_at,
+            ),
         )
         .await
     } else {

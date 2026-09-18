@@ -842,12 +842,14 @@ impl BalanceReservation {
             "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
             [user_id.into()],
         );
-        let mut balance = UserBalance::find_by_statement(lock_stmt)
-            .one(&tx)
-            .await?
-            .ok_or_else(|| {
-                DbError::insufficient_balance(minimum_available.to_string(), "0".to_string())
-            })?;
+        let mut balance = keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::BalanceRowLock,
+            UserBalance::find_by_statement(lock_stmt).one(&tx),
+        )
+        .await?
+        .ok_or_else(|| {
+            DbError::insufficient_balance(minimum_available.to_string(), "0".to_string())
+        })?;
         if balance.tenant_id != tenant_id {
             return Err(DbError::Other(
                 "balance reservation tenant mismatch".to_string(),
@@ -1011,10 +1013,12 @@ impl BalanceReservation {
             "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
             [snapshot.user_id.into()],
         );
-        let balance = UserBalance::find_by_statement(lock_balance)
-            .one(&tx)
-            .await?
-            .ok_or_else(|| DbError::not_found("UserBalance", snapshot.user_id.to_string()))?;
+        let balance = keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::BalanceRowLock,
+            UserBalance::find_by_statement(lock_balance).one(&tx),
+        )
+        .await?
+        .ok_or_else(|| DbError::not_found("UserBalance", snapshot.user_id.to_string()))?;
         let Some(reservation) = Self::find_by_request(&tx, request_id, true).await? else {
             return Err(DbError::Other(format!(
                 "balance reservation {request_id} disappeared during settlement"

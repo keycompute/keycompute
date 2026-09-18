@@ -152,6 +152,7 @@ jobs:
           set -euo pipefail
           bash -n scripts/*.sh scripts/tests/*.sh
           bash scripts/tests/reset_admin_password_test.sh
+          python3 -m unittest discover -s scripts/capacity -p 'test_*.py'
           # `config --quiet` validates YAML merging and all variable
           # interpolation without depending on Compose's version-specific
           # JSON representation of ports and commands. Those normalized

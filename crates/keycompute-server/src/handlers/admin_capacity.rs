@@ -36,6 +36,7 @@ pub fn process_snapshot(state: &AppState) -> Value {
         "generation":admission(state.generation_admission.requests.status()),
         "accounts_local":admission(state.generation_admission.accounts.status()),
         "balance_reservations":admission(keycompute_billing::balance::BalanceService::request_reservation_status()),
+        "balance_settlements":admission(keycompute_billing::balance::BalanceService::settlement_status()),
         "writer_pool":writer,
         "redis_commands":state.runtime_state.pool().map(|pool|redis_status!(pool.status())),
         "redis_cache":state.cache.pool().map(|pool|redis_status!(pool.status())),

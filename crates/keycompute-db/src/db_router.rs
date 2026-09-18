@@ -510,7 +510,11 @@ impl ConnectionTrait for DbRouter {
 #[async_trait]
 impl TransactionTrait for DbRouter {
     async fn begin(&self) -> Result<DatabaseTransaction, DbErr> {
-        self.write.begin().await
+        keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::WriterBegin,
+            self.write.begin(),
+        )
+        .await
     }
 
     async fn begin_with_config(
@@ -518,9 +522,11 @@ impl TransactionTrait for DbRouter {
         isolation_level: Option<IsolationLevel>,
         access_mode: Option<AccessMode>,
     ) -> Result<DatabaseTransaction, DbErr> {
-        self.write
-            .begin_with_config(isolation_level, access_mode)
-            .await
+        keycompute_observability::capacity::measure(
+            keycompute_observability::capacity::Stage::WriterBegin,
+            self.write.begin_with_config(isolation_level, access_mode),
+        )
+        .await
     }
 
     async fn transaction<F, T, E>(&self, txn: F) -> Result<T, TransactionError<E>>

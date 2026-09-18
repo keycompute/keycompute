@@ -133,6 +133,25 @@ impl NodeTip {
         db: &(impl ConnectionTrait + TransactionTrait),
         usage_log_id: Uuid,
     ) -> Result<Option<NodeTip>, DbError> {
+        // Most completions are external providers. A single writer-fresh probe
+        // avoids BEGIN + two reads + ROLLBACK for that path. Lock syntax routes
+        // DbRouter callers to the writer; this statement-scoped lock is NOT used
+        // as authorization. Eligible Node calls still re-read everything in the
+        // original transaction below, including terminal task and tip ratio.
+        let candidate = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                r#"SELECT u.id FROM usage_logs u
+               WHERE u.id=$1 AND EXISTS (
+                   SELECT 1 FROM node_tasks t WHERE t.request_id=u.request_id
+                   AND t.status='succeeded' AND t.assigned_node_id IS NOT NULL
+               ) FOR KEY SHARE OF u"#,
+                [usage_log_id.into()],
+            ))
+            .await?;
+        if candidate.is_none() {
+            return Ok(None);
+        }
         let txn = db.begin().await?;
 
         // 1. 查询 usage_log
@@ -304,5 +323,69 @@ impl NodeTip {
         );
 
         Ok(Some(tip))
+    }
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use sea_orm::{Database, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Debug, Default)]
+    struct NoNodeProxy {
+        reads: AtomicUsize,
+        begins: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl ProxyDatabaseTrait for NoNodeProxy {
+        async fn query(&self, statement: Statement) -> Result<Vec<ProxyRow>, DbErr> {
+            assert!(
+                statement.sql.contains("EXISTS") && statement.sql.contains("FOR KEY SHARE OF u")
+            );
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![])
+        }
+        async fn execute(&self, _: Statement) -> Result<ProxyExecResult, DbErr> {
+            panic!("no-node lookup must never mutate state")
+        }
+        async fn begin(&self) {
+            self.begins.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    #[tokio::test]
+    async fn non_node_tip_probe_uses_one_authoritative_read_and_no_transaction() {
+        let proxy = Arc::new(NoNodeProxy::default());
+        #[derive(Debug)]
+        struct Shared(Arc<NoNodeProxy>);
+        #[async_trait::async_trait]
+        impl ProxyDatabaseTrait for Shared {
+            async fn query(&self, statement: Statement) -> Result<Vec<ProxyRow>, DbErr> {
+                self.0.query(statement).await
+            }
+            async fn execute(&self, statement: Statement) -> Result<ProxyExecResult, DbErr> {
+                self.0.execute(statement).await
+            }
+            async fn begin(&self) {
+                self.0.begin().await;
+            }
+        }
+        let db = Database::connect_proxy(
+            DbBackend::Postgres,
+            Arc::new(Box::new(Shared(proxy.clone()))),
+        )
+        .await
+        .unwrap();
+        assert!(
+            NodeTip::create_from_usage_log(&db, Uuid::new_v4())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(proxy.reads.load(Ordering::Relaxed), 1);
+        assert_eq!(proxy.begins.load(Ordering::Relaxed), 0);
     }
 }
