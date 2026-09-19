@@ -5,6 +5,7 @@
 // 管理功能（拆分为多个模块）
 pub mod admin_account;
 pub mod admin_capacity;
+pub mod admin_model_binding;
 pub mod admin_monitoring;
 pub mod admin_node_gateway;
 pub mod admin_pricing;
@@ -42,7 +43,8 @@ pub use requirement::submit_requirement_handler;
 // OpenAI 兼容 API (统一入口)
 pub use openai::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ListModelsResponse, Model,
-    chat_completions, list_models, retrieve_model,
+    chat_completions, list_models, model_binding_chat_completions, model_binding_list_models,
+    model_binding_retrieve_model, retrieve_model,
 };
 
 // OpenAI Responses 兼容入口
@@ -92,6 +94,10 @@ pub use admin_node_gateway::{
 
 // 监控追踪
 pub use admin_account::{probe_account_for_monitoring, probe_enabled_account_for_monitoring};
+pub use admin_model_binding::{
+    create_model_binding, delete_model_binding, list_model_bindings, probe_model_binding,
+    update_model_binding,
+};
 pub use admin_monitoring::{
     get_monitoring_overview, get_monitoring_request, get_monitoring_summary,
     get_monitoring_target_health, list_monitoring_requests, probe_monitoring_targets,

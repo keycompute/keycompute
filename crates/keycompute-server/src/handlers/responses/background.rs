@@ -691,11 +691,12 @@ pub(super) fn background_account_snapshot(
     expected_provider: &str,
     account_id: uuid::Uuid,
 ) -> Result<ResolvedResponsesAccount> {
-    let Some(ExecutionTarget::ProviderAccount {
+    let Some(ExecutionTarget::UpstreamAccount {
         provider,
         account_id: accepted_account_id,
         endpoint,
         upstream_api_key,
+        ..
     }) = ctx.accepted_execution_target()
     else {
         return Err(ApiError::Internal(

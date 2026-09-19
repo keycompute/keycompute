@@ -321,6 +321,28 @@ curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer sk-xxx"
 ```
 
+### Tenant model-bound Chat
+
+Administrators can pin an exact tenant/model/capability tuple to one upstream
+account. After creating a binding, run its model-specific health probe from
+the console (or `POST /api/v1/admin/model-bindings/{id}/probe`) before sending
+traffic. Unknown or stale health is fail-closed. Bound Chat uses the same API
+key authentication and native Chat JSON, but performs one outbound attempt
+with no account-pool fallback or compatibility retry:
+
+```bash
+curl http://localhost:3000/pt/v1/chat/completions \
+  -H "Authorization: Bearer sk-tenant" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello!"}]}'
+
+curl http://localhost:3000/pt/v1/models \
+  -H "Authorization: Bearer sk-tenant"
+```
+
+The complete management contract, stable error behavior, limits and fresh
+schema activation notes are in [`docs/model-binding.md`](docs/model-binding.md).
+
 The Responses API is available through `POST /v1/responses` and a WebSocket
 upgrade on `GET /v1/responses`. KeyCompute's WebSocket mode currently accepts
 `response.create` events only; connection-control events such as
@@ -343,6 +365,9 @@ upgrade on `GET /v1/responses`. KeyCompute's WebSocket mode currently accepts
 | Node | `GET /api/v1/me/node-gateway/token` | Node token |
 | | `GET /api/v1/me/tips` | Tip summary |
 | Admin | `GET/POST /api/v1/accounts` | Upstream account management |
+| | `GET/POST /api/v1/admin/model-bindings` | List/create tenant model bindings |
+| | `PUT/DELETE /api/v1/admin/model-bindings/{id}` | Update/delete with optimistic revisions |
+| | `POST /api/v1/admin/model-bindings/{id}/probe` | Explicit model-specific health probe |
 | | `GET/POST /api/v1/settings` | System settings |
 | | `GET/POST /api/v1/pricing` | Pricing management |
 | | `GET /api/v1/admin/monitoring/overview` | Monitoring overview |

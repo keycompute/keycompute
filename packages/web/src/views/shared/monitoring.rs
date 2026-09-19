@@ -368,6 +368,7 @@ pub fn Monitoring() -> Element {
                     },
                     option { value: "", {i18n.t("monitoring.all_routes")} }
                     option { value: "provider_account", {i18n.t("monitoring.route_provider_account")} }
+                    option { value: "model_binding", {i18n.t("monitoring.route_model_binding")} }
                     option { value: "node", {i18n.t("monitoring.route_node")} }
                 }
                 button {
@@ -967,7 +968,7 @@ fn MonitoringAttemptRow(attempt: MonitoringAttemptDetail) -> Element {
             p { "{target_line}" }
             p { "{timing_line}" }
             p { "{http_line}" }
-            if attempt.route_type == "provider_account" {
+            if matches!(attempt.route_type.as_str(), "provider_account" | "model_binding") {
                 p { "{provider_timing_line}" }
             }
             if let Some(error) = error {

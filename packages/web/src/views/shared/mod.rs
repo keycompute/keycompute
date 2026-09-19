@@ -1,6 +1,7 @@
 pub mod accounts;
 pub mod distribution_records;
 pub mod loading;
+pub mod model_bindings;
 pub mod model_list;
 pub mod monitoring;
 pub mod node_gateway;
@@ -14,6 +15,7 @@ pub mod users;
 
 pub use accounts::Accounts;
 pub use distribution_records::DistributionRecords;
+pub use model_bindings::ModelBindings;
 pub use monitoring::{Monitoring, MonitoringDiagnostics};
 pub use node_gateway::NodeGateway;
 pub use payment_orders::PaymentOrders;

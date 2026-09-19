@@ -23,6 +23,7 @@ pub(crate) struct TrustedLocalApiError;
 /// API 错误类型
 #[derive(Debug, Clone)]
 pub enum ApiError {
+    ModelBinding(keycompute_types::ModelBindingError),
     /// 认证错误
     Auth(String),
     /// 限流错误
@@ -67,6 +68,7 @@ pub enum ApiError {
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ApiError::ModelBinding(error) => write!(f, "{error}"),
             ApiError::Auth(msg) => write!(f, "Authentication error: {}", msg),
             ApiError::RateLimit(msg) => write!(f, "Rate limit error: {}", msg),
             ApiError::Routing(msg) => write!(f, "Routing error: {}", msg),
@@ -95,6 +97,17 @@ impl std::error::Error for ApiError {}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let ApiError::ModelBinding(error) = self {
+            let status = StatusCode::from_u16(error.status()).expect("fixed model binding status");
+            let mut response = (status, Json(json!({"error": {
+                "message": error.public_message(),
+                "type": if error.status() == 404 { "invalid_request_error" } else { "server_error" },
+                "param": "model",
+                "code": error.code(),
+            }}))).into_response();
+            response.extensions_mut().insert(TrustedLocalApiError);
+            return response;
+        }
         if let ApiError::OpenAiUpstream(upstream) = &self {
             return native_openai_error_response(upstream);
         }
@@ -126,7 +139,7 @@ impl IntoResponse for ApiError {
             ),
             ApiError::NodeTaskConflict(msg) => (StatusCode::CONFLICT, msg.clone()),
             ApiError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            ApiError::OpenAiUpstream(_) | ApiError::AnthropicUpstream(_) => unreachable!(),
+            ApiError::ModelBinding(_) | ApiError::OpenAiUpstream(_) | ApiError::AnthropicUpstream(_) => unreachable!(),
         };
 
         let body = Json(json!({
@@ -145,6 +158,7 @@ impl IntoResponse for ApiError {
 
 fn error_type(error: &ApiError) -> &'static str {
     match error {
+        ApiError::ModelBinding(_) => "server_error",
         ApiError::Auth(_) => "authentication_error",
         ApiError::RateLimit(_) => "rate_limit_error",
         ApiError::Routing(_) => "routing_error",
@@ -369,6 +383,7 @@ impl From<keycompute_types::KeyComputeError> for ApiError {
     fn from(err: keycompute_types::KeyComputeError) -> Self {
         use keycompute_types::KeyComputeError;
         match err {
+            KeyComputeError::ModelBinding(error) => ApiError::ModelBinding(error),
             // 认证与授权
             KeyComputeError::AuthError(msg) => ApiError::Auth(msg),
             KeyComputeError::PermissionDenied(msg) => ApiError::Forbidden(msg),
@@ -462,12 +477,33 @@ pub fn map_routing_error(e: keycompute_types::KeyComputeError, protocol: &str) -
 pub fn map_execution_error(e: keycompute_types::KeyComputeError) -> ApiError {
     use keycompute_types::KeyComputeError;
     match e {
+        KeyComputeError::ModelBinding(error) => ApiError::ModelBinding(error),
+        KeyComputeError::ServiceUnavailable(message) => ApiError::ServiceUnavailable(message),
+        KeyComputeError::NotFound(message) => ApiError::NotFound(message),
         KeyComputeError::RoutingFailed(model) => ApiError::ServiceUnavailable(format!(
             "Model '{model}' could not be completed: all configured upstream targets failed. \
              Please retry later."
         )),
         other => ApiError::Internal(format!("Execution failed: {other}")),
     }
+}
+
+/// Retain a trusted local binding rejection across the asynchronous gateway
+/// channel. Never interpret an upstream-provided message as a local error code.
+pub(crate) fn openai_client_failure(
+    ctx: &keycompute_types::RequestContext,
+    fallback: &str,
+) -> ApiError {
+    if ctx.model_binding.is_some()
+        && let Some(failure) = ctx.execution_failure()
+        && failure.error.origin == keycompute_types::ErrorOrigin::Gateway
+        && let Some(code) = keycompute_types::ModelBindingError::from_code(&failure.error.code)
+    {
+        return ApiError::ModelBinding(code);
+    }
+    ctx.client_upstream_response()
+        .map(ApiError::OpenAiUpstream)
+        .unwrap_or_else(|| ApiError::Provider(fallback.to_string()))
 }
 
 /// Map an exhausted native-protocol execution while preserving a bounded

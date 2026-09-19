@@ -12,16 +12,16 @@ use uuid::Uuid;
 /// 从 ExecutionTarget 提取 provider 名称
 fn get_provider_name(target: &ExecutionTarget) -> String {
     match target {
-        ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
-        ExecutionTarget::Node { model } => format!("node:{}", model),
+        ExecutionTarget::UpstreamAccount { provider, .. } => provider.clone(),
+        ExecutionTarget::NodeDispatch { model } => format!("node:{}", model),
     }
 }
 
 /// 从 ExecutionTarget 提取 endpoint
 fn get_endpoint(target: &ExecutionTarget) -> Option<String> {
     match target {
-        ExecutionTarget::ProviderAccount { endpoint, .. } => Some(endpoint.clone()),
-        ExecutionTarget::Node { .. } => None,
+        ExecutionTarget::UpstreamAccount { endpoint, .. } => Some(endpoint.clone()),
+        ExecutionTarget::NodeDispatch { .. } => None,
     }
 }
 

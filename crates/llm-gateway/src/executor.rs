@@ -16,11 +16,12 @@ use crate::{GatewayConfig, HttpProxy, streaming::StreamPipeline};
 use futures::StreamExt;
 use keycompute_routing::{AccountStateStore, ProviderHealthStore};
 use keycompute_types::{
-    AttemptKind, AttemptRef, AttemptResponseMeta, AttemptStatus, AttemptTraceFinish,
-    AttemptTraceStart, BillingStatus, ClientUpstreamResponse, ErrorOrigin, ExecutionPlan,
-    ExecutionTarget, KeyComputeError, NoopRequestLifecycleRecorder, RequestContext,
-    RequestExecutionFailure, RequestLifecycleRecorder, RequestStatus, Result, RouteType,
-    StreamEndReason, TraceErrorCategory, TraceErrorInfo, sanitize_error_summary,
+    AccountModelHealthSnapshot, AttemptKind, AttemptRef, AttemptResponseMeta, AttemptStatus,
+    AttemptTraceFinish, AttemptTraceStart, BillingStatus, ClientUpstreamResponse, ErrorOrigin,
+    ExecutionPlan, ExecutionTarget, KeyComputeError, ModelBindingError, ModelHealthObservation,
+    NoopRequestLifecycleRecorder, RequestContext, RequestExecutionFailure,
+    RequestLifecycleRecorder, RequestStatus, Result, RouteType, StreamEndReason,
+    TraceErrorCategory, TraceErrorInfo, sanitize_error_summary,
 };
 use llm_protocol_provider::{
     DefaultHttpTransport, HttpTransport, LARGE_NATIVE_EVENT_CHANNEL_CAPACITY,
@@ -41,20 +42,20 @@ fn classify_attempt_kind(
     attempted_accounts: &mut HashSet<uuid::Uuid>,
 ) -> AttemptKind {
     match target {
-        ExecutionTarget::ProviderAccount { account_id, .. } if target_index == 0 => {
+        ExecutionTarget::UpstreamAccount { account_id, .. } if target_index == 0 => {
             attempted_accounts.insert(*account_id);
             AttemptKind::Primary
         }
-        ExecutionTarget::ProviderAccount { account_id, .. }
+        ExecutionTarget::UpstreamAccount { account_id, .. }
             if attempted_accounts.contains(account_id) =>
         {
             AttemptKind::Retry
         }
-        ExecutionTarget::ProviderAccount { account_id, .. } => {
+        ExecutionTarget::UpstreamAccount { account_id, .. } => {
             attempted_accounts.insert(*account_id);
             AttemptKind::Fallback
         }
-        ExecutionTarget::Node { .. } => AttemptKind::Primary,
+        ExecutionTarget::NodeDispatch { .. } => AttemptKind::Primary,
     }
 }
 
@@ -62,11 +63,11 @@ fn same_provider_account(left: &ExecutionTarget, right: &ExecutionTarget) -> boo
     matches!(
         (left, right),
         (
-            ExecutionTarget::ProviderAccount {
+            ExecutionTarget::UpstreamAccount {
                 account_id: left,
                 ..
             },
-            ExecutionTarget::ProviderAccount {
+            ExecutionTarget::UpstreamAccount {
                 account_id: right,
                 ..
             }
@@ -190,6 +191,63 @@ fn classify_execution_error(error: &KeyComputeError) -> (TraceErrorCategory, Str
             "provider_attempt_failed".to_string(),
             error.is_retryable(),
         ),
+    }
+}
+
+/// Model-bound traffic must not quarantine an otherwise usable account when
+/// the upstream response is only evidence about the requested model or JSON
+/// shape. Authentication, endpoint and transport failures remain account
+/// observations; ambiguous model/status failures are persisted through the
+/// model-health validator instead.
+fn should_record_account_health_failure(_ctx: &RequestContext, error: &KeyComputeError) -> bool {
+    !matches!(
+        error,
+        KeyComputeError::UpstreamFailure {
+            status: Some(400 | 404 | 422),
+            ..
+        } | KeyComputeError::ProviderError(_)
+            | KeyComputeError::SerializationError(_)
+            | KeyComputeError::ValidationError(_)
+    )
+}
+
+fn should_record_model_health_failure(error: &KeyComputeError) -> bool {
+    matches!(
+        error,
+        KeyComputeError::UpstreamFailure { .. }
+            | KeyComputeError::ProviderTimeout(_, _)
+            | KeyComputeError::Timeout(_)
+    ) && !matches!(
+        error,
+        KeyComputeError::UpstreamFailure {
+            status: Some(400 | 422),
+            ..
+        }
+    )
+}
+
+fn model_health_reason_code(error: &KeyComputeError) -> &'static str {
+    match error {
+        KeyComputeError::UpstreamFailure {
+            status: Some(401 | 403),
+            ..
+        } => "upstream_http_401",
+        KeyComputeError::UpstreamFailure {
+            status: Some(404), ..
+        } => "upstream_http_404",
+        KeyComputeError::UpstreamFailure {
+            status: Some(429), ..
+        } => "upstream_http_429",
+        KeyComputeError::UpstreamFailure { stable_code, .. } if stable_code.contains("timeout") => {
+            "upstream_timeout"
+        }
+        KeyComputeError::Timeout(_) | KeyComputeError::ProviderTimeout(_, _) => "upstream_timeout",
+        KeyComputeError::UpstreamFailure { stable_code, .. }
+            if stable_code.contains("protocol") =>
+        {
+            "upstream_protocol"
+        }
+        _ => "upstream_transport",
     }
 }
 
@@ -345,7 +403,7 @@ fn next_runnable_target_index(
         let compatibility_retry_is_runnable = !candidate.stream_options_compatibility_retry
             || matches!(
                 &candidate.target,
-                ExecutionTarget::ProviderAccount { account_id, .. }
+                ExecutionTarget::UpstreamAccount { account_id, .. }
                     if compatibility_retry_pending.contains(account_id)
             );
 
@@ -555,6 +613,7 @@ impl GatewayExecutor {
         provider_health: Option<Arc<ProviderHealthStore>>,
         lifecycle: Arc<dyn RequestLifecycleRecorder>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        validate_execution_plan(&ctx, &plan)?;
         let channel_capacity = if ctx.native_openai_responses_request.is_some()
             || ctx.native_openai_chat_request.is_some()
         {
@@ -611,6 +670,23 @@ impl GatewayExecutor {
                         .await;
                 }
                 Ok(Err(error)) => {
+                    if let KeyComputeError::ModelBinding(code) = &error {
+                        ctx.set_execution_failure(RequestExecutionFailure {
+                            status: RequestStatus::Failed,
+                            error: TraceErrorInfo {
+                                origin: ErrorOrigin::Gateway,
+                                category: if code.status() == 404 {
+                                    TraceErrorCategory::InvalidRequest
+                                } else {
+                                    TraceErrorCategory::Transport
+                                },
+                                code: code.code().to_string(),
+                                summary: None,
+                                retryable: Some(false),
+                            },
+                            billing_status: BillingStatus::NotApplicable,
+                        });
+                    }
                     tracing::error!(
                         request_id = %ctx.request_id,
                         error = %error,
@@ -704,30 +780,72 @@ impl GatewayExecutor {
             active_attempt,
             execution_completed,
         } = run;
+        // A model-bound request is an exact, server-selected account route.
+        // Never honor a malformed caller-supplied plan that smuggles in a
+        // fallback or a Node target; doing so would silently violate binding
+        // isolation.  The handler marks the context only after resolving the
+        // binding on the trusted writer connection.
+        let target_binding = match &plan.primary {
+            ExecutionTarget::UpstreamAccount {
+                selection:
+                    keycompute_types::AccountSelection::ModelBinding {
+                        binding_id,
+                        binding_revision,
+                    },
+                ..
+            } => Some(keycompute_types::ModelBindingSelection {
+                binding_id: *binding_id,
+                binding_revision: *binding_revision,
+            }),
+            _ => None,
+        };
+        let model_bound = target_binding.is_some();
+        if model_bound
+            && (ctx.model_binding != target_binding
+                || ctx.model_binding_validator.is_none()
+                || ctx.account_model_health_observer.is_none()
+                || ctx.model_binding_account_config_version.is_none()
+                || !plan.fallback_chain.is_empty())
+        {
+            return Err(KeyComputeError::ServiceUnavailable(
+                "model_binding_plan_invalid".to_string(),
+            ));
+        }
+        if !model_bound && ctx.model_binding.is_some() {
+            return Err(KeyComputeError::ServiceUnavailable(
+                "model_binding_plan_invalid".to_string(),
+            ));
+        }
         // Build the actual execution chain: configured retries stay on the
         // same account, then fallback advances to the next routed account.
         // Node execution is handled outside this executor and is not repeated.
         let primary_target = plan.primary.clone();
         let mut routed_targets = vec![plan.primary];
-        if self.config.enable_fallback {
+        if !model_bound && self.config.enable_fallback {
             routed_targets.extend(plan.fallback_chain);
         }
         // Configuration is trusted, but still cap expansion defensively so a
         // typo cannot allocate an unbounded execution chain.
-        let retries_per_account = self.config.max_retries.min(10);
+        let retries_per_account = if model_bound {
+            0
+        } else {
+            self.config.max_retries.min(10)
+        };
         let mut targets = Vec::new();
         for target in routed_targets {
-            let logical_attempts = if matches!(target, ExecutionTarget::ProviderAccount { .. }) {
+            let logical_attempts = if matches!(target, ExecutionTarget::UpstreamAccount { .. }) {
                 retries_per_account + 1
             } else {
                 1
             };
             for _ in 0..logical_attempts {
                 targets.push(PlannedTarget::regular(target.clone()));
-                if matches!(
-                    &target,
-                    ExecutionTarget::ProviderAccount { provider, .. } if provider == "openai"
-                ) {
+                if !model_bound
+                    && matches!(
+                        &target,
+                        ExecutionTarget::UpstreamAccount { provider, .. } if provider == "openai"
+                    )
+                {
                     targets.push(PlannedTarget::compatibility_retry(target.clone()));
                 }
             }
@@ -750,6 +868,9 @@ impl GatewayExecutor {
         let mut compatibility_retry_pending = HashSet::<uuid::Uuid>::new();
         let mut stream_usage_unsupported = HashSet::<uuid::Uuid>::new();
         let mut next_eligible_index = 0usize;
+        // Captured before each outbound attempt and reused for its terminal
+        // observation. Never reload generation after I/O: CAS fencing makes a
+        // late result harmless when a newer probe won the race.
         for (target_index, planned_target) in targets.iter().cloned().enumerate() {
             if target_index < next_eligible_index {
                 continue;
@@ -757,10 +878,10 @@ impl GatewayExecutor {
             let target = planned_target.target;
             if planned_target.stream_options_compatibility_retry {
                 let should_run = match &target {
-                    ExecutionTarget::ProviderAccount { account_id, .. } => {
+                    ExecutionTarget::UpstreamAccount { account_id, .. } => {
                         compatibility_retry_pending.remove(account_id)
                     }
-                    ExecutionTarget::Node { .. } => false,
+                    ExecutionTarget::NodeDispatch { .. } => false,
                 };
                 if !should_run {
                     continue;
@@ -770,7 +891,7 @@ impl GatewayExecutor {
                 classify_attempt_kind(target_index, &target, &mut attempted_accounts);
             if attempt_kind == AttemptKind::Retry
                 && !planned_target.stream_options_compatibility_retry
-                && let ExecutionTarget::ProviderAccount { account_id, .. } = &target
+                && let ExecutionTarget::UpstreamAccount { account_id, .. } = &target
             {
                 let retry = retry_counts.entry(*account_id).or_default();
                 *retry += 1;
@@ -797,7 +918,7 @@ impl GatewayExecutor {
             // poison health or retry the same saturated account repeatedly.
             let _account_permit = if let (
                 Some(admission),
-                ExecutionTarget::ProviderAccount { account_id, .. },
+                ExecutionTarget::UpstreamAccount { account_id, .. },
             ) = (&self.account_admission, &target)
             {
                 let acquired = tokio::select! {
@@ -809,9 +930,13 @@ impl GatewayExecutor {
                 match acquired {
                     Ok(permit) => Some(permit),
                     Err(_) => {
-                        last_error = Some(KeyComputeError::ServiceUnavailable(
-                            "upstream_capacity_exhausted".into(),
-                        ));
+                        last_error = Some(if model_bound {
+                            ModelBindingError::CapacityExhausted.into()
+                        } else {
+                            KeyComputeError::ServiceUnavailable(
+                                "upstream_capacity_exhausted".into(),
+                            )
+                        });
                         next_eligible_index = targets
                             .iter()
                             .enumerate()
@@ -840,9 +965,13 @@ impl GatewayExecutor {
                         KeyComputeError::RateLimitExceeded(_)
                         | KeyComputeError::PermissionDenied(_),
                     ) => {
-                        last_error = Some(KeyComputeError::ServiceUnavailable(
-                            "upstream_capacity_exhausted".into(),
-                        ));
+                        last_error = Some(if model_bound {
+                            ModelBindingError::CapacityExhausted.into()
+                        } else {
+                            KeyComputeError::ServiceUnavailable(
+                                "upstream_capacity_exhausted".into(),
+                            )
+                        });
                         next_eligible_index = targets
                             .iter()
                             .enumerate()
@@ -853,18 +982,78 @@ impl GatewayExecutor {
                     }
                     Err(error) => {
                         tracing::warn!(request_id=%ctx.request_id, %error, "account quota dependency unavailable; not dispatching");
-                        last_error = Some(KeyComputeError::ServiceUnavailable(
-                            "upstream_capacity_exhausted".into(),
-                        ));
+                        last_error = Some(if model_bound {
+                            ModelBindingError::DependencyUnavailable.into()
+                        } else {
+                            KeyComputeError::ServiceUnavailable(
+                                "upstream_capacity_exhausted".into(),
+                            )
+                        });
                         break;
                     }
                 }
             } else {
                 None
             };
+            // The final authoritative snapshot follows capacity queueing.
+            // Always release a not-yet-used quota lease on rejection/timeout.
+            let snapshot_result: Result<Option<AccountModelHealthSnapshot>> = if model_bound {
+                let selection = target_binding.expect("validated bound target");
+                let validator = ctx
+                    .model_binding_validator
+                    .as_ref()
+                    .expect("validated binding hook");
+                let version = ctx
+                    .model_binding_account_config_version
+                    .expect("validated config fence");
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    validator.validate_target(
+                        ctx.tenant_id,
+                        &ctx.model,
+                        selection,
+                        &target,
+                        version,
+                    ),
+                )
+                .await
+                .unwrap_or_else(|_| Err(ModelBindingError::DependencyUnavailable.into()))
+                .map(Some)
+            } else if let Some(observer) = &ctx.account_model_health_observer {
+                let capability = if ctx.native_anthropic_request.is_some() {
+                    "messages"
+                } else if ctx.native_openai_responses_request.is_some() {
+                    "responses"
+                } else {
+                    "chat_completions"
+                };
+                tokio::time::timeout(
+                    Duration::from_secs(3),
+                    observer.snapshot(&target, capability, &ctx.model),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(KeyComputeError::ServiceUnavailable(
+                        "model health state unavailable".into(),
+                    ))
+                })
+            } else {
+                Ok(None)
+            };
+            let health_snapshot = match snapshot_result {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    if let Some(lease) = &mut quota_lease {
+                        let _ =
+                            tokio::time::timeout(Duration::from_secs(2), lease.finish(None, true))
+                                .await;
+                    }
+                    return Err(error);
+                }
+            };
             let target_start = Instant::now();
             let attempt = match &target {
-                ExecutionTarget::ProviderAccount {
+                ExecutionTarget::UpstreamAccount {
                     provider,
                     account_id,
                     ..
@@ -873,7 +1062,11 @@ impl GatewayExecutor {
                         .start_attempt(AttemptTraceStart {
                             request_id: ctx.request_id,
                             attempt_kind,
-                            route_type: RouteType::ProviderAccount,
+                            route_type: if ctx.model_binding.is_some() {
+                                RouteType::ModelBinding
+                            } else {
+                                RouteType::ProviderAccount
+                            },
                             model: ctx.model.clone(),
                             provider_name: Some(provider.clone()),
                             account_id: Some(*account_id),
@@ -893,7 +1086,7 @@ impl GatewayExecutor {
                         }
                     }
                 }
-                ExecutionTarget::Node { .. } => None,
+                ExecutionTarget::NodeDispatch { .. } => None,
             };
             *active_attempt
                 .lock()
@@ -913,10 +1106,10 @@ impl GatewayExecutor {
                             lifecycle: Arc::clone(&lifecycle),
                             execution_completed: Arc::clone(&execution_completed),
                             include_stream_usage: match &target {
-                                ExecutionTarget::ProviderAccount { account_id, .. } => {
+                                ExecutionTarget::UpstreamAccount { account_id, .. } => {
                                     !stream_usage_unsupported.contains(account_id)
                                 }
-                                ExecutionTarget::Node { .. } => true,
+                                ExecutionTarget::NodeDispatch { .. } => true,
                             },
                         },
                     ),
@@ -1010,13 +1203,32 @@ impl GatewayExecutor {
             match result {
                 Ok(()) => {
                     // 成功：标记账号状态
-                    if let ExecutionTarget::ProviderAccount { account_id, .. } = &target {
+                    if let ExecutionTarget::UpstreamAccount { account_id, .. } = &target {
                         account_states.mark_success(*account_id);
+                        if let (Some(observer), Some(snapshot)) = (
+                            ctx.account_model_health_observer.as_ref(),
+                            health_snapshot.as_ref(),
+                        ) && let Err(error) = tokio::time::timeout(
+                            Duration::from_millis(500),
+                            observer.observe(snapshot, ModelHealthObservation::Healthy),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(KeyComputeError::ServiceUnavailable(
+                                "model_health_timeout".into(),
+                            ))
+                        }) {
+                            tracing::debug!(
+                                request_id = %ctx.request_id,
+                                %error,
+                                "model health success observation was not persisted"
+                            );
+                        }
                     }
 
                     // 成功：更新 Provider 健康状态
                     let latency_ms = target_start.elapsed().as_millis() as u64;
-                    if let ExecutionTarget::ProviderAccount {
+                    if let ExecutionTarget::UpstreamAccount {
                         provider,
                         account_id,
                         ..
@@ -1033,8 +1245,8 @@ impl GatewayExecutor {
                     }
 
                     let provider_name = match &target {
-                        ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
-                        ExecutionTarget::Node { model } => format!("node:{}", model),
+                        ExecutionTarget::UpstreamAccount { provider, .. } => provider.clone(),
+                        ExecutionTarget::NodeDispatch { model } => format!("node:{}", model),
                     };
                     tracing::info!(
                         request_id = %ctx.request_id,
@@ -1050,14 +1262,14 @@ impl GatewayExecutor {
                         &e,
                         KeyComputeError::UpstreamFailure { stable_code, .. }
                             if stable_code == "upstream_stream_options_unsupported"
-                    ) && let ExecutionTarget::ProviderAccount { account_id, .. } = &target
+                    ) && let ExecutionTarget::UpstreamAccount { account_id, .. } = &target
                     {
                         stream_usage_unsupported.insert(*account_id);
                         compatibility_retry_pending.insert(*account_id);
                     }
                     let provider_name = match &target {
-                        ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
-                        ExecutionTarget::Node { model } => format!("node:{}", model),
+                        ExecutionTarget::UpstreamAccount { provider, .. } => provider.clone(),
+                        ExecutionTarget::NodeDispatch { model } => format!("node:{}", model),
                     };
 
                     // 客户端已断开（receiver 被 drop，或 handler 显式标记）：继续
@@ -1082,7 +1294,7 @@ impl GatewayExecutor {
                         code: if client_gone {
                             "client_disconnected".to_string()
                         } else {
-                            code
+                            code.clone()
                         },
                         summary: Some(sanitize_error_summary(&error_text)),
                         retryable: Some(retryable),
@@ -1182,15 +1394,48 @@ impl GatewayExecutor {
 
                     // 生产调用同时更新账号级运行健康和兼容性的协议诊断统计；
                     // 后台账号探测只更新账号级运行健康，不污染协议诊断统计。
-                    if let ExecutionTarget::ProviderAccount {
-                        provider,
-                        account_id,
-                        ..
-                    } = &target
+                    // Bound model failures are persisted by the model-scoped
+                    // validator below.  Do not quarantine the whole account
+                    // (and thereby unrelated healthy models) on an isolated
+                    // model response/client error. Ordinary pool traffic keeps
+                    // the historical account/provider health observations.
+                    if (!model_bound || should_record_account_health_failure(&ctx, &e))
+                        && let ExecutionTarget::UpstreamAccount {
+                            provider,
+                            account_id,
+                            ..
+                        } = &target
                         && let Some(ref health_store) = provider_health
                     {
                         health_store.record_failure(provider);
                         health_store.record_account_failure(*account_id, &e);
+                    }
+
+                    if let (Some(observer), Some(snapshot)) = (
+                        ctx.account_model_health_observer.as_ref(),
+                        health_snapshot.as_ref(),
+                    ) && should_record_model_health_failure(&e)
+                        && let Err(observation_error) = tokio::time::timeout(
+                            Duration::from_millis(500),
+                            observer.observe(
+                                snapshot,
+                                ModelHealthObservation::Unhealthy {
+                                    reason_code: model_health_reason_code(&e),
+                                },
+                            ),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(KeyComputeError::ServiceUnavailable(
+                                "model_health_timeout".into(),
+                            ))
+                        })
+                    {
+                        tracing::debug!(
+                            request_id = %ctx.request_id,
+                            error = %observation_error,
+                            "model health failure observation was not persisted"
+                        );
                     }
 
                     tracing::warn!(
@@ -1271,16 +1516,16 @@ impl GatewayExecutor {
             execution_completed,
             include_stream_usage,
         } = run;
-        // 只处理 ProviderAccount 变体
+        // 只处理 UpstreamAccount 变体
         let (provider, account_id, endpoint, upstream_api_key) = match target {
-            ExecutionTarget::ProviderAccount {
+            ExecutionTarget::UpstreamAccount {
                 provider,
                 account_id,
                 endpoint,
                 upstream_api_key,
                 ..
             } => (provider, account_id, endpoint, upstream_api_key),
-            ExecutionTarget::Node { .. } => {
+            ExecutionTarget::NodeDispatch { .. } => {
                 // 防护性检查：Node 执行在 handler 层分流（openai.rs），
                 // 通过 node_gateway.enqueue_and_wait() + simulate_node_stream() 实现，
                 // 正常流程不应到达此处
@@ -1328,6 +1573,7 @@ impl GatewayExecutor {
             messages: upstream_messages,
             stream: ctx.stream,
             include_stream_usage,
+            preserve_native_chat_body: ctx.model_binding.is_some(),
             // 仅透传客户端指定的采样参数。余额预留使用独立的本地风险预算，
             // 不得为了计费而改变发往上游的协议请求。
             max_tokens: ctx.max_tokens,
@@ -1589,7 +1835,7 @@ impl GatewayExecutor {
                     // 在 run_plan 返回前记录真正完成的账号。外层会先发布 Done，
                     // 再分别关闭 attempt 和等待 handler 的客户端响应终态；此处若
                     // 延后会与 handler 结算形成竞态并把 fallback 用量记到 primary。
-                    let ExecutionTarget::ProviderAccount { account_id, .. } = target else {
+                    let ExecutionTarget::UpstreamAccount { account_id, .. } = target else {
                         unreachable!("nodes return before streaming");
                     };
                     ctx.set_executed_provider_account(provider.clone(), *account_id);
@@ -1882,6 +2128,70 @@ impl GatewayExecutor {
             })
             .unwrap_or_default()
     }
+}
+
+/// Validate the complete trusted plan before acquiring capacity or sending an
+/// upstream request. In particular, a bound primary may never smuggle an
+/// ordinary or differently-bound fallback into the executor.
+fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result<()> {
+    let mut bound_selection = None;
+    for (index, target) in plan.all_targets().enumerate() {
+        if let ExecutionTarget::UpstreamAccount {
+            provider,
+            account_id,
+            endpoint,
+            upstream_api_key,
+            selection:
+                keycompute_types::AccountSelection::ModelBinding {
+                    binding_id,
+                    binding_revision,
+                },
+        } = target
+        {
+            if index != 0
+                || binding_id.is_nil()
+                || *binding_revision <= 0
+                || account_id.is_nil()
+                || provider != "openai"
+                || endpoint.trim().is_empty()
+                || upstream_api_key.is_empty()
+            {
+                return Err(ModelBindingError::InvalidPlan.into());
+            }
+            bound_selection = Some(keycompute_types::ModelBindingSelection {
+                binding_id: *binding_id,
+                binding_revision: *binding_revision,
+            });
+        }
+    }
+    if let Some(selection) = bound_selection {
+        let native = ctx.native_openai_chat_request.as_deref();
+        let native_model_matches = native
+            .and_then(|body| body.get("model"))
+            .and_then(serde_json::Value::as_str)
+            == Some(ctx.model.as_str());
+        let native_stream_matches = match native.and_then(|body| body.get("stream")) {
+            None | Some(serde_json::Value::Null) => !ctx.stream,
+            Some(serde_json::Value::Bool(stream)) => *stream == ctx.stream,
+            _ => false,
+        };
+        if !native_model_matches
+            || !native_stream_matches
+            || !plan.fallback_chain.is_empty()
+            || ctx.model_binding != Some(selection)
+            || ctx.model_binding_validator.is_none()
+            || ctx.account_model_health_observer.is_none()
+            || ctx.model_binding_account_config_version.is_none()
+            || ctx.native_openai_chat_request.is_none()
+            || ctx.native_openai_responses_request.is_some()
+            || ctx.native_anthropic_request.is_some()
+        {
+            return Err(ModelBindingError::InvalidPlan.into());
+        }
+    } else if ctx.model_binding.is_some() {
+        return Err(ModelBindingError::InvalidPlan.into());
+    }
+    Ok(())
 }
 
 /// 判断原始事件是否已向客户端提交了不可回退的响应状态。
@@ -4086,11 +4396,12 @@ mod tests {
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
         assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
         assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
-        let Some(ExecutionTarget::ProviderAccount {
+        let Some(ExecutionTarget::UpstreamAccount {
             provider,
             account_id: accepted_account_id,
             endpoint,
             upstream_api_key,
+            ..
         }) = context.accepted_execution_target()
         else {
             panic!("accepted Responses target must be retained");
@@ -4234,7 +4545,7 @@ mod tests {
         assert!(matches!(rx.recv().await, Some(StreamEvent::Done)));
         assert_eq!(responses_calls.load(Ordering::SeqCst), 1);
         assert_eq!(chat_calls.load(Ordering::SeqCst), 0);
-        let Some(ExecutionTarget::ProviderAccount {
+        let Some(ExecutionTarget::UpstreamAccount {
             account_id: accepted_account_id,
             ..
         }) = context.accepted_execution_target()
@@ -6259,7 +6570,7 @@ mod tests {
             _: &RequestContext,
             target: &ExecutionTarget,
         ) -> Result<Box<dyn keycompute_types::AccountAttemptLease>> {
-            let ExecutionTarget::ProviderAccount { account_id, .. } = target else {
+            let ExecutionTarget::UpstreamAccount { account_id, .. } = target else {
                 unreachable!()
             };
             self.admissions.lock().unwrap().push(*account_id);
@@ -6540,5 +6851,217 @@ mod tests {
                 .get_health("memory-limited")
                 .is_none_or(|h| h.failed_requests == 0)
         );
+    }
+}
+
+#[cfg(test)]
+mod model_binding_contract_tests {
+    use super::*;
+    use keycompute_types::{
+        AccountModelHealthObserver, ModelBindingSelection, ModelBindingValidator,
+    };
+    use uuid::Uuid;
+
+    struct StateHook;
+    #[async_trait::async_trait]
+    impl ModelBindingValidator for StateHook {
+        async fn validate_target(
+            &self,
+            _tenant: Uuid,
+            model: &str,
+            _selection: ModelBindingSelection,
+            target: &ExecutionTarget,
+            version: chrono::DateTime<chrono::Utc>,
+        ) -> Result<AccountModelHealthSnapshot> {
+            Ok(AccountModelHealthSnapshot {
+                account_id: target.account_id().unwrap(),
+                api_capability: "chat_completions".into(),
+                model: model.into(),
+                account_config_version: version,
+                generation: 1,
+            })
+        }
+    }
+    #[async_trait::async_trait]
+    impl AccountModelHealthObserver for StateHook {
+        async fn snapshot(
+            &self,
+            _target: &ExecutionTarget,
+            _capability: &str,
+            _model: &str,
+        ) -> Result<Option<AccountModelHealthSnapshot>> {
+            Ok(None)
+        }
+        async fn observe(
+            &self,
+            _snapshot: &AccountModelHealthSnapshot,
+            _result: ModelHealthObservation,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+    fn bound() -> (RequestContext, ExecutionPlan) {
+        let mut ctx = RequestContext::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "bound-model",
+            Vec::new(),
+            false,
+            keycompute_types::PricingSnapshot::default(),
+        );
+        ctx.native_openai_chat_request = Some(Arc::new(
+            serde_json::json!({"model":"bound-model","messages":[]}),
+        ));
+        let selection = ModelBindingSelection {
+            binding_id: Uuid::new_v4(),
+            binding_revision: 1,
+        };
+        ctx.set_model_binding(selection);
+        ctx.set_model_binding_account_config_version(chrono::Utc::now());
+        ctx.set_model_binding_validator(Arc::new(StateHook));
+        ctx.set_account_model_health_observer(Arc::new(StateHook));
+        let target = ExecutionTarget::new_upstream_account(
+            "openai",
+            Uuid::new_v4(),
+            "http://bound.test/v1",
+            "test-secret",
+        )
+        .with_selection(keycompute_types::AccountSelection::ModelBinding {
+            binding_id: selection.binding_id,
+            binding_revision: 1,
+        });
+        (ctx, ExecutionPlan::new(target))
+    }
+    #[test]
+    fn valid_model_binding_requires_matching_native_request_and_trusted_hooks() {
+        let (ctx, plan) = bound();
+        validate_execution_plan(&ctx, &plan).unwrap();
+    }
+    #[tokio::test]
+    async fn malformed_binding_plans_are_rejected_before_spawning_an_attempt() {
+        for case in 0..12 {
+            let (mut ctx, mut plan) = bound();
+            match case {
+                0 => ctx.model_binding_validator = None,
+                1 => ctx.account_model_health_observer = None,
+                2 => ctx.model_binding_account_config_version = None,
+                3 => ctx.model_binding = None,
+                4 => ctx.native_openai_chat_request = None,
+                5 => {
+                    ctx.native_openai_responses_request =
+                        Some(Arc::new(serde_json::json!({"model":"bound-model"})))
+                }
+                6 => {
+                    ctx.native_anthropic_request =
+                        Some(Arc::new(serde_json::json!({"model":"bound-model"})))
+                }
+                7 => {
+                    ctx.native_openai_chat_request =
+                        Some(Arc::new(serde_json::json!({"model":"other-model"})))
+                }
+                8 => ctx.stream = true,
+                9 => plan.fallback_chain.push(ExecutionTarget::new_provider(
+                    "openai",
+                    Uuid::new_v4(),
+                    "http://other.test/v1",
+                    "secret",
+                )),
+                10 => {
+                    plan.primary = plan
+                        .primary
+                        .with_selection(keycompute_types::AccountSelection::Pool)
+                }
+                11 => {
+                    let bound_target = plan.primary.clone();
+                    plan.primary = ExecutionTarget::new_provider(
+                        "openai",
+                        Uuid::new_v4(),
+                        "http://pool.test/v1",
+                        "secret",
+                    );
+                    plan.fallback_chain.push(bound_target);
+                    ctx.model_binding = None;
+                }
+                _ => unreachable!(),
+            }
+            let result = crate::GatewayBuilder::new()
+                .build()
+                .execute(
+                    Arc::new(ctx),
+                    plan,
+                    Arc::new(AccountStateStore::new()),
+                    None,
+                )
+                .await;
+            assert!(
+                matches!(
+                    result,
+                    Err(KeyComputeError::ModelBinding(
+                        ModelBindingError::InvalidPlan
+                    ))
+                ),
+                "case {case} was accepted"
+            );
+        }
+    }
+    #[test]
+    fn binding_ids_revisions_and_protocol_are_validated() {
+        for case in 0..5 {
+            let (ctx, mut plan) = bound();
+            if let ExecutionTarget::UpstreamAccount {
+                provider,
+                account_id,
+                endpoint,
+                selection,
+                ..
+            } = &mut plan.primary
+            {
+                match case {
+                    0 => *provider = "anthropic".into(),
+                    1 => *account_id = Uuid::nil(),
+                    2 => *endpoint = String::new(),
+                    3 => {
+                        *selection = keycompute_types::AccountSelection::ModelBinding {
+                            binding_id: Uuid::nil(),
+                            binding_revision: 1,
+                        }
+                    }
+                    4 => {
+                        *selection = keycompute_types::AccountSelection::ModelBinding {
+                            binding_id: ctx.model_binding.unwrap().binding_id,
+                            binding_revision: 0,
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            assert!(validate_execution_plan(&ctx, &plan).is_err());
+        }
+    }
+    #[test]
+    fn request_validation_failures_are_not_model_health_observations() {
+        for status in [400, 422] {
+            let e = KeyComputeError::UpstreamFailure {
+                status: Some(status),
+                stable_code: format!("upstream_http_{status}"),
+                retryable: false,
+                summary: String::new(),
+            };
+            assert!(!should_record_model_health_failure(&e));
+        }
+        assert!(!should_record_model_health_failure(
+            &ModelBindingError::Changed.into()
+        ));
+        let e = KeyComputeError::UpstreamFailure {
+            status: Some(404),
+            stable_code: "upstream_http_404".into(),
+            retryable: false,
+            summary: String::new(),
+        };
+        assert!(should_record_model_health_failure(&e));
+        let (ctx, _) = bound();
+        assert!(!should_record_account_health_failure(&ctx, &e));
     }
 }

@@ -4,6 +4,229 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::common::encode_query_value;
 
+/// A tenant-scoped model binding.  The server deliberately returns only
+/// non-secret account metadata; credentials and endpoints never appear here.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ModelBindingInfo {
+    pub id: String,
+    pub tenant_id: String,
+    pub api_capability: String,
+    pub model: String,
+    pub account_id: String,
+    #[serde(default)]
+    pub account_name: Option<String>,
+    pub enabled: bool,
+    pub revision: i64,
+    #[serde(default)]
+    pub health_status: Option<String>,
+    #[serde(default)]
+    pub health_reason_code: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ModelBindingQueryParams {
+    pub tenant_id: Option<String>,
+    pub model: Option<String>,
+    pub api_capability: Option<String>,
+    pub enabled: Option<bool>,
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+impl ModelBindingQueryParams {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_api_capability(mut self, capability: impl Into<String>) -> Self {
+        self.api_capability = Some(capability.into());
+        self
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+
+    pub fn with_page(mut self, page: u32) -> Self {
+        self.page = Some(page);
+        self
+    }
+
+    pub fn with_page_size(mut self, page_size: u32) -> Self {
+        self.page_size = Some(page_size);
+        self
+    }
+
+    pub fn to_query_string(&self) -> String {
+        let mut params = Vec::new();
+        if let Some(value) = &self.tenant_id {
+            params.push(format!("tenant_id={}", encode_query_value(value)));
+        }
+        if let Some(value) = &self.model {
+            params.push(format!("model={}", encode_query_value(value)));
+        }
+        if let Some(value) = &self.api_capability {
+            params.push(format!("api_capability={}", encode_query_value(value)));
+        }
+        if let Some(value) = self.enabled {
+            params.push(format!("enabled={value}"));
+        }
+        if let Some(value) = self.page {
+            params.push(format!("page={value}"));
+        }
+        if let Some(value) = self.page_size {
+            params.push(format!("page_size={value}"));
+        }
+        params.join("&")
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ModelBindingPage {
+    #[serde(default)]
+    pub bindings: Vec<ModelBindingInfo>,
+    #[serde(default)]
+    pub total: u64,
+    #[serde(default)]
+    pub page: u32,
+    #[serde(default)]
+    pub page_size: u32,
+    #[serde(default)]
+    pub total_pages: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateModelBindingRequest {
+    pub tenant_id: String,
+    pub api_capability: String,
+    pub model: String,
+    pub account_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl CreateModelBindingRequest {
+    pub fn new(
+        tenant_id: impl Into<String>,
+        model: impl Into<String>,
+        account_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            api_capability: "chat_completions".to_string(),
+            model: model.into(),
+            account_id: account_id.into(),
+            enabled: None,
+        }
+    }
+
+    pub fn with_api_capability(mut self, capability: impl Into<String>) -> Self {
+        self.api_capability = capability.into();
+        self
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct UpdateModelBindingRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Required by the server for optimistic-concurrency updates.
+    pub expected_revision: i64,
+}
+
+impl UpdateModelBindingRequest {
+    pub fn new(expected_revision: i64) -> Self {
+        Self {
+            expected_revision,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_account_id(mut self, account_id: impl Into<String>) -> Self {
+        self.account_id = Some(account_id.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = Some(enabled);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ModelBindingProbeRequest {
+    /// Explicitly supplied even when probing a binding, preventing accidental
+    /// fallback to an account's first configured model.
+    pub model: String,
+    #[serde(default = "default_chat_capability")]
+    pub api_capability: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+fn default_chat_capability() -> String {
+    "chat_completions".to_string()
+}
+
+impl ModelBindingProbeRequest {
+    pub fn new(model: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            api_capability: default_chat_capability(),
+            timeout_ms: None,
+        }
+    }
+
+    pub fn with_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ModelBindingProbeResponse {
+    #[serde(default)]
+    pub binding_id: Option<String>,
+    pub account_id: String,
+    pub model: String,
+    pub status: String,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub checked_at: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    #[serde(default)]
+    pub generation: Option<i64>,
+}
+
 /// 账号查询参数
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AccountQueryParams {
@@ -326,7 +549,9 @@ pub struct AccountRefreshResponse {
 mod tests {
     use super::{
         AccountInfo, AccountQueryParams, AccountRefreshResponse, AccountTestResponse,
-        CreateAccountRequest, UpdateAccountRequest,
+        CreateAccountRequest, CreateModelBindingRequest, ModelBindingInfo,
+        ModelBindingProbeRequest, ModelBindingQueryParams, UpdateAccountRequest,
+        UpdateModelBindingRequest,
     };
 
     #[test]
@@ -439,5 +664,69 @@ mod tests {
         });
         let account: AccountInfo = serde_json::from_value(value).unwrap();
         assert_eq!(account.tpm_limit, 100_000);
+    }
+
+    #[test]
+    fn model_binding_query_escapes_filters_and_bounds_pages() {
+        let query = ModelBindingQueryParams::new()
+            .with_model("gpt/mini & test")
+            .with_api_capability("chat_completions")
+            .with_enabled(true)
+            .with_page(2)
+            .with_page_size(25)
+            .to_query_string();
+        assert_eq!(
+            query,
+            "model=gpt%2Fmini%20%26%20test&api_capability=chat_completions&enabled=true&page=2&page_size=25"
+        );
+    }
+
+    #[test]
+    fn model_binding_requests_keep_optimistic_revision_and_explicit_model_probe() {
+        let create =
+            CreateModelBindingRequest::new("tenant-1", "gpt-mini", "account-a").with_enabled(true);
+        let create_value = serde_json::to_value(create).unwrap();
+        assert_eq!(create_value["api_capability"], "chat_completions");
+        assert_eq!(create_value["model"], "gpt-mini");
+
+        let update = UpdateModelBindingRequest::new(7)
+            .with_account_id("account-b")
+            .with_enabled(false);
+        let update_value = serde_json::to_value(update).unwrap();
+        assert_eq!(update_value["expected_revision"], 7);
+        assert_eq!(update_value["account_id"], "account-b");
+
+        let probe = ModelBindingProbeRequest::new("gpt-mini").with_timeout_ms(2_000);
+        let probe_value = serde_json::to_value(probe).unwrap();
+        assert_eq!(probe_value["model"], "gpt-mini");
+        assert_eq!(probe_value["api_capability"], "chat_completions");
+        assert_eq!(probe_value["timeout_ms"], 2_000);
+    }
+
+    #[test]
+    fn model_binding_info_accepts_optional_health_metadata() {
+        let binding: ModelBindingInfo = serde_json::from_value(serde_json::json!({
+            "id": "binding-1",
+            "revision": 1,
+            "tenant_id": "tenant-1",
+            "api_capability": "chat_completions",
+            "model": "gpt-mini",
+            "account_id": "account-a",
+            "enabled": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(binding.revision, 1);
+        assert!(binding.health_status.is_none());
+    }
+    #[test]
+    fn model_binding_info_requires_authoritative_revision() {
+        let value = serde_json::json!({
+            "id":"binding-1", "tenant_id":"tenant-1", "model":"gpt-mini",
+            "api_capability":"chat_completions", "account_id":"account-a", "enabled":true,
+            "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z"
+        });
+        assert!(serde_json::from_value::<ModelBindingInfo>(value).is_err());
     }
 }

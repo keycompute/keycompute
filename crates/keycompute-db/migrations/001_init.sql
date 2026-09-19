@@ -166,6 +166,85 @@ CREATE INDEX IF NOT EXISTS idx_accounts_health_routing
     ON accounts(health_status, health_penalty, priority)
     WHERE enabled = TRUE;
 
+-- model_bindings: an explicit tenant/model -> one upstream account binding.
+-- The ordinary UNIQUE constraint intentionally spans enabled and disabled rows:
+-- disabling a binding does not make the model available for a second binding.
+CREATE TABLE IF NOT EXISTS model_bindings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    api_capability VARCHAR(50) NOT NULL DEFAULT 'chat_completions',
+    model VARCHAR(255) NOT NULL,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE RESTRICT,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    revision BIGINT NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_model_bindings_capability
+        CHECK (api_capability = 'chat_completions'),
+    CONSTRAINT ck_model_bindings_model_nonempty
+        CHECK (BTRIM(model) <> '' AND model = BTRIM(model)),
+    CONSTRAINT ck_model_bindings_model_not_node
+        CHECK (LOWER(model) NOT LIKE 'node:%'),
+    CONSTRAINT ck_model_bindings_revision_positive CHECK (revision > 0),
+    CONSTRAINT uk_model_bindings_tenant_capability_model
+        UNIQUE (tenant_id, api_capability, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_bindings_tenant
+    ON model_bindings(tenant_id, api_capability, model);
+CREATE INDEX IF NOT EXISTS idx_model_bindings_account
+    ON model_bindings(account_id);
+CREATE INDEX IF NOT EXISTS idx_model_bindings_enabled
+    ON model_bindings(tenant_id, model)
+    WHERE enabled = TRUE;
+
+COMMENT ON TABLE model_bindings IS
+    'Explicit tenant/model routing bindings; one account per model and capability.';
+COMMENT ON COLUMN model_bindings.revision IS
+    'Optimistic concurrency revision; account switches must increment it.';
+
+-- account_model_health: independent health snapshots for each account,
+-- capability and model.  A missing/unknown/expired/config-mismatched row is
+-- deliberately fail-closed for model-bound traffic.  The account config
+-- version fence prevents late probe results from reviving stale credentials.
+CREATE TABLE IF NOT EXISTS account_model_health (
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    api_capability VARCHAR(50) NOT NULL,
+    model VARCHAR(255) NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'unknown',
+    reason_code VARCHAR(128),
+    checked_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    -- Snapshot of accounts.updated_at when the observation was produced.
+    -- This timestamp is the account configuration version/fence.
+    account_config_version TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    generation BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (account_id, api_capability, model),
+    CONSTRAINT ck_account_model_health_capability
+        CHECK (api_capability IN ('chat_completions', 'responses', 'messages')),
+    CONSTRAINT ck_account_model_health_model_nonempty
+        CHECK (BTRIM(model) <> '' AND model = BTRIM(model)),
+    CONSTRAINT ck_account_model_health_status
+        CHECK (status IN ('unknown', 'healthy', 'degraded', 'unhealthy')),
+    CONSTRAINT ck_account_model_health_reason_safe
+        CHECK (reason_code IS NULL OR (
+            BTRIM(reason_code) = reason_code
+            AND CHAR_LENGTH(reason_code) <= 128
+            AND reason_code ~ '^[a-z0-9_.:-]+$'
+        )),
+    CONSTRAINT ck_account_model_health_expiry
+        CHECK (expires_at IS NULL OR checked_at IS NOT NULL AND expires_at > checked_at),
+    CONSTRAINT ck_account_model_health_generation_nonnegative
+        CHECK (generation >= 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_account_model_health_expiry
+    ON account_model_health(account_id, api_capability, expires_at);
+CREATE INDEX IF NOT EXISTS idx_account_model_health_status
+    ON account_model_health(status, expires_at);
+
 -- responses_idempotency_claims: Responses Idempotency-Key 的永久身份绑定及短期结果缓存。
 -- 只保留哈希后的绑定 ID；account_id 是历史执行归属，故意不引用可删除的
 -- accounts 配置行。否则删除账号会重新开放已经使用过的幂等键。结果正文受
@@ -450,7 +529,7 @@ CREATE TABLE IF NOT EXISTS gateway_requests (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_gateway_requests_protocol CHECK (protocol IN ('openai', 'anthropic')),
-    CONSTRAINT ck_gateway_requests_route_type CHECK (route_type IS NULL OR route_type IN ('provider_account', 'node')),
+    CONSTRAINT ck_gateway_requests_route_type CHECK (route_type IS NULL OR route_type IN ('provider_account', 'model_binding', 'node')),
     CONSTRAINT ck_gateway_requests_status CHECK (status IN ('received', 'routing', 'queued', 'running', 'succeeded', 'failed', 'timed_out', 'cancelled')),
     CONSTRAINT ck_gateway_requests_error_origin CHECK (error_origin IS NULL OR error_origin IN ('client', 'gateway', 'upstream', 'node')),
     CONSTRAINT ck_gateway_requests_error_category CHECK (error_category IS NULL OR error_category IN ('authorization', 'invalid_request', 'balance', 'rate_limit', 'transport', 'timeout', 'upstream_4xx', 'upstream_5xx', 'protocol', 'client_disconnect', 'node_expired', 'node_failed', 'internal')),
@@ -494,7 +573,7 @@ CREATE TABLE IF NOT EXISTS gateway_request_attempts (
     CONSTRAINT uk_gateway_request_attempt_no UNIQUE (request_id, attempt_no),
     CONSTRAINT ck_gateway_attempt_no CHECK (attempt_no > 0),
     CONSTRAINT ck_gateway_attempt_kind CHECK (attempt_kind IN ('primary', 'fallback', 'retry', 'reclaim')),
-    CONSTRAINT ck_gateway_attempt_route_type CHECK (route_type IN ('provider_account', 'node')),
+    CONSTRAINT ck_gateway_attempt_route_type CHECK (route_type IN ('provider_account', 'model_binding', 'node')),
     CONSTRAINT ck_gateway_attempt_status CHECK (status IN ('running', 'succeeded', 'failed', 'timed_out', 'cancelled', 'expired')),
     CONSTRAINT ck_gateway_attempt_error_origin CHECK (error_origin IS NULL OR error_origin IN ('upstream', 'gateway', 'node')),
     CONSTRAINT ck_gateway_attempt_error_category CHECK (error_category IS NULL OR error_category IN ('authorization', 'invalid_request', 'balance', 'rate_limit', 'transport', 'timeout', 'upstream_4xx', 'upstream_5xx', 'protocol', 'client_disconnect', 'node_expired', 'node_failed', 'internal')),
@@ -506,7 +585,7 @@ CREATE TABLE IF NOT EXISTS gateway_request_attempts (
     CONSTRAINT ck_gateway_attempt_content_finished CHECK (first_content_at IS NULL OR finished_at IS NULL OR first_content_at <= finished_at),
     CONSTRAINT ck_gateway_attempt_terminal_time CHECK ((status = 'running') = (finished_at IS NULL)),
     CONSTRAINT ck_gateway_attempt_target CHECK (
-        (route_type = 'provider_account' AND provider_name IS NOT NULL AND account_id IS NOT NULL AND node_task_id IS NULL AND node_id IS NULL AND session_id IS NULL AND lease_id IS NULL)
+        (route_type IN ('provider_account', 'model_binding') AND provider_name IS NOT NULL AND account_id IS NOT NULL AND node_task_id IS NULL AND node_id IS NULL AND session_id IS NULL AND lease_id IS NULL)
         OR
         (route_type = 'node' AND provider_name IS NULL AND account_id IS NULL AND node_task_id IS NOT NULL AND node_id IS NOT NULL AND session_id IS NOT NULL AND lease_id IS NOT NULL)
     )

@@ -19,7 +19,7 @@ use uuid::Uuid;
 /// 从 ExecutionTarget 提取路由目标信息
 fn extract_target_info(target: &ExecutionTarget) -> Option<RoutingTargetInfo> {
     match target {
-        ExecutionTarget::ProviderAccount {
+        ExecutionTarget::UpstreamAccount {
             provider,
             account_id,
             endpoint,
@@ -29,7 +29,7 @@ fn extract_target_info(target: &ExecutionTarget) -> Option<RoutingTargetInfo> {
             account_id: *account_id,
             endpoint: endpoint.clone(),
         }),
-        ExecutionTarget::Node { .. } => None, // Node 路径不支持此接口
+        ExecutionTarget::NodeDispatch { .. } => None, // Node 路径不支持此接口
     }
 }
 

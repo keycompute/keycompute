@@ -4,6 +4,87 @@
 
 use thiserror::Error;
 
+/// Stable, non-secret local failures for explicit model binding admission.
+/// These failures must survive the executor channel without becoming an
+/// upstream HTTP 502. They never authorize an automatic second attempt.
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelBindingError {
+    #[error("model_binding_not_found")]
+    NotFound,
+    #[error("model_binding_model_not_supported")]
+    ModelNotSupported,
+    #[error("model_binding_unavailable")]
+    Unavailable,
+    #[error("model_binding_changed")]
+    Changed,
+    #[error("model_binding_health_unknown")]
+    HealthUnknown,
+    #[error("model_binding_model_unhealthy")]
+    ModelUnhealthy,
+    #[error("model_binding_capacity_exhausted")]
+    CapacityExhausted,
+    #[error("model_binding_dependency_unavailable")]
+    DependencyUnavailable,
+    #[error("model_binding_plan_invalid")]
+    InvalidPlan,
+}
+
+impl ModelBindingError {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::NotFound => "model_binding_not_found",
+            Self::ModelNotSupported => "model_binding_model_not_supported",
+            Self::Unavailable => "model_binding_unavailable",
+            Self::Changed => "model_binding_changed",
+            Self::HealthUnknown => "model_binding_health_unknown",
+            Self::ModelUnhealthy => "model_binding_model_unhealthy",
+            Self::CapacityExhausted => "model_binding_capacity_exhausted",
+            Self::DependencyUnavailable => "model_binding_dependency_unavailable",
+            Self::InvalidPlan => "model_binding_plan_invalid",
+        }
+    }
+
+    pub fn from_code(value: &str) -> Option<Self> {
+        [
+            Self::NotFound,
+            Self::ModelNotSupported,
+            Self::Unavailable,
+            Self::Changed,
+            Self::HealthUnknown,
+            Self::ModelUnhealthy,
+            Self::CapacityExhausted,
+            Self::DependencyUnavailable,
+            Self::InvalidPlan,
+        ]
+        .into_iter()
+        .find(|candidate| candidate.code() == value)
+    }
+
+    pub const fn status(self) -> u16 {
+        match self {
+            Self::NotFound | Self::ModelNotSupported => 404,
+            _ => 503,
+        }
+    }
+
+    pub const fn public_message(self) -> &'static str {
+        match self {
+            Self::NotFound => "No model binding is available for the requested model.",
+            Self::ModelNotSupported => {
+                "The configured account no longer supports the requested model or API capability."
+            }
+            Self::Changed => "The model binding changed before execution. Submit a new request.",
+            Self::HealthUnknown => "The bound model needs a current successful health probe.",
+            Self::ModelUnhealthy => "The bound model is currently unhealthy.",
+            Self::CapacityExhausted => "The bound account has no available execution capacity.",
+            Self::DependencyUnavailable => "Model binding state is temporarily unavailable.",
+            Self::Unavailable | Self::InvalidPlan => {
+                "The configured model binding is temporarily unavailable."
+            }
+        }
+    }
+}
+
 /// KeyCompute 统一错误类型
 ///
 /// 涵盖认证、路由、Provider、数据库、配置等所有错误场景。
@@ -36,6 +117,10 @@ pub enum KeyComputeError {
     /// 无可用 Node 节点
     #[error("no ready node available for model: {0}")]
     NoReadyNode(String),
+
+    /// Explicit binding rejection; no sensitive account fields are included.
+    #[error("{0}")]
+    ModelBinding(#[from] ModelBindingError),
 
     // ============ Provider ============
     /// 上游 Provider 错误
@@ -161,9 +246,9 @@ impl KeyComputeError {
             }
             KeyComputeError::VerificationError(_) => ErrorCategory::Verification,
             KeyComputeError::RateLimitExceeded(_) => ErrorCategory::RateLimit,
-            KeyComputeError::RoutingFailed(_) | KeyComputeError::NoReadyNode(_) => {
-                ErrorCategory::Routing
-            }
+            KeyComputeError::RoutingFailed(_)
+            | KeyComputeError::NoReadyNode(_)
+            | KeyComputeError::ModelBinding(_) => ErrorCategory::Routing,
             KeyComputeError::ProviderError(_)
             | KeyComputeError::ProviderTimeout(_, _)
             | KeyComputeError::UpstreamFailure { .. } => ErrorCategory::Provider,

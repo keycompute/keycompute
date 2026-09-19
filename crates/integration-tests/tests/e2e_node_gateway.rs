@@ -254,7 +254,7 @@ impl NodeTestEnv {
         NodeRegisterRequest {
             protocol_version: "node.v1".to_string(),
             client_instance_id: client_id.to_string(),
-            display_name: format!("Test Node {}", client_id),
+            display_name: format!("Test NodeDispatch {}", client_id),
             registration_token: token.to_string(),
             capabilities: NodeCapabilities {
                 runtime: "ollama".to_string(),

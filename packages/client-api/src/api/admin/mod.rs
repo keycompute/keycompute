@@ -11,14 +11,16 @@ mod user;
 
 pub use super::common::MessageResponse;
 use crate::client::ApiClient;
-use crate::error::Result;
+use crate::error::{ClientError, Result};
 
 const COMPAT_LIST_PAGE_SIZE: u64 = 100;
 
 // Re-export 各子模块的公共类型
 pub use account::{
     AccountInfo, AccountPage, AccountQueryParams, AccountRefreshResponse, AccountTestResponse,
-    CreateAccountRequest, UpdateAccountRequest,
+    CreateAccountRequest, CreateModelBindingRequest, ModelBindingInfo, ModelBindingPage,
+    ModelBindingProbeRequest, ModelBindingProbeResponse, ModelBindingQueryParams,
+    UpdateAccountRequest, UpdateModelBindingRequest,
 };
 pub use monitoring::{
     MonitoringAttemptDetail, MonitoringNodeHealth, MonitoringOverviewResponse,
@@ -676,6 +678,83 @@ impl AdminApi {
             .post_json(
                 &format!("/api/v1/admin/payments/providers/{method}/verify"),
                 &serde_json::json!({}),
+                Some(token),
+            )
+            .await
+    }
+
+    // ==================== Model-bound account management ====================
+
+    /// List tenant model bindings. The server applies the caller's system or
+    /// tenant-admin visibility rules; clients must not infer cross-tenant
+    /// access from a `tenant_id` query parameter.
+    pub async fn list_model_bindings_page(
+        &self,
+        params: Option<&ModelBindingQueryParams>,
+        token: &str,
+    ) -> Result<ModelBindingPage> {
+        let path = match params {
+            Some(params) if !params.to_query_string().is_empty() => {
+                format!("/api/v1/admin/model-bindings?{}", params.to_query_string())
+            }
+            _ => "/api/v1/admin/model-bindings".to_string(),
+        };
+        self.client.get_json(&path, Some(token)).await
+    }
+
+    pub async fn create_model_binding(
+        &self,
+        req: &CreateModelBindingRequest,
+        token: &str,
+    ) -> Result<ModelBindingInfo> {
+        self.client
+            .post_json("/api/v1/admin/model-bindings", req, Some(token))
+            .await
+    }
+
+    pub async fn update_model_binding(
+        &self,
+        id: &str,
+        req: &UpdateModelBindingRequest,
+        token: &str,
+    ) -> Result<ModelBindingInfo> {
+        self.client
+            .put_json(
+                &format!("/api/v1/admin/model-bindings/{id}"),
+                req,
+                Some(token),
+            )
+            .await
+    }
+
+    pub async fn delete_model_binding(
+        &self,
+        id: &str,
+        expected_revision: i64,
+        token: &str,
+    ) -> Result<MessageResponse> {
+        if expected_revision <= 0 {
+            return Err(ClientError::InvalidResponse(
+                "expected_revision must be positive".to_string(),
+            ));
+        }
+        let path =
+            format!("/api/v1/admin/model-bindings/{id}?expected_revision={expected_revision}");
+        self.client.delete_json(&path, Some(token)).await
+    }
+
+    /// Probe exactly the supplied model/capability on the bound account. This
+    /// endpoint is intentionally separate from the account-wide probe.
+    pub async fn probe_model_binding(
+        &self,
+        id: &str,
+        req: &ModelBindingProbeRequest,
+        token: &str,
+    ) -> Result<ModelBindingProbeResponse> {
+        self.client
+            .post_json(
+                &format!("/api/v1/admin/model-bindings/{id}/probe"),
+                req,
                 Some(token),
             )
             .await

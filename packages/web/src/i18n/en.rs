@@ -26,6 +26,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.user.security", "Security");
     m.insert("nav.users", "Users");
     m.insert("nav.accounts", "Accounts");
+    m.insert("nav.model_bindings", "Model Bindings");
     m.insert("nav.pricing", "Pricing");
     m.insert("nav.payment_orders", "Payment Orders");
     m.insert("nav.distribution_records", "Distribution Records");
@@ -139,6 +140,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.security", "Security");
     m.insert("page.users", "User Management");
     m.insert("page.accounts", "Account Management");
+    m.insert("page.model_bindings", "Model Binding Management");
     m.insert("page.pricing", "Pricing");
     m.insert("page.payment_orders", "Payment Orders");
     m.insert("page.distribution_records", "Distribution Records");
@@ -182,6 +184,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("table.role", "Role");
 
     // ── Common ──────────────────────────────────
+    m.insert("common.pagination_total", "Total: {total}");
     m.insert("common.loading", "Loading");
     m.insert("common.more", "More");
     m.insert("common.error", "Something went wrong");
@@ -1410,6 +1413,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.protocol_model", "Protocol / Model");
     m.insert("monitoring.execution_route", "Execution Route");
     m.insert("monitoring.route_provider_account", "Provider Account");
+    m.insert("monitoring.route_model_binding", "Model Binding");
     m.insert("monitoring.route_node", "Node");
     m.insert("monitoring.status", "Status");
     m.insert("monitoring.duration_ttft", "Duration / TTFT");
@@ -1722,6 +1726,27 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution_records.empty_user", "No referral records yet");
     m.insert("distribution_records.referred_user", "Referred User");
     m.insert("accounts.subtitle", "Maintain provider channels, model mapping, and availability in one reviewable asset pool for the routing layer.");
+    m.insert("model_bindings.health_stale", "Stale");
+    m.insert("model_bindings.subtitle", "Pin a tenant and model to one upstream account. Unknown or stale health is fail-closed until an explicit probe succeeds.");
+    m.insert("model_bindings.create", "Add Binding");
+    m.insert("model_bindings.edit", "Edit Binding");
+    m.insert("model_bindings.saved", "Binding saved");
+    m.insert("model_bindings.deleted", "Binding deleted");
+    m.insert("model_bindings.probe", "Probe model");
+    m.insert("model_bindings.probe_done", "Probe result");
+    m.insert("model_bindings.delete_title", "Delete model binding?");
+    m.insert(
+        "model_bindings.required",
+        "Model, tenant, and account are required",
+    );
+    m.insert("model_bindings.search_placeholder", "Filter by exact model");
+    m.insert("model_bindings.empty", "No model bindings configured");
+    m.insert("model_bindings.model", "Model");
+    m.insert("model_bindings.account", "Account");
+    m.insert("model_bindings.tenant", "Tenant");
+    m.insert("model_bindings.health", "Model health");
+    m.insert("model_bindings.revision", "Revision");
+    m.insert("model_bindings.enabled", "Enabled");
     m.insert("accounts.reset_failed", "Reset failed");
     m.insert("accounts.fill_required", "Please fill in required fields");
     m.insert("accounts.created", "Channel created");

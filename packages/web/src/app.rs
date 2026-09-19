@@ -304,6 +304,7 @@ pub fn AppLayout() -> Element {
     let r_node_earnings = Route::NodeEarnings {}.to_string();
     let r_admin_users = Route::Users {}.to_string();
     let r_admin_accounts = Route::Accounts {}.to_string();
+    let r_admin_model_bindings = Route::ModelBindings {}.to_string();
     let r_admin_pricing = Route::Pricing {}.to_string();
     let r_admin_payment_orders = Route::PaymentOrders {}.to_string();
     let r_admin_distribution = Route::DistributionRecords {}.to_string();
@@ -385,6 +386,12 @@ pub fn AppLayout() -> Element {
             items: vec![
                 NavItem::new(i18n.t("nav.users"), r_admin_users, NavIcon::User).admin(),
                 NavItem::new(i18n.t("nav.accounts"), r_admin_accounts, NavIcon::Key).admin(),
+                NavItem::new(
+                    i18n.t("nav.model_bindings"),
+                    r_admin_model_bindings,
+                    NavIcon::Key,
+                )
+                .admin(),
                 NavItem::new(i18n.t("nav.pricing"), r_admin_pricing, NavIcon::Wallet).admin(),
                 NavItem::new(
                     i18n.t("nav.payment_orders"),
@@ -545,6 +552,7 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::NodeEarnings {} => "page.node_earnings",
         Route::Users {} => "page.users",
         Route::Accounts {} => "page.accounts",
+        Route::ModelBindings {} => "page.model_bindings",
         Route::Pricing {} => "page.pricing",
         Route::PaymentOrders {} => "page.payment_orders",
         Route::DistributionRecords {} => "page.distribution_records",
@@ -591,6 +599,7 @@ mod tests {
             Route::NodeEarnings {},
             Route::Users {},
             Route::Accounts {},
+            Route::ModelBindings {},
             Route::Pricing {},
             Route::PaymentOrders {},
             Route::DistributionRecords {},

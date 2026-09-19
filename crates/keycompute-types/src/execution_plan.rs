@@ -2,6 +2,36 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use uuid::Uuid;
 
+/// Trusted reason an upstream account target was selected.
+///
+/// Selection provenance is distinct from the upstream account identity and
+/// distinguishes pool selection, model bindings and resource affinity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum AccountSelection {
+    #[serde(rename = "pool")]
+    #[default]
+    Pool,
+    #[serde(rename = "model_binding")]
+    ModelBinding {
+        binding_id: Uuid,
+        binding_revision: i64,
+    },
+    #[serde(rename = "response_affinity")]
+    ResponseAffinity,
+}
+
+/// Trusted server-side selection metadata for a model-bound request.
+///
+/// This is intentionally separate from client request fields: callers cannot
+/// choose an account or endpoint.  The binding revision is carried through
+/// execution so an in-flight request can be rejected if an administrator
+/// retargets the binding before dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelBindingSelection {
+    pub binding_id: Uuid,
+    pub binding_revision: i64,
+}
+
 /// 敏感字符串：用于保护 API Key 等敏感信息
 ///
 /// - 序列化时会隐藏内容（显示为 ***REDACTED***）
@@ -100,7 +130,8 @@ impl ExecutionPlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ExecutionTarget {
     /// Provider 账户执行路径
-    ProviderAccount {
+    #[serde(rename = "ProviderAccount")]
+    UpstreamAccount {
         /// Provider 名称
         provider: String,
         /// 账号 ID
@@ -109,45 +140,96 @@ pub enum ExecutionTarget {
         endpoint: String,
         /// 上游 API Key（敏感信息自动隐藏）
         upstream_api_key: SensitiveString,
+        /// Trusted server-side provenance for this selected account.
+        #[serde(default)]
+        selection: AccountSelection,
     },
     /// Node 执行路径（去掉 `node:` 前缀后的实际模型名）
-    Node {
+    #[serde(rename = "Node")]
+    NodeDispatch {
         /// 模型名称（不包含 node: 前缀）
         model: String,
     },
 }
 
 impl ExecutionTarget {
-    /// 创建 ProviderAccount 执行目标
+    /// 创建 UpstreamAccount 执行目标
     pub fn new_provider(
         provider: impl Into<String>,
         account_id: Uuid,
         endpoint: impl Into<String>,
         upstream_api_key: impl Into<SensitiveString>,
     ) -> Self {
-        Self::ProviderAccount {
+        Self::UpstreamAccount {
             provider: provider.into(),
             account_id,
             endpoint: endpoint.into(),
             upstream_api_key: upstream_api_key.into(),
+            selection: AccountSelection::Pool,
+        }
+    }
+
+    /// Naming aligned with the model-bound execution terminology.  The
+    /// historical `ProviderAccount` enum tag remains the serialized target tag.
+    pub fn new_upstream_account(
+        provider: impl Into<String>,
+        account_id: Uuid,
+        endpoint: impl Into<String>,
+        upstream_api_key: impl Into<SensitiveString>,
+    ) -> Self {
+        Self::new_provider(provider, account_id, endpoint, upstream_api_key)
+    }
+
+    pub fn with_selection(mut self, selection: AccountSelection) -> Self {
+        if let Self::UpstreamAccount {
+            selection: target_selection,
+            ..
+        } = &mut self
+        {
+            *target_selection = selection;
+        }
+        self
+    }
+
+    pub fn account_selection(&self) -> Option<AccountSelection> {
+        match self {
+            Self::UpstreamAccount { selection, .. } => Some(*selection),
+            Self::NodeDispatch { .. } => None,
+        }
+    }
+
+    /// Return the selected account identity for either the ordinary pool or a
+    /// model-bound plan.  Keeping this accessor central avoids callers
+    /// accidentally treating a Node target as an account.
+    pub fn account_id(&self) -> Option<Uuid> {
+        match self {
+            Self::UpstreamAccount { account_id, .. } => Some(*account_id),
+            Self::NodeDispatch { .. } => None,
+        }
+    }
+
+    pub fn provider_name(&self) -> Option<&str> {
+        match self {
+            Self::UpstreamAccount { provider, .. } => Some(provider.as_str()),
+            Self::NodeDispatch { .. } => None,
         }
     }
 
     /// 创建 Node 执行目标
     pub fn new_node(model: impl Into<String>) -> Self {
-        Self::Node {
+        Self::NodeDispatch {
             model: model.into(),
         }
     }
 
     /// 判断是否为 Node 执行路径
     pub fn is_node(&self) -> bool {
-        matches!(self, Self::Node { .. })
+        matches!(self, Self::NodeDispatch { .. })
     }
 
     /// 判断是否为 Provider 执行路径
     pub fn is_provider(&self) -> bool {
-        matches!(self, Self::ProviderAccount { .. })
+        matches!(self, Self::UpstreamAccount { .. })
     }
 }
 
@@ -257,10 +339,10 @@ mod tests {
             "sk-test-key",
         );
         let plan = ExecutionPlan::new(target);
-        if let ExecutionTarget::ProviderAccount { provider, .. } = &plan.primary {
+        if let ExecutionTarget::UpstreamAccount { provider, .. } = &plan.primary {
             assert_eq!(provider, "openai");
         } else {
-            panic!("Expected ProviderAccount variant");
+            panic!("Expected UpstreamAccount variant");
         }
         assert!(plan.fallback_chain.is_empty());
     }
@@ -281,10 +363,10 @@ mod tests {
         );
         let plan = ExecutionPlan::new(primary).with_fallback(fallback);
         assert_eq!(plan.fallback_chain.len(), 1);
-        if let ExecutionTarget::ProviderAccount { provider, .. } = &plan.fallback_chain[0] {
+        if let ExecutionTarget::UpstreamAccount { provider, .. } = &plan.fallback_chain[0] {
             assert_eq!(provider, "claude");
         } else {
-            panic!("Expected ProviderAccount variant");
+            panic!("Expected UpstreamAccount variant");
         }
     }
 
@@ -315,13 +397,13 @@ mod tests {
         let targets: Vec<_> = plan.all_targets().collect();
         assert_eq!(targets.len(), 3);
 
-        if let ExecutionTarget::ProviderAccount { provider, .. } = targets[0] {
+        if let ExecutionTarget::UpstreamAccount { provider, .. } = targets[0] {
             assert_eq!(provider, "openai");
         }
-        if let ExecutionTarget::ProviderAccount { provider, .. } = targets[1] {
+        if let ExecutionTarget::UpstreamAccount { provider, .. } = targets[1] {
             assert_eq!(provider, "claude");
         }
-        if let ExecutionTarget::ProviderAccount { provider, .. } = targets[2] {
+        if let ExecutionTarget::UpstreamAccount { provider, .. } = targets[2] {
             assert_eq!(provider, "gemini");
         }
     }
@@ -361,13 +443,13 @@ mod tests {
             "sk-secret-key",
         );
         // expose() 方法可以获取原始值（用于实际请求）
-        if let ExecutionTarget::ProviderAccount {
+        if let ExecutionTarget::UpstreamAccount {
             upstream_api_key, ..
         } = &target
         {
             assert_eq!(upstream_api_key.expose(), "sk-secret-key");
         } else {
-            panic!("Expected ProviderAccount variant");
+            panic!("Expected UpstreamAccount variant");
         }
     }
 
@@ -377,10 +459,42 @@ mod tests {
         assert!(target.is_node());
         assert!(!target.is_provider());
 
-        if let ExecutionTarget::Node { model } = &target {
+        if let ExecutionTarget::NodeDispatch { model } = &target {
             assert_eq!(model, "deepseek-chat");
         } else {
-            panic!("Expected Node variant");
+            panic!("Expected NodeDispatch target");
         }
+    }
+
+    #[test]
+    fn execution_target_serde_keeps_historical_uppercase_tags() {
+        let account_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let target = ExecutionTarget::new_provider(
+            "openai",
+            account_id,
+            "https://example.test/v1",
+            "sk-test",
+        );
+        let json = serde_json::to_value(&target).unwrap();
+        assert_eq!(json["ProviderAccount"]["provider"], "openai");
+        assert_eq!(
+            json["ProviderAccount"]["account_id"],
+            account_id.to_string()
+        );
+        assert_eq!(json["ProviderAccount"]["selection"], "pool");
+        let decoded: ExecutionTarget = serde_json::from_value(serde_json::json!({
+            "ProviderAccount": {
+                "provider": "openai",
+                "account_id": account_id,
+                "endpoint": "https://example.test/v1",
+                "upstream_api_key": "sk-test"
+            }
+        }))
+        .unwrap();
+        assert!(matches!(decoded, ExecutionTarget::UpstreamAccount { .. }));
+
+        let node: ExecutionTarget =
+            serde_json::from_value(serde_json::json!({"Node": {"model": "local-model"}})).unwrap();
+        assert!(matches!(node, ExecutionTarget::NodeDispatch { model } if model == "local-model"));
     }
 }

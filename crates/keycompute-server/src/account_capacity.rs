@@ -34,11 +34,12 @@ impl AccountCapacityPolicy for ServerAccountCapacity {
         ctx: &RequestContext,
         target: &ExecutionTarget,
     ) -> Result<Box<dyn AccountAttemptLease>> {
-        let ExecutionTarget::ProviderAccount {
+        let ExecutionTarget::UpstreamAccount {
             account_id,
             provider,
             endpoint,
             upstream_api_key,
+            ..
         } = target
         else {
             return Err(KeyComputeError::InvalidRequest(

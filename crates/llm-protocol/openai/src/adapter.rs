@@ -57,6 +57,7 @@ struct RoutedNativeChatBody<'a> {
     model: &'a str,
     stream: bool,
     include_stream_usage: bool,
+    preserve_native_chat_body: bool,
 }
 
 impl Serialize for RoutedNativeChatBody<'_> {
@@ -72,23 +73,38 @@ impl Serialize for RoutedNativeChatBody<'_> {
             map.serialize_entry(name, value)?;
         }
         map.serialize_entry("model", self.model)?;
-        map.serialize_entry("stream", &self.stream)?;
-        if self.stream && self.include_stream_usage {
-            let mut options = self
-                .source
-                .get("stream_options")
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-                .unwrap_or_default();
-            options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
-            map.serialize_entry("stream_options", &options)?;
-        } else if !self.stream
-            && let Some(options) = self.source.get("stream_options")
-        {
-            // Preserve the native request exactly outside the executor's one
-            // explicit streaming compatibility retry. The upstream remains
-            // authoritative if it considers stream_options invalid here.
-            map.serialize_entry("stream_options", options)?;
+        if self.preserve_native_chat_body {
+            // The bound route must not manufacture a `stream` member: an
+            // omitted member and an explicit JSON null are distinct native
+            // request shapes for some OpenAI-compatible providers.  The
+            // parser already uses false for local execution semantics, while
+            // this branch retains the client's original wire value.
+            if let Some(stream) = self.source.get("stream") {
+                map.serialize_entry("stream", stream)?;
+            }
+            if let Some(options) = self.source.get("stream_options") {
+                map.serialize_entry("stream_options", options)?;
+            }
+        } else {
+            map.serialize_entry("stream", &self.stream)?;
+            if self.stream && self.include_stream_usage {
+                let mut options = self
+                    .source
+                    .get("stream_options")
+                    .and_then(serde_json::Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+                map.serialize_entry("stream_options", &options)?;
+            } else if !self.stream
+                && let Some(options) = self.source.get("stream_options")
+            {
+                // Preserve the native request exactly outside the executor's
+                // one explicit streaming compatibility retry. The upstream
+                // remains authoritative if it considers stream_options
+                // invalid here.
+                map.serialize_entry("stream_options", options)?;
+            }
         }
         map.end()
     }
@@ -259,6 +275,7 @@ impl OpenAIProvider {
             model: &request.model,
             stream: request.stream,
             include_stream_usage: request.include_stream_usage,
+            preserve_native_chat_body: request.preserve_native_chat_body,
         })
         .map_err(Self::protocol_failure)
     }
@@ -1655,6 +1672,24 @@ mod tests {
             serde_json::from_str(&OpenAIProvider::serialize_native_chat_body(&request).unwrap())
                 .unwrap();
         assert!(body.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn native_chat_model_binding_preserves_stream_options_without_injection() {
+        let mut request = stream_request();
+        request.preserve_native_chat_body = true;
+        request.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+            "stream_options": {"include_usage": false, "future_option": true}
+        })));
+
+        let body: serde_json::Value =
+            serde_json::from_str(&OpenAIProvider::serialize_native_chat_body(&request).unwrap())
+                .unwrap();
+        assert_eq!(body["stream_options"]["include_usage"], false);
+        assert_eq!(body["stream_options"]["future_option"], true);
     }
 
     #[test]

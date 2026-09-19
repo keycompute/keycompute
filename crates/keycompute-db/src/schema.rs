@@ -8,6 +8,8 @@ pub mod tables {
     pub const TENANTS: &str = "tenants";
     pub const PRODUCE_AI_KEYS: &str = "produce_ai_keys";
     pub const ACCOUNTS: &str = "accounts";
+    pub const MODEL_BINDINGS: &str = "model_bindings";
+    pub const ACCOUNT_MODEL_HEALTH: &str = "account_model_health";
     pub const PRICING_MODELS: &str = "pricing_models";
     pub const PRICING_AUDIT_EVENTS: &str = "pricing_audit_events";
     pub const RESPONSES_IDEMPOTENCY_CLAIMS: &str = "responses_idempotency_claims";
@@ -113,6 +115,34 @@ pub mod accounts {
     pub const MODELS_SUPPORTED: &str = "models_supported";
     pub const API_CAPABILITIES: &str = "api_capabilities";
     pub const VISIBILITY: &str = "visibility";
+    pub const CREATED_AT: &str = "created_at";
+    pub const UPDATED_AT: &str = "updated_at";
+}
+
+/// model_bindings 表列名
+pub mod model_bindings {
+    pub const ID: &str = "id";
+    pub const TENANT_ID: &str = "tenant_id";
+    pub const API_CAPABILITY: &str = "api_capability";
+    pub const MODEL: &str = "model";
+    pub const ACCOUNT_ID: &str = "account_id";
+    pub const ENABLED: &str = "enabled";
+    pub const REVISION: &str = "revision";
+    pub const CREATED_AT: &str = "created_at";
+    pub const UPDATED_AT: &str = "updated_at";
+}
+
+/// account_model_health 表列名
+pub mod account_model_health {
+    pub const ACCOUNT_ID: &str = "account_id";
+    pub const API_CAPABILITY: &str = "api_capability";
+    pub const MODEL: &str = "model";
+    pub const STATUS: &str = "status";
+    pub const REASON_CODE: &str = "reason_code";
+    pub const CHECKED_AT: &str = "checked_at";
+    pub const EXPIRES_AT: &str = "expires_at";
+    pub const ACCOUNT_CONFIG_VERSION: &str = "account_config_version";
+    pub const GENERATION: &str = "generation";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";
 }

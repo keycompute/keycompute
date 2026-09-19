@@ -258,7 +258,7 @@ fn generation_json_body_policy(method: &Method, path: &str) -> Option<Generation
         return None;
     }
     match path {
-        "/v1/chat/completions" => Some(GenerationJsonBodyPolicy {
+        "/v1/chat/completions" | "/pt/v1/chat/completions" => Some(GenerationJsonBodyPolicy {
             name: "Chat Completions",
             body_limit_bytes: OPENAI_CHAT_BODY_LIMIT_BYTES,
             working_set_limit_bytes: OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES,
@@ -509,8 +509,12 @@ pub async fn openai_responses_error_response_middleware(req: Request, next: Next
 /// REST error contract, while native upstream 429 responses remain untouched.
 pub async fn openai_rate_limit_response_middleware(req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    let is_openai_route =
-        path == "/v1/chat/completions" || path == "/v1/models" || path.starts_with("/v1/models/");
+    let is_openai_route = path == "/v1/chat/completions"
+        || path == "/pt/v1/chat/completions"
+        || path == "/v1/models"
+        || path.starts_with("/v1/models/")
+        || path == "/pt/v1/models"
+        || path.starts_with("/pt/v1/models/");
     let response = next.run(req).await;
     if !is_openai_route
         || response.status() != StatusCode::TOO_MANY_REQUESTS
@@ -1094,7 +1098,11 @@ pub async fn rate_limit_middleware(
     if req.method() == Method::POST
         && matches!(
             req.uri().path(),
-            "/v1/chat/completions" | "/v1/messages" | "/v1/responses" | "/v1/responses/compact"
+            "/v1/chat/completions"
+                | "/pt/v1/chat/completions"
+                | "/v1/messages"
+                | "/v1/responses"
+                | "/v1/responses/compact"
         )
     {
         // Generation RPM is execution-based: route-aware handlers own the

@@ -207,7 +207,7 @@ impl RoutingEngine {
     /// **Node 路由支持**:
     /// - 检测 `model.starts_with("node:")` 前缀
     /// - 去掉前缀得到 actual_model,调用 `node_index.has_ready_node(actual_model)`
-    /// - 存在 ready 节点: 返回 `ExecutionTarget::Node { model: actual_model }`
+    /// - 存在 ready 节点: 返回 `ExecutionTarget::NodeDispatch { model: actual_model }`
     /// - 不存在: 返回 `NoReadyNode` 错误,不 fallback
     /// - 无前缀: 走现有 Provider 路由逻辑
     ///
@@ -252,7 +252,7 @@ impl RoutingEngine {
                     "route: ready node found, routing to node path"
                 );
                 return Ok(ExecutionPlan {
-                    primary: ExecutionTarget::Node {
+                    primary: ExecutionTarget::NodeDispatch {
                         model: actual_model.to_string(),
                     },
                     fallback_chain: Vec::new(),
@@ -328,8 +328,8 @@ impl RoutingEngine {
         }
 
         let primary_provider = match &targets[0] {
-            ExecutionTarget::ProviderAccount { provider, .. } => provider.clone(),
-            ExecutionTarget::Node { model } => format!("node:{}", model),
+            ExecutionTarget::UpstreamAccount { provider, .. } => provider.clone(),
+            ExecutionTarget::NodeDispatch { model } => format!("node:{}", model),
         };
         tracing::info!(
             request_id = %ctx.request_id,
@@ -925,13 +925,13 @@ mod tests {
         assert!(plan.is_ok());
 
         let plan = plan.unwrap();
-        // 验证 primary target 是 ProviderAccount 变体
+        // 验证 primary target 是 UpstreamAccount 变体
         match &plan.primary {
-            ExecutionTarget::ProviderAccount { provider, .. } => {
+            ExecutionTarget::UpstreamAccount { provider, .. } => {
                 assert!(!provider.is_empty());
             }
-            ExecutionTarget::Node { .. } => {
-                panic!("Expected ProviderAccount variant in test");
+            ExecutionTarget::NodeDispatch { .. } => {
+                panic!("Expected UpstreamAccount variant in test");
             }
         }
     }
@@ -954,10 +954,12 @@ mod tests {
 
         let plan = engine.route(&ctx).await.unwrap();
         match &plan.primary {
-            ExecutionTarget::ProviderAccount { provider, .. } => {
+            ExecutionTarget::UpstreamAccount { provider, .. } => {
                 assert_eq!(provider, "openai");
             }
-            ExecutionTarget::Node { .. } => panic!("Expected ProviderAccount variant in test"),
+            ExecutionTarget::NodeDispatch { .. } => {
+                panic!("Expected UpstreamAccount variant in test")
+            }
         }
         // 无数据库时 select_fallback_account 只生成 1 个 target，fallback 链
         // 必然为空。fallback 链的协议隔离由 rank_providers 的过滤保证（见
@@ -982,10 +984,12 @@ mod tests {
 
         let plan = engine.route(&ctx).await.unwrap();
         match &plan.primary {
-            ExecutionTarget::ProviderAccount { provider, .. } => {
+            ExecutionTarget::UpstreamAccount { provider, .. } => {
                 assert_eq!(provider, "anthropic");
             }
-            ExecutionTarget::Node { .. } => panic!("Expected ProviderAccount variant in test"),
+            ExecutionTarget::NodeDispatch { .. } => {
+                panic!("Expected UpstreamAccount variant in test")
+            }
         }
     }
 
@@ -1237,11 +1241,11 @@ mod tests {
 
         let plan = plan.unwrap();
         match &plan.primary {
-            ExecutionTarget::Node { model } => {
+            ExecutionTarget::NodeDispatch { model } => {
                 assert_eq!(model, "deepseek-chat");
             }
-            ExecutionTarget::ProviderAccount { .. } => {
-                panic!("Expected Node variant");
+            ExecutionTarget::UpstreamAccount { .. } => {
+                panic!("Expected NodeDispatch target");
             }
         }
 
@@ -1277,11 +1281,11 @@ mod tests {
 
         let plan = engine.route(&ctx).await.unwrap();
         match &plan.primary {
-            ExecutionTarget::Node { model } => {
+            ExecutionTarget::NodeDispatch { model } => {
                 assert_eq!(model, "deepseek-chat");
             }
-            ExecutionTarget::ProviderAccount { .. } => {
-                panic!("Expected Node variant");
+            ExecutionTarget::UpstreamAccount { .. } => {
+                panic!("Expected NodeDispatch target");
             }
         }
         assert!(plan.fallback_chain.is_empty());
@@ -1352,7 +1356,7 @@ mod tests {
         assert!(plan.is_ok());
 
         match plan.unwrap().primary {
-            ExecutionTarget::Node { model } => {
+            ExecutionTarget::NodeDispatch { model } => {
                 assert_eq!(model, "deepseek-chat");
             }
             _ => panic!("Expected Node target"),
@@ -1450,13 +1454,13 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         match &targets[0] {
-            ExecutionTarget::ProviderAccount { endpoint, .. } => {
+            ExecutionTarget::UpstreamAccount { endpoint, .. } => {
                 assert_eq!(
                     endpoint,
                     llm_protocol_provider::ProtocolType::Openai.default_endpoint()
                 );
             }
-            _ => panic!("Expected ProviderAccount target"),
+            _ => panic!("Expected UpstreamAccount target"),
         }
     }
 
@@ -1482,7 +1486,7 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert!(matches!(
             &targets[0],
-            ExecutionTarget::ProviderAccount { endpoint, .. } if endpoint == responses_endpoint
+            ExecutionTarget::UpstreamAccount { endpoint, .. } if endpoint == responses_endpoint
         ));
     }
 
@@ -1508,8 +1512,8 @@ mod tests {
         let endpoints: Vec<&str> = targets
             .iter()
             .map(|t| match t {
-                ExecutionTarget::ProviderAccount { endpoint, .. } => endpoint.as_str(),
-                _ => panic!("Expected ProviderAccount target"),
+                ExecutionTarget::UpstreamAccount { endpoint, .. } => endpoint.as_str(),
+                _ => panic!("Expected UpstreamAccount target"),
             })
             .collect();
         assert_eq!(
@@ -1540,8 +1544,8 @@ mod tests {
         let endpoints: Vec<&str> = targets
             .iter()
             .map(|t| match t {
-                ExecutionTarget::ProviderAccount { endpoint, .. } => endpoint.as_str(),
-                _ => panic!("Expected ProviderAccount target"),
+                ExecutionTarget::UpstreamAccount { endpoint, .. } => endpoint.as_str(),
+                _ => panic!("Expected UpstreamAccount target"),
             })
             .collect();
         assert_eq!(
@@ -1607,7 +1611,7 @@ mod tests {
         let endpoints: Vec<&str> = targets
             .iter()
             .map(|target| match target {
-                ExecutionTarget::ProviderAccount { endpoint, .. } => endpoint.as_str(),
+                ExecutionTarget::UpstreamAccount { endpoint, .. } => endpoint.as_str(),
                 _ => panic!("expected provider account"),
             })
             .collect();
@@ -1637,7 +1641,7 @@ mod tests {
         assert_eq!(targets.len(), 1);
         assert!(matches!(
             &targets[0],
-            ExecutionTarget::ProviderAccount { endpoint, .. }
+            ExecutionTarget::UpstreamAccount { endpoint, .. }
                 if endpoint == "https://unknown.example.com/v1"
         ));
     }
@@ -1696,11 +1700,11 @@ mod tests {
 
         let plan = plan.unwrap();
         match &plan.primary {
-            ExecutionTarget::ProviderAccount { provider, .. } => {
+            ExecutionTarget::UpstreamAccount { provider, .. } => {
                 assert!(!provider.is_empty());
             }
-            ExecutionTarget::Node { .. } => {
-                panic!("Expected ProviderAccount variant for non-node prefix");
+            ExecutionTarget::NodeDispatch { .. } => {
+                panic!("Expected UpstreamAccount variant for non-node prefix");
             }
         }
     }
@@ -1734,7 +1738,7 @@ mod tests {
     }
     fn target_id(target: &ExecutionTarget) -> Uuid {
         match target {
-            ExecutionTarget::ProviderAccount { account_id, .. } => *account_id,
+            ExecutionTarget::UpstreamAccount { account_id, .. } => *account_id,
             _ => panic!("expected account"),
         }
     }

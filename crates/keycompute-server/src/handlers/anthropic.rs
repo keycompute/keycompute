@@ -279,6 +279,7 @@ pub async fn messages(
     request_ctx.top_p = top_p;
     request_ctx.native_anthropic_request = Some(native_anthropic_request);
     request_ctx.native_anthropic_headers = forwarded_anthropic_headers(&headers);
+    super::openai::install_model_health_observer(&mut request_ctx, &state);
     let mut ctx = Arc::new(request_ctx);
 
     let mut plan = match state.routing.route(&ctx).await {
@@ -296,12 +297,12 @@ pub async fn messages(
     };
 
     let (primary_provider, primary_account_id) = match &plan.primary {
-        ExecutionTarget::ProviderAccount {
+        ExecutionTarget::UpstreamAccount {
             provider,
             account_id,
             ..
         } if provider.eq_ignore_ascii_case("anthropic") => (provider.clone(), *account_id),
-        ExecutionTarget::ProviderAccount { .. } => {
+        ExecutionTarget::UpstreamAccount { .. } => {
             finish_anthropic_unexecuted_trace(
                 &mut pre_execution_guard,
                 ErrorOrigin::Gateway,
@@ -314,7 +315,7 @@ pub async fn messages(
                 model
             )));
         }
-        ExecutionTarget::Node { .. } => {
+        ExecutionTarget::NodeDispatch { .. } => {
             finish_anthropic_unexecuted_trace(
                 &mut pre_execution_guard,
                 ErrorOrigin::Gateway,
@@ -331,7 +332,7 @@ pub async fn messages(
     // 原生请求不得在失败后被降级到另一种协议，否则会悄悄遗失工具或 thinking。
     plan.fallback_chain.retain(|target| matches!(
         target,
-        ExecutionTarget::ProviderAccount { provider, .. } if provider.eq_ignore_ascii_case("anthropic")
+        ExecutionTarget::UpstreamAccount { provider, .. } if provider.eq_ignore_ascii_case("anthropic")
     ));
     if let Err(error) = lifecycle
         .set_route(

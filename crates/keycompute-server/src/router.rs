@@ -41,6 +41,7 @@ use crate::{
         create_account,
         create_api_key,
         create_distribution_rule,
+        create_model_binding,
         // 节点网关 token（用户自服务）
         create_my_node_gateway_token,
         create_payment_order,
@@ -53,6 +54,7 @@ use crate::{
         delete_account,
         delete_api_key,
         delete_distribution_rule,
+        delete_model_binding,
         delete_my_node_gateway_token,
         delete_node,
         delete_pricing,
@@ -104,6 +106,7 @@ use crate::{
         list_billing_records,
         list_distribution_records,
         list_distribution_rules,
+        list_model_bindings,
         list_models,
         list_monitoring_requests,
         list_my_api_keys,
@@ -119,11 +122,15 @@ use crate::{
         login_handler,
         make_pricing_default,
         messages,
+        model_binding_chat_completions,
+        model_binding_list_models,
+        model_binding_retrieve_model,
         // 节点网关
         node_complete,
         node_heartbeat,
         node_poll,
         node_register,
+        probe_model_binding,
         probe_monitoring_targets,
         recover_node,
         refresh_account,
@@ -144,6 +151,7 @@ use crate::{
         unfreeze_user_balance,
         update_account,
         update_distribution_rule,
+        update_model_binding,
         update_pricing,
         update_profile,
         update_system_setting_by_key,
@@ -212,6 +220,29 @@ pub fn create_router(state: AppState) -> Router {
         // Models
         .route("/v1/models", get(list_models))
         .route("/v1/models/{model}", get(retrieve_model))
+        .layer(DefaultBodyLimit::max(OPENAI_CHAT_BODY_LIMIT_BYTES))
+        .layer(from_fn_with_state(
+            state.clone(),
+            generation_http_body_admission_middleware,
+        ))
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::admission::ingress_middleware,
+        ))
+        .layer(axum::middleware::from_fn(
+            openai_rate_limit_response_middleware,
+        ));
+
+    // Exact model-bound surface.  It shares the generation lifecycle and
+    // body/rate/admission limits with Chat while preserving its route intent.
+    let model_binding_routes = Router::new()
+        .route(
+            "/pt/v1/chat/completions",
+            post(model_binding_chat_completions),
+        )
+        .route("/pt/v1/models", get(model_binding_list_models))
+        .route("/pt/v1/models/{model}", get(model_binding_retrieve_model))
         .layer(DefaultBodyLimit::max(OPENAI_CHAT_BODY_LIMIT_BYTES))
         .layer(from_fn_with_state(
             state.clone(),
@@ -360,6 +391,23 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/accounts/{id}/test", post(test_account))
         .route("/api/v1/accounts/{id}/refresh", post(refresh_account));
 
+    // Explicit tenant/model -> account bindings. These routes use the same
+    // JWT admin middleware as account management, while handlers additionally
+    // check ManageProviders so API keys can never acquire console access.
+    let admin_model_binding_routes = Router::new()
+        .route(
+            "/api/v1/admin/model-bindings",
+            get(list_model_bindings).post(create_model_binding),
+        )
+        .route(
+            "/api/v1/admin/model-bindings/{id}",
+            put(update_model_binding).delete(delete_model_binding),
+        )
+        .route(
+            "/api/v1/admin/model-bindings/{id}/probe",
+            post(probe_model_binding),
+        );
+
     // 租户管理（仅 Admin）
     let admin_tenant_routes = Router::new()
         .route("/api/v1/tenants", get(list_tenants).post(create_tenant))
@@ -499,6 +547,7 @@ pub fn create_router(state: AppState) -> Router {
     // 实际执行顺序：admin_auth_middleware -> rate_limit_middleware -> handler
     let admin_routes = admin_user_routes
         .merge(admin_account_routes)
+        .merge(admin_model_binding_routes)
         .merge(admin_tenant_routes)
         .merge(admin_settings_routes)
         .merge(admin_distribution_routes)
@@ -599,6 +648,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .merge(auth_routes)
         .merge(openai_routes)
+        .merge(model_binding_routes)
         .merge(responses_routes)
         .merge(anthropic_routes)
         .merge(user_routes)

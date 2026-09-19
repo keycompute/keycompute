@@ -345,10 +345,15 @@ pub(in crate::handlers) async fn responses_inner(
     request_ctx.native_openai_responses_request = Some(Arc::new(body));
     request_ctx.native_openai_responses_path = Some(upstream_path.to_string());
     request_ctx.native_openai_responses_headers = forwarded_headers;
+    super::super::openai::install_model_health_observer(&mut request_ctx, &state);
     let mut ctx = Arc::new(request_ctx);
 
     let mut plan = if let Some(account) = resolved_affinity_account.take() {
-        ExecutionPlan::new(account.into_target())
+        ExecutionPlan::new(
+            account
+                .into_target()
+                .with_selection(keycompute_types::AccountSelection::ResponseAffinity),
+        )
     } else {
         match state.routing.route(&ctx).await {
             Ok(plan) => plan,
@@ -365,12 +370,12 @@ pub(in crate::handlers) async fn responses_inner(
         }
     };
     let (selected_provider, selected_account_id) = match &plan.primary {
-        ExecutionTarget::ProviderAccount {
+        ExecutionTarget::UpstreamAccount {
             provider,
             account_id,
             ..
         } if provider.eq_ignore_ascii_case("openai") => (provider.clone(), *account_id),
-        ExecutionTarget::ProviderAccount { .. } => {
+        ExecutionTarget::UpstreamAccount { .. } => {
             pre_execution_guard
                 .finish_failed(
                     ErrorOrigin::Gateway,
@@ -383,7 +388,7 @@ pub(in crate::handlers) async fn responses_inner(
                 routing.model
             )));
         }
-        ExecutionTarget::Node { .. } => {
+        ExecutionTarget::NodeDispatch { .. } => {
             pre_execution_guard
                 .finish_failed(
                     ErrorOrigin::Gateway,
@@ -399,7 +404,7 @@ pub(in crate::handlers) async fn responses_inner(
     plan.fallback_chain.retain(|target| {
         matches!(
             target,
-            ExecutionTarget::ProviderAccount { provider, .. }
+            ExecutionTarget::UpstreamAccount { provider, .. }
                 if provider.eq_ignore_ascii_case("openai")
         )
     });
@@ -418,12 +423,12 @@ pub(in crate::handlers) async fn responses_inner(
         return Err(error);
     }
     let (mut primary_provider, mut primary_account_id) = match &plan.primary {
-        ExecutionTarget::ProviderAccount {
+        ExecutionTarget::UpstreamAccount {
             provider,
             account_id,
             ..
         } => (provider.clone(), *account_id),
-        ExecutionTarget::Node { .. } => unreachable!("Responses target validated above"),
+        ExecutionTarget::NodeDispatch { .. } => unreachable!("Responses target validated above"),
     };
     if let Err(error) = lifecycle
         .set_route(
@@ -489,7 +494,11 @@ pub(in crate::handlers) async fn responses_inner(
                     primary_provider.clone_from(&account.provider);
                     primary_account_id = account.account_id;
                     let claimed_account = account.clone();
-                    plan = ExecutionPlan::new(account.into_target());
+                    plan = ExecutionPlan::new(
+                        account
+                            .into_target()
+                            .with_selection(keycompute_types::AccountSelection::ResponseAffinity),
+                    );
                     state
                         .pricing
                         .update_context_pricing(Arc::make_mut(&mut ctx), &primary_provider)

@@ -51,7 +51,7 @@ pub(super) fn validate_project_resource_route(body: &Value, plan: &ExecutionPlan
     let account_ids = plan
         .all_targets()
         .filter_map(|target| match target {
-            ExecutionTarget::ProviderAccount {
+            ExecutionTarget::UpstreamAccount {
                 provider,
                 account_id,
                 ..
@@ -348,7 +348,7 @@ impl ResponsesExecutionReservations {
         };
         let mut targets = Vec::new();
         for target in std::iter::once(&plan.primary).chain(plan.fallback_chain.iter()) {
-            if let ExecutionTarget::ProviderAccount {
+            if let ExecutionTarget::UpstreamAccount {
                 provider,
                 account_id,
                 ..
@@ -629,7 +629,7 @@ pub(super) fn apply_reserved_account_snapshots(
     snapshots: &[ResolvedResponsesAccount],
 ) -> Result<()> {
     for target in std::iter::once(&mut plan.primary).chain(plan.fallback_chain.iter_mut()) {
-        let ExecutionTarget::ProviderAccount {
+        let ExecutionTarget::UpstreamAccount {
             provider,
             account_id,
             ..
@@ -648,7 +648,10 @@ pub(super) fn apply_reserved_account_snapshots(
                     "A reserved Responses execution target was not snapshotted".to_string(),
                 )
             })?;
-        *target = snapshot.clone().into_target();
+        let selection = target
+            .account_selection()
+            .expect("account target checked above");
+        *target = snapshot.clone().into_target().with_selection(selection);
     }
     Ok(())
 }
@@ -657,11 +660,12 @@ pub(super) fn validate_reserved_idempotency_connection(
     plan: &ExecutionPlan,
     claimed: &ResolvedResponsesAccount,
 ) -> Result<()> {
-    let ExecutionTarget::ProviderAccount {
+    let ExecutionTarget::UpstreamAccount {
         provider,
         account_id,
         endpoint,
         upstream_api_key,
+        ..
     } = &plan.primary
     else {
         return Err(ApiError::Internal(

@@ -64,6 +64,12 @@ pub struct UpstreamRequest {
     /// 已被完整追踪的兼容性重试中关闭，协议适配器本身不得隐藏发起第二个请求。
     #[serde(default = "default_true")]
     pub include_stream_usage: bool,
+    /// Preserve the client's native Chat body, including an explicitly
+    /// supplied `stream_options` object.  Model-bound traffic sets this flag;
+    /// ordinary traffic retains the compatibility behavior controlled by
+    /// `include_stream_usage`.
+    #[serde(default)]
+    pub preserve_native_chat_body: bool,
     /// 客户端指定的最大输出 token 数；未指定时保持 `None`
     pub max_tokens: Option<u32>,
     /// 温度参数（可选）
@@ -98,6 +104,7 @@ impl fmt::Debug for UpstreamRequest {
             .field("messages", &self.messages)
             .field("stream", &self.stream)
             .field("include_stream_usage", &self.include_stream_usage)
+            .field("preserve_native_chat_body", &self.preserve_native_chat_body)
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
             .field("top_p", &self.top_p)
@@ -131,6 +138,7 @@ impl UpstreamRequest {
             messages: Vec::new(),
             stream: false,
             include_stream_usage: true,
+            preserve_native_chat_body: false,
             max_tokens: None,
             temperature: None,
             top_p: None,

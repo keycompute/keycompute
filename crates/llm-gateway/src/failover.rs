@@ -43,12 +43,12 @@ impl FailoverManager {
     /// 记录失败
     pub fn record_failure(&self, target: &ExecutionTarget, error: &KeyComputeError) {
         let (account_id, provider) = match target {
-            ExecutionTarget::ProviderAccount {
+            ExecutionTarget::UpstreamAccount {
                 account_id,
                 provider,
                 ..
             } => (account_id, provider),
-            ExecutionTarget::Node { model } => {
+            ExecutionTarget::NodeDispatch { model } => {
                 tracing::warn!(
                     model = %model,
                     error = %error,
@@ -148,10 +148,10 @@ mod tests {
         assert!(next.is_some());
 
         // 验证返回的是 claude provider
-        if let ExecutionTarget::ProviderAccount { provider, .. } = next.unwrap() {
+        if let ExecutionTarget::UpstreamAccount { provider, .. } = next.unwrap() {
             assert_eq!(provider, "claude");
         } else {
-            panic!("Expected ProviderAccount variant");
+            panic!("Expected UpstreamAccount variant");
         }
 
         let none = manager.select_next(&targets, 1);

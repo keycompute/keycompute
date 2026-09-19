@@ -46,7 +46,7 @@ fn request_scope(request: &Request, base_path: &str) -> &'static str {
     if path == "/api/v1/settings/public" {
         return "public";
     }
-    if path.starts_with("/v1/") {
+    if path.starts_with("/v1/") || path.starts_with("/pt/v1/") {
         return "generation";
     }
     if !path.starts_with("/api/v1/") {
@@ -286,8 +286,14 @@ mod tests {
             .values_mut()
             .for_each(|entry| entry.until = Instant::now() - Duration::from_secs(1));
         assert!(state.remaining(&original).is_none());
+        let client = reqwest::Client::new();
         for i in 0..MAX_ENTRIES + 30 {
-            state.record(&request("/api/v1/keys", &i.to_string()), info.clone());
+            let request = client
+                .get("https://example.test/api/v1/keys")
+                .bearer_auth(i.to_string())
+                .build()
+                .unwrap();
+            state.record(&request, info.clone());
         }
         assert_eq!(state.entries.len(), MAX_ENTRIES);
     }

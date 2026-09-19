@@ -216,7 +216,7 @@ async fn account_policy_snapshot_outage_and_configuration_failure_are_fail_close
     assert_eq!(
         policy
             .snapshot(match target {
-                ExecutionTarget::ProviderAccount { account_id, .. } => account_id,
+                ExecutionTarget::UpstreamAccount { account_id, .. } => account_id,
                 _ => unreachable!(),
             })
             .await

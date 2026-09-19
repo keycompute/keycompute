@@ -532,10 +532,13 @@ mod tests {
         assert!(
             DATABASE_SCHEMA.contains("account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT")
         );
+        // Response affinities intentionally retain account ownership with a
+        // restrictive FK. Per-model health snapshots are ephemeral and may
+        // cascade when an account is removed, so they use a separate table/FK.
         assert!(
-            !DATABASE_SCHEMA
-                .contains("account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE")
+            DATABASE_SCHEMA.contains("account_id UUID REFERENCES accounts(id) ON DELETE RESTRICT")
         );
+        assert!(DATABASE_SCHEMA.contains("CREATE TABLE IF NOT EXISTS account_model_health"));
         assert!(DATABASE_SCHEMA.contains("CONSTRAINT ck_response_affinities_account_owner"));
         assert!(DATABASE_SCHEMA.contains("CONSTRAINT ck_accounts_probe_status"));
         assert!(!DATABASE_SCHEMA.contains("ALTER TABLE"));

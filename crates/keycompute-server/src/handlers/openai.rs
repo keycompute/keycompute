@@ -5,6 +5,10 @@
 
 #[cfg(test)]
 use super::ImmediateSettlementServices;
+pub(crate) use crate::model_binding::install_model_health_observer;
+use crate::model_binding::{
+    DbModelBindingValidator, list_routable_model_bindings, resolve_model_binding_plan,
+};
 use crate::{
     error::{ApiError, Result},
     extractors::{AuthExtractor, ClientRequestId, RequestId, RequestReceivedAt},
@@ -23,9 +27,10 @@ use futures::stream::Stream;
 use keycompute_auth::Permission;
 use keycompute_db::models::account::Account;
 use keycompute_types::{
-    AccountApiCapability, ClientResponseOutcome, ContentPart, ErrorOrigin, ExecutionTarget,
-    ImageUrl, Message, MessageContent, MessageRole, NoopRequestLifecycleRecorder, RequestContext,
-    RequestLifecycleRecorder, RequestStatus, RequestTraceStart, RouteType, TraceErrorCategory,
+    AccountApiCapability, AccountModelHealthObserver, ClientResponseOutcome, ContentPart,
+    ErrorOrigin, ExecutionTarget, ImageUrl, Message, MessageContent, MessageRole,
+    NoopRequestLifecycleRecorder, RequestContext, RequestLifecycleRecorder, RequestStatus,
+    RequestTraceStart, RouteType, TraceErrorCategory,
 };
 use llm_protocol_provider::{
     LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, LargeBodyPermit, MAX_JSON_PASSTHROUGH_BODY_BYTES,
@@ -593,7 +598,7 @@ where
 /// 注意：限流已在中间件层统一处理，此处直接开始业务逻辑
 pub async fn chat_completions(
     State(state): State<AppState>,
-    mut auth: AuthExtractor,
+    auth: AuthExtractor,
     request_id: RequestId,
     client_request_id: ClientRequestId,
     received_at: RequestReceivedAt,
@@ -601,6 +606,63 @@ pub async fn chat_completions(
         Option<Extension<crate::state::GenerationHttpBodyPermit>>,
         Json<Value>,
     ),
+) -> Result<axum::response::Response> {
+    chat_completions_inner(
+        state,
+        auth,
+        request_id,
+        client_request_id,
+        received_at,
+        body_permit,
+        body,
+        "/v1/chat/completions",
+        false,
+    )
+    .await
+}
+
+/// Model-bound Chat Completions handler.  The route differs intentionally from
+/// the ordinary account pool: its plan is resolved from the authenticated
+/// tenant's exact model binding and the executor is marked single-attempt.
+pub async fn model_binding_chat_completions(
+    State(state): State<AppState>,
+    auth: AuthExtractor,
+    request_id: RequestId,
+    client_request_id: ClientRequestId,
+    received_at: RequestReceivedAt,
+    (body_permit, Json(body)): (
+        Option<Extension<crate::state::GenerationHttpBodyPermit>>,
+        Json<Value>,
+    ),
+) -> Result<axum::response::Response> {
+    chat_completions_inner(
+        state,
+        auth,
+        request_id,
+        client_request_id,
+        received_at,
+        body_permit,
+        body,
+        "/pt/v1/chat/completions",
+        true,
+    )
+    .await
+}
+
+/// Shared Chat Completions lifecycle for ordinary pool and model-bound routes.
+/// Keeping one body parser/executor path prevents protocol drift and preserves
+/// native unknown/tool fields in both variants.
+#[allow(clippy::too_many_arguments)]
+async fn chat_completions_inner(
+    state: AppState,
+    mut auth: AuthExtractor,
+    request_id: RequestId,
+    client_request_id: ClientRequestId,
+    received_at: RequestReceivedAt,
+    body_permit: Option<Extension<crate::state::GenerationHttpBodyPermit>>,
+    body: Value,
+    request_path: &'static str,
+    model_bound: bool,
 ) -> Result<axum::response::Response> {
     crate::admission::ensure_generation(&state, &mut auth).await?;
     let request = parse_chat_completion_request(&body)?;
@@ -616,7 +678,7 @@ pub async fn chat_completions(
             user_id: auth.user_id,
             produce_ai_key_id: auth.produce_ai_key_id,
             protocol: "openai".to_string(),
-            request_path: "/v1/chat/completions".to_string(),
+            request_path: request_path.to_string(),
             requested_model: request.model.clone(),
             is_stream: request.stream,
             received_at: received_at.0,
@@ -637,9 +699,9 @@ pub async fn chat_completions(
             "permission_denied",
         )
         .await;
-        return Err(ApiError::Forbidden(
-            "API-use permission is required for /v1/chat/completions".to_string(),
-        ));
+        return Err(ApiError::Forbidden(format!(
+            "API-use permission is required for {request_path}"
+        )));
     }
     if let Err(error) = request
         .validate_core_fields()
@@ -710,20 +772,72 @@ pub async fn chat_completions(
     let mut ctx = Arc::new(request_ctx);
 
     // 5. 智能路由
-    let plan = match state.routing.route(&ctx).await {
-        Ok(plan) => plan,
-        Err(error) => {
-            finish_unexecuted_trace(
-                &mut pre_execution_guard,
-                ErrorOrigin::Gateway,
-                TraceErrorCategory::Internal,
-                "routing_failed",
-            )
-            .await;
-            return Err(crate::error::map_routing_error(error, "openai"));
+    let (plan, binding_selection, binding_config_version) = if model_bound {
+        match resolve_model_binding_plan(&state, auth.tenant_id, &request.model).await {
+            Ok(value) => (value.0, Some(value.1), Some(value.2)),
+            Err(error) => {
+                let error = ApiError::from(error);
+                let (origin, category, code) = match error {
+                    ApiError::ModelBinding(code) if code.status() == 404 => (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::InvalidRequest,
+                        code.code(),
+                    ),
+                    ApiError::ModelBinding(code) => (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Transport,
+                        code.code(),
+                    ),
+                    ApiError::NotFound(_) => (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::InvalidRequest,
+                        "model_binding_not_found",
+                    ),
+                    ApiError::BadRequest(_) => (
+                        ErrorOrigin::Client,
+                        TraceErrorCategory::InvalidRequest,
+                        "invalid_model_binding_request",
+                    ),
+                    _ => (
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Transport,
+                        "model_binding_unavailable",
+                    ),
+                };
+                finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+                return Err(error);
+            }
+        }
+    } else {
+        match state.routing.route(&ctx).await {
+            Ok(plan) => (plan, None, None),
+            Err(error) => {
+                finish_unexecuted_trace(
+                    &mut pre_execution_guard,
+                    ErrorOrigin::Gateway,
+                    TraceErrorCategory::Internal,
+                    "routing_failed",
+                )
+                .await;
+                return Err(crate::error::map_routing_error(error, "openai"));
+            }
         }
     };
-    let (route_type, route_status) = initial_route_trace_state(&plan.primary);
+    if state.pool.is_some() {
+        let health = Arc::new(DbModelBindingValidator::new(&state)?);
+        let ctx_mut = Arc::make_mut(&mut ctx);
+        ctx_mut.set_account_model_health_observer(
+            Arc::clone(&health) as Arc<dyn AccountModelHealthObserver>
+        );
+        if let Some(selection) = binding_selection {
+            ctx_mut.set_model_binding(selection);
+            if let Some(config_version) = binding_config_version {
+                ctx_mut.set_model_binding_account_config_version(config_version);
+            }
+            ctx_mut.set_model_binding_validator(health);
+        }
+    }
+    let (route_type, route_status) = initial_route_trace_state(&plan.primary, model_bound);
     if let Err(error) = lifecycle
         .set_route(request_id.0, route_type, route_status)
         .await
@@ -732,14 +846,14 @@ pub async fn chat_completions(
     }
 
     let execution_account_id = match &plan.primary {
-        ExecutionTarget::ProviderAccount { account_id, .. } => Some(*account_id),
+        ExecutionTarget::UpstreamAccount { account_id, .. } => Some(*account_id),
         _ => None,
     };
 
     // Node tasks have a narrower message protocol than the OpenAI-compatible
     // provider path. Validate that projection before charging execution RPM;
     // an unsupported payload is a client error and never reaches an upstream.
-    let node_messages = if matches!(&plan.primary, ExecutionTarget::Node { .. }) {
+    let node_messages = if matches!(&plan.primary, ExecutionTarget::NodeDispatch { .. }) {
         match ctx
             .native_openai_chat_request
             .as_deref()
@@ -818,7 +932,7 @@ pub async fn chat_completions(
 
     // 5. 根据 ExecutionTarget 分流执行路径
     match &plan.primary {
-        ExecutionTarget::Node { model } => {
+        ExecutionTarget::NodeDispatch { model } => {
             // 更新 ctx 的 model 字段（使用去掉前缀的实际模型名）
             let ctx_mut = Arc::make_mut(&mut ctx);
             ctx_mut.model = model.clone();
@@ -1095,7 +1209,7 @@ pub async fn chat_completions(
                 crate::admission::json_with_admission(body, node_admission)
             }
         }
-        ExecutionTarget::ProviderAccount {
+        ExecutionTarget::UpstreamAccount {
             provider,
             account_id,
             ..
@@ -1266,12 +1380,10 @@ pub async fn chat_completions(
                         super::InitialStreamStatus::Ready
                     ) {
                         drop(stream);
-                        return Err(error_ctx
-                            .client_upstream_response()
-                            .map(ApiError::OpenAiUpstream)
-                            .unwrap_or_else(|| {
-                                ApiError::Provider("Upstream request failed".to_string())
-                            }));
+                        return Err(crate::error::openai_client_failure(
+                            &error_ctx,
+                            "Upstream request failed",
+                        ));
                     }
                     Ok(Sse::new(stream).into_response())
                 } else {
@@ -1301,12 +1413,10 @@ pub async fn chat_completions(
                         Ok(super::InitialStreamStatus::Ready)
                     ) {
                         drop(stream);
-                        return Err(error_ctx
-                            .client_upstream_response()
-                            .map(ApiError::OpenAiUpstream)
-                            .unwrap_or_else(|| {
-                                ApiError::Provider("Upstream request failed".to_string())
-                            }));
+                        return Err(crate::error::openai_client_failure(
+                            &error_ctx,
+                            "Upstream request failed",
+                        ));
                     }
                     Ok(Sse::new(stream).into_response())
                 }
@@ -1340,12 +1450,20 @@ pub async fn chat_completions(
 /// Selecting a Node route does not mean a task has been queued yet. The Node
 /// gateway advances the trace to `queued` only after its PostgreSQL task row is
 /// created, which also keeps the queued-task metric aligned with real tasks.
-fn initial_route_trace_state(target: &ExecutionTarget) -> (RouteType, RequestStatus) {
+fn initial_route_trace_state(
+    target: &ExecutionTarget,
+    model_bound: bool,
+) -> (RouteType, RequestStatus) {
     match target {
-        ExecutionTarget::Node { .. } => (RouteType::Node, RequestStatus::Routing),
-        ExecutionTarget::ProviderAccount { .. } => {
-            (RouteType::ProviderAccount, RequestStatus::Routing)
-        }
+        ExecutionTarget::NodeDispatch { .. } => (RouteType::Node, RequestStatus::Routing),
+        ExecutionTarget::UpstreamAccount { .. } => (
+            if model_bound {
+                RouteType::ModelBinding
+            } else {
+                RouteType::ProviderAccount
+            },
+            RequestStatus::Routing,
+        ),
     }
 }
 
@@ -1406,10 +1524,7 @@ async fn create_openai_response_with_lifecycle(
                                 "Stream error during non-streaming response"
                             );
                             terminal_error = Some(
-                                worker_ctx
-                                    .client_upstream_response()
-                                    .map(ApiError::OpenAiUpstream)
-                                    .unwrap_or_else(|| ApiError::Provider(message)),
+                                crate::error::openai_client_failure(&worker_ctx, &message),
                             );
                             break;
                         }
@@ -2663,6 +2778,56 @@ pub async fn retrieve_model(
     Err(ApiError::NotFound(format!("Model not found: {}", model_id)))
 }
 
+/// List only currently routable model bindings for the authenticated tenant.
+/// The result is advisory; dispatch performs the same checks again on the
+/// writer immediately before execution.
+pub async fn model_binding_list_models(
+    State(state): State<AppState>,
+    auth: AuthExtractor,
+) -> Result<Json<ListModelsResponse>> {
+    if !auth.has_permission(&Permission::UseApi) {
+        return Err(ApiError::Forbidden(
+            "API-use permission is required for /pt/v1/models".to_string(),
+        ));
+    }
+    let rows = list_routable_model_bindings(&state, auth.tenant_id, None).await?;
+    Ok(Json(ListModelsResponse {
+        object: "list".to_string(),
+        data: rows
+            .into_iter()
+            .map(|(id, provider)| Model {
+                id,
+                object: "model".to_string(),
+                created: chrono::Utc::now().timestamp(),
+                owned_by: provider,
+            })
+            .collect(),
+    }))
+}
+
+/// Retrieve one currently routable model binding for the authenticated tenant.
+pub async fn model_binding_retrieve_model(
+    State(state): State<AppState>,
+    auth: AuthExtractor,
+    Path(model_id): Path<String>,
+) -> Result<Json<Model>> {
+    if !auth.has_permission(&Permission::UseApi) {
+        return Err(ApiError::Forbidden(
+            "API-use permission is required for /pt/v1/models".to_string(),
+        ));
+    }
+    let mut rows = list_routable_model_bindings(&state, auth.tenant_id, Some(&model_id)).await?;
+    let Some((id, provider)) = rows.pop() else {
+        return Err(ApiError::NotFound("Model not found".to_string()));
+    };
+    Ok(Json(Model {
+        id,
+        object: "model".to_string(),
+        created: chrono::Utc::now().timestamp(),
+        owned_by: provider,
+    }))
+}
+
 /// 将节点的完整响应转换为模拟流式输出
 ///
 /// 该函数接收节点返回的完整 ChatCompletionResponse，
@@ -3254,16 +3419,19 @@ mod tests {
     #[test]
     fn node_route_stays_routing_until_task_creation_succeeds() {
         assert_eq!(
-            initial_route_trace_state(&ExecutionTarget::new_node("node-model")),
+            initial_route_trace_state(&ExecutionTarget::new_node("node-model"), false),
             (RouteType::Node, RequestStatus::Routing)
         );
         assert_eq!(
-            initial_route_trace_state(&ExecutionTarget::new_provider(
-                "openai",
-                uuid::Uuid::new_v4(),
-                "https://provider.example/v1",
-                "secret",
-            )),
+            initial_route_trace_state(
+                &ExecutionTarget::new_provider(
+                    "openai",
+                    uuid::Uuid::new_v4(),
+                    "https://provider.example/v1",
+                    "secret",
+                ),
+                false
+            ),
             (RouteType::ProviderAccount, RequestStatus::Routing)
         );
     }

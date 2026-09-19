@@ -26,6 +26,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.user.security", "安全设置");
     m.insert("nav.users", "用户管理");
     m.insert("nav.accounts", "账号管理");
+    m.insert("nav.model_bindings", "模型绑定");
     m.insert("nav.pricing", "定价管理");
     m.insert("nav.payment_orders", "支付订单");
     m.insert("nav.distribution_records", "分销记录");
@@ -124,6 +125,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.security", "安全设置");
     m.insert("page.users", "用户管理");
     m.insert("page.accounts", "账号管理");
+    m.insert("page.model_bindings", "模型绑定管理");
     m.insert("page.pricing", "定价管理");
     m.insert("page.payment_orders", "支付订单");
     m.insert("page.distribution_records", "分销记录");
@@ -164,6 +166,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("table.role", "角色");
 
     // ── 通用 ────────────────────────────────────
+    m.insert("common.pagination_total", "共 {total} 条");
     m.insert("common.loading", "加载中");
     m.insert("common.more", "更多");
     m.insert("common.error", "出错了");
@@ -1211,6 +1214,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.protocol_model", "协议 / 模型");
     m.insert("monitoring.execution_route", "执行路径");
     m.insert("monitoring.route_provider_account", "Provider 账号");
+    m.insert("monitoring.route_model_binding", "模型绑定");
     m.insert("monitoring.route_node", "节点");
     m.insert("monitoring.status", "状态");
     m.insert("monitoring.duration_ttft", "总耗时 / TTFT");
@@ -1454,6 +1458,27 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "accounts.subtitle",
         "统一维护各 Provider 渠道、模型映射与可用性状态，确保路由层始终有可审阅的账号资产池。",
     );
+    m.insert("model_bindings.health_stale", "已过期");
+    m.insert(
+        "model_bindings.subtitle",
+        "将租户和模型固定到一个上游账号。未知或过期健康状态会安全拒绝，需显式探测恢复。",
+    );
+    m.insert("model_bindings.create", "新增绑定");
+    m.insert("model_bindings.edit", "编辑绑定");
+    m.insert("model_bindings.saved", "绑定已保存");
+    m.insert("model_bindings.deleted", "绑定已删除");
+    m.insert("model_bindings.probe", "探测模型");
+    m.insert("model_bindings.probe_done", "探测结果");
+    m.insert("model_bindings.delete_title", "删除模型绑定？");
+    m.insert("model_bindings.required", "模型、租户和账号均为必填项");
+    m.insert("model_bindings.search_placeholder", "按精确模型筛选");
+    m.insert("model_bindings.empty", "暂无模型绑定");
+    m.insert("model_bindings.model", "模型");
+    m.insert("model_bindings.account", "账号");
+    m.insert("model_bindings.tenant", "租户");
+    m.insert("model_bindings.health", "模型健康");
+    m.insert("model_bindings.revision", "版本");
+    m.insert("model_bindings.enabled", "启用");
     m.insert("accounts.reset_failed", "重置失败");
     m.insert("accounts.fill_required", "请填写必填项");
     m.insert("accounts.created", "渠道已创建");

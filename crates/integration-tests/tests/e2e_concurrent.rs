@@ -777,8 +777,8 @@ async fn test_full_chain_concurrent_pressure() {
 
             // Step 1: Routing
             if let Ok(plan) = engine.route(&ctx).await {
-                // Step 2: Check account cooldown (only for ProviderAccount)
-                if let ExecutionTarget::ProviderAccount {
+                // Step 2: Check account cooldown (only for UpstreamAccount)
+                if let ExecutionTarget::UpstreamAccount {
                     account_id,
                     endpoint,
                     upstream_api_key,
@@ -812,7 +812,7 @@ async fn test_full_chain_concurrent_pressure() {
                     } else {
                         stats.lock().unwrap().cooldown_skips += 1;
                     }
-                } // Close the if let ExecutionTarget::ProviderAccount
+                } // Close the if let ExecutionTarget::UpstreamAccount
             }
 
             if success {

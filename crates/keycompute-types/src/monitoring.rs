@@ -23,7 +23,18 @@ macro_rules! string_enum {
     };
 }
 
-string_enum!(RouteType { ProviderAccount => "provider_account", Node => "node" });
+// How a request reached an execution target.
+//
+// `ProviderAccount` remains the serialized value used by ordinary account
+// pool routing.  `ModelBinding` is deliberately a separate visibility value
+// even though it still owns an upstream account, so monitoring can distinguish
+// an explicit tenant/model binding from pool selection without changing the
+// account billing dimension.  `Node` retains its historical wire value.
+string_enum!(RouteType {
+    ProviderAccount => "provider_account",
+    ModelBinding => "model_binding",
+    Node => "node"
+});
 string_enum!(RequestStatus {
     Received => "received", Routing => "routing", Queued => "queued", Running => "running",
     Succeeded => "succeeded", Failed => "failed", TimedOut => "timed_out", Cancelled => "cancelled"

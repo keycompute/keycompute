@@ -768,6 +768,24 @@ pub async fn delete_account(
             ApiError::Internal(format!("Failed to drain account Responses routes: {error}"))
         })?;
 
+    let has_model_bindings = txn
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT 1 FROM model_bindings WHERE account_id = $1 LIMIT 1",
+            [account_id.into()],
+        ))
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!("Failed to inspect account model bindings: {error}"))
+        })?
+        .is_some();
+    if has_model_bindings {
+        let _ = txn.rollback().await;
+        return Err(ApiError::Conflict(
+            "Account is referenced by model bindings; delete or retarget them first".to_string(),
+        ));
+    }
+
     existing
         .delete(&txn)
         .await
@@ -1266,6 +1284,7 @@ async fn probe_upstream_account(
             }],
             stream: false,
             include_stream_usage: true,
+            preserve_native_chat_body: false,
             max_tokens: Some(if capability == AccountApiCapability::Responses {
                 RESPONSES_PROBE_MAX_OUTPUT_TOKENS
             } else {

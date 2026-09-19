@@ -7,7 +7,60 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::{ExecutionTarget, PricingSnapshot, RequestExecutionFailure, UsageAccumulator};
+use crate::{
+    ExecutionTarget, KeyComputeError, ModelBindingSelection, PricingSnapshot,
+    RequestExecutionFailure, UsageAccumulator,
+};
+
+/// Immutable model-health fence captured before one upstream attempt.
+/// Completion must compare against this generation, never load a fresh one.
+#[derive(Debug, Clone)]
+pub struct AccountModelHealthSnapshot {
+    pub account_id: Uuid,
+    pub api_capability: String,
+    pub model: String,
+    pub account_config_version: DateTime<Utc>,
+    pub generation: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ModelHealthObservation {
+    Healthy,
+    Unhealthy { reason_code: &'static str },
+}
+
+/// Revalidates a trusted binding and captures health in the same writer snapshot.
+/// The caller has already waited for local/account quota admission. This check
+/// is the admission linearization point; it never holds locks over HTTP or SSE.
+#[async_trait::async_trait]
+pub trait ModelBindingValidator: Send + Sync {
+    async fn validate_target(
+        &self,
+        tenant_id: Uuid,
+        model: &str,
+        selection: ModelBindingSelection,
+        target: &ExecutionTarget,
+        account_config_version: DateTime<Utc>,
+    ) -> std::result::Result<AccountModelHealthSnapshot, KeyComputeError>;
+}
+
+/// Model observations are shared by ordinary and bound account execution.
+/// Absence means an untracked model, not an implicit healthy declaration.
+#[async_trait::async_trait]
+pub trait AccountModelHealthObserver: Send + Sync {
+    async fn snapshot(
+        &self,
+        target: &ExecutionTarget,
+        api_capability: &str,
+        model: &str,
+    ) -> std::result::Result<Option<AccountModelHealthSnapshot>, KeyComputeError>;
+
+    async fn observe(
+        &self,
+        snapshot: &AccountModelHealthSnapshot,
+        observation: ModelHealthObservation,
+    ) -> std::result::Result<(), KeyComputeError>;
+}
 
 /// Client-visible HTTP failure returned by a native upstream protocol.
 ///
@@ -61,6 +114,16 @@ pub struct RequestContext {
     pub tenant_id: Uuid,
     pub produce_ai_key_id: Uuid,
     pub model: String,
+    /// Trusted route metadata for `/pt/v1/chat/completions`.  It is populated
+    /// only after server-side binding resolution and is never read from a
+    /// client header/body field.
+    pub model_binding: Option<ModelBindingSelection>,
+    /// Account configuration timestamp captured with the binding snapshot.
+    /// Account endpoint/key edits advance this fence and invalidate queued
+    /// bound requests before they send bytes.
+    pub model_binding_account_config_version: Option<DateTime<Utc>>,
+    pub model_binding_validator: Option<Arc<dyn ModelBindingValidator>>,
+    pub account_model_health_observer: Option<Arc<dyn AccountModelHealthObserver>>,
     /// Provider 名称（路由确定后设置）
     pub provider: Option<String>,
     pub messages: Vec<Message>,
@@ -174,6 +237,15 @@ impl fmt::Debug for RequestContext {
             .field("tenant_id", &self.tenant_id)
             .field("produce_ai_key_id", &self.produce_ai_key_id)
             .field("model", &self.model)
+            .field("model_binding", &self.model_binding)
+            .field(
+                "model_binding_account_config_version",
+                &self.model_binding_account_config_version,
+            )
+            .field(
+                "model_binding_validator",
+                &self.model_binding_validator.as_ref().map(|_| "<validator>"),
+            )
             .field("provider", &self.provider)
             .field("messages", &self.messages)
             .field("stream", &self.stream)
@@ -271,6 +343,10 @@ impl RequestContext {
             tenant_id,
             produce_ai_key_id,
             model: model.into(),
+            model_binding: None,
+            model_binding_account_config_version: None,
+            model_binding_validator: None,
+            account_model_health_observer: None,
             provider: None,
             messages,
             stream,
@@ -316,6 +392,10 @@ impl RequestContext {
             tenant_id: self.tenant_id,
             produce_ai_key_id: self.produce_ai_key_id,
             model: self.model.clone(),
+            model_binding: self.model_binding,
+            model_binding_account_config_version: self.model_binding_account_config_version,
+            model_binding_validator: self.model_binding_validator.clone(),
+            account_model_health_observer: self.account_model_health_observer.clone(),
             provider: self.provider.clone(),
             messages: Vec::new(),
             stream: self.stream,
@@ -407,6 +487,28 @@ impl RequestContext {
     /// 设置 Provider（路由确定后调用）
     pub fn set_provider(&mut self, provider: impl Into<String>) {
         self.provider = Some(provider.into());
+    }
+
+    /// Mark this context as selected by an exact model binding.
+    pub fn set_model_binding(&mut self, selection: ModelBindingSelection) {
+        self.model_binding = Some(selection);
+    }
+
+    pub fn set_model_binding_account_config_version(&mut self, config_version: DateTime<Utc>) {
+        self.model_binding_account_config_version = Some(config_version);
+    }
+
+    /// Install the server-side revalidator retained by executor clones.
+    pub fn set_model_binding_validator(&mut self, validator: Arc<dyn ModelBindingValidator>) {
+        self.model_binding_validator = Some(validator);
+    }
+
+    /// Install the immutable-snapshot health observer retained by executor clones.
+    pub fn set_account_model_health_observer(
+        &mut self,
+        observer: Arc<dyn AccountModelHealthObserver>,
+    ) {
+        self.account_model_health_observer = Some(observer);
     }
 
     /// 更新定价快照（路由后根据实际 provider 更新）

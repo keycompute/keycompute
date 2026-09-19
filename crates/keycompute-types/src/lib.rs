@@ -18,8 +18,10 @@ pub mod user;
 
 // 重新导出最常用的类型
 pub use account::AccountApiCapability;
-pub use error::{ErrorCategory, KeyComputeError, Result};
-pub use execution_plan::{ExecutionPlan, ExecutionTarget, SensitiveString};
+pub use error::{ErrorCategory, KeyComputeError, ModelBindingError, Result};
+pub use execution_plan::{
+    AccountSelection, ExecutionPlan, ExecutionTarget, ModelBindingSelection, SensitiveString,
+};
 pub use monitoring::*;
 pub use node::{
     ImageData, ImageEditRequest, ImageGenerationRequest, ImageGenerationResponse, NodeCapabilities,
@@ -30,8 +32,10 @@ pub use node::{
 };
 pub use pricing::PricingSnapshot;
 pub use request::{
-    ChatCompletionRequest, ClientResponseOutcome, ClientUpstreamResponse, ContentPart,
-    ExecutedProviderAccount, ImageUrl, Message, MessageContent, MessageRole, RequestContext,
+    AccountModelHealthObserver, AccountModelHealthSnapshot, ChatCompletionRequest,
+    ClientResponseOutcome, ClientUpstreamResponse, ContentPart, ExecutedProviderAccount, ImageUrl,
+    Message, MessageContent, MessageRole, ModelBindingValidator, ModelHealthObservation,
+    RequestContext,
 };
 pub use response::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ErrorResponse, MessageDelta, ModelInfo,

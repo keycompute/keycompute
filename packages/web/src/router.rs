@@ -10,8 +10,8 @@ use crate::views::{
     node::{node_earnings::NodeEarnings, node_token::NodeToken},
     payments::{PaymentsOverview, Recharge},
     shared::{
-        Accounts, DistributionRecords, Monitoring, MonitoringDiagnostics, NodeGateway,
-        PaymentOrders, Pricing, Settings, System, Tenants, Users,
+        Accounts, DistributionRecords, ModelBindings, Monitoring, MonitoringDiagnostics,
+        NodeGateway, PaymentOrders, Pricing, Settings, System, Tenants, Users,
     },
     user::{UserProfile, UserSettings},
 };
@@ -65,6 +65,8 @@ pub enum Route {
             Users {},
             #[route("/admin/accounts")]
             Accounts {},
+            #[route("/admin/model-bindings")]
+            ModelBindings {},
             #[route("/admin/pricing")]
             Pricing {},
             #[route("/admin/payment-orders")]
@@ -198,5 +200,24 @@ mod tests {
             .0;
         assert!(responses_location.contains("client_max_body_size 80m;"));
         assert!(responses_location.contains("proxy_request_buffering off;"));
+    }
+
+    #[test]
+    fn nginx_model_binding_routes_preserve_uri_and_do_not_fall_back_to_spa() {
+        let nginx = include_str!("../../../nginx/nginx.conf");
+        let chat = nginx
+            .split_once("location = /pt/v1/chat/completions {")
+            .expect("model-bound chat location must exist")
+            .1
+            .split_once("\n        }")
+            .expect("model-bound chat location must be closed")
+            .0;
+        assert!(chat.contains("proxy_pass         http://keycompute_backend;"));
+        assert!(chat.contains("client_max_body_size 96m;"));
+        assert!(chat.contains("proxy_request_buffering off;"));
+        assert!(chat.contains("proxy_buffering    off;"));
+        assert!(nginx.contains("location = /pt/v1/models {"));
+        assert!(nginx.contains("location ^~ /pt/v1/models/ {"));
+        assert!(!nginx.contains("location /pt/ {"));
     }
 }

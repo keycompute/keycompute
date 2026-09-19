@@ -145,8 +145,8 @@ fn test_gateway_failover() {
     // 3. 选择下一个 target
     let next = manager.select_next(&targets, 0);
     let next_provider = match &next {
-        Some(ExecutionTarget::ProviderAccount { provider, .. }) => Some(provider.clone()),
-        Some(ExecutionTarget::Node { model }) => Some(format!("node:{}", model)),
+        Some(ExecutionTarget::UpstreamAccount { provider, .. }) => Some(provider.clone()),
+        Some(ExecutionTarget::NodeDispatch { model }) => Some(format!("node:{}", model)),
         None => None,
     };
     chain.add_step(

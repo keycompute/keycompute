@@ -689,11 +689,12 @@ async fn select_responses_post_account(
         .map_err(|error| crate::error::map_routing_error(error, "openai responses"))?;
     validate_project_resource_route(body, &plan)?;
     match plan.primary {
-        ExecutionTarget::ProviderAccount {
+        ExecutionTarget::UpstreamAccount {
             provider,
             account_id,
             endpoint,
             upstream_api_key,
+            ..
         } if provider.eq_ignore_ascii_case("openai") => Ok(SelectedResponsesAccount {
             account: ResolvedResponsesAccount {
                 provider,
@@ -704,10 +705,10 @@ async fn select_responses_post_account(
             },
             constraint: None,
         }),
-        ExecutionTarget::ProviderAccount { .. } => Err(ApiError::BadRequest(
+        ExecutionTarget::UpstreamAccount { .. } => Err(ApiError::BadRequest(
             "The model is not available through an OpenAI-compatible provider".to_string(),
         )),
-        ExecutionTarget::Node { .. } => Err(ApiError::BadRequest(
+        ExecutionTarget::NodeDispatch { .. } => Err(ApiError::BadRequest(
             "Responses input token counting cannot be routed to a node".to_string(),
         )),
     }
@@ -729,11 +730,12 @@ async fn reserve_selected_responses_account(
         selected.constraint.as_ref(),
     )
     .await?;
-    let ExecutionTarget::ProviderAccount {
+    let ExecutionTarget::UpstreamAccount {
         provider,
         account_id,
         endpoint,
         upstream_api_key,
+        ..
     } = plan.primary
     else {
         return Err(ApiError::Internal(
@@ -6825,7 +6827,7 @@ mod tests {
                 "fresh-fallback-key",
             ),
         ] {
-            let ExecutionTarget::ProviderAccount {
+            let ExecutionTarget::UpstreamAccount {
                 account_id,
                 endpoint,
                 upstream_api_key,

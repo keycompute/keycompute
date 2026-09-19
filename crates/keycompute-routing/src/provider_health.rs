@@ -1339,9 +1339,13 @@ fn classify_runtime_error(error: &KeyComputeError) -> Option<(&'static str, bool
         }
         | KeyComputeError::AuthError(_)
         | KeyComputeError::ConfigError(_) => Some(("configuration_or_auth_failure", true)),
+        // A 404 is ambiguous for an OpenAI-compatible account: it can mean a
+        // model-specific miss while the endpoint and credentials remain
+        // healthy.  Keep it out of account-wide quarantine; bound requests
+        // record the model-scoped observation through their validator.
         KeyComputeError::UpstreamFailure {
             status: Some(404), ..
-        } => Some(("upstream_model_or_endpoint_not_found", true)),
+        } => None,
         KeyComputeError::UpstreamFailure {
             status: Some(408 | 409 | 429),
             ..

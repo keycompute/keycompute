@@ -5,6 +5,7 @@
 pub mod account;
 pub mod api_key;
 pub mod distribution_record;
+pub mod model_binding;
 pub mod node;
 pub mod node_session;
 pub mod node_task;
@@ -35,6 +36,11 @@ pub use account::{
 pub use api_key::{CreateProduceAiKeyRequest, ProduceAiKey, ProduceAiKeyResponse};
 pub use distribution_record::{
     CreateDistributionRecordRequest, DistributionLevelStats, DistributionRecord, DistributionStats,
+};
+pub use model_binding::{
+    AccountModelHealth, AccountModelHealthProbe, CreateModelBindingRequest,
+    MODEL_BINDING_CAPABILITY, MODEL_BINDING_MAX_MODEL_LENGTH, MODEL_BINDING_MAX_PAGE_SIZE,
+    ModelBinding, ModelBindingCount, UpdateModelBindingRequest, validate_model,
 };
 pub use node::{
     CreateNodeRequest, NODE_STATUS_EXCLUDED, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE, Node,
