@@ -195,8 +195,7 @@ async fn independent_aggregates_preserve_precise_money_and_do_not_multiply_rows_
         page.referrals
             .iter()
             .filter(|r| r.user_id != u)
-            .all(|r| r.total_consumption == bigdecimal::BigDecimal::from(0)
-                && r.earnings == bigdecimal::BigDecimal::from(0))
+            .all(|r| r.total_consumption == 0 && r.earnings == 0)
     );
     assert_ne!(
         f.beneficiary.tenant_id, f.tenant,
