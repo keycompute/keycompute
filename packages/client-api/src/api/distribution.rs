@@ -22,6 +22,12 @@ impl DistributionApi {
         }
     }
 
+    pub async fn get_my_overview(&self, token: &str) -> Result<DistributionOverview> {
+        self.client
+            .get_json("/api/v1/me/distribution/overview", Some(token))
+            .await
+    }
+
     // ==================== 用户端接口 ====================
 
     /// 获取我的分销收益
@@ -35,6 +41,22 @@ impl DistributionApi {
     pub async fn get_my_referrals(&self, token: &str) -> Result<Vec<ReferralInfo>> {
         self.client
             .get_json("/api/v1/me/distribution/referrals", Some(token))
+            .await
+    }
+
+    /// Read one explicit server page. The legacy Vec method is capped at the
+    /// server's first default page and never implicitly downloads every user.
+    pub async fn get_my_referrals_page(
+        &self,
+        page: u32,
+        page_size: u32,
+        token: &str,
+    ) -> Result<ReferralPage> {
+        self.client
+            .get_json(
+                &format!("/api/v1/me/distribution/referrals?page={page}&page_size={page_size}"),
+                Some(token),
+            )
             .await
     }
 
@@ -169,6 +191,16 @@ pub struct ReferralInfo {
         deserialize_with = "deserialize_string_from_number_or_string"
     )]
     pub earnings_from_referral: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReferralPage {
+    pub referrals: Vec<ReferralInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+    pub as_of: String,
 }
 
 /// 推荐码响应
@@ -390,4 +422,11 @@ impl UpdateDistributionRuleRequest {
         self.is_active = Some(is_active);
         self
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DistributionOverview {
+    pub earnings: DistributionEarnings,
+    pub referral: ReferralCodeResponse,
+    pub as_of: String,
 }

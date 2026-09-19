@@ -2882,3 +2882,5 @@ mod tests {
         assert!(base_url.is_none());
     }
 }
+
+pub mod console_display;

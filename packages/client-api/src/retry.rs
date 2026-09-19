@@ -52,19 +52,10 @@ fn request_scope(request: &Request, base_path: &str) -> &'static str {
     if !path.starts_with("/api/v1/") {
         return "public";
     }
-    if request.method() != reqwest::Method::GET && request.method() != reqwest::Method::HEAD {
-        return "console_write";
+    if let Some(class) = keycompute_types::console::classify(request.method().as_str(), path) {
+        return class.as_str();
     }
-    if path.ends_with("/stats")
-        || path.ends_with("/earnings")
-        || path.ends_with("/trend")
-        || path.ends_with("/overview")
-        || path.ends_with("/referrals")
-    {
-        "console_heavy_read"
-    } else {
-        "console_read"
-    }
+    "public"
 }
 
 fn key(request: &Request, scope: &str) -> Key {
@@ -101,16 +92,20 @@ impl Cooldowns {
             scope,
             "console_read" | "console_heavy_read" | "console_write"
         );
-        [Some(scope), legacy.then_some("authenticated")]
-            .into_iter()
-            .flatten()
-            .filter_map(|scope| self.entries.get(&key(request, scope)))
-            .max_by_key(|entry| entry.until)
-            .map(|entry| {
-                let mut info = entry.info.clone();
-                info.retry_after = Some(entry.until.saturating_duration_since(now));
-                info
-            })
+        [
+            Some(scope),
+            legacy.then_some("authenticated"),
+            legacy.then_some("console_all"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|scope| self.entries.get(&key(request, scope)))
+        .max_by_key(|entry| entry.until)
+        .map(|entry| {
+            let mut info = entry.info.clone();
+            info.retry_after = Some(entry.until.saturating_duration_since(now));
+            info
+        })
     }
 
     pub(crate) fn record(&mut self, request: &Request, info: RateLimitInfo) {
@@ -128,7 +123,7 @@ impl Cooldowns {
             .as_deref()
             .filter(|s| {
                 *s == request_scope(request, &self.base_path)
-                    || (*s == "authenticated"
+                    || (matches!(*s, "authenticated" | "console_all")
                         && matches!(
                             request_scope(request, &self.base_path),
                             "console_read" | "console_heavy_read" | "console_write"
@@ -170,6 +165,7 @@ pub(crate) fn response_metadata(headers: &HeaderMap) -> RateLimitInfo {
             matches!(
                 *s,
                 "authenticated"
+                    | "console_all"
                     | "console_read"
                     | "console_heavy_read"
                     | "console_write"
@@ -368,6 +364,34 @@ mod tests {
         assert!(
             state
                 .remaining(&request("/api/v1/auth/refresh-token", ""))
+                .is_none()
+        );
+    }
+    #[test]
+    fn console_wide_cooldown_blocks_all_console_classes_not_login_or_generation() {
+        let mut state = Cooldowns::default();
+        state.record(
+            &request("/api/v1/payments/balance", "a"),
+            RateLimitInfo {
+                message: "budget".into(),
+                retry_after: Some(Duration::from_secs(10)),
+                scope: Some("console_all".into()),
+            },
+        );
+        for path in ["/api/v1/payments/balance", "/api/v1/usage/stats"] {
+            assert!(state.remaining(&request(path, "a")).is_some());
+            assert!(state.remaining(&request(path, "b")).is_none());
+        }
+        let write = reqwest::Client::new()
+            .post("https://example.test/api/v1/keys")
+            .bearer_auth("a")
+            .build()
+            .unwrap();
+        assert!(state.remaining(&write).is_some());
+        assert!(state.remaining(&request("/v1/models", "a")).is_none());
+        assert!(
+            state
+                .remaining(&request("/api/v1/auth/login", "a"))
                 .is_none()
         );
     }

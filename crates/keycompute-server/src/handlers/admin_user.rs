@@ -50,6 +50,9 @@ pub struct AdminUserInfo {
     pub balance: f64,
     /// 冻结余额
     pub frozen_balance: f64,
+    /// Display-only snapshot metadata; never a spending authorization.
+    pub balance_initialized: bool,
+    pub balance_as_of: String,
     pub created_at: String,
     pub updated_at: String,
     pub last_login_at: Option<String>,
@@ -247,8 +250,17 @@ pub async fn list_all_users(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    // 计算分页偏移量
-    let offset = (params.page - 1) * params.page_size;
+    let (page, page_size, offset) = super::pagination::normalize_list_pagination(
+        Some(params.page),
+        Some(params.page_size),
+        None,
+        None,
+    );
+    let params = UserListQueryParams {
+        page,
+        page_size,
+        ..params
+    };
 
     // 过滤条件下推到 SQL 层，保证分页准确性
     let tenant_id_filter = params.tenant_id;
@@ -284,11 +296,26 @@ pub async fn list_all_users(
 
     // 批量预加载余额（避免 N+1 查询）
     let user_ids: Vec<Uuid> = users.iter().map(|u| u.id).collect();
-    let balance_map = if let Some(bs) = state.billing.balance_service() {
-        bs.find_by_users(&user_ids).await.ok().unwrap_or_default()
-    } else {
-        std::collections::HashMap::new()
-    };
+    let balance_map = state
+        .billing
+        .balance_service()
+        .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?
+        .find_display_snapshots(&user_ids)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query balance snapshots: {e}")))?;
+
+    // Ordinary statements can straddle a committed reassignment. Do not
+    // combine an old user's tenant label with another snapshot's owner.
+    for user in &users {
+        if balance_map
+            .get(&user.id)
+            .is_none_or(|snapshot| snapshot.tenant_id != user.tenant_id)
+        {
+            return Err(ApiError::Conflict(
+                "User changed while loading balances; please retry".into(),
+            ));
+        }
+    }
 
     // 批量预加载用户的最后登录时间（避免 N+1 查询）
     let credential_map: std::collections::HashMap<Uuid, UserCredential> =
@@ -300,7 +327,9 @@ pub async fn list_all_users(
     let result: Vec<AdminUserInfo> = users
         .into_iter()
         .map(|user| {
-            let balance = balance_map.get(&user.id);
+            let balance = balance_map
+                .get(&user.id)
+                .expect("snapshot exists for every listed user");
             let tenant_name = tenant_map
                 .get(&user.tenant_id)
                 .cloned()
@@ -313,12 +342,10 @@ pub async fn list_all_users(
                 role: user.role.clone(),
                 tenant_id: user.tenant_id,
                 tenant_name,
-                balance: balance
-                    .map(|b| b.available_balance.to_f64().unwrap_or(0.0))
-                    .unwrap_or(0.0),
-                frozen_balance: balance
-                    .map(|b| b.frozen_balance.to_f64().unwrap_or(0.0))
-                    .unwrap_or(0.0),
+                balance: balance.available_balance.to_f64().unwrap_or(0.0),
+                frozen_balance: balance.frozen_balance.to_f64().unwrap_or(0.0),
+                balance_initialized: balance.initialized,
+                balance_as_of: balance.as_of.to_rfc3339(),
                 created_at: user.created_at.to_rfc3339(),
                 updated_at: user.updated_at.to_rfc3339(),
                 last_login_at: credential_map
@@ -329,7 +356,7 @@ pub async fn list_all_users(
         .collect();
 
     // 基于过滤后的 total 计算总页数
-    let total_pages = (total + params.page_size - 1) / params.page_size;
+    let total_pages = super::pagination::total_pages(total, params.page_size);
 
     Ok(Json(UserListResponse {
         users: result,
@@ -374,11 +401,13 @@ pub async fn get_user_by_id(
         .unwrap_or_else(|| "Unknown".to_string());
 
     // 获取用户余额
-    let balance = if let Some(bs) = state.billing.balance_service() {
-        bs.find_by_user(user.id).await.ok().flatten()
-    } else {
-        None
-    };
+    let balance = state
+        .billing
+        .balance_service()
+        .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?
+        .find_display_snapshot(user.tenant_id, user.id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to query balance snapshot: {e}")))?;
 
     // 获取用户最后登录时间
     let last_login = UserCredential::find_by_user_id(writer, user_id)
@@ -393,14 +422,10 @@ pub async fn get_user_by_id(
         role: user.role,
         tenant_id: user.tenant_id,
         tenant_name,
-        balance: balance
-            .as_ref()
-            .map(|b| b.available_balance.to_f64().unwrap_or(0.0))
-            .unwrap_or(0.0),
-        frozen_balance: balance
-            .as_ref()
-            .map(|b| b.frozen_balance.to_f64().unwrap_or(0.0))
-            .unwrap_or(0.0),
+        balance: balance.available_balance.to_f64().unwrap_or(0.0),
+        frozen_balance: balance.frozen_balance.to_f64().unwrap_or(0.0),
+        balance_initialized: balance.initialized,
+        balance_as_of: balance.as_of.to_rfc3339(),
         created_at: user.created_at.to_rfc3339(),
         updated_at: user.updated_at.to_rfc3339(),
         last_login_at: last_login,
@@ -1669,6 +1694,8 @@ mod tests {
             tenant_name: "Test".to_string(),
             balance: 1000.0,
             frozen_balance: 0.0,
+            balance_initialized: true,
+            balance_as_of: "2024-01-01T00:00:00Z".to_string(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             last_login_at: None,

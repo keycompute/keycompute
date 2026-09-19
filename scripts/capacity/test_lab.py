@@ -9,7 +9,7 @@ from unittest.mock import patch
 import lab
 from workload import Reader, complete_json, percentiles
 
-DEFAULTS=dict(fault='none',protocol='chat',response_bytes=0,rate=20,seconds=30,tenants=4,users=2,accounts=8,mode='json',replicas=1,
+DEFAULTS=dict(fault='none',protocol='chat',console_rate=0,response_bytes=0,rate=20,seconds=30,tenants=4,users=2,accounts=8,mode='json',replicas=1,
               client_workers=128,stream_ms=1000,payload_bytes=0,writer_connections=10,
               global_limit=256,tenant_limit=32,account_limit=32,global_queue=128,
               tenant_queue=16,queue_ms=1000)
@@ -17,13 +17,21 @@ DEFAULTS=dict(fault='none',protocol='chat',response_bytes=0,rate=20,seconds=30,t
 class SettingsTests(unittest.TestCase):
     def test_settings_are_bounded_before_resources_exist(self):
         self.assertEqual(lab.settings_from_args(SimpleNamespace(**DEFAULTS)),DEFAULTS)
-        for key,value in [('rate',0),('rate',1001),('replicas',5),('seconds',3601),
+        for key,value in [('console_rate',-1),('console_rate',1001),('rate',0),('rate',1001),('replicas',5),('seconds',3601),
                           ('payload_bytes',9*1024*1024),('writer_connections',1),
                           ('tenant_limit',300),('tenant_queue',129),('queue_ms',0)]:
             with self.subTest(key=key,value=value),self.assertRaises(ValueError):
                 lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{key:value})))
         with self.assertRaises(ValueError):
             lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{'seconds':3600,'rate':1000})))
+    def test_console_mix_is_opt_in_and_combined_budget_is_finite(self):
+        old = {k:v for k,v in DEFAULTS.items() if k != 'console_rate'}
+        self.assertEqual(lab.settings_from_args(SimpleNamespace(**old))['console_rate'],0)
+        self.assertEqual(lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{'console_rate':10})))['console_rate'],10)
+        with self.assertRaises(ValueError):
+            lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{'console_rate':1000,'seconds':300})))
+        with self.assertRaises(ValueError):
+            lab.settings_from_args(SimpleNamespace(**(DEFAULTS|{'console_rate':1,'protocol':'websocket'})))
     def test_tls_addition_preserves_internal_health_and_bounded_upstreams(self):
         text='upstream x { server keycompute-server:3000; } server { listen       80; }'
         out=lab.nginx_config(text,2)
@@ -69,6 +77,18 @@ class SettingsTests(unittest.TestCase):
                 instance.close()
                 self.assertTrue(instance.manifest['cleanup_errors'])
                 self.assertTrue(all('rm' not in c.args[0] and 'exec' not in c.args[0] for c in call.call_args_list))
+
+class ConsoleReaderTests(unittest.TestCase):
+    def test_incomplete_or_error_successes_are_rejected(self):
+        from console_load import valid_body
+        for endpoint in ['/balance','/stats','/trend','/overview']:
+            for value in [{},[],{'error':{}},None]:
+                self.assertFalse(valid_body(endpoint,value))
+        self.assertTrue(valid_body('/balance',{'available_balance':'1.23'}))
+        self.assertTrue(valid_body('/stats',{'total_requests':10}))
+        self.assertTrue(valid_body('/trend',{'buckets':[{'requests':250}]}))
+        self.assertFalse(valid_body('/trend',{'buckets':[{}]}))
+        self.assertTrue(valid_body('/overview',{'stats':{'total_requests':250},'active_keys':[],'recent_usage':[],'recent_orders':[]}))
 
 class ReaderTests(unittest.TestCase):
     def good(self):

@@ -3,6 +3,7 @@ No external providers, implicit proxy, blind retries or unbounded client queue.
 """
 from __future__ import annotations
 import concurrent.futures
+from console_load import run as run_console_load
 from collections import deque
 import http.client
 import http.server
@@ -140,6 +141,9 @@ def run_client():
             except (OSError,ValueError,RuntimeError,http.client.HTTPException):observations.append({'diagnostics_failed':True})
             stop.wait(1)
     started=time.monotonic()
+    console_report = {}
+    console_thread = threading.Thread(target=run_console_load, args=(fixture['admin_token'], settings.get('console_rate',0), settings['seconds'], started, console_report))
+    console_thread.start()
     Path('/lab/results/load-started').touch(exist_ok=False)
     monitor_thread=threading.Thread(target=monitor,daemon=True);monitor_thread.start()
     planned=settings['seconds']*settings['rate']
@@ -155,7 +159,8 @@ def run_client():
             samples.extend(f.result() for f in concurrent.futures.as_completed(pending))
         time.sleep(max(0,started+settings['seconds']-time.monotonic()))
         elapsed=time.monotonic()-started
-    finally:stop.set();monitor_thread.join(12)
+    finally:
+        stop.set();monitor_thread.join(12);console_thread.join()
     good=[s for s in samples if s['status']==200 and s['complete']];statuses={};errors={}
     for sample in samples:
         statuses[str(sample['status'])]=statuses.get(str(sample['status']),0)+1
@@ -169,9 +174,11 @@ def run_client():
             'schedule_lag_ms':percentiles([s['lag_ms'] for s in samples]),'before':before,'capacity_samples':list(observations),'capacity_samples_dropped':max(0,observation_count-len(observations)),
             'after':[json_read('gw'+str(i),'/api/v1/admin/monitoring/capacity',fixture['admin_token']) for i in range(replicas)],
             'model':json_read('node' if protocol=='node' else 'model','/stats'),
+            'console':console_report,
             'reader_scope':'Only complete valid responses are successful; header latency is not full response latency'}
     with open('/lab/results/client.json','x') as file:json.dump(report,file,indent=2)
-    return 0 if len(good)/planned>=.99 and drops==0 else 2
+    console_ok = not console_report.get('harness_error') and not console_report.get('transport_errors',0) and not console_report.get('invalid_successes',0) and console_report.get('dropped',0)==0 and all(k in ('200','429','503') for k in console_report.get('status_counts',{}))
+    return 0 if len(good)/planned>=.99 and drops==0 and console_ok else 2
 
 if __name__=='__main__':
     import sys

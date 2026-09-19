@@ -4,6 +4,7 @@
 //! 仅用于类型定义和数据结构。
 
 pub mod account;
+pub mod console;
 pub mod error;
 pub mod execution_plan;
 pub mod memory;

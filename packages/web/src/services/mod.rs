@@ -18,3 +18,5 @@ pub mod settings_service;
 pub mod tenant_service;
 pub mod usage_service;
 pub mod user_service;
+
+pub mod console_service;

@@ -210,6 +210,11 @@ pub struct UserBalanceResponse {
     pub total_balance: String,
     pub total_recharged: String,
     pub total_consumed: String,
+    /// False means the valid user has not received a balance row yet. This is
+    /// display metadata only and never authorizes a spend.
+    pub initialized: bool,
+    /// Database statement timestamp for this committed primary snapshot.
+    pub as_of: String,
 }
 
 /// 支付订单查询参数
@@ -508,7 +513,7 @@ pub async fn get_my_balance(
         .ok_or_else(|| payment_internal_error("get_balance", "balance service unavailable"))?;
 
     let balance = balance_service
-        .get_or_create(auth.tenant_id, auth.user_id)
+        .find_display_snapshot(auth.tenant_id, auth.user_id)
         .await
         .map_err(|e| payment_internal_error("get_balance", e))?;
 
@@ -519,6 +524,8 @@ pub async fn get_my_balance(
         total_balance: balance.total_balance().to_string(),
         total_recharged: balance.total_recharged.to_string(),
         total_consumed: balance.total_consumed.to_string(),
+        initialized: balance.initialized,
+        as_of: balance.as_of.to_rfc3339(),
     }))
 }
 

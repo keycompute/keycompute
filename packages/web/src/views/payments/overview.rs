@@ -108,6 +108,9 @@ pub fn PaymentsOverview() -> Element {
                 },
             }
 
+            if let Some(Err(error)) = balance() {
+                p { class: "alert alert-error", role: "alert", {crate::services::api_client::user_error_message(&error)} }
+            }
             // ─── 账户余额 ───
             div { class: "stats-grid",
                 div { class: "stat-card",
@@ -116,11 +119,15 @@ pub fn PaymentsOverview() -> Element {
                         None => rsx! {
                             p { class: "stat-value", {i18n.t("table.loading")} }
                         },
-                        Some(Err(e)) => rsx! {
-                            p { class: "stat-value text-error", "{i18n.t(\"common.error\")}: {e}" }
+                        Some(Err(_)) => rsx! {
+                            p { class: "stat-value", "—" }
                         },
                         Some(Ok(b)) => rsx! {
-                            p { class: "stat-value", {format_cny_str(&b.available_balance)} }
+                            p {
+                                class: "stat-value",
+                                title: if b.as_of.is_empty() { i18n.t("common.balance_snapshot").to_string() } else { format!("{}: {}", i18n.t("common.balance_snapshot"), b.as_of) },
+                                {format_cny_str(&b.available_balance)}
+                            }
                         },
                     }
                 }

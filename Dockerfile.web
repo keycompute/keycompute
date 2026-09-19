@@ -127,6 +127,7 @@ RUN --mount=type=cache,id=keycompute-web-cargo-registry,target=/usr/local/cargo/
 # 分域部署时由 Compose build args 注入绝对 URL。
 ARG API_BASE_URL=""
 ENV API_BASE_URL=${API_BASE_URL}
+ENV RUSTUP_AUTO_INSTALL=0
 ENV NO_DOWNLOADS=1
 ENV CARGO_NET_OFFLINE=true
 RUN --mount=type=cache,id=keycompute-web-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

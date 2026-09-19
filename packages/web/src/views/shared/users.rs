@@ -1901,7 +1901,15 @@ fn AdminUsersView() -> Element {
                                         }
                                         td {
                                             div { class: "balance-cell",
-                                                span { class: "balance-available", "{fmt_balance(u.balance)}" }
+                                                span {
+                                                    class: "balance-available",
+                                                    title: if u.balance_as_of.is_empty() {
+                                                        i18n.t("common.balance_snapshot").to_string()
+                                                    } else {
+                                                        format!("{}: {}", i18n.t("common.balance_snapshot"), u.balance_as_of)
+                                                    },
+                                                    "{fmt_balance(u.balance)}"
+                                                }
                                                 if u.frozen_balance > 0.0 {
                                                     span { class: "balance-frozen text-secondary",
                                                         "({i18n.t(\"users.frozen_short\")} {fmt_balance(u.frozen_balance)})"

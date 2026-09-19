@@ -447,6 +447,9 @@ impl RateLimitEntry {
 /// 限流器 trait
 #[async_trait]
 pub trait RateLimiter: Send + Sync + std::fmt::Debug {
+    /// Drop expired process-local counters. Distributed backends may leave
+    /// expiry to Redis and therefore use the default no-op implementation.
+    fn cleanup(&self) {}
     /// 检查是否允许请求（使用默认限制）
     async fn check(&self, key: &RateLimitKey) -> Result<bool>;
 
@@ -624,6 +627,9 @@ impl Default for MemoryRateLimiter {
 
 #[async_trait]
 impl RateLimiter for MemoryRateLimiter {
+    fn cleanup(&self) {
+        MemoryRateLimiter::cleanup(self);
+    }
     async fn check(&self, key: &RateLimitKey) -> Result<bool> {
         self.check_with_config(key, &RateLimitConfig::default())
             .await
@@ -870,6 +876,13 @@ impl RateLimitService {
     /// 获取后端类型
     pub fn backend(&self) -> RateLimitBackend {
         self.backend
+    }
+
+    /// Best-effort cleanup for process-local counters. This is intentionally
+    /// explicit so high-cardinality console identities cannot retain expired
+    /// entries indefinitely; Redis TTL cleanup remains server-owned.
+    pub fn cleanup(&self) {
+        self.limiter.cleanup();
     }
 
     /// 检查并记录请求（使用默认限制）

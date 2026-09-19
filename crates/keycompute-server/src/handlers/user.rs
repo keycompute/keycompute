@@ -533,7 +533,7 @@ pub async fn get_my_usage(
 }
 
 /// 用量统计响应
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UsageStatsResponse {
     pub total_requests: i64,
     pub total_tokens: i64,
@@ -541,6 +541,8 @@ pub struct UsageStatsResponse {
     pub total_output_tokens: i64,
     pub total_cost: f64,
     pub period: String,
+    pub as_of: Option<String>,
+    pub cache_max_age_ms: Option<u64>,
 }
 
 /// 获取我的用量统计
@@ -550,23 +552,24 @@ pub async fn get_my_usage_stats(
     auth: AuthExtractor,
     State(state): State<AppState>,
 ) -> Result<Json<UsageStatsResponse>> {
-    let pool = state
+    state
         .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    let stats = UsageLog::get_user_stats(pool, auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch usage stats: {}", e)))?;
-
-    Ok(Json(UsageStatsResponse {
-        total_requests: stats.total_requests,
-        total_tokens: stats.total_tokens,
-        total_input_tokens: stats.total_input_tokens,
-        total_output_tokens: stats.total_output_tokens,
-        total_cost: stats.total_cost.to_f64().unwrap_or(0.0),
-        period: "all_time".to_string(),
-    }))
+        .as_ref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let db = state.pool.clone().expect("database checked above");
+    let key = crate::display_cache::DisplayCache::key(&auth, "usage-stats", "all-time");
+    let user_id = auth.user_id;
+    let value = state.display_cache.read(state.cache.clone(), state.console_admission.origin.clone(), auth.tenant_id, key, async move {
+        let as_of = chrono::Utc::now().to_rfc3339();
+        let stats = UsageLog::get_user_stats(db.write_conn(), user_id).await
+            .map_err(|e| ApiError::Internal(format!("Failed to fetch usage stats: {e}")))?;
+        Ok(serde_json::json!({"total_requests":stats.total_requests,"total_tokens":stats.total_tokens,
+            "total_input_tokens":stats.total_input_tokens,"total_output_tokens":stats.total_output_tokens,
+            "total_cost":stats.total_cost.to_f64().unwrap_or(0.0),"period":"all_time","as_of":as_of}))
+    }).await?;
+    Ok(Json(serde_json::from_value(value).map_err(|e| {
+        ApiError::Internal(format!("Invalid statistics snapshot: {e}"))
+    })?))
 }
 
 #[cfg(test)]

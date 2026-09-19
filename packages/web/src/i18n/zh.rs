@@ -198,6 +198,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "common.user_info_load_failed",
         "用户信息加载失败，无法验证管理员权限。",
     );
+    m.insert("distribution.settled_earnings", "已结算收益");
+    m.insert("common.display_snapshot", "数据快照");
+    m.insert("common.balance_snapshot", "余额快照");
     m.insert("common.retry", "重试");
     m.insert("common.redirecting", "跳转中");
     m.insert("common.redirect_to_login", "正在跳转到登录页…");

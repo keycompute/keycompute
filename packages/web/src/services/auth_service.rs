@@ -16,8 +16,7 @@ pub async fn login(email: &str, password: &str) -> Result<AuthResponse> {
     let client = get_client();
     let api = AuthApi::new(&client);
     let resp = api.login(&LoginRequest::new(email, password)).await?;
-    // 登录成功后设置全局 token
-    client.set_token(&resp.access_token);
+    // Session changes belong to the login UI, not a possibly stale transport.
     Ok(resp)
 }
 

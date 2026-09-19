@@ -8,7 +8,6 @@ use crate::services::{api_client::with_auto_refresh, usage_service};
 use crate::stores::auth_store::AuthStore;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
-use std::collections::HashMap;
 
 /// 用量统计页面 - /usage
 #[component]
@@ -42,40 +41,25 @@ pub fn Usage() -> Element {
         KeyedResourceValue::new(request_key, result)
     });
 
-    // 趋势图保持展示最近一段窗口，不随表格翻页而改变。
-    let trend_records = use_resource(move || async move {
+    // Aggregate the complete seven-day UTC window, independent of pagination.
+    let trend = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
-            usage_service::list_page(
-                &client_api::api::usage::UsageQueryParams::new()
-                    .with_page(1)
-                    .with_page_size(100),
-                &token,
-            )
-            .await
+            crate::services::console_service::trend(&token).await
         })
         .await
     });
-
-    // 折线图：按日期聚合调用次数
-    let (chart_x, chart_series) = match trend_records() {
-        Some(Ok(ref result)) => {
-            let mut by_date: HashMap<String, f64> = HashMap::new();
-            for r in &result.records {
-                let date = r.created_at.get(..10).unwrap_or("").to_string();
-                *by_date.entry(date).or_default() += 1.0;
-            }
-            let mut pairs: Vec<(String, f64)> = by_date.into_iter().collect();
-            pairs.sort_by(|a, b| a.0.cmp(&b.0));
-            let x: Vec<String> = pairs.iter().map(|(d, _)| d.clone()).collect();
-            let y: Vec<f64> = pairs.iter().map(|(_, v)| *v).collect();
-            (
-                x,
-                vec![LineSeriesData {
-                    name: i18n.t("usage.calls").to_string(),
-                    data: y,
-                }],
-            )
-        }
+    let (chart_x, chart_series) = match trend() {
+        Some(Ok(value)) => (
+            value
+                .buckets
+                .iter()
+                .map(|b| b.start.get(..10).unwrap_or(&b.start).to_string())
+                .collect::<Vec<_>>(),
+            vec![LineSeriesData {
+                name: i18n.t("usage.calls").to_string(),
+                data: value.buckets.iter().map(|b| b.requests as f64).collect(),
+            }],
+        ),
         _ => (vec![], vec![]),
     };
 
@@ -123,6 +107,12 @@ pub fn Usage() -> Element {
                 }
             }
 
+            if let Some(Err(error)) = trend() {
+                p { class: "alert alert-error", role: "alert", {format!("{}: {}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(&error))} }
+            }
+            if let Some(Ok(value)) = trend() {
+                p { class: "text-secondary", {format!("UTC · {}: {}", i18n.t("common.display_snapshot"), format_time(&value.as_of))} }
+            }
             // 调用趋势折线图
             if !chart_x.is_empty() {
                 div { class: "section",

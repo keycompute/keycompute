@@ -338,20 +338,48 @@ mod tests {
     // ── helpers ────────────────────────────────────────────────────────
 
     async fn create_test_pool(db: u8) -> Option<deadpool_redis::Pool> {
-        let url = format!("redis://127.0.0.1:6379/{}", db);
-        let mut cfg = deadpool_redis::Config::from_url(&url);
+        let base = match std::env::var("REDIS_URL").or_else(|_| std::env::var("KC__REDIS__URL")) {
+            Ok(url) => url,
+            Err(_) => {
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "CI must provide an isolated test Redis URL"
+                );
+                return None;
+            }
+        };
+        // Replace only the database path so credentials, TLS scheme, and any
+        // configured host/port remain exactly those supplied by the test
+        // environment.
+        let mut url = url::Url::parse(&base).expect("valid test Redis URL");
+        url.set_path(&format!("/{db}"));
+        let mut cfg = deadpool_redis::Config::from_url(url.to_string());
         cfg.pool = Some(deadpool_redis::PoolConfig {
             max_size: 2,
             ..Default::default()
         });
-        let pool = cfg
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .ok()?;
-        let mut conn = pool.get().await.ok()?;
+        let Some(pool) = cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1)).ok() else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "configured test Redis is required in CI for cache lock tests"
+            );
+            return None;
+        };
+        let Some(mut conn) = pool.get().await.ok() else {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "configured test Redis is required in CI for cache lock tests"
+            );
+            return None;
+        };
         let pong: Result<String, _> = deadpool_redis::redis::cmd("PING")
             .query_async(&mut conn)
             .await;
         if pong.is_err() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "configured test Redis is required in CI for cache lock tests"
+            );
             return None;
         }
         Some(pool)

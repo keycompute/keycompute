@@ -192,6 +192,8 @@ pub struct AppStateConfig {
     pub jwt: JwtConfig,
     /// Gateway 配置
     pub gateway: keycompute_config::GatewayConfig,
+    /// Independent console admission and abuse budgets.
+    pub console: keycompute_config::ConsoleConfig,
     /// 邮件服务配置
     pub email: EmailConfig,
     /// 节点网关配置（可选）
@@ -214,6 +216,7 @@ impl AppStateConfig {
                 expiry_secs: config.auth.jwt_expiry_secs as i64,
             },
             gateway: config.gateway.clone(),
+            console: config.console.clone(),
             email: config.email.clone(),
             node_gateway: config.node_gateway.clone(),
         }
@@ -272,6 +275,8 @@ pub fn init_global_crypto(
 pub struct AppState {
     pub shutdown: Arc<crate::shutdown::ShutdownState>,
     pub generation_admission: Arc<crate::admission::GenerationAdmission>,
+    pub display_cache: crate::display_cache::DisplayCache,
+    pub console_admission: Arc<crate::console::ConsoleAdmission>,
     /// 对外公开的前端应用基础 URL（可选）
     pub app_base_url: Option<String>,
     /// 数据库连接池（可选）
@@ -280,6 +285,8 @@ pub struct AppState {
     pub auth: Arc<AuthService>,
     /// 限流服务
     pub rate_limiter: Arc<keycompute_ratelimit::RateLimitService>,
+    /// Separate namespaced limiter; never used by generation handlers.
+    pub console_limiter: Arc<keycompute_ratelimit::RateLimitService>,
     /// 定价服务
     pub pricing: Arc<keycompute_pricing::PricingService>,
     /// 运行时状态存储（账号状态）
@@ -366,6 +373,7 @@ impl AppState {
         self.shutdown.begin();
         self.generation_admission.ingress.close();
         self.generation_admission.requests.close();
+        self.console_admission.close();
     }
 
     fn configure_memory(gateway: &keycompute_config::GatewayConfig) -> crate::error::Result<()> {
@@ -395,6 +403,10 @@ impl AppState {
         let generation_admission = Arc::new(
             crate::admission::GenerationAdmission::new(&config.gateway.admission)
                 .expect("valid generation admission configuration"),
+        );
+        let console_admission = Arc::new(
+            crate::console::ConsoleAdmission::new(config.console.clone())
+                .expect("valid console admission configuration"),
         );
         // 创建 API Key 验证器
         let api_key_validator = ProduceAiKeyValidator::new();
@@ -446,6 +458,8 @@ impl AppState {
         // 根据配置创建限流服务
         let rate_limiter = Self::create_rate_limiter(&config.rate_limit)
             .expect("configured rate-limit backend must initialize");
+        let console_limiter = Self::create_console_rate_limiter(&config.rate_limit)
+            .expect("configured console rate-limit backend must initialize");
 
         // 创建缓存服务（降级为 no-op，因为无 Redis 连接池）
         let cache = Self::create_disabled_cache();
@@ -463,6 +477,7 @@ impl AppState {
             pool: None,
             auth: Arc::new(auth_service),
             rate_limiter: Arc::new(rate_limiter),
+            console_limiter: Arc::new(console_limiter),
             pricing: Arc::new(pricing_service),
             account_states: Arc::clone(&account_states),
             provider_health,
@@ -480,6 +495,8 @@ impl AppState {
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             generation_admission,
+            display_cache: crate::display_cache::DisplayCache::default(),
+            console_admission,
             shutdown: Arc::new(crate::shutdown::ShutdownState::default()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
@@ -534,6 +551,27 @@ impl AppState {
             RateLimitBackendConfig::Redis(_) => Err(crate::error::ApiError::Config(
                 "Redis rate limiter is configured, but this server was built without Redis support"
                     .to_string(),
+            )),
+        }
+    }
+
+    fn create_console_rate_limiter(
+        config: &RateLimitBackendConfig,
+    ) -> crate::error::Result<keycompute_ratelimit::RateLimitService> {
+        match config {
+            RateLimitBackendConfig::Memory => Ok(keycompute_ratelimit::RateLimitService::default_memory()),
+            #[cfg(feature = "redis")]
+            RateLimitBackendConfig::Redis(redis) => Self::create_redis_command_pool(redis)
+                .map(|pool| keycompute_ratelimit::RateLimitService::with_redis_pool_and_prefix(
+                    pool,
+                    "keycompute:console:v1",
+                ))
+                .map_err(|error| crate::error::ApiError::Config(format!(
+                    "configured Redis console limiter could not initialize: {error}"
+                ))),
+            #[cfg(not(feature = "redis"))]
+            RateLimitBackendConfig::Redis(_) => Err(crate::error::ApiError::Config(
+                "Redis console limiter is configured, but this server was built without Redis support".into(),
             )),
         }
     }
@@ -767,6 +805,9 @@ impl AppState {
         let generation_admission = Arc::new(crate::admission::GenerationAdmission::new(
             &config.gateway.admission,
         )?);
+        let console_admission = Arc::new(crate::console::ConsoleAdmission::new(
+            config.console.clone(),
+        )?);
         // 创建带数据库连接的 API Key 验证器
         let api_key_validator = ProduceAiKeyValidator::with_pool(Arc::clone(&pool));
         // 创建 JWT 验证器
@@ -937,6 +978,18 @@ impl AppState {
             )
         };
 
+        // Share the existing critical command pool; never use evictable cache Redis.
+        #[cfg(feature = "redis")]
+        let console_limiter = Arc::new(match runtime_state.pool() {
+            Some(pool) => keycompute_ratelimit::RateLimitService::with_redis_pool_and_prefix(
+                pool.clone(),
+                "keycompute:console:v1",
+            ),
+            None => Self::create_console_rate_limiter(&config.rate_limit)?,
+        });
+        #[cfg(not(feature = "redis"))]
+        let console_limiter = Arc::new(Self::create_console_rate_limiter(&config.rate_limit)?);
+
         let account_capacity: Arc<dyn keycompute_types::AccountCapacityPolicy> =
             Arc::new(crate::account_capacity::ServerAccountCapacity {
                 db: Arc::clone(&pool),
@@ -968,6 +1021,7 @@ impl AppState {
             pool: Some(pool),
             auth: Arc::new(auth_service),
             rate_limiter: Arc::new(rate_limiter),
+            console_limiter,
             pricing: Arc::new(pricing_service),
             account_states: Arc::clone(&account_states),
             provider_health,
@@ -985,6 +1039,8 @@ impl AppState {
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             generation_admission,
+            display_cache: crate::display_cache::DisplayCache::default(),
+            console_admission,
             shutdown: Arc::new(crate::shutdown::ShutdownState::default()),
             gateway_config: config.gateway,
             lifecycle,
@@ -1004,6 +1060,10 @@ impl AppState {
         providers: HashMap<String, Arc<dyn ProviderAdapter>>,
         config: AppStateConfig,
     ) -> Self {
+        let console_admission = Arc::new(
+            crate::console::ConsoleAdmission::new(config.console.clone())
+                .expect("valid console admission configuration"),
+        );
         // 创建 API Key 验证器
         let generation_admission = Arc::new(
             crate::admission::GenerationAdmission::new(&config.gateway.admission)
@@ -1058,6 +1118,8 @@ impl AppState {
         // 根据配置创建限流服务
         let rate_limiter = Self::create_rate_limiter(&config.rate_limit)
             .expect("configured rate-limit backend must initialize");
+        let console_limiter = Self::create_console_rate_limiter(&config.rate_limit)
+            .expect("configured console rate-limit backend must initialize");
 
         // 创建缓存服务（降级为 no-op，因为无 Redis 连接池）
         let cache = Self::create_disabled_cache();
@@ -1075,6 +1137,7 @@ impl AppState {
             pool: None,
             auth: Arc::new(auth_service),
             rate_limiter: Arc::new(rate_limiter),
+            console_limiter: Arc::new(console_limiter),
             pricing: Arc::new(pricing_service),
             account_states: Arc::clone(&account_states),
             provider_health,
@@ -1092,6 +1155,8 @@ impl AppState {
             responses_websocket_admission: Arc::new(ResponsesWebSocketAdmission::default_limits()),
             generation_http_body_admission: Arc::new(GenerationHttpBodyAdmission::default_limit()),
             generation_admission,
+            display_cache: crate::display_cache::DisplayCache::default(),
+            console_admission,
             shutdown: Arc::new(crate::shutdown::ShutdownState::default()),
             gateway_config: config.gateway,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),

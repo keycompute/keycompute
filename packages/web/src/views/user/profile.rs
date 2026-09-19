@@ -29,19 +29,24 @@ pub fn UserProfile() -> Element {
             if user_store.info.read().is_some() {
                 return Ok(());
             }
-            // 获取当前用户信息
-            with_auto_refresh(auth, |token| async move {
-                let user = user_service::get_current_user(&token).await?;
-                *user_store.info.write() = Some(UserInfo {
-                    id: user.id.to_string(),
-                    email: user.email,
-                    name: user.name,
-                    role: user.role,
-                    tenant_id: user.tenant_id.to_string(),
-                });
-                Ok::<(), client_api::ClientError>(())
+            let observed = (auth.state)();
+            let result = with_auto_refresh(auth, |token| async move {
+                user_service::get_current_user(&token).await
             })
-            .await
+            .await;
+            if !auth.matches(&observed) {
+                return Err(client_api::ClientError::Other("登录状态已变更".into()));
+            }
+            let user = result?;
+            *user_store.info.write() = Some(UserInfo {
+                id: user.id.to_string(),
+                email: user.email,
+                name: user.name,
+                role: user.role,
+                tenant_id: user.tenant_id.to_string(),
+            });
+            user_store.loaded_session_id.set(observed.session_id);
+            Ok(())
         }
     });
 
@@ -92,8 +97,13 @@ pub fn UserProfile() -> Element {
             Some(name_val)
         };
         spawn(async move {
-            let token = auth_store.token().unwrap_or_default();
-            match user_service::update_profile(name_opt.clone(), &token).await {
+            let observed = (auth_store.state)();
+            let token = observed.access_token.clone().unwrap_or_default();
+            let result = user_service::update_profile(name_opt.clone(), &token).await;
+            if !auth_store.matches(&observed) {
+                return;
+            }
+            match result {
                 Ok(updated) => {
                     *user_store.info.write() = Some(UserInfo {
                         id: updated.id.to_string(),

@@ -14,14 +14,18 @@ use crate::views::shared::Toast;
 use ui::layout::sidebar::NavIcon;
 use ui::{AppShell, NavItem, NavSection, ThemeCtx, UserMenuAction};
 
+/// Explicit retry handle for the one cancellable profile bootstrap resource.
+#[derive(Clone, Copy)]
+struct UserBootstrap(Resource<()>);
+
 /// 根组件：提供所有全局 context，挂载路由
 #[component]
 pub fn App() -> Element {
     // 所有 Signal 必须在组件顶层直接创建，不能在 hook 的闭包里调用 use_signal
-    let auth_initial = AuthStore::load_from_storage();
-    let auth_state = use_signal(|| auth_initial);
+    let auth_state = use_signal(AuthStore::load_from_storage);
     let user_info = use_signal(|| None::<UserInfo>);
     let user_load_failed = use_signal(|| false);
+    let user_loaded_session = use_signal(uuid::Uuid::nil);
     let public_settings_state = use_signal(PublicSettingsState::default);
     let toast_signal = use_signal(|| None::<ToastMsg>);
     let lang_signal = use_signal(|| {
@@ -46,7 +50,8 @@ pub fn App() -> Element {
     });
 
     let auth_store = use_context_provider(|| AuthStore::new(auth_state));
-    let mut user_store = use_context_provider(|| UserStore::new(user_info, user_load_failed));
+    let user_store =
+        use_context_provider(|| UserStore::new(user_info, user_load_failed, user_loaded_session));
     let public_settings_store =
         use_context_provider(|| PublicSettingsStore::new(public_settings_state));
     let _ui_store = use_context_provider(|| UiStore::new(toast_signal));
@@ -84,49 +89,100 @@ pub fn App() -> Element {
         });
     });
 
-    // App 启动时或登录状态变化时，若已有 token，自动拉取用户信息
-    use_effect(move || {
-        // 依赖 auth_store 的认证状态，登录/登出时会重新执行
-        let is_auth = auth_store.is_authenticated();
-        if !is_auth {
-            user_store.load_failed.set(false);
-            return;
-        }
-
-        let Some(token) = auth_store.token() else {
-            return;
-        };
-
-        // 恢复 token 到 API 客户端
-        get_client().set_token(&token);
-        user_store.load_failed.set(false);
-        spawn(async move {
-            match user_service::get_current_user(&token).await {
-                Ok(user) => {
-                    *user_store.info.write() = Some(UserInfo {
-                        id: user.id.to_string(),
-                        email: user.email,
-                        name: user.name,
-                        role: user.role,
-                        tenant_id: user.tenant_id.to_string(),
-                    });
-                    user_store.load_failed.set(false);
-                }
-                Err(err) if err.is_auth_error() => {
-                    let mut auth_store = auth_store;
-                    auth_store.logout();
-                    get_client().clear_token();
-                    *user_store.info.write() = None;
-                    user_store.load_failed.set(false);
-                }
-                Err(_) => user_store.load_failed.set(true),
-            }
-        });
+    // Resource owns/cancels old work when reactive login credentials change.
+    // A root-scope spawn would survive reruns and duplicate bootstrap requests.
+    let user_bootstrap = use_user_bootstrap(auth_store, user_store, |auth| async move {
+        crate::services::api_client::with_auto_refresh(auth, |token| async move {
+            let user = user_service::get_current_user(&token).await?;
+            Ok((
+                token,
+                UserInfo {
+                    id: user.id.to_string(),
+                    email: user.email,
+                    name: user.name,
+                    role: user.role,
+                    tenant_id: user.tenant_id.to_string(),
+                },
+            ))
+        })
+        .await
     });
+    use_context_provider(|| UserBootstrap(user_bootstrap));
 
     rsx! {
         Router::<Route> {}
     }
+}
+
+/// The application and deterministic Dioxus tests share this lifecycle hook.
+fn use_user_bootstrap<F, Fut>(
+    auth_store: AuthStore,
+    mut user_store: UserStore,
+    fetch: F,
+) -> Resource<()>
+where
+    F: Fn(AuthStore) -> Fut + Clone + 'static,
+    Fut: std::future::Future<Output = client_api::Result<(String, UserInfo)>> + 'static,
+{
+    use_resource(move || {
+        let fetch = fetch.clone();
+        async move {
+            let observed = (auth_store.state)();
+            if !observed.is_authenticated {
+                user_store.clear();
+                return;
+            }
+            let Some(token) = observed.access_token.clone() else {
+                return;
+            };
+            if *user_store.loaded_session_id.peek() != observed.session_id {
+                user_store.clear();
+            }
+            get_client().set_token(&token);
+            user_store.load_failed.set(false);
+            match fetch(auth_store).await {
+                Ok((used_token, user)) => {
+                    let current = auth_store.state.peek().clone();
+                    if current.session_id != observed.session_id
+                        || current.token_revision != observed.token_revision
+                        || current.access_token.as_deref() != Some(used_token.as_str())
+                    {
+                        return;
+                    }
+                    complete_user_load(auth_store, user_store, &current, Ok(user));
+                }
+                Err(error) => {
+                    complete_user_load(auth_store, user_store, &observed, Err(error));
+                }
+            }
+        }
+    })
+}
+
+/// Both success and failure are fenced even when a response races cancellation.
+fn complete_user_load(
+    mut auth: AuthStore,
+    mut users: UserStore,
+    observed: &crate::stores::auth_store::AuthState,
+    result: client_api::Result<UserInfo>,
+) -> bool {
+    if !auth.matches(observed) {
+        return false;
+    }
+    match result {
+        Ok(user) => {
+            users.info.set(Some(user));
+            users.loaded_session_id.set(observed.session_id);
+            users.load_failed.set(false);
+        }
+        Err(error) if error.is_auth_error() => {
+            if auth.logout_if_current(observed) {
+                users.clear();
+            }
+        }
+        Err(_) => users.load_failed.set(true),
+    }
+    true
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -169,9 +225,11 @@ pub fn AppLayout() -> Element {
     let public_settings_store = use_context::<PublicSettingsStore>();
     let mut auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();
+    let mut bootstrap = use_context::<UserBootstrap>();
     let lang_signal = use_context::<Signal<String>>();
     let i18n = I18n::new(Lang::from_str(&lang_signal()));
     let nav = use_navigator();
+    let current_route = use_route::<Route>();
     let mut user_store_write = use_context::<UserStore>();
 
     // 同步检查认证状态：在渲染之前立即判断，未登录则渲染重定向占位符
@@ -201,6 +259,26 @@ pub fn AppLayout() -> Element {
                     span { style: "color:var(--text-secondary,#64748b);font-size:14px",
                         {i18n.t("common.redirect_to_login")}
                     }
+                }
+            }
+        };
+    }
+
+    let login_id = (auth_store.state)().session_id;
+    if (user_store.loaded_session_id)() != login_id {
+        let failed = (user_store.load_failed)();
+        return rsx! {
+            div { class: "auth-redirect-loading", role: "status",
+                if failed {
+                    p { {i18n.t("common.user_info_load_failed")} }
+                    button {
+                        class: "btn btn-secondary",
+                        r#type: "button",
+                        onclick: move |_| bootstrap.0.restart(),
+                        {i18n.t("common.retry")}
+                    }
+                } else {
+                    {i18n.t("common.loading")}
                 }
             }
         };
@@ -343,15 +421,13 @@ pub fn AppLayout() -> Element {
         });
     }
 
-    let current_route = use_route::<Route>();
     let current_path = current_route.to_string();
     let page_title = route_page_title(&current_route, &i18n);
     let document_title = format!("{page_title} · {site_name}");
 
     rsx! {
-        document::Title { "{document_title}" }
-
         AppShell {
+            key: "{login_id}",
             nav_sections,
             user_name,
             current_path,
@@ -388,6 +464,7 @@ pub fn AppLayout() -> Element {
                     nav.replace(Route::Home {});
                 }
             },
+            document::Title { "{document_title}" }
             Toast { toast: ui_store.toast }
             Outlet::<Route> {}
         }
@@ -585,3 +662,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "app_session_tests.rs"]
+mod session_tests;

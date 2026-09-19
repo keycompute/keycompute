@@ -1027,6 +1027,16 @@ pub async fn rate_limit_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // Console traffic has an independent class/user/tenant/aggregate budget.
+    // Do not charge it to generation RPM/TPM or allow a second limiter pass.
+    if req
+        .extensions()
+        .get::<crate::console::ConsoleAdmissionChecked>()
+        .is_some()
+        && keycompute_types::console::classify(req.method().as_str(), req.uri().path()).is_some()
+    {
+        return next.run(req).await;
+    }
     // WebSocket 握手只建立传输连接，不等同于一次 Responses 生成请求。
     // 每个 `response.create` 会在 WebSocket handler 内独立执行 RPM/TPM
     // 检查；这里跳过握手，避免首个事件被重复计数。
@@ -1566,82 +1576,72 @@ pub async fn admin_auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // 1. 从请求头提取认证信息
-    let headers = req.headers();
-    let auth_header = match headers.get("Authorization").and_then(|h| h.to_str().ok()) {
-        Some(h) => h,
-        None => {
-            warn!("Admin route accessed without authentication");
-            return (
-                StatusCode::UNAUTHORIZED,
-                serde_json::json!({
-                    "error": {
-                        "message": "Authentication required",
-                        "type": "auth_required",
-                        "code": "unauthorized"
-                    }
-                })
-                .to_string(),
-            )
-                .into_response();
-        }
+    // Reuse the identity established by the outer console middleware (or by a
+    // preceding auth layer) instead of verifying the same token a second time.
+    let auth_extractor = if let Some(auth) = req.extensions().get::<AuthExtractor>().cloned() {
+        auth
+    } else {
+        // 1. 从请求头中解析并验证 Bearer token。
+        let headers = req.headers();
+        let auth_header = match headers.get("Authorization").and_then(|h| h.to_str().ok()) {
+            Some(h) => h,
+            None => {
+                warn!("Admin route accessed without authentication");
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    serde_json::json!({
+                        "error": {"message": "Authentication required", "type": "auth_required", "code": "unauthorized"}
+                    })
+                    .to_string(),
+                )
+                    .into_response();
+            }
+        };
+        let token = match auth_header.strip_prefix("Bearer ") {
+            Some(token) => token,
+            None => {
+                warn!("Invalid authorization header format");
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    serde_json::json!({
+                        "error": {"message": "Invalid authorization format. Expected: Bearer <token>", "type": "auth_invalid_format", "code": "unauthorized"}
+                    })
+                    .to_string(),
+                )
+                    .into_response();
+            }
+        };
+        let auth_context = match state.auth.verify_token(token).await {
+            Ok(ctx) => ctx,
+            Err(keycompute_types::KeyComputeError::AuthError(error)) => {
+                warn!(%error, "Authentication failed for admin route");
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    serde_json::json!({
+                        "error": {"message": "Authentication failed", "type": "auth_failed", "code": "unauthorized"}
+                    })
+                    .to_string(),
+                )
+                    .into_response();
+            }
+            Err(error) => {
+                error!(%error, "Authentication backend failed for admin route");
+                return authentication_service_unavailable_response();
+            }
+        };
+        AuthExtractor::from_auth_context(auth_context)
     };
 
-    // 2. 解析 Bearer token
-    let token = match auth_header.strip_prefix("Bearer ") {
-        Some(t) => t,
-        None => {
-            warn!("Invalid authorization header format");
-            return (
-                StatusCode::UNAUTHORIZED,
-                serde_json::json!({
-                    "error": {
-                        "message": "Invalid authorization format. Expected: Bearer <token>",
-                        "type": "auth_invalid_format",
-                        "code": "unauthorized"
-                    }
-                })
-                .to_string(),
-            )
-                .into_response();
-        }
-    };
-
-    // 3. 验证 token 并获取认证上下文（支持 JWT 和 API Key）
-    let auth_context = match state.auth.verify_token(token).await {
-        Ok(ctx) => ctx,
-        Err(keycompute_types::KeyComputeError::AuthError(error)) => {
-            // 内部错误细节只记录日志，不回传客户端（避免信息泄露）
-            warn!(%error, "Authentication failed for admin route");
-            return (
-                StatusCode::UNAUTHORIZED,
-                serde_json::json!({
-                    "error": {
-                        "message": "Authentication failed",
-                        "type": "auth_failed",
-                        "code": "unauthorized"
-                    }
-                })
-                .to_string(),
-            )
-                .into_response();
-        }
-        Err(error) => {
-            error!(%error, "Authentication backend failed for admin route");
-            return authentication_service_unavailable_response();
-        }
-    };
-
-    // 4. 基于权限（而非角色字符串）进行管理访问控制。
+    // 2. 基于权限（而非角色字符串）进行管理访问控制。
     //
     // 关键：API Key 认证即使归属 admin/system 用户，也仅拥有 UseApi 权限
     // （见 build_api_key_permissions）。若这里按 role 字符串判断，admin 用户的
     // API Key 就能越权访问管理接口。改为检查 SystemAdmin 权限即可正确区分：
     // 只有 JWT 后台登录的 admin/system 才具备 SystemAdmin 权限。
-    if !auth_context.has_permission(&Permission::SystemAdmin) {
+    if !auth_extractor.has_permission(&Permission::SystemAdmin) {
         warn!(
-            user_id = %auth_context.user_id,
-            role = %auth_context.role,
+            user_id = %auth_extractor.user_id,
+            role = %auth_extractor.role,
             "Request without admin permission attempted to access admin route"
         );
         return (
@@ -1658,9 +1658,7 @@ pub async fn admin_auth_middleware(
             .into_response();
     }
 
-    // 5. 认证成功，注入认证信息到请求扩展
-    // 创建 AuthExtractor 并存入请求扩展，供后续 Handler 使用
-    let auth_extractor = AuthExtractor::from_auth_context(auth_context);
+    // 3. 认证成功，注入认证信息到请求扩展供 Handler 使用。
     req.extensions_mut().insert(auth_extractor);
 
     // 6. 继续处理请求
@@ -1787,7 +1785,9 @@ pub async fn maintenance_mode_middleware(
 
     // 维护模式已启用，检查是否为管理员
     // 从请求头提取认证信息
-    let is_system_admin = if let Some(auth_header) = req
+    let is_system_admin = if let Some(auth) = req.extensions().get::<AuthExtractor>() {
+        auth.has_permission(&Permission::SystemAdmin)
+    } else if let Some(auth_header) = req
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok())

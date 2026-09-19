@@ -367,43 +367,6 @@ async fn build_distribution_record_response(
     })
 }
 
-async fn build_referral_info(
-    pool: &impl ConnectionTrait,
-    beneficiary_id: Uuid,
-    referral: keycompute_db::UserReferral,
-) -> Result<ReferralInfo> {
-    let user = keycompute_db::User::find_by_id(pool, referral.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    let usage_stats = keycompute_db::UsageLog::get_user_stats(pool, referral.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    let earnings = keycompute_db::DistributionRecord::get_earnings_for_referral(
-        pool,
-        beneficiary_id,
-        referral.user_id,
-    )
-    .await
-    .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    let email = user
-        .as_ref()
-        .map(|user| user.email.clone())
-        .unwrap_or_else(|| referral.user_id.to_string());
-    let name = user.and_then(|user| user.name);
-
-    Ok(ReferralInfo {
-        id: referral.user_id.to_string(),
-        email,
-        name,
-        created_at: referral.created_at.to_rfc3339(),
-        total_consumption: bigdecimal_to_string(&usage_stats.total_cost),
-        earnings: bigdecimal_to_string(&earnings),
-    })
-}
-
 // ==================== API Handlers ====================
 
 /// 查看分销记录
@@ -797,43 +760,121 @@ pub async fn get_my_distribution_earnings(
     }))
 }
 
-/// 获取当前用户的推荐列表
-///
-/// GET /api/v1/me/distribution/referrals
+/// Optional page parameters; the legacy array response is capped at 20 rows.
+#[derive(Debug, Default, Deserialize)]
+pub struct ReferralQuery {
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReferralPageResponse {
+    pub referrals: Vec<ReferralInfo>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+    pub total_pages: i64,
+    pub as_of: String,
+}
+
+/// Read one bounded page. Authentication and distribution visibility checks
+/// remain mandatory; the query only sees this beneficiary's relationships.
 pub async fn get_my_referrals(
     auth: AuthExtractor,
     State(state): State<AppState>,
-) -> Result<Json<Vec<ReferralInfo>>> {
+    Query(params): Query<ReferralQuery>,
+) -> Result<Json<serde_json::Value>> {
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
+        .ok_or_else(|| ApiError::Internal("Database not available".into()))?;
+    check_distribution_enabled(pool.write_conn()).await?;
+    let modern = params.page.is_some() || params.page_size.is_some();
+    let (page, page_size, offset) =
+        normalize_list_pagination(params.page, params.page_size, None, None);
+    let result = keycompute_db::models::referral_display::find_referral_display_page(
+        pool,
+        auth.user_id,
+        page_size,
+        offset,
+    )
+    .await
+    .map_err(|error| ApiError::Internal(format!("Failed to query referrals: {error}")))?;
+    let referrals = result
+        .referrals
+        .into_iter()
+        .map(|referral| ReferralInfo {
+            id: referral.user_id.to_string(),
+            email: referral.email,
+            name: referral.name,
+            created_at: referral.created_at.to_rfc3339(),
+            total_consumption: bigdecimal_to_string(&referral.total_consumption),
+            earnings: bigdecimal_to_string(&referral.earnings),
+        })
+        .collect::<Vec<_>>();
+    let value = if modern {
+        serde_json::to_value(ReferralPageResponse {
+            referrals,
+            total: result.total,
+            page,
+            page_size,
+            total_pages: total_pages(result.total, page_size),
+            as_of: result.as_of.to_rfc3339(),
+        })
+    } else {
+        serde_json::to_value(referrals)
+    };
+    Ok(Json(value.map_err(|error| {
+        ApiError::Internal(format!("Referral serialization failed: {error}"))
+    })?))
+}
 
-    // 检查分销系统是否启用
-    check_distribution_enabled(pool).await?;
-
-    // 获取一级推荐
-    let level1_referrals = keycompute_db::UserReferral::find_by_level1_referrer(pool, auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    // 获取二级推荐
-    let level2_referrals = keycompute_db::UserReferral::find_by_level2_referrer(pool, auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    // 合并并转换为响应格式，查询真实收益
-    let mut referrals: Vec<ReferralInfo> = Vec::new();
-
-    for referral in level1_referrals {
-        referrals.push(build_referral_info(pool, auth.user_id, referral).await?);
+/// One overview replaces duplicated earnings/count/link requests in the Web UI.
+pub async fn get_my_distribution_overview(
+    auth: AuthExtractor,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>> {
+    use crate::display_cache::DisplayCache;
+    if !auth.has_permission(&keycompute_auth::Permission::ViewUsage) {
+        return Err(ApiError::Forbidden(
+            "Console display permission required".into(),
+        ));
     }
-
-    for referral in level2_referrals {
-        referrals.push(build_referral_info(pool, auth.user_id, referral).await?);
-    }
-
-    Ok(Json(referrals))
+    let pool = state
+        .pool
+        .clone()
+        .ok_or_else(|| ApiError::Internal("Database not available".into()))?;
+    // Check the authoritative feature switch even when a snapshot already exists.
+    check_distribution_enabled(pool.write_conn()).await?;
+    let base = configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
+        ApiError::Config("APP_BASE_URL is required to generate public invite links".into())
+    })?;
+    let referral_code = auth.user_id.to_string();
+    let invite_link = build_invite_link(&base, &referral_code, None)?;
+    let key = DisplayCache::key(&auth, "distribution-overview", &invite_link);
+    let user = auth.user_id;
+    let value = state
+        .display_cache
+        .read(
+            state.cache.clone(),
+            state.console_admission.origin.clone(),
+            auth.tenant_id,
+            key,
+            async move {
+                let mut value =
+                    keycompute_db::models::console_display::distribution(pool.write_conn(), user)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(%error,"distribution overview query failed");
+                            ApiError::Internal("Distribution overview unavailable".into())
+                        })?;
+                value["referral"] =
+                    serde_json::json!({"referral_code":referral_code,"invite_link":invite_link});
+                Ok(value)
+            },
+        )
+        .await?;
+    Ok(Json(value))
 }
 
 #[cfg(test)]

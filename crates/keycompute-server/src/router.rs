@@ -279,6 +279,18 @@ pub fn create_router(state: AppState) -> Router {
         // 用量统计
         .route("/api/v1/usage", get(get_my_usage))
         .route("/api/v1/usage/stats", get(get_my_usage_stats))
+        .route(
+            "/api/v1/usage/trend",
+            get(crate::handlers::console_display::usage_trend),
+        )
+        .route(
+            "/api/v1/dashboard/overview",
+            get(crate::handlers::console_display::dashboard),
+        )
+        .route(
+            "/api/v1/me/distribution/overview",
+            get(crate::handlers::distribution::get_my_distribution_overview),
+        )
         // 用户分销收益
         .route(
             "/api/v1/me/distribution/earnings",
@@ -604,6 +616,12 @@ pub fn create_router(state: AppState) -> Router {
         .layer(from_fn_with_state(
             state.clone(),
             maintenance_mode_middleware,
+        ))
+        // Console admission/auth/quota runs before maintenance and admin
+        // middleware so DB ingress is bounded and the identity is reused.
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::console::middleware,
         ))
         .layer(from_fn_with_state(
             state.clone(),

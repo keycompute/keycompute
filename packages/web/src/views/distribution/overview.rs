@@ -11,6 +11,7 @@ use crate::services::{
 use crate::stores::{
     auth_store::AuthStore, public_settings_store::PublicSettingsStore, ui_store::UiStore,
 };
+use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 use crate::utils::{format_precise_cny_str, on_copy};
 use ui::{PageHeader, Pagination, icons::IconCopy};
@@ -79,29 +80,33 @@ fn DistributionOverviewContent() -> Element {
     let ui_store = use_context::<UiStore>();
     let mut page = use_signal(|| 1u32);
     let mut page_size = use_signal(|| 20u32);
-    // 收益数据
-    let earnings = use_resource(move || async move {
+    // One server snapshot supplies earnings, counts and the stable invite link.
+    let overview = use_resource(move || async move {
         with_auto_refresh(auth_store, |token| async move {
-            distribution_service::get_earnings(&token).await
+            distribution_service::overview(&token).await
         })
         .await
     });
+    let earnings = move || overview().map(|result| result.map(|value| value.earnings));
+    let referral_code = move || overview().map(|result| result.map(|value| value.referral));
+    let as_of = overview()
+        .and_then(|result| result.ok())
+        .map(|value| value.as_of);
 
-    // 推荐码
-    let referral_code = use_resource(move || async move {
-        with_auto_refresh(auth_store, |token| async move {
-            distribution_service::get_referral_code(&token).await
-        })
-        .await
-    });
-
-    // 推荐列表
+    // Fetch only the selected server page and fence late page completions.
     let referrals = use_resource(move || async move {
-        with_auto_refresh(auth_store, |token| async move {
-            distribution_service::get_referrals(&token).await
+        let request_key = (page(), page_size());
+        let result = with_auto_refresh(auth_store, |token| async move {
+            distribution_service::get_referrals_page(request_key.0, request_key.1, &token).await
         })
-        .await
+        .await;
+        KeyedResourceValue::new(request_key, result)
     });
+    let referral_result = current_keyed_value(
+        &(page(), page_size()),
+        referrals.state().cloned(),
+        referrals(),
+    );
 
     let total_earnings = total_earnings_display(earnings(), i18n.t("table.loading"));
     let available_earnings = match earnings() {
@@ -129,11 +134,11 @@ fn DistributionOverviewContent() -> Element {
     let copy_manual_hint = i18n.t("common.copy_manual_hint");
     let distribution_disabled = is_distribution_disabled_error(&earnings())
         || is_distribution_disabled_error(&referral_code())
-        || is_distribution_disabled_error(&referrals());
+        || is_distribution_disabled_error(&referral_result);
     let page_error = earnings()
         .and_then(Result::err)
         .or_else(|| referral_code().and_then(Result::err))
-        .or_else(|| referrals().and_then(Result::err));
+        .or_else(|| referral_result.clone().and_then(Result::err));
     let page_error_message = page_error.as_ref().map(|error| {
         if error.is_rate_limited() {
             i18n.t("common.rate_limited_hint").to_string()
@@ -141,13 +146,16 @@ fn DistributionOverviewContent() -> Element {
             user_error_message(error)
         }
     });
-    let referral_total = referrals()
+    let referral_total = referral_result
         .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|list| list.len())
+        .and_then(|value| value.as_ref().ok())
+        .map(|value| value.total.max(0) as u64)
         .unwrap_or(0);
-    let referral_total_pages = referral_total.div_ceil(page_size() as usize).max(1) as u32;
-    let referral_start = (page().saturating_sub(1) as usize) * page_size() as usize;
+    let referral_total_pages = referral_result
+        .as_ref()
+        .and_then(|value| value.as_ref().ok())
+        .map(|value| value.total_pages.clamp(1, u32::MAX as i64) as u32)
+        .unwrap_or(1);
 
     rsx! {
         div { class: "page-container",
@@ -156,6 +164,9 @@ fn DistributionOverviewContent() -> Element {
                 description: i18n.t("distribution.subtitle").to_string(),
             }
 
+            if let Some(as_of) = as_of {
+                p { class: "text-secondary", {format!("{}: {}", i18n.t("common.display_snapshot"), format_time(&as_of))} }
+            }
             if !distribution_disabled {
                 if let Some(message) = page_error_message {
                     div { class: "alert alert-error", role: "alert", "{message}" }
@@ -183,7 +194,7 @@ fn DistributionOverviewContent() -> Element {
                     }
                     div { class: "stat-card card",
                         div { class: "card-body",
-                            p { class: "stat-label", {i18n.t("distribution.available_balance")} }
+                            p { class: "stat-label", {i18n.t("distribution.settled_earnings")} }
                             p { class: "stat-value", "{available_earnings}" }
                         }
                     }
@@ -251,9 +262,9 @@ fn DistributionOverviewContent() -> Element {
                                 }
                             }
                             tbody {
-                                match referrals() {
-                                    Some(Ok(ref list)) if !list.is_empty() => rsx! {
-                                        for r in list.iter().skip(referral_start).take(page_size() as usize) {
+                                match &referral_result {
+                                    Some(Ok(list)) if !list.referrals.is_empty() => rsx! {
+                                        for r in &list.referrals {
                                             tr {
                                                 td {
                                                     div { class: "user-cell",
@@ -272,6 +283,11 @@ fn DistributionOverviewContent() -> Element {
                                             td { colspan: "4", class: "table-empty", {i18n.t("common.load_failed")} }
                                         }
                                     },
+                                    None => rsx! {
+                                        tr {
+                                            td { colspan: "4", class: "table-empty", {i18n.t("table.loading")} }
+                                        }
+                                    },
                                     _ => rsx! {
                                         tr {
                                             td { colspan: "4", class: "table-empty", {i18n.t("distribution.no_referrals")} }
@@ -286,7 +302,7 @@ fn DistributionOverviewContent() -> Element {
                 Pagination {
                     current: page(),
                     total_pages: referral_total_pages,
-                    total: referral_total as u64,
+                    total: referral_total,
                     page_size: page_size(),
                     summary: i18n.t_with_args(
                         "common.pagination_summary",

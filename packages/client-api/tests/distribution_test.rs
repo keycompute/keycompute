@@ -476,3 +476,27 @@ async fn test_distribution_unauthorized() {
 
     assert!(matches!(result.unwrap_err(), ClientError::Unauthorized(_)));
 }
+
+#[tokio::test]
+async fn explicit_referral_page_sends_server_pagination_and_preserves_totals() {
+    let (client, server) = create_test_client().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/me/distribution/referrals"))
+        .and(wiremock::matchers::query_param("page", "2"))
+        .and(wiremock::matchers::query_param("page_size", "20"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "referrals": [], "total": 21, "page": 2, "page_size": 20,
+            "total_pages": 2, "as_of": "2026-01-01T00:00:00Z"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let page = DistributionApi::new(&client)
+        .get_my_referrals_page(2, 20, fixtures::TEST_ACCESS_TOKEN)
+        .await
+        .unwrap();
+    assert_eq!(page.total, 21);
+    assert_eq!(page.page, 2);
+    assert_eq!(page.total_pages, 2);
+    server.verify().await;
+}

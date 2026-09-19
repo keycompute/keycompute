@@ -15,6 +15,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "now", "wasmbind"] }
 rust_decimal = "1.35"
 uuid = { version = "1", features = ["v4", "js"] }
+futures = "0.3"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

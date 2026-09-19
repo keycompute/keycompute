@@ -397,4 +397,14 @@ pub struct UserBalanceResponse {
     pub total_balance: String,
     pub total_recharged: String,
     pub total_consumed: String,
+    #[serde(default = "legacy_balance_initialized")]
+    pub initialized: bool,
+    #[serde(default)]
+    pub as_of: String,
+}
+
+// Older servers always materialized this row. Their missing metadata does not
+// imply that a nonzero balance is uninitialized.
+fn legacy_balance_initialized() -> bool {
+    true
 }

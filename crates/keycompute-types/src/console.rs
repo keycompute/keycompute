@@ -1,0 +1,50 @@
+//! Shared HTTP traffic classification; never derived from client-supplied headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleClass {
+    Read,
+    HeavyRead,
+    Write,
+}
+impl ConsoleClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "console_read",
+            Self::HeavyRead => "console_heavy_read",
+            Self::Write => "console_write",
+        }
+    }
+    pub const fn index(self) -> usize {
+        match self {
+            Self::Read => 0,
+            Self::HeavyRead => 1,
+            Self::Write => 2,
+        }
+    }
+}
+pub fn classify(method: &str, path: &str) -> Option<ConsoleClass> {
+    if !path.starts_with("/api/v1/")
+        || path.starts_with("/api/v1/auth/")
+        || path.starts_with("/api/v1/payments/notify/")
+        || matches!(path, "/api/v1/settings/public" | "/api/v1/requirements")
+    {
+        return None;
+    }
+    if !matches!(method, "GET" | "HEAD") {
+        return Some(ConsoleClass::Write);
+    }
+    if [
+        "/stats",
+        "/earnings",
+        "/trend",
+        "/overview",
+        "/referrals",
+        "/export",
+    ]
+    .iter()
+    .any(|suffix| path.ends_with(suffix))
+    {
+        Some(ConsoleClass::HeavyRead)
+    } else {
+        Some(ConsoleClass::Read)
+    }
+}

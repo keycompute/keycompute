@@ -7,6 +7,7 @@ pub mod api_key;
 pub mod auth;
 pub mod billing;
 pub mod common;
+pub mod console;
 pub mod debug;
 pub mod distribution;
 pub mod health;

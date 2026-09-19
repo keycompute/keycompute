@@ -8324,6 +8324,7 @@ dependencies = [
  "chrono",
  "client-api",
  "dioxus",
+ "futures",
  "gloo-timers",
  "js-sys",
  "rust_decimal",

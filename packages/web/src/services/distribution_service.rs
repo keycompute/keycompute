@@ -46,3 +46,22 @@ pub async fn generate_invite_link(token: &str) -> Result<InviteLinkResponse> {
         .generate_invite_link(token)
         .await
 }
+
+/// Fetch the visible referral page instead of fetching and slicing every row.
+pub async fn get_referrals_page(
+    page: u32,
+    page_size: u32,
+    token: &str,
+) -> Result<client_api::api::distribution::ReferralPage> {
+    DistributionApi::new(&get_client())
+        .get_my_referrals_page(page, page_size, token)
+        .await
+}
+
+pub async fn overview(
+    token: &str,
+) -> client_api::Result<client_api::api::distribution::DistributionOverview> {
+    client_api::DistributionApi::new(&super::api_client::get_client())
+        .get_my_overview(token)
+        .await
+}

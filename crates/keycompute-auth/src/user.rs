@@ -312,6 +312,46 @@ impl Default for UserService {
     }
 }
 
+/// One primary MVCC snapshot for JWT identity and tenant lifecycle checks.
+/// Never cached across requests, and never reused for later WebSocket events.
+#[derive(Debug, sea_orm::FromQueryResult)]
+pub(crate) struct JwtIdentitySnapshot {
+    pub tenant_id: Uuid,
+    pub token_version: i32,
+    pub role: String,
+    pub tenant_name: String,
+    pub tenant_slug: String,
+    pub active: bool,
+    pub default_rpm_limit: i32,
+    pub default_tpm_limit: i32,
+}
+impl UserService {
+    pub(crate) async fn load_jwt_identity(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Option<JwtIdentitySnapshot>> {
+        use sea_orm::{DbBackend, FromQueryResult, Statement};
+        let Some(pool) = self.pool.as_deref() else {
+            return Ok(None);
+        };
+        let statement = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT u.tenant_id, u.token_version, u.role, t.name AS tenant_name, t.slug AS tenant_slug, \
+             t.status = 'active' AS active, t.default_rpm_limit, t.default_tpm_limit \
+             FROM users u INNER JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1",
+            [user_id.into()],
+        );
+        JwtIdentitySnapshot::find_by_statement(statement)
+            .one(pool.write_conn())
+            .await
+            .map_err(|error| {
+                KeyComputeError::DatabaseError(format!("Failed to load JWT identity: {error}"))
+            })?
+            .map(Some)
+            .ok_or_else(|| KeyComputeError::AuthError("User or tenant no longer exists".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

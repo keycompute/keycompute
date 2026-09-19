@@ -271,3 +271,19 @@ cache_entries = 4096
 ttl_ms = 100
 concurrency = 16
 timeout_ms = 1000
+
+# Console display/management traffic is independent of billable generation quotas.
+# These are finite abuse budgets, not permission or funding decisions.
+[console]
+read_rpm = 240
+heavy_read_rpm = 60
+write_rpm = 30
+user_rpm = 300
+tenant_rpm = 1200
+aggregate_rpm = 6000
+# Per process, before authentication and maintenance database reads.
+read_concurrency = 4
+write_concurrency = 2
+origin_concurrency = 2
+queue_limit = 16
+queue_timeout_ms = 250

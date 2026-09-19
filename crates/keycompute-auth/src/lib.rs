@@ -200,19 +200,30 @@ impl AuthService {
             return self.verify_api_key(token).await;
         }
 
-        // JWT 结构性校验（签名、过期、issuer）
-        let ctx = self.verify_jwt(token)?;
-
-        // token_version 失效校验：
-        // 与数据库中用户当前的 token_version 比对，密码重置/登出后旧 token 将被拒绝。
-        // 仅在配置了 UserService（含数据库连接）时执行；无连接时保持结构性校验行为。
-        if let Some(user_service) = &self.user_service {
-            validate_user_token_version(&ctx, user_service.load_token_version(ctx.user_id).await?)?;
-            // A JWT remains structurally valid after a tenant is closed, but
-            // must no longer authorize tenant-scoped work. Reuse the same
-            // authoritative tenant lookup used by API-key authentication so
-            // all request paths observe the lifecycle state consistently.
-            user_service.load_tenant(ctx.tenant_id).await?;
+        // Signature/expiry/issuer remain mandatory before any database work.
+        let mut ctx = self.verify_jwt(token)?;
+        if let Some(user_service) = &self.user_service
+            && let Some(identity) = user_service.load_jwt_identity(ctx.user_id).await?
+        {
+            validate_user_token_version(&ctx, Some(identity.token_version))?;
+            if identity.tenant_id != ctx.tenant_id || identity.role != ctx.role {
+                return Err(KeyComputeError::AuthError(
+                    "JWT identity has changed".into(),
+                ));
+            }
+            if !identity.active {
+                return Err(KeyComputeError::AuthError("Tenant is not active".into()));
+            }
+            ctx.tenant_info = Some(TenantInfo {
+                id: identity.tenant_id,
+                name: identity.tenant_name,
+                slug: identity.tenant_slug,
+                active: true,
+                config: TenantConfig {
+                    default_rpm_limit: identity.default_rpm_limit.max(0) as u32,
+                    default_tpm_limit: identity.default_tpm_limit.max(0) as u32,
+                },
+            });
         }
 
         Ok(ctx)

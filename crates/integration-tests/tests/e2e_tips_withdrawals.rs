@@ -7,8 +7,7 @@
 
 use bigdecimal::BigDecimal;
 use chrono::Utc;
-use dotenv::dotenv;
-use integration_tests::common::VerificationChain;
+use integration_tests::common::{VerificationChain, resolve_database_url};
 use keycompute_db::models::system_setting::setting_keys::NODE_TIP_RATIO;
 use keycompute_db::models::{
     api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
@@ -42,24 +41,9 @@ struct TipWithdrawalTestEnv {
 impl TipWithdrawalTestEnv {
     /// 创建测试环境
     async fn new(suffix: &str) -> anyhow::Result<Self> {
-        // 加载 .env 文件（如果存在）
-        dotenv().ok();
-
-        // 使用 PgConnectOptions 构建连接（正确处理密码中的特殊字符）
-        let db = std::env::var("POSTGRES_DB").unwrap_or_else(|_| "keycompute".to_string());
-        let user = std::env::var("POSTGRES_USER").unwrap_or_else(|_| "keycompute".to_string());
-        let password =
-            std::env::var("POSTGRES_PASSWORD").unwrap_or_else(|_| "password".to_string());
-
-        // 调试输出
-        println!(
-            "Debug: db={}, user={}, password length={}",
-            db,
-            user,
-            password.len()
-        );
-
-        let database_url = format!("postgres://{}:{}@localhost:5432/{}", user, password, db);
+        // Always use the task-isolated URL supplied by test-env.sh. Never
+        // fall back to the host's default 5432 instance or print credentials.
+        let database_url = resolve_database_url();
         use sea_orm::ConnectOptions;
         let mut opt = ConnectOptions::new(&database_url);
         opt.max_connections(5);

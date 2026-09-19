@@ -21,6 +21,9 @@ pub struct ClientConfig {
     /// 测试构建为 `true`（绕过系统代理）。集成测试（tests/ 目录）以非 test 模式编译库，
     /// 因此需经由共享测试辅助函数显式调用 `with_no_proxy(true)` 来绕过代理。
     pub no_proxy: bool,
+    /// Opt in to bounded, short-lived console DISPLAY snapshots. SDK reads
+    /// remain fresh by default; never use display snapshots to authorize money.
+    pub console_display_cache: bool,
 }
 
 impl ClientConfig {
@@ -35,6 +38,12 @@ impl ClientConfig {
     /// 设置是否绕过系统代理
     pub fn with_no_proxy(mut self, no_proxy: bool) -> Self {
         self.no_proxy = no_proxy;
+        self
+    }
+
+    /// Enable short-lived display-query reuse for an interactive console.
+    pub fn with_console_display_cache(mut self, enabled: bool) -> Self {
+        self.console_display_cache = enabled;
         self
     }
 
@@ -109,6 +118,7 @@ impl Default for ClientConfig {
             max_retries: 3,
             // 测试构建默认绕过系统代理，业务构建默认遵循系统代理
             no_proxy: cfg!(test),
+            console_display_cache: false,
         }
     }
 }

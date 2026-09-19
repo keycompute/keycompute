@@ -274,6 +274,37 @@ impl CacheService {
         }
     }
 
+    /// Read a size-bounded optional-cache value and its remaining Redis TTL.
+    /// The script performs only STRLEN, GET and PTTL; it cannot mutate data.
+    pub async fn get_with_ttl<T: DeserializeOwned>(
+        &self,
+        key: &str,
+        max_bytes: usize,
+    ) -> CacheResult<Option<(T, Duration)>> {
+        let Some(mut conn) = self.get_conn().await else {
+            return Ok(None);
+        };
+        let script = deadpool_redis::redis::Script::new(
+            "if redis.call('STRLEN',KEYS[1]) > tonumber(ARGV[1]) then return {false,-3} end; local v=redis.call('GET',KEYS[1]); if not v then return {false,-2} end; return {v,redis.call('PTTL',KEYS[1])}",
+        );
+        let (raw, ttl): (Option<String>, i64) = script
+            .key(self.build_key(key))
+            .arg(max_bytes)
+            .invoke_async(&mut conn)
+            .await?;
+        if ttl == -3 {
+            return Err(CacheError::Deserialization(
+                "cache value exceeds size bound".into(),
+            ));
+        }
+        let Some(raw) = raw.filter(|_| ttl > 0) else {
+            return Ok(None);
+        };
+        let value =
+            serde_json::from_str(&raw).map_err(|e| CacheError::Deserialization(e.to_string()))?;
+        Ok(Some((value, Duration::from_millis(ttl as u64))))
+    }
+
     /// Store a value with TTL.
     ///
     /// Returns `Ok(())` in no-op mode.
@@ -881,10 +912,30 @@ mod tests {
 
         let got: TestValue = cache.get("roundtrip").await.unwrap().unwrap();
         assert_eq!(got, val);
+        let (bounded, remaining): (TestValue, Duration) = cache
+            .get_with_ttl("roundtrip", 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bounded, val);
+        assert!(remaining > Duration::ZERO && remaining <= Duration::from_secs(60));
+        assert!(
+            cache
+                .get_with_ttl::<TestValue>("roundtrip", 1)
+                .await
+                .is_err()
+        );
 
         cache.delete("roundtrip").await.unwrap();
         let missing: Option<TestValue> = cache.get("roundtrip").await.unwrap();
         assert!(missing.is_none());
+        assert!(
+            cache
+                .get_with_ttl::<TestValue>("roundtrip", 1024)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// Value expires after TTL.

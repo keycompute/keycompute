@@ -80,6 +80,7 @@ pub use user_balance::{
     BalanceReservation, BalanceReservationEvent, BalanceReservationPageCursor, BalanceTransaction,
     ManualBalanceOperationDecision, ManualBalanceOperationKind, ManualBalanceOperationOutcome,
     TransactionType, UserBalance, UserBalanceBreakdown, UserBalanceBreakdownPage,
+    UserBalanceDisplaySnapshot,
 };
 pub use user_credential::{
     CreateUserCredentialRequest, UpdateUserCredentialRequest, UserCredential,
@@ -88,3 +89,7 @@ pub use user_node_gateway_token::{
     PendingTokenWithUser, UserNodeGatewayToken, UserNodeGatewayTokenResponse,
 };
 pub use user_referral::{CreateUserReferralRequest, ReferralStats, UserReferral};
+
+pub mod referral_display;
+
+pub mod console_display;

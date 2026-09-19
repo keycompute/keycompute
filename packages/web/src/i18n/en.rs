@@ -222,6 +222,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "common.user_info_load_failed",
         "Failed to load user information, so admin access could not be verified.",
     );
+    m.insert("distribution.settled_earnings", "Settled earnings");
+    m.insert("common.display_snapshot", "Display snapshot");
+    m.insert("common.balance_snapshot", "Balance snapshot");
     m.insert("common.retry", "Retry");
     m.insert("common.redirecting", "Redirecting");
     m.insert("common.redirect_to_login", "Redirecting to sign in...");

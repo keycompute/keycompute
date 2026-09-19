@@ -34,6 +34,8 @@ pub fn process_snapshot(state: &AppState) -> Value {
         "scope":"application_process", "shutdown":state.shutdown.snapshot(), "managed_payload_bytes":{"limit":memory.limit,"used":memory.used,"peak":memory.peak},
         "ingress":admission(state.generation_admission.ingress.status()),
         "generation":admission(state.generation_admission.requests.status()),
+        "console":state.console_admission.metrics(),
+        "display_cache":state.display_cache.metrics(),
         "accounts_local":admission(state.generation_admission.accounts.status()),
         "balance_reservations":admission(keycompute_billing::balance::BalanceService::request_reservation_status()),
         "balance_settlements":admission(keycompute_billing::balance::BalanceService::settlement_status()),

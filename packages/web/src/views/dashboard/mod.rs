@@ -1,13 +1,10 @@
-use std::collections::BTreeMap;
-
-use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::{
-    api_client::with_auto_refresh, api_key_service, billing_service, debug_service,
-    distribution_service, payment_service,
+    api_client::{user_error_message, with_auto_refresh},
+    console_service, debug_service, distribution_service, payment_service,
 };
 use crate::stores::auth_store::AuthStore;
 use crate::stores::public_settings_store::PublicSettingsStore;
@@ -18,7 +15,7 @@ use crate::utils::time::format_time;
 #[derive(Clone)]
 struct TrendPoint {
     label: String,
-    requests: i32,
+    requests: i64,
 }
 
 #[component]
@@ -35,16 +32,13 @@ pub fn Dashboard() -> Element {
         && distribution_settings_loaded
         && public_settings_store.distribution_is_enabled();
 
-    let usage_stats = use_resource(move || {
-        let auth = auth_store.clone();
-        async move {
-            with_auto_refresh(
-                auth,
-                |token| async move { billing_service::stats(&token).await },
-            )
-            .await
-        }
+    let overview = use_resource(move || async move {
+        with_auto_refresh(auth_store, |token| async move {
+            console_service::dashboard(&token).await
+        })
+        .await
     });
+    let usage_stats = move || overview().map(|result| result.map(|value| value.stats));
 
     let balance = use_resource(move || {
         let auth = auth_store.clone();
@@ -56,41 +50,13 @@ pub fn Dashboard() -> Element {
         }
     });
 
-    let api_keys = use_resource(move || {
-        let auth = auth_store.clone();
-        async move {
-            with_auto_refresh(auth, |token| async move {
-                api_key_service::list(false, &token).await
-            })
-            .await
-        }
-    });
-
-    let usage_records = use_resource(move || {
-        let auth = auth_store.clone();
-        async move {
-            with_auto_refresh(
-                auth,
-                |token| async move { billing_service::list(&token).await },
-            )
-            .await
-        }
-    });
-
-    let payment_orders = use_resource(move || {
-        let auth = auth_store.clone();
-        async move {
-            with_auto_refresh(auth, |token| async move {
-                payment_service::list_orders(None, &token).await
-            })
-            .await
-        }
-    });
-
     let distribution_earnings = use_resource(move || {
         let auth = auth_store.clone();
         let public_settings_store = public_settings_store;
         async move {
+            if is_admin {
+                return Some(Ok(None));
+            }
             if !public_settings_store.loaded() {
                 return None;
             }
@@ -165,7 +131,12 @@ pub fn Dashboard() -> Element {
     let total_cost_value = usage_stats()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
-        .map(|stats| format!("¥{}", crate::utils::format_money(stats.total_cost)))
+        .map(|stats| {
+            format!(
+                "¥{}",
+                crate::utils::format_precise_money_str(&stats.total_cost)
+            )
+        })
         .unwrap_or_else(|| "—".to_string());
 
     let balance_value = balance()
@@ -179,40 +150,41 @@ pub fn Dashboard() -> Element {
         })
         .unwrap_or_else(|| "—".to_string());
 
-    let active_key_value = api_keys()
+    let summary = overview().and_then(|result| result.ok());
+    let summary_ready = summary.is_some();
+    let summary_error = overview()
+        .and_then(Result::err)
+        .map(|error| user_error_message(&error));
+    let snapshot_time = summary.as_ref().map(|value| format_time(&value.as_of));
+    let active_key_value = summary
         .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|keys| keys.iter().filter(|key| key.is_active).count().to_string())
-        .unwrap_or_else(|| "—".to_string());
-
-    let active_keys = api_keys()
+        .map(|value| value.active_key_count.to_string())
+        .unwrap_or_else(|| "—".into());
+    let active_keys = summary
         .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|keys| {
-            keys.iter()
-                .filter(|key| key.is_active)
-                .take(4)
-                .cloned()
+        .map(|value| value.active_keys.clone())
+        .unwrap_or_default();
+    let recent_usage = summary
+        .as_ref()
+        .map(|value| value.recent_usage.clone())
+        .unwrap_or_default();
+    let recent_orders = summary
+        .as_ref()
+        .map(|value| value.recent_orders.clone())
+        .unwrap_or_default();
+    let recent_trend = summary
+        .as_ref()
+        .map(|value| {
+            value
+                .trend
+                .buckets
+                .iter()
+                .map(|bucket| TrendPoint {
+                    label: bucket.start.get(5..10).unwrap_or(&bucket.start).to_string(),
+                    requests: bucket.requests,
+                })
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
-
-    let recent_usage = usage_records()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|records| records.iter().take(5).cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    let recent_orders = payment_orders()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|orders| orders.iter().take(3).cloned().collect::<Vec<_>>())
-        .unwrap_or_default();
-
-    let recent_trend = usage_records()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .map(|records| build_trend_points(records.as_slice()))
         .unwrap_or_default();
 
     let trend_svg = build_trend_svg(&recent_trend);
@@ -271,6 +243,12 @@ pub fn Dashboard() -> Element {
                 }
             }
 
+            if let Some(error) = summary_error {
+                p { class: "alert alert-error", role: "alert", "{error}" }
+            }
+            if let Some(time) = snapshot_time {
+                p { class: "text-secondary", {format!("{}: {} · UTC", i18n.t("common.display_snapshot"), time)} }
+            }
             div { class: "dashboard-stats-row",
                 DashboardStatCard {
                     tone: "blue",
@@ -419,7 +397,9 @@ pub fn Dashboard() -> Element {
                         }
                     }
                     div { class: "dashboard-panel-body" ,
-                        if recent_usage.is_empty() {
+                        if !summary_ready {
+                            p { class: "dashboard-empty-copy", {i18n.t("common.loading")} }
+                        } else if recent_usage.is_empty() {
                             p { class: "dashboard-empty-copy", {i18n.t("dashboard.no_recent_calls")} }
                         } else {
                             div { class: "dashboard-activity-table",
@@ -446,7 +426,7 @@ pub fn Dashboard() -> Element {
                                             }
                                         }
                                         div { class: "dashboard-activity-time", { format_time(&record.created_at) } }
-                                        div { class: "dashboard-activity-time", "¥{crate::utils::format_money(record.cost)}" }
+                                        div { class: "dashboard-activity-time", "¥{crate::utils::format_precise_money_str(&record.cost)}" }
                                     }
                                 }
                             }
@@ -462,7 +442,9 @@ pub fn Dashboard() -> Element {
                         }
                     }
                     div { class: "dashboard-panel-body" ,
-                        if active_keys.is_empty() {
+                        if !summary_ready {
+                            p { class: "dashboard-empty-copy", {i18n.t("common.loading")} }
+                        } else if active_keys.is_empty() {
                             p { class: "dashboard-empty-copy", {i18n.t("dashboard.no_active_keys")} }
                         } else {
                             div { class: "dashboard-key-list",
@@ -566,7 +548,7 @@ pub fn Dashboard() -> Element {
                                 label: i18n.t("dashboard.latest_order").to_string(),
                                 value: recent_orders.first()
                                     .map(|order| order.status.clone())
-                                    .unwrap_or_else(|| i18n.t("dashboard.none").to_string()),
+                                    .unwrap_or_else(|| if summary_ready { i18n.t("dashboard.none").to_string() } else { "—".into() }),
                                 sub: i18n.t("dashboard.latest_order_desc").to_string()
                             }
                         }
@@ -575,26 +557,6 @@ pub fn Dashboard() -> Element {
             }
         }
     }
-}
-
-fn build_trend_points(records: &[client_api::api::billing::UsageRecord]) -> Vec<TrendPoint> {
-    let mut grouped: BTreeMap<String, i32> = BTreeMap::new();
-    for record in records.iter() {
-        let day = record.created_at.chars().take(10).collect::<String>();
-        *grouped.entry(day).or_insert(0) += 1;
-    }
-
-    let today = Utc::now().date_naive();
-    (0..10)
-        .map(|offset| {
-            let day = today - Duration::days((9 - offset) as i64);
-            let date_key = day.format("%Y-%m-%d").to_string();
-            TrendPoint {
-                label: day.format("%m-%d").to_string(),
-                requests: grouped.get(&date_key).copied().unwrap_or(0),
-            }
-        })
-        .collect()
 }
 
 struct TrendSvg {

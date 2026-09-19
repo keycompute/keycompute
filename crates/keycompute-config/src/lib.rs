@@ -15,6 +15,7 @@ use url::Url;
 use uuid::Uuid;
 
 pub mod auth;
+pub mod console;
 pub mod crypto;
 pub mod database;
 pub mod distribution;
@@ -26,6 +27,7 @@ pub mod server;
 
 pub use auth::AuthConfig;
 pub use auth::DEFAULT_JWT_SECRET;
+pub use console::ConsoleConfig;
 pub use crypto::CryptoConfig;
 pub use database::{DatabaseConfig, DatabaseReadConfig, DatabaseRoutingConfig};
 pub use distribution::DistributionConfig;
@@ -64,6 +66,9 @@ pub struct AppConfig {
     pub auth: AuthConfig,
     /// Gateway 配置
     pub gateway: GatewayConfig,
+    /// Independent console traffic budgets and resource caps.
+    #[serde(default)]
+    pub console: ConsoleConfig,
     /// 加密配置（可选）
     pub crypto: Option<CryptoConfig>,
     /// 邮件服务配置
@@ -261,6 +266,9 @@ impl AppConfig {
     /// - Gateway 超时配置警告
     /// - Gateway 最大重试次数警告
     pub fn validate(&self) -> Result<(), ConfigLoadError> {
+        self.console
+            .validate()
+            .map_err(|message| ConfigLoadError::ValidationError(message.to_string()))?;
         self.gateway
             .admission
             .validate()

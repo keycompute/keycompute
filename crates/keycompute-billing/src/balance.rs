@@ -11,7 +11,7 @@ pub use keycompute_db::models::user_balance::{
     MAX_ADMIN_BALANCE_IDEMPOTENCY_KEY_BYTES, MAX_ADMIN_BALANCE_OPERATION_REASON_CHARS,
     MAX_BALANCE_RESERVATION_PAGE_SIZE, MAX_BALANCE_RESERVATION_RELEASE_REASON_CHARS,
     ManualBalanceOperationDecision, ManualBalanceOperationKind, ManualBalanceOperationOutcome,
-    UserBalanceBreakdown, UserBalanceBreakdownPage,
+    UserBalanceBreakdown, UserBalanceBreakdownPage, UserBalanceDisplaySnapshot,
 };
 use keycompute_db::{BalanceReservation, BalanceTransaction, DbRouter, UserBalance};
 use keycompute_types::{KeyComputeError, Result};
@@ -160,6 +160,35 @@ impl BalanceService {
             .await
             .map_err(|error| {
                 KeyComputeError::DatabaseError(format!("Failed to find balance breakdown: {error}"))
+            })
+    }
+
+    /// Read one authoritative, read-only display snapshot from the primary.
+    /// This is intentionally not a spending authorization and never performs
+    /// balance materialization, expiry reclamation, or row locking.
+    pub async fn find_display_snapshot(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<UserBalanceDisplaySnapshot> {
+        UserBalance::find_display_snapshot(self.pool.write_conn(), tenant_id, user_id)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to read balance snapshot: {e}"))
+            })
+    }
+
+    /// Read a bounded batch of authoritative display snapshots from the
+    /// primary. Missing balance rows are explicit zero snapshots; backend and
+    /// ownership failures are propagated to the caller.
+    pub async fn find_display_snapshots(
+        &self,
+        user_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, UserBalanceDisplaySnapshot>> {
+        UserBalance::find_display_snapshots(self.pool.write_conn(), user_ids)
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to read balance snapshots: {e}"))
             })
     }
 

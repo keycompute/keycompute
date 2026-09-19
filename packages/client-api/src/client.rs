@@ -4,6 +4,9 @@
 
 use crate::config::ClientConfig;
 use crate::error::{ClientError, Result};
+use crate::query_cache::{
+    JSON_REPRESENTATION, QueryCache, box_cache_future, cache_key, is_allowlisted,
+};
 use crate::retry::{Cooldowns, response_metadata};
 use reqwest::{Client, Method, Request, RequestBuilder, Response};
 use serde::{Serialize, de::DeserializeOwned};
@@ -19,8 +22,15 @@ pub struct ApiClient {
 struct ClientInner {
     client: Client,
     config: ClientConfig,
-    auth_token: RwLock<Option<String>>,
+    session: RwLock<SessionState>,
     cooldowns: Mutex<Cooldowns>,
+    query_cache: QueryCache,
+}
+
+#[derive(Default)]
+struct SessionState {
+    token: Option<String>,
+    generation: u64,
 }
 
 impl std::fmt::Debug for ClientInner {
@@ -32,6 +42,7 @@ impl std::fmt::Debug for ClientInner {
 
 impl ApiClient {
     /// 创建新的 API 客户端
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
     pub fn new(config: ClientConfig) -> Result<Self> {
         config.validate()?;
 
@@ -61,33 +72,133 @@ impl ApiClient {
             inner: Arc::new(ClientInner {
                 client,
                 config,
-                auth_token: RwLock::new(None),
+                session: RwLock::new(SessionState::default()),
                 cooldowns,
+                query_cache: QueryCache::default(),
             }),
         })
     }
 
     /// 设置认证 Token
     pub fn set_token(&self, token: impl Into<String>) {
-        let mut guard = self.inner.auth_token.write().expect("RwLock poisoned");
-        *guard = Some(token.into());
+        let token = token.into();
+        let changed = {
+            let mut session = self.inner.session.write().expect("RwLock poisoned");
+            if session.token.as_deref() == Some(token.as_str()) {
+                false
+            } else {
+                session.token = Some(token);
+                session.generation = session.generation.saturating_add(1);
+                true
+            }
+        };
+        if changed {
+            self.inner.query_cache.invalidate_all();
+        }
     }
 
     /// 清除认证 Token
     pub fn clear_token(&self) {
-        let mut guard = self.inner.auth_token.write().expect("RwLock poisoned");
-        *guard = None;
+        {
+            let mut session = self.inner.session.write().expect("RwLock poisoned");
+            session.token = None;
+            session.generation = session.generation.saturating_add(1);
+        }
+        self.inner.query_cache.invalidate_all();
     }
 
     /// 获取当前 Token
     pub fn get_token(&self) -> Option<String> {
-        let guard = self.inner.auth_token.read().expect("RwLock poisoned");
-        guard.clone()
+        self.inner
+            .session
+            .read()
+            .expect("RwLock poisoned")
+            .token
+            .clone()
     }
 
     /// 检查是否已认证
     pub fn is_authenticated(&self) -> bool {
         self.get_token().is_some()
+    }
+
+    /// Monotonic session fence used by cache keys and refresh CAS checks.
+    pub fn session_generation(&self) -> u64 {
+        self.inner
+            .session
+            .read()
+            .expect("RwLock poisoned")
+            .generation
+    }
+
+    /// Read the token and generation under one lock for refresh CAS logic.
+    pub fn session_snapshot(&self) -> (Option<String>, u64) {
+        let session = self.inner.session.read().expect("RwLock poisoned");
+        (session.token.clone(), session.generation)
+    }
+
+    /// Replace a token only if the observed token and session generation are
+    /// still current.  A late refresh must never overwrite a newer login.
+    pub fn compare_and_set_token(
+        &self,
+        expected_token: &str,
+        expected_generation: u64,
+        token: impl Into<String>,
+    ) -> bool {
+        self.compare_and_set_session_token(Some(expected_token), expected_generation, token)
+    }
+
+    /// Replace a token only if the complete session snapshot is still current.
+    /// `None` supports the short window where a store has a restored token but
+    /// the shared HTTP client has not yet been initialized.
+    pub fn compare_and_set_session_token(
+        &self,
+        expected_token: Option<&str>,
+        expected_generation: u64,
+        token: impl Into<String>,
+    ) -> bool {
+        {
+            let mut session = self.inner.session.write().expect("RwLock poisoned");
+            if session.generation != expected_generation
+                || session.token.as_deref() != expected_token
+            {
+                return false;
+            }
+            session.token = Some(token.into());
+            session.generation = session.generation.saturating_add(1);
+        }
+        self.inner.query_cache.invalidate_all();
+        true
+    }
+
+    /// Clear only the session that a refresh failure observed.
+    pub fn clear_token_if_current(
+        &self,
+        expected_token: Option<&str>,
+        expected_generation: u64,
+    ) -> bool {
+        let cleared = {
+            let mut session = self.inner.session.write().expect("RwLock poisoned");
+            if session.generation != expected_generation
+                || session.token.as_deref() != expected_token
+            {
+                false
+            } else {
+                session.token = None;
+                session.generation = session.generation.saturating_add(1);
+                true
+            }
+        };
+        if cleared {
+            self.inner.query_cache.invalidate_all();
+        }
+        cleared
+    }
+
+    /// Invalidate all cached console display reads, normally after a mutation
+    /// or an identity/session transition.
+    pub fn invalidate_console_reads(&self) {
+        self.inner.query_cache.invalidate_all();
     }
 
     /// 发送请求（带认证）
@@ -116,8 +227,74 @@ impl ApiClient {
         path: &str,
         token: Option<&str>,
     ) -> Result<T> {
+        if self.inner.config.console_display_cache && is_allowlisted(path) {
+            return self.get_json_cached(path, token).await;
+        }
+        self.get_json_fresh(path, token).await
+    }
+
+    /// Fetch a network response without reading or populating the client
+    /// display cache. The server endpoint still defines data freshness.
+    pub async fn get_json_fresh<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        token: Option<&str>,
+    ) -> Result<T> {
         let builder = self.request_with_auth(Method::GET, path, token).await?;
         self.send_and_parse(builder).await
+    }
+
+    async fn get_json_cached<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        token: Option<&str>,
+    ) -> Result<T> {
+        let (session_token, generation) = self.session_snapshot();
+        let token = token
+            .map(str::to_owned)
+            .or(session_token)
+            .unwrap_or_default();
+        let url = self.inner.config.build_url(path);
+        let Some(key) = cache_key(&url, &token, generation, JSON_REPRESENTATION) else {
+            return self.get_json_fresh(path, Some(&token)).await;
+        };
+        let client = self.clone();
+        let path = path.to_owned();
+        let token_for_request = token.clone();
+        let future = self
+            .inner
+            .query_cache
+            .get_or_start(key, move |state, key, id, epoch| {
+                box_cache_future(async move {
+                    let started = web_time::Instant::now();
+                    let mut result = client
+                        .get_json_fresh::<serde_json::Value>(&path, Some(&token_for_request))
+                        .await;
+                    // Do not renew a server snapshot's remaining freshness at L1.
+                    // Subtract the whole round trip conservatively, including retry waits.
+                    if let Ok(value) = &mut result
+                        && let Some(remaining) = value
+                            .get("cache_max_age_ms")
+                            .and_then(serde_json::Value::as_u64)
+                    {
+                        value["cache_max_age_ms"] =
+                            serde_json::Value::from(remaining.saturating_sub(
+                                started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                            ));
+                    }
+                    crate::query_cache::QueryCache::finish(&state, &key, id, epoch, &result)
+                })
+            });
+        let result = future.await;
+        if self.session_generation() != generation && result.is_ok() {
+            return Err(ClientError::Other(
+                "console read session changed before delivery".into(),
+            ));
+        }
+        result.and_then(|value| {
+            serde_json::from_value(value)
+                .map_err(|error| ClientError::Serialization(error.to_string()))
+        })
     }
 
     /// 发送 POST 请求并解析响应
@@ -195,6 +372,10 @@ impl ApiClient {
         idempotent_post: bool,
     ) -> Result<T> {
         let request = builder.build().map_err(ClientError::from)?;
+        let mutation = !matches!(*request.method(), Method::GET | Method::HEAD);
+        // The guard also invalidates on timeout, early return and cancellation.
+        // A dropped HTTP command may still commit on the server.
+        let _mutation_fence = mutation.then(|| self.inner.query_cache.mutation_fence());
         let budget = Duration::from_secs(self.inner.config.timeout_secs);
         let operation = self.send_attempts(request, idempotent_post);
         #[cfg(not(target_arch = "wasm32"))]

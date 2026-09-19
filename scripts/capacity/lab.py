@@ -39,6 +39,10 @@ def bounded(value,minimum,maximum,name):
     if not minimum<=value<=maximum:raise ValueError(f'{name} must be {minimum}..{maximum}')
 
 def settings_from_args(args):
+    if not hasattr(args,'console_rate'):args.console_rate=0
+    bounded(args.console_rate,0,1000,'console_rate')
+    if args.console_rate and getattr(args,'protocol','chat')=='websocket':raise ValueError('console mix uses the HTTP load client')
+    if (args.rate+args.console_rate)*args.seconds>200000:raise ValueError('combined request budget exceeded')
     if not hasattr(args,'fault'):args.fault='none'
     if args.fault not in ('none','drain-rejoin'):raise ValueError('unsupported lab fault')
     if args.fault=='drain-rejoin' and (args.replicas<2 or args.seconds<20):raise ValueError('drain-rejoin requires >=2 disposable replicas and >=20 seconds')
@@ -56,7 +60,7 @@ def settings_from_args(args):
     if args.tenant_limit>args.global_limit or args.account_limit>args.global_limit or args.tenant_queue>args.global_queue:
         raise ValueError('scope limits exceed global limits')
     if args.rate*args.seconds>200000:raise ValueError('bounded lab request budget exceeded')
-    return {k:getattr(args,k) for k in ('fault','protocol','response_bytes','rate','seconds','tenants','users','accounts','mode','replicas','client_workers',
+    return {k:getattr(args,k) for k in ('fault','protocol','console_rate','response_bytes','rate','seconds','tenants','users','accounts','mode','replicas','client_workers',
         'stream_ms','payload_bytes','writer_connections','global_limit','tenant_limit','account_limit','global_queue','tenant_queue','queue_ms')}
 
 def nginx_config(source,replicas):
@@ -354,6 +358,7 @@ def main():
     parser.add_argument('--ack-isolated',action='store_true',required=True)
     parser.add_argument('--server-bin',required=True);parser.add_argument('--fixture-bin',required=True);parser.add_argument('--output',required=True)
     parser.add_argument('--runtime-image',default='keycompute-server:latest');parser.add_argument('--web-image',default='keycompute-web:latest');parser.add_argument('--python-image',default='python:3.12-alpine')
+    parser.add_argument('--console-rate',type=int,default=0,help='Optional bounded synthetic console reads/second')
     parser.add_argument('--mode',choices=['json','sse'],default='json')
     parser.add_argument('--protocol',choices=PROTOCOLS,default='chat')
     parser.add_argument('--response-bytes',type=int,default=0)

@@ -21,7 +21,7 @@ const UPSTREAM_REQUEST_TIMEOUT_MESSAGE: &str = "Upstream request timed out";
 pub(crate) struct TrustedLocalApiError;
 
 /// API 错误类型
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ApiError {
     /// 认证错误
     Auth(String),

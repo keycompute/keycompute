@@ -1,22 +1,142 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::LazyLock;
 
 use client_api::api::auth::RefreshTokenRequest;
 use client_api::error::{ClientError, Result};
 use client_api::{ApiClient, AuthApi, ClientConfig};
+use dioxus::prelude::ReadableExt;
+use futures::FutureExt;
+#[cfg(not(target_arch = "wasm32"))]
+use futures::future::BoxFuture;
+#[cfg(target_arch = "wasm32")]
+use futures::future::LocalBoxFuture;
 
-use crate::stores::auth_store::AuthStore;
+use crate::stores::auth_store::{AuthState, AuthStore};
 
 /// 全局单例 API 客户端
 /// ApiClient 内部持有 Arc，Clone 只是增加引用计数，开销极低
-static CLIENT: LazyLock<ApiClient> = LazyLock::new(|| {
+fn build_client() -> ApiClient {
     let base_url = option_env!("API_BASE_URL").unwrap_or("").to_string();
-    let config = ClientConfig::new(base_url);
+    let config = ClientConfig::new(base_url).with_console_display_cache(true);
     ApiClient::new(config).expect("Failed to create API client")
-});
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static CLIENT: LazyLock<ApiClient> = LazyLock::new(build_client);
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static CLIENT: std::cell::OnceCell<ApiClient> = const { std::cell::OnceCell::new() };
+}
+
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct RefreshKey {
+    login: uuid::Uuid,
+    revision: u64,
+    token: String,
+}
+
+struct RefreshHandle {
+    future: futures::future::Shared<RefreshFuture>,
+}
+
+#[cfg(target_arch = "wasm32")]
+type RefreshFuture = LocalBoxFuture<'static, Result<String>>;
+#[cfg(not(target_arch = "wasm32"))]
+type RefreshFuture = BoxFuture<'static, Result<String>>;
+
+/// Weak storage cannot keep abandoned refresh HTTP requests alive. Keeping
+/// the handle in every caller permits cancellation of one waiter, not others.
+#[derive(Default)]
+struct RefreshCoordinator {
+    flights:
+        std::sync::Mutex<std::collections::HashMap<RefreshKey, std::sync::Weak<RefreshHandle>>>,
+}
+
+impl RefreshCoordinator {
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+    fn run(&self, key: RefreshKey, future: RefreshFuture) -> RefreshFuture {
+        let mut flights = self.flights.lock().unwrap_or_else(|e| e.into_inner());
+        flights.retain(|_, handle| handle.strong_count() != 0);
+        let handle = if let Some(handle) = flights.get(&key).and_then(std::sync::Weak::upgrade) {
+            handle
+        } else {
+            if flights.len() >= 16 {
+                return box_refresh_future(async {
+                    Err(ClientError::ServiceUnavailable(
+                        "登录刷新繁忙，请稍后重试".into(),
+                    ))
+                });
+            }
+            let handle = std::sync::Arc::new(RefreshHandle {
+                future: future.shared(),
+            });
+            flights.insert(key, std::sync::Arc::downgrade(&handle));
+            handle
+        };
+        drop(flights);
+        box_refresh_future(async move { handle.future.clone().await })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static REFRESH: LazyLock<RefreshCoordinator> = LazyLock::new(RefreshCoordinator::default);
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static REFRESH: RefreshCoordinator = RefreshCoordinator::default();
+}
+
+#[cfg(target_arch = "wasm32")]
+fn box_refresh_future<F>(future: F) -> RefreshFuture
+where
+    F: std::future::Future<Output = Result<String>> + 'static,
+{
+    future.boxed_local()
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn box_refresh_future<F>(future: F) -> RefreshFuture
+where
+    F: std::future::Future<Output = Result<String>> + Send + 'static,
+{
+    future.boxed()
+}
+
+fn refresh_singleflight(observed: AuthState) -> RefreshFuture {
+    let token = observed.access_token.unwrap_or_default();
+    let key = RefreshKey {
+        login: observed.session_id,
+        revision: observed.token_revision,
+        token: token.clone(),
+    };
+    let client = get_client();
+    let future = box_refresh_future(async move {
+        let req = RefreshTokenRequest::new(token);
+        let response = AuthApi::new(&client).refresh_token(&req).await?;
+        if response.access_token.is_empty() {
+            return Err(ClientError::InvalidResponse("刷新令牌响应为空".into()));
+        }
+        Ok(response.access_token)
+    });
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        REFRESH.run(key, future)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        REFRESH.with(|coordinator| coordinator.run(key, future))
+    }
+}
 
 /// 获取全局 API 客户端实例（廉价克隆，仅增加 Arc 引用计数）
 pub fn get_client() -> ApiClient {
-    CLIENT.clone()
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        CLIENT.clone()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        CLIENT.with(|client| client.get_or_init(build_client).clone())
+    }
 }
 
 /// 归一化配置的 API 基址到根路径（去掉 /auth、/api/v1、/v1 等后缀）
@@ -81,59 +201,106 @@ pub fn public_openai_api_base_url() -> String {
     append_v1(&public_api_root_url())
 }
 
-/// Token 自动刷新封装器
-///
-/// 在 service 层调用任意异步 API 时，若返回 `ClientError::Unauthorized`，
-/// 则尝试用当前 token 刷新获取新 token，刷新成功后重试原请求。
-/// 如果刷新失败，则强制登出。
-///
-/// # 示例
-/// ```rust
-/// let result = with_auto_refresh(auth_store, |token| async move {
-///     some_service::fetch(&token).await
-/// }).await;
-/// ```
-pub async fn with_auto_refresh<F, Fut, T>(mut auth_store: AuthStore, f: F) -> Result<T>
+/// Refresh only inside the same login session, then replay a rejected request
+/// once. Neither a late 401 nor a successful stale response may cross a login.
+pub async fn with_auto_refresh<F, Fut, T>(auth_store: AuthStore, f: F) -> Result<T>
 where
     F: Fn(String) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    // 优先从全局 API 客户端获取 token（登录时会设置到这里）
-    let token = get_client()
-        .get_token()
-        .or_else(|| auth_store.token())
-        .unwrap_or_default();
-
-    match f(token.clone()).await {
-        Err(ClientError::Unauthorized(_)) => {
-            // Token 过期，尝试刷新
-            match try_refresh_token(&token).await {
-                Ok(new_token) => {
-                    // 刷新成功，更新 token 并重试原请求
-                    get_client().set_token(new_token.clone());
-                    auth_store.login(new_token.clone());
-                    f(new_token).await
-                }
-                Err(_) => {
-                    // 刷新失败，强制登出
-                    auth_store.logout();
-                    get_client().clear_token();
-                    Err(ClientError::Unauthorized(
-                        "登录已过期，请重新登录".to_string(),
-                    ))
-                }
-            }
-        }
-        other => other,
-    }
+    with_auto_refresh_using(auth_store, get_client(), f, refresh_singleflight).await
 }
 
-/// 尝试刷新 Token
-async fn try_refresh_token(token: &str) -> Result<String> {
-    let client = get_client();
-    let req = RefreshTokenRequest::new(token);
-    let resp = AuthApi::new(&client).refresh_token(&req).await?;
-    Ok(resp.access_token)
+fn session_changed() -> ClientError {
+    ClientError::Other("登录状态已变更，请重新操作".into())
+}
+
+/// Shared by the real UI and deterministic Dioxus race tests. The injected
+/// refresh transport does not alter the session/command replay decision.
+async fn with_auto_refresh_using<F, Fut, R, T>(
+    mut auth_store: AuthStore,
+    client: ApiClient,
+    f: F,
+    refresh: R,
+) -> Result<T>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+    R: Fn(AuthState) -> RefreshFuture,
+{
+    // Always read the Signal: a populated HTTP-client token is not a substitute
+    // for observing reactive UI login state.
+    let observed = (auth_store.state)();
+    let token = observed
+        .access_token
+        .clone()
+        .filter(|_| observed.is_authenticated)
+        .ok_or_else(|| ClientError::Unauthorized("请先登录".into()))?;
+    let result = f(token).await;
+    if !auth_store.same_session(&observed) {
+        return Err(session_changed());
+    }
+    if !matches!(result, Err(ClientError::Unauthorized(_))) {
+        return result;
+    }
+
+    let next_token = if !auth_store.matches(&observed) {
+        // A concurrent refresh, not a new login (checked above), already won.
+        auth_store
+            .state
+            .peek()
+            .access_token
+            .clone()
+            .ok_or_else(session_changed)?
+    } else {
+        let refreshed = refresh(observed.clone()).await;
+        if !auth_store.same_session(&observed) {
+            return Err(session_changed());
+        }
+        if !auth_store.matches(&observed) {
+            auth_store
+                .state
+                .peek()
+                .access_token
+                .clone()
+                .ok_or_else(session_changed)?
+        } else {
+            match refreshed {
+                Ok(token) if !token.is_empty() => {
+                    if !auth_store.refresh_if_current(&observed, token.clone()) {
+                        return Err(session_changed());
+                    }
+                    client.set_token(token.clone());
+                    token
+                }
+                Ok(_) => return Err(ClientError::InvalidResponse("刷新令牌响应为空".into())),
+                Err(ClientError::Unauthorized(_)) => {
+                    // Logout is another exact CAS. A same-session refresh
+                    // that wins between the check above and this branch must
+                    // be allowed to supply the replay token instead.
+                    if auth_store.logout_if_current(&observed) {
+                        client.clear_token();
+                        return Err(ClientError::Unauthorized("登录已过期，请重新登录".into()));
+                    }
+                    if !auth_store.same_session(&observed) {
+                        return Err(session_changed());
+                    }
+                    auth_store
+                        .state
+                        .peek()
+                        .access_token
+                        .clone()
+                        .ok_or_else(session_changed)?
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    };
+    let replay = f(next_token).await;
+    if !auth_store.same_session(&observed) {
+        return Err(session_changed());
+    }
+    replay
 }
 
 /// 将 ClientError 转为用户友好的中文提示文本
@@ -276,3 +443,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "api_client_session_tests.rs"]
+mod session_tests;

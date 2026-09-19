@@ -34,13 +34,23 @@ impl UserInfo {
 pub struct UserStore {
     pub info: Signal<Option<UserInfo>>,
     pub load_failed: Signal<bool>,
+    /// Identity that owns the loaded profile; never render it for another login.
+    pub loaded_session_id: Signal<uuid::Uuid>,
 }
 
 impl UserStore {
     /// 创建新的 UserStore。
     /// 注意：Signal 必须在组件顶层创建后传入
-    pub fn new(info: Signal<Option<UserInfo>>, load_failed: Signal<bool>) -> Self {
-        Self { info, load_failed }
+    pub fn new(
+        info: Signal<Option<UserInfo>>,
+        load_failed: Signal<bool>,
+        loaded_session_id: Signal<uuid::Uuid>,
+    ) -> Self {
+        Self {
+            info,
+            load_failed,
+            loaded_session_id,
+        }
     }
 
     #[allow(dead_code)]
@@ -52,6 +62,7 @@ impl UserStore {
     pub fn clear(&mut self) {
         *self.info.write() = None;
         self.load_failed.set(false);
+        self.loaded_session_id.set(uuid::Uuid::nil());
     }
 
     #[allow(dead_code)]

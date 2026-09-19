@@ -8,6 +8,7 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 /// 交易类型
@@ -65,6 +66,96 @@ pub struct UserBalance {
     pub total_consumed: Decimal,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Read-only balance representation for ordinary display paths.
+///
+/// This is deliberately separate from [`UserBalance::get_or_create`] and the
+/// reclamation helpers: constructing it never starts a transaction, takes a
+/// row lock, reclaims a reservation, or writes a balance row.  `initialized`
+/// is false only when the user is valid and owned by the requested tenant but
+/// has not yet received a balance row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserBalanceDisplaySnapshot {
+    pub user_id: Uuid,
+    pub tenant_id: Uuid,
+    pub available_balance: Decimal,
+    pub frozen_balance: Decimal,
+    pub total_recharged: Decimal,
+    pub total_consumed: Decimal,
+    pub initialized: bool,
+    pub as_of: DateTime<Utc>,
+}
+
+impl UserBalanceDisplaySnapshot {
+    pub fn total_balance(&self) -> Decimal {
+        self.available_balance + self.frozen_balance
+    }
+}
+
+#[derive(Debug, FromQueryResult)]
+struct DisplayBalanceRow {
+    user_id: Uuid,
+    owner_tenant_id: Uuid,
+    balance_id: Option<Uuid>,
+    balance_tenant_id: Option<Uuid>,
+    available_balance: Option<Decimal>,
+    frozen_balance: Option<Decimal>,
+    total_recharged: Option<Decimal>,
+    total_consumed: Option<Decimal>,
+    as_of: DateTime<Utc>,
+}
+
+impl DisplayBalanceRow {
+    fn into_snapshot(
+        self,
+        requested_tenant_id: Uuid,
+    ) -> Result<UserBalanceDisplaySnapshot, DbError> {
+        if self.owner_tenant_id != requested_tenant_id {
+            return Err(DbError::UserTenantMismatch {
+                user_id: self.user_id,
+                requested_tenant_id,
+                actual_tenant_id: self.owner_tenant_id,
+            });
+        }
+
+        self.into_snapshot_unchecked_owner()
+    }
+
+    fn into_snapshot_unchecked_owner(self) -> Result<UserBalanceDisplaySnapshot, DbError> {
+        if let Some(balance_tenant_id) = self.balance_tenant_id
+            && balance_tenant_id != self.owner_tenant_id
+        {
+            return Err(DbError::UserTenantMismatch {
+                user_id: self.user_id,
+                requested_tenant_id: self.owner_tenant_id,
+                actual_tenant_id: balance_tenant_id,
+            });
+        }
+
+        let initialized = self.balance_id.is_some();
+        if initialized
+            && (self.balance_tenant_id.is_none()
+                || self.available_balance.is_none()
+                || self.frozen_balance.is_none()
+                || self.total_recharged.is_none()
+                || self.total_consumed.is_none())
+        {
+            return Err(DbError::Other(
+                "incomplete persisted display balance".into(),
+            ));
+        }
+        Ok(UserBalanceDisplaySnapshot {
+            user_id: self.user_id,
+            tenant_id: self.owner_tenant_id,
+            available_balance: self.available_balance.unwrap_or(Decimal::ZERO),
+            frozen_balance: self.frozen_balance.unwrap_or(Decimal::ZERO),
+            total_recharged: self.total_recharged.unwrap_or(Decimal::ZERO),
+            total_consumed: self.total_consumed.unwrap_or(Decimal::ZERO),
+            initialized,
+            as_of: self.as_of,
+        })
+    }
 }
 
 /// Durable pre-dispatch balance reservation keyed by the logical billing
@@ -1452,6 +1543,104 @@ impl UserBalance {
         );
         let balance = UserBalance::find_by_statement(stmt).one(db).await?;
         Ok(balance)
+    }
+
+    /// Read one display snapshot. Service callers must supply the primary;
+    /// this generic model helper also accepts a caller-owned read transaction.
+    /// The ordinary SELECT performs no mutation or row locking.
+    ///
+    /// Read one authoritative display snapshot using an ordinary primary
+    /// `SELECT`.  This method intentionally performs no transaction
+    /// materialization, row locking, reservation reclamation, or writes.
+    pub async fn find_display_snapshot(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<UserBalanceDisplaySnapshot, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+                SELECT
+                    u.id AS user_id,
+                    u.tenant_id AS owner_tenant_id,
+                    ub.id AS balance_id,
+                    ub.tenant_id AS balance_tenant_id,
+                    ub.available_balance,
+                    ub.frozen_balance,
+                    ub.total_recharged,
+                    ub.total_consumed,
+                    statement_timestamp() AS as_of
+                FROM users u
+                JOIN tenants t ON t.id = u.tenant_id
+                LEFT JOIN user_balances ub ON ub.user_id = u.id
+                WHERE u.id = $1
+            "#,
+            [user_id.into()],
+        );
+        let row = DisplayBalanceRow::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| DbError::not_found("user", user_id))?;
+        row.into_snapshot(tenant_id)
+    }
+
+    /// Read a bounded batch of authoritative display snapshots from the
+    /// primary using one ordinary `SELECT`.  Missing balance rows become
+    /// `initialized = false`; missing users and tenant/balance ownership
+    /// mismatches remain errors instead of being rendered as zero.
+    pub async fn find_display_snapshots(
+        db: &impl ConnectionTrait,
+        user_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, UserBalanceDisplaySnapshot>, DbError> {
+        // Bound allocations even for direct model callers, before deduplication.
+        if user_ids.len() > 1_000 {
+            return Err(DbError::Other(
+                "display balance batch exceeds 1000 users".into(),
+            ));
+        }
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let requested: Vec<Uuid> = user_ids
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+                SELECT
+                    u.id AS user_id,
+                    u.tenant_id AS owner_tenant_id,
+                    ub.id AS balance_id,
+                    ub.tenant_id AS balance_tenant_id,
+                    ub.available_balance,
+                    ub.frozen_balance,
+                    ub.total_recharged,
+                    ub.total_consumed,
+                    statement_timestamp() AS as_of
+                FROM users u
+                JOIN tenants t ON t.id = u.tenant_id
+                LEFT JOIN user_balances ub ON ub.user_id = u.id
+                WHERE u.id = ANY($1)
+            "#,
+            [requested.clone().into()],
+        );
+        let rows = DisplayBalanceRow::find_by_statement(stmt).all(db).await?;
+        let mut snapshots = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let snapshot = row.into_snapshot_unchecked_owner()?;
+            snapshots.insert(snapshot.user_id, snapshot);
+        }
+
+        // The batch endpoint is called after an authorized user query.  If a
+        // user disappears between those two ordinary reads, surface that
+        // race instead of silently manufacturing a zero balance.
+        if let Some(missing) = requested.iter().find(|id| !snapshots.contains_key(id)) {
+            return Err(DbError::not_found("user", missing.to_string()));
+        }
+        Ok(snapshots)
     }
 
     /// Find a balance after atomically reclaiming any expired request

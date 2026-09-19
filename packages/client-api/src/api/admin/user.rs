@@ -89,9 +89,17 @@ pub struct UserDetail {
     /// 用户冻结余额（后端始终返回，默认 0.0）
     #[serde(default)]
     pub frozen_balance: f64,
+    #[serde(default = "default_balance_initialized")]
+    pub balance_initialized: bool,
+    #[serde(default)]
+    pub balance_as_of: String,
     pub created_at: String,
     pub updated_at: String,
     pub last_login_at: Option<String>,
+}
+
+fn default_balance_initialized() -> bool {
+    true
 }
 
 /// 用户列表响应（带分页信息）
