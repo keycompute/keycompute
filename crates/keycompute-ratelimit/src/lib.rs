@@ -564,6 +564,17 @@ pub trait RateLimiter: Send + Sync + std::fmt::Debug {
         occurred_at: SystemTime,
     ) -> Result<()>;
 
+    /// Advisory time until this RPM bucket can admit a request. This never
+    /// grants admission; callers must still use the atomic check-and-record.
+    /// Custom backends may omit metadata rather than inventing a reset time.
+    async fn rpm_retry_after(
+        &self,
+        _key: &RateLimitKey,
+        _config: &RateLimitConfig,
+    ) -> Result<Option<Duration>> {
+        Ok(None)
+    }
+
     /// 获取当前计数
     async fn get_count(&self, key: &RateLimitKey) -> Result<u64>;
 
@@ -744,6 +755,28 @@ impl RateLimiter for MemoryRateLimiter {
                 "TPM terminal identity {terminal_id} conflicts with an active reservation"
             )))
         }
+    }
+
+    async fn rpm_retry_after(
+        &self,
+        key: &RateLimitKey,
+        config: &RateLimitConfig,
+    ) -> Result<Option<Duration>> {
+        if config.rpm_limit == 0 {
+            return Err(KeyComputeError::Internal("Invalid zero RPM policy".into()));
+        }
+        let Some(entry) = self.entries.get(key) else {
+            return Ok(None);
+        };
+        let start = entry
+            .window_start
+            .lock()
+            .map_err(|_| KeyComputeError::Internal("RPM window lock poisoned".into()))?;
+        let remaining = entry.window_size.saturating_sub(start.elapsed());
+        Ok(
+            (entry.request_count() >= u64::from(config.rpm_limit) && !remaining.is_zero())
+                .then_some(remaining),
+        )
     }
 
     async fn get_count(&self, key: &RateLimitKey) -> Result<u64> {
@@ -1026,6 +1059,15 @@ impl RateLimitService {
         Ok(current_tokens < config.tpm_limit as u64)
     }
 
+    /// Return backend-derived RPM recovery metadata without charging a request.
+    pub async fn rpm_retry_after(
+        &self,
+        key: &RateLimitKey,
+        config: &RateLimitConfig,
+    ) -> Result<Option<Duration>> {
+        self.limiter.rpm_retry_after(key, config).await
+    }
+
     /// 获取当前 RPM 计数
     pub async fn get_rpm_count(&self, key: &RateLimitKey) -> Result<u64> {
         self.limiter.get_count(key).await
@@ -1119,6 +1161,63 @@ mod tests {
         let config = RateLimitConfig::from_tenant(120, 150_000);
         assert_eq!(config.rpm_limit, 120);
         assert_eq!(config.tpm_limit, 150_000);
+    }
+
+    #[tokio::test]
+    async fn memory_rpm_recovery_tracks_actual_window_without_charging() {
+        let limiter = MemoryRateLimiter::default();
+        let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let config = RateLimitConfig::new(1, 1000);
+        assert!(
+            limiter
+                .rpm_retry_after(&key, &config)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            limiter.entries.is_empty(),
+            "metadata must not allocate absent identities"
+        );
+        limiter
+            .check_and_record_with_config(&key, &config)
+            .await
+            .unwrap();
+        {
+            let entry = limiter.entries.get(&key).unwrap();
+            *entry.window_start.lock().unwrap() = Instant::now() - Duration::from_secs(45);
+        }
+        let remaining = limiter
+            .rpm_retry_after(&key, &config)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(remaining > Duration::from_secs(13) && remaining <= Duration::from_secs(15));
+        assert_eq!(limiter.get_count(&key).await.unwrap(), 1);
+        let higher = RateLimitConfig::new(2, 1000);
+        assert!(
+            limiter
+                .rpm_retry_after(&key, &higher)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        {
+            let entry = limiter.entries.get(&key).unwrap();
+            *entry.window_start.lock().unwrap() = Instant::now() - Duration::from_secs(61);
+        }
+        assert!(
+            limiter
+                .rpm_retry_after(&key, &config)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        limiter
+            .check_and_record_with_config(&key, &config)
+            .await
+            .unwrap();
+        assert_eq!(limiter.get_count(&key).await.unwrap(), 1);
     }
 
     #[tokio::test]

@@ -4,6 +4,32 @@
 
 use thiserror::Error;
 
+/// Quota recovery metadata. Durations are advisory, never permission to send.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("{message}")]
+pub struct RateLimitInfo {
+    pub message: String,
+    pub retry_after: Option<std::time::Duration>,
+    pub scope: Option<String>,
+}
+
+impl From<String> for RateLimitInfo {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retry_after: None,
+            scope: None,
+        }
+    }
+}
+
+impl std::ops::Deref for RateLimitInfo {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
 /// Client API 错误类型
 #[derive(Error, Debug, Clone)]
 pub enum ClientError {
@@ -33,7 +59,7 @@ pub enum ClientError {
 
     /// 请求过多，触发限流 (429)
     #[error("Rate limited: {0}")]
-    RateLimited(String),
+    RateLimited(RateLimitInfo),
 
     /// 验证流程错误 (422)
     #[error("Verification failed: {0}")]
@@ -71,7 +97,7 @@ impl ClientError {
             401 => ClientError::Unauthorized(msg),
             403 => ClientError::Forbidden(msg),
             404 => ClientError::NotFound(msg),
-            429 => ClientError::RateLimited(msg),
+            429 => ClientError::RateLimited(msg.into()),
             422 => ClientError::Verification(msg),
             503 => ClientError::ServiceUnavailable(msg),
             500..=599 => ClientError::ServerError(msg),
@@ -105,12 +131,12 @@ impl ClientError {
     pub fn message(&self) -> String {
         match self {
             ClientError::Http(msg) => strip_http_prefix(msg),
+            ClientError::RateLimited(info) => info.message.clone(),
             ClientError::Serialization(msg)
             | ClientError::Network(msg)
             | ClientError::Unauthorized(msg)
             | ClientError::Forbidden(msg)
             | ClientError::NotFound(msg)
-            | ClientError::RateLimited(msg)
             | ClientError::Verification(msg)
             | ClientError::ServiceUnavailable(msg)
             | ClientError::ServerError(msg)

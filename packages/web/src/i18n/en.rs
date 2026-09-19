@@ -3,6 +3,10 @@ use std::sync::LazyLock;
 
 pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    m.insert(
+        "common.rate_limited_hint",
+        "Too many requests. Automatic retries are paused; refresh later.",
+    );
 
     // ── Navigation ──────────────────────────────
     m.insert("nav.home", "Home");

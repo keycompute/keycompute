@@ -3,6 +3,10 @@ use std::sync::LazyLock;
 
 pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    m.insert(
+        "common.rate_limited_hint",
+        "请求过于频繁，已暂停自动重试，请稍后刷新。",
+    );
 
     // ── 导航 ────────────────────────────────────
     m.insert("nav.home", "首页");

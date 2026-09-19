@@ -806,6 +806,8 @@ pub fn cors_layer() -> tower_http::cors::CorsLayer {
         .expose_headers([
             HeaderName::from_static("x-request-id"),
             HeaderName::from_static("x-client-request-id"),
+            HeaderName::from_static("retry-after"),
+            HeaderName::from_static("x-ratelimit-scope"),
         ])
 }
 
@@ -1124,7 +1126,8 @@ pub async fn rate_limit_middleware(
                 "Rate limit exceeded: {}",
                 msg
             );
-            rate_limit_exceeded_response()
+            rate_limit_response_for_key(&state, &rate_key, &rate_limit_config, "authenticated")
+                .await
         }
         Err(e) => {
             // RPM 检查出错（如 Redis 不可用），按 fail-closed 原则拒绝请求
@@ -1383,7 +1386,9 @@ async fn enforce_public_rate_limit(
                 "Public auth rate limit exceeded: {}",
                 msg
             );
-            Err(Box::new(rate_limit_exceeded_response()))
+            Err(Box::new(
+                rate_limit_response_for_key(state, &rate_key, config, scope).await,
+            ))
         }
         Err(e) => {
             // 限流检查出错（如 Redis 不可用），按 fail-closed 原则拒绝请求
@@ -1420,6 +1425,45 @@ fn x_api_key_allowed_on_path(path: &str) -> bool {
     path == "/v1/messages"
 }
 
+/// Recovery is advisory and may race another caller. An unavailable metadata
+/// read must not change an already-established quota rejection into admission.
+async fn rate_limit_response_for_key(
+    state: &AppState,
+    key: &RateLimitKey,
+    config: &RateLimitConfig,
+    scope: &str,
+) -> Response {
+    let mut response = rate_limit_exceeded_response();
+    if let Ok(scope) = HeaderValue::from_str(scope) {
+        response.headers_mut().insert("x-ratelimit-scope", scope);
+    }
+    match tokio::time::timeout(
+        Duration::from_millis(250),
+        state.rate_limiter.rpm_retry_after(key, config),
+    )
+    .await
+    {
+        Ok(Ok(Some(remaining))) => {
+            // Round upwards: HTTP delay-seconds must not ask clients to retry
+            // before a sub-second fixed window actually expires.
+            let seconds = remaining
+                .as_secs()
+                .saturating_add(u64::from(remaining.subsec_nanos() > 0))
+                .max(1);
+            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert("retry-after", value);
+            }
+        }
+        // No current blocking window, or an extension backend without metadata.
+        // Omit the header rather than fabricating a recovery timestamp.
+        Ok(Ok(None)) => {}
+        _ => warn!(
+            "RPM recovery metadata unavailable; retaining quota rejection without a fabricated reset"
+        ),
+    }
+    response
+}
+
 fn rate_limit_exceeded_response() -> Response {
     let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
@@ -1433,6 +1477,12 @@ fn rate_limit_exceeded_response() -> Response {
         .to_string(),
     )
         .into_response();
+    response
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
     response.extensions_mut().insert(TrustedLocalApiError);
     response
 }
@@ -2256,6 +2306,34 @@ mod tests {
         let effective = stricter_rate_limit_config(effective, tighter_account);
         assert_eq!(effective.rpm_limit, 5);
         assert_eq!(effective.tpm_limit, 500);
+    }
+
+    #[tokio::test]
+    async fn console_rpm_response_reports_backend_recovery_and_is_not_cacheable() {
+        let state = AppState::new();
+        let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::nil());
+        let config = RateLimitConfig::new(1, 1000);
+        state
+            .rate_limiter
+            .check_and_record_with_config(&key, &config)
+            .await
+            .unwrap();
+        let response = rate_limit_response_for_key(&state, &key, &config, "authenticated").await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.headers()["x-ratelimit-scope"], "authenticated");
+        let delay: u64 = response.headers()["retry-after"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&delay));
+        assert_eq!(state.rate_limiter.get_rpm_count(&key).await.unwrap(), 1);
+        let unknown = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::nil());
+        let response =
+            rate_limit_response_for_key(&state, &unknown, &config, "authenticated").await;
+        assert!(!response.headers().contains_key("retry-after"));
     }
 
     #[tokio::test]

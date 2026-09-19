@@ -1,3 +1,4 @@
+use client_api::api::distribution::DistributionEarnings;
 use client_api::error::ClientError;
 use dioxus::prelude::*;
 
@@ -13,6 +14,17 @@ use crate::stores::{
 use crate::utils::time::format_time;
 use crate::utils::{format_precise_cny_str, on_copy};
 use ui::{PageHeader, Pagination, icons::IconCopy};
+
+fn total_earnings_display(
+    result: Option<Result<DistributionEarnings, ClientError>>,
+    loading: &str,
+) -> String {
+    match result {
+        Some(Ok(earnings)) => format_precise_cny_str(&earnings.total_earnings),
+        Some(Err(_)) => "—".to_string(),
+        None => loading.to_string(),
+    }
+}
 
 fn is_distribution_disabled_error<T>(result: &Option<Result<T, ClientError>>) -> bool {
     matches!(
@@ -91,11 +103,7 @@ fn DistributionOverviewContent() -> Element {
         .await
     });
 
-    let total_earnings = match earnings() {
-        Some(Ok(ref e)) => format_precise_cny_str(&e.total_earnings),
-        Some(Err(ref e)) => user_error_message(e),
-        None => i18n.t("table.loading").to_string(),
-    };
+    let total_earnings = total_earnings_display(earnings(), i18n.t("table.loading"));
     let available_earnings = match earnings() {
         Some(Ok(ref e)) => format_precise_cny_str(&e.available_earnings),
         _ => "—".to_string(),
@@ -110,7 +118,7 @@ fn DistributionOverviewContent() -> Element {
     };
     let invite_link = match referral_code() {
         Some(Ok(ref r)) => r.referral_link.clone(),
-        Some(Err(ref e)) => user_error_message(e),
+        Some(Err(_)) => "—".to_string(),
         None => i18n.t("table.loading").to_string(),
     };
     let link_ready = matches!(referral_code(), Some(Ok(_)));
@@ -122,6 +130,17 @@ fn DistributionOverviewContent() -> Element {
     let distribution_disabled = is_distribution_disabled_error(&earnings())
         || is_distribution_disabled_error(&referral_code())
         || is_distribution_disabled_error(&referrals());
+    let page_error = earnings()
+        .and_then(Result::err)
+        .or_else(|| referral_code().and_then(Result::err))
+        .or_else(|| referrals().and_then(Result::err));
+    let page_error_message = page_error.as_ref().map(|error| {
+        if error.is_rate_limited() {
+            i18n.t("common.rate_limited_hint").to_string()
+        } else {
+            user_error_message(error)
+        }
+    });
     let referral_total = referrals()
         .as_ref()
         .and_then(|result| result.as_ref().ok())
@@ -135,6 +154,12 @@ fn DistributionOverviewContent() -> Element {
             PageHeader {
                 title: i18n.t("distribution.title").to_string(),
                 description: i18n.t("distribution.subtitle").to_string(),
+            }
+
+            if !distribution_disabled {
+                if let Some(message) = page_error_message {
+                    div { class: "alert alert-error", role: "alert", "{message}" }
+                }
             }
 
             if distribution_disabled {
@@ -283,5 +308,17 @@ fn DistributionOverviewContent() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn quota_failure_is_never_displayed_as_money() {
+        let error = ClientError::RateLimited("Rate limit exceeded".to_string().into());
+        assert_eq!(total_earnings_display(Some(Err(error)), "Loading"), "—");
+        assert_eq!(total_earnings_display(None, "Loading"), "Loading");
     }
 }

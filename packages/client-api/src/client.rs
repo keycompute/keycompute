@@ -4,10 +4,10 @@
 
 use crate::config::ClientConfig;
 use crate::error::{ClientError, Result};
-use reqwest::{Client, Method, RequestBuilder, Response};
+use crate::retry::{Cooldowns, response_metadata};
+use reqwest::{Client, Method, Request, RequestBuilder, Response};
 use serde::{Serialize, de::DeserializeOwned};
-use std::sync::{Arc, RwLock};
-#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 /// HTTP 客户端
@@ -16,11 +16,18 @@ pub struct ApiClient {
     inner: Arc<ClientInner>,
 }
 
-#[derive(Debug)]
 struct ClientInner {
     client: Client,
     config: ClientConfig,
     auth_token: RwLock<Option<String>>,
+    cooldowns: Mutex<Cooldowns>,
+}
+
+impl std::fmt::Debug for ClientInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never include credentials or their derived cooldown keys in logs.
+        f.debug_struct("ClientInner").finish_non_exhaustive()
+    }
 }
 
 impl ApiClient {
@@ -49,11 +56,13 @@ impl ApiClient {
             }
         };
 
+        let cooldowns = Mutex::new(Cooldowns::with_base_url(&config.base_url));
         Ok(Self {
             inner: Arc::new(ClientInner {
                 client,
                 config,
                 auth_token: RwLock::new(None),
+                cooldowns,
             }),
         })
     }
@@ -133,10 +142,18 @@ impl ApiClient {
         token: Option<&str>,
     ) -> Result<T> {
         let builder = self.request_with_auth(Method::POST, path, token).await?;
-        self.send_and_parse(
+        if idempotency_key.trim().is_empty() {
+            return Err(ClientError::Config(
+                "Idempotency key must not be empty".into(),
+            ));
+        }
+        // This explicit API is only for endpoints with server-enforced
+        // idempotency. An arbitrary header on a generic POST is insufficient.
+        self.send_with_policy(
             builder
                 .header("Idempotency-Key", idempotency_key)
                 .json(body),
+            true,
         )
         .await
     }
@@ -162,94 +179,144 @@ impl ApiClient {
         self.send_and_parse(builder).await
     }
 
-    /// 发送请求并解析 JSON 响应（含重试逻辑）
-    ///
-    /// 重试条件：网络/连接错误、服务器 5xx、限流 429
-    /// 退避策略：指数退避，初始延迟 500ms，最大 4s（第 i 次 = 500ms × 2^i）
-    /// 每次重试使用 `try_clone` 克隆 builder，无需外部依赖
+    /// Safe reads may retry transient failures. Mutations require an explicit
+    /// idempotency contract. A 429 returns immediately and cools down all
+    /// matching calls instead of starting one retry loop per component.
     pub(crate) async fn send_and_parse<T: DeserializeOwned>(
         &self,
         builder: RequestBuilder,
     ) -> Result<T> {
-        let max_retries = if self.inner.config.retry_enabled {
-            self.inner.config.max_retries
+        self.send_with_policy(builder, false).await
+    }
+
+    async fn send_with_policy<T: DeserializeOwned>(
+        &self,
+        builder: RequestBuilder,
+        idempotent_post: bool,
+    ) -> Result<T> {
+        let request = builder.build().map_err(ClientError::from)?;
+        let budget = Duration::from_secs(self.inner.config.timeout_secs);
+        let operation = self.send_attempts(request, idempotent_post);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            tokio::time::timeout(budget, operation)
+                .await
+                .map_err(|_| ClientError::Network("Request deadline exceeded".into()))?
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // reqwest 0.12 owns an AbortGuard until the response body is
+            // consumed; dropping this future aborts the browser fetch too.
+            // Neither browser nor native cancellation can undo a server-side
+            // command that already committed, hence the strict retry policy.
+            let timeout = gloo_timers::future::TimeoutFuture::new(
+                budget.as_millis().min(u128::from(u32::MAX)) as u32,
+            );
+            futures::pin_mut!(operation, timeout);
+            match futures::future::select(operation, timeout).await {
+                futures::future::Either::Left((result, _)) => result,
+                futures::future::Either::Right(_) => {
+                    Err(ClientError::Network("Request deadline exceeded".into()))
+                }
+            }
+        }
+    }
+
+    async fn send_attempts<T: DeserializeOwned>(
+        &self,
+        request: Request,
+        idempotent_post: bool,
+    ) -> Result<T> {
+        // Keep only header/URL identity for cooldown lookup, never duplicate
+        // a request body just to calculate its rate-limit category.
+        let identity = self
+            .inner
+            .client
+            .request(request.method().clone(), request.url().clone())
+            .headers(request.headers().clone())
+            .build()
+            .map_err(ClientError::from)?;
+        let safe = matches!(*request.method(), Method::GET | Method::HEAD)
+            || (idempotent_post && request.method() == Method::POST);
+        let template = request.try_clone();
+        let retries = if safe && self.inner.config.retry_enabled && template.is_some() {
+            self.inner.config.max_retries.min(5)
         } else {
             0
         };
-
-        // 带 streaming body 的 builder 无法克隆，直接发送不重试
-        if max_retries > 0 && builder.try_clone().is_none() {
-            let response = builder.send().await.map_err(ClientError::from)?;
-            return self.handle_response(response).await;
-        }
-
-        let mut last_err: Option<ClientError> = None;
-        for attempt in 0..=max_retries {
-            // 在第 2 次及以后的尝试前，加入指数退避延迟
+        let mut next_request = Some(request);
+        for attempt in 0..=retries {
             if attempt > 0 {
-                // 延迟时间：500ms, 1000ms, 2000ms, 最大 4000ms
-                let delay_ms = (500u64 * (1u64 << (attempt - 1).min(3))) as u32;
-                Self::sleep_ms(delay_ms).await;
+                let base = 500u32.saturating_mul(1 << (attempt - 1).min(3));
+                let jitter = (uuid::Uuid::new_v4().as_u128() % 251) as u32;
+                Self::sleep_ms(base + jitter).await;
             }
-
-            // 每次使用克隆的 builder，保留原始供后续重试
-            let req = match builder.try_clone() {
-                Some(cloned) => cloned,
-                None => break,
+            let blocked = self
+                .inner
+                .cooldowns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remaining(&identity);
+            if let Some(info) = blocked {
+                return Err(ClientError::RateLimited(info));
+            }
+            let request = next_request
+                .take()
+                .or_else(|| template.as_ref().and_then(Request::try_clone))
+                .ok_or_else(|| ClientError::Other("Request cannot be replayed".into()))?;
+            let result = match self.inner.client.execute(request).await {
+                Ok(response) => self.handle_response(response, &identity).await,
+                Err(error) => Err(ClientError::from(error)),
             };
-
-            match req.send().await.map_err(ClientError::from) {
-                Ok(response) => match self.handle_response::<T>(response).await {
-                    Ok(result) => return Ok(result),
-                    Err(e) if self.should_retry(&e) && attempt < max_retries => {
-                        last_err = Some(e);
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                },
-                Err(e) if self.should_retry(&e) && attempt < max_retries => {
-                    last_err = Some(e);
-                    continue;
-                }
-                Err(e) => return Err(e),
+            match result {
+                Err(ref error)
+                    if attempt < retries
+                        && matches!(
+                            error,
+                            ClientError::Network(_) | ClientError::ServerError(_)
+                        ) => {}
+                result => return result,
             }
         }
-
-        Err(last_err.unwrap_or(ClientError::Other(
-            "Request failed after retries".to_string(),
-        )))
+        unreachable!("the final attempt always returns")
     }
 
-    /// 跨平台异步等待：WASM 使用 gloo_timers，native 使用 tokio
     async fn sleep_ms(ms: u32) {
         #[cfg(target_arch = "wasm32")]
-        {
-            gloo_timers::future::TimeoutFuture::new(ms).await;
-        }
+        gloo_timers::future::TimeoutFuture::new(ms).await;
         #[cfg(not(target_arch = "wasm32"))]
-        {
-            tokio::time::sleep(Duration::from_millis(ms as u64)).await;
-        }
+        tokio::time::sleep(Duration::from_millis(u64::from(ms))).await;
     }
 
-    /// 判断错误是否值得重试
-    fn should_retry(&self, err: &ClientError) -> bool {
-        matches!(
-            err,
-            ClientError::Network(_) | ClientError::ServerError(_) | ClientError::RateLimited(_)
-        )
-    }
-
-    /// 处理响应
-    async fn handle_response<T: DeserializeOwned>(&self, response: Response) -> Result<T> {
+    async fn handle_response<T: DeserializeOwned>(
+        &self,
+        response: Response,
+        identity: &Request,
+    ) -> Result<T> {
         let status = response.status();
-
         if status.is_success() {
-            response.json::<T>().await.map_err(ClientError::from)
-        } else {
-            let text = response.text().await.unwrap_or_default();
-            Err(ClientError::from_status(status.as_u16(), text))
+            return response.json::<T>().await.map_err(ClientError::from);
         }
+        // Publish the cooldown as soon as headers arrive, before waiting for
+        // an error body, so subsequent component requests are already fenced.
+        let metadata = (status.as_u16() == 429).then(|| response_metadata(response.headers()));
+        if let Some(info) = &metadata {
+            self.inner
+                .cooldowns
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record(identity, info.clone());
+        }
+        let text = response.text().await.unwrap_or_default();
+        let error = ClientError::from_status(status.as_u16(), text);
+        if let Some(mut info) = metadata {
+            let message = error.message();
+            if !message.trim().is_empty() {
+                info.message = message;
+            }
+            return Err(ClientError::RateLimited(info));
+        }
+        Err(error)
     }
 
     /// 获取配置

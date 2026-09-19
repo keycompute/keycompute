@@ -1085,6 +1085,50 @@ impl RateLimiter for RedisRateLimiter {
             .await
     }
 
+    async fn rpm_retry_after(
+        &self,
+        key: &RateLimitKey,
+        config: &crate::RateLimitConfig,
+    ) -> Result<Option<Duration>> {
+        static SCRIPT: std::sync::OnceLock<deadpool_redis::redis::Script> =
+            std::sync::OnceLock::new();
+        let script = SCRIPT.get_or_init(|| {
+            deadpool_redis::redis::Script::new(
+                r#"#!lua flags=allow-oom
+            local now = tonumber(redis.call('TIME')[1])
+            local window = tonumber(ARGV[1])
+            local limit = tonumber(ARGV[2])
+            if limit < 1 then return -1 end
+            redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now - window)
+            local count = redis.call('ZCARD', KEYS[1])
+            if count < limit then return 0 end
+            -- A lowered policy may require more than the oldest event to
+            -- expire. Read the one event that frees an admission slot.
+            local event = redis.call('ZRANGE', KEYS[1], count-limit, count-limit, 'WITHSCORES')
+            if #event ~= 2 then return -1 end
+            return math.max(1, tonumber(event[2]) + window - now)
+            "#,
+            )
+        });
+        let mut conn = self.get_conn().await?;
+        let seconds: i64 = script
+            .key(self.build_rpm_key(key))
+            .arg(self.window_size.as_secs())
+            .arg(config.rpm_limit)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|error| {
+                KeyComputeError::Internal(format!("Redis RPM metadata error: {error}"))
+            })?;
+        match seconds {
+            0 => Ok(None),
+            value if value > 0 => Ok(Some(Duration::from_secs(value as u64))),
+            _ => Err(KeyComputeError::Internal(
+                "Invalid RPM recovery state".into(),
+            )),
+        }
+    }
+
     async fn get_count(&self, key: &RateLimitKey) -> Result<u64> {
         let mut conn = self.get_conn().await?;
         let redis_key = self.build_rpm_key(key);
@@ -1400,6 +1444,78 @@ mod tests {
         assert_eq!(hash_tag(&keys[0]), hash_tag(&keys[1]));
         assert_eq!(hash_tag(&keys[0]), hash_tag(&keys[2]));
         assert!(keys.iter().all(|key| key.contains(":tpm-v3:")));
+    }
+
+    #[tokio::test]
+    async fn redis_rpm_recovery_uses_policy_rank_and_preserves_bucket() {
+        let Some(limiter) = create_test_limiter().await else {
+            return;
+        };
+        let key = RateLimitKey::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let config = crate::RateLimitConfig::new(3, 1000);
+        assert!(
+            limiter
+                .rpm_retry_after(&key, &config)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let redis_key = limiter.build_rpm_key(&key);
+        let mut conn = limiter.get_conn().await.unwrap();
+        let _: i64 = deadpool_redis::redis::Script::new(
+            "local n=tonumber(redis.call('TIME')[1]); redis.call('ZADD',KEYS[1],n-40,'a',n-30,'b',n-10,'c'); return redis.call('EXPIRE',KEYS[1],120)"
+        ).key(&redis_key).invoke_async(&mut conn).await.unwrap();
+        let before: i64 = deadpool_redis::redis::cmd("PTTL")
+            .arg(&redis_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        drop(conn);
+        let delay = limiter
+            .rpm_retry_after(&key, &config)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_secs();
+        assert!(
+            (18..=20).contains(&delay),
+            "oldest slot should expire in about 20s, got {delay}"
+        );
+        let lower = crate::RateLimitConfig::new(1, 1000);
+        let delay = limiter
+            .rpm_retry_after(&key, &lower)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_secs();
+        assert!(
+            (48..=50).contains(&delay),
+            "lower policy needs three expirations, got {delay}"
+        );
+        assert_eq!(limiter.get_count(&key).await.unwrap(), 3);
+        let higher = crate::RateLimitConfig::new(4, 1000);
+        assert!(
+            limiter
+                .rpm_retry_after(&key, &higher)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let mut conn = limiter.get_conn().await.unwrap();
+        let after: i64 = deadpool_redis::redis::cmd("PTTL")
+            .arg(&redis_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(
+            after > 0 && after <= before,
+            "metadata must not extend key lifetime"
+        );
+        let _: i64 = deadpool_redis::redis::cmd("DEL")
+            .arg(&redis_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

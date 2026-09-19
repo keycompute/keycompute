@@ -780,17 +780,21 @@ dependencies = [
 name = "client-api"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gloo-timers",
+ "httpdate",
  "keycompute-types",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
  "urlencoding",
  "uuid",
  "web-sys",
+ "web-time",
  "wiremock",
 ]
 

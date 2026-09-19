@@ -9,11 +9,11 @@ use crate::error::{ClientError, Result};
 pub struct ClientConfig {
     /// API 基础 URL
     pub base_url: String,
-    /// 请求超时时间（秒）
+    /// 整个逻辑请求的截止时间（秒，包含网络等待与重试退避）
     pub timeout_secs: u64,
     /// 是否启用请求重试
     pub retry_enabled: bool,
-    /// 最大重试次数
+    /// 最大重试次数（仅安全读取或显式幂等命令，硬上限 5 次；429 不自动重试）
     pub max_retries: u32,
     /// 是否绕过系统代理（native 构建生效）
     ///

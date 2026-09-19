@@ -23,6 +23,10 @@ uuid = { version = "1", features = ["v4", "serde", "js"] }
 
 # 错误处理
 thiserror = "2"
+httpdate = "1"
+web-time = "1"
+sha2 = "0.10"
+futures = "0.3"
 
 # 异步延迟（重试退避）： WASM 下使用 gloo-timers， native 下使用 tokio
 [target.'cfg(target_arch = "wasm32")'.dependencies]
