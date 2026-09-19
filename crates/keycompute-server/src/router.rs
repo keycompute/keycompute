@@ -41,9 +41,9 @@ use crate::{
         create_account,
         create_api_key,
         create_distribution_rule,
-        create_model_binding,
         // 节点网关 token（用户自服务）
         create_my_node_gateway_token,
+        create_passthrough_binding,
         create_payment_order,
         // 定价管理（Admin）
         create_pricing,
@@ -54,9 +54,9 @@ use crate::{
         delete_account,
         delete_api_key,
         delete_distribution_rule,
-        delete_model_binding,
         delete_my_node_gateway_token,
         delete_node,
+        delete_passthrough_binding,
         delete_pricing,
         delete_response,
         delete_tenant,
@@ -90,6 +90,7 @@ use crate::{
         get_my_usage_stats,
         get_my_withdrawals,
         get_node_gateway_overview,
+        get_passthrough_binding,
         get_payment_order,
         get_provider_health,
         // 公开设置
@@ -106,7 +107,6 @@ use crate::{
         list_billing_records,
         list_distribution_records,
         list_distribution_rules,
-        list_model_bindings,
         list_models,
         list_monitoring_requests,
         list_my_api_keys,
@@ -114,6 +114,7 @@ use crate::{
         list_my_payment_orders,
         list_node_gateway_nodes,
         list_node_gateway_tasks,
+        list_passthrough_bindings,
         list_payment_methods,
         // 定价管理
         list_pricing,
@@ -122,16 +123,18 @@ use crate::{
         login_handler,
         make_pricing_default,
         messages,
-        model_binding_chat_completions,
-        model_binding_list_models,
-        model_binding_retrieve_model,
+        model_catalog,
         // 节点网关
         node_complete,
         node_heartbeat,
         node_poll,
         node_register,
-        probe_model_binding,
+        passthrough_binding_chat_completions,
+        passthrough_binding_list_models,
+        passthrough_binding_options,
+        passthrough_binding_retrieve_model,
         probe_monitoring_targets,
+        probe_passthrough_binding,
         recover_node,
         refresh_account,
         refresh_token_handler,
@@ -151,7 +154,7 @@ use crate::{
         unfreeze_user_balance,
         update_account,
         update_distribution_rule,
-        update_model_binding,
+        update_passthrough_binding,
         update_pricing,
         update_profile,
         update_system_setting_by_key,
@@ -234,15 +237,18 @@ pub fn create_router(state: AppState) -> Router {
             openai_rate_limit_response_middleware,
         ));
 
-    // Exact model-bound surface.  It shares the generation lifecycle and
+    // Exact passthrough surface.  It shares the generation lifecycle and
     // body/rate/admission limits with Chat while preserving its route intent.
-    let model_binding_routes = Router::new()
+    let passthrough_binding_routes = Router::new()
         .route(
             "/pt/v1/chat/completions",
-            post(model_binding_chat_completions),
+            post(passthrough_binding_chat_completions),
         )
-        .route("/pt/v1/models", get(model_binding_list_models))
-        .route("/pt/v1/models/{model}", get(model_binding_retrieve_model))
+        .route("/pt/v1/models", get(passthrough_binding_list_models))
+        .route(
+            "/pt/v1/models/{model}",
+            get(passthrough_binding_retrieve_model),
+        )
         .layer(DefaultBodyLimit::max(OPENAI_CHAT_BODY_LIMIT_BYTES))
         .layer(from_fn_with_state(
             state.clone(),
@@ -391,21 +397,29 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/accounts/{id}/test", post(test_account))
         .route("/api/v1/accounts/{id}/refresh", post(refresh_account));
 
-    // Explicit tenant/model -> account bindings. These routes use the same
+    // Explicit account -> tenant passthrough grants. These routes use the same
     // JWT admin middleware as account management, while handlers additionally
     // check ManageProviders so API keys can never acquire console access.
-    let admin_model_binding_routes = Router::new()
+    let admin_passthrough_binding_routes = Router::new()
         .route(
-            "/api/v1/admin/model-bindings",
-            get(list_model_bindings).post(create_model_binding),
+            "/api/v1/admin/passthrough-bindings",
+            get(list_passthrough_bindings).post(create_passthrough_binding),
         )
         .route(
-            "/api/v1/admin/model-bindings/{id}",
-            put(update_model_binding).delete(delete_model_binding),
+            "/api/v1/admin/passthrough-bindings/{id}",
+            get(get_passthrough_binding)
+                .put(update_passthrough_binding)
+                .delete(delete_passthrough_binding),
         )
         .route(
-            "/api/v1/admin/model-bindings/{id}/probe",
-            post(probe_model_binding),
+            "/api/v1/admin/passthrough-bindings/{id}/probe",
+            post(probe_passthrough_binding),
+        );
+    let admin_model_catalog_routes = Router::new()
+        .route("/api/v1/admin/model-catalog", get(model_catalog))
+        .route(
+            "/api/v1/admin/passthrough-bindings/options",
+            get(passthrough_binding_options),
         );
 
     // 租户管理（仅 Admin）
@@ -547,7 +561,8 @@ pub fn create_router(state: AppState) -> Router {
     // 实际执行顺序：admin_auth_middleware -> rate_limit_middleware -> handler
     let admin_routes = admin_user_routes
         .merge(admin_account_routes)
-        .merge(admin_model_binding_routes)
+        .merge(admin_passthrough_binding_routes)
+        .merge(admin_model_catalog_routes)
         .merge(admin_tenant_routes)
         .merge(admin_settings_routes)
         .merge(admin_distribution_routes)
@@ -648,7 +663,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .merge(auth_routes)
         .merge(openai_routes)
-        .merge(model_binding_routes)
+        .merge(passthrough_binding_routes)
         .merge(responses_routes)
         .merge(anthropic_routes)
         .merge(user_routes)

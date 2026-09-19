@@ -149,7 +149,7 @@ pub async fn cleanup_test_data(
     // bound by another tenant created in the same isolated test namespace.
     pool.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "DELETE FROM model_bindings WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1) OR account_id IN (SELECT id FROM accounts WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1))",
+        "DELETE FROM passthrough_bindings WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1) OR account_id IN (SELECT id FROM accounts WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1))",
         [slug_pattern.clone().into()],
     )).await?;
     // accounts 使用租户 RESTRICT 外键，需先显式删除，避免残留账号阻止租户清理。

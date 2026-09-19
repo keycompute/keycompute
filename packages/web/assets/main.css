@@ -7128,3 +7128,49 @@ select.form-input:focus {
     padding: 20px 0;
   }
 }
+
+/* Model management: resource identity, availability and invocation are separate. */
+.kc-mode-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; margin:20px 0; }
+.kc-mode-card { padding:20px; border:1px solid var(--border-color,#d8dfe7); border-radius:12px; background:var(--bg-surface,var(--bg-secondary,#fff)); transition:border-color .15s; min-width:0; }
+.kc-mode-card p { margin:9px 0 0; font-size:13px; line-height:1.6; color:var(--text-secondary,#64748b); }
+.kc-mode-card.active { border-color:var(--accent-primary,#2691b4); box-shadow:inset 0 3px 0 var(--accent-primary,#2691b4); }
+.kc-mode-card:focus-visible,.kc-inline-actions button:focus-visible { outline:2px solid var(--accent-primary,#2691b4); outline-offset:3px; }
+.kc-tenant-context,.kc-mode-workflow { border:1px solid var(--border-color,#d8dfe7); border-radius:12px; padding:18px 20px; margin:18px 0; }
+.kc-context-name { display:inline-block; margin:0 0 12px 12px; }
+.kc-picker-controls { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+.kc-picker-controls>.input-field { width:auto; flex:1; min-width:160px; }
+.kc-mode-workflow h2 { margin:0 0 8px; font-size:18px; }
+.kc-mode-workflow p { line-height:1.7; color:var(--text-secondary,#64748b); }
+.kc-inline-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+.kc-model-toolbar { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+.kc-model-toolbar .input-field { flex:1; min-width:150px; width:auto; }
+.kc-model-rows { display:flex; flex-direction:column; gap:12px; margin:18px 0; }
+.kc-model-row { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(0,1fr) minmax(0,1.1fr); gap:20px; border:1px solid var(--border-color,#d8dfe7); border-radius:12px; padding:20px; }
+.kc-model-row h3 { margin:0 0 8px; font-size:16px; }
+.kc-mode-kind { font-size:12px; color:var(--text-secondary,#64748b); }
+.kc-call-contract { display:flex; flex-direction:column; gap:6px; margin-top:12px; font-size:12px; }
+.kc-model-row code { overflow-wrap:anywhere; white-space:normal; }
+.kc-model-state p { font-size:13px; line-height:1.65; margin:8px 0; }
+.kc-model-targets>small,.kc-model-state>small { display:block; margin:8px 0; color:var(--text-secondary,#64748b); line-height:1.6; overflow-wrap:anywhere; }
+.kc-binding-actions { margin-top:12px; }
+.kc-action-confirm { padding:12px; margin-top:10px; border:1px solid var(--border-color,#d8dfe7); border-radius:8px; }
+.kc-action-confirm p { font-size:13px; line-height:1.6; }
+.kc-action-confirm button { margin:5px 6px 0 0; }
+.kc-mode-empty { text-align:center; padding:32px 20px; border:1px dashed var(--border-color,#d8dfe7); border-radius:12px; }
+.kc-mode-empty p { color:var(--text-secondary,#64748b); line-height:1.7; }
+.kc-binding-editor { width:min(640px,calc(100vw - 28px)); max-height:calc(100dvh - 32px); overflow:auto; }
+.kc-binding-editor .form-label { display:block; margin-top:18px; margin-bottom:8px; }
+.kc-binding-editor .input-field { margin-bottom:8px; width:100%; }
+@media (max-width:900px) { .kc-mode-grid { grid-template-columns:1fr; gap:10px; } .kc-mode-card { padding:14px 16px; } .kc-model-row { grid-template-columns:1fr; gap:14px; } }
+
+/* Shared upstream resource shell. */
+.upstream-tabs { display:flex; gap:4px; border-bottom:1px solid var(--border-color,#d8dfe7); margin:0 0 20px; }
+.upstream-tab { padding:10px 16px; color:var(--text-secondary,#64748b); text-decoration:none; border-bottom:2px solid transparent; }
+.upstream-tab:hover,.upstream-tab.active { color:var(--accent-primary,#2691b4); border-bottom-color:var(--accent-primary,#2691b4); }
+.upstreams-page .resource-panel { min-width:0; }
+.upstreams-page .table-container { overflow-x:auto; }
+
+/* Passthrough grants reuse the channel modal and only style their bounded choices. */
+.picker-pagination { display:flex; align-items:center; justify-content:flex-end; gap:8px; margin-top:8px; }
+.passthrough-model-summary { margin-top:10px; overflow-wrap:anywhere; }
+.passthrough-model-summary p { max-height:100px; overflow:auto; }

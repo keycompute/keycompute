@@ -549,15 +549,15 @@ pub async fn get_monitoring_summary(
        COUNT(*) FILTER(WHERE status IN ('failed','timed_out','cancelled'))::BIGINT failed_count,
        COUNT(*) FILTER(WHERE status IN ('received','routing','running'))::BIGINT active_count,COUNT(*) FILTER(WHERE status='queued')::BIGINT queued_count,
        COUNT(*) FILTER(WHERE EXISTS(SELECT 1 FROM gateway_request_attempts a WHERE a.request_id=filtered.request_id AND a.attempt_kind='fallback'))::BIGINT fallback_request_count,
-       COUNT(*) FILTER(WHERE EXISTS(SELECT 1 FROM gateway_request_attempts a WHERE a.request_id=filtered.request_id AND a.route_type IN ('provider_account','model_binding')))::BIGINT provider_request_count,
+       COUNT(*) FILTER(WHERE EXISTS(SELECT 1 FROM gateway_request_attempts a WHERE a.request_id=filtered.request_id AND a.route_type IN ('provider_account','passthrough_binding')))::BIGINT provider_request_count,
        (percentile_cont(0.5) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(finished_at-received_at))*1000) FILTER(WHERE finished_at IS NOT NULL))::DOUBLE PRECISION p50_duration_ms,
        (percentile_cont(0.95) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(finished_at-received_at))*1000) FILTER(WHERE finished_at IS NOT NULL))::DOUBLE PRECISION p95_duration_ms,
        (percentile_cont(0.99) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(finished_at-received_at))*1000) FILTER(WHERE finished_at IS NOT NULL))::DOUBLE PRECISION p99_duration_ms
       FROM filtered), attempt_stats AS (SELECT COUNT(*)::BIGINT attempt_count,
        COUNT(*) FILTER(WHERE a.status<>'running')::BIGINT terminal_attempt_count,
        COUNT(*) FILTER(WHERE a.status='succeeded')::BIGINT succeeded_attempt_count,
-       (percentile_cont(0.5) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(a.first_content_at-a.started_at))*1000) FILTER(WHERE a.first_content_at IS NOT NULL AND a.route_type IN ('provider_account','model_binding')))::DOUBLE PRECISION p50_provider_ttft_ms,
-       (percentile_cont(0.95) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(a.first_content_at-a.started_at))*1000) FILTER(WHERE a.first_content_at IS NOT NULL AND a.route_type IN ('provider_account','model_binding')))::DOUBLE PRECISION p95_provider_ttft_ms
+       (percentile_cont(0.5) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(a.first_content_at-a.started_at))*1000) FILTER(WHERE a.first_content_at IS NOT NULL AND a.route_type IN ('provider_account','passthrough_binding')))::DOUBLE PRECISION p50_provider_ttft_ms,
+       (percentile_cont(0.95) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(a.first_content_at-a.started_at))*1000) FILTER(WHERE a.first_content_at IS NOT NULL AND a.route_type IN ('provider_account','passthrough_binding')))::DOUBLE PRECISION p95_provider_ttft_ms
       FROM gateway_request_attempts a JOIN filtered f ON f.request_id=a.request_id{attempt_filter_clause}), node_stats AS (SELECT
        (percentile_cont(0.5) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(nt.claimed_at-nt.queued_at))*1000) FILTER(WHERE nt.claimed_at IS NOT NULL))::DOUBLE PRECISION p50_node_queue_ms,
        (percentile_cont(0.95) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(nt.claimed_at-nt.queued_at))*1000) FILTER(WHERE nt.claimed_at IS NOT NULL))::DOUBLE PRECISION p95_node_queue_ms,

@@ -148,6 +148,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpo
             priority: Some(0),
             models_supported: vec![chat_model.clone(), responses_model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -168,6 +169,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_all_generation_endpo
             priority: Some(0),
             models_supported: vec![anthropic_model.clone()],
             api_capabilities: vec!["messages".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -340,6 +342,7 @@ async fn postgres_tenant_rpm_cap_is_not_widened_by_a_provider_account() {
             priority: Some(0),
             models_supported: vec![model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -422,6 +425,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(10),
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -442,6 +446,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(5),
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -564,6 +569,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(10),
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["messages".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -584,6 +590,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(5),
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["messages".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -709,6 +716,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(10),
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -729,6 +737,7 @@ async fn postgres_account_rpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(5),
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -864,6 +873,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_all_generation_endpo
             priority: Some(0),
             models_supported: vec![chat_model.clone(), responses_model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -884,6 +894,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_all_generation_endpo
             priority: Some(0),
             models_supported: vec![anthropic_model.clone()],
             api_capabilities: vec!["messages".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1045,6 +1056,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(10),
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1065,6 +1077,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(5),
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["chat_completions".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1188,6 +1201,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(10),
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["messages".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1208,6 +1222,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(5),
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["messages".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1333,6 +1348,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(10),
             models_supported: vec![pass_model.clone()],
             api_capabilities: vec!["responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1353,6 +1369,7 @@ async fn postgres_account_tpm_limit_from_db_is_account_specific_for_same_triplet
             priority: Some(5),
             models_supported: vec![block_model.clone()],
             api_capabilities: vec!["responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1478,6 +1495,7 @@ async fn postgres_account_rpm_limit_from_db_is_enforced_for_request_key_triplet(
             priority: Some(0),
             models_supported: vec![model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1598,6 +1616,7 @@ async fn postgres_responses_rpm_rejection_releases_idempotency_claim_for_retry()
             priority: Some(0),
             models_supported: vec![model.clone()],
             api_capabilities: vec!["responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -1699,6 +1718,7 @@ async fn postgres_account_tpm_limit_from_db_is_enforced_for_triplet_key() {
             priority: Some(0),
             models_supported: vec![model.clone()],
             api_capabilities: vec!["chat_completions".to_string(), "responses".to_string()],
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )

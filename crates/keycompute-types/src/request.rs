@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
-    ExecutionTarget, KeyComputeError, ModelBindingSelection, PricingSnapshot,
+    ExecutionTarget, KeyComputeError, PassthroughBindingSelection, PricingSnapshot,
     RequestExecutionFailure, UsageAccumulator,
 };
 
@@ -33,12 +33,12 @@ pub enum ModelHealthObservation {
 /// The caller has already waited for local/account quota admission. This check
 /// is the admission linearization point; it never holds locks over HTTP or SSE.
 #[async_trait::async_trait]
-pub trait ModelBindingValidator: Send + Sync {
+pub trait PassthroughBindingValidator: Send + Sync {
     async fn validate_target(
         &self,
         tenant_id: Uuid,
         model: &str,
-        selection: ModelBindingSelection,
+        selection: PassthroughBindingSelection,
         target: &ExecutionTarget,
         account_config_version: DateTime<Utc>,
     ) -> std::result::Result<AccountModelHealthSnapshot, KeyComputeError>;
@@ -117,12 +117,12 @@ pub struct RequestContext {
     /// Trusted route metadata for `/pt/v1/chat/completions`.  It is populated
     /// only after server-side binding resolution and is never read from a
     /// client header/body field.
-    pub model_binding: Option<ModelBindingSelection>,
+    pub passthrough_binding: Option<PassthroughBindingSelection>,
     /// Account configuration timestamp captured with the binding snapshot.
     /// Account endpoint/key edits advance this fence and invalidate queued
     /// bound requests before they send bytes.
-    pub model_binding_account_config_version: Option<DateTime<Utc>>,
-    pub model_binding_validator: Option<Arc<dyn ModelBindingValidator>>,
+    pub passthrough_binding_account_config_version: Option<DateTime<Utc>>,
+    pub passthrough_binding_validator: Option<Arc<dyn PassthroughBindingValidator>>,
     pub account_model_health_observer: Option<Arc<dyn AccountModelHealthObserver>>,
     /// Provider 名称（路由确定后设置）
     pub provider: Option<String>,
@@ -237,14 +237,17 @@ impl fmt::Debug for RequestContext {
             .field("tenant_id", &self.tenant_id)
             .field("produce_ai_key_id", &self.produce_ai_key_id)
             .field("model", &self.model)
-            .field("model_binding", &self.model_binding)
+            .field("passthrough_binding", &self.passthrough_binding)
             .field(
-                "model_binding_account_config_version",
-                &self.model_binding_account_config_version,
+                "passthrough_binding_account_config_version",
+                &self.passthrough_binding_account_config_version,
             )
             .field(
-                "model_binding_validator",
-                &self.model_binding_validator.as_ref().map(|_| "<validator>"),
+                "passthrough_binding_validator",
+                &self
+                    .passthrough_binding_validator
+                    .as_ref()
+                    .map(|_| "<validator>"),
             )
             .field("provider", &self.provider)
             .field("messages", &self.messages)
@@ -343,9 +346,9 @@ impl RequestContext {
             tenant_id,
             produce_ai_key_id,
             model: model.into(),
-            model_binding: None,
-            model_binding_account_config_version: None,
-            model_binding_validator: None,
+            passthrough_binding: None,
+            passthrough_binding_account_config_version: None,
+            passthrough_binding_validator: None,
             account_model_health_observer: None,
             provider: None,
             messages,
@@ -392,9 +395,10 @@ impl RequestContext {
             tenant_id: self.tenant_id,
             produce_ai_key_id: self.produce_ai_key_id,
             model: self.model.clone(),
-            model_binding: self.model_binding,
-            model_binding_account_config_version: self.model_binding_account_config_version,
-            model_binding_validator: self.model_binding_validator.clone(),
+            passthrough_binding: self.passthrough_binding,
+            passthrough_binding_account_config_version: self
+                .passthrough_binding_account_config_version,
+            passthrough_binding_validator: self.passthrough_binding_validator.clone(),
             account_model_health_observer: self.account_model_health_observer.clone(),
             provider: self.provider.clone(),
             messages: Vec::new(),
@@ -489,18 +493,24 @@ impl RequestContext {
         self.provider = Some(provider.into());
     }
 
-    /// Mark this context as selected by an exact model binding.
-    pub fn set_model_binding(&mut self, selection: ModelBindingSelection) {
-        self.model_binding = Some(selection);
+    /// Mark this context as selected by an exact passthrough binding.
+    pub fn set_passthrough_binding(&mut self, selection: PassthroughBindingSelection) {
+        self.passthrough_binding = Some(selection);
     }
 
-    pub fn set_model_binding_account_config_version(&mut self, config_version: DateTime<Utc>) {
-        self.model_binding_account_config_version = Some(config_version);
+    pub fn set_passthrough_binding_account_config_version(
+        &mut self,
+        config_version: DateTime<Utc>,
+    ) {
+        self.passthrough_binding_account_config_version = Some(config_version);
     }
 
     /// Install the server-side revalidator retained by executor clones.
-    pub fn set_model_binding_validator(&mut self, validator: Arc<dyn ModelBindingValidator>) {
-        self.model_binding_validator = Some(validator);
+    pub fn set_passthrough_binding_validator(
+        &mut self,
+        validator: Arc<dyn PassthroughBindingValidator>,
+    ) {
+        self.passthrough_binding_validator = Some(validator);
     }
 
     /// Install the immutable-snapshot health observer retained by executor clones.

@@ -26,13 +26,13 @@ macro_rules! string_enum {
 // How a request reached an execution target.
 //
 // `ProviderAccount` remains the serialized value used by ordinary account
-// pool routing.  `ModelBinding` is deliberately a separate visibility value
+// pool routing.  `PassthroughBinding` is deliberately a separate visibility value
 // even though it still owns an upstream account, so monitoring can distinguish
-// an explicit tenant/model binding from pool selection without changing the
+// an explicit tenant/passthrough binding from pool selection without changing the
 // account billing dimension.  `Node` retains its historical wire value.
 string_enum!(RouteType {
     ProviderAccount => "provider_account",
-    ModelBinding => "model_binding",
+    PassthroughBinding => "passthrough_binding",
     Node => "node"
 });
 string_enum!(RequestStatus {

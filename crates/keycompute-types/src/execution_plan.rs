@@ -5,14 +5,14 @@ use uuid::Uuid;
 /// Trusted reason an upstream account target was selected.
 ///
 /// Selection provenance is distinct from the upstream account identity and
-/// distinguishes pool selection, model bindings and resource affinity.
+/// distinguishes pool selection, passthrough bindings and resource affinity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AccountSelection {
     #[serde(rename = "pool")]
     #[default]
     Pool,
-    #[serde(rename = "model_binding")]
-    ModelBinding {
+    #[serde(rename = "passthrough_binding")]
+    PassthroughBinding {
         binding_id: Uuid,
         binding_revision: i64,
     },
@@ -20,14 +20,14 @@ pub enum AccountSelection {
     ResponseAffinity,
 }
 
-/// Trusted server-side selection metadata for a model-bound request.
+/// Trusted server-side selection metadata for a passthrough request.
 ///
 /// This is intentionally separate from client request fields: callers cannot
 /// choose an account or endpoint.  The binding revision is carried through
 /// execution so an in-flight request can be rejected if an administrator
 /// retargets the binding before dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ModelBindingSelection {
+pub struct PassthroughBindingSelection {
     pub binding_id: Uuid,
     pub binding_revision: i64,
 }
@@ -169,7 +169,7 @@ impl ExecutionTarget {
         }
     }
 
-    /// Naming aligned with the model-bound execution terminology.  The
+    /// Naming aligned with the passthrough execution terminology.  The
     /// historical `ProviderAccount` enum tag remains the serialized target tag.
     pub fn new_upstream_account(
         provider: impl Into<String>,
@@ -199,7 +199,7 @@ impl ExecutionTarget {
     }
 
     /// Return the selected account identity for either the ordinary pool or a
-    /// model-bound plan.  Keeping this accessor central avoids callers
+    /// passthrough plan.  Keeping this accessor central avoids callers
     /// accidentally treating a Node target as an account.
     pub fn account_id(&self) -> Option<Uuid> {
         match self {

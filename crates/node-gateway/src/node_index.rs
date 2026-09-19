@@ -8,21 +8,15 @@ use keycompute_routing::NodeCapabilityIndex;
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use std::sync::Arc;
 
-const READY_NODE_QUERY: &str = r#"
-            SELECT EXISTS (
-                SELECT 1 FROM nodes n
-                INNER JOIN node_sessions ns ON n.id = ns.node_id
-                INNER JOIN users u ON u.id = n.owner_user_id
-                INNER JOIN tenants t ON t.id = u.tenant_id
-                WHERE n.status = 'online'
-                  AND t.status = 'active'
-                  AND ns.expires_at > NOW()
-                  AND ns.revoked_at IS NULL
-                  AND ns.accepted_models_json @> $1::jsonb
-                  AND n.capabilities_json->>'runtime' = 'ollama'
-                LIMIT 1
-            )
-            "#;
+/// Shared readiness predicate for dispatch and mode-aware model discovery.
+/// Query aliases must be nodes `n`, node_sessions `ns`, and owner tenants `t`.
+pub const READY_NODE_CONDITION: &str = "n.status = 'online' AND t.status = 'active' AND ns.expires_at > NOW() AND ns.revoked_at IS NULL AND n.capabilities_json->>'runtime' = 'ollama'";
+
+fn ready_node_query() -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM nodes n INNER JOIN node_sessions ns ON n.id = ns.node_id INNER JOIN users u ON u.id = n.owner_user_id INNER JOIN tenants t ON t.id = u.tenant_id WHERE {READY_NODE_CONDITION} AND ns.accepted_models_json @> $1::jsonb LIMIT 1)"
+    )
+}
 
 /// 基于 PostgreSQL 的 Node 能力索引
 pub struct PostgresNodeIndex {
@@ -44,7 +38,7 @@ impl NodeCapabilityIndex for PostgresNodeIndex {
 
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            READY_NODE_QUERY,
+            ready_node_query(),
             [model_json.into()],
         );
 
@@ -62,13 +56,14 @@ impl NodeCapabilityIndex for PostgresNodeIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::READY_NODE_QUERY;
+    use super::ready_node_query;
 
     #[test]
     fn ready_node_query_requires_an_active_owner_tenant() {
-        assert!(READY_NODE_QUERY.contains("INNER JOIN tenants t"));
-        assert!(READY_NODE_QUERY.contains("t.status = 'active'"));
-        assert!(READY_NODE_QUERY.contains("ns.expires_at > NOW()"));
-        assert!(READY_NODE_QUERY.contains("ns.revoked_at IS NULL"));
+        let ready_node_query = ready_node_query();
+        assert!(ready_node_query.contains("INNER JOIN tenants t"));
+        assert!(ready_node_query.contains("t.status = 'active'"));
+        assert!(ready_node_query.contains("ns.expires_at > NOW()"));
+        assert!(ready_node_query.contains("ns.revoked_at IS NULL"));
     }
 }

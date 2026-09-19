@@ -25,8 +25,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.user.profile", "个人资料");
     m.insert("nav.user.security", "安全设置");
     m.insert("nav.users", "用户管理");
-    m.insert("nav.accounts", "账号管理");
-    m.insert("nav.model_bindings", "模型绑定");
+    m.insert("nav.accounts", "上游账号");
+    m.insert("nav.upstreams", "上游渠道");
+    m.insert("nav.model_management", "模型管理");
     m.insert("nav.pricing", "定价管理");
     m.insert("nav.payment_orders", "支付订单");
     m.insert("nav.distribution_records", "分销记录");
@@ -119,13 +120,83 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.usage", "用量统计");
     m.insert("page.billing", "账单管理");
     m.insert("page.api_keys", "API Key 管理");
+    m.insert("page.model_management", "模型管理");
+    m.insert("api_keys.mode_account_pool", "账号池");
+    m.insert("api_keys.mode_passthrough", "透传模式");
+    m.insert("api_keys.mode_node_dispatch", "NodeDispatch（节点调度）");
+    m.insert("api_keys.models_load_failed", "模型发现失败");
+    m.insert(
+        "api_keys.models_empty_for_selection",
+        "当前模式和协议没有可用模型；出现真实模型前不会展示可复制示例。",
+    );
     m.insert("page.payments", "支付中心");
     m.insert("page.distribution", "分销中心");
     m.insert("page.profile", "个人资料");
     m.insert("page.security", "安全设置");
     m.insert("page.users", "用户管理");
-    m.insert("page.accounts", "账号管理");
-    m.insert("page.model_bindings", "模型绑定管理");
+    m.insert("page.accounts", "上游账号资源");
+    m.insert("upstreams.title", "上游渠道");
+    m.insert("upstreams.subtitle", "管理上游账号、透传授权与节点网关");
+    m.insert("upstreams.accounts", "账号管理");
+    m.insert("upstreams.passthrough", "透传绑定");
+    m.insert("upstreams.nodes", "节点网关");
+    m.insert(
+        "passthrough.subtitle",
+        "按账号—租户授权全部已声明模型；模型与健康状态仅作只读信息。",
+    );
+    m.insert("passthrough.edit_title", "编辑透传绑定");
+    m.insert(
+        "passthrough.no_accounts",
+        "没有符合条件的账号，请先在账号管理中添加 OpenAI Chat 渠道。",
+    );
+    m.insert("passthrough.no_tenants", "没有匹配的租户。");
+    m.insert(
+        "passthrough.probe_warning",
+        "此诊断只测试账号的一个模型，会调用上游并可能产生费用；不会改变绑定范围。",
+    );
+    m.insert("passthrough.confirm_probe", "确认诊断");
+    m.insert("passthrough.add", "新增透传绑定");
+    m.insert("passthrough.empty", "暂无透传绑定");
+    m.insert("passthrough.health_healthy", "账号健康");
+    m.insert("passthrough.health_degraded", "部分异常");
+    m.insert("passthrough.health_unhealthy", "不健康");
+    m.insert("passthrough.health_unavailable", "不可用");
+    m.insert("passthrough.health_unknown", "尚无健康结论");
+    m.insert("passthrough.account", "账号");
+    m.insert("passthrough.tenant", "租户");
+    m.insert("passthrough.scope", "授权范围");
+    m.insert("passthrough.models", "已声明模型");
+    m.insert("passthrough.pool", "参与账号池");
+    m.insert("passthrough.health", "运行状态");
+    m.insert("passthrough.global", "全局");
+    m.insert("passthrough.bound_tenant", "指定租户");
+    m.insert("passthrough.view_models", "查看");
+    m.insert("passthrough.form_title", "新增透传绑定");
+    m.insert("passthrough.search_account", "搜索账号");
+    m.insert("passthrough.search_tenant", "搜索租户");
+    m.insert("passthrough.choose_account", "选择账号");
+    m.insert("passthrough.choose_tenant", "选择租户");
+    m.insert("passthrough.declared_models", "账号已声明模型");
+    m.insert("passthrough.global_flag", "是否全局");
+    m.insert("passthrough.global_help", "勾选后，所有活跃平台租户均可使用此绑定；不是匿名访问。仍须选择归属租户，该租户停用时绑定不可用。");
+    m.insert("passthrough.pool_flag", "是否参与账号池");
+    m.insert("passthrough.pool_help", "勾选后，仅在此绑定的租户范围内允许普通账号池使用该账号；不勾选时仅允许 /pt。其他已存在的全局授权仍独立生效。");
+    m.insert(
+        "passthrough.broadening_warning",
+        "此选项会扩大访问范围，请确认授权范围。",
+    );
+    m.insert("passthrough.required", "账号和租户均为必填项");
+    m.insert("passthrough.diagnostic", "诊断");
+    m.insert(
+        "passthrough.delete_warning",
+        "删除只撤销本条账号—租户授权；其他授权仍可能生效。账号不会自动重新加入账号池。",
+    );
+    m.insert("passthrough.confirm_delete", "确认撤销");
+    m.insert(
+        "accounts.pool_managed_by_passthrough",
+        "此账号已有透传绑定，账号池参与权由绑定管理，不能在账号编辑中覆盖。",
+    );
+    m.insert("accounts.view_passthrough_bindings", "查看透传绑定");
     m.insert("page.pricing", "定价管理");
     m.insert("page.payment_orders", "支付订单");
     m.insert("page.distribution_records", "分销记录");
@@ -215,6 +286,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.disabled", "已禁用");
     m.insert("common.yes", "是");
     m.insert("common.no", "否");
+    m.insert("common.search", "搜索");
+    m.insert("common.actions", "操作");
     m.insert("common.admin", "管理员");
     m.insert("common.user", "普通用户");
     m.insert("common.no_permission", "您没有权限访问此页面");
@@ -1213,9 +1286,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.request_id", "Request ID");
     m.insert("monitoring.protocol_model", "协议 / 模型");
     m.insert("monitoring.execution_route", "执行路径");
-    m.insert("monitoring.route_provider_account", "Provider 账号");
-    m.insert("monitoring.route_model_binding", "模型绑定");
-    m.insert("monitoring.route_node", "节点");
+    m.insert("monitoring.route_provider_account", "账号池 / 普通入口");
+    m.insert("monitoring.route_passthrough_binding", "透传模式");
+    m.insert("monitoring.route_node", "NodeDispatch（节点调度）");
     m.insert("monitoring.status", "状态");
     m.insert("monitoring.duration_ttft", "总耗时 / TTFT");
     m.insert("monitoring.page", "第 {page} 页");
@@ -1458,27 +1531,6 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "accounts.subtitle",
         "统一维护各 Provider 渠道、模型映射与可用性状态，确保路由层始终有可审阅的账号资产池。",
     );
-    m.insert("model_bindings.health_stale", "已过期");
-    m.insert(
-        "model_bindings.subtitle",
-        "将租户和模型固定到一个上游账号。未知或过期健康状态会安全拒绝，需显式探测恢复。",
-    );
-    m.insert("model_bindings.create", "新增绑定");
-    m.insert("model_bindings.edit", "编辑绑定");
-    m.insert("model_bindings.saved", "绑定已保存");
-    m.insert("model_bindings.deleted", "绑定已删除");
-    m.insert("model_bindings.probe", "探测模型");
-    m.insert("model_bindings.probe_done", "探测结果");
-    m.insert("model_bindings.delete_title", "删除模型绑定？");
-    m.insert("model_bindings.required", "模型、租户和账号均为必填项");
-    m.insert("model_bindings.search_placeholder", "按精确模型筛选");
-    m.insert("model_bindings.empty", "暂无模型绑定");
-    m.insert("model_bindings.model", "模型");
-    m.insert("model_bindings.account", "账号");
-    m.insert("model_bindings.tenant", "租户");
-    m.insert("model_bindings.health", "模型健康");
-    m.insert("model_bindings.revision", "版本");
-    m.insert("model_bindings.enabled", "启用");
     m.insert("accounts.reset_failed", "重置失败");
     m.insert("accounts.fill_required", "请填写必填项");
     m.insert("accounts.created", "渠道已创建");
@@ -1828,6 +1880,177 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert(
         "node_earnings.withdraw_alipay_success",
         "提现申请已提交，请等待管理员审批",
+    );
+
+    m.insert("models.pool", "账号池");
+    m.insert("models.passthrough", "透传模式");
+    m.insert("models.node", "节点网关（NodeDispatch）");
+    m.insert(
+        "models.pool_desc",
+        "从可选上游账号中调度；按健康、容量和策略选路。",
+    );
+    m.insert(
+        "models.pass_desc",
+        "按账号—租户绑定开放该账号的全部已声明模型；通过 /pt 调用，失败不重试、不换渠道。",
+    );
+    m.insert(
+        "models.node_desc",
+        "由在线节点领取并执行任务，不是另一个上游账号。",
+    );
+    m.insert(
+        "models.subtitle",
+        "先确定使用方式，再管理模型供给、可用条件和调用入口。模式与协议相互独立。",
+    );
+    m.insert("models.access_mode", "模型使用方式");
+    m.insert("models.ready", "可选路");
+    m.insert("models.disabled", "已停用");
+    m.insert("models.unverified", "待验证");
+    m.insert("models.stale", "验证已过期");
+    m.insert("models.unhealthy", "模型不健康");
+    m.insert("models.unavailable", "暂不可用");
+    m.insert(
+        "models.pool_ready_help",
+        "有符合选路条件的账号；并非每个模型均已主动探测。",
+    );
+    m.insert(
+        "models.pass_ready_help",
+        "账号透传授权有效；实际请求仍会复核权限、模型和健康状态。",
+    );
+    m.insert(
+        "models.node_ready_help",
+        "存在支持该模型的有效在线节点会话。",
+    );
+    m.insert(
+        "models.disabled_help",
+        "已保存但未开放调用；探测通过后可启用。",
+    );
+    m.insert("models.probe_help", "先手动探测这个账号上的确切模型。");
+    m.insert("models.expired_help", "健康验证已过期，请重新探测。");
+    m.insert(
+        "models.config_help",
+        "账号配置已改变，请确认渠道并重新探测。",
+    );
+    m.insert(
+        "models.unhealthy_help",
+        "上游报告模型异常；修复后重新探测。",
+    );
+    m.insert(
+        "models.unsupported_help",
+        "账号不再声明该模型或接口能力，请调整绑定。",
+    );
+    m.insert("models.tenant_help", "调用租户或资源所属租户已停用。");
+    m.insert("models.account_help", "检查上游账号和所属租户是否启用。");
+    m.insert(
+        "models.visibility_help",
+        "此账号对选定租户已不可见，请更换或调整授权。",
+    );
+    m.insert(
+        "models.cooldown_help",
+        "账号处于冷却期；透传请求不会自动换渠道。",
+    );
+    m.insert(
+        "models.no_node_help",
+        "检查节点在线状态、运行时、会话有效期及已接受模型。",
+    );
+    m.insert(
+        "models.unavailable_help",
+        "当前没有满足条件的目标，请检查资源状态后刷新。",
+    );
+    m.insert("models.consumer_tenant", "调用方租户");
+    m.insert("models.current_tenant", "当前登录租户");
+    m.insert("models.choose_tenant", "选择调用方租户");
+    m.insert("models.search_tenant", "按租户名称搜索");
+    m.insert("models.invalid_mode", "未知的模型使用方式");
+    m.insert("models.pool_workflow", "维护上游账号及支持模型 → 勾选“参与账号池” → 查看可选账号数量。备用渠道仅在安全条件满足时使用。");
+    m.insert(
+        "models.pass_workflow",
+        "选择账号和租户 → 保存透传绑定。默认非全局、不参与账号池；无需逐个模型绑定或启用。",
+    );
+    m.insert("models.node_workflow", "接入节点 → 节点声明模型能力 → 确认有效在线会话 → 使用 node: 模型名调用。注册令牌仅用于接入，不是调用 Key。");
+    m.insert("models.manage_nodes", "管理节点资源");
+    m.insert("models.manage_accounts", "管理上游账号");
+    m.insert("models.create_binding", "配置透传模型");
+    m.insert("models.invocation_guide", "查看调用指南");
+    m.insert("models.api_surface", "接口协议与能力");
+    m.insert("models.search", "搜索模型名称");
+    m.insert("models.empty", "此范围内暂无模型");
+    m.insert(
+        "models.no_match",
+        "没有匹配的模型，请调整筛选；不会用示例模型替代真实供给。",
+    );
+    m.insert("models.health_deadline", "验证有效至");
+    m.insert(
+        "models.shared_account",
+        "该渠道同时参与账号池；两种入口共享账号配额。",
+    );
+    m.insert(
+        "models.bound_only_account",
+        "不参与账号池；仍可用于显式绑定与已有资源续接。",
+    );
+    m.insert("models.eligible_targets", "可选 / 已配置");
+    m.insert(
+        "models.node_count_help",
+        "按节点去重计数；在线会话不代表并发名额已预留。",
+    );
+    m.insert(
+        "models.pool_count_help",
+        "候选账号可随健康、冷却和租户状态变化。",
+    );
+    m.insert(
+        "models.catalog_disclaimer",
+        "目录反映当前选路条件，不是容量预留或下一次请求成功保证。价格与账号资源独立管理。",
+    );
+    m.insert("models.validated_enable", "验证通过，可以启用");
+    m.insert("models.probe", "验证模型");
+    m.insert("models.enable", "启用调用");
+    m.insert("models.disable", "停用调用");
+    m.insert("models.probe_cost", "此操作会调用指定渠道上的模型，可能产生上游费用。验证结果有效 300 秒；成功请求按版本条件刷新。是否继续？");
+    m.insert(
+        "models.delete_warning",
+        "删除后此租户将无法通过透传入口调用该模型。不会删除上游账号。",
+    );
+    m.insert("models.confirm", "确认操作");
+    m.insert("models.binding_setup", "配置唯一渠道");
+    m.insert("models.choose_account", "选择上游账号");
+    m.insert("models.search_account", "按渠道名称搜索");
+    m.insert("models.choose_model", "选择该账号声明的模型");
+    m.insert(
+        "models.edit_disables",
+        "保存修改会先停用此绑定。确认新渠道并验证后，再重新启用调用。",
+    );
+    m.insert(
+        "models.save_disabled_help",
+        "保存不会发起模型请求，也不会立即开放调用。下一步请手动验证，再启用。",
+    );
+    m.insert("models.save_disabled", "保存为停用");
+    m.insert("models.pool_switch", "参与账号池");
+    m.insert(
+        "models.pool_switch_help",
+        "关闭仅退出新账号池选路；不会停用已有透传绑定。账号“启用”总开关仍控制所有入口。",
+    );
+    m.insert(
+        "models.resources_help",
+        "上游账号是共享资源，不等于使用方式。账号池和透传可以共用同一账号，但共享同一份配额。",
+    );
+    m.insert(
+        "models.node_token_help",
+        "NodeDispatch 使用节点注册令牌接入工作节点；用户调用模型仍使用平台 API Key。",
+    );
+    m.insert(
+        "models.guide_help",
+        "同一个平台 Key 可用于已授权的不同模式；选择模式只改变调用入口，不改变 Key 的身份。",
+    );
+    m.insert(
+        "models.no_examples",
+        "暂无可调用模型，不提供虚构模型示例。请联系管理员配置或修复。",
+    );
+    m.insert(
+        "models.placeholder_key",
+        "以下使用占位 Key，请替换为已保存的平台 Key。",
+    );
+    m.insert(
+        "models.node_stream_help",
+        "节点模式采用任务派发，不等同于上游原生逐 token 推送；仅展示当前支持的 Chat 能力。",
     );
 
     m

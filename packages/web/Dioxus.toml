@@ -31,3 +31,6 @@ backend = "http://127.0.0.1:3000/v1/"
 
 [[web.proxy]]
 backend = "http://127.0.0.1:3000/health"
+
+[[web.proxy]]
+backend = "http://127.0.0.1:3000/pt/"

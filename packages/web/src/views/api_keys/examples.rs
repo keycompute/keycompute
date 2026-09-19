@@ -5,15 +5,18 @@
 //! 示例文本生成与视图解耦，便于单元测试，防止占位符与参数失配导致
 //! 复制出去的示例不可用。
 
+#[cfg(test)]
 use client_api::api::openai::ModelInfo;
 
 /// Anthropic 示例的默认模型：列表中没有 Anthropic 兼容模型时显示的空模型。
 /// 与后端 openai 接口的空模型占位一致（见 server list_models 的 model-empty），
 /// 提示用户该模型不可用、需自行替换为实际可用的模型。
 /// `pub`：供视图层把模型名代入翻译文案（见 list.rs 的 example_note_anthropic）。
+#[cfg(test)]
 pub const DEFAULT_ANTHROPIC_MODEL: &str = "model-empty";
 /// Responses 目录为空时使用不可执行的显式占位，避免把 chat-only 模型
 /// 展示成可直接调用的 Responses 模型。
+#[cfg(test)]
 pub const DEFAULT_RESPONSES_MODEL: &str = "model-empty";
 
 /// 一套四种示例文本（env / python / node / curl）
@@ -270,6 +273,7 @@ console.log(message.content[0].text);"#,
 }
 
 /// 从模型列表中选取展示用的默认模型（列表为空时回退 deepseek-chat）
+#[cfg(test)]
 pub fn pick_sample_model(models: &[ModelInfo]) -> String {
     models
         .first()
@@ -279,6 +283,7 @@ pub fn pick_sample_model(models: &[ModelInfo]) -> String {
 
 /// 从 Responses-capable 模型目录选择示例模型；空目录不回退到 chat-only
 /// 默认模型，保留显式的不可用占位。
+#[cfg(test)]
 pub fn pick_responses_model(models: &[ModelInfo]) -> String {
     models
         .first()
@@ -290,6 +295,7 @@ pub fn pick_responses_model(models: &[ModelInfo]) -> String {
 /// （大小写不敏感）；列表中没有 Claude 模型时取列表中第一个
 /// Anthropic 兼容模型；列表为空时显示空模型
 /// （DEFAULT_ANTHROPIC_MODEL，与 openai 空模型一致），提示用户不可用。
+#[cfg(test)]
 pub fn pick_anthropic_model(models: &[ModelInfo]) -> String {
     models
         .iter()

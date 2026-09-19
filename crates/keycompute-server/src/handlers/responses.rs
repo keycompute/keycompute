@@ -306,9 +306,13 @@ pub(super) async fn stored_warmup_context(
         return Ok(None);
     };
     let keycompute_db::models::response_affinity::LocalResponseState {
+        account_id,
         model,
         local_context,
     } = affinity;
+    if let Some(account_id) = account_id {
+        authorize_non_pt_account(pool.write_conn(), tenant_id, account_id).await?;
+    }
     match local_context {
         Value::Object(mut context) => Ok(Some(StoredWarmupContext {
             items: context
@@ -893,6 +897,9 @@ pub async fn list_response_input_items(
                     ApiError::Internal(format!("Failed to load Responses input items: {error}"))
                 })?
         {
+            if let Some(account_id) = affinity.account_id {
+                authorize_non_pt_account(pool.write_conn(), auth.tenant_id, account_id).await?;
+            }
             let data = match affinity.local_context {
                 Value::Object(mut context) => context
                     .remove("items")
@@ -1053,9 +1060,17 @@ async fn local_response_affinity(
     let Some(pool) = state.pool.as_deref() else {
         return Ok(None);
     };
-    ResponseAffinity::find_active_local_response(pool, tenant_id, response_id)
-        .await
-        .map_err(|error| ApiError::Internal(format!("Failed to load local Response: {error}")))
+    let row = ResponseAffinity::find_active_local_owned_response(
+        pool.write_conn(),
+        tenant_id,
+        response_id,
+    )
+    .await
+    .map_err(|error| ApiError::Internal(format!("Failed to load local Response: {error}")))?;
+    if let Some(account_id) = row.as_ref().and_then(|row| row.account_id) {
+        authorize_non_pt_account(pool.write_conn(), tenant_id, account_id).await?;
+    }
+    Ok(row.map(|row| row.local_response))
 }
 
 #[derive(Clone)]
@@ -1138,6 +1153,7 @@ async fn discover_conversation_account(
         Duration::from_secs(state.gateway_config.request_timeout_secs)
             .min(RESPONSES_CONVERSATION_DISCOVERY_MAX_DURATION),
         |configured_account| async move {
+            authorize_non_pt_account(pool.write_conn(), tenant_id, configured_account.id).await?;
             // Conversation discovery bypasses normal model routing. Register
             // every real candidate before a successful discovery can construct
             // a direct execution plan, so executor health callbacks are not
@@ -1275,6 +1291,24 @@ where
         })?
 }
 
+/// Existing opaque resources and deferred work do not confer permission to
+/// bypass a subsequently restricted account-to-tenant grant.
+pub(super) async fn authorize_non_pt_account(
+    db: &impl sea_orm::ConnectionTrait,
+    tenant: uuid::Uuid,
+    account: uuid::Uuid,
+) -> Result<()> {
+    let allowed = Account::authorize_non_pt(db, tenant, account)
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("Upstream access state is unavailable".into()))?;
+    if !allowed {
+        return Err(ApiError::NotFound(
+            "Upstream resource is unavailable for this tenant and request path".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn resolve_response_account(
     state: &AppState,
     response_id: &str,
@@ -1340,11 +1374,7 @@ async fn resolve_response_account(
     // existing upstream resource remains addressable, but its health events
     // must still continue from the persisted snapshot after a restart.
     state.provider_health.hydrate_account_health(&account);
-    if !responses_account_is_visible_to_tenant(&account, tenant_id) {
-        return Err(ApiError::NotFound(format!(
-            "Response not found: {response_id}"
-        )));
-    }
+    authorize_non_pt_account(&txn, tenant_id, account.id).await?;
     if !account.provider.eq_ignore_ascii_case("openai")
         || !affinity.provider.eq_ignore_ascii_case("openai")
         || affinity.account_id != Some(account.id)
@@ -1402,6 +1432,7 @@ async fn resolve_response_account(
     Ok(resolved)
 }
 
+#[cfg(test)]
 fn responses_account_is_visible_to_tenant(account: &Account, tenant_id: uuid::Uuid) -> bool {
     account.tenant_id == tenant_id || account.visibility == "global"
 }
@@ -2470,8 +2501,8 @@ async fn bind_responses_idempotency(
     // general account `updated_at` check would incorrectly reject harmless
     // metadata, limit, or priority edits; current eligibility is revalidated
     // by `reserved_responses_account_snapshot` below.
-    let mut resolved =
-        reserved_responses_account_snapshot(account, &binding.provider, tenant_id, true)?;
+    authorize_non_pt_account(&txn, tenant_id, account.id).await?;
+    let mut resolved = reserved_responses_account_snapshot(account, &binding.provider, true)?;
     resolved.model = binding.model;
     txn.commit().await.map_err(|error| {
         responses_state_unavailable("commit a Responses idempotency claim", error)
@@ -5031,6 +5062,7 @@ mod tests {
             tpm_limit: 100_000,
             priority,
             enabled: true,
+            pool_enabled: true,
             models_supported: vec!["gpt-test".to_string()],
             api_capabilities: vec![AccountApiCapability::Responses.as_str().to_string()],
             visibility: "tenant".to_string(),
@@ -5051,6 +5083,7 @@ mod tests {
             last_probe_error_code: None,
             created_at: now,
             updated_at: now,
+            upstream_config_version: now,
         }
     }
 

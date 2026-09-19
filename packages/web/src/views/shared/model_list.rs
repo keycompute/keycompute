@@ -23,11 +23,6 @@ impl ModelListEntry {
             is_default: false,
         }
     }
-
-    pub fn with_default(mut self, is_default: bool) -> Self {
-        self.is_default = is_default;
-        self
-    }
 }
 
 fn filter_models(models: &[ModelListEntry], query: &str) -> Vec<ModelListEntry> {

@@ -92,6 +92,7 @@ async fn create_test_account(
             } else {
                 vec!["chat_completions".to_string(), "responses".to_string()]
             },
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         },
     )
@@ -168,7 +169,7 @@ async fn get_debug_routing(app: &Router, token: &str, model: &str, entry: Option
 }
 
 /// 调用 /v1/models 并返回模型 id 列表（缺省或显式协议）
-async fn get_model_ids(app: &Router, protocol: Option<&str>) -> Vec<String> {
+async fn get_model_ids(app: &Router, token: &str, protocol: Option<&str>) -> Vec<String> {
     let uri = match protocol {
         Some(p) => format!("/v1/models?protocol={p}"),
         None => "/v1/models".to_string(),
@@ -179,6 +180,7 @@ async fn get_model_ids(app: &Router, protocol: Option<&str>) -> Vec<String> {
             Request::builder()
                 .method("GET")
                 .uri(&uri)
+                .header("Authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -315,12 +317,10 @@ async fn test_list_models_filters_by_protocol_param() {
     let _anthropic_account =
         create_test_account(&pool, tenant.id, "anthropic", &anthropic_models).await;
 
-    let router = DbRouter::single(pool.clone());
-    let state = AppState::with_pool(router);
-    let app = create_router(state);
+    let (app, token) = build_admin_app(&pool, tenant.id, &test_id).await;
 
     // 缺省（openai 入口）：只列出 openai 协议模型
-    let models = get_model_ids(&app, None).await;
+    let models = get_model_ids(&app, &token, None).await;
     assert!(models.contains(&openai_models[0].to_string()));
     assert!(models.contains(&openai_models[1].to_string()));
     assert!(
@@ -329,12 +329,12 @@ async fn test_list_models_filters_by_protocol_param() {
     );
 
     // 显式 protocol=openai：与缺省一致
-    let models = get_model_ids(&app, Some("openai")).await;
+    let models = get_model_ids(&app, &token, Some("openai")).await;
     assert!(models.contains(&openai_models[0].to_string()));
     assert!(!models.contains(&anthropic_models[0].to_string()));
 
     // protocol=anthropic：只列出 anthropic 协议模型
-    let models = get_model_ids(&app, Some("anthropic")).await;
+    let models = get_model_ids(&app, &token, Some("anthropic")).await;
     assert!(models.contains(&anthropic_models[0].to_string()));
     assert!(
         !models.contains(&openai_models[0].to_string()),
@@ -349,6 +349,7 @@ async fn test_list_models_filters_by_protocol_param() {
             Request::builder()
                 .method("GET")
                 .uri("/v1/models?protocol=deepseek")
+                .header("Authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
         )

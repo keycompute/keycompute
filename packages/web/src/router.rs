@@ -10,8 +10,9 @@ use crate::views::{
     node::{node_earnings::NodeEarnings, node_token::NodeToken},
     payments::{PaymentsOverview, Recharge},
     shared::{
-        Accounts, DistributionRecords, ModelBindings, Monitoring, MonitoringDiagnostics,
-        NodeGateway, PaymentOrders, Pricing, Settings, System, Tenants, Users,
+        Accounts, DistributionRecords, ModelBindings, ModelManagement, ModelManagementBase,
+        Monitoring, MonitoringDiagnostics, NodeGateway, PaymentOrders, Pricing, Settings, System,
+        Tenants, UpstreamAccounts, UpstreamNodes, UpstreamPassthrough, Users,
     },
     user::{UserProfile, UserSettings},
 };
@@ -67,6 +68,16 @@ pub enum Route {
             Accounts {},
             #[route("/admin/model-bindings")]
             ModelBindings {},
+            #[route("/admin/models")]
+            ModelManagementBase {},
+            #[route("/admin/models/:mode")]
+            ModelManagement { mode: String },
+            #[route("/admin/upstreams/accounts")]
+            UpstreamAccounts {},
+            #[route("/admin/upstreams/passthrough")]
+            UpstreamPassthrough {},
+            #[route("/admin/upstreams/nodes")]
+            UpstreamNodes {},
             #[route("/admin/pricing")]
             Pricing {},
             #[route("/admin/payment-orders")]
@@ -182,6 +193,22 @@ mod tests {
     }
 
     #[test]
+    fn upstream_tabs_have_canonical_route_backed_pages() {
+        for (url, expected) in [
+            ("/admin/upstreams/accounts", Route::UpstreamAccounts {}),
+            (
+                "/admin/upstreams/passthrough",
+                Route::UpstreamPassthrough {},
+            ),
+            ("/admin/upstreams/nodes", Route::UpstreamNodes {}),
+        ] {
+            let route = Route::from_str(url).expect("upstream route should parse");
+            assert_eq!(route, expected);
+            assert_eq!(route.to_string(), url);
+        }
+    }
+
+    #[test]
     fn nginx_node_api_rule_does_not_capture_console_routes() {
         let nginx = include_str!("../../../nginx/nginx.conf");
         assert!(nginx.contains("location /node/v1/ {"));
@@ -203,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn nginx_model_binding_routes_preserve_uri_and_do_not_fall_back_to_spa() {
+    fn nginx_passthrough_routes_preserve_uri_and_do_not_fall_back_to_spa() {
         let nginx = include_str!("../../../nginx/nginx.conf");
         let chat = nginx
             .split_once("location = /pt/v1/chat/completions {")

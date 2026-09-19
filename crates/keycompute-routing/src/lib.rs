@@ -524,6 +524,8 @@ impl RoutingEngine {
         let accounts = accounts
             .into_iter()
             .filter(|account| {
+                // Scoped pool authorization was already resolved by the SQL
+                // query. The raw account flag is only the unbound fallback.
                 account
                     .api_capabilities
                     .iter()
@@ -1410,6 +1412,7 @@ mod tests {
             tpm_limit: 100_000,
             priority,
             enabled: true,
+            pool_enabled: true,
             models_supported: vec!["gpt-4o".to_string()],
             api_capabilities: if provider == "anthropic" {
                 vec![AccountApiCapability::Messages.as_str().to_string()]
@@ -1437,6 +1440,7 @@ mod tests {
             last_probe_error_code: None,
             created_at: now,
             updated_at: now,
+            upstream_config_version: now,
         }
     }
 

@@ -197,6 +197,7 @@ async fn main() -> anyhow::Result<()> {
                             }
                             .into(),
                         ],
+                        pool_enabled: None,
                         visibility: Some("global".into()),
                     },
                 )

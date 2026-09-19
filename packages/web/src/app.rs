@@ -303,13 +303,11 @@ pub fn AppLayout() -> Element {
     let r_node_token = Route::NodeToken {}.to_string();
     let r_node_earnings = Route::NodeEarnings {}.to_string();
     let r_admin_users = Route::Users {}.to_string();
-    let r_admin_accounts = Route::Accounts {}.to_string();
-    let r_admin_model_bindings = Route::ModelBindings {}.to_string();
+    let r_admin_upstreams = Route::UpstreamAccounts {}.to_string();
     let r_admin_pricing = Route::Pricing {}.to_string();
     let r_admin_payment_orders = Route::PaymentOrders {}.to_string();
     let r_admin_distribution = Route::DistributionRecords {}.to_string();
     let r_admin_tenants = Route::Tenants {}.to_string();
-    let r_admin_node_gateway = Route::NodeGateway {}.to_string();
     let r_admin_monitoring = Route::Monitoring {}.to_string();
     let r_admin_system_settings = Route::Settings {}.to_string();
     let site_name = public_settings_store
@@ -385,13 +383,7 @@ pub fn AppLayout() -> Element {
             title: Some(i18n.t("nav.group.admin").to_string()),
             items: vec![
                 NavItem::new(i18n.t("nav.users"), r_admin_users, NavIcon::User).admin(),
-                NavItem::new(i18n.t("nav.accounts"), r_admin_accounts, NavIcon::Key).admin(),
-                NavItem::new(
-                    i18n.t("nav.model_bindings"),
-                    r_admin_model_bindings,
-                    NavIcon::Key,
-                )
-                .admin(),
+                NavItem::new(i18n.t("nav.upstreams"), r_admin_upstreams, NavIcon::Key).admin(),
                 NavItem::new(i18n.t("nav.pricing"), r_admin_pricing, NavIcon::Wallet).admin(),
                 NavItem::new(
                     i18n.t("nav.payment_orders"),
@@ -406,12 +398,6 @@ pub fn AppLayout() -> Element {
                 )
                 .admin(),
                 NavItem::new(i18n.t("nav.tenants"), r_admin_tenants, NavIcon::Home).admin(),
-                NavItem::new(
-                    i18n.t("nav.node_gateway"),
-                    r_admin_node_gateway,
-                    NavIcon::Server,
-                )
-                .admin(),
                 NavItem::new(
                     i18n.t("nav.monitoring"),
                     r_admin_monitoring,
@@ -552,7 +538,11 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::NodeEarnings {} => "page.node_earnings",
         Route::Users {} => "page.users",
         Route::Accounts {} => "page.accounts",
-        Route::ModelBindings {} => "page.model_bindings",
+        Route::ModelBindings {} => "upstreams.title",
+        Route::ModelManagementBase {} | Route::ModelManagement { .. } => "page.model_management",
+        Route::UpstreamAccounts {} | Route::UpstreamPassthrough {} | Route::UpstreamNodes {} => {
+            "upstreams.title"
+        }
         Route::Pricing {} => "page.pricing",
         Route::PaymentOrders {} => "page.payment_orders",
         Route::DistributionRecords {} => "page.distribution_records",
@@ -600,6 +590,13 @@ mod tests {
             Route::Users {},
             Route::Accounts {},
             Route::ModelBindings {},
+            Route::ModelManagementBase {},
+            Route::ModelManagement {
+                mode: "account_pool".to_string(),
+            },
+            Route::UpstreamAccounts {},
+            Route::UpstreamPassthrough {},
+            Route::UpstreamNodes {},
             Route::Pricing {},
             Route::PaymentOrders {},
             Route::DistributionRecords {},

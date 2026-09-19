@@ -321,27 +321,31 @@ curl http://localhost:3000/v1/models \
   -H "Authorization: Bearer sk-xxx"
 ```
 
-### Tenant model-bound Chat
+### Account-to-tenant passthrough
 
-Administrators can pin an exact tenant/model/capability tuple to one upstream
-account. After creating a binding, run its model-specific health probe from
-the console (or `POST /api/v1/admin/model-bindings/{id}/probe`) before sending
-traffic. Unknown or stale health is fail-closed. Bound Chat uses the same API
-key authentication and native Chat JSON, but performs one outbound attempt
-with no account-pool fallback or compatibility retry:
+Use **Upstream Channels → Account Management / Passthrough Bindings / Node Gateway**
+for upstream configuration. A passthrough binding grants one tenant access to
+all models declared on one account. There is no per-model binding or enabled
+switch. Global access and account-pool participation both default to false:
+only the selected tenant can use `/pt`, and ordinary account-pool or existing
+Responses resource paths cannot bypass the grant.
 
 ```bash
 curl http://localhost:3000/pt/v1/chat/completions \
-  -H "Authorization: Bearer sk-tenant" \
+  -H "Authorization: Bearer $PLATFORM_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello!"}]}'
+  -d '{"model":"example-model","messages":[{"role":"user","content":"Hello!"}]}'
 
 curl http://localhost:3000/pt/v1/models \
-  -H "Authorization: Bearer sk-tenant"
+  -H "Authorization: Bearer $PLATFORM_KEY"
 ```
 
-The complete management contract, stable error behavior, limits and fresh
-schema activation notes are in [`docs/model-binding.md`](docs/model-binding.md).
+Requests make at most one upstream generation attempt, without retries or
+fallback. Saving a grant requires no per-model activation and makes no paid
+probe call. Optional diagnostics are explicit. See
+[`docs/passthrough-bindings.md`](docs/passthrough-bindings.md) for scope flags,
+revocation, health, API contracts and fresh-schema requirements, and
+[`docs/upstream-channels.md`](docs/upstream-channels.md) for the administration flow.
 
 The Responses API is available through `POST /v1/responses` and a WebSocket
 upgrade on `GET /v1/responses`. KeyCompute's WebSocket mode currently accepts
@@ -365,9 +369,9 @@ upgrade on `GET /v1/responses`. KeyCompute's WebSocket mode currently accepts
 | Node | `GET /api/v1/me/node-gateway/token` | Node token |
 | | `GET /api/v1/me/tips` | Tip summary |
 | Admin | `GET/POST /api/v1/accounts` | Upstream account management |
-| | `GET/POST /api/v1/admin/model-bindings` | List/create tenant model bindings |
-| | `PUT/DELETE /api/v1/admin/model-bindings/{id}` | Update/delete with optimistic revisions |
-| | `POST /api/v1/admin/model-bindings/{id}/probe` | Explicit model-specific health probe |
+| | `GET/POST /api/v1/admin/passthrough-bindings` | List/create account-to-tenant grants |
+| | `PUT/DELETE /api/v1/admin/passthrough-bindings/{id}` | Update/delete with optimistic revisions |
+| | `POST /api/v1/admin/passthrough-bindings/{id}/probe` | Optional single-model diagnostic |
 | | `GET/POST /api/v1/settings` | System settings |
 | | `GET/POST /api/v1/pricing` | Pricing management |
 | | `GET /api/v1/admin/monitoring/overview` | Monitoring overview |

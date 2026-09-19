@@ -120,6 +120,7 @@ mod tests {
                 priority: Some(priority),
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
+                pool_enabled: None,
                 visibility: Some("tenant".to_string()),
             },
         )
@@ -328,6 +329,7 @@ mod tests {
                 priority: Some(0),
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
+                pool_enabled: None,
                 visibility: Some("tenant".to_string()),
             },
         )
@@ -336,7 +338,7 @@ mod tests {
         let new_config_version = account.updated_at + chrono::Duration::seconds(1);
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE accounts SET endpoint=$1,updated_at=$2 WHERE id=$3",
+            "UPDATE accounts SET endpoint=$1,updated_at=$2,upstream_config_version=$2 WHERE id=$3",
             [
                 "https://new.example/v1".into(),
                 new_config_version.into(),
@@ -485,6 +487,7 @@ mod tests {
                 priority: Some(0),
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
+                pool_enabled: None,
                 visibility: Some("tenant".to_string()),
             },
         )
@@ -601,6 +604,7 @@ mod tests {
                 priority: Some(0),
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
+                pool_enabled: None,
                 visibility: Some("tenant".to_string()),
             },
         )
@@ -622,6 +626,7 @@ mod tests {
                     enabled: None,
                     models_supported: None,
                     api_capabilities: None,
+                    pool_enabled: None,
                     visibility: None,
                 },
             )
@@ -682,6 +687,7 @@ mod tests {
                 priority: Some(0),
                 models_supported: vec!["test-model".to_string()],
                 api_capabilities: vec!["chat_completions".to_string()],
+                pool_enabled: None,
                 visibility: Some("tenant".to_string()),
             },
         )
@@ -1805,6 +1811,7 @@ mod tests {
                     enabled: None,
                     models_supported: None,
                     api_capabilities: None,
+                    pool_enabled: None,
                     visibility: None,
                 },
             )

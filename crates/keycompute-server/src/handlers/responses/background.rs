@@ -1488,6 +1488,7 @@ pub(super) async fn background_poll_account(
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to load Responses account: {error}")))?
         .ok_or_else(|| ApiError::NotFound("Responses account not found".into()))?;
+    authorize_non_pt_account(pool.write_conn(), affinity.tenant_id, account_id).await?;
     let endpoint = if account.endpoint.is_empty() {
         ProtocolType::parse(&account.provider)
             .map(|protocol| protocol.default_endpoint().to_string())

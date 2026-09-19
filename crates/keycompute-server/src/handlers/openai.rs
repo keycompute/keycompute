@@ -5,9 +5,10 @@
 
 #[cfg(test)]
 use super::ImmediateSettlementServices;
-pub(crate) use crate::model_binding::install_model_health_observer;
-use crate::model_binding::{
-    DbModelBindingValidator, list_routable_model_bindings, resolve_model_binding_plan,
+pub(crate) use crate::passthrough_binding::install_model_health_observer;
+use crate::passthrough_binding::{
+    DbPassthroughBindingValidator, list_routable_passthrough_bindings,
+    resolve_passthrough_binding_plan,
 };
 use crate::{
     error::{ApiError, Result},
@@ -26,11 +27,13 @@ use axum::{
 use futures::stream::Stream;
 use keycompute_auth::Permission;
 use keycompute_db::models::account::Account;
+#[cfg(test)]
+use keycompute_types::AccountApiCapability;
 use keycompute_types::{
-    AccountApiCapability, AccountModelHealthObserver, ClientResponseOutcome, ContentPart,
-    ErrorOrigin, ExecutionTarget, ImageUrl, Message, MessageContent, MessageRole,
-    NoopRequestLifecycleRecorder, RequestContext, RequestLifecycleRecorder, RequestStatus,
-    RequestTraceStart, RouteType, TraceErrorCategory,
+    AccountModelHealthObserver, ClientResponseOutcome, ContentPart, ErrorOrigin, ExecutionTarget,
+    ImageUrl, Message, MessageContent, MessageRole, ModelAccessMode, NoopRequestLifecycleRecorder,
+    RequestContext, RequestLifecycleRecorder, RequestStatus, RequestTraceStart, RouteType,
+    TraceErrorCategory,
 };
 use llm_protocol_provider::{
     LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, LargeBodyPermit, MAX_JSON_PASSTHROUGH_BODY_BYTES,
@@ -623,8 +626,8 @@ pub async fn chat_completions(
 
 /// Model-bound Chat Completions handler.  The route differs intentionally from
 /// the ordinary account pool: its plan is resolved from the authenticated
-/// tenant's exact model binding and the executor is marked single-attempt.
-pub async fn model_binding_chat_completions(
+/// tenant's exact passthrough binding and the executor is marked single-attempt.
+pub async fn passthrough_binding_chat_completions(
     State(state): State<AppState>,
     auth: AuthExtractor,
     request_id: RequestId,
@@ -649,7 +652,7 @@ pub async fn model_binding_chat_completions(
     .await
 }
 
-/// Shared Chat Completions lifecycle for ordinary pool and model-bound routes.
+/// Shared Chat Completions lifecycle for ordinary pool and passthrough routes.
 /// Keeping one body parser/executor path prevents protocol drift and preserves
 /// native unknown/tool fields in both variants.
 #[allow(clippy::too_many_arguments)]
@@ -773,17 +776,17 @@ async fn chat_completions_inner(
 
     // 5. 智能路由
     let (plan, binding_selection, binding_config_version) = if model_bound {
-        match resolve_model_binding_plan(&state, auth.tenant_id, &request.model).await {
+        match resolve_passthrough_binding_plan(&state, auth.tenant_id, &request.model).await {
             Ok(value) => (value.0, Some(value.1), Some(value.2)),
             Err(error) => {
                 let error = ApiError::from(error);
                 let (origin, category, code) = match error {
-                    ApiError::ModelBinding(code) if code.status() == 404 => (
+                    ApiError::PassthroughBinding(code) if code.status() == 404 => (
                         ErrorOrigin::Client,
                         TraceErrorCategory::InvalidRequest,
                         code.code(),
                     ),
-                    ApiError::ModelBinding(code) => (
+                    ApiError::PassthroughBinding(code) => (
                         ErrorOrigin::Gateway,
                         TraceErrorCategory::Transport,
                         code.code(),
@@ -791,17 +794,17 @@ async fn chat_completions_inner(
                     ApiError::NotFound(_) => (
                         ErrorOrigin::Client,
                         TraceErrorCategory::InvalidRequest,
-                        "model_binding_not_found",
+                        "passthrough_binding_not_found",
                     ),
                     ApiError::BadRequest(_) => (
                         ErrorOrigin::Client,
                         TraceErrorCategory::InvalidRequest,
-                        "invalid_model_binding_request",
+                        "invalid_passthrough_binding_request",
                     ),
                     _ => (
                         ErrorOrigin::Gateway,
                         TraceErrorCategory::Transport,
-                        "model_binding_unavailable",
+                        "passthrough_binding_unavailable",
                     ),
                 };
                 finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
@@ -824,17 +827,17 @@ async fn chat_completions_inner(
         }
     };
     if state.pool.is_some() {
-        let health = Arc::new(DbModelBindingValidator::new(&state)?);
+        let health = Arc::new(DbPassthroughBindingValidator::new(&state)?);
         let ctx_mut = Arc::make_mut(&mut ctx);
         ctx_mut.set_account_model_health_observer(
             Arc::clone(&health) as Arc<dyn AccountModelHealthObserver>
         );
         if let Some(selection) = binding_selection {
-            ctx_mut.set_model_binding(selection);
+            ctx_mut.set_passthrough_binding(selection);
             if let Some(config_version) = binding_config_version {
-                ctx_mut.set_model_binding_account_config_version(config_version);
+                ctx_mut.set_passthrough_binding_account_config_version(config_version);
             }
-            ctx_mut.set_model_binding_validator(health);
+            ctx_mut.set_passthrough_binding_validator(health);
         }
     }
     let (route_type, route_status) = initial_route_trace_state(&plan.primary, model_bound);
@@ -844,11 +847,6 @@ async fn chat_completions_inner(
     {
         tracing::warn!(request_id=%request_id.0, %error, "failed to record request route");
     }
-
-    let execution_account_id = match &plan.primary {
-        ExecutionTarget::UpstreamAccount { account_id, .. } => Some(*account_id),
-        _ => None,
-    };
 
     // Node tasks have a narrower message protocol than the OpenAI-compatible
     // provider path. Validate that projection before charging execution RPM;
@@ -879,10 +877,10 @@ async fn chat_completions_inner(
     };
 
     let generation_rate_limit_config =
-        match crate::middleware::authenticated_rate_limit_config_for_account(
+        match crate::middleware::authenticated_rate_limit_config_for_target(
             &state,
             auth.tenant_id,
-            execution_account_id,
+            &plan.primary,
         )
         .await
         {
@@ -1458,7 +1456,7 @@ fn initial_route_trace_state(
         ExecutionTarget::NodeDispatch { .. } => (RouteType::Node, RequestStatus::Routing),
         ExecutionTarget::UpstreamAccount { .. } => (
             if model_bound {
-                RouteType::ModelBinding
+                RouteType::PassthroughBinding
             } else {
                 RouteType::ProviderAccount
             },
@@ -2599,6 +2597,8 @@ pub struct ListModelsResponse {
 /// 模型列表查询参数
 #[derive(Debug, Deserialize)]
 pub struct ListModelsQuery {
+    #[serde(default)]
+    pub mode: Option<ModelAccessMode>,
     /// 入口协议（openai / anthropic），缺省 openai。
     ///
     /// 与路由的入口协议隔离保持一致：/v1/models 是 OpenAI 兼容入口，
@@ -2619,6 +2619,7 @@ pub struct ListModelsQuery {
 ///
 /// 提取为纯函数便于单元测试（handler 级测试需构造完整 AppState，
 /// 成本高且不必要）。
+#[cfg(test)]
 fn collect_models_by_protocol(
     accounts: impl IntoIterator<Item = Account>,
     protocol: &str,
@@ -2639,6 +2640,9 @@ fn collect_models_by_protocol(
             })
     }) {
         for model in account.models_supported {
+            if model.to_ascii_lowercase().starts_with("node:") {
+                continue;
+            }
             model_set.insert(model.clone());
             provider_map.insert(model, account.provider.clone());
         }
@@ -2646,12 +2650,16 @@ fn collect_models_by_protocol(
     (model_set, provider_map)
 }
 
+#[cfg(test)]
 fn resolve_list_capability(
     protocol: &str,
     capability: Option<&str>,
 ) -> Result<Option<AccountApiCapability>> {
     let Some(value) = capability else {
-        return Ok(None);
+        return Ok(Some(match protocol {
+            "anthropic" => AccountApiCapability::Messages,
+            _ => AccountApiCapability::ChatCompletions,
+        }));
     };
     let capability = AccountApiCapability::parse(value).ok_or_else(|| {
         ApiError::BadRequest(format!(
@@ -2678,6 +2686,7 @@ fn resolve_list_capability(
 ///
 /// 提取为纯函数便于单元测试（handler 级测试需构造完整 AppState，
 /// 成本高且不必要）。
+#[cfg(test)]
 fn resolve_list_protocol(protocol: Option<&str>) -> Result<&'static str> {
     match protocol {
         Some(p) => match llm_protocol_provider::ProtocolType::parse(p) {
@@ -2691,97 +2700,113 @@ fn resolve_list_protocol(protocol: Option<&str>) -> Result<&'static str> {
     }
 }
 
-/// 列出所有模型
-/// GET /v1/models
-/// 从数据库聚合指定入口协议（缺省 openai）的启用账号支持的模型列表
+/// Authenticated, mode-specific model discovery. The exact same projection
+/// serves list and detail, so a detail lookup cannot cross protocol/tenant gates.
 pub async fn list_models(
+    auth: AuthExtractor,
     State(state): State<AppState>,
     Query(query): Query<ListModelsQuery>,
 ) -> Result<Json<ListModelsResponse>> {
-    let protocol = resolve_list_protocol(query.protocol.as_deref())?;
-    let capability = resolve_list_capability(protocol, query.capability.as_deref())?;
-
-    let (mut model_set, mut provider_map) = (
-        std::collections::HashSet::new(),
-        std::collections::HashMap::new(),
-    );
-
-    // 尝试从数据库获取模型列表
-    if let Some(pool) = state.pool.as_deref() {
-        // 查询所有启用的账号（不限制 tenant_id，使用系统级查询）
-        // Model discovery is exposed to clients; use the writer so a closed
-        // tenant's accounts disappear immediately instead of waiting for
-        // replica lag.
-        if let Ok(accounts) = Account::find_enabled_all(pool.write_conn()).await {
-            (model_set, provider_map) = collect_models_by_protocol(accounts, protocol, capability);
-        }
-    }
-
-    // 如果数据库中没有模型，使用默认模型列表（仅保留一个示例模型）
-    if model_set.is_empty() {
-        model_set.insert("model-empty".to_string());
-
-        // 使用 provideraccount 计费维度
-        let provider = keycompute_pricing::DEFAULT_PRICING_PROVIDER;
-        provider_map.insert("model-empty".to_string(), provider.to_string());
-    }
-
-    let models: Vec<Model> = model_set
-        .into_iter()
-        .map(|id| Model {
-            id: id.clone(),
-            object: "model".to_string(),
-            created: chrono::Utc::now().timestamp(),
-            owned_by: provider_map
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string()),
-        })
-        .collect();
-
     Ok(Json(ListModelsResponse {
-        object: "list".to_string(),
-        data: models,
+        object: "list".into(),
+        data: discover_models(&auth, &state, &query).await?,
     }))
 }
 
-/// 获取模型信息
-/// GET /v1/models/{model}
-///
-/// 从数据库查询指定模型，返回其所属 Provider 信息
 pub async fn retrieve_model(
+    auth: AuthExtractor,
     State(state): State<AppState>,
+    Query(query): Query<ListModelsQuery>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Model>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    // 查询所有启用的账号，找到支持该模型的 Provider
-    let accounts = Account::find_enabled_all(pool.write_conn())
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
-
-    for account in accounts {
-        if account.models_supported.contains(&model_id) {
-            return Ok(Json(Model {
-                id: model_id,
-                object: "model".to_string(),
-                created: chrono::Utc::now().timestamp(),
-                owned_by: account.provider,
-            }));
-        }
-    }
-
-    // 模型不存在
-    Err(ApiError::NotFound(format!("Model not found: {}", model_id)))
+    discover_models(&auth, &state, &query)
+        .await?
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .map(Json)
+        .ok_or_else(|| {
+            ApiError::NotFound(
+                "Model is not available in the selected access mode and API capability".into(),
+            )
+        })
 }
 
-/// List only currently routable model bindings for the authenticated tenant.
+async fn discover_models(
+    auth: &AuthExtractor,
+    state: &AppState,
+    query: &ListModelsQuery,
+) -> Result<Vec<Model>> {
+    if !auth.has_permission(&Permission::UseApi) {
+        return Err(ApiError::Forbidden(
+            "API-use permission required for model discovery".into(),
+        ));
+    }
+    let mode = query.mode.unwrap_or_default();
+    if mode == ModelAccessMode::Passthrough {
+        return Err(ApiError::BadRequest(
+            "Discover passthrough models through /pt/v1/models".into(),
+        ));
+    }
+    let (protocol, capability) = super::admin_model_catalog::protocol_capability(
+        mode,
+        query.protocol.as_deref(),
+        query.capability.as_deref(),
+    )?;
+    let db = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Model discovery metadata unavailable".into()))?
+        .write_conn();
+    let entries: std::collections::BTreeMap<String, String> = if mode
+        == ModelAccessMode::NodeDispatch
+    {
+        super::admin_model_catalog::ready_node_models(state, auth.tenant_id)
+            .await?
+            .into_iter()
+            .map(|m| (m, "node".into()))
+            .collect()
+    } else {
+        let accounts = tokio::time::timeout(
+            Duration::from_secs(3),
+            Account::find_enabled_by_tenant(db, auth.tenant_id),
+        )
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("Model discovery metadata unavailable".into()))?
+        .map_err(|_| ApiError::ServiceUnavailable("Model discovery metadata unavailable".into()))?;
+        let mut entries = std::collections::BTreeMap::new();
+        for account in accounts {
+            // Visibility and pool participation have already been resolved
+            // from the caller's authoritative account grants by this query.
+            if account.provider != protocol
+                || !account.api_capabilities.iter().any(|v| v == &capability)
+                || !state.provider_health.account_is_routable(&account)
+                || state.account_states.is_cooling_down(&account.id)
+            {
+                continue;
+            }
+            for model in account.models_supported {
+                if !model.is_empty() && !model.starts_with("node:") {
+                    entries.insert(model, protocol.clone());
+                }
+            }
+        }
+        entries
+    };
+    Ok(entries
+        .into_iter()
+        .map(|(id, owned_by)| Model {
+            id,
+            owned_by,
+            object: "model".into(),
+            created: chrono::Utc::now().timestamp(),
+        })
+        .collect())
+}
+
+/// List only currently routable passthrough account models for the authenticated tenant.
 /// The result is advisory; dispatch performs the same checks again on the
 /// writer immediately before execution.
-pub async fn model_binding_list_models(
+pub async fn passthrough_binding_list_models(
     State(state): State<AppState>,
     auth: AuthExtractor,
 ) -> Result<Json<ListModelsResponse>> {
@@ -2790,7 +2815,7 @@ pub async fn model_binding_list_models(
             "API-use permission is required for /pt/v1/models".to_string(),
         ));
     }
-    let rows = list_routable_model_bindings(&state, auth.tenant_id, None).await?;
+    let rows = list_routable_passthrough_bindings(&state, auth.tenant_id, None).await?;
     Ok(Json(ListModelsResponse {
         object: "list".to_string(),
         data: rows
@@ -2805,8 +2830,8 @@ pub async fn model_binding_list_models(
     }))
 }
 
-/// Retrieve one currently routable model binding for the authenticated tenant.
-pub async fn model_binding_retrieve_model(
+/// Retrieve one currently routable passthrough model for the authenticated tenant.
+pub async fn passthrough_binding_retrieve_model(
     State(state): State<AppState>,
     auth: AuthExtractor,
     Path(model_id): Path<String>,
@@ -2816,7 +2841,8 @@ pub async fn model_binding_retrieve_model(
             "API-use permission is required for /pt/v1/models".to_string(),
         ));
     }
-    let mut rows = list_routable_model_bindings(&state, auth.tenant_id, Some(&model_id)).await?;
+    let mut rows =
+        list_routable_passthrough_bindings(&state, auth.tenant_id, Some(&model_id)).await?;
     let Some((id, provider)) = rows.pop() else {
         return Err(ApiError::NotFound("Model not found".to_string()));
     };
@@ -4306,6 +4332,7 @@ mod tests {
             tpm_limit: 100_000,
             priority: 10,
             enabled: true,
+            pool_enabled: true,
             models_supported: models.iter().map(|m| m.to_string()).collect(),
             api_capabilities: if provider == "anthropic" {
                 vec!["messages".to_string()]
@@ -4330,6 +4357,7 @@ mod tests {
             last_probe_error_code: None,
             created_at: now,
             updated_at: now,
+            upstream_config_version: now,
         }
     }
 

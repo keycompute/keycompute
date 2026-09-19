@@ -5,13 +5,13 @@
 pub mod account;
 pub mod api_key;
 pub mod distribution_record;
-pub mod model_binding;
 pub mod node;
 pub mod node_session;
 pub mod node_task;
 pub mod node_task_submission;
 pub mod node_tip;
 pub mod node_tip_withdrawal;
+pub mod passthrough_binding;
 pub mod password_reset;
 pub mod payment_order;
 pub mod pending_registration;
@@ -22,6 +22,7 @@ pub mod responses_idempotency_claim;
 pub mod system_setting;
 pub mod tenant;
 pub mod tenant_distribution_rule;
+pub mod upstream_access;
 pub mod usage_log;
 pub mod user;
 pub mod user_balance;
@@ -36,11 +37,6 @@ pub use account::{
 pub use api_key::{CreateProduceAiKeyRequest, ProduceAiKey, ProduceAiKeyResponse};
 pub use distribution_record::{
     CreateDistributionRecordRequest, DistributionLevelStats, DistributionRecord, DistributionStats,
-};
-pub use model_binding::{
-    AccountModelHealth, AccountModelHealthProbe, CreateModelBindingRequest,
-    MODEL_BINDING_CAPABILITY, MODEL_BINDING_MAX_MODEL_LENGTH, MODEL_BINDING_MAX_PAGE_SIZE,
-    ModelBinding, ModelBindingCount, UpdateModelBindingRequest, validate_model,
 };
 pub use node::{
     CreateNodeRequest, NODE_STATUS_EXCLUDED, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE, Node,
@@ -57,6 +53,11 @@ pub use node_tip_withdrawal::{
     NodeTipWithdrawalWithUser, WITHDRAWAL_STATUS_APPROVED, WITHDRAWAL_STATUS_COMPLETED,
     WITHDRAWAL_STATUS_PENDING, WITHDRAWAL_STATUS_REJECTED, WITHDRAWAL_TYPE_ALIPAY,
     WITHDRAWAL_TYPE_BALANCE,
+};
+pub use passthrough_binding::{
+    AccountModelHealth, AccountModelHealthProbe, CreatePassthroughBindingRequest,
+    PASSTHROUGH_BINDING_MAX_PAGE_SIZE, PassthroughBinding, PassthroughBindingCount,
+    UpdatePassthroughBindingRequest,
 };
 pub use password_reset::{CreatePasswordResetRequest, PasswordReset};
 pub use payment_order::{

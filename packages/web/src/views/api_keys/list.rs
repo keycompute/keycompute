@@ -1,15 +1,11 @@
-use super::examples::{
-    anthropic_examples, openai_examples, pick_anthropic_model, pick_responses_model,
-    pick_sample_model, responses_examples,
-};
+use super::usage_guide::ModelUsageGuide;
 use crate::hooks::use_i18n::use_i18n;
-use crate::services::{api_client::with_auto_refresh, api_key_service, model_service};
+use crate::services::{api_client::with_auto_refresh, api_key_service};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
 use crate::utils::on_copy;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
-use crate::views::shared::model_list::{ModelListEntry, ModelListModal};
 use dioxus::prelude::*;
 use ui::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, Pagination, Table,
@@ -18,19 +14,6 @@ use ui::{
 };
 
 const PAGE_SIZE: usize = 20;
-
-fn model_display_rank(model: &str) -> usize {
-    match model {
-        "gpt-4-turbo" => 0,
-        "gpt-4o-mini" => 1,
-        "qwen3-14b" => 2,
-        "deepseek-chat" => 3,
-        model if model.starts_with("claude-3-5-sonnet") => 4,
-        "gpt-4o" => 5,
-        "gpt-3.5-turbo" => 6,
-        _ => 100,
-    }
-}
 
 #[component]
 pub fn ApiKeyList() -> Element {
@@ -50,31 +33,7 @@ pub fn ApiKeyList() -> Element {
     let mut include_revoked = use_signal(|| false);
     // 复制状态
     let mut copied = use_signal(|| false);
-    let mut example_tab = use_signal(|| "env".to_string());
-    // 示例入口（Chat Completions / Responses / Anthropic Messages）
-    let mut example_protocol = use_signal(|| "openai".to_string());
-    // 当前 API Key 创建成功面板中打开的完整模型列表。
-    let mut show_model_list = use_signal(|| false);
-    let mut selected_models = use_signal(Vec::<ModelListEntry>::new);
     let create_failed = i18n.t("api_keys.create_failed");
-
-    // 获取模型列表（用于显示用法示例）：按当前示例协议拉取，
-    // 与入口协议隔离保持一致（OpenAI 示例只展示 openai 协议模型，
-    // Anthropic 示例展示 anthropic 协议模型）。
-    let models = use_resource(move || {
-        let selected = example_protocol();
-        let (protocol, capability) = match selected.as_str() {
-            "anthropic" => ("anthropic".to_string(), "messages".to_string()),
-            "responses" => ("openai".to_string(), "responses".to_string()),
-            _ => ("openai".to_string(), "chat_completions".to_string()),
-        };
-        async move {
-            model_service::list_models(&protocol, Some(&capability))
-                .await
-                .ok()
-        }
-    });
-
     // 拉取 key 列表
     let mut keys = use_resource(move || async move {
         let request_key = (include_revoked(), page(), page_size());
@@ -122,12 +81,6 @@ pub fn ApiKeyList() -> Element {
         });
     };
 
-    let selected_model_entries = selected_models();
-    let model_list_description = i18n.t_with_args(
-        "api_keys.models_dialog_description",
-        &[("count", &selected_model_entries.len().to_string())],
-    );
-
     rsx! {
         div { class: "page-container kc-api-page",
             div { class: "page-header kc-api-header",
@@ -141,7 +94,6 @@ pub fn ApiKeyList() -> Element {
                         onclick: move |_| {
                             show_create.set(true);
                             new_key_value.set(None);
-                            example_protocol.set("openai".to_string());
                         },
                         IconPlus { size: 16 }
                         {i18n.t("api_keys.create")}
@@ -177,240 +129,20 @@ pub fn ApiKeyList() -> Element {
                 }
             }
 
-            // 新建成功后展示完整密钥（仅一次）
+            // Keep the one-time secret separate from reusable invocation guidance.
             if let Some(key) = new_key_value() {
-                {
-                    // 同域部署时从浏览器地址解析完整 origin，避免示例里只显示相对路径 /v1
-                    let api_url = crate::services::api_client::public_openai_api_base_url();
-                    // Anthropic SDK 会在 base_url 后自行追加 /v1/messages，示例需用不含 /v1 的根路径
-                    let api_root = crate::services::api_client::public_api_root_url();
-
-                    let available_models = models()
-                        .flatten()
-                        .map(|m| {
-                            let mut data = m.data;
-                            data.sort_by(|a, b| {
-                                model_display_rank(&a.id)
-                                    .cmp(&model_display_rank(&b.id))
-                                    .then_with(|| a.id.cmp(&b.id))
-                            });
-                            data
-                        })
-                        .unwrap_or_default();
-
-                    let selected_tab = example_tab();
-                    let is_anthropic = example_protocol() == "anthropic";
-                    let is_responses = example_protocol() == "responses";
-                    let sample_model = if is_responses {
-                        pick_responses_model(&available_models)
-                    } else {
-                        pick_sample_model(&available_models)
-                    };
-                    let anthropic_model = pick_anthropic_model(&available_models);
-
-                    let examples = if is_anthropic {
-                        anthropic_examples(
-                            &api_root,
-                            &key,
-                            &anthropic_model,
-                            i18n.t("api_keys.example_env_comment"),
-                        )
-                    } else if is_responses {
-                        responses_examples(
-                            &api_url,
-                            &key,
-                            &sample_model,
-                            i18n.t("api_keys.example_env_comment"),
-                        )
-                    } else {
-                        openai_examples(
-                            &api_url,
-                            &key,
-                            &sample_model,
-                            i18n.t("api_keys.example_env_comment"),
-                        )
-                    };
-
-                    let example_text = examples.for_tab(&selected_tab).to_string();
-                    // 预先计算 anthropic 提示文案（含模型名参数），避免在 rsx 内嵌多行表达式节点。
-                    // {model} 参数与示例实际使用的 anthropic_model 保持一致：列表为空时
-                    // anthropic_model 即空模型，文案与示例不会出现矛盾。
-                    let anthropic_note = i18n
-                        .t_with_args(
-                            "api_keys.example_note_anthropic",
-                            &[("model", anthropic_model.as_str())],
-                        );
-                    let copied_label = i18n.t("api_keys.copied");
-                    let copy_hint = i18n.t("api_keys.copy_hint");
-                    let copy_manual_hint = i18n.t("common.copy_manual_hint");
-                    rsx! {
-                        div { class: "kc-api-success-panel",
-                            div { class: "kc-api-success-head",
-                                div { class: "kc-api-success-icon", "✓" }
-                                div {
-                                    h2 { {i18n.t("api_keys.created_title")} }
-                                    p { {i18n.t("api_keys.created_once")} }
-                                }
-                            }
-
-                            div { class: "kc-api-success-grid",
-                                section { class: "kc-api-model-panel",
-                                    h3 { {i18n.t("api_keys.models_title")} }
-                                    p {
-                                        {i18n.t("api_keys.models_desc_prefix")}
-                                        code { "API_MODEL" }
-                                        {i18n.t("api_keys.models_desc_suffix")}
-                                    }
-                                    div { class: "kc-api-model-list",
-                                        for (idx , model) in available_models.iter().take(6).enumerate() {
-                                            div { class: "kc-api-model-row",
-                                                span { class: "kc-api-model-name", "{model.id}" }
-                                                span { class: if idx == 0 { "kc-api-model-badge is-default" } else { "kc-api-model-badge" },
-                                                    if idx == 0 {
-                                                        {i18n.t("api_keys.default_model")}
-                                                    } else {
-                                                        "{model.owned_by}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if available_models.len() > 6 {
-                                        button {
-                                            class: "kc-api-model-more",
-                                            r#type: "button",
-                                            aria_label: {
-                                                i18n.t_with_args(
-                                                    "api_keys.models_more_aria",
-                                                    &[("count", &(available_models.len() - 6).to_string())],
-                                                )
-                                            },
-                                            onclick: {
-                                                let models = available_models
-                                                    .iter()
-                                                    .enumerate()
-                                                    .map(|(idx, model)| {
-                                                        ModelListEntry::new(model.id.clone(), Some(model.owned_by.clone()))
-                                                            .with_default(idx == 0)
-                                                    })
-                                                    .collect::<Vec<_>>();
-                                                move |_| {
-                                                    selected_models.set(models.clone());
-                                                    show_model_list.set(true);
-                                                }
-                                            },
-                                            "+{available_models.len() - 6} {i18n.t(\"api_keys.more_models\")}"
-                                        }
-                                    }
-                                }
-
-                                section { class: "kc-api-example-panel",
-                                    h3 { {i18n.t("api_keys.quick_example")} }
-                                    p { {i18n.t("api_keys.quick_example_desc")} }
-
-                                    div { class: "kc-api-example-box",
-                                        div { class: "kc-api-example-protocols",
-                                            for (value , label) in [
-                                                ("openai", i18n.t("api_keys.example_protocol_openai")),
-                                                ("responses", i18n.t("api_keys.example_protocol_responses")),
-                                                ("anthropic", i18n.t("api_keys.example_protocol_anthropic")),
-                                            ]
-                                            {
-                                                button {
-                                                    class: if example_protocol() == value { "kc-api-example-protocol active" } else { "kc-api-example-protocol" },
-                                                    r#type: "button",
-                                                    onclick: move |_| {
-                                                        example_protocol.set(value.to_string());
-                                                        if value != "responses" && example_tab() == "websocket" {
-                                                            example_tab.set("env".to_string());
-                                                        }
-                                                        copied.set(false);
-                                                    },
-                                                    "{label}"
-                                                }
-                                            }
-                                        }
-                                        div { class: "kc-api-example-tabs",
-                                            for (value , label) in [
-                                                ("env", i18n.t("api_keys.example_env")),
-                                                (
-                                                    "python",
-                                                    if is_anthropic {
-                                                        i18n.t("api_keys.example_python_anthropic")
-                                                    } else {
-                                                        i18n.t("api_keys.example_python")
-                                                    },
-                                                ),
-                                                (
-                                                    "node",
-                                                    if is_anthropic {
-                                                        i18n.t("api_keys.example_node_anthropic")
-                                                    } else {
-                                                        i18n.t("api_keys.example_node")
-                                                    },
-                                                ),
-                                                ("curl", i18n.t("api_keys.example_curl")),
-                                                ("websocket", i18n.t("api_keys.example_websocket")),
-                                            ]
-                                            {
-                                                if value != "websocket" || is_responses {
-                                                    button {
-                                                        class: if selected_tab == value { "kc-api-example-tab active" } else { "kc-api-example-tab" },
-                                                        r#type: "button",
-                                                        onclick: move |_| {
-                                                            example_tab.set(value.to_string());
-                                                            copied.set(false);
-                                                        },
-                                                        "{label}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        div { class: "kc-api-copy-block",
-                                            pre {
-                                                class: if copied() { "kc-api-example copied" } else { "kc-api-example" },
-                                                title: if copied() { copied_label } else { copy_hint },
-                                                "{example_text}"
-                                            }
-                                            button {
-                                                class: "kc-api-copy-button",
-                                                r#type: "button",
-                                                onclick: on_copy(example_text.clone(), copy_manual_hint.to_string(), ui_store, copied),
-                                                IconCopy { size: 15 }
-                                                if copied() {
-                                                    {copied_label}
-                                                } else {
-                                                    {i18n.t("api_keys.copy")}
-                                                }
-                                            }
-                                        }
-                                    }
-                                    p { class: "kc-api-secret-note",
-                                        if is_anthropic {
-                                            {anthropic_note}
-                                        } else {
-                                            {i18n.t("api_keys.example_note_prefix")}
-                                            code { "API_MODEL" }
-                                            {i18n.t("api_keys.example_note_suffix")}
-                                        }
-                                    }
-                                }
-                            }
-                            div { class: "kc-api-success-actions",
-                                Button {
-                                    variant: ButtonVariant::Ghost,
-                                    size: ButtonSize::Small,
-                                    onclick: move |_| {
-                                        new_key_value.set(None);
-                                        copied.set(false);
-                                    },
-                                    {i18n.t("api_keys.close_saved")}
-                                }
-                            }
+                section {class:"kc-api-success-panel",
+                    h2 {{i18n.t("api_keys.created_title")}}
+                    p {{i18n.t("api_keys.created_once")}}
+                    div {class:"kc-api-copy-block",pre {class:"kc-api-example","{key}"}
+                        button {class:"btn btn-secondary",r#type:"button",onclick:on_copy(key.clone(),i18n.t("common.copy_manual_hint").to_string(),ui_store,copied),
+                            IconCopy {size:15} {i18n.t("api_keys.copy")}
                         }
                     }
+                    Button {variant:ButtonVariant::Ghost,size:ButtonSize::Small,onclick:move|_|{new_key_value.set(None);copied.set(false);},{i18n.t("api_keys.close_saved")}}
                 }
             }
+            ModelUsageGuide {key:"{new_key_value().is_some()}",api_key:new_key_value()}
 
             // 创建弹窗
             if show_create() {
@@ -484,13 +216,7 @@ pub fn ApiKeyList() -> Element {
                 },
             }
 
-            ModelListModal {
-                open: show_model_list,
-                title: i18n.t("api_keys.models_dialog_title").to_string(),
-                description: model_list_description,
-                models: selected_model_entries,
-                onclose: move |_| show_model_list.set(false),
-            }
+
 
             {
                 let request_key = (include_revoked(), page(), page_size());

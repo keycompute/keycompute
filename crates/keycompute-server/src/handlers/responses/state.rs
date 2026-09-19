@@ -486,6 +486,7 @@ pub(super) async fn reserve_responses_execution_target(
             ));
         }
     };
+    authorize_non_pt_account(&txn, tenant_id, account_id).await?;
     let require_responses_capability = !matches!(
         constraint,
         Some(ResponsesReservationConstraint::Affinity { .. })
@@ -493,7 +494,6 @@ pub(super) async fn reserve_responses_execution_target(
     let snapshot = match reserved_responses_account_snapshot(
         account,
         expected_provider,
-        tenant_id,
         require_responses_capability,
     ) {
         Ok(snapshot) => snapshot,
@@ -577,12 +577,10 @@ pub(super) async fn validate_responses_reservation_constraint(
 pub(super) fn reserved_responses_account_snapshot(
     account: Account,
     expected_provider: &str,
-    tenant_id: uuid::Uuid,
     require_responses_capability: bool,
 ) -> Result<ResolvedResponsesAccount> {
     if !account.provider.eq_ignore_ascii_case(expected_provider)
         || !account.provider.eq_ignore_ascii_case("openai")
-        || !responses_account_is_visible_to_tenant(&account, tenant_id)
     {
         return Err(ApiError::ServiceUnavailable(
             "The selected Responses account changed before execution".to_string(),

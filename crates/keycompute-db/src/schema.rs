@@ -8,7 +8,7 @@ pub mod tables {
     pub const TENANTS: &str = "tenants";
     pub const PRODUCE_AI_KEYS: &str = "produce_ai_keys";
     pub const ACCOUNTS: &str = "accounts";
-    pub const MODEL_BINDINGS: &str = "model_bindings";
+    pub const PASSTHROUGH_BINDINGS: &str = "passthrough_bindings";
     pub const ACCOUNT_MODEL_HEALTH: &str = "account_model_health";
     pub const PRICING_MODELS: &str = "pricing_models";
     pub const PRICING_AUDIT_EVENTS: &str = "pricing_audit_events";
@@ -112,21 +112,22 @@ pub mod accounts {
     pub const TPM_LIMIT: &str = "tpm_limit";
     pub const PRIORITY: &str = "priority";
     pub const ENABLED: &str = "enabled";
+    pub const POOL_ENABLED: &str = "pool_enabled";
     pub const MODELS_SUPPORTED: &str = "models_supported";
     pub const API_CAPABILITIES: &str = "api_capabilities";
     pub const VISIBILITY: &str = "visibility";
     pub const CREATED_AT: &str = "created_at";
+    pub const UPSTREAM_CONFIG_VERSION: &str = "upstream_config_version";
     pub const UPDATED_AT: &str = "updated_at";
 }
 
-/// model_bindings 表列名
-pub mod model_bindings {
+/// passthrough_bindings 表列名
+pub mod passthrough_bindings {
     pub const ID: &str = "id";
-    pub const TENANT_ID: &str = "tenant_id";
-    pub const API_CAPABILITY: &str = "api_capability";
-    pub const MODEL: &str = "model";
     pub const ACCOUNT_ID: &str = "account_id";
-    pub const ENABLED: &str = "enabled";
+    pub const TENANT_ID: &str = "tenant_id";
+    pub const IS_GLOBAL: &str = "is_global";
+    pub const POOL_ENABLED: &str = "pool_enabled";
     pub const REVISION: &str = "revision";
     pub const CREATED_AT: &str = "created_at";
     pub const UPDATED_AT: &str = "updated_at";

@@ -47,6 +47,7 @@ impl Fixture {
                 priority: Some(10),
                 models_supported: vec![MODEL.into()],
                 api_capabilities: vec!["chat_completions".into(), "responses".into()],
+                pool_enabled: None,
                 visibility: Some("global".into()),
             },
         )

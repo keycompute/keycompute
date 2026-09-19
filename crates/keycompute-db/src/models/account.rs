@@ -55,6 +55,7 @@ pub struct Account {
     pub tpm_limit: i32,
     pub priority: i32,
     pub enabled: bool,
+    pub pool_enabled: bool,
     pub models_supported: Vec<String>,
     pub api_capabilities: Vec<String>,
     /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
@@ -77,6 +78,7 @@ pub struct Account {
     pub last_probe_error_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub upstream_config_version: DateTime<Utc>,
 }
 
 #[derive(Debug, FromQueryResult)]
@@ -99,6 +101,7 @@ pub struct CreateAccountRequest {
     pub models_supported: Vec<String>,
     pub api_capabilities: Vec<String>,
     pub visibility: Option<String>,
+    pub pool_enabled: Option<bool>,
 }
 
 /// 更新账号请求
@@ -116,6 +119,7 @@ pub struct UpdateAccountRequest {
     pub models_supported: Option<Vec<String>>,
     pub api_capabilities: Option<Vec<String>>,
     pub visibility: Option<String>,
+    pub pool_enabled: Option<bool>,
 }
 
 impl Account {
@@ -132,9 +136,9 @@ impl Account {
             INSERT INTO accounts (
                 tenant_id, provider, name, endpoint,
                 upstream_api_key_encrypted, upstream_api_key_preview,
-                rpm_limit, tpm_limit, priority, models_supported, api_capabilities, visibility
+                rpm_limit, tpm_limit, priority, models_supported, api_capabilities, visibility, pool_enabled
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING *
             "#,
             [
@@ -150,6 +154,7 @@ impl Account {
                 req.models_supported.clone().into(),
                 req.api_capabilities.clone().into(),
                 req.visibility.as_deref().unwrap_or("tenant").into(),
+                req.pool_enabled.unwrap_or(true).into(),
             ],
         );
         let account = Account::find_by_statement(stmt)
@@ -248,28 +253,12 @@ impl Account {
         api_capability: &str,
         limit: u64,
     ) -> Result<Vec<Account>, DbError> {
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            SELECT * FROM accounts
-            WHERE tenant_id = $1
-              AND EXISTS (SELECT 1 FROM tenants WHERE tenants.id = accounts.tenant_id AND tenants.status = 'active')
-              AND visibility = 'tenant'
-              AND enabled = TRUE
-              AND LOWER(provider) = LOWER($2)
-              AND api_capabilities @> ARRAY[$3]::TEXT[]
-            ORDER BY priority DESC, created_at ASC
-            LIMIT $4
-            "#,
-            [
-                tenant_id.into(),
-                provider.into(),
-                api_capability.into(),
-                limit.into(),
-            ],
-        );
-        Ok(Account::find_by_statement(stmt).all(db).await?)
+        let policy = super::upstream_access::non_pt_predicate("a", "$1");
+        // Discovery is limited to consumer-owned private accounts: it probes
+        // opaque resources, not global accounts belonging to another consumer.
+        Ok(Account::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            format!("SELECT a.* FROM accounts a WHERE a.tenant_id=$1 AND a.visibility='tenant' AND NOT EXISTS (SELECT 1 FROM passthrough_bindings shared_grant WHERE shared_grant.account_id=a.id AND (shared_grant.is_global OR shared_grant.tenant_id<>$1)) AND {policy} AND LOWER(a.provider)=LOWER($2) AND $3=ANY(a.api_capabilities) ORDER BY a.priority DESC,a.id LIMIT $4"),
+            [tenant_id.into(),provider.into(),api_capability.into(),i64::try_from(limit).unwrap_or(i64::MAX).into()])).all(db).await?)
     }
 
     /// 查找所有账号（不限租户，Admin 管理面使用）
@@ -389,14 +378,14 @@ impl Account {
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
     ) -> Result<Vec<Account>, DbError> {
-        let stmt = Statement::from_sql_and_values(
+        let policy = super::upstream_access::non_pt_predicate("a", "$1");
+        Ok(Account::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE EXISTS (SELECT 1 FROM tenants AS target_tenant WHERE target_tenant.id = $1 AND target_tenant.status = 'active') AND tenants.status = 'active' AND (accounts.tenant_id = $1 OR accounts.visibility = 'global') AND accounts.enabled = TRUE ORDER BY accounts.priority DESC",
+            format!("SELECT a.* FROM accounts a WHERE {policy} ORDER BY a.priority DESC,a.id"),
             [tenant_id.into()],
-        );
-        let accounts = Account::find_by_statement(stmt).all(db).await?;
-
-        Ok(accounts)
+        ))
+        .all(db)
+        .await?)
     }
 
     /// 查找所有启用的账号（系统级，不限租户）
@@ -413,8 +402,8 @@ impl Account {
     /// Persist a health probe only if the account configuration has not changed
     /// since the probe started.
     ///
-    /// Probe telemetry deliberately does not modify `updated_at`: that column is
-    /// the optimistic version for account configuration. The expected health
+    /// Probe telemetry does not modify the dedicated `upstream_config_version`.
+    /// Ordinary labels and pool options do not invalidate it. The expected health
     /// timestamp is a second compare-and-swap token, so a late probe cannot
     /// overwrite a newer live transition or administrator reset.
     #[allow(clippy::too_many_arguments)]
@@ -450,7 +439,7 @@ impl Account {
                        health_last_success_at=$12,health_last_failure_at=$13,
                        health_updated_at=GREATEST(health_updated_at,$1),
                        health_generation=health_generation+1
-                   WHERE id=$14 AND updated_at=$15 AND health_updated_at=$16
+                   WHERE id=$14 AND upstream_config_version=$15 AND health_updated_at=$16
                      AND health_generation=$17"#,
                 [
                     probed_at.into(),
@@ -493,7 +482,7 @@ impl Account {
                 r#"UPDATE accounts
                    SET last_probe_at=$1,last_probe_latency_ms=$2,
                        last_probe_status=$3,last_probe_error_code=$4
-                   WHERE id=$5 AND updated_at=$6"#,
+                   WHERE id=$5 AND upstream_config_version=$6"#,
                 [
                     probed_at.into(),
                     latency_ms.into(),
@@ -674,24 +663,31 @@ impl Account {
         model: &str,
         api_capability: &str,
     ) -> Result<Vec<Account>, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            SELECT accounts.* FROM accounts
-            JOIN tenants ON tenants.id = accounts.tenant_id
-            WHERE EXISTS (SELECT 1 FROM tenants AS target_tenant WHERE target_tenant.id = $1 AND target_tenant.status = 'active')
-              AND tenants.status = 'active'
-              AND (accounts.tenant_id = $1 OR accounts.visibility = 'global')
-              AND accounts.enabled = TRUE
-              AND $2 = ANY(accounts.models_supported)
-              AND accounts.api_capabilities @> ARRAY[$3]::TEXT[]
-            ORDER BY accounts.priority DESC
-            "#,
-            [tenant_id.into(), model.into(), api_capability.into()],
-        );
-        let accounts = Account::find_by_statement(stmt).all(db).await?;
+        let policy = super::upstream_access::non_pt_predicate("a", "$1");
+        Ok(Account::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            format!("SELECT a.* FROM accounts a WHERE {policy} AND $2=ANY(a.models_supported) AND $3=ANY(a.api_capabilities) ORDER BY a.priority DESC,a.id"),
+            [tenant_id.into(),model.into(),api_capability.into()])).all(db).await?)
+    }
 
-        Ok(accounts)
+    /// Shared authorization predicate for all non-passthrough account paths,
+    /// including Responses affinity/resource/background work.
+    pub async fn authorize_non_pt(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        account_id: Uuid,
+    ) -> Result<bool, DbError> {
+        let policy = super::upstream_access::non_pt_predicate("a", "$1");
+        let row = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            db.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!("SELECT 1 FROM accounts a WHERE a.id=$2 AND {policy}"),
+                [tenant_id.into(), account_id.into()],
+            )),
+        )
+        .await
+        .map_err(|_| DbError::Other("account access lookup timed out".into()))??;
+        Ok(row.is_some())
     }
 
     /// 更新账号
@@ -700,6 +696,20 @@ impl Account {
         db: &impl ConnectionTrait,
         req: &UpdateAccountRequest,
     ) -> Result<Account, DbError> {
+        if req.pool_enabled.is_some()
+            && db
+                .query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT 1 FROM passthrough_bindings WHERE account_id=$1 LIMIT 1",
+                    [self.id.into()],
+                ))
+                .await?
+                .is_some()
+        {
+            return Err(DbError::Other(
+                "account pool participation is managed by passthrough bindings".into(),
+            ));
+        }
         validate_priority(req.priority)?;
         validate_rate_limits(req.rpm_limit, req.tpm_limit)?;
         let stmt = Statement::from_sql_and_values(
@@ -714,15 +724,31 @@ impl Account {
                 tpm_limit = COALESCE($6, tpm_limit),
                 priority = COALESCE($7, priority),
                 enabled = COALESCE($8, enabled),
+                pool_enabled = COALESCE($14, pool_enabled),
                 models_supported = COALESCE($9, models_supported),
                 api_capabilities = COALESCE($10, api_capabilities),
                 visibility = COALESCE($11, visibility),
                 -- Fence runtime health events that were started against the
                 -- previous account configuration. The health snapshot itself
                 -- is preserved until a probe or runtime result replaces it.
-                health_updated_at = GREATEST(health_updated_at, NOW()) + INTERVAL '1 microsecond',
-                health_generation = health_generation + 1,
+                health_updated_at = CASE WHEN COALESCE($2,endpoint) IS DISTINCT FROM endpoint
+                    OR COALESCE($3,upstream_api_key_encrypted) IS DISTINCT FROM upstream_api_key_encrypted
+                    OR COALESCE($9,models_supported) IS DISTINCT FROM models_supported
+                    OR COALESCE($10,api_capabilities) IS DISTINCT FROM api_capabilities
+                    THEN GREATEST(health_updated_at,statement_timestamp())+INTERVAL '1 microsecond'
+                    ELSE health_updated_at END,
+                health_generation = health_generation + CASE WHEN COALESCE($2,endpoint) IS DISTINCT FROM endpoint
+                    OR COALESCE($3,upstream_api_key_encrypted) IS DISTINCT FROM upstream_api_key_encrypted
+                    OR COALESCE($9,models_supported) IS DISTINCT FROM models_supported
+                    OR COALESCE($10,api_capabilities) IS DISTINCT FROM api_capabilities THEN 1 ELSE 0 END,
                 tenant_id = COALESCE($12, tenant_id),
+                upstream_config_version = CASE WHEN
+                    COALESCE($2,endpoint) IS DISTINCT FROM endpoint
+                    OR COALESCE($3,upstream_api_key_encrypted) IS DISTINCT FROM upstream_api_key_encrypted
+                    OR COALESCE($9,models_supported) IS DISTINCT FROM models_supported
+                    OR COALESCE($10,api_capabilities) IS DISTINCT FROM api_capabilities
+                    THEN GREATEST(upstream_config_version,statement_timestamp())+INTERVAL '1 microsecond'
+                    ELSE upstream_config_version END,
                 updated_at = GREATEST(updated_at, NOW()) + INTERVAL '1 microsecond'
             WHERE id = $13
             RETURNING *
@@ -741,6 +767,7 @@ impl Account {
                 req.visibility.clone().into(),
                 req.tenant_id.into(),
                 self.id.into(),
+                req.pool_enabled.into(),
             ],
         );
         let account = Account::find_by_statement(stmt)

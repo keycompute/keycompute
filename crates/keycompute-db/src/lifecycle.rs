@@ -822,7 +822,7 @@ impl RequestLifecycleRecorder for PostgresRequestLifecycleRecorder {
             async {
                 let result=self.pool.execute(Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    "UPDATE gateway_requests SET status=$1,error_origin=$2,error_category=$3,error_code=$4,billing_status=CASE WHEN billing_status IN ('succeeded','failed') THEN billing_status ELSE $5 END,finished_at=$6,trace_quality=CASE WHEN $8 OR (route_type IN ('provider_account','model_binding') AND NOT EXISTS(SELECT 1 FROM gateway_request_attempts a WHERE a.request_id=gateway_requests.request_id)) THEN 'partial' ELSE trace_quality END,updated_at=NOW() WHERE request_id=$7 AND finished_at IS NULL",
+                    "UPDATE gateway_requests SET status=$1,error_origin=$2,error_category=$3,error_code=$4,billing_status=CASE WHEN billing_status IN ('succeeded','failed') THEN billing_status ELSE $5 END,finished_at=$6,trace_quality=CASE WHEN $8 OR (route_type IN ('provider_account','passthrough_binding') AND NOT EXISTS(SELECT 1 FROM gateway_request_attempts a WHERE a.request_id=gateway_requests.request_id)) THEN 'partial' ELSE trace_quality END,updated_at=NOW() WHERE request_id=$7 AND finished_at IS NULL",
                     [finish.status.as_str().into(), origin.into(), category.into(), truncate(code, 128).into(), finish.billing_status.as_str().into(), finish.finished_at.into(), finish.request_id.into(), intermediate_flush_failed.into()],
                 )).await.map_err(write_error)?;
                 if result.rows_affected() != 1 {

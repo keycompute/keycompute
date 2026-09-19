@@ -18,8 +18,8 @@ use keycompute_routing::{AccountStateStore, ProviderHealthStore};
 use keycompute_types::{
     AccountModelHealthSnapshot, AttemptKind, AttemptRef, AttemptResponseMeta, AttemptStatus,
     AttemptTraceFinish, AttemptTraceStart, BillingStatus, ClientUpstreamResponse, ErrorOrigin,
-    ExecutionPlan, ExecutionTarget, KeyComputeError, ModelBindingError, ModelHealthObservation,
-    NoopRequestLifecycleRecorder, RequestContext, RequestExecutionFailure,
+    ExecutionPlan, ExecutionTarget, KeyComputeError, ModelHealthObservation,
+    NoopRequestLifecycleRecorder, PassthroughBindingError, RequestContext, RequestExecutionFailure,
     RequestLifecycleRecorder, RequestStatus, Result, RouteType, StreamEndReason,
     TraceErrorCategory, TraceErrorInfo, sanitize_error_summary,
 };
@@ -670,7 +670,7 @@ impl GatewayExecutor {
                         .await;
                 }
                 Ok(Err(error)) => {
-                    if let KeyComputeError::ModelBinding(code) = &error {
+                    if let KeyComputeError::PassthroughBinding(code) = &error {
                         ctx.set_execution_failure(RequestExecutionFailure {
                             status: RequestStatus::Failed,
                             error: TraceErrorInfo {
@@ -788,12 +788,12 @@ impl GatewayExecutor {
         let target_binding = match &plan.primary {
             ExecutionTarget::UpstreamAccount {
                 selection:
-                    keycompute_types::AccountSelection::ModelBinding {
+                    keycompute_types::AccountSelection::PassthroughBinding {
                         binding_id,
                         binding_revision,
                     },
                 ..
-            } => Some(keycompute_types::ModelBindingSelection {
+            } => Some(keycompute_types::PassthroughBindingSelection {
                 binding_id: *binding_id,
                 binding_revision: *binding_revision,
             }),
@@ -801,19 +801,19 @@ impl GatewayExecutor {
         };
         let model_bound = target_binding.is_some();
         if model_bound
-            && (ctx.model_binding != target_binding
-                || ctx.model_binding_validator.is_none()
+            && (ctx.passthrough_binding != target_binding
+                || ctx.passthrough_binding_validator.is_none()
                 || ctx.account_model_health_observer.is_none()
-                || ctx.model_binding_account_config_version.is_none()
+                || ctx.passthrough_binding_account_config_version.is_none()
                 || !plan.fallback_chain.is_empty())
         {
             return Err(KeyComputeError::ServiceUnavailable(
-                "model_binding_plan_invalid".to_string(),
+                "passthrough_binding_plan_invalid".to_string(),
             ));
         }
-        if !model_bound && ctx.model_binding.is_some() {
+        if !model_bound && ctx.passthrough_binding.is_some() {
             return Err(KeyComputeError::ServiceUnavailable(
-                "model_binding_plan_invalid".to_string(),
+                "passthrough_binding_plan_invalid".to_string(),
             ));
         }
         // Build the actual execution chain: configured retries stay on the
@@ -931,7 +931,7 @@ impl GatewayExecutor {
                     Ok(permit) => Some(permit),
                     Err(_) => {
                         last_error = Some(if model_bound {
-                            ModelBindingError::CapacityExhausted.into()
+                            PassthroughBindingError::CapacityExhausted.into()
                         } else {
                             KeyComputeError::ServiceUnavailable(
                                 "upstream_capacity_exhausted".into(),
@@ -966,7 +966,7 @@ impl GatewayExecutor {
                         | KeyComputeError::PermissionDenied(_),
                     ) => {
                         last_error = Some(if model_bound {
-                            ModelBindingError::CapacityExhausted.into()
+                            PassthroughBindingError::CapacityExhausted.into()
                         } else {
                             KeyComputeError::ServiceUnavailable(
                                 "upstream_capacity_exhausted".into(),
@@ -983,7 +983,7 @@ impl GatewayExecutor {
                     Err(error) => {
                         tracing::warn!(request_id=%ctx.request_id, %error, "account quota dependency unavailable; not dispatching");
                         last_error = Some(if model_bound {
-                            ModelBindingError::DependencyUnavailable.into()
+                            PassthroughBindingError::DependencyUnavailable.into()
                         } else {
                             KeyComputeError::ServiceUnavailable(
                                 "upstream_capacity_exhausted".into(),
@@ -1000,11 +1000,11 @@ impl GatewayExecutor {
             let snapshot_result: Result<Option<AccountModelHealthSnapshot>> = if model_bound {
                 let selection = target_binding.expect("validated bound target");
                 let validator = ctx
-                    .model_binding_validator
+                    .passthrough_binding_validator
                     .as_ref()
                     .expect("validated binding hook");
                 let version = ctx
-                    .model_binding_account_config_version
+                    .passthrough_binding_account_config_version
                     .expect("validated config fence");
                 tokio::time::timeout(
                     Duration::from_secs(3),
@@ -1017,7 +1017,7 @@ impl GatewayExecutor {
                     ),
                 )
                 .await
-                .unwrap_or_else(|_| Err(ModelBindingError::DependencyUnavailable.into()))
+                .unwrap_or_else(|_| Err(PassthroughBindingError::DependencyUnavailable.into()))
                 .map(Some)
             } else if let Some(observer) = &ctx.account_model_health_observer {
                 let capability = if ctx.native_anthropic_request.is_some() {
@@ -1062,8 +1062,8 @@ impl GatewayExecutor {
                         .start_attempt(AttemptTraceStart {
                             request_id: ctx.request_id,
                             attempt_kind,
-                            route_type: if ctx.model_binding.is_some() {
-                                RouteType::ModelBinding
+                            route_type: if ctx.passthrough_binding.is_some() {
+                                RouteType::PassthroughBinding
                             } else {
                                 RouteType::ProviderAccount
                             },
@@ -1573,7 +1573,7 @@ impl GatewayExecutor {
             messages: upstream_messages,
             stream: ctx.stream,
             include_stream_usage,
-            preserve_native_chat_body: ctx.model_binding.is_some(),
+            preserve_native_chat_body: ctx.passthrough_binding.is_some(),
             // 仅透传客户端指定的采样参数。余额预留使用独立的本地风险预算，
             // 不得为了计费而改变发往上游的协议请求。
             max_tokens: ctx.max_tokens,
@@ -2142,7 +2142,7 @@ fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result
             endpoint,
             upstream_api_key,
             selection:
-                keycompute_types::AccountSelection::ModelBinding {
+                keycompute_types::AccountSelection::PassthroughBinding {
                     binding_id,
                     binding_revision,
                 },
@@ -2156,9 +2156,9 @@ fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result
                 || endpoint.trim().is_empty()
                 || upstream_api_key.is_empty()
             {
-                return Err(ModelBindingError::InvalidPlan.into());
+                return Err(PassthroughBindingError::InvalidPlan.into());
             }
-            bound_selection = Some(keycompute_types::ModelBindingSelection {
+            bound_selection = Some(keycompute_types::PassthroughBindingSelection {
                 binding_id: *binding_id,
                 binding_revision: *binding_revision,
             });
@@ -2178,18 +2178,18 @@ fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result
         if !native_model_matches
             || !native_stream_matches
             || !plan.fallback_chain.is_empty()
-            || ctx.model_binding != Some(selection)
-            || ctx.model_binding_validator.is_none()
+            || ctx.passthrough_binding != Some(selection)
+            || ctx.passthrough_binding_validator.is_none()
             || ctx.account_model_health_observer.is_none()
-            || ctx.model_binding_account_config_version.is_none()
+            || ctx.passthrough_binding_account_config_version.is_none()
             || ctx.native_openai_chat_request.is_none()
             || ctx.native_openai_responses_request.is_some()
             || ctx.native_anthropic_request.is_some()
         {
-            return Err(ModelBindingError::InvalidPlan.into());
+            return Err(PassthroughBindingError::InvalidPlan.into());
         }
-    } else if ctx.model_binding.is_some() {
-        return Err(ModelBindingError::InvalidPlan.into());
+    } else if ctx.passthrough_binding.is_some() {
+        return Err(PassthroughBindingError::InvalidPlan.into());
     }
     Ok(())
 }
@@ -6855,21 +6855,21 @@ mod tests {
 }
 
 #[cfg(test)]
-mod model_binding_contract_tests {
+mod passthrough_binding_contract_tests {
     use super::*;
     use keycompute_types::{
-        AccountModelHealthObserver, ModelBindingSelection, ModelBindingValidator,
+        AccountModelHealthObserver, PassthroughBindingSelection, PassthroughBindingValidator,
     };
     use uuid::Uuid;
 
     struct StateHook;
     #[async_trait::async_trait]
-    impl ModelBindingValidator for StateHook {
+    impl PassthroughBindingValidator for StateHook {
         async fn validate_target(
             &self,
             _tenant: Uuid,
             model: &str,
-            _selection: ModelBindingSelection,
+            _selection: PassthroughBindingSelection,
             target: &ExecutionTarget,
             version: chrono::DateTime<chrono::Utc>,
         ) -> Result<AccountModelHealthSnapshot> {
@@ -6914,13 +6914,13 @@ mod model_binding_contract_tests {
         ctx.native_openai_chat_request = Some(Arc::new(
             serde_json::json!({"model":"bound-model","messages":[]}),
         ));
-        let selection = ModelBindingSelection {
+        let selection = PassthroughBindingSelection {
             binding_id: Uuid::new_v4(),
             binding_revision: 1,
         };
-        ctx.set_model_binding(selection);
-        ctx.set_model_binding_account_config_version(chrono::Utc::now());
-        ctx.set_model_binding_validator(Arc::new(StateHook));
+        ctx.set_passthrough_binding(selection);
+        ctx.set_passthrough_binding_account_config_version(chrono::Utc::now());
+        ctx.set_passthrough_binding_validator(Arc::new(StateHook));
         ctx.set_account_model_health_observer(Arc::new(StateHook));
         let target = ExecutionTarget::new_upstream_account(
             "openai",
@@ -6928,14 +6928,14 @@ mod model_binding_contract_tests {
             "http://bound.test/v1",
             "test-secret",
         )
-        .with_selection(keycompute_types::AccountSelection::ModelBinding {
+        .with_selection(keycompute_types::AccountSelection::PassthroughBinding {
             binding_id: selection.binding_id,
             binding_revision: 1,
         });
         (ctx, ExecutionPlan::new(target))
     }
     #[test]
-    fn valid_model_binding_requires_matching_native_request_and_trusted_hooks() {
+    fn valid_passthrough_binding_requires_matching_native_request_and_trusted_hooks() {
         let (ctx, plan) = bound();
         validate_execution_plan(&ctx, &plan).unwrap();
     }
@@ -6944,10 +6944,10 @@ mod model_binding_contract_tests {
         for case in 0..12 {
             let (mut ctx, mut plan) = bound();
             match case {
-                0 => ctx.model_binding_validator = None,
+                0 => ctx.passthrough_binding_validator = None,
                 1 => ctx.account_model_health_observer = None,
-                2 => ctx.model_binding_account_config_version = None,
-                3 => ctx.model_binding = None,
+                2 => ctx.passthrough_binding_account_config_version = None,
+                3 => ctx.passthrough_binding = None,
                 4 => ctx.native_openai_chat_request = None,
                 5 => {
                     ctx.native_openai_responses_request =
@@ -6982,7 +6982,7 @@ mod model_binding_contract_tests {
                         "secret",
                     );
                     plan.fallback_chain.push(bound_target);
-                    ctx.model_binding = None;
+                    ctx.passthrough_binding = None;
                 }
                 _ => unreachable!(),
             }
@@ -6998,8 +6998,8 @@ mod model_binding_contract_tests {
             assert!(
                 matches!(
                     result,
-                    Err(KeyComputeError::ModelBinding(
-                        ModelBindingError::InvalidPlan
+                    Err(KeyComputeError::PassthroughBinding(
+                        PassthroughBindingError::InvalidPlan
                     ))
                 ),
                 "case {case} was accepted"
@@ -7023,14 +7023,14 @@ mod model_binding_contract_tests {
                     1 => *account_id = Uuid::nil(),
                     2 => *endpoint = String::new(),
                     3 => {
-                        *selection = keycompute_types::AccountSelection::ModelBinding {
+                        *selection = keycompute_types::AccountSelection::PassthroughBinding {
                             binding_id: Uuid::nil(),
                             binding_revision: 1,
                         }
                     }
                     4 => {
-                        *selection = keycompute_types::AccountSelection::ModelBinding {
-                            binding_id: ctx.model_binding.unwrap().binding_id,
+                        *selection = keycompute_types::AccountSelection::PassthroughBinding {
+                            binding_id: ctx.passthrough_binding.unwrap().binding_id,
                             binding_revision: 0,
                         }
                     }
@@ -7052,7 +7052,7 @@ mod model_binding_contract_tests {
             assert!(!should_record_model_health_failure(&e));
         }
         assert!(!should_record_model_health_failure(
-            &ModelBindingError::Changed.into()
+            &PassthroughBindingError::Changed.into()
         ));
         let e = KeyComputeError::UpstreamFailure {
             status: Some(404),

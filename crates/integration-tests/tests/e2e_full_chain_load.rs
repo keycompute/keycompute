@@ -390,6 +390,7 @@ async fn sustained_real_http_database_redis_and_billing_profile() {
                 priority: Some(0),
                 models_supported: vec!["gpt-4o".into()],
                 api_capabilities: vec!["chat_completions".into()],
+                pool_enabled: None,
                 visibility: Some("global".into()),
             },
         )

@@ -94,7 +94,7 @@ impl AccountHealth {
             last_failure_at: account.health_last_failure_at.map(postgres_timestamp),
             updated_at: postgres_timestamp(account.health_updated_at),
             generation: account.health_generation,
-            configuration_updated_at: Some(postgres_timestamp(account.updated_at)),
+            configuration_updated_at: Some(postgres_timestamp(account.upstream_config_version)),
         }
     }
 
@@ -428,7 +428,8 @@ impl ProviderHealthStore {
 
     pub fn account_health_for(&self, account: &Account) -> AccountHealth {
         let persisted_updated_at = postgres_timestamp(account.health_updated_at);
-        let persisted_configuration_updated_at = postgres_timestamp(account.updated_at);
+        let persisted_configuration_updated_at =
+            postgres_timestamp(account.upstream_config_version);
         self.account_health_map
             .get(&account.id)
             .filter(|health| {
@@ -457,9 +458,10 @@ impl ProviderHealthStore {
             }
             dashmap::mapref::entry::Entry::Occupied(mut entry) => {
                 let local = entry.get();
-                let configuration_changed = local
-                    .configuration_updated_at
-                    .is_some_and(|updated_at| updated_at != postgres_timestamp(account.updated_at));
+                let configuration_changed =
+                    local.configuration_updated_at.is_some_and(|updated_at| {
+                        updated_at != postgres_timestamp(account.upstream_config_version)
+                    });
                 if configuration_changed
                     || entry.get().updated_at < persisted.updated_at
                     || (entry.get().updated_at == persisted.updated_at
@@ -476,6 +478,22 @@ impl ProviderHealthStore {
 
     pub fn account_is_routable(&self, account: &Account) -> bool {
         account.enabled && self.account_health_for(account).is_routable()
+    }
+
+    /// Read-only health overlay for bounded model-catalog SQL aggregation.
+    /// Contains no endpoint/key and follows account_health_for's version rules.
+    pub fn catalog_health_overlay(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.account_health_map
+                .iter()
+                .map(|entry| {
+                    let h = entry.value();
+                    serde_json::json!({"id":entry.key(),"status":h.status,
+                "updated_at":h.updated_at,"generation":h.generation,
+                "configuration_updated_at":h.configuration_updated_at})
+                })
+                .collect(),
+        )
     }
 
     pub fn account_health(&self, account_id: &Uuid) -> Option<AccountHealth> {
@@ -1922,6 +1940,7 @@ mod tests {
             tpm_limit: 100_000,
             priority: 0,
             enabled: true,
+            pool_enabled: true,
             models_supported: vec!["model".to_string()],
             api_capabilities: vec!["chat_completions".to_string()],
             visibility: "tenant".to_string(),
@@ -1942,6 +1961,7 @@ mod tests {
             last_probe_error_code: None,
             created_at: health_updated_at,
             updated_at: health_updated_at,
+            upstream_config_version: health_updated_at,
         }
     }
 

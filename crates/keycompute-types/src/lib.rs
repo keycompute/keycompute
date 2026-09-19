@@ -8,6 +8,7 @@ pub mod console;
 pub mod error;
 pub mod execution_plan;
 pub mod memory;
+pub mod model_access;
 pub mod monitoring;
 pub mod node;
 pub mod pricing;
@@ -18,9 +19,13 @@ pub mod user;
 
 // 重新导出最常用的类型
 pub use account::AccountApiCapability;
-pub use error::{ErrorCategory, KeyComputeError, ModelBindingError, Result};
+pub use error::{ErrorCategory, KeyComputeError, PassthroughBindingError, Result};
 pub use execution_plan::{
-    AccountSelection, ExecutionPlan, ExecutionTarget, ModelBindingSelection, SensitiveString,
+    AccountSelection, ExecutionPlan, ExecutionTarget, PassthroughBindingSelection, SensitiveString,
+};
+pub use model_access::{
+    BindingAccountOption, BindingAccountOptions, ModelAccessMode, ModelAvailability,
+    ModelCatalogEntry, ModelCatalogPage,
 };
 pub use monitoring::*;
 pub use node::{
@@ -34,7 +39,7 @@ pub use pricing::PricingSnapshot;
 pub use request::{
     AccountModelHealthObserver, AccountModelHealthSnapshot, ChatCompletionRequest,
     ClientResponseOutcome, ClientUpstreamResponse, ContentPart, ExecutedProviderAccount, ImageUrl,
-    Message, MessageContent, MessageRole, ModelBindingValidator, ModelHealthObservation,
+    Message, MessageContent, MessageRole, ModelHealthObservation, PassthroughBindingValidator,
     RequestContext,
 };
 pub use response::{

@@ -2422,6 +2422,7 @@ mod tests {
                     priority: Some(10),
                     models_supported: vec![model],
                     api_capabilities: capabilities,
+                    pool_enabled: None,
                     visibility: Some("tenant".to_string()),
                 },
             )

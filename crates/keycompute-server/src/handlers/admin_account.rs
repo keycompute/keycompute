@@ -120,6 +120,46 @@ async fn load_active_tenant_ids(
     Ok(rows.into_iter().map(|row| row.id).collect())
 }
 
+#[derive(FromQueryResult)]
+struct AccountBindingCount {
+    account_id: Uuid,
+    count: i64,
+}
+async fn account_binding_counts(
+    db: &impl ConnectionTrait,
+    ids: &[Uuid],
+) -> Result<BTreeMap<Uuid, u64>> {
+    if ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let rows=tokio::time::timeout(std::time::Duration::from_secs(3),AccountBindingCount::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT account_id,COUNT(*)::BIGINT AS count FROM passthrough_bindings WHERE account_id=ANY($1::UUID[]) GROUP BY account_id",[ids.to_vec().into()])).all(db))
+        .await.map_err(|_|ApiError::ServiceUnavailable("Account binding metadata timed out".into()))?
+        .map_err(|_|ApiError::ServiceUnavailable("Account binding metadata is unavailable".into()))?;
+    Ok(rows
+        .into_iter()
+        .map(|r| (r.account_id, r.count.max(0) as u64))
+        .collect())
+}
+fn account_update_error(error: keycompute_db::DbError) -> ApiError {
+    match error {
+        keycompute_db::DbError::Other(message)
+            if message.contains("managed by passthrough bindings") =>
+        {
+            ApiError::Conflict(
+                "This account's pool access is managed by its passthrough bindings".into(),
+            )
+        }
+        keycompute_db::DbError::Other(message) if message == "passthrough_binding_ambiguous" => {
+            ApiError::Conflict(
+                "This model change overlaps another passthrough account in the same tenant scope"
+                    .into(),
+            )
+        }
+        error => ApiError::Internal(format!("Account update failed: {error}")),
+    }
+}
+
 /// Provider 账号信息
 #[derive(Debug, Serialize)]
 pub struct AccountInfo {
@@ -144,6 +184,8 @@ pub struct AccountInfo {
     pub health_penalty: i32,
     pub health_reason: Option<String>,
     pub routing_eligible: bool,
+    pub pool_enabled: bool,
+    pub passthrough_binding_count: u64,
     pub last_probe_at: Option<String>,
     pub last_probe_status: Option<String>,
     pub last_probe_error_code: Option<String>,
@@ -230,6 +272,8 @@ pub async fn list_accounts(
         .collect();
     let active_tenant_ids = load_active_tenant_ids(pool.write_conn(), &tenant_ids).await?;
 
+    let account_ids: Vec<Uuid> = db_accounts.iter().map(|account| account.id).collect();
+    let binding_counts = account_binding_counts(pool.write_conn(), &account_ids).await?;
     let accounts: Vec<AccountInfo> = db_accounts
         .into_iter()
         .map(|acc| {
@@ -265,6 +309,8 @@ pub async fn list_accounts(
                 health_penalty: health.penalty,
                 health_reason: health.reason,
                 routing_eligible,
+                pool_enabled: acc.pool_enabled,
+                passthrough_binding_count: binding_counts.get(&acc.id).copied().unwrap_or(0),
                 last_probe_at: acc.last_probe_at.map(|value| value.to_rfc3339()),
                 last_probe_status: acc.last_probe_status,
                 last_probe_error_code: acc.last_probe_error_code,
@@ -302,6 +348,8 @@ pub struct CreateAccountRequest {
     /// 可见性：'tenant' = 仅本租户可见（默认），'global' = 所有租户可见
     #[serde(default = "default_visibility")]
     pub visibility: String,
+    #[serde(default)]
+    pub pool_enabled: Option<bool>,
 }
 
 fn default_visibility() -> String {
@@ -448,6 +496,7 @@ pub async fn create_account(
         models_supported: models,
         api_capabilities,
         visibility: Some(req.visibility.clone()),
+        pool_enabled: req.pool_enabled,
     };
 
     let account = Account::create(&txn, &db_req)
@@ -483,6 +532,8 @@ pub async fn create_account(
         "routing_eligible": account.enabled
             && account.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
             && !state.account_states.is_cooling_down(&account.id),
+        "pool_enabled": account.pool_enabled,
+        "passthrough_binding_count": 0,
         "last_probe_at": account.last_probe_at.map(|value| value.to_rfc3339()),
         "last_probe_status": account.last_probe_status,
         "last_probe_error_code": account.last_probe_error_code,
@@ -509,6 +560,7 @@ pub struct UpdateAccountRequest {
     pub priority: Option<i32>,
     /// 可见性：'tenant' = 仅本租户可见，'global' = 所有租户可见
     pub visibility: Option<String>,
+    pub pool_enabled: Option<bool>,
 }
 
 /// 更新账号
@@ -535,6 +587,9 @@ pub async fn update_account(
         .begin()
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to begin account update: {error}")))?;
+    keycompute_db::models::upstream_access::lock_configuration(&txn)
+        .await
+        .map_err(account_update_error)?;
 
     // Responses execution reservations establish the tenant -> account lock
     // order before they insert a route reservation. An account update that
@@ -658,12 +713,14 @@ pub async fn update_account(
         models_supported,
         api_capabilities,
         visibility: req.visibility.clone(),
+        pool_enabled: req.pool_enabled,
     };
 
     let updated = existing
         .update(&txn, &db_req)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to update account: {}", e)))?;
+        .map_err(account_update_error)?;
+    keycompute_db::models::passthrough_binding::PassthroughBinding::ensure_account_models_unambiguous(&txn,account_id).await.map_err(account_update_error)?;
     txn.commit()
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to commit account update: {error}")))?;
@@ -710,6 +767,8 @@ pub async fn update_account(
             && updated.enabled
             && updated.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
             && !state.account_states.is_cooling_down(&updated.id),
+        "pool_enabled": updated.pool_enabled,
+        "passthrough_binding_count": account_binding_counts(pool.write_conn(), &[updated.id]).await?.get(&updated.id).copied().unwrap_or(0),
         "last_probe_at": updated.last_probe_at.map(|value| value.to_rfc3339()),
         "last_probe_status": updated.last_probe_status,
         "last_probe_error_code": updated.last_probe_error_code,
@@ -768,21 +827,24 @@ pub async fn delete_account(
             ApiError::Internal(format!("Failed to drain account Responses routes: {error}"))
         })?;
 
-    let has_model_bindings = txn
+    let has_passthrough_bindings = txn
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT 1 FROM model_bindings WHERE account_id = $1 LIMIT 1",
+            "SELECT 1 FROM passthrough_bindings WHERE account_id = $1 LIMIT 1",
             [account_id.into()],
         ))
         .await
         .map_err(|error| {
-            ApiError::Internal(format!("Failed to inspect account model bindings: {error}"))
+            ApiError::Internal(format!(
+                "Failed to inspect account passthrough bindings: {error}"
+            ))
         })?
         .is_some();
-    if has_model_bindings {
+    if has_passthrough_bindings {
         let _ = txn.rollback().await;
         return Err(ApiError::Conflict(
-            "Account is referenced by model bindings; delete or retarget them first".to_string(),
+            "Account is referenced by passthrough bindings; delete or retarget them first"
+                .to_string(),
         ));
     }
 
@@ -1100,7 +1162,7 @@ async fn persist_probe_outcome(
         .provider_health
         .record_account_probe_if_current_and_enqueue(
             account.id,
-            account.updated_at,
+            account.upstream_config_version,
             expected_health_updated_at,
             expected_health_generation,
             probed_at,
@@ -1113,7 +1175,7 @@ async fn persist_probe_outcome(
         match Account::record_probe_telemetry_if_config_current(
             writer,
             account.id,
-            account.updated_at,
+            account.upstream_config_version,
             probed_at,
             latency_ms,
             probe_status,
@@ -1137,7 +1199,7 @@ async fn persist_probe_outcome(
     match Account::record_probe_snapshot_if_config_current(
         writer,
         account.id,
-        account.updated_at,
+        account.upstream_config_version,
         expected_health_updated_at,
         expected_health_generation,
         probed_at,
@@ -1409,10 +1471,32 @@ pub async fn refresh_account(
     // 更新数据库
     let db_req = refresh_models_update_request(fetched_models);
 
-    let updated = account
-        .update(pool, &db_req)
+    // No configuration lock is held during external metadata I/O.
+    let txn = pool
+        .begin()
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to update account: {}", e)))?;
+        .map_err(|e| ApiError::Internal(format!("Failed to begin model refresh: {e}")))?;
+    keycompute_db::models::upstream_access::lock_configuration(&txn)
+        .await
+        .map_err(account_update_error)?;
+    let current = Account::find_by_id_for_update(&txn, account_id)
+        .await
+        .map_err(account_update_error)?
+        .ok_or_else(|| ApiError::NotFound("Account no longer exists".into()))?;
+    if current.upstream_config_version != account.upstream_config_version {
+        return Err(ApiError::Conflict(
+            "Account configuration changed during model refresh; retry".into(),
+        ));
+    }
+    let updated = current
+        .update(&txn, &db_req)
+        .await
+        .map_err(account_update_error)?;
+    keycompute_db::models::passthrough_binding::PassthroughBinding::ensure_account_models_unambiguous(&txn,account_id)
+        .await.map_err(account_update_error)?;
+    txn.commit()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to commit model refresh: {e}")))?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -1442,6 +1526,7 @@ fn refresh_models_update_request(models_supported: Vec<String>) -> DbUpdateAccou
         models_supported: Some(models_supported),
         api_capabilities: None,
         visibility: None,
+        pool_enabled: None,
     }
 }
 

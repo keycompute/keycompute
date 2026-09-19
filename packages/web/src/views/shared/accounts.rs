@@ -13,6 +13,12 @@ const ACCOUNT_PRIORITY_MIN: i32 = 0;
 const ACCOUNT_PRIORITY_MAX: i32 = 10;
 const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
 
+/// A bound account's pool exposure is owned by its grants, not the
+/// resource editor. Omitting this field keeps metadata edits independent.
+fn pool_update_field(pool_enabled: bool, binding_managed: bool) -> Option<bool> {
+    (!binding_managed).then_some(pool_enabled)
+}
+
 fn parse_account_priority(value: &str) -> Option<i32> {
     let priority = value.trim().parse::<i32>().ok()?;
     (ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX)
@@ -257,6 +263,14 @@ fn account_test_outcome(response: AccountTestResponse) -> AccountTestOutcome {
 /// - Admin：管理 LLM Provider 渠道，支持测试连接、刷新状态
 #[component]
 pub fn Accounts() -> Element {
+    let navigator = use_navigator();
+    let current = use_route::<crate::router::Route>();
+    use_effect(move || {
+        if current.to_string() == "/admin/accounts" {
+            navigator.replace(crate::router::Route::UpstreamAccounts {});
+        }
+    });
+
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let is_admin = user_store
@@ -292,6 +306,7 @@ fn AdminAccountsView() -> Element {
     let mut create_api_key = use_signal(String::new);
     let mut create_api_base = use_signal(String::new);
     let mut create_api_mode = use_signal(|| "both".to_string());
+    let mut create_pool_enabled = use_signal(|| true);
     let mut create_models_input = use_signal(String::new); // 逗号分隔的模型列表
     let mut create_rpm_limit = use_signal(|| "60".to_string());
     let mut create_tpm_limit = use_signal(|| "100000".to_string());
@@ -316,6 +331,8 @@ fn AdminAccountsView() -> Element {
     let mut edit_tpm_limit = use_signal(|| "100000".to_string());
     let mut edit_reset_api_base = use_signal(|| false);
     let mut edit_is_active = use_signal(|| true);
+    let mut edit_pool_enabled = use_signal(|| false);
+    let mut edit_has_passthrough_binding = use_signal(|| false);
     let mut edit_visibility = use_signal(|| "tenant".to_string());
     let mut edit_priority = use_signal(|| "0".to_string());
     let mut edit_tenant_id = use_signal(String::new);
@@ -395,6 +412,7 @@ fn AdminAccountsView() -> Element {
         let api_key_val = create_api_key();
         let api_base = create_api_base();
         let api_mode = create_api_mode();
+        let pool_enabled = create_pool_enabled();
         let models_str = create_models_input();
         let priority_input = create_priority();
         // 解析模型列表（逗号分隔，去空格、空项和重复项）
@@ -428,6 +446,7 @@ fn AdminAccountsView() -> Element {
                 .with_rpm_limit(rpm_limit)
                 .with_tpm_limit(tpm_limit)
                 .with_priority(priority);
+            req = req.with_pool_enabled(pool_enabled);
             if !api_base.is_empty() {
                 req = req.with_api_base(api_base);
             }
@@ -440,6 +459,7 @@ fn AdminAccountsView() -> Element {
                     create_api_key.write().clear();
                     create_api_base.write().clear();
                     *create_api_mode.write() = "both".to_string();
+                    create_pool_enabled.set(true);
                     create_models_input.write().clear();
                     create_rpm_limit.set("60".to_string());
                     create_tpm_limit.set("100000".to_string());
@@ -469,6 +489,8 @@ fn AdminAccountsView() -> Element {
         let provider = edit_provider();
         let reset_base = edit_reset_api_base();
         let active = edit_is_active();
+        let pool_enabled = edit_pool_enabled();
+        let bindings_manage_pool = edit_has_passthrough_binding();
         let visibility = edit_visibility();
         let tenant_id = edit_tenant_id();
         let priority_input = edit_priority();
@@ -503,6 +525,7 @@ fn AdminAccountsView() -> Element {
                 .with_rpm_limit(rpm_limit)
                 .with_tpm_limit(tpm_limit)
                 .with_api_capabilities(api_capabilities_for_mode(&provider, &api_mode));
+            req.pool_enabled = pool_update_field(pool_enabled, bindings_manage_pool);
             if !tenant_id.trim().is_empty() {
                 req = req.with_tenant_id(tenant_id);
             }
@@ -782,6 +805,12 @@ fn AdminAccountsView() -> Element {
                                                 p { class: "account-status-note",
                                                     "{i18n.t(\"accounts.priority\")}: {acc.priority}"
                                                 }
+                                                if acc.passthrough_binding_count > 0 {
+                                                    p { class: "account-status-note account-passthrough-managed",
+                                                        {i18n.t("accounts.pool_managed_by_passthrough")}, " ",
+                                                        Link { to: "/admin/upstreams/passthrough", {i18n.t("accounts.view_passthrough_bindings")} }
+                                                    }
+                                                }
                                                 if acc.health_penalty > 0 {
                                                     p { class: "account-status-note",
                                                         "{i18n.t(\"accounts.health_penalty\")}: {acc.health_penalty}"
@@ -847,6 +876,8 @@ fn AdminAccountsView() -> Element {
                                                             .to_string();
                                                         let models = acc.models.join(", ");
                                                         let active = acc.is_active;
+                                                        let pool_enabled = acc.pool_enabled;
+                                                        let has_passthrough_binding = acc.passthrough_binding_count > 0;
                                                         let priority = acc.priority;
                                                         let rpm_limit = acc.rpm_limit;
                                                         let tpm_limit = acc.tpm_limit;
@@ -864,6 +895,8 @@ fn AdminAccountsView() -> Element {
                                                             edit_api_base.set(String::new());
                                                             edit_reset_api_base.set(false);
                                                             edit_is_active.set(active);
+                                                            edit_pool_enabled.set(pool_enabled);
+                                                            edit_has_passthrough_binding.set(has_passthrough_binding);
                                                             edit_priority.set(priority.to_string());
                                                             edit_visibility.set(visibility.clone());
                                                             edit_tenant_id.set(tenant_id.clone());
@@ -997,6 +1030,10 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "modal-body",
+                            div {class:"form-group",
+                                label {class:"checkbox-label",input {r#type:"checkbox",checked:create_pool_enabled(),onchange:move|e|create_pool_enabled.set(e.checked())} {i18n.t("models.pool_switch")}}
+                                p {class:"form-hint",{i18n.t("models.pool_switch_help")}}
+                            }
                             if !error_msg().is_empty() {
                                 div { class: "alert alert-error",
                                     span { "{error_msg}" }
@@ -1158,6 +1195,15 @@ fn AdminAccountsView() -> Element {
                             }
                         }
                         div { class: "modal-body",
+                            div {class:"form-group",
+                                label {class:"checkbox-label",input {r#type:"checkbox",disabled:edit_has_passthrough_binding(),checked:edit_pool_enabled(),onchange:move|e|edit_pool_enabled.set(e.checked())} {i18n.t("models.pool_switch")}}
+                                p {class:"form-hint",{i18n.t("models.pool_switch_help")}}
+                                if edit_has_passthrough_binding() {
+                                    p { class: "form-hint", {i18n.t("accounts.pool_managed_by_passthrough")}, " ",
+                                        Link { to: "/admin/upstreams/passthrough", {i18n.t("accounts.view_passthrough_bindings")} }
+                                    }
+                                }
+                            }
                             if !edit_error().is_empty() {
                                 div { class: "alert alert-error",
                                     span { "{edit_error}" }
@@ -1617,5 +1663,21 @@ mod tests {
             vec!["gpt-test".to_string(), "claude-test".to_string()]
         );
         assert!(parse_models_input(" , ").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod passthrough_resource_edit_tests {
+    use super::pool_update_field;
+    use client_api::api::admin::UpdateAccountRequest;
+    #[test]
+    fn bound_account_metadata_edit_does_not_override_grants() {
+        let mut request = UpdateAccountRequest::new().with_name("Renamed account");
+        request.pool_enabled = pool_update_field(true, true);
+        let body = serde_json::to_value(request).unwrap();
+        assert_eq!(body["name"], "Renamed account");
+        assert!(body.get("pool_enabled").is_none());
+        assert_eq!(pool_update_field(false, false), Some(false));
+        assert_eq!(pool_update_field(true, false), Some(true));
     }
 }

@@ -77,8 +77,15 @@ pub struct SettlementRecoveryRow {
 /// potentially large continuation context.
 #[derive(Debug, Clone, FromQueryResult, PartialEq)]
 pub struct LocalResponseState {
+    pub account_id: Option<Uuid>,
     pub model: Option<String>,
     pub local_context: Value,
+}
+
+#[derive(Debug, Clone, FromQueryResult, PartialEq)]
+pub struct LocalResponseDocument {
+    pub account_id: Option<Uuid>,
+    pub local_response: Value,
 }
 
 #[derive(FromQueryResult)]
@@ -741,14 +748,21 @@ impl ResponseAffinity {
         tenant_id: Uuid,
         response_id: &str,
     ) -> Result<Option<Value>, DbError> {
-        #[derive(FromQueryResult)]
-        struct LocalResponseDocument {
-            local_response: Value,
-        }
+        Ok(
+            Self::find_active_local_owned_response(db, tenant_id, response_id)
+                .await?
+                .map(|row| row.local_response),
+        )
+    }
 
+    pub async fn find_active_local_owned_response(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<LocalResponseDocument>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT local_response FROM response_affinities \
+            "SELECT account_id, local_response FROM response_affinities \
              WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
                AND deleted_at IS NULL AND expires_at > NOW() \
                AND local_response IS NOT NULL FOR KEY SHARE",
@@ -756,8 +770,7 @@ impl ResponseAffinity {
         );
         Ok(LocalResponseDocument::find_by_statement(stmt)
             .one(db)
-            .await?
-            .map(|row| row.local_response))
+            .await?)
     }
 
     /// Load the local replay projection after the caller has admitted its
@@ -769,7 +782,7 @@ impl ResponseAffinity {
     ) -> Result<Option<LocalResponseState>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT model, local_context FROM response_affinities \
+            "SELECT account_id, model, local_context FROM response_affinities \
              WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
                AND deleted_at IS NULL AND expires_at > NOW() \
                AND local_response IS NOT NULL AND local_context IS NOT NULL FOR KEY SHARE",

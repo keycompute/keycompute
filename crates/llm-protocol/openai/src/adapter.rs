@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn native_chat_model_binding_preserves_stream_options_without_injection() {
+    fn native_chat_passthrough_binding_preserves_stream_options_without_injection() {
         let mut request = stream_request();
         request.preserve_native_chat_body = true;
         request.native_openai_chat_request = Some(std::sync::Arc::new(serde_json::json!({

@@ -3,8 +3,10 @@
 //! 拆分为子模块：user / account / pricing / payment
 
 mod account;
+mod model_catalog;
 mod monitoring;
 mod node_gateway;
+mod passthrough_binding;
 mod payment;
 mod pricing;
 mod user;
@@ -18,9 +20,12 @@ const COMPAT_LIST_PAGE_SIZE: u64 = 100;
 // Re-export 各子模块的公共类型
 pub use account::{
     AccountInfo, AccountPage, AccountQueryParams, AccountRefreshResponse, AccountTestResponse,
-    CreateAccountRequest, CreateModelBindingRequest, ModelBindingInfo, ModelBindingPage,
-    ModelBindingProbeRequest, ModelBindingProbeResponse, ModelBindingQueryParams,
-    UpdateAccountRequest, UpdateModelBindingRequest,
+    CreateAccountRequest, UpdateAccountRequest,
+};
+pub use model_catalog::{
+    BindingOption, BindingOptions, BindingOptionsQuery, ModelAccessMode, ModelAvailability,
+    ModelCatalog, ModelCatalogEntry, ModelCatalogQuery, SharedBindingAccountOption,
+    SharedBindingAccountOptions, SharedModelAccessMode, SharedModelCatalogPage,
 };
 pub use monitoring::{
     MonitoringAttemptDetail, MonitoringNodeHealth, MonitoringOverviewResponse,
@@ -34,6 +39,12 @@ pub use node_gateway::{
     NodeGatewayTaskInfo, NodeGatewayTaskPage, NodeGatewayTaskStats, PendingTokenPage,
     PendingTokenQueryParams, PendingTokenWithUser, RecoverNodeResponse, RevokeNodeRequest,
     RevokeNodeTokenResponse,
+};
+pub use passthrough_binding::{
+    CreatePassthroughBindingRequest, PassthroughAccountOption, PassthroughAccountOptions,
+    PassthroughAccountOptionsQuery, PassthroughBindingInfo, PassthroughBindingPage,
+    PassthroughBindingProbeRequest, PassthroughBindingProbeResponse, PassthroughBindingQueryParams,
+    UpdatePassthroughBindingRequest,
 };
 pub use payment::{PaymentOrderInfo, PaymentOrderPage, PaymentProviderStatus};
 pub use pricing::{
@@ -683,51 +694,75 @@ impl AdminApi {
             .await
     }
 
-    // ==================== Model-bound account management ====================
+    // ==================== Upstream catalog and account grants ====================
 
-    /// List tenant model bindings. The server applies the caller's system or
-    /// tenant-admin visibility rules; clients must not infer cross-tenant
-    /// access from a `tenant_id` query parameter.
-    pub async fn list_model_bindings_page(
+    /// Fetch the tenant-scoped product catalog for one of the three access modes.
+    pub async fn model_catalog(
         &self,
-        params: Option<&ModelBindingQueryParams>,
+        params: &ModelCatalogQuery,
         token: &str,
-    ) -> Result<ModelBindingPage> {
-        let path = match params {
-            Some(params) if !params.to_query_string().is_empty() => {
-                format!("/api/v1/admin/model-bindings?{}", params.to_query_string())
-            }
-            _ => "/api/v1/admin/model-bindings".to_string(),
+    ) -> Result<ModelCatalog> {
+        let query = params.to_query_string();
+        self.client
+            .get_json(&format!("/api/v1/admin/model-catalog?{query}"), Some(token))
+            .await
+    }
+
+    pub async fn passthrough_binding_options(
+        &self,
+        params: &PassthroughAccountOptionsQuery,
+        token: &str,
+    ) -> Result<PassthroughAccountOptions> {
+        let query = params.to_query_string();
+        let path = if query.is_empty() {
+            "/api/v1/admin/passthrough-bindings/options".to_string()
+        } else {
+            format!("/api/v1/admin/passthrough-bindings/options?{query}")
         };
         self.client.get_json(&path, Some(token)).await
     }
 
-    pub async fn create_model_binding(
+    pub async fn list_passthrough_bindings_page(
         &self,
-        req: &CreateModelBindingRequest,
+        params: Option<&PassthroughBindingQueryParams>,
         token: &str,
-    ) -> Result<ModelBindingInfo> {
+    ) -> Result<PassthroughBindingPage> {
+        let path = match params {
+            Some(params) if !params.to_query_string().is_empty() => format!(
+                "/api/v1/admin/passthrough-bindings?{}",
+                params.to_query_string()
+            ),
+            _ => "/api/v1/admin/passthrough-bindings".to_string(),
+        };
+        self.client.get_json(&path, Some(token)).await
+    }
+
+    pub async fn create_passthrough_binding(
+        &self,
+        req: &CreatePassthroughBindingRequest,
+        token: &str,
+    ) -> Result<PassthroughBindingInfo> {
         self.client
-            .post_json("/api/v1/admin/model-bindings", req, Some(token))
+            .post_json("/api/v1/admin/passthrough-bindings", req, Some(token))
             .await
     }
 
-    pub async fn update_model_binding(
+    pub async fn update_passthrough_binding(
         &self,
         id: &str,
-        req: &UpdateModelBindingRequest,
+        req: &UpdatePassthroughBindingRequest,
         token: &str,
-    ) -> Result<ModelBindingInfo> {
+    ) -> Result<PassthroughBindingInfo> {
         self.client
             .put_json(
-                &format!("/api/v1/admin/model-bindings/{id}"),
+                &format!("/api/v1/admin/passthrough-bindings/{id}"),
                 req,
                 Some(token),
             )
             .await
     }
 
-    pub async fn delete_model_binding(
+    pub async fn delete_passthrough_binding(
         &self,
         id: &str,
         expected_revision: i64,
@@ -738,22 +773,25 @@ impl AdminApi {
                 "expected_revision must be positive".to_string(),
             ));
         }
-        let path =
-            format!("/api/v1/admin/model-bindings/{id}?expected_revision={expected_revision}");
-        self.client.delete_json(&path, Some(token)).await
+        self.client
+            .delete_json(
+                &format!(
+                    "/api/v1/admin/passthrough-bindings/{id}?expected_revision={expected_revision}"
+                ),
+                Some(token),
+            )
+            .await
     }
 
-    /// Probe exactly the supplied model/capability on the bound account. This
-    /// endpoint is intentionally separate from the account-wide probe.
-    pub async fn probe_model_binding(
+    pub async fn probe_passthrough_binding(
         &self,
         id: &str,
-        req: &ModelBindingProbeRequest,
+        req: &PassthroughBindingProbeRequest,
         token: &str,
-    ) -> Result<ModelBindingProbeResponse> {
+    ) -> Result<PassthroughBindingProbeResponse> {
         self.client
             .post_json(
-                &format!("/api/v1/admin/model-bindings/{id}/probe"),
+                &format!("/api/v1/admin/passthrough-bindings/{id}/probe"),
                 req,
                 Some(token),
             )

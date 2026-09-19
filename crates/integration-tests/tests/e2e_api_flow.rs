@@ -72,7 +72,7 @@ async fn test_api_request_flow_requires_database() {
         status_unauthorized,
     );
 
-    // 3. 测试模型列表接口（不需要认证）
+    // 3. 模型发现按调用租户隔离，匿名访问必须拒绝。
     let models_request = Request::builder()
         .method("GET")
         .uri("/v1/models")
@@ -80,7 +80,7 @@ async fn test_api_request_flow_requires_database() {
         .unwrap();
 
     let models_response = app.oneshot(models_request).await.unwrap();
-    let models_ok = models_response.status() == StatusCode::OK;
+    let models_ok = models_response.status() == StatusCode::UNAUTHORIZED;
     chain.add_step(
         "keycompute-server",
         "list_models_handler",

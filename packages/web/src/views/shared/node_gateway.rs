@@ -33,6 +33,14 @@ use crate::views::shared::accounts::NoPermissionView;
 
 #[component]
 pub fn NodeGateway() -> Element {
+    let navigator = use_navigator();
+    let current = use_route::<crate::router::Route>();
+    use_effect(move || {
+        if current.to_string() == "/admin/node-gateway" {
+            navigator.replace(crate::router::Route::UpstreamNodes {});
+        }
+    });
+
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();

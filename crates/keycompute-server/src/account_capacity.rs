@@ -48,28 +48,22 @@ impl AccountCapacityPolicy for ServerAccountCapacity {
         };
         // Route snapshots and affinity picks do not authorize future attempts.
         // Re-read enabled state, visibility, protocol, model and quota on writer.
+        let (policy,binding_id,binding_revision) = match target.account_selection() {
+            Some(keycompute_types::AccountSelection::PassthroughBinding {binding_id,binding_revision}) => (
+                "a.enabled AND EXISTS(SELECT 1 FROM passthrough_bindings access_grant JOIN tenants anchor ON anchor.id=access_grant.tenant_id AND anchor.status='active' WHERE access_grant.id=$3 AND access_grant.revision=$4 AND access_grant.account_id=a.id AND (access_grant.tenant_id=$2 OR access_grant.is_global))".to_string(),binding_id,binding_revision),
+            _ => (format!("{} AND $3::UUID IS NULL AND $4::BIGINT=0",keycompute_db::models::upstream_access::non_pt_predicate("a","$2")),Uuid::nil(),0),
+        };
+        let binding_id = (!binding_id.is_nil()).then_some(binding_id);
         let account = tokio::time::timeout(
-            Duration::from_secs(5),
+            Duration::from_secs(3),
             Account::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-                "SELECT a.* FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id \
-                 WHERE a.id=$1 AND owner.status='active' \
-                 AND EXISTS(SELECT 1 FROM tenants caller WHERE caller.id=$2 AND caller.status='active')",
-                [(*account_id).into(),ctx.tenant_id.into()])).one(self.db.write_conn()),
-        )
-        .await
-        .map_err(|_| {
-            KeyComputeError::ServiceUnavailable("account configuration lookup timed out".into())
-        })?
-        .map_err(|_| {
-            KeyComputeError::ServiceUnavailable("account configuration unavailable".into())
-        })?
-        .ok_or_else(|| {
-            KeyComputeError::PermissionDenied("upstream account is no longer available".into())
-        })?;
-        if !account.enabled
-            || account.health_status == "unhealthy"
+                format!("SELECT a.* FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id WHERE a.id=$1 AND owner.status='active' AND EXISTS(SELECT 1 FROM tenants caller WHERE caller.id=$2 AND caller.status='active') AND {policy}"),
+                [(*account_id).into(),ctx.tenant_id.into(),binding_id.into(),binding_revision.into()])).one(self.db.write_conn()),
+        ).await.map_err(|_|KeyComputeError::ServiceUnavailable("account configuration lookup timed out".into()))?
+         .map_err(|_|KeyComputeError::ServiceUnavailable("account configuration unavailable".into()))?
+         .ok_or_else(||KeyComputeError::PermissionDenied("upstream account is not authorized for this entry point".into()))?;
+        if account.health_status == "unhealthy"
             || account.provider != *provider
-            || (account.tenant_id != ctx.tenant_id && account.visibility != "global")
             || (!ctx.model.is_empty()
                 && !account
                     .models_supported

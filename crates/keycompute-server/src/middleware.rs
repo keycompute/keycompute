@@ -951,6 +951,31 @@ pub(crate) async fn authenticated_rate_limit_config_for_account(
     tenant_id: Uuid,
     account_id: Option<Uuid>,
 ) -> Result<RateLimitConfig> {
+    authenticated_rate_limit_config_for_selection(state, tenant_id, account_id, None).await
+}
+
+/// The trusted execution target carries passthrough provenance. An explicit
+/// cross-owner grant must not be rejected using obsolete account visibility.
+pub(crate) async fn authenticated_rate_limit_config_for_target(
+    state: &AppState,
+    tenant_id: Uuid,
+    target: &keycompute_types::ExecutionTarget,
+) -> Result<RateLimitConfig> {
+    authenticated_rate_limit_config_for_selection(
+        state,
+        tenant_id,
+        target.account_id(),
+        target.account_selection(),
+    )
+    .await
+}
+
+async fn authenticated_rate_limit_config_for_selection(
+    state: &AppState,
+    tenant_id: Uuid,
+    account_id: Option<Uuid>,
+    selection: Option<keycompute_types::AccountSelection>,
+) -> Result<RateLimitConfig> {
     let tenant_config = authenticated_rate_limit_config(state, tenant_id).await?;
 
     let Some(account_id) = account_id else {
@@ -984,15 +1009,28 @@ pub(crate) async fn authenticated_rate_limit_config_for_account(
         }
     };
 
-    if account.tenant_id != tenant_id && account.visibility != "global" {
-        error!(
-            %account_id,
-            %tenant_id,
-            account_tenant_id = %account.tenant_id,
-            "Selected account is not visible to the authenticated tenant, denying request"
-        );
+    let authorized = if let Some(keycompute_types::AccountSelection::PassthroughBinding {
+        binding_id,
+        binding_revision,
+    }) = selection
+    {
+        use sea_orm::ConnectionTrait;
+        tokio::time::timeout(std::time::Duration::from_secs(3), pool.write_conn().query_one(
+            sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+            "SELECT 1 FROM passthrough_bindings b JOIN accounts a ON a.id=b.account_id JOIN tenants anchor ON anchor.id=b.tenant_id AND anchor.status='active' JOIN tenants owner ON owner.id=a.tenant_id AND owner.status='active' WHERE b.id=$1 AND b.revision=$2 AND b.account_id=$3 AND (b.tenant_id=$4 OR b.is_global) AND a.enabled AND EXISTS(SELECT 1 FROM tenants caller WHERE caller.id=$4 AND caller.status='active')",
+            [binding_id.into(), binding_revision.into(), account_id.into(), tenant_id.into()])))
+            .await.map_err(|_|ApiError::ServiceUnavailable("Rate limit access lookup timed out".into()))?
+            .map_err(|_|ApiError::ServiceUnavailable("Rate limit access state unavailable".into()))?.is_some()
+    } else {
+        keycompute_db::Account::authorize_non_pt(pool.write_conn(), tenant_id, account_id)
+            .await
+            .map_err(|_| {
+                ApiError::ServiceUnavailable("Rate limit access state unavailable".into())
+            })?
+    };
+    if !authorized {
         return Err(ApiError::ServiceUnavailable(
-            "Rate limit configuration is unavailable. Please try again later.".to_string(),
+            "Selected account access changed before generation admission".into(),
         ));
     }
     if !account.enabled {

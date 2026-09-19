@@ -25,8 +25,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.user.profile", "My Profile");
     m.insert("nav.user.security", "Security");
     m.insert("nav.users", "Users");
-    m.insert("nav.accounts", "Accounts");
-    m.insert("nav.model_bindings", "Model Bindings");
+    m.insert("nav.accounts", "Upstream accounts");
+    m.insert("nav.upstreams", "Upstreams");
+    m.insert("nav.model_management", "Model management");
     m.insert("nav.pricing", "Pricing");
     m.insert("nav.payment_orders", "Payment Orders");
     m.insert("nav.distribution_records", "Distribution Records");
@@ -134,13 +135,74 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.usage", "Usage");
     m.insert("page.billing", "Billing");
     m.insert("page.api_keys", "API Keys");
+    m.insert("page.model_management", "Model management");
+    m.insert("api_keys.mode_account_pool", "Account pool");
+    m.insert("api_keys.mode_passthrough", "Passthrough");
+    m.insert("api_keys.mode_node_dispatch", "NodeDispatch");
+    m.insert("api_keys.models_load_failed", "Model discovery failed");
+    m.insert("api_keys.models_empty_for_selection", "No eligible models for this mode and protocol. Copyable examples are hidden until one is available.");
     m.insert("page.payments", "Payments");
     m.insert("page.distribution", "Distribution");
     m.insert("page.profile", "Profile");
     m.insert("page.security", "Security");
     m.insert("page.users", "User Management");
-    m.insert("page.accounts", "Account Management");
-    m.insert("page.model_bindings", "Model Binding Management");
+    m.insert("page.accounts", "Upstream account resources");
+    m.insert("upstreams.title", "Upstreams");
+    m.insert(
+        "upstreams.subtitle",
+        "Manage upstream accounts, passthrough grants, and node gateways",
+    );
+    m.insert("upstreams.accounts", "Accounts");
+    m.insert("upstreams.passthrough", "Passthrough bindings");
+    m.insert("upstreams.nodes", "Node gateway");
+    m.insert("passthrough.subtitle", "Grant an account to a tenant; all declared account models are inherited and remain read-only here.");
+    m.insert("passthrough.edit_title", "Edit Passthrough Binding");
+    m.insert(
+        "passthrough.no_accounts",
+        "No eligible accounts. Add an OpenAI Chat account first.",
+    );
+    m.insert("passthrough.no_tenants", "No matching tenants.");
+    m.insert("passthrough.probe_warning", "This diagnostic tests one declared model, can incur upstream charges, and does not change access.");
+    m.insert("passthrough.confirm_probe", "Run diagnostic");
+    m.insert("passthrough.add", "Add Passthrough Binding");
+    m.insert("passthrough.empty", "No passthrough bindings");
+    m.insert("passthrough.health_healthy", "Account healthy");
+    m.insert("passthrough.health_degraded", "Degraded");
+    m.insert("passthrough.health_unhealthy", "Unhealthy");
+    m.insert("passthrough.health_unavailable", "Unavailable");
+    m.insert("passthrough.health_unknown", "Not yet observed");
+    m.insert("passthrough.account", "Account");
+    m.insert("passthrough.tenant", "Tenant");
+    m.insert("passthrough.scope", "Scope");
+    m.insert("passthrough.models", "Declared models");
+    m.insert("passthrough.pool", "Account pool");
+    m.insert("passthrough.health", "Runtime health");
+    m.insert("passthrough.global", "Global");
+    m.insert("passthrough.bound_tenant", "Bound tenant");
+    m.insert("passthrough.view_models", "View");
+    m.insert("passthrough.form_title", "Add Passthrough Binding");
+    m.insert("passthrough.search_account", "Search accounts");
+    m.insert("passthrough.search_tenant", "Search tenants");
+    m.insert("passthrough.choose_account", "Choose account");
+    m.insert("passthrough.choose_tenant", "Choose tenant");
+    m.insert("passthrough.declared_models", "Declared account models");
+    m.insert("passthrough.global_flag", "Global grant");
+    m.insert("passthrough.global_help", "Grant all active platform tenants access, not anonymous users. A selected owning tenant is still required; disabling it makes this grant unavailable.");
+    m.insert("passthrough.pool_flag", "Participate in account pool");
+    m.insert("passthrough.pool_help", "Allow ordinary account-pool use within this grant’s tenant scope. Otherwise only /pt is allowed. Other existing global grants remain independently effective.");
+    m.insert(
+        "passthrough.broadening_warning",
+        "This broadens access. Confirm the intended authorization scope.",
+    );
+    m.insert("passthrough.required", "Account and tenant are required");
+    m.insert("passthrough.diagnostic", "Diagnostic");
+    m.insert("passthrough.delete_warning", "Revoke this account-to-tenant grant only; other grants may remain effective. The account will not automatically rejoin the pool.");
+    m.insert("passthrough.confirm_delete", "Revoke grant");
+    m.insert("accounts.pool_managed_by_passthrough", "This account has passthrough bindings; pool participation is authoritative there and cannot be overridden here.");
+    m.insert(
+        "accounts.view_passthrough_bindings",
+        "View passthrough bindings",
+    );
     m.insert("page.pricing", "Pricing");
     m.insert("page.payment_orders", "Payment Orders");
     m.insert("page.distribution_records", "Distribution Records");
@@ -242,6 +304,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.disabled", "Disabled");
     m.insert("common.yes", "Yes");
     m.insert("common.no", "No");
+    m.insert("common.search", "Search");
+    m.insert("common.actions", "Actions");
     m.insert("common.admin", "Admin");
     m.insert("common.user", "User");
     m.insert(
@@ -1412,9 +1476,12 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.request_id", "Request ID");
     m.insert("monitoring.protocol_model", "Protocol / Model");
     m.insert("monitoring.execution_route", "Execution Route");
-    m.insert("monitoring.route_provider_account", "Provider Account");
-    m.insert("monitoring.route_model_binding", "Model Binding");
-    m.insert("monitoring.route_node", "Node");
+    m.insert(
+        "monitoring.route_provider_account",
+        "Account pool / standard entry",
+    );
+    m.insert("monitoring.route_passthrough_binding", "Passthrough");
+    m.insert("monitoring.route_node", "NodeDispatch");
     m.insert("monitoring.status", "Status");
     m.insert("monitoring.duration_ttft", "Duration / TTFT");
     m.insert("monitoring.page", "Page {page}");
@@ -1726,27 +1793,6 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution_records.empty_user", "No referral records yet");
     m.insert("distribution_records.referred_user", "Referred User");
     m.insert("accounts.subtitle", "Maintain provider channels, model mapping, and availability in one reviewable asset pool for the routing layer.");
-    m.insert("model_bindings.health_stale", "Stale");
-    m.insert("model_bindings.subtitle", "Pin a tenant and model to one upstream account. Unknown or stale health is fail-closed until an explicit probe succeeds.");
-    m.insert("model_bindings.create", "Add Binding");
-    m.insert("model_bindings.edit", "Edit Binding");
-    m.insert("model_bindings.saved", "Binding saved");
-    m.insert("model_bindings.deleted", "Binding deleted");
-    m.insert("model_bindings.probe", "Probe model");
-    m.insert("model_bindings.probe_done", "Probe result");
-    m.insert("model_bindings.delete_title", "Delete model binding?");
-    m.insert(
-        "model_bindings.required",
-        "Model, tenant, and account are required",
-    );
-    m.insert("model_bindings.search_placeholder", "Filter by exact model");
-    m.insert("model_bindings.empty", "No model bindings configured");
-    m.insert("model_bindings.model", "Model");
-    m.insert("model_bindings.account", "Account");
-    m.insert("model_bindings.tenant", "Tenant");
-    m.insert("model_bindings.health", "Model health");
-    m.insert("model_bindings.revision", "Revision");
-    m.insert("model_bindings.enabled", "Enabled");
     m.insert("accounts.reset_failed", "Reset failed");
     m.insert("accounts.fill_required", "Please fill in required fields");
     m.insert("accounts.created", "Channel created");
@@ -2130,6 +2176,150 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "node_earnings.withdraw_alipay_success",
         "Withdrawal request submitted. Please wait for admin approval.",
     );
+
+    m.insert("models.pool", "Account pool");
+    m.insert("models.passthrough", "Passthrough");
+    m.insert("models.node", "Node Gateway (NodeDispatch)");
+    m.insert(
+        "models.pool_desc",
+        "Select from eligible upstream accounts using health, capacity and routing policy.",
+    );
+    m.insert("models.pass_desc", "An account-to-tenant grant exposes every declared model on that account through /pt, with one attempt and no account fallback.");
+    m.insert(
+        "models.node_desc",
+        "Dispatch tasks to live worker nodes, not another HTTP provider account.",
+    );
+    m.insert("models.subtitle", "Choose the access mode, then manage supply, eligibility and invocation. Modes are separate from protocols.");
+    m.insert("models.access_mode", "Model access mode");
+    m.insert("models.ready", "Eligible");
+    m.insert("models.disabled", "Disabled");
+    m.insert("models.unverified", "Probe required");
+    m.insert("models.stale", "Validation stale");
+    m.insert("models.unhealthy", "Model unhealthy");
+    m.insert("models.unavailable", "Unavailable");
+    m.insert(
+        "models.pool_ready_help",
+        "Eligible accounts exist. This does not mean every model was actively probed.",
+    );
+    m.insert("models.pass_ready_help", "The account grant is eligible; each request still rechecks access, model support and health.");
+    m.insert(
+        "models.node_ready_help",
+        "An online node has a valid session accepting this model.",
+    );
+    m.insert(
+        "models.disabled_help",
+        "Saved but not published. Probe successfully before enabling.",
+    );
+    m.insert(
+        "models.probe_help",
+        "Explicitly probe this exact model on its configured account.",
+    );
+    m.insert(
+        "models.expired_help",
+        "Health validation expired. Run another explicit probe.",
+    );
+    m.insert(
+        "models.config_help",
+        "Account configuration changed. Confirm the target and probe again.",
+    );
+    m.insert(
+        "models.unhealthy_help",
+        "The model reported an upstream failure. Repair it and probe again.",
+    );
+    m.insert(
+        "models.unsupported_help",
+        "The account no longer declares this model or API capability. Update the binding.",
+    );
+    m.insert(
+        "models.tenant_help",
+        "The consumer tenant or resource owner tenant is inactive.",
+    );
+    m.insert(
+        "models.account_help",
+        "Check whether the upstream account and its owner tenant are enabled.",
+    );
+    m.insert(
+        "models.visibility_help",
+        "This account is no longer visible to the selected tenant. Adjust access or the binding.",
+    );
+    m.insert(
+        "models.cooldown_help",
+        "The account is cooling down; passthrough never substitutes another account.",
+    );
+    m.insert(
+        "models.no_node_help",
+        "Check node status, runtime, session expiry and accepted models.",
+    );
+    m.insert(
+        "models.unavailable_help",
+        "No target currently meets the requirements. Check resources and refresh.",
+    );
+    m.insert("models.consumer_tenant", "Consumer tenant");
+    m.insert("models.current_tenant", "Current login tenant");
+    m.insert("models.choose_tenant", "Choose consumer tenant");
+    m.insert("models.search_tenant", "Search tenant names");
+    m.insert("models.invalid_mode", "Unknown model access mode");
+    m.insert("models.pool_workflow", "Configure accounts and declared models → enable pool participation → review eligible counts. Fallback is conditional on safe execution.");
+    m.insert("models.pass_workflow", "Select an account and tenant, then save. Defaults are tenant-only and excluded from the pool; no per-model binding or activation is required.");
+    m.insert("models.node_workflow", "Enroll nodes → declare model capabilities → confirm a live session → invoke a node: model. Registration tokens are for enrollment, not API calls.");
+    m.insert("models.manage_nodes", "Manage worker nodes");
+    m.insert("models.manage_accounts", "Manage upstream accounts");
+    m.insert("models.create_binding", "Configure passthrough model");
+    m.insert("models.invocation_guide", "Invocation guide");
+    m.insert("models.api_surface", "API protocol and capability");
+    m.insert("models.search", "Search model names");
+    m.insert("models.empty", "No models in this scope");
+    m.insert(
+        "models.no_match",
+        "No matching model. Adjust the filter; example models never replace real supply.",
+    );
+    m.insert("models.health_deadline", "Validation expires");
+    m.insert(
+        "models.shared_account",
+        "Also participates in the account pool. Both paths share its quota.",
+    );
+    m.insert("models.bound_only_account", "Excluded from pool selection; still usable by explicit bindings and existing resource affinity.");
+    m.insert("models.eligible_targets", "Eligible / configured");
+    m.insert(
+        "models.node_count_help",
+        "Distinct nodes, not session count. Eligibility does not reserve capacity.",
+    );
+    m.insert(
+        "models.pool_count_help",
+        "Candidate eligibility changes with health, cooldown and tenant status.",
+    );
+    m.insert("models.catalog_disclaimer", "The catalog reflects current routing eligibility, not reserved capacity or a success guarantee. Pricing remains separately managed.");
+    m.insert("models.validated_enable", "Validated; ready to enable");
+    m.insert("models.probe", "Probe model");
+    m.insert("models.enable", "Enable calls");
+    m.insert("models.disable", "Disable calls");
+    m.insert("models.probe_cost", "This invokes the configured upstream model and may incur cost. Validation lasts 300 seconds and valid successful requests refresh it. Continue?");
+    m.insert("models.delete_warning", "Deleting this binding removes passthrough access for this tenant/model. The upstream account is retained.");
+    m.insert("models.confirm", "Confirm");
+    m.insert("models.binding_setup", "Configure the unique channel");
+    m.insert("models.choose_account", "Choose upstream account");
+    m.insert("models.search_account", "Search account names");
+    m.insert(
+        "models.choose_model",
+        "Choose a model declared by this account",
+    );
+    m.insert("models.edit_disables", "Saving an edit disables the binding first. Confirm and validate the channel before enabling calls again.");
+    m.insert(
+        "models.save_disabled_help",
+        "Saving neither invokes a model nor publishes access. Next, probe explicitly and enable.",
+    );
+    m.insert("models.save_disabled", "Save disabled");
+    m.insert("models.pool_switch", "Participate in account pool");
+    m.insert("models.pool_switch_help", "Turning this off excludes new pool selections, not existing passthrough bindings. The account-enabled master switch still controls all entry points.");
+    m.insert("models.resources_help", "Upstream accounts are shared resources, not access modes. Pool and passthrough may share an account and its quota.");
+    m.insert("models.node_token_help", "NodeDispatch registration tokens enroll workers. Model consumers still authenticate with a platform API key.");
+    m.insert("models.guide_help", "One platform key can use authorized modes. Selecting a mode changes the request, not the key identity.");
+    m.insert("models.no_examples", "No callable model is available. No invented example is offered. Ask an administrator to configure or repair supply.");
+    m.insert(
+        "models.placeholder_key",
+        "Examples use a placeholder key; replace it with your saved platform key.",
+    );
+    m.insert("models.node_stream_help", "Node mode dispatches tasks rather than a native upstream token stream. Only supported Chat capability is shown.");
 
     m
 });

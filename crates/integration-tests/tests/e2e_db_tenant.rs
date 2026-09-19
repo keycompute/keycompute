@@ -462,6 +462,7 @@ mod tests {
                 priority: None,
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
+                pool_enabled: None,
                 visibility: Some("global".to_string()),
             },
         )
@@ -549,6 +550,7 @@ mod tests {
                 priority: None,
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
+                pool_enabled: None,
                 visibility: None,
             },
         )
@@ -693,6 +695,7 @@ mod tests {
                 priority: None,
                 models_supported: vec!["gpt-test".to_string()],
                 api_capabilities: vec!["responses".to_string()],
+                pool_enabled: None,
                 visibility: None,
             },
         )
@@ -725,6 +728,7 @@ mod tests {
             tpm_limit: Some(100001),
             is_active: Some(true),
             priority: Some(0),
+            pool_enabled: None,
             visibility: Some("tenant".to_string()),
         };
         let update_task = tokio::spawn(async move {

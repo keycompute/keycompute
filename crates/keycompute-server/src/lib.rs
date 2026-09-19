@@ -12,7 +12,7 @@ pub mod extractors;
 pub mod handlers;
 mod lifecycle_metrics;
 pub mod middleware;
-pub(crate) mod model_binding;
+pub(crate) mod passthrough_binding;
 pub mod payment_registry;
 pub mod providers;
 pub mod router;

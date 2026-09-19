@@ -4,43 +4,46 @@
 
 use thiserror::Error;
 
-/// Stable, non-secret local failures for explicit model binding admission.
+/// Stable, non-secret local failures for account-to-tenant passthrough admission.
 /// These failures must survive the executor channel without becoming an
 /// upstream HTTP 502. They never authorize an automatic second attempt.
 #[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModelBindingError {
-    #[error("model_binding_not_found")]
+pub enum PassthroughBindingError {
+    #[error("passthrough_binding_not_found")]
     NotFound,
-    #[error("model_binding_model_not_supported")]
+    #[error("passthrough_binding_model_not_supported")]
     ModelNotSupported,
-    #[error("model_binding_unavailable")]
+    #[error("passthrough_binding_unavailable")]
     Unavailable,
-    #[error("model_binding_changed")]
+    #[error("passthrough_binding_changed")]
     Changed,
-    #[error("model_binding_health_unknown")]
+    #[error("passthrough_binding_health_unknown")]
     HealthUnknown,
-    #[error("model_binding_model_unhealthy")]
+    #[error("passthrough_binding_model_unhealthy")]
     ModelUnhealthy,
-    #[error("model_binding_capacity_exhausted")]
+    #[error("passthrough_binding_capacity_exhausted")]
     CapacityExhausted,
-    #[error("model_binding_dependency_unavailable")]
+    #[error("passthrough_binding_dependency_unavailable")]
     DependencyUnavailable,
-    #[error("model_binding_plan_invalid")]
+    #[error("passthrough_binding_plan_invalid")]
     InvalidPlan,
+    #[error("passthrough_binding_ambiguous")]
+    Ambiguous,
 }
 
-impl ModelBindingError {
+impl PassthroughBindingError {
     pub const fn code(self) -> &'static str {
         match self {
-            Self::NotFound => "model_binding_not_found",
-            Self::ModelNotSupported => "model_binding_model_not_supported",
-            Self::Unavailable => "model_binding_unavailable",
-            Self::Changed => "model_binding_changed",
-            Self::HealthUnknown => "model_binding_health_unknown",
-            Self::ModelUnhealthy => "model_binding_model_unhealthy",
-            Self::CapacityExhausted => "model_binding_capacity_exhausted",
-            Self::DependencyUnavailable => "model_binding_dependency_unavailable",
-            Self::InvalidPlan => "model_binding_plan_invalid",
+            Self::NotFound => "passthrough_binding_not_found",
+            Self::ModelNotSupported => "passthrough_binding_model_not_supported",
+            Self::Unavailable => "passthrough_binding_unavailable",
+            Self::Changed => "passthrough_binding_changed",
+            Self::HealthUnknown => "passthrough_binding_health_unknown",
+            Self::ModelUnhealthy => "passthrough_binding_model_unhealthy",
+            Self::CapacityExhausted => "passthrough_binding_capacity_exhausted",
+            Self::DependencyUnavailable => "passthrough_binding_dependency_unavailable",
+            Self::InvalidPlan => "passthrough_binding_plan_invalid",
+            Self::Ambiguous => "passthrough_binding_ambiguous",
         }
     }
 
@@ -55,6 +58,7 @@ impl ModelBindingError {
             Self::CapacityExhausted,
             Self::DependencyUnavailable,
             Self::InvalidPlan,
+            Self::Ambiguous,
         ]
         .into_iter()
         .find(|candidate| candidate.code() == value)
@@ -63,23 +67,31 @@ impl ModelBindingError {
     pub const fn status(self) -> u16 {
         match self {
             Self::NotFound | Self::ModelNotSupported => 404,
+            Self::Ambiguous => 409,
             _ => 503,
         }
     }
 
     pub const fn public_message(self) -> &'static str {
         match self {
-            Self::NotFound => "No model binding is available for the requested model.",
+            Self::NotFound => {
+                "No passthrough account grant is available for this tenant and model."
+            }
             Self::ModelNotSupported => {
                 "The configured account no longer supports the requested model or API capability."
             }
-            Self::Changed => "The model binding changed before execution. Submit a new request.",
-            Self::HealthUnknown => "The bound model needs a current successful health probe.",
+            Self::Changed => {
+                "The passthrough grant or upstream configuration changed before execution. Submit a new request."
+            }
+            Self::HealthUnknown => "The passthrough model health state is temporarily unavailable.",
             Self::ModelUnhealthy => "The bound model is currently unhealthy.",
             Self::CapacityExhausted => "The bound account has no available execution capacity.",
             Self::DependencyUnavailable => "Model binding state is temporarily unavailable.",
             Self::Unavailable | Self::InvalidPlan => {
-                "The configured model binding is temporarily unavailable."
+                "The configured passthrough account grant is temporarily unavailable."
+            }
+            Self::Ambiguous => {
+                "Multiple passthrough accounts declare this model; configuration is ambiguous."
             }
         }
     }
@@ -120,7 +132,7 @@ pub enum KeyComputeError {
 
     /// Explicit binding rejection; no sensitive account fields are included.
     #[error("{0}")]
-    ModelBinding(#[from] ModelBindingError),
+    PassthroughBinding(#[from] PassthroughBindingError),
 
     // ============ Provider ============
     /// 上游 Provider 错误
@@ -248,7 +260,7 @@ impl KeyComputeError {
             KeyComputeError::RateLimitExceeded(_) => ErrorCategory::RateLimit,
             KeyComputeError::RoutingFailed(_)
             | KeyComputeError::NoReadyNode(_)
-            | KeyComputeError::ModelBinding(_) => ErrorCategory::Routing,
+            | KeyComputeError::PassthroughBinding(_) => ErrorCategory::Routing,
             KeyComputeError::ProviderError(_)
             | KeyComputeError::ProviderTimeout(_, _)
             | KeyComputeError::UpstreamFailure { .. } => ErrorCategory::Provider,
