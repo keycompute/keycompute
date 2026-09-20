@@ -144,10 +144,10 @@ pub enum ExecutionTarget {
         #[serde(default)]
         selection: AccountSelection,
     },
-    /// Node 执行路径（去掉 `node:` 前缀后的实际模型名）
+    /// Node 执行路径（/nt/v1 入口指定的原始模型名）
     #[serde(rename = "Node")]
     NodeDispatch {
-        /// 模型名称（不包含 node: 前缀）
+        /// 原始模型名称
         model: String,
     },
 }

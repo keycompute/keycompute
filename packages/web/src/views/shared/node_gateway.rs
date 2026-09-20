@@ -27,6 +27,7 @@ impl NodeGatewayPageKey {
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{api_client::with_auto_refresh, node_gateway_service};
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore};
+use crate::utils::on_copy;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::{format_time, format_time_opt};
 use crate::views::shared::accounts::NoPermissionView;
@@ -81,6 +82,7 @@ pub fn NodeGateway() -> Element {
     // 恢复节点弹窗控制
     let mut recover_modal_open = use_signal(|| false);
     let mut recover_node_id = use_signal(String::new);
+    let guide_copied = use_signal(|| false);
 
     let overview = use_resource(move || {
         let _key = overview_key();
@@ -423,6 +425,8 @@ pub fn NodeGateway() -> Element {
                 title: i18n.t("page.node_gateway").to_string(),
                 description: i18n.t("node_gateway.subtitle").to_string(),
             }
+
+            NodeDispatchGuide { copied: guide_copied }
 
             match overview() {
                 None => rsx! {
@@ -882,6 +886,43 @@ fn ProtocolItem(method: String, path: String, desc: String) -> Element {
                 code { class: "node-gateway-path", "{path}" }
             }
             p { class: "text-secondary", "{desc}" }
+        }
+    }
+}
+
+#[component]
+fn NodeDispatchGuide(copied: Signal<bool>) -> Element {
+    let ui_store = use_context::<UiStore>();
+    let i18n = use_i18n();
+    let example = r#"curl "$BASE_URL/nt/v1/chat/completions" \
+  -H "Authorization: Bearer $PLATFORM_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemma3:270m","messages":[{"role":"user","content":"Hello"}]}'"#;
+    rsx! {
+        div { class: "section node-gateway-dispatch-guide",
+            h2 { class: "section-title", {i18n.t("node_gateway.request_title")} }
+            p { class: "text-secondary", {i18n.t("node_gateway.request_entry_help")} }
+            p { code { "/nt/v1/chat/completions" } }
+            ol { class: "node-gateway-request-steps",
+                li { {i18n.t("node_gateway.request_step_key")} }
+                li { {i18n.t("node_gateway.request_step_model")} }
+                li { {i18n.t("node_gateway.request_step_stream")} }
+            }
+            p { class: "form-hint", {i18n.t("node_gateway.request_auth_note")} }
+            div { class: "kc-api-copy-block",
+                pre { class: "kc-api-example", "{example}" }
+                button {
+                    class: "btn btn-secondary",
+                    r#type: "button",
+                    onclick: on_copy(
+                        example.to_string(),
+                        i18n.t("common.copy_manual_hint").to_string(),
+                        ui_store,
+                        copied,
+                    ),
+                    {i18n.t(if copied() { "api_keys.copied" } else { "api_keys.copy" })}
+                }
+            }
         }
     }
 }

@@ -21,10 +21,14 @@ pub async fn list_models(
 }
 
 fn models_path(mode: &str, protocol: &str, capability: &str) -> String {
-    if mode == "passthrough" {
-        format!("/pt/v1/models?protocol={protocol}&capability={capability}")
-    } else {
-        format!("/v1/models?mode={mode}&protocol={protocol}&capability={capability}")
+    match mode {
+        "passthrough" => {
+            format!("/pt/v1/models?protocol={protocol}&capability={capability}")
+        }
+        "node_dispatch" => {
+            format!("/nt/v1/models?protocol={protocol}&capability={capability}")
+        }
+        _ => format!("/v1/models?mode=account_pool&protocol={protocol}&capability={capability}"),
     }
 }
 
@@ -41,6 +45,18 @@ mod tests {
         assert_eq!(
             models_path("passthrough", "openai", "chat_completions"),
             "/pt/v1/models?protocol=openai&capability=chat_completions"
+        );
+        assert_eq!(
+            models_path("node_dispatch", "openai", "chat_completions"),
+            "/nt/v1/models?protocol=openai&capability=chat_completions"
+        );
+    }
+
+    #[test]
+    fn node_model_paths_keep_raw_colon_ids_in_the_detail_url() {
+        assert_eq!(
+            format!("/nt/v1/models/{}", "gemma3:270m"),
+            "/nt/v1/models/gemma3:270m"
         );
     }
 }

@@ -31,6 +31,18 @@ impl OpenAiApi {
             .await
     }
 
+    /// NodeDispatch Chat Completions. The URL selects NodeDispatch; the model
+    /// remains the raw worker model ID (for example, `gemma3:270m`).
+    pub async fn node_chat_completions(
+        &self,
+        req: &ChatCompletionRequest,
+        api_key: &str,
+    ) -> Result<ChatCompletionResponse> {
+        self.client
+            .post_json("/nt/v1/chat/completions", req, api_key)
+            .await
+    }
+
     /// 获取模型列表
     ///
     /// 不指定协议，网关按 openai 入口过滤模型（见 `list_models_for_protocol`）。
@@ -56,10 +68,34 @@ impl OpenAiApi {
         self.client.get_json(&path, api_key).await
     }
 
+    /// List ready NodeDispatch models using their raw IDs.
+    pub async fn list_node_models_for_protocol(
+        &self,
+        api_key: &str,
+        protocol: Option<&str>,
+    ) -> Result<ModelListResponse> {
+        let path = match protocol {
+            Some(p) => format!("/nt/v1/models?protocol={}", urlencoding::encode(p)),
+            None => "/nt/v1/models".to_string(),
+        };
+        self.client.get_json(&path, api_key).await
+    }
+
     /// 获取模型详情
     pub async fn retrieve_model(&self, model: &str, api_key: &str) -> Result<ModelInfo> {
         self.client
             .get_json(&format!("/v1/models/{}", model), api_key)
+            .await
+    }
+
+    /// Retrieve a NodeDispatch model by its raw ID. Colons are valid model ID
+    /// characters. The full raw identifier is percent-encoded as one path segment.
+    pub async fn retrieve_node_model(&self, model: &str, api_key: &str) -> Result<ModelInfo> {
+        self.client
+            .get_json(
+                &format!("/nt/v1/models/{}", urlencoding::encode(model)),
+                api_key,
+            )
             .await
     }
 }

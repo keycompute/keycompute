@@ -1035,6 +1035,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "pricing.negative_output_price",
         "Output price cannot be negative",
     );
+    m.insert(
+        "pricing.node_legacy_prefix_help",
+        "NodeDispatch pricing uses the raw model ID, for example gemma3:270m. Remove the deprecated node: prefix; routing is selected by /nt/v1.",
+    );
     m.insert("pricing.create_failed", "Create failed");
     m.insert("pricing.update_failed", "Update failed");
     m.insert("pricing.create_title", "Create Pricing");
@@ -1204,7 +1208,25 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert(
         "node_gateway.subtitle",
-        "Manage local node access, task queues, and the node: model execution path.",
+        "Manage local node access, task queues, and the NodeDispatch execution path.",
+    );
+    m.insert("node_gateway.request_title", "NodeDispatch request entry");
+    m.insert(
+        "node_gateway.request_entry_help",
+        "Use the explicit public entry below with a platform API key and the raw model ID. The registration token is not an inference key.",
+    );
+    m.insert(
+        "node_gateway.request_step_key",
+        "Send a platform API key in the Authorization header.",
+    );
+    m.insert("node_gateway.request_step_model", "Send the raw worker model ID in model, such as gemma3:270m; do not add the deprecated routing prefix.");
+    m.insert(
+        "node_gateway.request_step_stream",
+        "Set stream=true only when you want the existing completion-buffered SSE response.",
+    );
+    m.insert(
+        "node_gateway.request_auth_note",
+        "Registration tokens are only for /node/v1/register; the returned session token is only for the unchanged worker heartbeat/poll/complete protocol.",
     );
     m.insert("node_gateway.runtime_status", "Runtime Status");
     m.insert(
@@ -1218,7 +1240,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_gateway.nodes_online", "Online Nodes");
     m.insert(
         "node_gateway.nodes_online_desc",
-        "Eligible for node: routing",
+        "Eligible for NodeDispatch",
     );
     m.insert("node_gateway.tasks_active", "Active Tasks");
     m.insert("node_gateway.tasks_active_desc", "queued + leased");
@@ -1377,7 +1399,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.flow_gateway", "Gateway Intake");
     m.insert(
         "monitoring.flow_gateway_desc",
-        "OpenAI-compatible endpoint detects node: models and creates requests.",
+        "POST /nt/v1/chat/completions selects NodeDispatch; the request keeps its raw model ID.",
     );
     m.insert("monitoring.flow_queue", "Task Queue");
     m.insert(
@@ -1430,8 +1452,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.map_model_service", "Model Service");
     m.insert("monitoring.map_model_response", "Model Response");
     m.insert("monitoring.map_gateway", "Gateway");
-    m.insert("monitoring.map_gateway_subtitle", "OpenAI API");
-    m.insert("monitoring.map_router_subtitle", "node: model");
+    m.insert(
+        "monitoring.map_gateway_subtitle",
+        "POST /nt/v1/chat/completions",
+    );
+    m.insert("monitoring.map_router_subtitle", "raw model → ready node");
     m.insert("monitoring.map_node", "Node");
     m.insert("monitoring.time_range", "Time range");
     m.insert("monitoring.range_1h", "Last 1 hour");
@@ -2261,7 +2286,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("models.invalid_mode", "Unknown model access mode");
     m.insert("models.pool_workflow", "Configure accounts and declared models → enable pool participation → review eligible counts. Fallback is conditional on safe execution.");
     m.insert("models.pass_workflow", "Select an account and tenant, then save. Defaults are tenant-only and excluded from the pool; no per-model binding or activation is required.");
-    m.insert("models.node_workflow", "Enroll nodes → declare model capabilities → confirm a live session → invoke a node: model. Registration tokens are for enrollment, not API calls.");
+    m.insert("models.node_workflow", "Enroll nodes → declare model capabilities → confirm a live session → call /nt/v1/chat/completions with the raw model ID. Registration tokens are for enrollment, not API calls.");
     m.insert("models.manage_nodes", "Manage worker nodes");
     m.insert("models.manage_accounts", "Manage upstream accounts");
     m.insert("models.create_binding", "Configure passthrough model");

@@ -307,7 +307,9 @@ pub(in crate::handlers) async fn responses_inner(
         None
     };
 
-    let provider = keycompute_pricing::resolve_pricing_provider(&routing.model);
+    let provider = keycompute_pricing::resolve_pricing_provider(
+        keycompute_types::ModelAccessMode::AccountPool,
+    );
     let pricing = match state
         .pricing
         .create_snapshot(&routing.model, &auth.tenant_id, Some(provider))

@@ -5,7 +5,7 @@
 
 use keycompute_cache::CacheService;
 use keycompute_db::{DbRouter, PricingModel};
-use keycompute_types::{KeyComputeError, PricingSnapshot, Result};
+use keycompute_types::{KeyComputeError, ModelAccessMode, PricingSnapshot, Result};
 use lru::LruCache;
 use rust_decimal::Decimal;
 use sea_orm::ConnectionTrait;
@@ -16,34 +16,18 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 /// Node 模型定价 provider 标识
-/// 用于区分 Node 路径模型（node:前缀）的定价查询
 pub const NODE_PRICING_PROVIDER: &str = "node";
 
 /// ProviderAccount 定价 provider 标识
 /// 用于所有非 Node 路径模型的定价查询
 pub const DEFAULT_PRICING_PROVIDER: &str = "provideraccount";
 
-/// 根据模型名确定定价 provider
-///
-/// # 参数
-/// - `model_name`: 模型名称
-///
-/// # 返回
-/// - `"node"`: Node 模型（node:前缀）
-/// - `"provideraccount"`: 其他模型
-///
-/// # 示例
-/// ```rust
-/// use keycompute_pricing::resolve_pricing_provider;
-///
-/// assert_eq!(resolve_pricing_provider("node:ollama-llama3"), "node");
-/// assert_eq!(resolve_pricing_provider("gpt-4o"), "provideraccount");
-/// ```
-pub fn resolve_pricing_provider(model_name: &str) -> &'static str {
-    if model_name.starts_with("node:") {
-        NODE_PRICING_PROVIDER
-    } else {
-        DEFAULT_PRICING_PROVIDER
+/// Resolve the billing dimension from the explicit ingress access mode.
+/// Model names are intentionally opaque and never infer trusted routing.
+pub const fn resolve_pricing_provider(mode: ModelAccessMode) -> &'static str {
+    match mode {
+        ModelAccessMode::NodeDispatch => NODE_PRICING_PROVIDER,
+        ModelAccessMode::AccountPool | ModelAccessMode::Passthrough => DEFAULT_PRICING_PROVIDER,
     }
 }
 
@@ -468,7 +452,7 @@ impl PricingService {
         actual_provider: &str,
     ) -> bool {
         // 根据模型确定计费维度（而非使用真实 provider）
-        let pricing_provider = resolve_pricing_provider(&ctx.model);
+        let pricing_provider = resolve_pricing_provider(ctx.access_mode);
 
         let current_provider = ctx.provider.as_deref().unwrap_or(pricing_provider);
 
@@ -1011,7 +995,7 @@ mod tests {
 
         // 第二次请求：使用 node 计费维度，不同租户
         let snapshot2 = service
-            .create_snapshot("node:llama3", &tenant2, Some("node"))
+            .create_snapshot("llama3", &tenant2, Some("node"))
             .await
             .unwrap();
 
@@ -1078,36 +1062,19 @@ mod tests {
     /// 测试 resolve_pricing_provider 函数
     #[test]
     fn test_resolve_pricing_provider() {
-        // Node 模型应返回 "node"
-        assert_eq!(resolve_pricing_provider("node:ollama-llama3"), "node");
-        assert_eq!(resolve_pricing_provider("node:test"), "node");
-        assert_eq!(resolve_pricing_provider("node:gpt-4o"), "node");
-        assert_eq!(resolve_pricing_provider("node:"), "node");
-
-        // 非 Node 模型应返回 "provideraccount"
-        assert_eq!(resolve_pricing_provider("gpt-4o"), "provideraccount");
-        assert_eq!(resolve_pricing_provider("gpt-3.5-turbo"), "provideraccount");
+        use keycompute_types::ModelAccessMode;
         assert_eq!(
-            resolve_pricing_provider("claude-3-5-sonnet"),
+            resolve_pricing_provider(ModelAccessMode::NodeDispatch),
+            "node"
+        );
+        assert_eq!(
+            resolve_pricing_provider(ModelAccessMode::AccountPool),
             "provideraccount"
         );
-        assert_eq!(resolve_pricing_provider("deepseek-chat"), "provideraccount");
         assert_eq!(
-            resolve_pricing_provider("gemini-1.5-flash"),
+            resolve_pricing_provider(ModelAccessMode::Passthrough),
             "provideraccount"
         );
-
-        // 大小写敏感
-        assert_eq!(resolve_pricing_provider("NODE:test"), "provideraccount");
-        assert_eq!(resolve_pricing_provider("Node:test"), "provideraccount");
-
-        // 其他情况
-        assert_eq!(resolve_pricing_provider("mynode:test"), "provideraccount");
-        assert_eq!(
-            resolve_pricing_provider("test-node:model"),
-            "provideraccount"
-        );
-        assert_eq!(resolve_pricing_provider(""), "provideraccount");
     }
 
     /// 测试常量值

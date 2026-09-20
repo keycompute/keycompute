@@ -52,7 +52,7 @@ KeyCompute es una plataforma de servicios de cómputo de tokens de IA **de alto 
 Los nodos de cómputo se conectan mediante **sondeo pull-based** sin necesidad de **IP pública**. Ejecutan modelos alojados en hardware local y obtienen recompensas según sus contribuciones.
 
 - **Conexión con un clic**: ejecuta el binario CLI independiente para auto-registro → heartbeat → sondeo de tareas → ejecución local → envío de resultados
-- **Enrutamiento de nodos**: usa `node:<nombre_modelo>` para enrutar solicitudes explícitamente al pool de nodos
+- **Enrutamiento NodeDispatch**: usa `/nt/v1/chat/completions` con el ID `model` sin prefijo (por ejemplo, `gemma3:270m`); la URL selecciona el pool de nodos
 - **Conmutación por error automática**: los nodos fallidos se excluyen, las tareas se reencolan automáticamente
 - **Persistencia de sesión**: las sesiones locales evitan registros duplicados; el cierre graceful garantiza la integridad de las tareas
 - **Mecanismo de propinas**: los propietarios de nodos pueden ganar y retirar propinas

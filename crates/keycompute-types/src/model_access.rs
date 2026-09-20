@@ -19,6 +19,59 @@ impl ModelAccessMode {
             Self::NodeDispatch => "node_dispatch",
         }
     }
+
+    pub fn is_generation_path(path: &str) -> bool {
+        Self::from_chat_path(path).is_some()
+            || matches!(
+                path,
+                "/v1/messages"
+                    | "/v1/responses"
+                    | "/v1/responses/compact"
+                    | "/v1/responses/input_tokens"
+            )
+    }
+    pub fn uses_execution_rpm(path: &str) -> bool {
+        Self::is_generation_path(path) && path != "/v1/responses/input_tokens"
+    }
+
+    pub const fn models_path(self) -> &'static str {
+        match self {
+            Self::AccountPool => "/v1/models",
+            Self::Passthrough => "/pt/v1/models",
+            Self::NodeDispatch => "/nt/v1/models",
+        }
+    }
+    /// Classify registered generation routes, never a client parameter.
+    pub fn from_chat_path(path: &str) -> Option<Self> {
+        match path {
+            "/v1/chat/completions" => Some(Self::AccountPool),
+            "/pt/v1/chat/completions" => Some(Self::Passthrough),
+            "/nt/v1/chat/completions" => Some(Self::NodeDispatch),
+            _ => None,
+        }
+    }
+
+    /// Public Chat Completions path for this access mode.
+    pub const fn chat_path(self) -> &'static str {
+        match self {
+            Self::AccountPool => "/v1/chat/completions",
+            Self::Passthrough => "/pt/v1/chat/completions",
+            Self::NodeDispatch => "/nt/v1/chat/completions",
+        }
+    }
+}
+
+/// Retired routing syntax must fail visibly. Other colons are model data.
+pub fn validate_raw_model_id(model: &str) -> crate::Result<()> {
+    if model
+        .get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("node:"))
+    {
+        return Err(crate::KeyComputeError::InvalidRequest(
+            "The node: routing prefix is no longer supported. Use /nt/v1/chat/completions and the raw model name without node:.".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,5 +155,50 @@ mod tests {
         }
         assert!(serde_json::from_str::<ModelAccessMode>("\"openai\"").is_err());
         assert!(serde_json::from_str::<ModelAccessMode>("\"node_token\"").is_err());
+    }
+}
+
+#[cfg(test)]
+mod ingress_contract_tests {
+    use super::*;
+    #[test]
+    fn paths_are_unique_explicit_and_never_inferred_from_model_text() {
+        for mode in [
+            ModelAccessMode::AccountPool,
+            ModelAccessMode::Passthrough,
+            ModelAccessMode::NodeDispatch,
+        ] {
+            assert_eq!(
+                ModelAccessMode::from_chat_path(mode.chat_path()),
+                Some(mode)
+            );
+            assert!(ModelAccessMode::is_generation_path(mode.chat_path()));
+            assert!(ModelAccessMode::uses_execution_rpm(mode.chat_path()));
+            assert!(mode.models_path().ends_with("/models"));
+        }
+        for bad in [
+            "/nt/v1/responses",
+            "/nt/v1/chat/completions/extra",
+            "/nt/v1/models",
+            "node:gemma3",
+        ] {
+            assert_eq!(ModelAccessMode::from_chat_path(bad), None);
+            assert!(!ModelAccessMode::uses_execution_rpm(bad));
+        }
+        assert!(ModelAccessMode::is_generation_path(
+            "/v1/responses/input_tokens"
+        ));
+        assert!(!ModelAccessMode::uses_execution_rpm(
+            "/v1/responses/input_tokens"
+        ));
+    }
+    #[test]
+    fn legacy_prefix_is_rejected_without_rejecting_valid_model_colons() {
+        for model in ["node:llama", "NODE:llama", "Node:"] {
+            assert!(validate_raw_model_id(model).is_err());
+        }
+        for model in ["gemma3:270m", "org/model:latest", "mynode:llama", "模型"] {
+            assert!(validate_raw_model_id(model).is_ok());
+        }
     }
 }

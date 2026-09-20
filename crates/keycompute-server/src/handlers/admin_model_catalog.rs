@@ -199,7 +199,7 @@ async fn account_pool_catalog(
           AND (h.updated_at>a.health_updated_at OR (h.updated_at=a.health_updated_at AND h.generation>=a.health_generation))
         WHERE (a.tenant_id=$1 OR a.visibility='global') AND a.pool_enabled
           AND a.provider=$2 AND a.api_capabilities @> ARRAY[$3]::TEXT[]
-          AND m.model<>'' AND m.model NOT LIKE 'node:%'
+          AND m.model<>'' AND LOWER(m.model) NOT LIKE 'node:%'
           AND ($4::TEXT IS NULL OR m.model ILIKE '%'||$4||'%')
       ), grouped AS (
         SELECT model,COUNT(*)::BIGINT configured_targets,
@@ -325,7 +325,7 @@ fn node_supply_sql() -> String {
         UNION SELECT jsonb_array_elements_text(ns.accepted_models_json) FROM node_sessions ns
           WHERE ns.node_id=n.id AND ns.expires_at>NOW() AND ns.revoked_at IS NULL
       ) m
-      WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama'
+      WHERE m.model IS NOT NULL AND m.model<>'' AND LOWER(m.model) NOT LIKE 'node:%' AND n.capabilities_json->>'runtime'='ollama'
     "#,
         ready = node_gateway::node_index::READY_NODE_CONDITION
     )
@@ -385,10 +385,10 @@ async fn node_catalog(
         let ready = r.eligible_targets > 0 && state.node_gateway.is_some();
         entries.push(ModelCatalogEntry {
             model: r.model.clone(),
-            request_model: format!("node:{}", r.model),
+            request_model: r.model.clone(),
             protocol: "openai".into(),
             capability: "chat_completions".into(),
-            request_path: "/v1/chat/completions".into(),
+            request_path: "/nt/v1/chat/completions".into(),
             status: if ready {
                 ModelAvailability::Ready
             } else {
@@ -418,7 +418,7 @@ pub(crate) async fn ready_node_models(state: &AppState, tenant: Uuid) -> Result<
         .ok_or_else(|| ApiError::ServiceUnavailable("Node catalog unavailable".into()))?
         .write_conn();
     let sql = format!(
-        "WITH supply AS ({}) SELECT DISTINCT 'node:'||model AS model FROM supply WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active') ORDER BY model",
+        "WITH supply AS ({}) SELECT DISTINCT model FROM supply WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active') ORDER BY model",
         node_supply_sql()
     );
     #[derive(FromQueryResult)]

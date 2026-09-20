@@ -402,7 +402,9 @@ pub fn SystemDiagnostics() -> Element {
                                         p { "✓ {i18n.t(\"system.route_success\")}" }
                                         if let Some(ref primary) = info.primary {
                                             p { class: "text-sm",
-                                                "{i18n.t(\"system.primary_target\")}: {primary.provider} ({primary.endpoint})"
+                                                "{i18n.t(\"system.primary_target\")}: {primary.provider} "
+                                                if let Some(endpoint) = &primary.endpoint { " ({endpoint})" }
+                                                if let Some(model) = &primary.model { " · {model}" }
                                             }
 
                                         }

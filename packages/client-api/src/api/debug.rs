@@ -56,6 +56,29 @@ impl DebugApi {
         self.client.get_json(&path, Some(token)).await
     }
 
+    /// Simulate a route in an explicit access family without executing it.
+    pub async fn debug_routing_for_mode(
+        &self,
+        model: &str,
+        mode: crate::api::admin::ModelAccessMode,
+        token: &str,
+    ) -> Result<RoutingDebugInfo> {
+        let mode = match mode {
+            crate::api::admin::ModelAccessMode::AccountPool => "account_pool",
+            crate::api::admin::ModelAccessMode::Passthrough => "passthrough",
+            crate::api::admin::ModelAccessMode::NodeDispatch => "node_dispatch",
+        };
+        self.client
+            .get_json(
+                &format!(
+                    "/api/v1/debug/routing?model={}&mode={mode}",
+                    urlencoding::encode(model)
+                ),
+                Some(token),
+            )
+            .await
+    }
+
     /// 获取 Provider 健康状态
     pub async fn get_provider_health(&self, token: &str) -> Result<ProviderHealthResponse> {
         self.client
@@ -129,8 +152,10 @@ pub struct RoutingDebugInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoutingTargetInfo {
     pub provider: String,
-    pub account_id: String,
-    pub endpoint: String,
+    pub account_id: Option<String>,
+    pub endpoint: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// 定价信息

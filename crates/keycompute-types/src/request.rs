@@ -7,6 +7,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::ModelAccessMode;
 use crate::{
     ExecutionTarget, KeyComputeError, PassthroughBindingSelection, PricingSnapshot,
     RequestExecutionFailure, UsageAccumulator,
@@ -114,6 +115,9 @@ pub struct RequestContext {
     pub tenant_id: Uuid,
     pub produce_ai_key_id: Uuid,
     pub model: String,
+    /// Explicit ingress access mode. This is selected only by the route
+    /// handler; model names never infer or override it.
+    pub access_mode: ModelAccessMode,
     /// Trusted route metadata for `/pt/v1/chat/completions`.  It is populated
     /// only after server-side binding resolution and is never read from a
     /// client header/body field.
@@ -237,6 +241,7 @@ impl fmt::Debug for RequestContext {
             .field("tenant_id", &self.tenant_id)
             .field("produce_ai_key_id", &self.produce_ai_key_id)
             .field("model", &self.model)
+            .field("access_mode", &self.access_mode)
             .field("passthrough_binding", &self.passthrough_binding)
             .field(
                 "passthrough_binding_account_config_version",
@@ -346,6 +351,7 @@ impl RequestContext {
             tenant_id,
             produce_ai_key_id,
             model: model.into(),
+            access_mode: ModelAccessMode::AccountPool,
             passthrough_binding: None,
             passthrough_binding_account_config_version: None,
             passthrough_binding_validator: None,
@@ -395,6 +401,7 @@ impl RequestContext {
             tenant_id: self.tenant_id,
             produce_ai_key_id: self.produce_ai_key_id,
             model: self.model.clone(),
+            access_mode: self.access_mode,
             passthrough_binding: self.passthrough_binding,
             passthrough_binding_account_config_version: self
                 .passthrough_binding_account_config_version,

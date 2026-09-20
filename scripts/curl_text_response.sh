@@ -16,12 +16,12 @@
 #   KC_BASE_URL     服务端地址          (默认: http://localhost:3000)
 #   KC_API_KEY      API Key            (默认: sk-your-api-key-here)
 #   KC_MODEL        Provider 路径模型  (默认: deepseek-chat)
-#   KC_NODE_MODEL   Node 路径模型      (默认: node:gemma3:270m)
+#   KC_NODE_MODEL   Node 路径模型      (默认: gemma3:270m)
 #
 # 示例:
 #   KC_BASE_URL=https://api.example.com KC_API_KEY=sk-xxx ./curl_response.sh
 #   KC_MODEL=gemma3:270m ./curl_response.sh non-stream
-#   KC_NODE_MODEL=node:llama3 ./curl_response.sh node-stream
+#   KC_NODE_MODEL=llama3 ./curl_response.sh node-stream
 # ============================================================================
 # curl -X POST "https://192.168.100.100:3000/v1/chat/completions" \
 #   -H "Content-Type: application/json" \
@@ -52,15 +52,17 @@ fi
 # ==================== 配置 ====================
 # 修改为你的 KeyCompute 服务端地址
 BASE_URL="${KC_BASE_URL:-http://localhost:3000}"
-# 剥离用户可能误传入的尾部路径（允许 KC_BASE_URL 带 /v1 或 /v1/chat/completions）
+# 剥离用户可能误传入的尾部路径（允许 KC_BASE_URL 带 /v1、/nt/v1 或完整 Chat 路径）
 BASE_URL="${BASE_URL%/v1/chat/completions}"
+BASE_URL="${BASE_URL%/nt/v1/chat/completions}"
+BASE_URL="${BASE_URL%/nt/v1}"
 BASE_URL="${BASE_URL%/v1}"
 # 你的 API Key
 API_KEY="${KC_API_KEY:-sk-your-api-key-here}"
 # Provider 路径模型名称（非流式/流式示例使用）
 DEFAULT_MODEL="${KC_MODEL:-deepseek-chat}"
 # Node 路径模型名称（node-non-stream/node-stream 示例使用）
-DEFAULT_NODE_MODEL="${KC_NODE_MODEL:-node:gemma3:270m}"
+DEFAULT_NODE_MODEL="${KC_NODE_MODEL:-gemma3:270m}"
 
 # ==================== 配置校验 ====================
 if [ -z "${BASE_URL}" ]; then
@@ -104,7 +106,7 @@ print_usage() {
     printf '  KC_BASE_URL      服务端地址          (默认: http://localhost:3000)\n'
     printf '  KC_API_KEY       API Key            (默认: sk-your-api-key-here)\n'
     printf '  KC_MODEL         Provider 路径模型  (默认: deepseek-chat)\n'
-    printf '  KC_NODE_MODEL    Node 路径模型      (默认: node:gemma3:270m)\n'
+    printf '  KC_NODE_MODEL    Node 路径模型      (默认: gemma3:270m)\n'
     printf '\n'
     printf '  %s# 完整示例:%s\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
     printf '  KC_BASE_URL=http://localhost:3000 '
@@ -255,11 +257,11 @@ example_node_non_stream() {
     body=$(build_body "$model" false)
 
     printf '%b请求:%b\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-    printf '    POST %s/v1/chat/completions\n' "${BASE_URL}"
-    printf '    model: %s (stream=false, node: 前缀命中 Node 执行路径)\n' "$model"
+    printf '    POST %s/nt/v1/chat/completions\n' "${BASE_URL}"
+    printf '    model: %s (stream=false, URL selects NodeDispatch)\n' "$model"
     printf '\n'
 
-    curl_with_check -X POST "${BASE_URL}/v1/chat/completions" \
+    curl_with_check -X POST "${BASE_URL}/nt/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "$body"
@@ -278,12 +280,12 @@ example_node_stream() {
     body=$(build_body "$model" true)
 
     printf '%b请求:%b\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-    printf '    POST %s/v1/chat/completions\n' "${BASE_URL}"
-    printf '    model: %s (stream=true, node: 前缀 → 服务端模拟流式输出)\n' "$model"
+    printf '    POST %s/nt/v1/chat/completions\n' "${BASE_URL}"
+    printf '    model: %s (stream=true, completion-buffered SSE)\n' "$model"
     printf '\n'
 
     # --noproxy '*' 绕过全局代理，避免 localhost 请求被转发到外部
-    curl -sS --noproxy '*' -N -X POST "${BASE_URL}/v1/chat/completions" \
+    curl -sS --noproxy '*' -N -X POST "${BASE_URL}/nt/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "$body" || {
@@ -298,16 +300,16 @@ example_node_stream() {
 example_error() {
     print_header "示例 5: 错误场景 → Node 路径 (无可用节点)"
 
-    local model="node:non-existent-model"
+    local model="non-existent-model"
     local body
     body=$(build_body "$model" false)
 
     printf '%b请求:%b\n' "${COLOR_YELLOW}" "${COLOR_RESET}"
-    printf '    POST %s/v1/chat/completions\n' "${BASE_URL}"
+    printf '    POST %s/nt/v1/chat/completions\n' "${BASE_URL}"
     printf '    model: %s (无可用节点, 预期返回错误)\n' "$model"
     printf '\n'
 
-    curl_with_check -X POST "${BASE_URL}/v1/chat/completions" \
+    curl_with_check -X POST "${BASE_URL}/nt/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Authorization: Bearer ${API_KEY}" \
         -d "$body" || true  # 错误场景允许失败

@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 
+use super::ModelAccessMode;
+
 const fn default_pricing_version() -> i64 {
     1
 }
@@ -227,13 +229,38 @@ pub struct MakeDefaultPricingResponse {
 }
 
 /// 计算费用请求
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct CalculateCostRequest {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    /// Optional for wire compatibility; omitted requests use AccountPool on the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModelAccessMode>,
+}
+
+impl CalculateCostRequest {
+    pub fn new(model: impl Into<String>, input_tokens: i64, output_tokens: i64) -> Self {
+        Self {
+            model: model.into(),
+            input_tokens,
+            output_tokens,
+            tenant_id: None,
+            mode: None,
+        }
+    }
+
+    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
+
+    pub fn with_mode(mut self, mode: ModelAccessMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
 }
 
 /// 费用计算响应
@@ -252,8 +279,8 @@ pub struct CostCalculationResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        CalculateCostRequest, CostCalculationResponse, PricingInfo, PricingQueryParams,
-        UpdatePricingRequest,
+        CalculateCostRequest, CostCalculationResponse, ModelAccessMode, PricingInfo,
+        PricingQueryParams, UpdatePricingRequest,
     };
 
     #[test]
@@ -284,10 +311,19 @@ mod tests {
             input_tokens: 1,
             output_tokens: 2,
             tenant_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            mode: Some(ModelAccessMode::NodeDispatch),
         };
+        let calculate = serde_json::to_value(calculate).unwrap();
         assert_eq!(
-            serde_json::to_value(calculate).unwrap()["tenant_id"],
+            calculate["tenant_id"],
             "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(calculate["mode"], "node_dispatch");
+        assert_eq!(
+            serde_json::to_value(CalculateCostRequest::new("gemma3:270m", 1, 2))
+                .unwrap()
+                .get("mode"),
+            None
         );
     }
 

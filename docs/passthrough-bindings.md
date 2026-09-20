@@ -4,6 +4,8 @@ A passthrough binding is an explicit grant from one upstream account to one
 platform tenant. It covers **all models declared on the account**, including
 models added later. It does not copy model lists, credentials or endpoints.
 There is no model selector, per-model activation or binding enabled switch.
+NodeDispatch is a separate execution family at `/nt/v1`; it does not use these
+account grants or accept a model-name routing prefix.
 
 Manage bindings under **Upstream Channels → Passthrough Bindings**:
 `/admin/upstreams/passthrough`. The sibling tabs are Account Management and

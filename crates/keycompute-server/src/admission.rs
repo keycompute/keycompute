@@ -49,15 +49,7 @@ pub async fn ingress_middleware(
 ) -> Response {
     use axum::{http::Method, response::IntoResponse};
     let generation = request.method() == Method::POST
-        && matches!(
-            request.uri().path(),
-            "/v1/chat/completions"
-                | "/pt/v1/chat/completions"
-                | "/v1/messages"
-                | "/v1/responses"
-                | "/v1/responses/compact"
-                | "/v1/responses/input_tokens"
-        );
+        && keycompute_types::ModelAccessMode::is_generation_path(request.uri().path());
     if !generation {
         return next.run(request).await;
     }

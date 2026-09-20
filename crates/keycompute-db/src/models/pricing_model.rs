@@ -17,7 +17,7 @@ pub struct BillingDimensionError(pub String);
 /// 计费维度枚举
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BillingDimension {
-    /// Node 路径（node: 前缀的模型）
+    /// NodeDispatch 路径（/nt/v1 入口）
     #[serde(rename = "node")]
     Node,
     /// Provider Account 路径（所有非 Node 模型）

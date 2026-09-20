@@ -918,6 +918,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.invalid_output_price", "输出单价格式不正确");
     m.insert("pricing.negative_input_price", "输入单价不能为负数");
     m.insert("pricing.negative_output_price", "输出单价不能为负数");
+    m.insert(
+        "pricing.node_legacy_prefix_help",
+        "NodeDispatch 定价使用原始模型 ID，例如 gemma3:270m。请删除已废弃的 node: 前缀；路由由 /nt/v1 选择。",
+    );
     m.insert("pricing.create_failed", "创建失败");
     m.insert("pricing.update_failed", "更新失败");
     m.insert("pricing.create_title", "新建定价");
@@ -1041,7 +1045,28 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert(
         "node_gateway.subtitle",
-        "管理本地节点接入、任务队列和 node: 模型执行路径。",
+        "管理本地节点接入、任务队列和 NodeDispatch 执行路径。",
+    );
+    m.insert("node_gateway.request_title", "NodeDispatch 请求入口");
+    m.insert(
+        "node_gateway.request_entry_help",
+        "使用下方明确的公共入口、平台 API Key 和原始模型 ID。注册令牌不是推理调用 Key。",
+    );
+    m.insert(
+        "node_gateway.request_step_key",
+        "在 Authorization 请求头中发送平台 API Key。",
+    );
+    m.insert(
+        "node_gateway.request_step_model",
+        "model 使用原始节点模型 ID，例如 gemma3:270m；不要添加已废弃的路由前缀。",
+    );
+    m.insert(
+        "node_gateway.request_step_stream",
+        "仅在需要现有的完成后缓冲 SSE 响应时设置 stream=true。",
+    );
+    m.insert(
+        "node_gateway.request_auth_note",
+        "注册令牌仅用于 /node/v1/register；换取的 session token 仅用于不变的节点 heartbeat/poll/complete 协议。",
     );
     m.insert("node_gateway.runtime_status", "运行状态");
     m.insert(
@@ -1053,7 +1078,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_gateway.nodes_total", "节点总数");
     m.insert("node_gateway.nodes_total_desc", "已注册节点实例");
     m.insert("node_gateway.nodes_online", "在线节点");
-    m.insert("node_gateway.nodes_online_desc", "可参与 node: 路由");
+    m.insert("node_gateway.nodes_online_desc", "可参与 NodeDispatch");
     m.insert("node_gateway.tasks_active", "活跃任务");
     m.insert("node_gateway.tasks_active_desc", "queued + leased");
     m.insert("node_gateway.tasks_done", "成功任务");
@@ -1190,7 +1215,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.flow_gateway", "Gateway 接入");
     m.insert(
         "monitoring.flow_gateway_desc",
-        "OpenAI 兼容入口识别 node: 模型并创建请求。",
+        "POST /nt/v1/chat/completions 选择 NodeDispatch，请求保留原始模型 ID。",
     );
     m.insert("monitoring.flow_queue", "任务入队");
     m.insert(
@@ -1243,8 +1268,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("monitoring.map_model_service", "模型服务");
     m.insert("monitoring.map_model_response", "模型响应");
     m.insert("monitoring.map_gateway", "网关");
-    m.insert("monitoring.map_gateway_subtitle", "OpenAI API");
-    m.insert("monitoring.map_router_subtitle", "节点: 模型");
+    m.insert(
+        "monitoring.map_gateway_subtitle",
+        "POST /nt/v1/chat/completions",
+    );
+    m.insert("monitoring.map_router_subtitle", "原始模型 → 在线节点");
     m.insert("monitoring.map_node", "节点");
     m.insert("monitoring.time_range", "时间范围");
     m.insert("monitoring.range_1h", "最近 1 小时");
@@ -1966,7 +1994,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "models.pass_workflow",
         "选择账号和租户 → 保存透传绑定。默认非全局、不参与账号池；无需逐个模型绑定或启用。",
     );
-    m.insert("models.node_workflow", "接入节点 → 节点声明模型能力 → 确认有效在线会话 → 使用 node: 模型名调用。注册令牌仅用于接入，不是调用 Key。");
+    m.insert("models.node_workflow", "接入节点 → 节点声明模型能力 → 确认有效在线会话 → 使用原始模型 ID 调用 /nt/v1/chat/completions。注册令牌仅用于接入，不是调用 Key。");
     m.insert("models.manage_nodes", "管理节点资源");
     m.insert("models.manage_accounts", "管理上游账号");
     m.insert("models.create_binding", "配置透传模型");

@@ -924,6 +924,7 @@ async fn test_calculate_cost_success() {
         input_tokens: 1000,
         output_tokens: 500,
         tenant_id: None,
+        mode: None,
     };
     let result = admin_api
         .calculate_cost(&req, fixtures::TEST_ACCESS_TOKEN)

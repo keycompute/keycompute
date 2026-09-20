@@ -46,7 +46,7 @@ fn request_scope(request: &Request, base_path: &str) -> &'static str {
     if path == "/api/v1/settings/public" {
         return "public";
     }
-    if path.starts_with("/v1/") || path.starts_with("/pt/v1/") {
+    if path.starts_with("/v1/") || path.starts_with("/pt/v1/") || path.starts_with("/nt/v1/") {
         return "generation";
     }
     if !path.starts_with("/api/v1/") {
@@ -395,6 +395,7 @@ mod tests {
             .unwrap();
         assert!(state.remaining(&write).is_some());
         assert!(state.remaining(&request("/v1/models", "a")).is_none());
+        assert!(state.remaining(&request("/nt/v1/models", "a")).is_none());
         assert!(
             state
                 .remaining(&request("/api/v1/auth/login", "a"))

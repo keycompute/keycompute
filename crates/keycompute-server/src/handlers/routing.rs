@@ -26,10 +26,16 @@ fn extract_target_info(target: &ExecutionTarget) -> Option<RoutingTargetInfo> {
             ..
         } => Some(RoutingTargetInfo {
             provider: provider.clone(),
-            account_id: *account_id,
-            endpoint: endpoint.clone(),
+            account_id: Some(*account_id),
+            endpoint: Some(endpoint.clone()),
+            model: None,
         }),
-        ExecutionTarget::NodeDispatch { .. } => None, // Node 路径不支持此接口
+        ExecutionTarget::NodeDispatch { model } => Some(RoutingTargetInfo {
+            provider: "node".into(),
+            account_id: None,
+            endpoint: None,
+            model: Some(model.clone()),
+        }),
     }
 }
 
@@ -38,6 +44,8 @@ fn extract_target_info(target: &ExecutionTarget) -> Option<RoutingTargetInfo> {
 pub struct RoutingDebugQuery {
     /// 模型名称
     pub model: String,
+    #[serde(default)]
+    pub mode: keycompute_types::ModelAccessMode,
     /// 入口协议（openai / anthropic），默认 openai；
     /// 用于按入口协议隔离模拟路由（Anthropic 入口只从 anthropic 协议选路）
     #[serde(default)]
@@ -50,9 +58,10 @@ pub struct RoutingTargetInfo {
     /// Provider 名称
     pub provider: String,
     /// 账号 ID
-    pub account_id: Uuid,
+    pub account_id: Option<Uuid>,
     /// 端点
-    pub endpoint: String,
+    pub endpoint: Option<String>,
+    pub model: Option<String>,
 }
 
 /// Provider 状态信息
@@ -123,8 +132,8 @@ fn apply_debug_entry_protocol(ctx: &mut RequestContext, entry: Option<&str>) {
 /// NoReadyNode 与 RoutingFailed 的排查路径不同：node 模型看节点是否
 /// 在线，普通模型看账号/Provider 配置，提示需区分。提取为纯函数便于
 /// 单元测试。
-fn routing_debug_failure_message(model: &str) -> String {
-    if model.starts_with("node:") {
+fn routing_debug_failure_message(model: &str, mode: keycompute_types::ModelAccessMode) -> String {
+    if mode == keycompute_types::ModelAccessMode::NodeDispatch {
         format!(
             "模型 '{}' 暂时没有在线节点。请检查：1) 节点是否已注册并在线；2) 节点会话是否有效。",
             model
@@ -149,8 +158,17 @@ pub async fn debug_routing(
     use keycompute_db::models::Account;
 
     // 1. 构建 PricingSnapshot
-    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
-    let provider = keycompute_pricing::resolve_pricing_provider(&query.model);
+    // Billing dimension is derived from the explicit access mode.
+    keycompute_types::validate_raw_model_id(&query.model).map_err(ApiError::from)?;
+    let (entry, _) =
+        super::admin_model_catalog::protocol_capability(query.mode, query.entry.as_deref(), None)?;
+    if query.mode == keycompute_types::ModelAccessMode::NodeDispatch && state.node_gateway.is_none()
+    {
+        return Err(ApiError::ServiceUnavailable(
+            "NodeDispatch task service is unavailable".into(),
+        ));
+    }
+    let provider = keycompute_pricing::resolve_pricing_provider(query.mode);
     let pricing = state
         .pricing
         .create_snapshot(&query.model, &auth.tenant_id, Some(provider))
@@ -170,7 +188,8 @@ pub async fn debug_routing(
     );
 
     // 入口协议隔离：按 entry 参数模拟对应入口的路由（与真实 handler 行为一致）
-    apply_debug_entry_protocol(&mut ctx, query.entry.as_deref());
+    ctx.access_mode = query.mode;
+    apply_debug_entry_protocol(&mut ctx, Some(&entry));
 
     // 3. 获取所有配置的 protocol 列表
     let all_providers: Vec<String> = state.routing.configured_providers().to_vec();
@@ -229,7 +248,17 @@ pub async fn debug_routing(
     }
 
     // 5. 执行路由（只读）
-    match state.routing.route(&ctx).await {
+    match if query.mode == keycompute_types::ModelAccessMode::Passthrough {
+        crate::passthrough_binding::resolve_passthrough_binding_plan(
+            &state,
+            auth.tenant_id,
+            &query.model,
+        )
+        .await
+        .map(|(plan, _, _)| plan)
+    } else {
+        state.routing.route(&ctx).await
+    } {
         Ok(plan) => {
             // 提取 primary target 信息
             let primary_info = match extract_target_info(&plan.primary) {
@@ -292,7 +321,7 @@ pub async fn debug_routing(
             | keycompute_types::KeyComputeError::NoReadyNode(_),
         ) => {
             // 路由失败，但仍返回诊断信息
-            let message = routing_debug_failure_message(&query.model);
+            let message = routing_debug_failure_message(&query.model, query.mode);
             let response = RoutingDebugResponse {
                 request_id: ctx.request_id,
                 routed: false,
@@ -535,13 +564,17 @@ mod tests {
     #[test]
     fn routing_debug_failure_message_distinguishes_node_models() {
         // node 模型：提示检查节点在线状态
-        let node_msg = routing_debug_failure_message("node:llama3");
-        assert!(node_msg.contains("node:llama3"));
+        let node_msg = routing_debug_failure_message(
+            "llama3",
+            keycompute_types::ModelAccessMode::NodeDispatch,
+        );
+        assert!(node_msg.contains("llama3"));
         assert!(node_msg.contains("在线节点"));
         assert!(!node_msg.contains("路由目标"));
 
         // 普通模型：提示检查账号/Provider 配置
-        let model_msg = routing_debug_failure_message("gpt-4o");
+        let model_msg =
+            routing_debug_failure_message("gpt-4o", keycompute_types::ModelAccessMode::AccountPool);
         assert!(model_msg.contains("gpt-4o"));
         assert!(model_msg.contains("路由目标"));
         assert!(!model_msg.contains("在线节点"));
@@ -551,8 +584,9 @@ mod tests {
     fn test_routing_target_info_serialize() {
         let info = RoutingTargetInfo {
             provider: "openai".to_string(),
-            account_id: Uuid::new_v4(),
-            endpoint: "https://api.openai.com/v1".to_string(),
+            account_id: Some(Uuid::new_v4()),
+            endpoint: Some("https://api.openai.com/v1".to_string()),
+            model: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("openai"));

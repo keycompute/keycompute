@@ -40,7 +40,7 @@ pub trait NodeCapabilityIndex: Send + Sync {
     /// 检查是否存在 ready 节点可以处理指定模型
     ///
     /// 该方法为异步，因为实际实现需要执行数据库查询 (I/O 操作)。
-    async fn has_ready_node(&self, model: &str) -> bool;
+    async fn has_ready_node(&self, model: &str) -> Result<bool>;
 }
 
 /// 每个 Provider（协议）最多选入执行计划的账号数
@@ -204,15 +204,7 @@ impl RoutingEngine {
     /// 根据 RequestContext 路由到最优的 Provider 和账号
     /// 使用租户专属账号池进行路由
     ///
-    /// **Node 路由支持**:
-    /// - 检测 `model.starts_with("node:")` 前缀
-    /// - 去掉前缀得到 actual_model,调用 `node_index.has_ready_node(actual_model)`
-    /// - 存在 ready 节点: 返回 `ExecutionTarget::NodeDispatch { model: actual_model }`
-    /// - 不存在: 返回 `NoReadyNode` 错误,不 fallback
-    /// - 无前缀: 走现有 Provider 路由逻辑
-    ///
-    /// **注**: Node 路径支持 stream=true，流式由 handler 层的 `simulate_node_stream()`
-    /// 模拟实现（获取完整响应后按块拆分输出），不经过 GatewayExecutor
+    /// Explicit URL-derived mode selects NodeDispatch without account fallback.
     pub async fn route(&self, ctx: &RequestContext) -> Result<ExecutionPlan> {
         keycompute_observability::capacity::measure(
             keycompute_observability::capacity::Stage::Routing,
@@ -229,42 +221,45 @@ impl RoutingEngine {
             "route: starting"
         );
 
-        // 检测 Node 路由前缀
-        if let Some(actual_model) = ctx.model.strip_prefix("node:") {
-            tracing::info!(
-                request_id = %ctx.request_id,
-                model = %ctx.model,
-                actual_model = %actual_model,
-                "route: node prefix detected"
-            );
-
-            // 检查是否配置了 node_index
-            let node_index = self.node_index.as_ref().ok_or_else(|| {
-                tracing::error!("route: node_index not configured");
-                KeyComputeError::Internal("Node routing not configured".to_string())
-            })?;
-
-            // 检查是否存在 ready 节点
-            if node_index.has_ready_node(actual_model).await {
-                tracing::info!(
-                    request_id = %ctx.request_id,
-                    model = %actual_model,
-                    "route: ready node found, routing to node path"
-                );
-                return Ok(ExecutionPlan {
-                    primary: ExecutionTarget::NodeDispatch {
-                        model: actual_model.to_string(),
-                    },
-                    fallback_chain: Vec::new(),
-                });
-            } else {
-                tracing::warn!(
-                    request_id = %ctx.request_id,
-                    model = %actual_model,
-                    "route: no ready node available"
-                );
-                return Err(KeyComputeError::NoReadyNode(actual_model.to_string()));
+        keycompute_types::validate_raw_model_id(&ctx.model)?;
+        match ctx.access_mode {
+            keycompute_types::ModelAccessMode::Passthrough => {
+                return Err(KeyComputeError::InvalidRequest(
+                    "Passthrough requires an account grant resolver".into(),
+                ));
             }
+            keycompute_types::ModelAccessMode::NodeDispatch => {
+                if ctx.native_anthropic_request.is_some()
+                    || ctx.native_openai_responses_request.is_some()
+                    || ctx.passthrough_binding.is_some()
+                {
+                    return Err(KeyComputeError::InvalidRequest(
+                        "NodeDispatch supports Chat Completions only".into(),
+                    ));
+                }
+                let index = self.node_index.as_ref().ok_or_else(|| {
+                    KeyComputeError::ServiceUnavailable(
+                        "NodeDispatch metadata service unavailable".into(),
+                    )
+                })?;
+                let ready = tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    index.has_ready_node(&ctx.model),
+                )
+                .await
+                .map_err(|_| {
+                    KeyComputeError::ServiceUnavailable(
+                        "NodeDispatch readiness lookup timed out".into(),
+                    )
+                })??;
+                if !ready {
+                    return Err(KeyComputeError::NoReadyNode(ctx.model.clone()));
+                }
+                return Ok(ExecutionPlan::new(ExecutionTarget::new_node(
+                    ctx.model.clone(),
+                )));
+            }
+            keycompute_types::ModelAccessMode::AccountPool => {}
         }
 
         // Layer1: 模型路由 - 选择 provider 排序
@@ -854,8 +849,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl NodeCapabilityIndex for MockNodeIndex {
-        async fn has_ready_node(&self, model: &str) -> bool {
-            self.ready_models.contains(&model.to_string())
+        async fn has_ready_node(&self, model: &str) -> Result<bool> {
+            Ok(self.ready_models.contains(&model.to_string()))
         }
     }
 
@@ -1234,7 +1229,8 @@ mod tests {
 
         // 创建请求上下文,使用 node: 前缀
         let mut ctx = create_test_context();
-        ctx.model = "node:deepseek-chat".to_string();
+        ctx.model = "deepseek-chat".to_string();
+        ctx.access_mode = keycompute_types::ModelAccessMode::NodeDispatch;
         ctx.stream = false;
 
         // 应该路由到 Node
@@ -1256,7 +1252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_route_node_model_ignores_entry_protocol_isolation() {
+    async fn test_node_mode_rejects_anthropic_protocol() {
         // node 模型走 node 路由分支，不受入口协议隔离影响；对应 debug_routing
         // 的 entry=anthropic + node: 模型组合（哨兵 body 仅让 route() 判定入口协议，
         // node 分支在协议判定之前返回）。
@@ -1276,21 +1272,16 @@ mod tests {
         );
 
         let mut ctx = create_test_context();
-        ctx.model = "node:deepseek-chat".to_string();
+        ctx.model = "deepseek-chat".to_string();
+        ctx.access_mode = keycompute_types::ModelAccessMode::NodeDispatch;
         ctx.stream = false;
         // anthropic 入口（debug_routing entry=anthropic 注入的哨兵 body）
         ctx.native_anthropic_request = Some(Arc::new(serde_json::json!({ "messages": [] })));
 
-        let plan = engine.route(&ctx).await.unwrap();
-        match &plan.primary {
-            ExecutionTarget::NodeDispatch { model } => {
-                assert_eq!(model, "deepseek-chat");
-            }
-            ExecutionTarget::UpstreamAccount { .. } => {
-                panic!("Expected NodeDispatch target");
-            }
-        }
-        assert!(plan.fallback_chain.is_empty());
+        assert!(matches!(
+            engine.route(&ctx).await,
+            Err(KeyComputeError::InvalidRequest(_))
+        ));
     }
 
     #[tokio::test]
@@ -1314,7 +1305,8 @@ mod tests {
 
         // 创建请求上下文,使用 node: 前缀
         let mut ctx = create_test_context();
-        ctx.model = "node:deepseek-chat".to_string();
+        ctx.model = "deepseek-chat".to_string();
+        ctx.access_mode = keycompute_types::ModelAccessMode::NodeDispatch;
         ctx.stream = false;
 
         // 应该返回 NoReadyNode 错误
@@ -1350,7 +1342,8 @@ mod tests {
 
         // 创建请求上下文,使用 node: 前缀但 stream=true
         let mut ctx = create_test_context();
-        ctx.model = "node:deepseek-chat".to_string();
+        ctx.model = "deepseek-chat".to_string();
+        ctx.access_mode = keycompute_types::ModelAccessMode::NodeDispatch;
         ctx.stream = true; // 流式请求现在应该被允许
 
         // 应该成功路由到 Node,服务端会模拟流式输出
@@ -1376,7 +1369,8 @@ mod tests {
 
         // 创建请求上下文,使用 node: 前缀
         let mut ctx = create_test_context();
-        ctx.model = "node:deepseek-chat".to_string();
+        ctx.model = "deepseek-chat".to_string();
+        ctx.access_mode = keycompute_types::ModelAccessMode::NodeDispatch;
         ctx.stream = false;
 
         // 应该返回 Internal 错误(node_index not configured)
@@ -1384,8 +1378,8 @@ mod tests {
         assert!(plan.is_err());
 
         match plan.unwrap_err() {
-            KeyComputeError::Internal(msg) => {
-                assert!(msg.contains("Node routing not configured"));
+            KeyComputeError::ServiceUnavailable(msg) => {
+                assert!(msg.contains("NodeDispatch metadata service unavailable"));
             }
             _ => panic!("Expected Internal error"),
         }

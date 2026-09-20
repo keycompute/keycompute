@@ -263,6 +263,47 @@ pub fn create_router(state: AppState) -> Router {
             openai_rate_limit_response_middleware,
         ));
 
+    // Explicit node API namespace; unsupported paths never fall through to the account pool.
+    let node_dispatch_routes = Router::new()
+        .route(
+            "/nt/v1",
+            axum::routing::any(crate::handlers::openai::unsupported_node_endpoint),
+        )
+        .route(
+            "/nt/v1/",
+            axum::routing::any(crate::handlers::openai::unsupported_node_endpoint),
+        )
+        .route(
+            "/nt/v1/chat/completions",
+            post(crate::handlers::openai::node_dispatch_chat_completions),
+        )
+        .route(
+            "/nt/v1/models",
+            get(crate::handlers::openai::node_dispatch_list_models),
+        )
+        .route(
+            "/nt/v1/models/{model}",
+            get(crate::handlers::openai::node_dispatch_retrieve_model),
+        )
+        .route(
+            "/nt/v1/{*rest}",
+            axum::routing::any(crate::handlers::openai::unsupported_node_endpoint),
+        )
+        .method_not_allowed_fallback(crate::handlers::openai::node_method_not_allowed)
+        .layer(DefaultBodyLimit::max(OPENAI_CHAT_BODY_LIMIT_BYTES))
+        .layer(from_fn_with_state(
+            state.clone(),
+            generation_http_body_admission_middleware,
+        ))
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::admission::ingress_middleware,
+        ))
+        .layer(axum::middleware::from_fn(
+            openai_rate_limit_response_middleware,
+        ));
+
     let responses_routes = Router::new()
         .route("/v1/responses", post(responses).get(responses_websocket))
         .route("/v1/responses/compact", post(compact_response))
@@ -664,6 +705,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(auth_routes)
         .merge(openai_routes)
         .merge(passthrough_binding_routes)
+        .merge(node_dispatch_routes)
         .merge(responses_routes)
         .merge(anthropic_routes)
         .merge(user_routes)

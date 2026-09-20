@@ -113,6 +113,70 @@ async fn test_chat_completions_with_options() {
 }
 
 #[tokio::test]
+async fn test_node_chat_completions_preserves_raw_model_and_nt_path() {
+    let (client, mock_server) = create_openai_test_client().await;
+    let openai_api = OpenAiApi::new(&client);
+    let req = ChatCompletionRequest::new("gemma3:270m", vec![Message::user("Hello")]);
+
+    Mock::given(method("POST"))
+        .and(path("/nt/v1/chat/completions"))
+        .and(body_json(serde_json::json!({
+            "model": "gemma3:270m",
+            "messages": [{"role": "user", "content": "Hello"}]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-node-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "gemma3:270m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let response = openai_api
+        .node_chat_completions(&req, "sk-test-api-key")
+        .await
+        .unwrap();
+    assert_eq!(response.model, "gemma3:270m");
+}
+
+#[tokio::test]
+async fn test_node_model_discovery_and_retrieval_use_nt_paths() {
+    let (client, mock_server) = create_openai_test_client().await;
+    let openai_api = OpenAiApi::new(&client);
+
+    Mock::given(method("GET"))
+        .and(path("/nt/v1/models"))
+        .and(query_param("protocol", "openai"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": "list",
+            "data": [{"id": "gemma3:270m", "object": "model", "created": 1, "owned_by": "node"}]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/nt/v1/models/gemma3%3A270m"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "gemma3:270m", "object": "model", "created": 1, "owned_by": "node"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let list = openai_api
+        .list_node_models_for_protocol("sk-test-api-key", Some("openai"))
+        .await
+        .unwrap();
+    assert_eq!(list.data[0].id, "gemma3:270m");
+    let model = openai_api
+        .retrieve_node_model("gemma3:270m", "sk-test-api-key")
+        .await
+        .unwrap();
+    assert_eq!(model.id, "gemma3:270m");
+}
+
+#[tokio::test]
 async fn test_list_models_success() {
     let (client, mock_server) = create_openai_test_client().await;
     let openai_api = OpenAiApi::new(&client);

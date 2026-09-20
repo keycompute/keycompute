@@ -2134,6 +2134,15 @@ impl GatewayExecutor {
 /// upstream request. In particular, a bound primary may never smuggle an
 /// ordinary or differently-bound fallback into the executor.
 fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result<()> {
+    if ctx.access_mode == keycompute_types::ModelAccessMode::NodeDispatch
+        || plan.all_targets().any(ExecutionTarget::is_node)
+    {
+        return Err(KeyComputeError::InvalidRequest(
+            "NodeDispatch must execute through the node task service, not an upstream account"
+                .into(),
+        ));
+    }
+
     let mut bound_selection = None;
     for (index, target) in plan.all_targets().enumerate() {
         if let ExecutionTarget::UpstreamAccount {

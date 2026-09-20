@@ -258,11 +258,13 @@ fn generation_json_body_policy(method: &Method, path: &str) -> Option<Generation
         return None;
     }
     match path {
-        "/v1/chat/completions" | "/pt/v1/chat/completions" => Some(GenerationJsonBodyPolicy {
-            name: "Chat Completions",
-            body_limit_bytes: OPENAI_CHAT_BODY_LIMIT_BYTES,
-            working_set_limit_bytes: OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES,
-        }),
+        p if keycompute_types::ModelAccessMode::from_chat_path(p).is_some() => {
+            Some(GenerationJsonBodyPolicy {
+                name: "Chat Completions",
+                body_limit_bytes: OPENAI_CHAT_BODY_LIMIT_BYTES,
+                working_set_limit_bytes: OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES,
+            })
+        }
         "/v1/messages" => Some(GenerationJsonBodyPolicy {
             name: "Anthropic Messages",
             body_limit_bytes: ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES,
@@ -509,7 +511,8 @@ pub async fn openai_responses_error_response_middleware(req: Request, next: Next
 /// REST error contract, while native upstream 429 responses remain untouched.
 pub async fn openai_rate_limit_response_middleware(req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    let is_openai_route = path == "/v1/chat/completions"
+    let is_openai_route = path.starts_with("/nt/v1/")
+        || path == "/v1/chat/completions"
         || path == "/pt/v1/chat/completions"
         || path == "/v1/models"
         || path.starts_with("/v1/models/")
@@ -1134,14 +1137,7 @@ pub async fn rate_limit_middleware(
     };
 
     if req.method() == Method::POST
-        && matches!(
-            req.uri().path(),
-            "/v1/chat/completions"
-                | "/pt/v1/chat/completions"
-                | "/v1/messages"
-                | "/v1/responses"
-                | "/v1/responses/compact"
-        )
+        && keycompute_types::ModelAccessMode::uses_execution_rpm(req.uri().path())
     {
         // Generation RPM is execution-based: route-aware handlers own the
         // admission because the effective upstream account is only known after

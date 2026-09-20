@@ -139,7 +139,7 @@ pub fn get_client() -> ApiClient {
     }
 }
 
-/// 归一化配置的 API 基址到根路径（去掉 /auth、/api/v1、/v1 等后缀）
+/// 归一化配置的 API 基址到根路径（去掉已知 API 家族后缀）。
 fn normalize_api_root(configured: &str) -> String {
     let mut root = configured.trim_end_matches('/');
     loop {
@@ -148,6 +148,8 @@ fn normalize_api_root(configured: &str) -> String {
         let stripped = root
             .strip_suffix("/api/v1")
             .or_else(|| root.strip_suffix("/auth"))
+            .or_else(|| root.strip_suffix("/nt/v1"))
+            .or_else(|| root.strip_suffix("/pt/v1"))
             .or_else(|| root.strip_suffix("/v1"));
         match stripped {
             Some(next) => root = next.trim_end_matches('/'),
@@ -390,6 +392,14 @@ mod tests {
             normalize_api_root("http://gw.example.com/api/v1/v1"),
             "http://gw.example.com"
         );
+        assert_eq!(
+            normalize_api_root("https://gw.example.com/console/nt/v1"),
+            "https://gw.example.com/console"
+        );
+        assert_eq!(
+            normalize_api_root("https://gw.example.com/console/pt/v1"),
+            "https://gw.example.com/console"
+        );
     }
 
     /// 空串输入保持空串返回（调用方保证不会传入空串，此处锁定防御性行为）
@@ -440,6 +450,10 @@ mod tests {
         assert_eq!(
             append_v1(&normalize_api_root("http://localhost:8080/v1")),
             "http://localhost:8080/v1"
+        );
+        assert_eq!(
+            append_v1(&normalize_api_root("https://gw.example.com/console/nt/v1")),
+            "https://gw.example.com/console/v1"
         );
     }
 }

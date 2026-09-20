@@ -618,8 +618,33 @@ pub async fn chat_completions(
         received_at,
         body_permit,
         body,
-        "/v1/chat/completions",
-        false,
+        keycompute_types::ModelAccessMode::AccountPool,
+    )
+    .await
+}
+
+/// POST /nt/v1/chat/completions. The URL is the sole trusted NodeDispatch
+/// selector; request fields cannot switch the execution family.
+pub async fn node_dispatch_chat_completions(
+    State(state): State<AppState>,
+    auth: AuthExtractor,
+    request_id: RequestId,
+    client_request_id: ClientRequestId,
+    received_at: RequestReceivedAt,
+    (body_permit, Json(body)): (
+        Option<Extension<crate::state::GenerationHttpBodyPermit>>,
+        Json<Value>,
+    ),
+) -> Result<axum::response::Response> {
+    chat_completions_inner(
+        state,
+        auth,
+        request_id,
+        client_request_id,
+        received_at,
+        body_permit,
+        body,
+        keycompute_types::ModelAccessMode::NodeDispatch,
     )
     .await
 }
@@ -646,8 +671,7 @@ pub async fn passthrough_binding_chat_completions(
         received_at,
         body_permit,
         body,
-        "/pt/v1/chat/completions",
-        true,
+        keycompute_types::ModelAccessMode::Passthrough,
     )
     .await
 }
@@ -664,9 +688,9 @@ async fn chat_completions_inner(
     received_at: RequestReceivedAt,
     body_permit: Option<Extension<crate::state::GenerationHttpBodyPermit>>,
     body: Value,
-    request_path: &'static str,
-    model_bound: bool,
+    access_mode: keycompute_types::ModelAccessMode,
 ) -> Result<axum::response::Response> {
+    let request_path = access_mode.chat_path();
     crate::admission::ensure_generation(&state, &mut auth).await?;
     let request = parse_chat_completion_request(&body)?;
     let native_chat_request = Arc::new(body);
@@ -719,10 +743,33 @@ async fn chat_completions_inner(
         .await;
         return Err(error);
     }
+    if let Some(error) = reject_legacy_node_model(&request.model) {
+        finish_unexecuted_trace(
+            &mut pre_execution_guard,
+            ErrorOrigin::Client,
+            TraceErrorCategory::InvalidRequest,
+            "deprecated_node_model_prefix",
+        )
+        .await;
+        return Err(error);
+    }
+    // A live capability row is not enough when the task service is disabled.
+    // Reject before pricing, execution RPM or TPM/balance reservations.
+    if access_mode == ModelAccessMode::NodeDispatch && state.node_gateway.is_none() {
+        finish_unexecuted_trace(
+            &mut pre_execution_guard,
+            ErrorOrigin::Gateway,
+            TraceErrorCategory::Transport,
+            "node_gateway_unavailable",
+        )
+        .await;
+        return Err(ApiError::ServiceUnavailable(
+            "NodeDispatch task service is unavailable".into(),
+        ));
+    }
     // 1. 构建 PricingSnapshot
     // 注意：此时 provider 尚未确定（路由在之后执行）
-    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
-    let provider = keycompute_pricing::resolve_pricing_provider(&request.model);
+    let provider = keycompute_pricing::resolve_pricing_provider(access_mode);
     let pricing = match state
         .pricing
         .create_snapshot(&request.model, &auth.tenant_id, Some(provider))
@@ -765,6 +812,7 @@ async fn chat_completions_inner(
         request.stream,
         pricing,
     );
+    request_ctx.access_mode = access_mode;
     crate::admission::bind_context(&auth, &mut request_ctx);
     // 仅投影客户端显式提供的采样参数。缺省或显式 null 时保持 None，
     // 且原生 OpenAI JSON 不被改写；余额预留默认值只属于内部风控。
@@ -775,57 +823,58 @@ async fn chat_completions_inner(
     let mut ctx = Arc::new(request_ctx);
 
     // 5. 智能路由
-    let (plan, binding_selection, binding_config_version) = if model_bound {
-        match resolve_passthrough_binding_plan(&state, auth.tenant_id, &request.model).await {
-            Ok(value) => (value.0, Some(value.1), Some(value.2)),
-            Err(error) => {
-                let error = ApiError::from(error);
-                let (origin, category, code) = match error {
-                    ApiError::PassthroughBinding(code) if code.status() == 404 => (
-                        ErrorOrigin::Client,
-                        TraceErrorCategory::InvalidRequest,
-                        code.code(),
-                    ),
-                    ApiError::PassthroughBinding(code) => (
-                        ErrorOrigin::Gateway,
-                        TraceErrorCategory::Transport,
-                        code.code(),
-                    ),
-                    ApiError::NotFound(_) => (
-                        ErrorOrigin::Client,
-                        TraceErrorCategory::InvalidRequest,
-                        "passthrough_binding_not_found",
-                    ),
-                    ApiError::BadRequest(_) => (
-                        ErrorOrigin::Client,
-                        TraceErrorCategory::InvalidRequest,
-                        "invalid_passthrough_binding_request",
-                    ),
-                    _ => (
-                        ErrorOrigin::Gateway,
-                        TraceErrorCategory::Transport,
-                        "passthrough_binding_unavailable",
-                    ),
-                };
-                finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
-                return Err(error);
+    let (plan, binding_selection, binding_config_version) =
+        if access_mode == keycompute_types::ModelAccessMode::Passthrough {
+            match resolve_passthrough_binding_plan(&state, auth.tenant_id, &request.model).await {
+                Ok(value) => (value.0, Some(value.1), Some(value.2)),
+                Err(error) => {
+                    let error = ApiError::from(error);
+                    let (origin, category, code) = match error {
+                        ApiError::PassthroughBinding(code) if code.status() == 404 => (
+                            ErrorOrigin::Client,
+                            TraceErrorCategory::InvalidRequest,
+                            code.code(),
+                        ),
+                        ApiError::PassthroughBinding(code) => (
+                            ErrorOrigin::Gateway,
+                            TraceErrorCategory::Transport,
+                            code.code(),
+                        ),
+                        ApiError::NotFound(_) => (
+                            ErrorOrigin::Client,
+                            TraceErrorCategory::InvalidRequest,
+                            "passthrough_binding_not_found",
+                        ),
+                        ApiError::BadRequest(_) => (
+                            ErrorOrigin::Client,
+                            TraceErrorCategory::InvalidRequest,
+                            "invalid_passthrough_binding_request",
+                        ),
+                        _ => (
+                            ErrorOrigin::Gateway,
+                            TraceErrorCategory::Transport,
+                            "passthrough_binding_unavailable",
+                        ),
+                    };
+                    finish_unexecuted_trace(&mut pre_execution_guard, origin, category, code).await;
+                    return Err(error);
+                }
             }
-        }
-    } else {
-        match state.routing.route(&ctx).await {
-            Ok(plan) => (plan, None, None),
-            Err(error) => {
-                finish_unexecuted_trace(
-                    &mut pre_execution_guard,
-                    ErrorOrigin::Gateway,
-                    TraceErrorCategory::Internal,
-                    "routing_failed",
-                )
-                .await;
-                return Err(crate::error::map_routing_error(error, "openai"));
+        } else {
+            match state.routing.route(&ctx).await {
+                Ok(plan) => (plan, None, None),
+                Err(error) => {
+                    finish_unexecuted_trace(
+                        &mut pre_execution_guard,
+                        ErrorOrigin::Gateway,
+                        TraceErrorCategory::Internal,
+                        "routing_failed",
+                    )
+                    .await;
+                    return Err(crate::error::map_routing_error(error, "openai"));
+                }
             }
-        }
-    };
+        };
     if state.pool.is_some() {
         let health = Arc::new(DbPassthroughBindingValidator::new(&state)?);
         let ctx_mut = Arc::make_mut(&mut ctx);
@@ -840,7 +889,8 @@ async fn chat_completions_inner(
             ctx_mut.set_passthrough_binding_validator(health);
         }
     }
-    let (route_type, route_status) = initial_route_trace_state(&plan.primary, model_bound);
+    let (route_type, route_status) =
+        initial_route_trace_state(&plan.primary, access_mode == ModelAccessMode::Passthrough);
     if let Err(error) = lifecycle
         .set_route(request_id.0, route_type, route_status)
         .await
@@ -931,13 +981,7 @@ async fn chat_completions_inner(
     // 5. 根据 ExecutionTarget 分流执行路径
     match &plan.primary {
         ExecutionTarget::NodeDispatch { model } => {
-            // 更新 ctx 的 model 字段（使用去掉前缀的实际模型名）
             let ctx_mut = Arc::make_mut(&mut ctx);
-            ctx_mut.model = model.clone();
-
-            // 更新定价快照（使用实际模型名和 NODE_PRICING_PROVIDER 进行定价查找）
-            // 注意：必须先调用 update_context_pricing，再设置 provider
-            // 因为 update_context_pricing 会检查 provider 是否变化
             state
                 .pricing
                 .update_context_pricing(ctx_mut, keycompute_pricing::NODE_PRICING_PROVIDER)
@@ -967,7 +1011,7 @@ async fn chat_completions_inner(
             let payload = keycompute_types::node::NodeTaskPayload {
                 request_id: ctx.request_id,
                 chat: Some(keycompute_types::ChatCompletionRequest {
-                    model: model.clone(), // 使用去掉 node: 前缀的实际模型名
+                    model: model.clone(),
                     messages: node_messages,
                     stream: Some(request.stream), // 传递 stream 标志
                     max_tokens: request.effective_max_tokens(),
@@ -2700,8 +2744,12 @@ fn resolve_list_protocol(protocol: Option<&str>) -> Result<&'static str> {
     }
 }
 
-/// Authenticated, mode-specific model discovery. The exact same projection
-/// serves list and detail, so a detail lookup cannot cross protocol/tenant gates.
+fn reject_legacy_node_model(model: &str) -> Option<ApiError> {
+    keycompute_types::validate_raw_model_id(model)
+        .err()
+        .map(ApiError::from)
+}
+
 pub async fn list_models(
     auth: AuthExtractor,
     State(state): State<AppState>,
@@ -2709,49 +2757,110 @@ pub async fn list_models(
 ) -> Result<Json<ListModelsResponse>> {
     Ok(Json(ListModelsResponse {
         object: "list".into(),
-        data: discover_models(&auth, &state, &query).await?,
+        data: discover_models(&auth, &state, &query, ModelAccessMode::AccountPool).await?,
     }))
 }
-
 pub async fn retrieve_model(
     auth: AuthExtractor,
     State(state): State<AppState>,
     Query(query): Query<ListModelsQuery>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Model>> {
-    discover_models(&auth, &state, &query)
+    keycompute_types::validate_raw_model_id(&model_id).map_err(ApiError::from)?;
+    discover_models(&auth, &state, &query, ModelAccessMode::AccountPool)
         .await?
         .into_iter()
-        .find(|m| m.id == model_id)
+        .find(|model| model.id == model_id)
         .map(Json)
-        .ok_or_else(|| {
-            ApiError::NotFound(
-                "Model is not available in the selected access mode and API capability".into(),
-            )
-        })
+        .ok_or_else(|| ApiError::NotFound("Model is not available on this API path".into()))
+}
+
+pub async fn node_dispatch_list_models(
+    auth: AuthExtractor,
+    State(state): State<AppState>,
+    Query(query): Query<ListModelsQuery>,
+) -> Result<Json<ListModelsResponse>> {
+    Ok(Json(ListModelsResponse {
+        object: "list".into(),
+        data: discover_models(&auth, &state, &query, ModelAccessMode::NodeDispatch).await?,
+    }))
+}
+pub async fn node_dispatch_retrieve_model(
+    auth: AuthExtractor,
+    State(state): State<AppState>,
+    Query(query): Query<ListModelsQuery>,
+    Path(model_id): Path<String>,
+) -> Result<Json<Model>> {
+    keycompute_types::validate_raw_model_id(&model_id).map_err(ApiError::from)?;
+    discover_models(&auth, &state, &query, ModelAccessMode::NodeDispatch)
+        .await?
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound("Model is not available on this API path".into()))
+}
+
+pub async fn passthrough_binding_list_models(
+    auth: AuthExtractor,
+    State(state): State<AppState>,
+    Query(query): Query<ListModelsQuery>,
+) -> Result<Json<ListModelsResponse>> {
+    Ok(Json(ListModelsResponse {
+        object: "list".into(),
+        data: discover_models(&auth, &state, &query, ModelAccessMode::Passthrough).await?,
+    }))
+}
+pub async fn passthrough_binding_retrieve_model(
+    auth: AuthExtractor,
+    State(state): State<AppState>,
+    Query(query): Query<ListModelsQuery>,
+    Path(model_id): Path<String>,
+) -> Result<Json<Model>> {
+    keycompute_types::validate_raw_model_id(&model_id).map_err(ApiError::from)?;
+    discover_models(&auth, &state, &query, ModelAccessMode::Passthrough)
+        .await?
+        .into_iter()
+        .find(|model| model.id == model_id)
+        .map(Json)
+        .ok_or_else(|| ApiError::NotFound("Model is not available on this API path".into()))
 }
 
 async fn discover_models(
     auth: &AuthExtractor,
     state: &AppState,
     query: &ListModelsQuery,
+    mode: ModelAccessMode,
 ) -> Result<Vec<Model>> {
     if !auth.has_permission(&Permission::UseApi) {
         return Err(ApiError::Forbidden(
             "API-use permission required for model discovery".into(),
         ));
     }
-    let mode = query.mode.unwrap_or_default();
-    if mode == ModelAccessMode::Passthrough {
-        return Err(ApiError::BadRequest(
-            "Discover passthrough models through /pt/v1/models".into(),
-        ));
+    if query.mode.is_some_and(|requested| requested != mode) {
+        return Err(ApiError::BadRequest(format!(
+            "The request path selects the access mode; use {}",
+            query.mode.unwrap().models_path()
+        )));
     }
     let (protocol, capability) = super::admin_model_catalog::protocol_capability(
         mode,
         query.protocol.as_deref(),
         query.capability.as_deref(),
     )?;
+    if mode == ModelAccessMode::Passthrough {
+        return Ok(
+            list_routable_passthrough_bindings(state, auth.tenant_id, None)
+                .await?
+                .into_iter()
+                .map(|(id, owned_by)| Model {
+                    id,
+                    owned_by,
+                    object: "model".into(),
+                    created: chrono::Utc::now().timestamp(),
+                })
+                .collect(),
+        );
+    }
     let db = state
         .pool
         .as_deref()
@@ -2785,7 +2894,9 @@ async fn discover_models(
                 continue;
             }
             for model in account.models_supported {
-                if !model.is_empty() && !model.starts_with("node:") {
+                if !model.trim().is_empty()
+                    && keycompute_types::validate_raw_model_id(&model).is_ok()
+                {
                     entries.insert(model, protocol.clone());
                 }
             }
@@ -2803,55 +2914,24 @@ async fn discover_models(
         .collect())
 }
 
-/// List only currently routable passthrough account models for the authenticated tenant.
-/// The result is advisory; dispatch performs the same checks again on the
-/// writer immediately before execution.
-pub async fn passthrough_binding_list_models(
-    State(state): State<AppState>,
-    auth: AuthExtractor,
-) -> Result<Json<ListModelsResponse>> {
-    if !auth.has_permission(&Permission::UseApi) {
-        return Err(ApiError::Forbidden(
-            "API-use permission is required for /pt/v1/models".to_string(),
-        ));
-    }
-    let rows = list_routable_passthrough_bindings(&state, auth.tenant_id, None).await?;
-    Ok(Json(ListModelsResponse {
-        object: "list".to_string(),
-        data: rows
-            .into_iter()
-            .map(|(id, provider)| Model {
-                id,
-                object: "model".to_string(),
-                created: chrono::Utc::now().timestamp(),
-                owned_by: provider,
-            })
-            .collect(),
-    }))
+pub async fn unsupported_node_endpoint() -> axum::response::Response {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error":{
+        "message":"Unsupported NodeDispatch API. Use /nt/v1/chat/completions or /nt/v1/models.",
+        "type":"invalid_request_error","code":"unsupported_node_endpoint"}})),
+    )
+        .into_response()
 }
 
-/// Retrieve one currently routable passthrough model for the authenticated tenant.
-pub async fn passthrough_binding_retrieve_model(
-    State(state): State<AppState>,
-    auth: AuthExtractor,
-    Path(model_id): Path<String>,
-) -> Result<Json<Model>> {
-    if !auth.has_permission(&Permission::UseApi) {
-        return Err(ApiError::Forbidden(
-            "API-use permission is required for /pt/v1/models".to_string(),
-        ));
-    }
-    let mut rows =
-        list_routable_passthrough_bindings(&state, auth.tenant_id, Some(&model_id)).await?;
-    let Some((id, provider)) = rows.pop() else {
-        return Err(ApiError::NotFound("Model not found".to_string()));
-    };
-    Ok(Json(Model {
-        id,
-        object: "model".to_string(),
-        created: chrono::Utc::now().timestamp(),
-        owned_by: provider,
-    }))
+pub async fn node_method_not_allowed() -> axum::response::Response {
+    (
+        axum::http::StatusCode::METHOD_NOT_ALLOWED,
+        Json(serde_json::json!({"error":{
+        "message":"Unsupported HTTP method for this NodeDispatch API.",
+        "type":"invalid_request_error","code":"method_not_allowed"}})),
+    )
+        .into_response()
 }
 
 /// 将节点的完整响应转换为模拟流式输出

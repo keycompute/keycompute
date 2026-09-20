@@ -52,7 +52,7 @@ KeyCompute is a **high-performance**, **extensible**, and **out-of-the-box** AI 
 Compute nodes connect via **pull-based polling** without requiring a **public IP**. They run hosted models on local hardware and earn rewards based on contributions.
 
 - **One-click connection**: Run the standalone CLI binary to auto-register → heartbeat → poll tasks → local execution → submit results
-- **Node routing**: Use `node:<model_name>` to explicitly route requests to the node pool
+- **NodeDispatch routing**: Use `/nt/v1/chat/completions` with the raw `model` ID (for example `gemma3:270m`); the URL selects the node pool
 - **Automatic failover**: Failed nodes are excluded from scheduling, tasks are automatically requeued
 - **Session persistence**: Local sessions prevent duplicate registration; graceful shutdown ensures task integrity
 - **Tip mechanism**: Node owners can earn and withdraw tips

@@ -32,12 +32,14 @@ Pricing, tenants, platform keys and request monitoring remain distinct workflows
 Monitoring records `passthrough_binding` separately while retaining the real
 account identity and shared accounting.
 
-Caller guidance starts with account pool, passthrough or node execution, then
-shows only compatible protocol and model choices. Model discovery is authenticated
-and tenant-scoped. Empty data, loading and dependency failures are distinct;
-examples never manufacture an available model. A generated platform key identifies
-a caller, not a fixed execution mode. `/pt` is the passthrough URL prefix; a node
-uses its explicit `node:` model identifier on the supported ordinary interface.
+Caller guidance starts with account pool, passthrough or NodeDispatch execution,
+then shows only compatible protocol and model choices. Model discovery is
+authenticated and tenant-scoped. Empty data, loading and dependency failures are
+distinct; examples never manufacture an available model. A generated platform
+key identifies a caller, not a fixed execution mode. `/pt` is the passthrough URL
+prefix; `/nt/v1` is the NodeDispatch URL prefix and node model IDs remain raw.
+See [NodeDispatch](node-dispatch.md) for the supported public surface and
+explicit migration from the removed prefix-based routing form.
 
 For grant semantics, the four-option scope matrix, APIs, diagnostics, revocation
 and fresh-schema constraints, see [Passthrough bindings](passthrough-bindings.md).

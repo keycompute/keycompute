@@ -232,6 +232,8 @@ pub async fn get_billing_stats(
 pub struct CalculateCostRequest {
     /// 模型名称
     pub model: String,
+    #[serde(default)]
+    pub mode: keycompute_types::ModelAccessMode,
     /// 输入 token 数
     pub input_tokens: u32,
     /// 输出 token 数
@@ -280,8 +282,9 @@ pub async fn calculate_cost(
 ) -> Result<Json<CalculateCostResponse>> {
     // 预览应按调用方租户解析。管理员可显式指定目标租户，普通用户不能越权。
     let tenant_id = resolve_preview_tenant(&auth, request.tenant_id)?;
-    // Node 模型（node:前缀）使用 empty provider
-    let provider = keycompute_pricing::resolve_pricing_provider(&request.model);
+    keycompute_types::validate_raw_model_id(&request.model)
+        .map_err(crate::error::ApiError::from)?;
+    let provider = keycompute_pricing::resolve_pricing_provider(request.mode);
     let pricing = state
         .pricing
         .create_snapshot(&request.model, &tenant_id, Some(provider))

@@ -33,7 +33,7 @@ impl PostgresNodeIndex {
 #[async_trait]
 impl NodeCapabilityIndex for PostgresNodeIndex {
     /// 检查是否存在 ready 节点可以处理指定模型
-    async fn has_ready_node(&self, model: &str) -> bool {
+    async fn has_ready_node(&self, model: &str) -> keycompute_types::Result<bool> {
         let model_json: serde_json::Value = serde_json::json!([model]);
 
         let stmt = Statement::from_sql_and_values(
@@ -45,12 +45,27 @@ impl NodeCapabilityIndex for PostgresNodeIndex {
         // Routing is authorization-sensitive: a replica may still advertise a
         // node after its tenant was closed. Read the readiness predicate from
         // the writer so closure takes effect immediately.
-        let result = self.pool.write_conn().query_one(stmt).await;
-
-        match result {
-            Ok(Some(row)) => row.try_get_by_index::<bool>(0).unwrap_or(false),
-            _ => false,
-        }
+        let row = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self.pool.write_conn().query_one(stmt),
+        )
+        .await
+        .map_err(|_| {
+            keycompute_types::KeyComputeError::ServiceUnavailable(
+                "Node metadata lookup timed out".into(),
+            )
+        })?
+        .map_err(|_| {
+            keycompute_types::KeyComputeError::ServiceUnavailable(
+                "Node metadata unavailable".into(),
+            )
+        })?
+        .ok_or_else(|| {
+            keycompute_types::KeyComputeError::ServiceUnavailable("Missing node metadata".into())
+        })?;
+        row.try_get_by_index::<bool>(0).map_err(|_| {
+            keycompute_types::KeyComputeError::ServiceUnavailable("Invalid node metadata".into())
+        })
     }
 }
 

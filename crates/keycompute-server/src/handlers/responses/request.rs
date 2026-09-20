@@ -95,6 +95,7 @@ pub(super) fn validate_responses_reference_fields(
 }
 
 pub(super) fn validate_effective_responses_model(upstream_path: &str, model: &str) -> Result<()> {
+    keycompute_types::validate_raw_model_id(model).map_err(ApiError::from)?;
     if upstream_path == "/responses/compact" && model.trim().is_empty() {
         return Err(ApiError::BadRequest(
             "model is required for /v1/responses/compact when it cannot be resolved from previous_response_id"
@@ -111,7 +112,8 @@ pub(super) fn validate_effective_responses_model(upstream_path: &str, model: &st
 /// WebSocket `generate:false` warmups do not execute the HTTP pipeline, so an
 /// upstream cannot reject malformed known fields on KeyCompute's behalf.
 pub(in crate::handlers) fn validate_responses_request(body: &Value) -> Result<()> {
-    ResponsesRoutingFields::parse(body)?;
+    let routing = ResponsesRoutingFields::parse(body)?;
+    keycompute_types::validate_raw_model_id(&routing.model).map_err(ApiError::from)?;
     let object = body
         .as_object()
         .expect("ResponsesRoutingFields validated the request as an object");

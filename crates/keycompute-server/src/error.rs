@@ -458,12 +458,14 @@ pub fn map_routing_error(e: keycompute_types::KeyComputeError, protocol: &str) -
              If the account pool is temporarily unavailable, retry later."
         )),
         KeyComputeError::NoReadyNode(model) => ApiError::ServiceUnavailable(format!(
-            "Model 'node:{model}' is temporarily unavailable: no ready node is online. \
+            "Model '{model}' is temporarily unavailable on /nt/v1: no ready node is online. \
              Please retry later."
         )),
         // route() 当前只产生 RoutingFailed / NoReadyNode / DatabaseError /
         // Internal，其余分支为防御性兜底：数据库与内部故障统一 500，
         // 响应体不泄露具体原因（ApiError::Internal 输出通用消息）
+        KeyComputeError::InvalidRequest(message) => ApiError::BadRequest(message),
+        KeyComputeError::ServiceUnavailable(message) => ApiError::ServiceUnavailable(message),
         other => ApiError::Internal(format!("Routing failed: {other}")),
     }
 }
@@ -697,7 +699,8 @@ mod tests {
             "openai",
         );
         // 容量问题提示可重试，且模型名保留 node: 前缀便于客户端对应
-        assert!(err.to_string().contains("node:llama3"));
+        assert!(err.to_string().contains("llama3"));
+        assert!(err.to_string().contains("/nt/v1"));
         assert!(err.to_string().contains("retry"));
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);

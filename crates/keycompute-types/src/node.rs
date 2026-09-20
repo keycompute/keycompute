@@ -148,7 +148,7 @@ pub struct NodeTaskEnvelope {
     pub task_id: NodeTaskId,
     /// 租约 ID
     pub lease_id: NodeLeaseId,
-    /// 模型名称（去掉 node: 前缀后的实际模型名）
+    /// 模型名称（原始模型名）
     pub model: String,
     /// 任务截止时间（Unix 毫秒时间戳）
     pub deadline_unix_ms: i64,

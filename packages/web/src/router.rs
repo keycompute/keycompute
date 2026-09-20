@@ -247,4 +247,31 @@ mod tests {
         assert!(nginx.contains("location ^~ /pt/v1/models/ {"));
         assert!(!nginx.contains("location /pt/ {"));
     }
+
+    #[test]
+    fn nginx_node_dispatch_routes_preserve_uri_and_proxy_unknown_nt_paths() {
+        let nginx = include_str!("../../../nginx/nginx.conf");
+        let chat = nginx
+            .split_once("location = /nt/v1/chat/completions {")
+            .expect("NodeDispatch chat location must exist")
+            .1
+            .split_once("\n        }")
+            .expect("NodeDispatch chat location must be closed")
+            .0;
+        assert!(chat.contains("proxy_pass         http://keycompute_backend;"));
+        assert!(chat.contains("client_max_body_size 96m;"));
+        assert!(chat.contains("proxy_request_buffering off;"));
+        assert!(chat.contains("proxy_buffering    off;"));
+        assert!(nginx.contains("location = /nt/v1/models {"));
+        assert!(nginx.contains("location ^~ /nt/v1/models/ {"));
+        assert!(nginx.contains("location ^~ /nt/v1/ {"));
+        assert!(!nginx.contains("location /nt/ {"));
+        assert!(!nginx.contains("location /nt/v1/ {"));
+    }
+
+    #[test]
+    fn dioxus_dev_proxy_preserves_the_nt_family_prefix() {
+        let dioxus = include_str!("../Dioxus.toml");
+        assert!(dioxus.contains("backend = \"http://127.0.0.1:3000/nt/\""));
+    }
 }

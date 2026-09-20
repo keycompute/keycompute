@@ -11,6 +11,7 @@ use axum::{
     Json,
     extract::{Query, State},
 };
+use keycompute_types::ModelAccessMode;
 use serde::{Deserialize, Serialize};
 
 /// 定价查询请求
@@ -18,6 +19,8 @@ use serde::{Deserialize, Serialize};
 pub struct PricingQuery {
     /// 模型名称
     pub model: String,
+    #[serde(default)]
+    pub mode: ModelAccessMode,
 }
 
 /// 定价响应
@@ -38,6 +41,8 @@ pub struct PricingResponse {
 pub struct CostCalculationRequest {
     /// 模型名称
     pub model: String,
+    #[serde(default)]
+    pub mode: ModelAccessMode,
     /// 输入 token 数
     pub input_tokens: u32,
     /// 输出 token 数
@@ -65,8 +70,8 @@ pub async fn get_pricing(
     auth: AuthExtractor,
     Query(query): Query<PricingQuery>,
 ) -> Result<Json<PricingResponse>> {
-    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
-    let provider = keycompute_pricing::resolve_pricing_provider(&query.model);
+    keycompute_types::validate_raw_model_id(&query.model).map_err(ApiError::from)?;
+    let provider = keycompute_pricing::resolve_pricing_provider(query.mode);
     let snapshot = state
         .pricing
         .create_snapshot(&query.model, &auth.tenant_id, Some(provider))
@@ -87,8 +92,8 @@ pub async fn calculate_cost(
     auth: AuthExtractor,
     Json(request): Json<CostCalculationRequest>,
 ) -> Result<Json<CostCalculationResponse>> {
-    // Node 模型（node:前缀）使用 empty provider，其他使用 openai
-    let provider = keycompute_pricing::resolve_pricing_provider(&request.model);
+    keycompute_types::validate_raw_model_id(&request.model).map_err(ApiError::from)?;
+    let provider = keycompute_pricing::resolve_pricing_provider(request.mode);
     let snapshot = state
         .pricing
         .create_snapshot(&request.model, &auth.tenant_id, Some(provider))

@@ -194,6 +194,16 @@ pub async fn messages(
         .await;
         return Err(error);
     }
+    if let Err(error) = keycompute_types::validate_raw_model_id(&request.model) {
+        finish_anthropic_unexecuted_trace(
+            &mut pre_execution_guard,
+            ErrorOrigin::Client,
+            TraceErrorCategory::InvalidRequest,
+            "deprecated_node_model_prefix",
+        )
+        .await;
+        return Err(ApiError::from(error));
+    }
     if let Err(error) = request.validate() {
         finish_anthropic_unexecuted_trace(
             &mut pre_execution_guard,
@@ -224,7 +234,9 @@ pub async fn messages(
     let top_p = request.top_p;
     let context_messages = request.context_messages();
 
-    let provider = keycompute_pricing::resolve_pricing_provider(&model);
+    let provider = keycompute_pricing::resolve_pricing_provider(
+        keycompute_types::ModelAccessMode::AccountPool,
+    );
     let pricing = match state
         .pricing
         .create_snapshot(&model, &auth.tenant_id, Some(provider))

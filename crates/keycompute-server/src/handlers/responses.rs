@@ -660,7 +660,9 @@ async fn select_responses_post_account(
             Err(error) => return Err(error),
         }
     }
-    let provider = keycompute_pricing::resolve_pricing_provider(&routing.model);
+    let provider = keycompute_pricing::resolve_pricing_provider(
+        keycompute_types::ModelAccessMode::AccountPool,
+    );
     let pricing = state
         .pricing
         .create_snapshot(&routing.model, &auth.tenant_id, Some(provider))
@@ -1853,7 +1855,9 @@ async fn resolved_responses_billing_context(
     let Some(actual_model) = actual_model else {
         return Ok(Arc::clone(ctx));
     };
-    let provider = keycompute_pricing::resolve_pricing_provider(actual_model);
+    let provider = keycompute_pricing::resolve_pricing_provider(
+        keycompute_types::ModelAccessMode::AccountPool,
+    );
     let pricing = state
         .pricing
         .create_snapshot(actual_model, &ctx.tenant_id, Some(provider))

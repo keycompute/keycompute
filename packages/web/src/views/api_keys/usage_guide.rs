@@ -21,10 +21,10 @@ pub fn mode_base(root: &str, mode: ModelAccessMode) -> String {
     format!(
         "{}/{}",
         root.trim_end_matches('/'),
-        if mode == ModelAccessMode::Passthrough {
-            "pt/v1"
-        } else {
-            "v1"
+        match mode {
+            ModelAccessMode::AccountPool => "v1",
+            ModelAccessMode::Passthrough => "pt/v1",
+            ModelAccessMode::NodeDispatch => "nt/v1",
         }
     )
 }
@@ -90,10 +90,9 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
         })
         .map(|m| m.id.clone());
     let root = public_api_root_url();
-    let base = if mode == ModelAccessMode::Passthrough {
-        mode_base(&root, mode)
-    } else {
-        crate::services::api_client::public_openai_api_base_url()
+    let base = match mode {
+        ModelAccessMode::AccountPool => crate::services::api_client::public_openai_api_base_url(),
+        ModelAccessMode::Passthrough | ModelAccessMode::NodeDispatch => mode_base(&root, mode),
     };
     let displayed_base = if surface() == "messages" {
         root.clone()
@@ -171,7 +170,7 @@ mod tests {
         );
         assert_eq!(
             mode_base("https://example.test/ai/", ModelAccessMode::NodeDispatch),
-            "https://example.test/ai/v1"
+            "https://example.test/ai/nt/v1"
         );
     }
 }

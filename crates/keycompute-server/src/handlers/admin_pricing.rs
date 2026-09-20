@@ -246,6 +246,7 @@ fn parse_timestamp(raw: Option<&String>, field: &str) -> Result<Option<DateTime<
 
 fn validate_model_name(model_name: &str) -> Result<String> {
     let model_name = model_name.trim();
+    keycompute_types::validate_raw_model_id(model_name).map_err(ApiError::from)?;
     if model_name.is_empty()
         || model_name.chars().count() > 100
         || model_name.chars().any(|character| character.is_control())

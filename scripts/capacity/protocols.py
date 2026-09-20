@@ -8,11 +8,11 @@ import uuid
 PROTOCOLS=('chat','responses','anthropic','websocket','node')
 
 def model_name(protocol):
-    return 'claude-3-5-sonnet' if protocol=='anthropic' else 'gpt-4o'
+    return 'claude-3-5-sonnet' if protocol=='anthropic' else 'gemma3:270m' if protocol=='node' else 'gpt-4o'
 
 def path_for(protocol):
     if protocol not in PROTOCOLS:raise ValueError('unsupported lab protocol')
-    return '/v1/messages' if protocol=='anthropic' else '/v1/responses' if protocol in ('responses','websocket') else '/v1/chat/completions'
+    return '/v1/messages' if protocol=='anthropic' else '/v1/responses' if protocol in ('responses','websocket') else '/nt/v1/chat/completions' if protocol=='node' else '/v1/chat/completions'
 
 def request_body(protocol,stream,payload_bytes=0):
     if protocol not in PROTOCOLS or not 0<=payload_bytes<=8*1024*1024:raise ValueError('invalid fixture request')
@@ -21,7 +21,7 @@ def request_body(protocol,stream,payload_bytes=0):
         body={'model':name,'input':text,'max_output_tokens':32,'stream':stream,'store':False}
         if protocol=='websocket':body.update(type='response.create',stream_id='lab_'+uuid.uuid4().hex)
         return body
-    body={'model':('node:'+name) if protocol=='node' else name,'messages':[{'role':'user','content':text}],
+    body={'model':name,'messages':[{'role':'user','content':text}],
           'max_tokens':32,'stream':stream}
     if protocol!='anthropic':body['stream_options']={'include_usage':True} if stream else None
     return body
