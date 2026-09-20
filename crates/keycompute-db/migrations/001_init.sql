@@ -1386,6 +1386,44 @@ CREATE INDEX IF NOT EXISTS idx_node_tasks_finished_at ON node_tasks(finished_at)
 -- 用于 admin_monitoring.rs 中的 LEFT JOIN LATERAL 子查询（WHERE task_id = nt.id ORDER BY created_at DESC）
 CREATE INDEX IF NOT EXISTS idx_node_task_submissions_task_id_created_at ON node_task_submissions(task_id, created_at DESC);
 
+-- Native SSE delivery is immutable per task lease.  The state row is the
+-- bounded cursor/window; event rows make retries and contiguous sequence
+-- checks durable without holding a transaction across HTTP streaming.
+CREATE TABLE IF NOT EXISTS node_native_streams (
+    task_id UUID NOT NULL REFERENCES node_tasks(id) ON DELETE CASCADE,
+    lease_id UUID NOT NULL,
+    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    session_id UUID NOT NULL REFERENCES node_sessions(id) ON DELETE CASCADE,
+    state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','terminal','failed','canceled')),
+    next_seq BIGINT NOT NULL DEFAULT 0 CHECK (next_seq BETWEEN 0 AND 4100),
+    unread_frames INTEGER NOT NULL DEFAULT 0 CHECK (unread_frames >= 0),
+    unread_bytes BIGINT NOT NULL DEFAULT 0 CHECK (unread_bytes >= 0),
+    total_bytes BIGINT NOT NULL DEFAULT 0 CHECK (total_bytes >= 0),
+    inspector_json JSONB NOT NULL,
+    head_status INTEGER NOT NULL CHECK (head_status=200),
+    head_headers JSONB NOT NULL,
+    summary_json JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (task_id,lease_id)
+);
+CREATE TABLE IF NOT EXISTS node_native_stream_events (
+    task_id UUID NOT NULL,
+    lease_id UUID NOT NULL,
+    seq BIGINT NOT NULL CHECK (seq >= 0),
+    event_json JSONB,
+    event_hash TEXT NOT NULL CHECK (event_hash ~ '^[0-9a-f]{64}$'),
+    event_bytes INTEGER NOT NULL CHECK (event_bytes > 0),
+    consumed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (task_id,lease_id,seq),
+    FOREIGN KEY (task_id,lease_id) REFERENCES node_native_streams(task_id,lease_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_node_native_stream_events_unread
+    ON node_native_stream_events(task_id,lease_id,seq) WHERE consumed_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_node_native_streams_updated
+    ON node_native_streams(updated_at,task_id);
+
 -- node_sessions 监控查询优化索引
 -- 用于 admin_monitoring.rs 和 admin_node_gateway.rs 中的 LEFT JOIN LATERAL 子查询
 -- （WHERE node_id = n.id ORDER BY last_seen_at DESC LIMIT 1）

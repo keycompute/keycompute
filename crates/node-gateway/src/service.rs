@@ -266,6 +266,40 @@ impl NodeGatewayService {
         }
     }
 
+    /// Create a native streaming task; result events use the durable stream cursor.
+    pub async fn enqueue_native_stream(
+        &self,
+        user_id: Uuid,
+        model: String,
+        payload: NodeTaskPayload,
+    ) -> Result<NodeTask, DbError> {
+        let task = self
+            .store
+            .create_and_enqueue_task(user_id, model.clone(), payload)
+            .await?;
+        let _ = self
+            .lifecycle
+            .set_route(task.request_id, RouteType::Node, RequestStatus::Queued)
+            .await;
+        // Redis is a wake-up transport. The existing sweeper recovers a failed
+        // enqueue from the durable queued task without creating another request.
+        let _ = self.redis.push_to_native_model_queue(&model, task.id).await;
+        Ok(task)
+    }
+    pub async fn cancel_native_stream(&self, task_id: Uuid, reason: &str) -> Result<(), DbError> {
+        self.store.cancel_native_stream(task_id, reason).await?;
+        if let Some(task) = NodeTask::find_by_id(self.store.pool().write_conn(), task_id).await? {
+            // The Redis helper removes every copy from both legacy and native
+            // model lists; a native task must not remain as a stale wake-up.
+            let _ = self
+                .redis
+                .remove_from_model_queue(&task.model, task.id)
+                .await;
+            let _ = self.synchronize_terminal_trace(&task).await;
+        }
+        Ok(())
+    }
+
     /// Wait without abandoning settlement ownership on a transient read failure.
     pub async fn enqueue_native_and_wait(
         &self,

@@ -1,7 +1,8 @@
 //! Available for existing keys as well as newly created keys; examples never
 //! manufacture a model or mix a late response from another access mode.
 use super::examples::{
-    anthropic_examples, openai_examples, responses_examples, stateless_responses_examples,
+    anthropic_examples, native_stream_examples, openai_examples, responses_examples,
+    stateless_responses_examples,
 };
 use crate::{
     hooks::use_i18n::use_i18n,
@@ -69,9 +70,16 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
     let mut model = use_signal(String::new);
     let mut tab = use_signal(|| "curl".to_string());
     let mut copied = use_signal(|| false);
+    let mut streaming = use_signal(|| false);
     let mut refresh = use_signal(|| 0u32);
     let data = use_resource(move || {
-        let key = (mode, surface(), refresh(), (auth.state)().session_id);
+        let key = (
+            mode,
+            surface(),
+            refresh(),
+            (auth.state)().session_id,
+            streaming(),
+        );
         async move {
             let protocol = if key.1 == "messages" {
                 "anthropic"
@@ -82,14 +90,27 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
             let result = with_auto_refresh(auth, move |token| {
                 let capability = capability.clone();
                 async move {
-                    model_service::list_models(mode.as_str(), protocol, &capability, &token).await
+                    model_service::list_models_with_streaming(
+                        mode.as_str(),
+                        protocol,
+                        &capability,
+                        key.4,
+                        &token,
+                    )
+                    .await
                 }
             })
             .await;
             KeyedResourceValue::new(key, result)
         }
     });
-    let key = (mode, surface(), refresh(), (auth.state)().session_id);
+    let key = (
+        mode,
+        surface(),
+        refresh(),
+        (auth.state)().session_id,
+        streaming(),
+    );
     let result = current_keyed_value(&key, data.state().cloned(), data());
     let selected = result
         .as_ref()
@@ -115,36 +136,49 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
     let credential = api_key
         .clone()
         .unwrap_or_else(|| "YOUR_PLATFORM_KEY".to_string());
-    let examples = selected.as_ref().map(|model| match surface().as_str() {
-        "responses" => {
-            if mode == ModelAccessMode::AccountPool {
-                responses_examples(
-                    &base,
-                    &credential,
-                    model,
-                    i.t("api_keys.example_env_comment"),
-                )
-            } else {
-                stateless_responses_examples(
-                    &base,
-                    &credential,
-                    model,
-                    i.t("api_keys.example_env_comment"),
-                )
-            }
+    let examples = selected.as_ref().map(|model| {
+        if streaming() {
+            return native_stream_examples(
+                &base,
+                &protocol_root,
+                &credential,
+                model,
+                &surface(),
+                i.t("api_keys.example_env_comment"),
+                mode != ModelAccessMode::AccountPool,
+            );
         }
-        "messages" => anthropic_examples(
-            &protocol_root,
-            &credential,
-            model,
-            i.t("api_keys.example_env_comment"),
-        ),
-        _ => openai_examples(
-            &base,
-            &credential,
-            model,
-            i.t("api_keys.example_env_comment"),
-        ),
+        match surface().as_str() {
+            "responses" => {
+                if mode == ModelAccessMode::AccountPool {
+                    responses_examples(
+                        &base,
+                        &credential,
+                        model,
+                        i.t("api_keys.example_env_comment"),
+                    )
+                } else {
+                    stateless_responses_examples(
+                        &base,
+                        &credential,
+                        model,
+                        i.t("api_keys.example_env_comment"),
+                    )
+                }
+            }
+            "messages" => anthropic_examples(
+                &protocol_root,
+                &credential,
+                model,
+                i.t("api_keys.example_env_comment"),
+            ),
+            _ => openai_examples(
+                &base,
+                &credential,
+                model,
+                i.t("api_keys.example_env_comment"),
+            ),
+        }
     });
     rsx! {
         p {{mode_description(i,mode)}}
@@ -157,6 +191,11 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
             option {value:"responses","OpenAI · Responses"}
             option {value:"messages","Anthropic · Messages"}
         }
+        label {class:"checkbox-label",
+            input {r#type:"checkbox",checked:streaming(),onchange:move|event|{streaming.set(event.checked());model.set(String::new());copied.set(false);}}
+            {i.t("models.native_stream_choice")}
+        }
+        if streaming() {p {class:"form-hint",{i.t("models.native_stream_help")}}}
         p {code {"Base URL: {displayed_base}"}}
         match result {
             None=>rsx!{p {role:"status",{i.t("common.loading")}}},

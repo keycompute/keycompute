@@ -48,6 +48,7 @@ pub use openai::{
     passthrough_binding_list_models, passthrough_binding_retrieve_model, retrieve_model,
 };
 pub(crate) mod scoped_native;
+pub(crate) mod scoped_stream;
 pub use scoped_native::{node_dispatch_messages, passthrough_binding_messages};
 
 // OpenAI Responses 兼容入口

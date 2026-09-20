@@ -13,6 +13,7 @@ pub const MAX_NATIVE_PROFILES: usize = 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeFeature {
+    Sse,
     Tools,
     Vision,
     StructuredOutput,
@@ -70,7 +71,7 @@ impl NativeModelProfile {
         if self.version != NATIVE_CAPABILITY_VERSION
             || self.model.is_empty()
             || self.model.chars().count() > 100
-            || self.features.len() > 4
+            || self.features.len() > 5
             || self.features.iter().collect::<BTreeSet<_>>().len() != self.features.len()
             || self.max_request_bytes == 0
             || self.max_request_bytes as usize > MAX_NATIVE_BODY_BYTES
@@ -124,6 +125,9 @@ impl NativeRequirements {
 
         let mut features = BTreeSet::new();
         inspect_features(&request.body, request.operation, &mut features);
+        if request.body.get("stream").and_then(Value::as_bool) == Some(true) {
+            features.insert(NativeFeature::Sse);
+        }
         let output = match request.operation {
             NodeNativeOperation::Chat => request
                 .body

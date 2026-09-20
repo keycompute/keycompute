@@ -1084,69 +1084,34 @@ impl NodeGatewayStore {
                 ));
             }
 
-            // 检查 submission 是否未归档（24 小时内且任务未终态）
-            let is_not_archived =
-                NodeTaskSubmission::is_not_archived(&tx, task_id, lease_id).await?;
-
-            if is_not_archived {
-                // 未归档，检查 request_hash
-                let current_request_hash = Self::compute_request_hash(task_id, lease_id, &result)?;
-
-                if submission.request_hash == current_request_hash {
-                    // request_hash 相同,直接返回已保存的 ACK
-                    let action = parse_action(&submission.action)?;
-
-                    let node = Node::find_by_statement(Statement::from_sql_and_values(
-                        DbBackend::Postgres,
-                        "SELECT * FROM nodes WHERE id = $1",
-                        [authenticated_node_id.into()],
-                    ))
-                    .one(&tx)
-                    .await?
-                    .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
-
-                    return Ok(NodeTaskCompletionOutcome {
-                        response: NodeTaskCompleteResponse {
-                            action,
-                            task_status: submission.action.clone(),
-                            node_status: node.status,
-                            server_failure_count: node.consecutive_failure_count as u32,
-                            failure_threshold: node.failure_threshold as u32,
-                        },
-                        model: task.model.clone(),
-                        is_new_task_transition: false,
-                        attempt_started_at: task.claimed_at,
-                    });
-                } else {
-                    // request_hash 不同，冲突
-                    return Err(DbError::Other("duplicate_submission_conflict".to_string()));
-                }
-            } else {
-                // 已归档,仍然返回已保存的 ACK (幂等)
-                let action = parse_action(&submission.action)?;
-
-                let node = Node::find_by_statement(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "SELECT * FROM nodes WHERE id = $1",
-                    [authenticated_node_id.into()],
-                ))
-                .one(&tx)
-                .await?
-                .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
-
-                return Ok(NodeTaskCompletionOutcome {
-                    response: NodeTaskCompleteResponse {
-                        action,
-                        task_status: submission.action.clone(),
-                        node_status: node.status,
-                        server_failure_count: node.consecutive_failure_count as u32,
-                        failure_threshold: node.failure_threshold as u32,
-                    },
-                    model: task.model.clone(),
-                    is_new_task_transition: false,
-                    attempt_started_at: task.claimed_at,
-                });
+            // The hash is authoritative even after the task becomes terminal:
+            // an exact retry receives the saved ACK, while a different result
+            // variant cannot be silently accepted as an archived completion.
+            let current_request_hash = Self::compute_request_hash(task_id, lease_id, &result)?;
+            if submission.request_hash != current_request_hash {
+                return Err(DbError::Other("duplicate_submission_conflict".to_string()));
             }
+            let action = parse_action(&submission.action)?;
+            let node = Node::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT * FROM nodes WHERE id = $1",
+                [authenticated_node_id.into()],
+            ))
+            .one(&tx)
+            .await?
+            .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
+            return Ok(NodeTaskCompletionOutcome {
+                response: NodeTaskCompleteResponse {
+                    action,
+                    task_status: submission.action.clone(),
+                    node_status: node.status,
+                    server_failure_count: node.consecutive_failure_count as u32,
+                    failure_threshold: node.failure_threshold as u32,
+                },
+                model: task.model.clone(),
+                is_new_task_transition: false,
+                attempt_started_at: task.claimed_at,
+            });
         }
 
         // 4. 无 submission，检查 session 状态
@@ -1341,6 +1306,18 @@ impl NodeGatewayStore {
                 )
                 .await
             }
+            NodeTaskResult::NativeStreamSucceeded { summary } => {
+                self.handle_native_stream_success_submission(
+                    &tx,
+                    &task,
+                    &node,
+                    authenticated_node_id,
+                    authenticated_session_id,
+                    lease_id,
+                    summary,
+                )
+                .await
+            }
             NodeTaskResult::Failed {
                 code,
                 message,
@@ -1483,14 +1460,27 @@ impl NodeGatewayStore {
         profile
             .validate_result(&response)
             .map_err(|e| DbError::Other(e.into()))?;
-        let operation = serde_json::from_value::<keycompute_types::node_native::NodeNativeRequest>(
+        let request = serde_json::from_value::<keycompute_types::node_native::NodeNativeRequest>(
             task.payload_json
                 .get("native")
                 .cloned()
                 .ok_or_else(|| DbError::Other("native task payload missing".into()))?,
         )
-        .map_err(|_| DbError::Other("invalid native task payload".into()))?
-        .operation;
+        .map_err(|_| DbError::Other("invalid native task payload".into()))?;
+        let operation = request.operation;
+        // A successful HTTP-200 stream must be completed by the durable
+        // Start/Data/Terminal protocol.  A pre-header upstream HTTP error is
+        // intentionally still represented by NativeSucceeded and settles as
+        // a failed task without ever creating a stream head.
+        if response.status == 200
+            && request
+                .body
+                .get("stream")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            return Err(DbError::Other("native_stream_result_expected".into()));
+        }
         response
             .validate_for(operation, &task.model)
             .map_err(|error| DbError::Other(format!("invalid native result: {error}")))?;
@@ -1507,6 +1497,81 @@ impl NodeGatewayStore {
             _lease_id,
             response_json,
             "succeeded",
+            result_for_hash,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_native_stream_success_submission(
+        &self,
+        tx: &DatabaseTransaction,
+        task: &NodeTask,
+        node: &Node,
+        node_id: Uuid,
+        session_id: Uuid,
+        lease_id: Uuid,
+        summary: keycompute_types::node_stream::NodeNativeStreamSummary,
+    ) -> Result<NodeTaskCompleteResponse, DbError> {
+        let request = serde_json::from_value::<keycompute_types::node_native::NodeNativeRequest>(
+            task.payload_json
+                .get("native")
+                .cloned()
+                .ok_or_else(|| DbError::Other("native task payload missing".into()))?,
+        )
+        .map_err(|_| DbError::Other("invalid native task payload".into()))?;
+        let expected_protocol = match request.operation {
+            keycompute_types::node_native::NodeNativeOperation::Chat => {
+                keycompute_types::node_stream::NativeStreamProtocol::Chat
+            }
+            keycompute_types::node_native::NodeNativeOperation::Messages => {
+                keycompute_types::node_stream::NativeStreamProtocol::Messages
+            }
+            keycompute_types::node_native::NodeNativeOperation::Responses => {
+                keycompute_types::node_stream::NativeStreamProtocol::Responses
+            }
+        };
+        if request
+            .body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+            || summary.protocol != expected_protocol
+        {
+            return Err(DbError::Other(
+                "native_stream_result_variant_mismatch".into(),
+            ));
+        }
+        let recorded=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT summary_json,node_id,session_id FROM node_native_streams WHERE task_id=$1 AND lease_id=$2 AND node_id=$3 AND session_id=$4 AND state='terminal'",
+            [task.id.into(),lease_id.into(),node_id.into(),session_id.into()])).await?
+            .ok_or_else(||DbError::Other("native_stream_terminal_not_recorded".into()))?;
+        let verified: keycompute_types::node_stream::NodeNativeStreamSummary =
+            serde_json::from_value(recorded.try_get("", "summary_json")?)
+                .map_err(|_| DbError::Other("native_stream_terminal_invalid".into()))?;
+        if summary != verified
+            || !matches!(
+                summary.terminal_outcome,
+                Some(
+                    keycompute_types::node_stream::NativeStreamTerminalOutcome::Complete
+                        | keycompute_types::node_stream::NativeStreamTerminalOutcome::Incomplete
+                )
+            )
+        {
+            return Err(DbError::Other("native_stream_terminal_mismatch".into()));
+        }
+        let response_json =
+            serde_json::to_value(&summary).map_err(|e| DbError::Other(e.to_string()))?;
+        let result_for_hash = NodeTaskResult::NativeStreamSucceeded { summary };
+        self.handle_success_submission_inner(
+            tx,
+            task,
+            node,
+            node_id,
+            session_id,
+            lease_id,
+            response_json,
+            "native_stream_succeeded",
             result_for_hash,
         )
         .await
@@ -1781,6 +1846,15 @@ impl NodeGatewayStore {
             }
         };
 
+        // A stream event can be rejected before the worker sends a terminal
+        // event. The ordinary failure completion must close its durable stream
+        // in the same transaction while retaining the observed usage snapshot.
+        if native_task && updated_task.status == TASK_STATUS_FAILED {
+            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                "UPDATE node_native_streams SET state='failed',updated_at=NOW() WHERE task_id=$1 AND lease_id=$2 AND state='open'",
+                [task.id.into(),lease_id.into()])).await?;
+        }
+
         // 增加节点连续失败计数并检查排除
         if !is_client_error {
             tx.execute(Statement::from_sql_and_values(
@@ -1884,6 +1958,7 @@ fn result_matches_payload(payload: &NodeTaskPayload, result: &NodeTaskResult) ->
     match result {
         NodeTaskResult::Succeeded { .. } => payload.is_chat(),
         NodeTaskResult::NativeSucceeded { .. } => payload.is_native(),
+        NodeTaskResult::NativeStreamSucceeded { .. } => payload.is_native(),
         NodeTaskResult::ImageSucceeded { .. } => {
             payload.is_image_generation() || payload.is_image_edit()
         }

@@ -1,5 +1,7 @@
 # Native node protocol — phase 1
 
+> Historical phase baseline. The current implementation also supports [native event streaming](native-streaming.md).
+
 Node Chat now preserves the complete JSON request and response instead of
 projecting it through the legacy text-only Chat task. This phase implements
 native **non-streaming Chat Completions** only. Messages, Responses, native

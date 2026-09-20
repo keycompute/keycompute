@@ -1222,11 +1222,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_gateway.request_step_model", "Send the exact worker model ID in model, such as gemma3:270m; only the request URL selects the execution mode.");
     m.insert(
         "node_gateway.request_step_stream",
-        "Native node Chat currently requires stream=false; unsupported streaming is rejected before execution.",
+        "Chat, Messages and Responses support native SSE; stream=true requires an SSE-capable profile for the selected model and operation.",
     );
     m.insert(
         "node_gateway.request_auth_note",
-        "Registration tokens are only for /node/v1/register; the returned session token is only for the unchanged worker heartbeat/poll/complete protocol.",
+        "Registration tokens are only for /node/v1/register; the returned session token is only for worker heartbeat/poll/events/complete requests.",
     );
     m.insert("node_gateway.runtime_status", "Runtime Status");
     m.insert(
@@ -2204,6 +2204,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert("models.pool", "Account pool");
     m.insert("models.passthrough", "Passthrough");
+    m.insert(
+        "models.native_stream_choice",
+        "Native event streaming (SSE)",
+    );
+    m.insert("models.native_stream_help", "Displays complete protocol events, including tools and thinking. Node discovery includes only workers advertising SSE; this does not turn on background state.");
     m.insert("models.native_stateless_help", "Scoped Responses currently runs without stored response resources. Examples use store=false; previous_response_id, conversation and background are not enabled in this phase.");
     m.insert("models.node", "Node Gateway (NodeDispatch)");
     m.insert(
@@ -2345,7 +2350,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "models.placeholder_key",
         "Examples use a placeholder key; replace it with your saved platform key.",
     );
-    m.insert("models.node_stream_help", "Native node Chat, Messages and Responses preserve their JSON requests and responses. This phase requires stream=false and a worker advertising the selected protocol capability.");
+    m.insert("models.node_stream_help", "Native node Chat, Messages and Responses preserve protocol data. Streaming requires a worker explicitly advertising SSE for that model and operation.");
 
     m
 });

@@ -24,7 +24,7 @@ const server = http.createServer(async (req, res) => {
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const base = `http://127.0.0.1:${server.address().port}`;
 const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-const calls = [], errors = [], unknown = [], checks = [];
+const calls = [], requests = [], errors = [], unknown = [], checks = [];
 const check = name => { checks.push(name); console.log('PASS', name); };
 const stamp = '2026-09-20T00:00:00Z';
 try {
@@ -38,6 +38,7 @@ try {
     if (u.origin !== base) return route.abort();
     if (!/^\/(api|v1|pt|nt)\//.test(p)) return route.continue();
     calls.push(p);
+    requests.push(p+u.search);
     const paged = key => ({ [key]: [], total: 0, page: 1, page_size: 20, total_pages: 0 });
     let body;
     if (p === '/api/v1/settings/public') body = { site_name: 'KeyCompute', distribution_enabled: true };
@@ -48,7 +49,7 @@ try {
     else if (p === '/api/v1/admin/node-gateway/tasks') body = paged('tasks');
     else if (p === '/api/v1/admin/node-gateway/tokens/pending') body = paged('tokens');
     else if (['/v1/models', '/pt/v1/models', '/nt/v1/models'].includes(p)) {
-      body = { object: 'list', data: [{ id: 'gemma3:270m', object: 'model', created: 1, owned_by: p.startsWith('/nt/') ? 'node' : 'openai' }] };
+      body = { object: 'list', data: [{ id: u.searchParams.get('stream')==='true' ? 'stream/gemma:tag' : 'gemma3:270m', object: 'model', created: 1, owned_by: p.startsWith('/nt/') ? 'node' : 'openai' }] };
     } else {
       unknown.push(p);
       return route.fulfill({ status: 404, contentType: 'application/json', body: '{}' });
@@ -74,6 +75,25 @@ try {
   }
   check('invocation_examples_and_model_discovery_follow_each_url_family');
   check('node_model_ids_remain_raw_and_native_protocol_choices_are_available');
+  await guide.locator('input[type="checkbox"]').check();
+  await page.waitForFunction(()=>document.querySelector('.kc-api-example')?.textContent.includes('stream/gemma:tag'));
+  for(const surface of ['chat_completions','messages','responses']) {
+    await guide.locator('select').first().selectOption(surface);
+    const endpoint=surface==='chat_completions'?'chat/completions':surface;
+    await page.waitForFunction(endpoint=>document.querySelector('.kc-api-example')?.textContent.includes('/nt/v1/'+endpoint),endpoint);
+    const code=await guide.locator('.kc-api-example').innerText();
+    assert.ok(code.includes('"stream": true') && code.includes('stream/gemma:tag'));
+    if(surface==='messages')assert.ok(code.includes('anthropic-version')&&code.includes('x-api-key'));
+    if(surface==='responses')assert.ok(code.includes('"store": false'));
+    await guide.getByRole('button',{name:'python',exact:true}).click();
+    assert.match(await guide.locator('.kc-api-example').innerText(),/model_dump_json/);
+    await guide.getByRole('button',{name:'curl',exact:true}).click();
+  }
+  assert.ok(requests.some(path=>path.startsWith('/nt/v1/models?')&&path.includes('stream=true')));
+  check('native_stream_selection_filters_capabilities_and_preserves_protocol_event_examples');
+  await guide.locator('input[type="checkbox"]').uncheck();
+  await page.waitForFunction(()=>document.querySelector('.kc-api-example')?.textContent.includes('gemma3:270m'));
+  check('nonstream_and_stream_discovery_do_not_share_stale_results');
   await page.goto(base + '/admin/upstreams/nodes');
   await page.locator('.node-gateway-dispatch-guide').waitFor();
   assert.equal(await page.locator('.upstream-tab').count(), 3);

@@ -78,10 +78,10 @@ fn validate_request(body: &Value, headers: &HeaderMap, op: Op) -> Result<()> {
     }
     if !matches!(
         body.get("stream"),
-        None | Some(Value::Null) | Some(Value::Bool(false))
+        None | Some(Value::Null) | Some(Value::Bool(false)) | Some(Value::Bool(true))
     ) {
         return Err(ApiError::BadRequest(
-            "This native endpoint currently requires stream=false".into(),
+            "stream must be a boolean or null".into(),
         ));
     }
     if body.get("model").and_then(Value::as_str).is_none_or(|m| {
@@ -175,7 +175,7 @@ pub(crate) async fn generate(
             protocol: op.protocol().into(),
             request_path: request_path(mode, op),
             requested_model: model.clone(),
-            is_stream: false,
+            is_stream: body.get("stream").and_then(Value::as_bool).unwrap_or(false),
             received_at: received.0,
         })
         .await
@@ -194,7 +194,7 @@ pub(crate) async fn generate(
         auth.produce_ai_key_id,
         model.clone(),
         vec![],
-        false,
+        body.get("stream").and_then(Value::as_bool).unwrap_or(false),
         pricing,
     );
     ctx.messages = match op {
@@ -318,6 +318,25 @@ pub(crate) async fn generate(
     }
     let mut guard = super::ClientResponseGuard::new(lifecycle.clone(), ctx.clone());
     pre.disarm();
+    if ctx.stream {
+        return super::scoped_stream::serve(super::scoped_stream::Prepared {
+            state,
+            mode,
+            op,
+            model,
+            ctx,
+            plan,
+            native,
+            billing_provider,
+            account_id,
+            lifecycle,
+            body_permit,
+            balance,
+            tpm,
+            guard,
+        })
+        .await;
+    }
     let (mut sender, receiver) = tokio::sync::oneshot::channel();
     let worker_ctx = ctx.clone();
     let worker_lifecycle = lifecycle.clone();

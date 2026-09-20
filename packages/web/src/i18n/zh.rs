@@ -1059,11 +1059,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "node_gateway.request_step_stream",
-        "当前原生节点 Chat 需使用 stream=false；不支持的流式请求会在执行前拒绝。",
+        "Chat、Messages 和 Responses 可使用原生 SSE；stream=true 仅路由到声明该模型与操作 SSE 能力的节点。",
     );
     m.insert(
         "node_gateway.request_auth_note",
-        "注册令牌仅用于 /node/v1/register；换取的 session token 仅用于不变的节点 heartbeat/poll/complete 协议。",
+        "注册令牌仅用于 /node/v1/register；换取的 session token 仅用于节点 heartbeat/poll/events/complete 协议。",
     );
     m.insert("node_gateway.runtime_status", "运行状态");
     m.insert(
@@ -1909,6 +1909,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert("models.pool", "账号池");
     m.insert("models.passthrough", "透传模式");
+    m.insert("models.native_stream_choice", "原生事件流（SSE）");
+    m.insert("models.native_stream_help", "保留工具调用、思考等完整协议事件。节点模型列表仅显示声明 SSE 能力的工作节点；此选项不启用后台状态资源。");
     m.insert("models.native_stateless_help", "当前透传与节点 Responses 为无状态调用，示例使用 store=false；本阶段暂不启用 previous_response_id、conversation 和后台响应资源。");
     m.insert("models.node", "节点网关（NodeDispatch）");
     m.insert(
@@ -2076,7 +2078,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "models.node_stream_help",
-        "原生节点 Chat、Messages 和 Responses 保留各自的 JSON 请求与响应；本阶段使用 stream=false，并由声明对应协议能力的节点执行。",
+        "原生节点 Chat、Messages 和 Responses 保留完整协议数据；启用事件流时，只使用声明对应 SSE 能力的节点。",
     );
 
     m

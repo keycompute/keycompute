@@ -14,6 +14,7 @@ use axum::{
 use keycompute_types::node::{
     NodeHeartbeatRequest, NodeHeartbeatResponse, NodePollRequest, NodePollResponse,
     NodeRegisterRequest, NodeRegisterResponse, NodeTaskCompleteRequest, NodeTaskCompleteResponse,
+    NodeTaskStreamEventRequest, NodeTaskStreamEventResponse,
 };
 use node_gateway::NodeGatewayService;
 use std::sync::Arc;
@@ -197,6 +198,115 @@ pub async fn node_complete(
         .map_err(ApiError::from)?;
 
     Ok(Json(response))
+}
+
+/// POST /node/v1/tasks/{task_id}/events
+///
+/// Native stream delivery uses the completion-authentication policy, but its
+/// lease/session/task checks are performed atomically by the gateway store.
+pub async fn node_stream_event(
+    State(state): State<AppState>,
+    auth: NodeSessionCompletionAuth,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<NodeTaskStreamEventRequest>,
+) -> Result<Json<NodeTaskStreamEventResponse>> {
+    if body.task_id != task_id {
+        return Err(ApiError::BadRequest(
+            "task_id in path does not match task_id in body".into(),
+        ));
+    }
+    if body.node_id != auth.node_id || body.session_id != auth.session_id {
+        return Err(ApiError::NodeIdentityMismatch {
+            expected_node_id: auth.node_id,
+            expected_session_id: auth.session_id,
+            actual_node_id: body.node_id,
+            actual_session_id: body.session_id,
+        });
+    }
+    if body.protocol_version != "node.v1" {
+        return Err(ApiError::BadRequest(
+            "Unsupported node control protocol".into(),
+        ));
+    }
+    let gateway = get_node_gateway(&state)?;
+    let completion = match &body.event {
+        keycompute_types::node::NodeNativeStreamEvent::Terminal { summary } => Some(
+            keycompute_types::node::NodeTaskResult::NativeStreamSucceeded {
+                summary: summary.clone(),
+            },
+        ),
+        keycompute_types::node::NodeNativeStreamEvent::Failed { code, message, .. } => {
+            Some(keycompute_types::node::NodeTaskResult::Failed {
+                code: code.clone(),
+                message: message.clone(),
+                is_client_error: false,
+            })
+        }
+        _ => None,
+    };
+    let ids = (body.task_id, body.lease_id, body.node_id, body.session_id);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        gateway.store.accept_native_stream_event(body),
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("Native stream event storage timed out".into()))?
+    .map_err(map_native_stream_error)?;
+    if response.accepted
+        && let Some(result) = completion
+    {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            gateway.complete_task(ids.0, ids.1, ids.2, ids.3, result),
+        )
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("Native stream completion timed out".into()))?
+        .map_err(map_native_stream_error)?;
+    }
+    Ok(Json(response))
+}
+
+fn map_native_stream_error(error: keycompute_db::DbError) -> ApiError {
+    let keycompute_db::DbError::Other(message) = error else {
+        return ApiError::from(error);
+    };
+    match message.as_str() {
+        "native_stream_lease_mismatch"
+        | "native_stream_session_inactive"
+        | "native_stream_tenant_inactive"
+        | "native_stream_capability_denied" => ApiError::Auth(message),
+        "native_stream_delivery_backpressure" => {
+            ApiError::RateLimit("native stream delivery window is full".into())
+        }
+        "native_stream_sequence_conflict"
+        | "native_stream_sequence_gap"
+        | "native_stream_already_terminal"
+        | "native_stream_terminal_mismatch"
+        | "native_stream_usage_mismatch"
+        | "native_stream_result_variant_mismatch"
+        | "native_stream_result_expected" => ApiError::NodeTaskConflict(message),
+        "native_stream_event_limit"
+        | "native_stream_encoding"
+        | "native_stream_payload_missing"
+        | "native_stream_payload_invalid"
+        | "native_stream_capability_invalid"
+        | "native_stream_start_invalid"
+        | "native_stream_must_start_at_seq_zero"
+        | "native_stream_duplicate_start"
+        | "native_stream_frame_limit"
+        | "native_stream_total_limit"
+        | "native_stream_frame_invalid"
+        | "native_stream_error_limit"
+        | "native_stream_state_invalid" => ApiError::BadRequest(message),
+        "native_stream_deadline" => ApiError::NodeTaskConflict(message),
+        "lease_mismatch"
+        | "invalid_task_state"
+        | "task_expired_during_complete"
+        | "node_result_type_mismatch"
+        | "concurrent_task_update_failed" => ApiError::NodeTaskConflict(message),
+        "Session revoked" | "Session has been revoked" => ApiError::Auth(message),
+        _ => ApiError::Internal(message),
+    }
 }
 
 /// 获取 NodeGatewayService 引用

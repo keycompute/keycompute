@@ -13,6 +13,7 @@ pub mod monitoring;
 pub mod node;
 pub mod node_capability;
 pub mod node_native;
+pub mod node_stream;
 pub mod pricing;
 pub mod request;
 pub mod response;
@@ -33,9 +34,10 @@ pub use monitoring::*;
 pub use node::{
     ImageData, ImageEditRequest, ImageGenerationRequest, ImageGenerationResponse, NodeCapabilities,
     NodeHeartbeatRequest, NodeHeartbeatResponse, NodeId, NodeLeaseId, NodeModelCapability,
-    NodePollRequest, NodePollResponse, NodeRegisterRequest, NodeRegisterResponse, NodeSessionId,
-    NodeTaskCompleteAction, NodeTaskCompleteRequest, NodeTaskCompleteResponse, NodeTaskEnvelope,
-    NodeTaskId, NodeTaskPayload, NodeTaskResult,
+    NodeNativeStreamEvent, NodePollRequest, NodePollResponse, NodeRegisterRequest,
+    NodeRegisterResponse, NodeSessionId, NodeTaskCompleteAction, NodeTaskCompleteRequest,
+    NodeTaskCompleteResponse, NodeTaskEnvelope, NodeTaskId, NodeTaskPayload, NodeTaskResult,
+    NodeTaskStreamEventRequest, NodeTaskStreamEventResponse,
 };
 pub use pricing::PricingSnapshot;
 pub use request::{

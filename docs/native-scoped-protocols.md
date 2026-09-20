@@ -1,5 +1,7 @@
 # Native scoped generation — phase 3
 
+> Historical phase baseline. The current implementation also supports [native event streaming](native-streaming.md).
+
 The `/pt/v1/messages`, `/pt/v1/responses`, `/nt/v1/messages` and
 `/nt/v1/responses` endpoints now support non-streaming native requests.
 Existing account-pool endpoints and passthrough Chat behavior are unchanged.

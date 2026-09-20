@@ -181,6 +181,13 @@ mod tests {
         assert!(sql.contains("registered_models_json JSONB NOT NULL DEFAULT '[]'::jsonb"));
         assert!(sql.contains("accepting_tasks BOOLEAN NOT NULL DEFAULT TRUE"));
         assert!(sql.contains("native_requirements_json JSONB"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS node_native_streams"));
+        assert!(sql.contains("CREATE TABLE IF NOT EXISTS node_native_stream_events"));
+        assert!(
+            sql.split_whitespace()
+                .collect::<String>()
+                .contains("PRIMARYKEY(task_id,lease_id,seq)")
+        );
     }
 
     #[test]

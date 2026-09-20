@@ -4,6 +4,7 @@
 
 use crate::config::NodeGatewayAppConfig;
 use crate::redis::NodeGatewayRedis;
+use crate::store::NodeGatewayStore;
 use keycompute_db::DbError;
 use keycompute_db::DbRouter;
 use keycompute_db::models::node_task::*;
@@ -91,6 +92,24 @@ impl NodeGatewaySweeper {
 
         // 5. 补推 queued 任务到 Redis
         self.repush_queued_tasks(&tasks_to_repush).await;
+
+        // Stream rows are bounded event storage, but terminal rows still need
+        // retention cleanup.  Run one small, independently timed batch so a
+        // slow cleanup cannot delay queue recovery or the next sweep.
+        let stream_store = NodeGatewayStore::new(Arc::clone(&self.pool), self.config.clone());
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream_store.cleanup_native_streams(),
+        )
+        .await
+        {
+            Ok(Ok(cleaned)) if cleaned > 0 => {
+                tracing::debug!(cleaned, "Cleaned native stream rows");
+            }
+            Ok(Err(error)) => tracing::warn!(%error, "Native stream cleanup failed"),
+            Err(_) => tracing::warn!("Native stream cleanup timed out"),
+            _ => {}
+        }
 
         // 6. 通知等待方过期任务
         for task in &expired_tasks {

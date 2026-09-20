@@ -524,14 +524,14 @@ async fn urls_isolate_same_model_and_keep_node_pricing_raw() {
 }
 
 #[tokio::test]
-async fn native_streaming_is_rejected_explicitly_until_event_transport_is_enabled() {
+async fn native_streaming_requires_an_sse_capable_native_profile() {
     let mut f = Fixture::new().await;
     let body = expect(
         f.request(Method::POST, NT, Some(f.body(&f.shared, true)))
             .await,
-        StatusCode::BAD_REQUEST,
+        StatusCode::SERVICE_UNAVAILABLE,
     );
-    assert!(body.to_string().contains("native_streaming_unsupported"));
+    assert!(body.to_string().contains("No available node") || body.to_string().contains("node"));
     assert_eq!(f.tasks().await, 0);
     assert!(f.calls.lock().unwrap().is_empty());
     f.finish().await;

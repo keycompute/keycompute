@@ -272,6 +272,9 @@ pub enum NodeTaskResult {
     NativeSucceeded {
         response: crate::node_native::NodeNativeHttpResult,
     },
+    NativeStreamSucceeded {
+        summary: crate::node_stream::NodeNativeStreamSummary,
+    },
     /// 任务失败
     Failed {
         /// 错误码
@@ -285,6 +288,52 @@ pub enum NodeTaskResult {
         #[serde(default)]
         is_client_error: bool,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum NodeNativeStreamEvent {
+    Start {
+        status: u16,
+        #[serde(default)]
+        headers: Vec<(String, String)>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<serde_json::Value>,
+    },
+    Data {
+        frame: String,
+    },
+    Terminal {
+        summary: crate::node_stream::NodeNativeStreamSummary,
+    },
+    Failed {
+        code: String,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<crate::node_stream::NativeStreamUsage>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeTaskStreamEventRequest {
+    pub protocol_version: String,
+    pub node_id: NodeId,
+    pub session_id: NodeSessionId,
+    pub task_id: NodeTaskId,
+    pub lease_id: NodeLeaseId,
+    pub seq: u64,
+    pub event: NodeNativeStreamEvent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeTaskStreamEventResponse {
+    pub accepted: bool,
+    pub next_seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 /// 节点任务完成响应

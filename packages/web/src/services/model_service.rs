@@ -9,14 +9,18 @@ use super::api_client::get_client;
 
 /// 获取可用模型列表。模型发现始终带当前登录身份，避免匿名聚合或
 /// 用静态占位模型掩盖后端依赖故障。
-pub async fn list_models(
+pub async fn list_models_with_streaming(
     mode: &str,
     protocol: &str,
     capability: &str,
+    streaming: bool,
     token: &str,
 ) -> Result<ModelListResponse> {
     let client = get_client();
-    let path = models_path(mode, protocol, capability);
+    let mut path = models_path(mode, protocol, capability);
+    if streaming && mode == "node_dispatch" {
+        path.push_str("&stream=true");
+    }
     client.get_json(&path, Some(token)).await
 }
 

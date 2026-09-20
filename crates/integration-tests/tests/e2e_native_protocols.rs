@@ -55,6 +55,7 @@ struct Call {
 struct Upstream {
     calls: Mutex<Vec<Call>>,
     status: AtomicU16,
+    stream_release: tokio::sync::Notify,
 }
 fn sample_response(op: Op, model: &str) -> Value {
     match op {
@@ -88,6 +89,9 @@ async fn upstream(
         Op::Chat
     };
     let status = s.status.load(Ordering::Relaxed);
+    if status == 200 && body["stream"] == true {
+        return streaming_upstream(s, op, body).await;
+    }
     let response = if status == 200 {
         sample_response(op, body["model"].as_str().unwrap())
     } else {
@@ -142,7 +146,13 @@ async fn http(
     .unwrap();
     let status = response.status();
     let headers = response.headers().clone();
-    let bytes = to_bytes(response.into_body(), 2 << 20).await.unwrap();
+    let bytes = tokio::time::timeout(
+        Duration::from_secs(20),
+        to_bytes(response.into_body(), 2 << 20),
+    )
+    .await
+    .expect("response body timeout")
+    .unwrap();
     let body = serde_json::from_slice(&bytes)
         .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into_owned()));
     HttpResult {
@@ -176,6 +186,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_sse(false).await
+    }
+    async fn with_sse(sse: bool) -> Self {
         let db = create_test_pool().await;
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
@@ -272,12 +285,16 @@ impl Fixture {
         let profiles: Vec<_> = [Op::Chat, Op::Messages, Op::Responses]
             .into_iter()
             .map(|op| {
-                NativeModelProfile::for_operation(model.clone(), op).with_features(vec![
+                let mut features = vec![
                     NativeFeature::Tools,
                     NativeFeature::Vision,
                     NativeFeature::Thinking,
                     NativeFeature::StructuredOutput,
-                ])
+                ];
+                if sse {
+                    features.push(NativeFeature::Sse);
+                }
+                NativeModelProfile::for_operation(model.clone(), op).with_features(features)
             })
             .collect();
         let session = NodeSession::create(
@@ -592,12 +609,12 @@ async fn scoped_model_discovery_reports_each_supported_protocol() {
 }
 
 #[tokio::test]
-async fn stateful_or_streaming_requests_are_not_silently_downgraded() {
+async fn unsupported_state_and_invalid_stream_controls_are_not_silently_downgraded() {
     let mut f = Fixture::new().await;
     for family in ["pt", "nt"] {
         for op in [Op::Messages, Op::Responses] {
             let mut body = f.body(op);
-            body["stream"] = true.into();
+            body["stream"] = "invalid-stream-flag".into();
             expect(
                 f.request(
                     Method::POST,
@@ -622,6 +639,18 @@ async fn stateful_or_streaming_requests_are_not_silently_downgraded() {
                 StatusCode::BAD_REQUEST,
             );
         }
+    }
+    // The fixture's immutable worker profiles do not advertise SSE. New
+    // native streaming requests must fail readiness instead of being sent to
+    // these non-streaming executors; PT live-stream success is tested below.
+    for op in [Op::Messages, Op::Responses] {
+        let mut body = f.body(op);
+        body["stream"] = true.into();
+        expect(
+            f.request(Method::POST, &format!("/nt{}", op.local_path()), Some(body))
+                .await,
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
     }
     assert_eq!(f.tasks().await, 0);
     assert!(f.upstream.calls.lock().unwrap().is_empty());
@@ -674,6 +703,323 @@ async fn user_tool_schemas_are_not_mistaken_for_protocol_control_fields() {
         let task = worker.await.unwrap();
         assert_eq!(task.payload.native.unwrap().body, body);
     }
+    assert!(f.upstream.calls.lock().unwrap().is_empty());
+    f.finish().await;
+}
+
+async fn streaming_upstream(s: Arc<Upstream>, op: Op, body: Value) -> Response {
+    let (first, last) = stream_fixture(op, body["model"].as_str().unwrap());
+    let (tx, rx) =
+        tokio::sync::mpsc::channel::<std::result::Result<bytes::Bytes, std::io::Error>>(1);
+    tokio::spawn(async move {
+        if tx.send(Ok(bytes::Bytes::from(first))).await.is_err() {
+            return;
+        }
+        tokio::select! {_ = s.stream_release.notified()=>{},_ = tx.closed()=>return}
+        let _ = tx.send(Ok(bytes::Bytes::from(last))).await;
+    });
+    (
+        [
+            ("content-type", "text/event-stream"),
+            ("set-cookie", "do-not-forward"),
+        ],
+        Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)),
+    )
+        .into_response()
+}
+
+fn stream_fixture(op: Op, model: &str) -> (String, String) {
+    let frame = |event: &str, data: Value| format!("event: {event}\r\ndata: {data}\r\n\r\n");
+    match op {
+        Op::Messages => (
+            frame(
+                "message_start",
+                json!({"type":"message_start","message":{"id":"msg-stream","type":"message","role":"assistant","model":model,"content":[],"usage":{"input_tokens":7,"output_tokens":0}}}),
+            ) + &frame(
+                "content_block_start",
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            ) + &frame(
+                "content_block_delta",
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"终端 preserved native text"},"vendor_extension":{"untouched":[null,1]}}),
+            ),
+            frame(
+                "content_block_stop",
+                json!({"type":"content_block_stop","index":0}),
+            ) + &frame(
+                "message_delta",
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":3}}),
+            ) + &frame("message_stop", json!({"type":"message_stop"})),
+        ),
+        Op::Responses => {
+            let mut head = sample_response(op, model);
+            head["id"] = "resp-stream".into();
+            head["status"] = "in_progress".into();
+            head["usage"] = Value::Null;
+            head["output"] = json!([]);
+            let mut completed = sample_response(op, model);
+            completed["id"] = "resp-stream".into();
+            (
+                frame(
+                    "response.created",
+                    json!({"type":"response.created","sequence_number":0,"response":head}),
+                ) + &frame(
+                    "response.output_text.delta",
+                    json!({"type":"response.output_text.delta","sequence_number":1,"output_index":0,"content_index":0,"item_id":"msg-stream","delta":"终端 preserved native text","vendor_extension":{"untouched":[null,1]}}),
+                ),
+                frame(
+                    "response.completed",
+                    json!({"type":"response.completed","sequence_number":2,"response":completed}),
+                ),
+            )
+        }
+        Op::Chat => unreachable!("PT Chat uses its existing tests"),
+    }
+}
+
+async fn scoped_stream_request(f: &Fixture, op: Op) -> Response {
+    let mut body = f.body(op);
+    body["stream"] = true.into();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/pt{}", op.local_path()))
+        .header("authorization", format!("Bearer {}", f.key))
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), f.app.clone().oneshot(request))
+        .await
+        .expect("HTTP head must not wait for terminal event")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn passthrough_streams_deliver_before_completion_and_preserve_native_events() {
+    use http_body_util::BodyExt;
+    let mut f = Fixture::new().await;
+    for op in [Op::Messages, Op::Responses] {
+        let response = scoped_stream_request(&f, op).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        assert!(!response.headers().contains_key("set-cookie"));
+        let mut body = response.into_body();
+        let first = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .into_data()
+            .unwrap();
+        assert!(!first.is_empty());
+        f.upstream.stream_release.notify_one();
+        let tail = tokio::time::timeout(Duration::from_secs(10), body.collect())
+            .await
+            .unwrap()
+            .unwrap()
+            .to_bytes();
+        let mut data = first.to_vec();
+        data.extend_from_slice(&tail);
+        let text = String::from_utf8(data).unwrap();
+        assert!(text.contains("终端") && text.contains("vendor_extension"));
+        assert!(text.contains(if op == Op::Messages {
+            "message_stop"
+        } else {
+            "response.completed"
+        }));
+    }
+    assert_eq!(f.upstream.calls.lock().unwrap().len(), 2);
+    assert_eq!(f.tasks().await, 0);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn passthrough_stream_errors_preserve_status() {
+    let mut f = Fixture::new().await;
+    for op in [Op::Messages, Op::Responses] {
+        f.upstream.status.store(429, Ordering::Relaxed);
+        let response = scoped_stream_request(&f, op).await;
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        let bytes = to_bytes(response.into_body(), 2 << 20).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], "isolated_rejection");
+    }
+    assert_eq!(f.upstream.calls.lock().unwrap().len(), 2);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn passthrough_disconnect_settlement() {
+    use http_body_util::BodyExt;
+    let mut f = Fixture::new().await;
+    let response = scoped_stream_request(&f, Op::Messages).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let mut received = String::new();
+    while !received.contains("终端") {
+        let frame = tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Ok(bytes) = frame.into_data() {
+            received.push_str(std::str::from_utf8(&bytes).unwrap());
+        }
+    }
+    drop(body);
+    let rows = tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let rows =
+                keycompute_db::models::usage_log::UsageLog::find_by_user(&f.db, f.user.id, 2, 0)
+                    .await
+                    .unwrap();
+            if !rows.is_empty() {
+                break rows;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .expect("detached settlement timeout");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].input_tokens, 7);
+    assert!(rows[0].output_tokens > 0);
+    assert_ne!(rows[0].usage_source, "provider");
+    assert_eq!(f.upstream.calls.lock().unwrap().len(), 1);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn node_stream_generic_failure_after_head_closes_before_deadline() {
+    use http_body_util::BodyExt;
+    use keycompute_types::node::{NodeNativeStreamEvent, NodeTaskStreamEventRequest};
+    let mut f = Fixture::with_sse(true).await;
+    let gateway = f.state.node_gateway.as_ref().unwrap().clone();
+    let node = f.node.id;
+    let session = f.session.id;
+    let model = f.model.clone();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let worker_release = release.clone();
+    let worker = tokio::spawn(async move {
+        let task = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(task) = gateway
+                    .poll_task(node, session, vec![model.clone()])
+                    .await
+                    .unwrap()
+                    .task
+                {
+                    break task;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let first = format!(
+            "data: {}\n\n",
+            json!({"id":"failure-stream","object":"chat.completion.chunk","model":model,"choices":[{"index":0,"delta":{"content":"observed partial output"},"finish_reason":null}]})
+        );
+        for (seq, event) in [
+            NodeNativeStreamEvent::Start {
+                status: 200,
+                headers: vec![("content-type".into(), "text/event-stream".into())],
+                body: None,
+            },
+            NodeNativeStreamEvent::Data { frame: first },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            gateway
+                .store
+                .accept_native_stream_event(NodeTaskStreamEventRequest {
+                    protocol_version: "node.v1".into(),
+                    node_id: node,
+                    session_id: session,
+                    task_id: task.task_id,
+                    lease_id: task.lease_id,
+                    seq: seq as u64,
+                    event,
+                })
+                .await
+                .unwrap();
+        }
+        worker_release.notified().await;
+        gateway
+            .complete_task(
+                task.task_id,
+                task.lease_id,
+                node,
+                session,
+                NodeTaskResult::Failed {
+                    code: "event_delivery_rejected".into(),
+                    message: "fixture terminal rejection".into(),
+                    is_client_error: false,
+                },
+            )
+            .await
+            .unwrap();
+        task
+    });
+    let mut body = f.body(Op::Chat);
+    body["stream"] = true.into();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/nt/v1/chat/completions")
+        .header("authorization", format!("Bearer {}", f.key))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), f.app.clone().oneshot(request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body();
+    let first = tokio::time::timeout(Duration::from_secs(3), stream.frame())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(String::from_utf8_lossy(first.data_ref().unwrap()).contains("observed partial output"));
+    release.notify_one();
+    let drained = tokio::time::timeout(Duration::from_secs(5), stream.collect())
+        .await
+        .expect("generic task failure must not wait for original 10-second task deadline");
+    assert!(
+        drained.is_err(),
+        "failed native stream must not end as successful EOF"
+    );
+    let task = worker.await.unwrap();
+    let row =
+        f.db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT state FROM node_native_streams WHERE task_id=$1",
+            [task.task_id.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<String>("", "state").unwrap(), "failed");
+    let summary = f
+        .state
+        .node_gateway
+        .as_ref()
+        .unwrap()
+        .store
+        .native_stream_summary(task.task_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        summary.usage.unwrap().output_tokens > 0,
+        "observed partial output must retain accounting"
+    );
+    assert_eq!(f.tasks().await, 1);
     assert!(f.upstream.calls.lock().unwrap().is_empty());
     f.finish().await;
 }

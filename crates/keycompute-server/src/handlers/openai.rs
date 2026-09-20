@@ -992,6 +992,7 @@ async fn chat_completions_inner(
                 image_edit: None,
                 native: Some(
                     node_native_body
+                        .clone()
                         .ok_or_else(|| ApiError::Internal("native node request missing".into()))?,
                 ),
             };
@@ -1062,6 +1063,25 @@ async fn chat_completions_inner(
             let mut client_response_guard =
                 super::ClientResponseGuard::new(Arc::clone(&lifecycle), Arc::clone(&ctx));
             pre_execution_guard.disarm();
+            if request.stream {
+                return super::scoped_stream::serve(super::scoped_stream::Prepared {
+                    state,
+                    mode: keycompute_types::ModelAccessMode::NodeDispatch,
+                    op: keycompute_types::node_native::NodeNativeOperation::Chat,
+                    model: request.model.clone(),
+                    ctx,
+                    plan,
+                    native: node_native_body,
+                    billing_provider: keycompute_pricing::NODE_PRICING_PROVIDER.to_owned(),
+                    account_id: uuid::Uuid::nil(),
+                    lifecycle,
+                    body_permit: body_permit.map(|Extension(permit)| permit),
+                    balance: balance_reservation,
+                    tpm: tpm_reservation,
+                    guard: client_response_guard,
+                })
+                .await;
+            }
             let settlement = super::ImmediateSettlementServices::from_state(&state);
 
             // Once the task has been enqueued, its usage can arrive after the
@@ -2580,6 +2600,10 @@ pub struct ListModelsQuery {
     /// accounts cannot serve the selected endpoint.
     #[serde(default)]
     pub capability: Option<String>,
+    /// When true, NodeDispatch discovery only advertises native SSE profiles.
+    /// The default remains the non-streaming model list.
+    #[serde(default)]
+    pub stream: bool,
 }
 
 /// 按入口协议收集模型清单：仅保留指定协议账号声明的模型。
@@ -2786,11 +2810,16 @@ async fn discover_models(
     let entries: std::collections::BTreeMap<String, String> = if mode
         == ModelAccessMode::NodeDispatch
     {
-        super::admin_model_catalog::ready_node_models_for(state, auth.tenant_id, &capability)
-            .await?
-            .into_iter()
-            .map(|m| (m, "node".into()))
-            .collect()
+        super::admin_model_catalog::ready_node_models_for(
+            state,
+            auth.tenant_id,
+            &capability,
+            query.stream,
+        )
+        .await?
+        .into_iter()
+        .map(|m| (m, "node".into()))
+        .collect()
     } else {
         let accounts = tokio::time::timeout(
             Duration::from_secs(3),

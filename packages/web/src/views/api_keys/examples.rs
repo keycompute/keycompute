@@ -520,3 +520,142 @@ mod tests {
         assert!(examples.websocket.is_empty());
     }
 }
+
+/// Native SSE examples print complete protocol events, including tool/thinking
+/// deltas, rather than projecting every protocol into plain text.
+pub fn native_stream_examples(
+    base: &str,
+    root: &str,
+    key: &str,
+    model: &str,
+    surface: &str,
+    env_comment: &str,
+    stateless: bool,
+) -> ApiExamples {
+    let messages = surface == "messages";
+    let responses = surface == "responses";
+    let sdk_base = if messages { root } else { base };
+    let path = if messages {
+        format!("{}/v1/messages", root.trim_end_matches('/'))
+    } else {
+        format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            if responses {
+                "responses"
+            } else {
+                "chat/completions"
+            }
+        )
+    };
+    let mut body = serde_json::json!({"model":model,"stream":true});
+    if responses {
+        body["input"] = serde_json::json!("Hello");
+    } else {
+        body["messages"] = serde_json::json!([{"role":"user","content":"Hello"}]);
+    }
+    if messages {
+        body["max_tokens"] = 1024.into();
+    }
+    if responses && stateless {
+        body["store"] = false.into();
+    }
+    let quoted_model = serde_json::to_string(model).expect("string serialization");
+    let quoted_base = serde_json::to_string(sdk_base).expect("string serialization");
+    let quoted_key = serde_json::to_string(key).expect("string serialization");
+    let data = serde_json::to_string_pretty(&body).expect("example serialization");
+    let shell = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+    let auth = if messages {
+        format!("x-api-key: {key}")
+    } else {
+        format!("Authorization: Bearer {key}")
+    };
+    let version = if messages {
+        " \\\n  -H 'anthropic-version: 2023-06-01'"
+    } else {
+        ""
+    };
+    let curl = format!(
+        "curl --fail-with-body -N {} \\\n  -H {} \\\n  -H 'Content-Type: application/json'{} \\\n  -d {}",
+        shell(&path),
+        shell(&auth),
+        version,
+        shell(&data)
+    );
+    let package = if messages { "anthropic" } else { "openai" };
+    let class = if messages { "Anthropic" } else { "OpenAI" };
+    let method = if messages {
+        "messages.create"
+    } else if responses {
+        "responses.create"
+    } else {
+        "chat.completions.create"
+    };
+    let py_input = if responses {
+        "    input=\"Hello\",\n"
+    } else {
+        "    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n"
+    };
+    let py_extra = if messages {
+        "    max_tokens=1024,\n"
+    } else if responses && stateless {
+        "    store=False,\n"
+    } else {
+        ""
+    };
+    let python = format!(
+        "from {package} import {class}\n\nclient = {class}(base_url={quoted_base}, api_key={quoted_key})\nstream = client.{method}(\n    model={quoted_model},\n{py_input}{py_extra}    stream=True,\n)\nfor event in stream:\n    print(event.model_dump_json())"
+    );
+    let js_package = if messages {
+        "@anthropic-ai/sdk"
+    } else {
+        "openai"
+    };
+    let node = format!(
+        "import {class} from \"{js_package}\";\n\nconst client = new {class}({{baseURL: {quoted_base}, apiKey: {quoted_key}}});\nconst stream = await client.{method}({data});\nfor await (const event of stream) {{\n  console.log(JSON.stringify(event));\n}}"
+    );
+    ApiExamples {
+        env: format!(
+            "# {env_comment}\nAPI_URL={quoted_base}\nAPI_KEY={quoted_key}\nAPI_MODEL={quoted_model}"
+        ),
+        python,
+        node,
+        curl,
+        websocket: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod native_stream_example_tests {
+    use super::*;
+    #[test]
+    fn native_examples_preserve_url_model_protocol_events_and_stateless_controls() {
+        for (surface, path) in [
+            ("chat_completions", "chat/completions"),
+            ("messages", "messages"),
+            ("responses", "responses"),
+        ] {
+            let e = native_stream_examples(
+                "https://example.test/prefix/nt/v1",
+                "https://example.test/prefix/nt",
+                "test-key",
+                "org/gemma:tag",
+                surface,
+                "example",
+                true,
+            );
+            assert!(e.curl.contains(&format!("/nt/v1/{path}")));
+            assert!(e.curl.contains("\"stream\": true") && e.curl.contains("org/gemma:tag"));
+            assert!(
+                e.python.contains("model_dump_json") && e.node.contains("JSON.stringify(event)")
+            );
+            assert!(e.websocket.is_empty());
+            if surface == "responses" {
+                assert!(e.curl.contains("\"store\": false") && e.python.contains("store=False"));
+            }
+            if surface == "messages" {
+                assert!(e.curl.contains("anthropic-version") && e.curl.contains("x-api-key"));
+            }
+        }
+    }
+}

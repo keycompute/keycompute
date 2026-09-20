@@ -714,7 +714,11 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/node/v1/heartbeat", post(node_heartbeat))
         .route("/node/v1/tasks/poll", post(node_poll))
-        .route("/node/v1/tasks/{task_id}/complete", post(node_complete));
+        .route("/node/v1/tasks/{task_id}/complete", post(node_complete))
+        .route(
+            "/node/v1/tasks/{task_id}/events",
+            post(crate::handlers::node::node_stream_event),
+        );
 
     // ==================== 合并所有路由 ====================
     Router::new()

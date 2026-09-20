@@ -263,8 +263,8 @@ fn validate_runtime_features(
 
 fn validate_stream(body: &Value) -> Result<(), &'static str> {
     match body.get("stream") {
-        None | Some(Value::Null) | Some(Value::Bool(false)) => Ok(()),
-        _ => Err("native_streaming_unsupported_until_phase4"),
+        None | Some(Value::Null) | Some(Value::Bool(false)) | Some(Value::Bool(true)) => Ok(()),
+        _ => Err("native_stream_invalid"),
     }
 }
 
@@ -608,7 +608,12 @@ mod chat_regression_tests {
             body: json!({"model":"m","messages":[{}],"stream":true}),
             headers: vec![],
         };
-        assert!(request.validate("m").is_err());
+        request.validate("m").unwrap();
+        let requirements =
+            crate::node_capability::NativeRequirements::from_request(&request).unwrap();
+        assert!(
+            !crate::node_capability::NativeModelProfile::plain_chat("m").permits(&requirements)
+        );
         let mut result = NodeNativeHttpResult {
             status: 200,
             headers: vec![],

@@ -441,6 +441,7 @@ pub(crate) async fn ready_node_models_for(
     state: &AppState,
     tenant: Uuid,
     capability: &str,
+    stream: bool,
 ) -> Result<Vec<String>> {
     if state.node_gateway.is_none() {
         return Ok(Vec::new());
@@ -450,22 +451,39 @@ pub(crate) async fn ready_node_models_for(
         .as_deref()
         .ok_or_else(|| ApiError::ServiceUnavailable("Node catalog unavailable".into()))?
         .write_conn();
+    let operation = operation_for_capability(capability);
+    let feature_filter = if stream {
+        " AND EXISTS (SELECT 1 FROM node_sessions ns2, jsonb_array_elements(ns2.native_profiles_json) p2 WHERE ns2.node_id = n.id AND p2->>'model' = m.model AND p2->>'operation' = $2 AND p2->'features' @> '[\"sse\"]'::jsonb)"
+    } else {
+        ""
+    };
     let sql = format!(
-        "WITH supply AS ({}) SELECT DISTINCT model FROM supply WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active') ORDER BY model",
-        node_supply_sql(operation_for_capability(capability))
+        "WITH supply AS (SELECT DISTINCT n.id,m.model, EXISTS(SELECT 1 FROM node_sessions ns WHERE ns.node_id=n.id AND {ready} AND ns.accepted_models_json @> jsonb_build_array(m.model) AND {profile}{feature_filter}) AS ready FROM nodes n JOIN users u ON u.id=n.owner_user_id JOIN tenants t ON t.id=u.tenant_id CROSS JOIN LATERAL (SELECT v->>'model' AS model FROM jsonb_array_elements(CASE WHEN jsonb_typeof(n.capabilities_json->'models')='array' THEN n.capabilities_json->'models' ELSE '[]'::JSONB END) v UNION SELECT jsonb_array_elements_text(ns.accepted_models_json) FROM node_sessions ns WHERE ns.node_id=n.id AND ns.expires_at>NOW() AND ns.revoked_at IS NULL) m WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama') SELECT DISTINCT model FROM supply WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active') ORDER BY model",
+        ready = node_gateway::node_index::READY_NODE_CONDITION,
+        profile = node_gateway::node_index::ready_profile_condition(
+            "m.model",
+            &format!("'{}'", operation.as_str())
+        ),
+        feature_filter = feature_filter,
     );
     #[derive(FromQueryResult)]
     struct NodeModel {
         model: String,
     }
-    Ok(query_rows::<NodeModel>(
-        db,
-        Statement::from_sql_and_values(DbBackend::Postgres, sql, [tenant.into()]),
-    )
-    .await?
-    .into_iter()
-    .map(|r| r.model)
-    .collect())
+    let statement = if stream {
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [tenant.into(), operation.as_str().into()],
+        )
+    } else {
+        Statement::from_sql_and_values(DbBackend::Postgres, sql, [tenant.into()])
+    };
+    Ok(query_rows::<NodeModel>(db, statement)
+        .await?
+        .into_iter()
+        .map(|r| r.model)
+        .collect())
 }
 
 #[cfg(test)]

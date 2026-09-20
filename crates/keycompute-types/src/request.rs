@@ -705,6 +705,16 @@ impl RequestContext {
         }
     }
 
+    /// Stop the upstream after a handler timeout or failure without recording
+    /// a fictitious network disconnect. The first terminal delivery outcome wins.
+    pub fn cancel_upstream(&self, outcome: ClientResponseOutcome) {
+        if outcome == ClientResponseOutcome::Succeeded {
+            return;
+        }
+        self.set_client_response_outcome(outcome);
+        self.client_disconnect.cancel();
+    }
+
     /// 客户端是否已断开。
     pub fn is_client_disconnected(&self) -> bool {
         self.client_disconnect.is_cancelled()
@@ -1478,5 +1488,42 @@ mod tests {
         let json = r#"{"role":"user","content":[]}"#;
         let result: Result<Message, _> = serde_json::from_str(json);
         assert!(result.is_err(), "Empty array [] should be rejected");
+    }
+}
+
+#[cfg(test)]
+mod upstream_cancellation_tests {
+    use super::*;
+    fn context() -> RequestContext {
+        RequestContext::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            "test",
+            Vec::new(),
+            true,
+            crate::PricingSnapshot::default(),
+        )
+    }
+    #[test]
+    fn cancellation_preserves_timeout_and_failure_outcomes() {
+        for outcome in [
+            ClientResponseOutcome::TimedOut,
+            ClientResponseOutcome::ResponseFailed,
+        ] {
+            let ctx = context();
+            ctx.cancel_upstream(outcome);
+            assert!(ctx.is_client_disconnected());
+            ctx.mark_client_disconnected();
+            assert_eq!(ctx.client_response_outcome(), Some(outcome));
+        }
+    }
+    #[test]
+    fn success_does_not_cancel_upstream() {
+        let ctx = context();
+        ctx.cancel_upstream(ClientResponseOutcome::Succeeded);
+        assert!(!ctx.is_client_disconnected());
+        assert_eq!(ctx.client_response_outcome(), None);
     }
 }
