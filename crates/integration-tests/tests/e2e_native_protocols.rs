@@ -609,7 +609,7 @@ async fn scoped_model_discovery_reports_each_supported_protocol() {
 }
 
 #[tokio::test]
-async fn unsupported_state_and_invalid_stream_controls_are_not_silently_downgraded() {
+async fn invalid_state_controls_and_missing_references_are_not_silently_downgraded() {
     let mut f = Fixture::new().await;
     for family in ["pt", "nt"] {
         for op in [Op::Messages, Op::Responses] {
@@ -625,18 +625,30 @@ async fn unsupported_state_and_invalid_stream_controls_are_not_silently_downgrad
                 StatusCode::BAD_REQUEST,
             );
         }
-        for (name, value) in [
-            ("previous_response_id", json!("resp-do-not-drop")),
-            ("conversation", json!("conv-do-not-drop")),
-            ("background", json!(true)),
-            ("store", json!(true)),
+        for (name, value, status) in [
+            (
+                "previous_response_id",
+                json!("resp-do-not-drop"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "conversation",
+                json!("conv-do-not-drop"),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "background",
+                json!("not-a-boolean"),
+                StatusCode::BAD_REQUEST,
+            ),
+            ("store", json!([true]), StatusCode::BAD_REQUEST),
         ] {
             let mut body = f.body(Op::Responses);
             body[name] = value;
             expect(
                 f.request(Method::POST, &format!("/{family}/v1/responses"), Some(body))
                     .await,
-                StatusCode::BAD_REQUEST,
+                status,
             );
         }
     }

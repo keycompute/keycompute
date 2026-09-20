@@ -432,3 +432,13 @@ If this project helps you, feel free to give it a ⭐️ star.
 **[Quick Start](#quick-start)** • **[Report Issues](https://github.com/keycompute/keycompute/issues)** • **[Latest Releases](https://github.com/keycompute/keycompute/releases)**
 
 </div>
+
+### Native protocols and managed Responses
+
+Account-pool (`/v1`), passthrough (`/pt/v1`) and NodeDispatch (`/nt/v1`)
+remain distinct execution families. Scoped Chat, Messages and Responses support
+complete native payloads and operation-specific SSE. KeyCompute can additionally
+manage scoped Responses history, Conversations, background work and cancellation
+without requiring stateful Ollama support. See [native streaming](docs/native-streaming.md)
+and [platform Responses state](docs/scoped-response-state.md) for API operations,
+capability negotiation, scope boundaries, retention and limits.

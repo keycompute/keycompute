@@ -161,6 +161,9 @@ pub struct NodePollResponse {
 /// 节点任务信封
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeTaskEnvelope {
+    /// Whether this lease requires periodic cancellation checks.
+    #[serde(default)]
+    pub requires_cancellation: bool,
     /// 任务 ID
     pub task_id: NodeTaskId,
     /// 租约 ID
@@ -429,4 +432,20 @@ pub struct ImageGenerationResponse {
     pub created: i64,
     /// 图片数据列表
     pub data: Vec<ImageData>,
+}
+
+/// Metadata-only probe of the exact lease issued to this authenticated worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeTaskLeaseStatusRequest {
+    pub protocol_version: String,
+    pub node_id: NodeId,
+    pub session_id: NodeSessionId,
+    pub task_id: NodeTaskId,
+    pub lease_id: NodeLeaseId,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeTaskLeaseStatusResponse {
+    pub active: bool,
+    pub status: String,
 }

@@ -3950,7 +3950,11 @@ mod tests {
         let task_id = Uuid::new_v4();
         let received_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         insert_unfinished_node_trace(&pool, request_id, attempt_id, task_id, received_at).await;
-        let recorder = keycompute_db::PostgresRequestLifecycleRecorder::new(router);
+        // This regression checks persisted status restoration, not the 250 ms
+        // production tracing budget. Keep a finite test deadline under concurrent
+        // schema/load tests; dedicated timeout tests retain the production-bound checks.
+        let recorder = keycompute_db::PostgresRequestLifecycleRecorder::new(router)
+            .with_synchronous_write_timeout(std::time::Duration::from_secs(5));
 
         recorder
             .finish_attempt_and_request(AttemptTraceFinish {

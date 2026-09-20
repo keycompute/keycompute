@@ -13,6 +13,7 @@
 
 pub mod config;
 mod metrics;
+pub mod native_control;
 pub mod native_stream;
 pub mod node_index;
 pub mod redis;

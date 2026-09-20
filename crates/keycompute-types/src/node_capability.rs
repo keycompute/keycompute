@@ -14,6 +14,8 @@ pub const MAX_NATIVE_PROFILES: usize = 1024;
 #[serde(rename_all = "snake_case")]
 pub enum NativeFeature {
     Sse,
+    /// Worker can abort non-streaming local inference after its lease is cancelled.
+    Cancellation,
     Tools,
     Vision,
     StructuredOutput,
@@ -71,7 +73,7 @@ impl NativeModelProfile {
         if self.version != NATIVE_CAPABILITY_VERSION
             || self.model.is_empty()
             || self.model.chars().count() > 100
-            || self.features.len() > 5
+            || self.features.len() > 6
             || self.features.iter().collect::<BTreeSet<_>>().len() != self.features.len()
             || self.max_request_bytes == 0
             || self.max_request_bytes as usize > MAX_NATIVE_BODY_BYTES

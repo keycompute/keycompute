@@ -16,6 +16,7 @@ pub(crate) mod passthrough_binding;
 pub mod payment_registry;
 pub mod providers;
 pub mod router;
+pub(crate) mod scoped_state;
 pub mod shutdown;
 pub mod state;
 
@@ -58,6 +59,16 @@ pub async fn run_with_shutdown(
         std::time::Duration::from_secs(config.shutdown_timeout_secs),
     )
     .await
+}
+
+/// Start bounded recovery and retention for platform-managed scoped Responses.
+pub fn spawn_scoped_response_maintenance(state: AppState) {
+    scoped_state::maintenance::spawn(state);
+}
+
+/// One maintenance pass, also usable by controlled administration/tests.
+pub async fn maintain_scoped_responses_once(state: &AppState) -> Result<usize> {
+    scoped_state::maintenance::run_once(state).await
 }
 
 #[cfg(test)]

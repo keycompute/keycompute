@@ -2209,7 +2209,22 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Native event streaming (SSE)",
     );
     m.insert("models.native_stream_help", "Displays complete protocol events, including tools and thinking. Node discovery includes only workers advertising SSE; this does not turn on background state.");
-    m.insert("models.native_stateless_help", "Scoped Responses currently runs without stored response resources. Examples use store=false; previous_response_id, conversation and background are not enabled in this phase.");
+    m.insert("models.response_lifecycle", "Responses lifecycle");
+    m.insert(
+        "models.response_stateless",
+        "Stateless — do not retain this response",
+    );
+    m.insert(
+        "models.response_stored",
+        "Stored response and previous_response_id",
+    );
+    m.insert("models.response_conversation", "Platform conversation");
+    m.insert(
+        "models.response_background",
+        "Background execution and polling",
+    );
+    m.insert("models.response_state_help", "KeyCompute owns this state, not Ollama. Keep the same mode, tenant and user for resources. Examples explicitly store responses (30-day retention); background without store=true uses 10-minute polling retention. Managed non-stream node requests require cancellation-capable workers.");
+    m.insert("models.native_stateless_help", "This stateless example uses store=false. Select stored responses, a conversation or background execution to use platform-managed state; the local inference runtime remains stateless.");
     m.insert("models.node", "Node Gateway (NodeDispatch)");
     m.insert(
         "models.pool_desc",

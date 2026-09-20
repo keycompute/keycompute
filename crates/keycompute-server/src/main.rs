@@ -256,6 +256,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     keycompute_server::handlers::responses::spawn_responses_maintenance(app_state.clone());
+    keycompute_server::spawn_scoped_response_maintenance(app_state.clone());
     if let Some(node_gateway) = app_state.node_gateway.as_ref() {
         spawn_node_gateway_sweeper(
             node_gateway.sweeper(),

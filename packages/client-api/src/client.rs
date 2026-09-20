@@ -568,6 +568,31 @@ impl OpenAiClient {
         self.api_client.send_and_parse(builder).await
     }
 
+    /// Delete a resource within the authenticated API-key scope.
+    pub async fn delete_json<T: DeserializeOwned>(&self, path: &str, api_key: &str) -> Result<T> {
+        let request = self
+            .request_with_api_key(Method::DELETE, path, api_key)
+            .await?;
+        self.api_client.send_and_parse(request).await
+    }
+
+    /// Explicit idempotency permits retry only when the server can recognize
+    /// the same logical operation. Ordinary POST calls remain non-retrying.
+    pub async fn post_idempotent_json<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        api_key: &str,
+        idempotency_key: &str,
+    ) -> Result<T> {
+        let request = self
+            .request_with_api_key(Method::POST, path, api_key)
+            .await?
+            .header("Idempotency-Key", idempotency_key)
+            .json(body);
+        self.api_client.send_and_parse(request).await
+    }
+
     /// 发送 GET 请求并解析响应（含重试）
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str, api_key: &str) -> Result<T> {
         let builder = self

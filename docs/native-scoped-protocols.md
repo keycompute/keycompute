@@ -28,12 +28,13 @@ prompt caching, PDFs, forced tool choice and thinking budgets return explicit
 errors instead of being discarded. Tool schemas and tool arguments are treated
 as data, not recursively mistaken for these protocol controls.
 
-Phase 3 explicitly rejects native `stream:true`, stateful Responses references,
-`background:true` and `store:true`. Native event transport and platform-owned
-Responses state are subsequent stages; these are not silently downgraded.
-Passthrough does not inherit Ollama-only feature restrictions, but its new
-Messages/Responses ingress currently has the same non-stream/stateless boundary.
-Missing/null optional controls remain distinguishable in forwarded JSON.
+The phase-3 baseline was non-streaming and stateless. Native SSE is now
+implemented as described in `native-streaming.md`, and platform-managed
+Responses resources/conversations/background work in `scoped-response-state.md`.
+Explicit `store:false` keeps the direct stateless path. Stateful controls are
+resolved by KeyCompute, not silently discarded by the executor. Passthrough does
+not inherit Ollama-only feature restrictions. Missing/null optional controls
+remain distinguishable in native JSON.
 
 Model discovery and the usage guide offer the operation actually supported by
 an account or node. `/nt/v1/models?protocol=anthropic&capability=messages` and

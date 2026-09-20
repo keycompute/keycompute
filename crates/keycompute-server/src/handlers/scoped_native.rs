@@ -72,6 +72,10 @@ fn request_path(mode: ModelAccessMode, op: Op) -> String {
         op.local_path()
     )
 }
+pub(crate) fn validate_managed_responses_body(body: &Value) -> Result<()> {
+    super::responses::request::validate_responses_request(body)
+}
+
 fn validate_request(body: &Value, headers: &HeaderMap, op: Op) -> Result<()> {
     if !body.is_object() {
         return Err(ApiError::BadRequest("Request must be a JSON object".into()));
@@ -125,6 +129,49 @@ fn validate_request(body: &Value, headers: &HeaderMap, op: Op) -> Result<()> {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate(
     state: AppState,
+    auth: AuthExtractor,
+    request_id: RequestId,
+    client_request_id: ClientRequestId,
+    received: RequestReceivedAt,
+    headers: HeaderMap,
+    body_permit: Option<GenerationHttpBodyPermit>,
+    body: Value,
+    mode: ModelAccessMode,
+    op: Op,
+) -> Result<Response> {
+    if op == Op::Responses {
+        return crate::scoped_state::create(
+            state,
+            auth,
+            request_id,
+            client_request_id,
+            received,
+            headers,
+            body_permit,
+            body,
+            mode,
+        )
+        .await;
+    }
+    generate_with_state(
+        state,
+        auth,
+        request_id,
+        client_request_id,
+        received,
+        headers,
+        body_permit,
+        body,
+        mode,
+        op,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn generate_with_state(
+    state: AppState,
     mut auth: AuthExtractor,
     request_id: RequestId,
     client_request_id: ClientRequestId,
@@ -134,6 +181,7 @@ pub(crate) async fn generate(
     body: Value,
     mode: ModelAccessMode,
     op: Op,
+    managed: Option<Arc<crate::scoped_state::execution::ManagedExecution>>,
 ) -> Result<Response> {
     crate::admission::ensure_generation(&state, &mut auth).await?;
     if !auth.has_permission(&Permission::UseApi) {
@@ -293,6 +341,9 @@ pub(crate) async fn generate(
         &plan.primary,
     )
     .await?;
+    if let Some(managed) = &managed {
+        managed.prepare(ctx.clone(), account_id).await?;
+    }
     let mut tpm = super::reserve_generation_tpm(&state, &ctx, limits.clone()).await?;
     let lifetime = if mode == ModelAccessMode::NodeDispatch {
         super::GenerationBalanceReservationLifetime::Node(
@@ -316,6 +367,13 @@ pub(crate) async fn generate(
         tpm.release().await;
         return Err(error);
     }
+    if let Some(managed) = &managed
+        && let Err(error) = managed.checkpoint(&ctx).await
+    {
+        balance.release().await;
+        tpm.release().await;
+        return Err(error);
+    }
     let mut guard = super::ClientResponseGuard::new(lifecycle.clone(), ctx.clone());
     pre.disarm();
     if ctx.stream {
@@ -334,6 +392,7 @@ pub(crate) async fn generate(
             balance,
             tpm,
             guard,
+            managed,
         })
         .await;
     }
@@ -342,7 +401,7 @@ pub(crate) async fn generate(
     let worker_lifecycle = lifecycle.clone();
     tokio::spawn(async move {
         let _body_permit = body_permit;
-        let result = if mode == ModelAccessMode::NodeDispatch {
+        let mut result = if mode == ModelAccessMode::NodeDispatch {
             let payload = NodeTaskPayload {
                 request_id: worker_ctx.request_id,
                 native,
@@ -350,13 +409,22 @@ pub(crate) async fn generate(
                 image_generation: None,
                 image_edit: None,
             };
-            match state
-                .node_gateway
-                .as_ref()
-                .unwrap()
-                .enqueue_native_and_wait(worker_ctx.user_id, model, payload)
-                .await
-            {
+            let gateway = state.node_gateway.as_ref().unwrap();
+            let execution = if managed.is_some() {
+                gateway
+                    .enqueue_native_cancellable_and_wait(
+                        worker_ctx.user_id,
+                        model,
+                        payload,
+                        worker_ctx.clone(),
+                    )
+                    .await
+            } else {
+                gateway
+                    .enqueue_native_and_wait(worker_ctx.user_id, model, payload)
+                    .await
+            };
+            match execution {
                 Ok(response) => match response.validate_for(op, &worker_ctx.model) {
                     Ok(Some((input, output))) => {
                         worker_ctx.set_input_tokens(input);
@@ -382,10 +450,26 @@ pub(crate) async fn generate(
             )
             .await
         };
+        let mut persisted = true;
+        if let Some(managed) = &managed {
+            persisted = match &result {
+                Ok(response) => managed
+                    .capture_http(
+                        &worker_ctx,
+                        response.status,
+                        &response.headers,
+                        &response.body,
+                    )
+                    .await
+                    .is_ok(),
+                Err(_) => managed.checkpoint(&worker_ctx).await.is_ok(),
+            };
+        }
+        let mut secured = true;
         if mode == ModelAccessMode::Passthrough || result.as_ref().is_ok_and(|r| r.status == 200) {
             balance.transfer_to_settlement();
             tpm.transfer_to_settlement();
-            super::finalize_immediate_settlement_logged(
+            secured = super::finalize_immediate_settlement_logged(
                 &super::ImmediateSettlementServices::from_state(&state),
                 &worker_ctx,
                 &billing_provider,
@@ -401,6 +485,30 @@ pub(crate) async fn generate(
         } else {
             balance.release().await;
             tpm.release().await;
+        }
+        if let Some(managed) = &managed {
+            let outcome = if result.as_ref().is_ok_and(|r| r.status == 200) {
+                ClientResponseOutcome::Succeeded
+            } else {
+                ClientResponseOutcome::ResponseFailed
+            };
+            match managed.finish(outcome, secured && persisted).await {
+                Ok((public, _)) => {
+                    if let Ok(response) = &mut result
+                        && response.status == 200
+                    {
+                        response.body = public;
+                    }
+                    if !persisted || !secured {
+                        result = Err(ApiError::ServiceUnavailable(
+                            "Managed response could not be durably completed".into(),
+                        ));
+                    }
+                }
+                Err(error) => {
+                    result = Err(error);
+                }
+            }
         }
         if sender.send(result).is_err() {
             worker_ctx.mark_client_disconnected();
@@ -535,6 +643,17 @@ async fn execute_account(
                 });
             }
             Some(StreamEvent::Done) => {
+                if let Some(response) = &mut result {
+                    response.headers = ctx
+                        .client_upstream_response_headers()
+                        .into_iter()
+                        .filter(|(name, value)| {
+                            keycompute_types::node_native::native_response_header_allowed(
+                                name, value,
+                            )
+                        })
+                        .collect();
+                }
                 return result
                     .ok_or_else(|| ApiError::Provider("Native response body missing".into()));
             }

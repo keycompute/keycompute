@@ -1911,7 +1911,16 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("models.passthrough", "透传模式");
     m.insert("models.native_stream_choice", "原生事件流（SSE）");
     m.insert("models.native_stream_help", "保留工具调用、思考等完整协议事件。节点模型列表仅显示声明 SSE 能力的工作节点；此选项不启用后台状态资源。");
-    m.insert("models.native_stateless_help", "当前透传与节点 Responses 为无状态调用，示例使用 store=false；本阶段暂不启用 previous_response_id、conversation 和后台响应资源。");
+    m.insert("models.response_lifecycle", "Responses 生命周期");
+    m.insert("models.response_stateless", "无状态：不保留响应");
+    m.insert(
+        "models.response_stored",
+        "保存响应并通过 previous_response_id 续聊",
+    );
+    m.insert("models.response_conversation", "平台会话 Conversations");
+    m.insert("models.response_background", "后台执行与结果轮询");
+    m.insert("models.response_state_help", "状态由 KeyCompute 管理，不是 Ollama 原生状态。资源访问需保持相同模式、租户和用户。示例明确保存响应（保留 30 天）；后台请求未启用 store=true 时仅保留 10 分钟用于轮询。节点非流式托管请求需要声明取消能力的客户端。");
+    m.insert("models.native_stateless_help", "此无状态示例使用 store=false。选择保存响应、平台会话或后台执行，可启用 KeyCompute 管理的状态；本地推理运行时仍按无状态接口执行。");
     m.insert("models.node", "节点网关（NodeDispatch）");
     m.insert(
         "models.pool_desc",

@@ -242,6 +242,9 @@ pub fn create_router(state: AppState) -> Router {
     // Exact passthrough surface.  It shares the generation lifecycle and
     // body/rate/admission limits with Chat while preserving its route intent.
     let passthrough_binding_routes = Router::new()
+        .merge(crate::scoped_state::resource_routes(
+            keycompute_types::ModelAccessMode::Passthrough,
+        ))
         .route(
             "/pt/v1/chat/completions",
             post(passthrough_binding_chat_completions),
@@ -269,6 +272,9 @@ pub fn create_router(state: AppState) -> Router {
 
     // Explicit node API namespace; unsupported paths never fall through to the account pool.
     let node_dispatch_routes = Router::new()
+        .merge(crate::scoped_state::resource_routes(
+            keycompute_types::ModelAccessMode::NodeDispatch,
+        ))
         .route(
             "/nt/v1",
             axum::routing::any(crate::handlers::openai::unsupported_node_endpoint),
@@ -715,6 +721,10 @@ pub fn create_router(state: AppState) -> Router {
         .route("/node/v1/heartbeat", post(node_heartbeat))
         .route("/node/v1/tasks/poll", post(node_poll))
         .route("/node/v1/tasks/{task_id}/complete", post(node_complete))
+        .route(
+            "/node/v1/tasks/{task_id}/lease-status",
+            post(crate::handlers::node::node_lease_status),
+        )
         .route(
             "/node/v1/tasks/{task_id}/events",
             post(crate::handlers::node::node_stream_event),

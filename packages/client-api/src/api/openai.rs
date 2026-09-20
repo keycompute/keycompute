@@ -6,6 +6,9 @@ use crate::client::OpenAiClient;
 use crate::error::Result;
 use serde::{Deserialize, Serialize};
 
+mod resources;
+pub use resources::{ResourceListQuery, ResourceOrder};
+
 /// OpenAI API 客户端
 #[derive(Debug, Clone)]
 pub struct OpenAiApi {

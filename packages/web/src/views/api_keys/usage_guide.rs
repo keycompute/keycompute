@@ -1,8 +1,8 @@
 //! Available for existing keys as well as newly created keys; examples never
 //! manufacture a model or mix a late response from another access mode.
 use super::examples::{
-    anthropic_examples, native_stream_examples, openai_examples, responses_examples,
-    stateless_responses_examples,
+    anthropic_examples, managed_response_examples, native_stream_examples, openai_examples,
+    responses_examples, stateless_responses_examples,
 };
 use crate::{
     hooks::use_i18n::use_i18n,
@@ -71,6 +71,7 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
     let mut tab = use_signal(|| "curl".to_string());
     let mut copied = use_signal(|| false);
     let mut streaming = use_signal(|| false);
+    let mut response_workflow = use_signal(|| "stateless".to_string());
     let mut refresh = use_signal(|| 0u32);
     let data = use_resource(move || {
         let key = (
@@ -79,6 +80,7 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
             refresh(),
             (auth.state)().session_id,
             streaming(),
+            response_workflow(),
         );
         async move {
             let protocol = if key.1 == "messages" {
@@ -87,14 +89,17 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
                 "openai"
             };
             let capability = key.1.clone();
+            let managed = key.1 == "responses" && key.5 != "stateless";
+            let streaming = key.4;
             let result = with_auto_refresh(auth, move |token| {
                 let capability = capability.clone();
                 async move {
-                    model_service::list_models_with_streaming(
+                    model_service::list_models_for_execution(
                         mode.as_str(),
                         protocol,
                         &capability,
-                        key.4,
+                        streaming,
+                        managed,
                         &token,
                     )
                     .await
@@ -110,6 +115,7 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
         refresh(),
         (auth.state)().session_id,
         streaming(),
+        response_workflow(),
     );
     let result = current_keyed_value(&key, data.state().cloned(), data());
     let selected = result
@@ -137,6 +143,19 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
         .clone()
         .unwrap_or_else(|| "YOUR_PLATFORM_KEY".to_string());
     let examples = selected.as_ref().map(|model| {
+        if mode != ModelAccessMode::AccountPool
+            && surface() == "responses"
+            && response_workflow() != "stateless"
+        {
+            return managed_response_examples(
+                &base,
+                &credential,
+                model,
+                &response_workflow(),
+                streaming(),
+                i.t("api_keys.example_env_comment"),
+            );
+        }
         if streaming() {
             return native_stream_examples(
                 &base,
@@ -183,7 +202,16 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
     rsx! {
         p {{mode_description(i,mode)}}
         if mode==ModelAccessMode::NodeDispatch {p {class:"form-hint",{i.t("models.node_stream_help")}}}
-        if mode!=ModelAccessMode::AccountPool && surface()=="responses" {p {class:"form-hint",{i.t("models.native_stateless_help")}}}
+        if mode!=ModelAccessMode::AccountPool && surface()=="responses" {
+            label {class:"form-label",{i.t("models.response_lifecycle")}}
+            select {class:"input-field",aria_label:i.t("models.response_lifecycle"),value:"{response_workflow}",onchange:move|event|{response_workflow.set(event.value());model.set(String::new());copied.set(false);},
+                option {value:"stateless",{i.t("models.response_stateless")}}
+                option {value:"stored",{i.t("models.response_stored")}}
+                option {value:"conversation",{i.t("models.response_conversation")}}
+                option {value:"background",{i.t("models.response_background")}}
+            }
+            p {class:"form-hint",{i.t(if response_workflow()=="stateless" {"models.native_stateless_help"} else {"models.response_state_help"})}}
+        }
         if api_key.is_none() {p {class:"form-hint",{i.t("models.placeholder_key")}}}
         label {class:"form-label",{i.t("models.api_surface")}}
         select {class:"input-field",aria_label:i.t("models.api_surface"),value:"{surface}",onchange:move|e|{surface.set(e.value());model.set(String::new());tab.set("curl".into());copied.set(false);},

@@ -48,6 +48,7 @@ pub(crate) struct Prepared {
     pub balance: GenerationBalanceReservation,
     pub tpm: GenerationTpmReservation,
     pub guard: ClientResponseGuard,
+    pub managed: Option<Arc<crate::scoped_state::execution::ManagedExecution>>,
 }
 
 struct Head {
@@ -909,6 +910,22 @@ impl Owner {
     }
 
     async fn send_head(&mut self, head: Head) {
+        if let Some(managed) = &self.input.managed
+            && let Some(body) = &head.initial_body
+            && let Ok(value) = serde_json::from_slice::<Value>(body)
+        {
+            // Preserve definite pre-stream HTTP failures in the resource record;
+            // the detached owner still settles before marking it terminal.
+            if managed
+                .capture_http(&self.input.ctx, head.status, &head.headers, &value)
+                .await
+                .is_err()
+            {
+                self.input
+                    .ctx
+                    .cancel_upstream(ClientResponseOutcome::ResponseFailed);
+            }
+        }
         self.stream_started |= head.status == 200 && head.initial_body.is_none();
         if let Some(sender) = self.head_tx.take()
             && sender.send(head).is_err()
@@ -918,6 +935,30 @@ impl Owner {
     }
 
     async fn send_chunk(&self, chunk: Chunk) -> bool {
+        let chunk = if let (Some(managed), Ok(bytes)) = (&self.input.managed, &chunk) {
+            let Ok(raw) = std::str::from_utf8(bytes) else {
+                self.input
+                    .ctx
+                    .cancel_upstream(ClientResponseOutcome::ResponseFailed);
+                return false;
+            };
+            match managed.frame(&self.input.ctx, raw).await {
+                Ok(Some(frame)) => Ok(Bytes::from(frame)),
+                Ok(None) => return true, // Terminal is emitted after durable settlement/state commit.
+                Err(_) => {
+                    self.input
+                        .ctx
+                        .cancel_upstream(ClientResponseOutcome::ResponseFailed);
+                    return false;
+                }
+            }
+        } else {
+            chunk
+        };
+        self.send_raw_chunk(chunk).await
+    }
+
+    async fn send_raw_chunk(&self, chunk: Chunk) -> bool {
         tokio::time::timeout_at(
             self.execution_deadline
                 .min(tokio::time::Instant::now() + SEND_TIMEOUT),
@@ -1059,6 +1100,10 @@ impl Owner {
             self.apply_summary(&summary);
         }
         let observed = observed || self.input.ctx.is_upstream_response_accepted();
+        let mut durable = true;
+        if let Some(managed) = &self.input.managed {
+            durable = managed.checkpoint(&self.input.ctx).await.is_ok();
+        }
         if observed {
             self.input.balance.transfer_to_settlement();
             self.input.tpm.transfer_to_settlement();
@@ -1072,12 +1117,43 @@ impl Owner {
                 self.input.op.protocol(),
             )
             .await;
+            durable &= secured;
             if !secured {
                 outcome = ClientResponseOutcome::ResponseFailed;
             }
         } else {
             self.input.balance.release().await;
             self.input.tpm.release().await;
+        }
+        if let Some(managed) = &self.input.managed {
+            match managed.finish(outcome, durable).await {
+                Ok((response, terminal)) => {
+                    if !matches!(
+                        response["status"].as_str(),
+                        Some("completed" | "incomplete")
+                    ) {
+                        outcome = ClientResponseOutcome::ResponseFailed;
+                    }
+                    if self.stream_started
+                        && let Some(terminal) = terminal
+                    {
+                        // All model I/O has ended. Permit a short bounded final
+                        // delivery after the execution deadline, without retrying inference.
+                        if !tokio::time::timeout(
+                            Duration::from_secs(5),
+                            self.body_tx.send(Ok(Bytes::from(terminal))),
+                        )
+                        .await
+                        .is_ok_and(|r| r.is_ok())
+                        {
+                            outcome = ClientResponseOutcome::ClientDisconnected;
+                        }
+                    }
+                }
+                Err(_) => {
+                    outcome = ClientResponseOutcome::ResponseFailed;
+                }
+            }
         }
         if let Some(sender) = self.outcome_tx.take() {
             let _ = sender.send(outcome);

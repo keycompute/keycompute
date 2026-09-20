@@ -771,6 +771,7 @@ impl NodeGatewayStore {
                     .map_err(|e| DbError::Other(format!("Invalid payload: {}", e)))?;
 
                 let envelope = NodeTaskEnvelope {
+                    requires_cancellation: requires_native_cancellation(&t),
                     task_id: t.id,
                     lease_id,
                     model: t.model.clone(),
@@ -815,6 +816,7 @@ impl NodeGatewayStore {
             }
             Self::record_node_claim_savepoint(&tx, &task).await;
             let envelope = NodeTaskEnvelope {
+                requires_cancellation: requires_native_cancellation(&task),
                 task_id: task.id,
                 lease_id,
                 model: task.model.clone(),
@@ -1964,6 +1966,74 @@ fn result_matches_payload(payload: &NodeTaskPayload, result: &NodeTaskResult) ->
         }
         NodeTaskResult::Failed { .. } => true,
     }
+}
+
+impl NodeGatewayStore {
+    /// Create a task whose immutable profile includes cancellation support.
+    pub async fn create_cancellable_native_task(
+        &self,
+        user_id: Uuid,
+        model: String,
+        payload: NodeTaskPayload,
+    ) -> Result<NodeTask, DbError> {
+        payload.validate().map_err(|e| DbError::Other(e.into()))?;
+        let native = payload
+            .native
+            .as_ref()
+            .ok_or_else(|| DbError::Other("native payload required".into()))?;
+        native
+            .validate(&model)
+            .map_err(|e| DbError::Other(e.into()))?;
+        if native
+            .body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            return Err(DbError::Other("streaming uses event cancellation".into()));
+        }
+        let mut required =
+            keycompute_types::node_capability::NativeRequirements::from_request(native)
+                .map_err(|e| DbError::Other(e.into()))?;
+        required
+            .features
+            .push(keycompute_types::node_capability::NativeFeature::Cancellation);
+        let deadline_at = Utc::now() + self.config.task_deadline();
+        let request = CreateNodeTaskRequest {
+            request_id: payload.request_id,
+            user_id,
+            model,
+            payload_json: serde_json::to_value(payload)
+                .map_err(|_| DbError::Other("invalid native task".into()))?,
+            deadline_at,
+            complete_grace_until: deadline_at + self.config.complete_grace(),
+        };
+        let tx = self.pool.begin().await?;
+        tx.execute_unprepared(
+            "SET LOCAL statement_timeout='2500ms'; SET LOCAL lock_timeout='1000ms'",
+        )
+        .await?;
+        let mut task = NodeTask::create(&tx, &request).await?;
+        let required = serde_json::to_value(required)
+            .map_err(|_| DbError::Other("invalid control requirements".into()))?;
+        tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE node_tasks SET native_requirements_json=$2 WHERE id=$1",
+            [task.id.into(), required.clone().into()],
+        ))
+        .await?;
+        task.native_requirements_json = Some(required);
+        tx.commit().await?;
+        Ok(task)
+    }
+}
+
+fn requires_native_cancellation(task: &NodeTask) -> bool {
+    task.native_requirements_json
+        .as_ref()
+        .and_then(|r| r.get("features"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|features| features.iter().any(|v| v.as_str() == Some("cancellation")))
 }
 
 #[cfg(test)]

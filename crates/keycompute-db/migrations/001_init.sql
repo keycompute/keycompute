@@ -1603,3 +1603,72 @@ COMMENT ON COLUMN node_tip_withdrawals.encrypted_alipay_account IS '加密的支
 COMMENT ON COLUMN node_tip_withdrawals.encrypted_real_name IS '加密的真实姓名（仅 alipay 方式，AES-256-GCM 加密，格式：base64(nonce || ciphertext)）';
 COMMENT ON COLUMN node_tip_withdrawals.status IS '状态：pending / approved / completed / rejected';
 COMMENT ON COLUMN node_tip_withdrawals.admin_remark IS '管理员备注（审批/操作备注，非审计日志，生产环境建议独立审计表）';
+
+-- Platform-owned Responses state; it never shares the upstream resource namespace.
+CREATE TABLE IF NOT EXISTS scoped_conversations (
+    id TEXT PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    access_mode TEXT NOT NULL CHECK (access_mode IN ('passthrough','node_dispatch')),
+    account_id UUID,
+    model TEXT,
+    metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata_json)='object'),
+    items_json JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(items_json)='array'),
+    active_response_id TEXT,
+    revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    deleted_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_scoped_conversations_scope
+    ON scoped_conversations(tenant_id,user_id,access_mode,created_at);
+CREATE INDEX IF NOT EXISTS idx_scoped_conversations_expiry ON scoped_conversations(expires_at);
+CREATE TABLE IF NOT EXISTS scoped_responses (
+    id TEXT PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    access_mode TEXT NOT NULL CHECK (access_mode IN ('passthrough','node_dispatch')),
+    account_id UUID,
+    model TEXT NOT NULL,
+    request_id UUID NOT NULL UNIQUE,
+    owner_id UUID NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued','in_progress','completed','incomplete','failed','cancelled')),
+    background BOOLEAN NOT NULL DEFAULT FALSE,
+    store_response BOOLEAN NOT NULL DEFAULT TRUE,
+    stream BOOLEAN NOT NULL DEFAULT FALSE,
+    request_json JSONB NOT NULL CHECK (jsonb_typeof(request_json)='object'),
+    input_json JSONB NOT NULL CHECK (jsonb_typeof(input_json)='array'),
+    new_input_json JSONB NOT NULL CHECK (jsonb_typeof(new_input_json)='array'),
+    output_json JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(output_json)='array'),
+    response_json JSONB,
+    execution_json JSONB,
+    previous_id TEXT,
+    conversation_id TEXT,
+    idempotency_hash TEXT,
+    request_hash TEXT NOT NULL,
+    next_seq BIGINT NOT NULL DEFAULT 0 CHECK (next_seq >= 0),
+    event_bytes BIGINT NOT NULL DEFAULT 0 CHECK (event_bytes >= 0),
+    revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deadline_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    deleted_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_scoped_responses_idempotency
+    ON scoped_responses(tenant_id,user_id,access_mode,idempotency_hash)
+    WHERE idempotency_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_scoped_responses_scope
+    ON scoped_responses(tenant_id,user_id,access_mode,created_at);
+CREATE INDEX IF NOT EXISTS idx_scoped_responses_pending
+    ON scoped_responses(status,deadline_at) WHERE status IN ('queued','in_progress');
+CREATE INDEX IF NOT EXISTS idx_scoped_responses_expiry ON scoped_responses(expires_at);
+CREATE TABLE IF NOT EXISTS scoped_response_events (
+    response_id TEXT NOT NULL REFERENCES scoped_responses(id) ON DELETE CASCADE,
+    seq BIGINT NOT NULL CHECK (seq >= 0),
+    frame TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(response_id,seq)
+);

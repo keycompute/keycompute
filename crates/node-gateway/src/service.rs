@@ -1281,3 +1281,91 @@ mod native_wait_tests {
         assert_eq!(reads.load(Ordering::SeqCst), 2);
     }
 }
+
+impl NodeGatewayService {
+    /// Managed non-streaming requests are only claimable by cancellation-aware
+    /// workers. Cancelling the request never starts a replacement inference.
+    pub async fn enqueue_native_cancellable_and_wait(
+        &self,
+        user_id: Uuid,
+        model: String,
+        payload: NodeTaskPayload,
+        ctx: Arc<keycompute_types::RequestContext>,
+    ) -> Result<keycompute_types::node_native::NodeNativeHttpResult, NodeExecutionError> {
+        if payload.request_id != ctx.request_id || user_id != ctx.user_id || model != ctx.model {
+            return Err(NodeExecutionError::gateway_internal(
+                anyhow::anyhow!("native control identity mismatch"),
+                "native_control_identity_mismatch",
+            ));
+        }
+        if ctx.is_client_disconnected() {
+            return Err(managed_node_cancelled());
+        }
+        let task = self
+            .store
+            .create_cancellable_native_task(user_id, model.clone(), payload)
+            .await
+            .map_err(|e| {
+                NodeExecutionError::gateway_internal(e.into(), "node_task_create_failed")
+            })?;
+        let _ = self
+            .lifecycle
+            .set_route(task.request_id, RouteType::Node, RequestStatus::Queued)
+            .await;
+        let _ = self.redis.push_to_native_model_queue(&model, task.id).await;
+        let result = tokio::select! {
+            biased;
+            _=ctx.wait_for_client_disconnect()=>None,
+            result=wait_native_result(self.config.task_deadline(),
+                ||self.query_native_outcome(task.id,&model),
+                ||self.redis.wait_for_result(task.id,1))=>result,
+        };
+        if let Some(result) = result {
+            return result;
+        }
+        let cancelled = ctx.is_client_disconnected();
+        let reason = if cancelled {
+            "managed_response_cancelled"
+        } else {
+            "managed_response_deadline"
+        };
+        if let Err(error) = self.cancel_native_stream(task.id, reason).await {
+            tracing::warn!(task_id=%task.id,%error,"managed native cancellation could not be persisted");
+        }
+        // Completion may have committed immediately before cancellation. Its
+        // already-observed usage remains billable; the public state CAS still
+        // decides whether the user sees a cancelled or completed resource.
+        if let Ok(Ok(NativeOutcome::Complete(response))) = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.query_native_outcome(task.id, &model),
+        )
+        .await
+        {
+            return Ok(response);
+        }
+        if cancelled {
+            Err(managed_node_cancelled())
+        } else {
+            Err(NodeExecutionError::other(
+                anyhow::anyhow!("native task deadline elapsed"),
+                node_wait_timeout_failure(),
+            ))
+        }
+    }
+}
+fn managed_node_cancelled() -> NodeExecutionError {
+    NodeExecutionError::other(
+        anyhow::anyhow!("managed response cancelled"),
+        RequestExecutionFailure {
+            status: RequestStatus::Cancelled,
+            error: TraceErrorInfo {
+                origin: ErrorOrigin::Client,
+                category: TraceErrorCategory::ClientDisconnect,
+                code: "managed_response_cancelled".into(),
+                summary: None,
+                retryable: Some(false),
+            },
+            billing_status: BillingStatus::NotApplicable,
+        },
+    )
+}

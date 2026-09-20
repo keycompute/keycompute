@@ -413,4 +413,22 @@ mod tests {
     WHERE settlement IS NOT NULL;"#;
         assert!(V0001.contains(recovery), "V0001 is missing {recovery}");
     }
+    #[test]
+    fn scoped_resource_schema_has_ownership_retention_and_event_fences() {
+        let schema = include_str!("../migrations/001_init.sql");
+        for fragment in [
+            "CREATE TABLE IF NOT EXISTS scoped_responses",
+            "CREATE TABLE IF NOT EXISTS scoped_conversations",
+            "CREATE TABLE IF NOT EXISTS scoped_response_events",
+            "uk_scoped_responses_idempotency",
+            "idx_scoped_responses_pending",
+            "PRIMARY KEY(response_id,seq)",
+            "owner_id UUID NOT NULL",
+        ] {
+            assert!(
+                schema.contains(fragment),
+                "missing schema contract {fragment}"
+            );
+        }
+    }
 }

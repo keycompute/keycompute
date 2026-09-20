@@ -659,3 +659,192 @@ mod native_stream_example_tests {
         }
     }
 }
+
+/// Platform-managed Responses examples keep state on the selected /pt or /nt
+/// base URL. They never ask the local inference runtime to store resources.
+pub fn managed_response_examples(
+    base: &str,
+    key: &str,
+    model: &str,
+    workflow: &str,
+    streaming: bool,
+    env_comment: &str,
+) -> ApiExamples {
+    let base = base.trim_end_matches('/');
+    let quoted = |value: &str| serde_json::to_string(value).expect("string serialization");
+    let shell = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+    let base_json = quoted(base);
+    let key_json = quoted(key);
+    let model_json = quoted(model);
+    let background = workflow == "background";
+    let conversation = workflow == "conversation";
+    let mut body =
+        serde_json::json!({"model":model,"input":"Hello","store":true,"stream":streaming});
+    if background {
+        body["background"] = true.into();
+    }
+    let body_json = serde_json::to_string_pretty(&body).expect("example serialization");
+    let setup_python = if conversation {
+        "conversation = client.conversations.create()\n"
+    } else {
+        ""
+    };
+    let conversation_python = if conversation {
+        "    conversation=conversation.id,\n"
+    } else {
+        ""
+    };
+    let background_python = if background {
+        "    background=True,\n"
+    } else {
+        ""
+    };
+    let create = format!(
+        "client.responses.create(\n    model={model_json}, input=\"Hello\", store=True,\n{conversation_python}{background_python}    stream={},\n)",
+        if streaming { "True" } else { "False" }
+    );
+    let mut python = format!(
+        "import time\nfrom openai import OpenAI\n\nclient = OpenAI(base_url={base_json}, api_key={key_json}, max_retries=0)\n{setup_python}"
+    );
+    if streaming {
+        python.push_str(&format!("stream = {create}\nresponse_id = None\nlast_sequence = None\nfor event in stream:\n    print(event.model_dump_json())\n    last_sequence = getattr(event, \"sequence_number\", last_sequence)\n    if hasattr(event, \"response\"):\n        response_id = event.response.id\nassert response_id is not None\nresponse = client.responses.retrieve(response_id)\n"));
+    } else {
+        python.push_str(&format!("response = {create}\n"));
+    }
+    if background {
+        python.push_str("deadline = time.monotonic() + 120\nwhile response.status in (\"queued\", \"in_progress\"):\n    if time.monotonic() >= deadline:\n        client.responses.cancel(response.id)\n        raise TimeoutError(\"Cancelled after the polling budget\")\n    time.sleep(1)\n    response = client.responses.retrieve(response.id)\nprint(response.model_dump_json())\n");
+        if streaming {
+            python.push_str("# After a disconnect, resume without new inference:\n# client.responses.retrieve(response_id, stream=True, starting_after=last_sequence)\n");
+        }
+    } else {
+        python.push_str("print(response.model_dump_json())\n");
+        let ref_param = if conversation {
+            "conversation=conversation.id"
+        } else {
+            "previous_response_id=response.id"
+        };
+        python.push_str(&format!("follow_up = client.responses.create(model={model_json}, input=\"Continue\", instructions=\"Answer briefly\", {ref_param}, store=True)\nprint(follow_up.model_dump_json())\n"));
+    }
+    let mut node_body = body.clone();
+    if conversation {
+        node_body["conversation"] = "CONVERSATION_ID".into();
+    }
+    let mut js_data = serde_json::to_string_pretty(&node_body).unwrap();
+    if conversation {
+        js_data = js_data.replace("\"CONVERSATION_ID\"", "conversation.id");
+    }
+    let setup_js = if conversation {
+        "const conversation = await client.conversations.create();\n"
+    } else {
+        ""
+    };
+    let mut node = format!(
+        "import OpenAI from \"openai\";\nconst client = new OpenAI({{baseURL:{base_json}, apiKey:{key_json}, maxRetries:0}});\n{setup_js}"
+    );
+    if streaming {
+        node.push_str(&format!("const stream = await client.responses.create({js_data});\nlet responseId;\nlet lastSequence;\nfor await (const event of stream) {{\n  console.log(JSON.stringify(event));\n  lastSequence = event.sequence_number ?? lastSequence;\n  if (event.response) responseId = event.response.id;\n}}\nif (!responseId) throw new Error(\"No response ID\");\nlet response = await client.responses.retrieve(responseId);\n"));
+    } else {
+        node.push_str(&format!(
+            "let response = await client.responses.create({js_data});\n"
+        ));
+    }
+    if background {
+        node.push_str("const deadline = Date.now() + 120000;\nwhile ([\"queued\", \"in_progress\"].includes(response.status)) {\n  if (Date.now() >= deadline) {\n    await client.responses.cancel(response.id);\n    throw new Error(\"Cancelled after polling budget\");\n  }\n  await new Promise(resolve => setTimeout(resolve, 1000));\n  response = await client.responses.retrieve(response.id);\n}\nconsole.log(JSON.stringify(response));\n");
+    } else {
+        let reference = if conversation {
+            "conversation: conversation.id"
+        } else {
+            "previous_response_id: response.id"
+        };
+        node.push_str(&format!("console.log(JSON.stringify(response));\nconst next = await client.responses.create({{model:{model_json}, input:\"Continue\", instructions:\"Answer briefly\", {reference}, store:true}});\nconsole.log(JSON.stringify(next));\n"));
+    }
+    let mut curl = format!(
+        "BASE_URL={}\nPLATFORM_KEY={}\nMODEL={}\n",
+        shell(base),
+        shell(key),
+        shell(model)
+    );
+    if conversation {
+        curl.push_str("# jq is used to insert returned identifiers safely.\nCONVERSATION_ID=$(curl --fail-with-body -sS \"$BASE_URL/conversations\" -H \"Authorization: Bearer $PLATFORM_KEY\" -H 'Content-Type: application/json' -d '{}' | jq -er .id)\n");
+        curl.push_str(&format!("BODY=$(printf '%s' {} | jq --arg id \"$CONVERSATION_ID\" '. + {{conversation:$id}}')\n",shell(&body_json)));
+    } else {
+        curl.push_str(&format!("BODY={}\n", shell(&body_json)));
+    }
+    if streaming {
+        curl.push_str("curl --fail-with-body -N \"$BASE_URL/responses\" -H \"Authorization: Bearer $PLATFORM_KEY\" -H 'Content-Type: application/json' -d \"$BODY\"\n# Keep response.id and sequence_number from the events above.\n");
+        if background {
+            curl.push_str("# Resume after a disconnect with the last received sequence number:\n# curl --fail-with-body -N \"$BASE_URL/responses/$RESPONSE_ID?stream=true&starting_after=$LAST_SEQUENCE\" -H \"Authorization: Bearer $PLATFORM_KEY\"\n");
+        }
+    } else {
+        curl.push_str("RESPONSE=$(curl --fail-with-body -sS \"$BASE_URL/responses\" -H \"Authorization: Bearer $PLATFORM_KEY\" -H 'Content-Type: application/json' -d \"$BODY\")\nprintf '%s\\n' \"$RESPONSE\"\nRESPONSE_ID=$(printf '%s' \"$RESPONSE\" | jq -er .id)\ncurl --fail-with-body \"$BASE_URL/responses/$RESPONSE_ID\" -H \"Authorization: Bearer $PLATFORM_KEY\"\n");
+        if background {
+            curl.push_str("# Poll until completed/incomplete/failed/cancelled. To cancel:\n# curl --fail-with-body -X POST \"$BASE_URL/responses/$RESPONSE_ID/cancel\" -H \"Authorization: Bearer $PLATFORM_KEY\"\n");
+        } else {
+            let reference = if conversation {
+                "--arg id \"$CONVERSATION_ID\" '{model:$model,input:\"Continue\",conversation:$id,store:true}'"
+            } else {
+                "--arg id \"$RESPONSE_ID\" '{model:$model,input:\"Continue\",previous_response_id:$id,store:true}'"
+            };
+            curl.push_str(&format!("NEXT=$(jq -n --arg model \"$MODEL\" {reference})\ncurl --fail-with-body \"$BASE_URL/responses\" -H \"Authorization: Bearer $PLATFORM_KEY\" -H 'Content-Type: application/json' -d \"$NEXT\"\n"));
+        }
+    }
+    ApiExamples {
+        env: format!(
+            "# {env_comment}\nAPI_URL={base_json}\nAPI_KEY={key_json}\nAPI_MODEL={model_json}"
+        ),
+        python,
+        node,
+        curl,
+        websocket: String::new(),
+    }
+}
+
+#[cfg(test)]
+mod managed_response_example_tests {
+    use super::*;
+    #[test]
+    fn examples_keep_resources_in_the_same_mode_and_never_repeat_inference_to_poll() {
+        for base in [
+            "https://example.test/prefix/pt/v1",
+            "https://example.test/prefix/nt/v1",
+        ] {
+            for workflow in ["stored", "conversation", "background"] {
+                for stream in [false, true] {
+                    let e = managed_response_examples(
+                        base,
+                        "key-placeholder",
+                        "org/model:tag",
+                        workflow,
+                        stream,
+                        "example",
+                    );
+                    assert!(
+                        e.python.contains(base) && e.node.contains(base) && e.curl.contains(base)
+                    );
+                    assert!(e.python.contains("store=True") && e.node.contains("\"store\": true"));
+                    assert!(e.python.contains("max_retries=0") && e.node.contains("maxRetries:0"));
+                    assert!(e.python.contains("org/model:tag"));
+                    if workflow == "background" {
+                        assert!(
+                            e.python.contains("time.monotonic()")
+                                && e.python.contains("responses.cancel")
+                        );
+                    }
+                    if workflow == "conversation" {
+                        assert!(
+                            e.python.contains("conversations.create()")
+                                && !e.python.contains("previous_response_id=")
+                        );
+                    }
+                    if workflow == "stored" {
+                        assert!(e.python.contains("previous_response_id=response.id"));
+                    }
+                    if stream {
+                        assert!(e.python.contains("model_dump_json") && e.curl.contains(" -N "));
+                    }
+                    assert!(e.websocket.is_empty());
+                }
+            }
+        }
+    }
+}

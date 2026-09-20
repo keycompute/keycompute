@@ -1079,6 +1079,7 @@ async fn chat_completions_inner(
                     balance: balance_reservation,
                     tpm: tpm_reservation,
                     guard: client_response_guard,
+                    managed: None,
                 })
                 .await;
             }
@@ -2604,6 +2605,9 @@ pub struct ListModelsQuery {
     /// The default remains the non-streaming model list.
     #[serde(default)]
     pub stream: bool,
+    /// Managed non-stream Responses require cancellation-capable workers.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 /// 按入口协议收集模型清单：仅保留指定协议账号声明的模型。
@@ -2782,6 +2786,11 @@ async fn discover_models(
         query.protocol.as_deref(),
         query.capability.as_deref(),
     )?;
+    if query.managed && capability != "responses" {
+        return Err(ApiError::BadRequest(
+            "managed applies only to Responses model discovery".into(),
+        ));
+    }
     if mode == ModelAccessMode::Passthrough {
         return Ok(
             crate::passthrough_binding::list_routable_passthrough_bindings_for(
@@ -2810,11 +2819,12 @@ async fn discover_models(
     let entries: std::collections::BTreeMap<String, String> = if mode
         == ModelAccessMode::NodeDispatch
     {
-        super::admin_model_catalog::ready_node_models_for(
+        super::admin_model_catalog::ready_node_models_with_requirements(
             state,
             auth.tenant_id,
             &capability,
             query.stream,
+            query.managed && !query.stream,
         )
         .await?
         .into_iter()
@@ -2862,7 +2872,7 @@ pub async fn unsupported_node_endpoint() -> axum::response::Response {
     (
         axum::http::StatusCode::NOT_FOUND,
         Json(serde_json::json!({"error":{
-        "message":"Unsupported NodeDispatch API. Use /nt/v1/chat/completions or /nt/v1/models.",
+        "message":"Unsupported NodeDispatch API. Use the documented Chat, Messages, Responses, Conversations or model-discovery endpoints.",
         "type":"invalid_request_error","code":"unsupported_node_endpoint"}})),
     )
         .into_response()

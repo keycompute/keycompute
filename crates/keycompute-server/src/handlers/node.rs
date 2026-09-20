@@ -316,3 +316,44 @@ fn get_node_gateway(state: &AppState) -> Result<Arc<NodeGatewayService>> {
         .clone()
         .ok_or_else(|| ApiError::Internal("Node gateway not configured".to_string()))
 }
+
+/// Metadata-only status for an already issued native task lease.
+pub async fn node_lease_status(
+    State(state): State<AppState>,
+    auth: NodeSessionCompletionAuth,
+    Path(task_id): Path<Uuid>,
+    Json(body): Json<keycompute_types::node::NodeTaskLeaseStatusRequest>,
+) -> Result<Json<keycompute_types::node::NodeTaskLeaseStatusResponse>> {
+    if body.task_id != task_id {
+        return Err(ApiError::BadRequest(
+            "Task identity does not match the path".into(),
+        ));
+    }
+    if body.node_id != auth.node_id || body.session_id != auth.session_id {
+        return Err(ApiError::NodeIdentityMismatch {
+            expected_node_id: auth.node_id,
+            expected_session_id: auth.session_id,
+            actual_node_id: body.node_id,
+            actual_session_id: body.session_id,
+        });
+    }
+    if body.protocol_version != "node.v1" {
+        return Err(ApiError::BadRequest(
+            "Unsupported node control protocol".into(),
+        ));
+    }
+    let gateway = get_node_gateway(&state)?;
+    gateway
+        .store
+        .native_lease_status(&body)
+        .await
+        .map(Json)
+        .map_err(|error| match error {
+            keycompute_db::DbError::NotFound { .. } => {
+                ApiError::NotFound("Native task lease was not found".into())
+            }
+            _ => {
+                ApiError::ServiceUnavailable("Native task status is temporarily unavailable".into())
+            }
+        })
+}

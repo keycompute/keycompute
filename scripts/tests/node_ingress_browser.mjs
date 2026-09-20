@@ -78,7 +78,7 @@ try {
   await guide.locator('input[type="checkbox"]').check();
   await page.waitForFunction(()=>document.querySelector('.kc-api-example')?.textContent.includes('stream/gemma:tag'));
   for(const surface of ['chat_completions','messages','responses']) {
-    await guide.locator('select').first().selectOption(surface);
+    await guide.locator('select').filter({has:page.locator('option[value="chat_completions"]')}).selectOption(surface);
     const endpoint=surface==='chat_completions'?'chat/completions':surface;
     await page.waitForFunction(endpoint=>document.querySelector('.kc-api-example')?.textContent.includes('/nt/v1/'+endpoint),endpoint);
     const code=await guide.locator('.kc-api-example').innerText();
@@ -94,6 +94,22 @@ try {
   await guide.locator('input[type="checkbox"]').uncheck();
   await page.waitForFunction(()=>document.querySelector('.kc-api-example')?.textContent.includes('gemma3:270m'));
   check('nonstream_and_stream_discovery_do_not_share_stale_results');
+  const lifecycle = guide.locator('select').filter({has:page.locator('option[value="stateless"]')});
+  assert.equal(await lifecycle.locator('option').count(),4);
+  for(const workflow of ['stored','conversation','background']) {
+    await lifecycle.selectOption(workflow);
+    await page.waitForFunction(()=>document.querySelector('.kc-api-example')?.textContent.includes('"store": true'));
+    const code=await guide.locator('.kc-api-example').innerText();
+    assert.ok(code.includes('/nt/v1'));
+    if(workflow==='conversation')assert.ok(code.includes('/conversations')&&!code.includes('previous_response_id'));
+    if(workflow==='stored')assert.ok(code.includes('previous_response_id'));
+    if(workflow==='background')assert.ok(code.includes('"background": true')&&code.includes('/cancel'));
+  }
+  assert.ok(requests.some(p=>p.startsWith('/nt/v1/models?')&&p.includes('managed=true')&&!p.includes('stream=true')));
+  await guide.locator('input[type="checkbox"]').check();
+  await page.waitForFunction(()=>document.querySelector('.kc-api-example')?.textContent.includes('starting_after'));
+  assert.ok((await guide.locator('.kc-api-example').innerText()).includes('/nt/v1'));
+  check('managed_response_modes_keep_state_in_the_selected_family_and_filter_cancellation_capability');
   await page.goto(base + '/admin/upstreams/nodes');
   await page.locator('.node-gateway-dispatch-guide').waitFor();
   assert.equal(await page.locator('.upstream-tab').count(), 3);
