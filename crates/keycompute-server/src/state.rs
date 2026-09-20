@@ -33,6 +33,7 @@ const RESPONSES_WEBSOCKET_PER_TENANT_LIMIT: usize = 2;
 #[derive(Debug, Clone, Serialize, Deserialize, sea_orm::FromQueryResult, PartialEq, Eq)]
 pub(crate) struct ResponsesAffinity {
     pub tenant_id: uuid::Uuid,
+    pub user_id: uuid::Uuid,
     pub provider: String,
     #[serde(default)]
     pub model: Option<String>,

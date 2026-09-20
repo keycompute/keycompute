@@ -1544,7 +1544,7 @@ fn rate_limit_exceeded_response() -> Response {
 /// 权限检查中间件
 ///
 /// 检查用户是否具有指定的权限
-/// 管理员角色自动拥有所有权限
+/// Only the permissions of the authenticated credential are considered.
 pub async fn require_permission(
     State(_state): State<AppState>,
     auth: AuthExtractor,
@@ -1707,7 +1707,7 @@ pub async fn admin_auth_middleware(
 
     // 6. 继续处理请求
     info!("Admin authentication successful");
-    next.run(req).await
+    crate::console::run_with_mutation_fence(&state, req, next).await
 }
 
 /// 从请求扩展中提取 AuthExtractor

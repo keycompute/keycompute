@@ -284,9 +284,9 @@ fn test_auth_user_info() {
     // 5. 检查是否是管理员
     chain.add_step(
         "keycompute-auth",
-        "UserInfo::is_admin",
-        format!("Is admin: {}", user.is_admin()),
-        !user.is_admin(),
+        "UserInfo::has_admin_role",
+        format!("Is admin: {}", user.has_admin_role()),
+        !user.has_admin_role(),
     );
 
     chain.print_report();

@@ -212,7 +212,7 @@ fn test_user_info_functionality() {
         "keycompute-auth",
         "UserInfo::new",
         format!("User created: {}", user.email),
-        user.email == "user@test.com" && !user.is_admin(),
+        user.email == "user@test.com" && !user.has_admin_role(),
     );
 
     // 2. 创建管理员用户
@@ -225,9 +225,9 @@ fn test_user_info_functionality() {
     );
     chain.add_step(
         "keycompute-auth",
-        "UserInfo::is_admin",
-        format!("Admin check: {}", admin.is_admin()),
-        admin.is_admin(),
+        "UserInfo::has_admin_role",
+        format!("Admin check: {}", admin.has_admin_role()),
+        admin.has_admin_role(),
     );
 
     // 3. 创建系统管理员
@@ -241,8 +241,8 @@ fn test_user_info_functionality() {
     chain.add_step(
         "keycompute-auth",
         "UserInfo::system_admin",
-        format!("System admin check: {}", system_admin.is_admin()),
-        system_admin.is_admin(),
+        format!("System admin check: {}", system_admin.has_system_role()),
+        system_admin.has_system_role(),
     );
 
     chain.print_report();

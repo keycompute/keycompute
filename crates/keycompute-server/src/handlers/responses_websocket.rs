@@ -1111,16 +1111,20 @@ async fn process_response_create(
                 )
             }
         } else if let Some(previous_response_id) = previous_response_id.as_deref() {
-            if let Some(context_bytes) =
-                stored_warmup_context_size(&state, auth.tenant_id, previous_response_id)
-                    .await
-                    .map_err(|error| api_error(error, lane.clone()))?
+            if let Some(context_bytes) = stored_warmup_context_size(
+                &state,
+                auth.tenant_id,
+                auth.user_id,
+                previous_response_id,
+            )
+            .await
+            .map_err(|error| api_error(error, lane.clone()))?
             {
                 let context_budget = context_bytes.saturating_mul(continuation_context_copies);
                 try_extend_request_budget(&mut request_budget, context_budget)
                     .map_err(|error| request_budget_protocol_error(error, lane.clone()))?;
             }
-            match stored_warmup_context(&state, auth.tenant_id, previous_response_id)
+            match stored_warmup_context(&state, auth.tenant_id, auth.user_id, previous_response_id)
                 .await
                 .map_err(|error| api_error(error, lane.clone()))?
             {

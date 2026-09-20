@@ -685,6 +685,65 @@ async fn resource_scope_is_user_tenant_family_and_current_passthrough_grant() {
         http(f.app.clone(), Method::GET, &path, Some(&token), None).await,
         StatusCode::NOT_FOUND,
     );
+    // Raising the peer's platform role cannot grant access to private content.
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET role='admin',token_version=token_version+1 WHERE id=$1",
+        [user.id.into()],
+    ))
+    .await
+    .unwrap();
+    let admin = User::find_by_id(&f.db, user.id).await.unwrap().unwrap();
+    let token = f
+        .state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_token_with_version(admin.id, admin.tenant_id, &admin.role, admin.token_version)
+        .unwrap();
+    for (method, target) in [
+        (Method::GET, path.clone()),
+        (Method::DELETE, path.clone()),
+        (Method::POST, format!("{path}/cancel")),
+        (Method::GET, format!("{path}/input_items")),
+    ] {
+        expect(
+            http(f.app.clone(), method, &target, Some(&token), None).await,
+            StatusCode::NOT_FOUND,
+        );
+    }
+    let mut continuation = f.body(Op::Responses);
+    continuation["previous_response_id"] = json!(id);
+    expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            "/pt/v1/responses",
+            Some(&token),
+            Some(continuation),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+    );
+    // Rotating only the owning user's inference key keeps the stable owner.
+    let rotated = ProduceAiKeyValidator::generate_key();
+    ProduceAiKey::create(
+        &f.db,
+        &CreateProduceAiKeyRequest {
+            tenant_id: f.user.tenant_id,
+            user_id: f.user.id,
+            name: "rotated owner".into(),
+            produce_ai_key_hash: ProduceAiKeyValidator::hash_key(&rotated),
+            produce_ai_key_preview: "sk-test****".into(),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    expect(
+        http(f.app.clone(), Method::GET, &path, Some(&rotated), None).await,
+        StatusCode::OK,
+    );
     expect(
         f.request(Method::GET, &format!("/nt/v1/responses/{id}"), None)
             .await,

@@ -274,6 +274,17 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
     };
 
     if let Some(auth) = auth {
+        // Authentication does not imply console authorization. Inference keys
+        // retain UseApi only, regardless of their owner's role. Reject before
+        // quotas, display cache reads or mutation fences can have side effects.
+        if !auth.has_permission(&keycompute_auth::Permission::AccessConsole) {
+            let mut response =
+                ApiError::Forbidden("Console session required".into()).into_response();
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            return response;
+        }
         let user_config =
             RateLimitConfig::new(config_user(&state.console_admission.config), u32::MAX);
         let tenant_config =
@@ -368,13 +379,8 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
         None
     };
     req.extensions_mut().insert(ConsoleAdmissionChecked);
-    // The final drop fences success, uncertain transport results and cancellation.
-    // An unauthenticated request must not be able to invalidate every user's
-    // display cache. Only a successfully identified, quota-checked command
-    // can create the conservative mutation fence.
-    let _mutation = (matches!(class, ConsoleClass::Write)
-        && req.extensions().get::<AuthExtractor>().is_some())
-    .then(|| state.display_cache.mutation_guard());
+    // Mutation fencing runs after the route's authorization, not here: a
+    // console user denied by an admin route must not flush shared snapshots.
     let mut response = next.run(req).await;
     // These are private authenticated resources, never shared HTTP cache entries.
     response.headers_mut().insert(
@@ -382,6 +388,33 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
         HeaderValue::from_static("private, no-store"),
     );
     response
+}
+
+/// Fence self-service commands only after checking console-session authority.
+/// Platform commands use the same fence from admin_auth_middleware after its
+/// stronger authorization check. The outer console layer still bounds ingress
+/// and counts abuse attempts, including denied authenticated requests.
+pub(crate) async fn mutation_middleware(
+    _auth: crate::extractors::ConsoleAuth,
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    run_with_mutation_fence(&state, req, next).await
+}
+
+pub(crate) async fn run_with_mutation_fence(
+    state: &AppState,
+    req: Request,
+    next: Next,
+) -> Response {
+    // The guard fences both ends, including cancellation and uncertain results.
+    let _mutation = matches!(
+        keycompute_types::console::classify(req.method().as_str(), req.uri().path()),
+        Some(ConsoleClass::Write)
+    )
+    .then(|| state.display_cache.mutation_guard());
+    next.run(req).await
 }
 
 fn config_user(config: &ConsoleConfig) -> u32 {

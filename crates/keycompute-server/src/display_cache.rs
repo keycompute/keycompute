@@ -120,7 +120,7 @@ impl DisplayCache {
             h.update((p.len() as u64).to_be_bytes());
             h.update(p.as_bytes());
         }
-        format!("console-display:v1:{:x}", h.finalize())
+        format!("console-display:v2:{:x}", h.finalize())
     }
     pub async fn read<F>(
         &self,

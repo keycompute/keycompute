@@ -353,8 +353,8 @@ pub async fn mutate_conversation(
                     let public =
                         final_response(&active_row, public_response(&active_row), "cancelled");
                     active_row=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-                        "UPDATE scoped_responses SET status='cancelled',response_json=$2,updated_at=NOW(),revision=revision+1 WHERE id=$1 RETURNING *",
-                        [active.into(),public.into()])).one(&tx)).await?.ok_or_else(missing)?;
+                        "UPDATE scoped_responses SET status='cancelled',response_json=$5,updated_at=NOW(),revision=revision+1 WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 RETURNING *",
+                        [active.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into(),public.into()])).one(&tx)).await?.ok_or_else(missing)?;
                     // A replay sees cancellation and its protocol event in the
                     // same committed transaction, including conversation deletion.
                     let _ = terminal_event(&tx, &mut active_row, None).await?;
@@ -365,8 +365,8 @@ pub async fn mutate_conversation(
         }
     }
     let updated=timed(ConversationRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE scoped_conversations SET metadata_json=$2,items_json=$3,deleted_at=CASE WHEN $4 THEN NOW() ELSE deleted_at END,active_response_id=CASE WHEN $4 THEN NULL ELSE active_response_id END,revision=revision+1,updated_at=NOW(),expires_at=NOW()+($5::BIGINT*INTERVAL '1 second') WHERE id=$1 RETURNING *",
-        [id.into(),row.metadata_json.into(),row.items_json.into(),deleting.into(),STORED_TTL.into()])).one(&tx)).await?.ok_or_else(missing)?;
+        "UPDATE scoped_conversations SET metadata_json=$5,items_json=$6,deleted_at=CASE WHEN $7 THEN NOW() ELSE deleted_at END,active_response_id=CASE WHEN $7 THEN NULL ELSE active_response_id END,revision=revision+1,updated_at=NOW(),expires_at=NOW()+($8::BIGINT*INTERVAL '1 second') WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 RETURNING *",
+        [id.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into(),row.metadata_json.into(),row.items_json.into(),deleting.into(),STORED_TTL.into()])).one(&tx)).await?.ok_or_else(missing)?;
     timed(tx.commit()).await?;
     Ok(updated)
 }
@@ -545,14 +545,17 @@ pub async fn create_response(
     .await?
     .ok_or_else(missing)?;
     if let Some(conv) = spec.conversation {
-        timed(tx.execute(Statement::from_sql_and_values(
+        let updated = timed(tx.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE scoped_conversations SET active_response_id=$2,
              revision=revision+1,updated_at=NOW()
-             WHERE id=$1 AND active_response_id IS NULL",
-            [conv.into(), id.into()],
+             WHERE id=$1 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5 AND active_response_id IS NULL",
+            [conv.into(), id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
         )))
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(conflict("Conversation execution ownership changed"));
+        }
     }
     timed(tx.commit()).await?;
     Ok((row, true))
@@ -588,29 +591,43 @@ pub async fn activate(
         {
             return Err(conflict("Conversation execution target changed"));
         }
-        timed(tx.execute(Statement::from_sql_and_values(
+        let updated = timed(tx.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE scoped_conversations SET account_id=$2 WHERE id=$1",
-            [id.into(), account.into()],
+            "UPDATE scoped_conversations SET account_id=$2 WHERE id=$1 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5",
+            [id.into(), account.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
         )))
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(conflict("Conversation execution ownership changed"));
+        }
     }
-    timed(tx.execute(Statement::from_sql_and_values(
+    let updated = timed(tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE scoped_responses SET status='in_progress',account_id=$2,
-         execution_json=$3,heartbeat_at=NOW(),updated_at=NOW(),revision=revision+1 WHERE id=$1",
-        [record.id.as_str().into(), account.into(), execution.into()],
+        "UPDATE scoped_responses SET status='in_progress',account_id=$6,
+         execution_json=$7,heartbeat_at=NOW(),updated_at=NOW(),revision=revision+1 WHERE id=$1 AND owner_id=$2 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5",
+        [record.id.as_str().into(), record.owner_id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into(), account.into(), execution.into()],
     )))
     .await?;
+    if updated.rows_affected() != 1 {
+        return Err(conflict("Response execution ownership changed"));
+    }
     timed(tx.commit()).await?;
     Ok(())
 }
 pub async fn running(pool: &DbRouter, record: &ResponseRecord) -> Result<bool> {
+    let scope = record.scope();
     let result = timed(pool.write_conn().execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE scoped_responses SET heartbeat_at=NOW() WHERE id=$1 AND owner_id=$2
+         AND tenant_id=$3 AND user_id=$4 AND access_mode=$5
          AND status IN ('queued','in_progress') AND deleted_at IS NULL AND deadline_at>NOW()",
-        [record.id.as_str().into(), record.owner_id.into()],
+        [
+            record.id.as_str().into(),
+            record.owner_id.into(),
+            scope.tenant.into(),
+            scope.user.into(),
+            scope.mode.as_str().into(),
+        ],
     )))
     .await?;
     Ok(result.rows_affected() == 1)
@@ -629,15 +646,19 @@ pub async fn record_execution(
             "Managed response exceeds the 8 MiB limit".into(),
         ));
     }
+    let scope = record.scope();
     let result = timed(pool.write_conn().execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE scoped_responses SET execution_json=COALESCE(execution_json,'{}'::jsonb)||(CASE WHEN deleted_at IS NULL THEN $3 ELSE $3-'native_result' END),
-         updated_at=NOW() WHERE id=$1 AND owner_id=$2
+         updated_at=NOW() WHERE id=$1 AND owner_id=$2 AND tenant_id=$4 AND user_id=$5 AND access_mode=$6
          AND status IN ('queued','in_progress','cancelled')",
         [
             record.id.as_str().into(),
             record.owner_id.into(),
             result.into(),
+            scope.tenant.into(),
+            scope.user.into(),
+            scope.mode.as_str().into(),
         ],
     )))
     .await?;
@@ -648,11 +669,12 @@ pub async fn release_conversation(
     record: &ResponseRecord,
 ) -> Result<()> {
     if let Some(id) = &record.conversation_id {
+        let scope = record.scope();
         timed(db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE scoped_conversations SET active_response_id=NULL,updated_at=NOW(),
-             revision=revision+1 WHERE id=$1 AND active_response_id=$2",
-            [id.into(), record.id.as_str().into()],
+             revision=revision+1 WHERE id=$1 AND active_response_id=$2 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5",
+            [id.into(), record.id.as_str().into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
         )))
         .await?;
     }
@@ -742,8 +764,8 @@ pub async fn finish_and_event(
     let mut current = timed(
         ResponseRecord::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM scoped_responses WHERE id=$1 AND owner_id=$2 FOR UPDATE",
-            [record.id.as_str().into(), record.owner_id.into()],
+            "SELECT * FROM scoped_responses WHERE id=$1 AND owner_id=$2 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5 FOR UPDATE",
+            [record.id.as_str().into(), record.owner_id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
         ))
         .one(&tx),
     )
@@ -776,8 +798,8 @@ pub async fn finish_and_event(
         let conv = timed(
             ConversationRecord::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT * FROM scoped_conversations WHERE id=$1 FOR UPDATE",
-                [id.into()],
+                "SELECT * FROM scoped_conversations WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 FOR UPDATE",
+                [id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
             ))
             .one(&tx),
         )
@@ -811,12 +833,15 @@ pub async fn finish_and_event(
             timed(tx.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "UPDATE scoped_conversations SET items_json=$2,active_response_id=NULL,model=$3,
-                 revision=revision+1,updated_at=NOW() WHERE id=$1 AND active_response_id=$4",
+                 revision=revision+1,updated_at=NOW() WHERE id=$1 AND active_response_id=$4 AND tenant_id=$5 AND user_id=$6 AND access_mode=$7",
                 [
                     id.into(),
                     conv.items_json.into(),
                     current.model.as_str().into(),
                     current.id.as_str().into(),
+                    scope.tenant.into(),
+                    scope.user.into(),
+                    scope.mode.as_str().into(),
                 ],
             )))
             .await?;
@@ -858,14 +883,15 @@ pub async fn finish_and_event(
          new_input_json=CASE WHEN $3 THEN new_input_json ELSE '[]'::jsonb END,
          execution_json=CASE WHEN $3 THEN execution_json ELSE NULL END,
          updated_at=NOW(),revision=revision+1,expires_at=NOW()+($6::BIGINT*INTERVAL '1 second')
-         WHERE id=$1 RETURNING *",
-        [current.id.as_str().into(),status.into(),retain.into(),output.into(),response.into(),ttl.into()])).one(&tx)).await?.ok_or_else(missing)?;
+         WHERE id=$1 AND owner_id=$7 AND tenant_id=$8 AND user_id=$9 AND access_mode=$10 RETURNING *",
+        [current.id.as_str().into(),status.into(),retain.into(),output.into(),response.into(),ttl.into(),current.owner_id.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()])).one(&tx)).await?.ok_or_else(missing)?;
     if !retain {
         current.response_json = Some(returned);
         timed(tx.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "DELETE FROM scoped_response_events WHERE response_id=$1",
-            [current.id.as_str().into()],
+            "DELETE FROM scoped_response_events e USING scoped_responses r
+             WHERE e.response_id=$1 AND r.id=e.response_id AND r.tenant_id=$2 AND r.user_id=$3 AND r.access_mode=$4",
+            [current.id.as_str().into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
         )))
         .await?;
     }
@@ -932,13 +958,14 @@ pub async fn cancel_or_delete(
          new_input_json=CASE WHEN $3 THEN '[]'::jsonb ELSE new_input_json END,
          output_json=CASE WHEN $3 THEN '[]'::jsonb ELSE output_json END,
          execution_json=CASE WHEN $3 THEN execution_json-'native_result' ELSE execution_json END,
-         updated_at=NOW(),revision=revision+1 WHERE id=$1 RETURNING *",
-        [id.into(),row.status.into(),delete.into(),row.response_json.into()])).one(&tx)).await?.ok_or_else(missing)?;
+         updated_at=NOW(),revision=revision+1 WHERE id=$1 AND tenant_id=$5 AND user_id=$6 AND access_mode=$7 RETURNING *",
+        [id.into(),row.status.into(),delete.into(),row.response_json.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()])).one(&tx)).await?.ok_or_else(missing)?;
     if delete {
         timed(tx.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "DELETE FROM scoped_response_events WHERE response_id=$1",
-            [id.into()],
+            "DELETE FROM scoped_response_events e USING scoped_responses r
+             WHERE e.response_id=$1 AND r.id=e.response_id AND r.tenant_id=$2 AND r.user_id=$3 AND r.access_mode=$4",
+            [id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
         )))
         .await?;
     }
@@ -950,11 +977,12 @@ pub async fn cancel_or_delete(
 }
 /// Internal runner metadata lookup; not a public authorization path.
 pub async fn owned(pool: &DbRouter, record: &ResponseRecord) -> Result<ResponseRecord> {
+    let scope = record.scope();
     timed(
         ResponseRecord::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM scoped_responses WHERE id=$1 AND owner_id=$2",
-            [record.id.as_str().into(), record.owner_id.into()],
+            "SELECT * FROM scoped_responses WHERE id=$1 AND owner_id=$2 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5",
+            [record.id.as_str().into(), record.owner_id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
         ))
         .one(pool.write_conn()),
     )
@@ -984,19 +1012,33 @@ pub async fn append_event(
             "Managed response event storage limit reached".into(),
         ));
     }
-    timed(tx.execute(Statement::from_sql_and_values(
+    let inserted = timed(tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO scoped_response_events(response_id,seq,frame) VALUES($1,$2,$3)",
+        "INSERT INTO scoped_response_events(response_id,seq,frame)
+         SELECT $1,$2,$3 WHERE EXISTS (
+             SELECT 1 FROM scoped_responses
+             WHERE id=$1 AND tenant_id=$4 AND user_id=$5 AND access_mode=$6 AND owner_id=$7
+         )",
         [
             record.id.as_str().into(),
             current.next_seq.into(),
             frame.clone().into(),
+            scope.tenant.into(),
+            scope.user.into(),
+            scope.mode.as_str().into(),
+            record.owner_id.into(),
         ],
     )))
     .await?;
-    timed(tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE scoped_responses SET next_seq=next_seq+1,event_bytes=event_bytes+$2,updated_at=NOW() WHERE id=$1",
-        [record.id.as_str().into(),length.into()]))).await?;
+    if inserted.rows_affected() != 1 {
+        return Err(conflict("Response event ownership changed"));
+    }
+    let updated = timed(tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE scoped_responses SET next_seq=next_seq+1,event_bytes=event_bytes+$2,updated_at=NOW() WHERE id=$1 AND owner_id=$3 AND tenant_id=$4 AND user_id=$5 AND access_mode=$6",
+        [record.id.as_str().into(),length.into(),record.owner_id.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()]))).await?;
+    if updated.rows_affected() != 1 {
+        return Err(conflict("Response event ownership changed"));
+    }
     timed(tx.commit()).await?;
     Ok(frame)
 }
@@ -1033,8 +1075,8 @@ pub async fn read_events(
         ));
     }
     let events=timed(StoredEvent::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT seq,frame FROM scoped_response_events WHERE response_id=$1 AND seq>$2 ORDER BY seq LIMIT 4",
-        [id.into(),after.into()])).all(db)).await?;
+        "SELECT e.seq,e.frame FROM scoped_response_events e JOIN scoped_responses r ON r.id=e.response_id WHERE e.response_id=$1 AND r.tenant_id=$3 AND r.user_id=$4 AND r.access_mode=$5 AND e.seq>$2 ORDER BY e.seq LIMIT 4",
+        [id.into(),after.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()])).all(db)).await?;
     Ok((record, events))
 }
 #[derive(Debug, Clone, serde::Deserialize, Default)]
@@ -1178,18 +1220,37 @@ async fn terminal_event(
             "Managed terminal event exceeds its reserved storage budget".into(),
         ));
     }
-    timed(db.execute(Statement::from_sql_and_values(
+    let scope = row.scope();
+    let inserted = timed(db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO scoped_response_events(response_id,seq,frame) VALUES($1,$2,$3)",
-        [row.id.as_str().into(), seq.into(), frame.clone().into()],
+        "INSERT INTO scoped_response_events(response_id,seq,frame)
+         SELECT $1,$2,$3 WHERE EXISTS (
+             SELECT 1 FROM scoped_responses
+             WHERE id=$1 AND owner_id=$4 AND tenant_id=$5 AND user_id=$6 AND access_mode=$7
+         )",
+        [
+            row.id.as_str().into(),
+            seq.into(),
+            frame.clone().into(),
+            row.owner_id.into(),
+            scope.tenant.into(),
+            scope.user.into(),
+            scope.mode.as_str().into(),
+        ],
     )))
     .await?;
-    timed(db.execute(Statement::from_sql_and_values(
+    if inserted.rows_affected() != 1 {
+        return Err(conflict("Response event ownership changed"));
+    }
+    let updated = timed(db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE scoped_responses SET next_seq=next_seq+1,event_bytes=event_bytes+$2 WHERE id=$1",
-        [row.id.as_str().into(), bytes.into()],
+        "UPDATE scoped_responses SET next_seq=next_seq+1,event_bytes=event_bytes+$2 WHERE id=$1 AND owner_id=$3 AND tenant_id=$4 AND user_id=$5 AND access_mode=$6",
+        [row.id.as_str().into(), bytes.into(), row.owner_id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
     )))
     .await?;
+    if updated.rows_affected() != 1 {
+        return Err(conflict("Response event ownership changed"));
+    }
     row.next_seq += 1;
     row.event_bytes += bytes;
     Ok(Some(frame))
@@ -1197,9 +1258,10 @@ async fn terminal_event(
 
 /// Accounting completion is separate from resource delivery/cancellation.
 pub async fn accounting_secured(pool: &DbRouter, record: &ResponseRecord) -> Result<()> {
+    let scope = record.scope();
     let result=timed(pool.write_conn().execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE scoped_responses SET execution_json=COALESCE(execution_json,'{}'::jsonb)||'{\"accounting_pending\":false}'::jsonb WHERE id=$1 AND owner_id=$2",
-        [record.id.as_str().into(),record.owner_id.into()]))).await?;
+        "UPDATE scoped_responses SET execution_json=COALESCE(execution_json,'{}'::jsonb)||'{\"accounting_pending\":false}'::jsonb WHERE id=$1 AND owner_id=$2 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5",
+        [record.id.as_str().into(),record.owner_id.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()]))).await?;
     if result.rows_affected() != 1 {
         return Err(conflict(
             "Execution ownership changed during reconciliation",
@@ -1225,8 +1287,8 @@ pub async fn claim_recovery(
 ) -> Result<Option<ResponseRecord>> {
     let tx = owner_transaction(pool, record.scope()).await?;
     let next=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE scoped_responses SET owner_id=$3,heartbeat_at=NOW(),revision=revision+1 WHERE id=$1 AND owner_id=$2 AND heartbeat_at<NOW()-INTERVAL '60 seconds' AND (status IN ('queued','in_progress') OR execution_json->>'accounting_pending'='true') RETURNING *",
-        [record.id.as_str().into(),record.owner_id.into(),Uuid::new_v4().into()])).one(&tx)).await?;
+        "UPDATE scoped_responses SET owner_id=$6,heartbeat_at=NOW(),revision=revision+1 WHERE id=$1 AND owner_id=$2 AND tenant_id=$3 AND user_id=$4 AND access_mode=$5 AND heartbeat_at<NOW()-INTERVAL '60 seconds' AND (status IN ('queued','in_progress') OR execution_json->>'accounting_pending'='true') RETURNING *",
+        [record.id.as_str().into(),record.owner_id.into(),record.tenant_id.into(),record.user_id.into(),record.access_mode.as_str().into(),Uuid::new_v4().into()])).one(&tx)).await?;
     timed(tx.commit()).await?;
     Ok(next)
 }

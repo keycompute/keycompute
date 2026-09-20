@@ -43,6 +43,7 @@ async fn trend_counts_all_rows_zero_fills_and_uses_half_open_utc_bounds() {
     let value = console_display::usage_trend(
         &db,
         user,
+        tenant,
         time("2026-01-01T00:00:00Z"),
         time("2026-01-04T00:00:00Z"),
         "day",
@@ -74,6 +75,7 @@ async fn trend_counts_all_rows_zero_fills_and_uses_half_open_utc_bounds() {
     let shifted = console_display::usage_trend(
         &tx,
         user,
+        tenant,
         time("2026-01-01T00:00:00Z"),
         time("2026-01-04T00:00:00Z"),
         "day",
@@ -89,12 +91,18 @@ async fn trend_counts_all_rows_zero_fills_and_uses_half_open_utc_bounds() {
 }
 #[tokio::test]
 async fn trend_empty_and_invalid_intervals_are_bounded() {
-    let (db, mut guard, _, user) = fixture().await;
+    let (db, mut guard, tenant, user) = fixture().await;
     let from = time("2026-01-01T00:00:00Z");
-    let value =
-        console_display::usage_trend(&db, user, from, from + chrono::Duration::hours(3), "hour")
-            .await
-            .unwrap();
+    let value = console_display::usage_trend(
+        &db,
+        user,
+        tenant,
+        from,
+        from + chrono::Duration::hours(3),
+        "hour",
+    )
+    .await
+    .unwrap();
     assert_eq!(value["buckets"].as_array().unwrap().len(), 3);
     assert_eq!(value["buckets"][0]["requests"], 0);
     for (to, grain) in [
@@ -104,7 +112,7 @@ async fn trend_empty_and_invalid_intervals_are_bounded() {
         (from + chrono::Duration::days(1), "minute"),
     ] {
         assert!(
-            console_display::usage_trend(&db, user, from, to, grain)
+            console_display::usage_trend(&db, user, tenant, from, to, grain)
                 .await
                 .is_err()
         );

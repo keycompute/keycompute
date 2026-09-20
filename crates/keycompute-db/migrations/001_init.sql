@@ -306,10 +306,14 @@ CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_tenant_replay
     ON responses_idempotency_claims(tenant_id, completed_at DESC, binding_id DESC)
     WHERE execution_state = 'completed';
 
--- response_affinities: OpenAI resp_*/conv_* 资源到创建账号的租户级绑定。
--- 后续资源操作及 conversation 请求必须继续命中同一上游账号。
+-- response_affinities: OpenAI resp_*/conv_* 资源到创建账号的租户+用户绑定。
+-- 后续资源操作及 conversation 请求必须继续命中同一上游账号和调用者。
 CREATE TABLE IF NOT EXISTS response_affinities (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    -- Immutable caller identity snapshot, intentionally not a cascading user FK:
+    -- accepted requests must still persist settlement after a user is removed.
+    -- NULL is for internal/unowned rows; public paths require an exact user ID.
+    user_id UUID,
     -- Also stores official conv_* IDs; the namespaces are disjoint.
     -- OpenAI resource IDs are opaque. The 2048-byte application limit keeps
     -- this primary-key component below PostgreSQL's B-tree entry limit.
@@ -377,6 +381,8 @@ CREATE TABLE IF NOT EXISTS response_affinities (
 
 CREATE INDEX IF NOT EXISTS idx_response_affinities_account
     ON response_affinities(account_id);
+CREATE INDEX IF NOT EXISTS idx_response_affinities_user
+    ON response_affinities(tenant_id,user_id,response_id);
 CREATE INDEX IF NOT EXISTS idx_response_affinities_expires
     ON response_affinities(expires_at);
 CREATE INDEX IF NOT EXISTS idx_response_affinities_local_warmups
@@ -485,6 +491,8 @@ CREATE TABLE IF NOT EXISTS usage_logs (
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_tenant ON usage_logs(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_user ON usage_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_usage_logs_user_tenant_created
+    ON usage_logs(tenant_id,user_id,created_at DESC,id DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_produce_ai_key ON usage_logs(produce_ai_key_id);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_created ON usage_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_request ON usage_logs(request_id);

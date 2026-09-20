@@ -77,8 +77,6 @@ pub(crate) const OPENAI_RESPONSES_BODY_LIMIT_BYTES: usize = 80 * 1024 * 1024;
 pub(crate) const OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES: usize = 192 * 1024 * 1024;
 const OPENAI_RESPONSES_MIN_MAX_OUTPUT_TOKENS: u32 = 16;
 const RESPONSES_SETTLEMENT_CONCURRENCY: usize = 16;
-const RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES: usize = 8;
-const RESPONSES_CONVERSATION_DISCOVERY_MAX_DURATION: Duration = Duration::from_secs(30);
 const RESPONSES_IDEMPOTENCY_REPLAY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const RESPONSES_IDEMPOTENCY_REPLAYS_PER_TENANT: u64 = 1024;
 const RESPONSES_IDEMPOTENCY_REPLAY_BYTES_PER_TENANT: u64 = 128 * 1024 * 1024;
@@ -216,9 +214,10 @@ pub(super) async fn persist_responses_warmup(
         )
         .saturating_add(128);
     let local_context_bytes = i64::try_from(local_context_bytes).unwrap_or(i64::MAX);
-    ResponseAffinity::upsert_local_with_quota(
+    ResponseAffinity::upsert_local_with_quota_for_user(
         pool,
         auth.tenant_id,
+        auth.user_id,
         response_id,
         &provider,
         upstream_owner_account_id,
@@ -241,6 +240,7 @@ pub(super) async fn persist_responses_warmup(
             response_id,
             ResponsesAffinity {
                 tenant_id: auth.tenant_id,
+                user_id: auth.user_id,
                 provider,
                 model,
                 account_id,
@@ -269,8 +269,14 @@ async fn resolve_warmup_storage_owner(
         let selected =
             select_responses_post_account(state, auth, request_id, request_body, routing, None)
                 .await?;
-        let (account, reservations) =
-            reserve_selected_responses_account(state, auth.tenant_id, request_id, selected).await?;
+        let (account, reservations) = reserve_selected_responses_account(
+            state,
+            auth.tenant_id,
+            auth.user_id,
+            request_id,
+            selected,
+        )
+        .await?;
         Ok((account.provider, Some(account.account_id), reservations))
     } else {
         Ok((
@@ -294,14 +300,18 @@ pub(super) struct StoredWarmupContext {
 pub(super) async fn stored_warmup_context(
     state: &AppState,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     response_id: &str,
 ) -> Result<Option<StoredWarmupContext>> {
     let Some(pool) = state.pool.as_deref() else {
         return Ok(None);
     };
-    let Some(affinity) = ResponseAffinity::find_active_local_state(pool, tenant_id, response_id)
-        .await
-        .map_err(|error| ApiError::Internal(format!("Failed to load Responses warmup: {error}")))?
+    let Some(affinity) =
+        ResponseAffinity::find_active_local_state_for_user(pool, tenant_id, user_id, response_id)
+            .await
+            .map_err(|error| {
+                ApiError::Internal(format!("Failed to load Responses warmup: {error}"))
+            })?
     else {
         return Ok(None);
     };
@@ -341,12 +351,13 @@ pub(super) async fn stored_warmup_context(
 pub(super) async fn stored_warmup_context_size(
     state: &AppState,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     response_id: &str,
 ) -> Result<Option<usize>> {
     let Some(pool) = state.pool.as_deref() else {
         return Ok(None);
     };
-    ResponseAffinity::find_active_local_context_size(pool, tenant_id, response_id)
+    ResponseAffinity::find_active_local_context_size_for_user(pool, tenant_id, user_id, response_id)
         .await
         .map(|size| size.map(|bytes| usize::try_from(bytes).unwrap_or(usize::MAX)))
         .map_err(|error| {
@@ -386,6 +397,7 @@ fn admit_stored_warmup_http_context(
 async fn replay_stored_warmup_body(
     state: &AppState,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     body: &mut Value,
     body_permit: &mut Option<GenerationHttpBodyPermit>,
 ) -> Result<Option<String>> {
@@ -397,13 +409,13 @@ async fn replay_stored_warmup_body(
         return Ok(None);
     };
     if let Some(context_bytes) =
-        stored_warmup_context_size(state, tenant_id, &client_previous_response_id).await?
+        stored_warmup_context_size(state, tenant_id, user_id, &client_previous_response_id).await?
     {
         let resident_bytes = estimated_json_bytes(body).saturating_add(context_bytes);
         admit_stored_warmup_http_context(state, resident_bytes, body_permit)?;
     }
     let Some(context) =
-        stored_warmup_context(state, tenant_id, &client_previous_response_id).await?
+        stored_warmup_context(state, tenant_id, user_id, &client_previous_response_id).await?
     else {
         return Ok(None);
     };
@@ -538,7 +550,7 @@ pub async fn count_response_input_tokens(
             "API-use permission is required for /v1/responses/input_tokens".to_string(),
         ));
     }
-    let forwarded_headers = forwarded_responses_headers(&headers, auth.tenant_id)?;
+    let forwarded_headers = forwarded_responses_headers(&headers, auth.tenant_id, auth.user_id)?;
     // Preserve the official mutual-exclusion check on the client request even
     // though replay may replace or remove its synthetic previous-response ID.
     validate_responses_reference_fields(&body)?;
@@ -548,7 +560,14 @@ pub async fn count_response_input_tokens(
     // The effective model, conversation, and real upstream previous-response ID
     // must drive account selection.
     let mut body_permit = body_permit.map(|Extension(permit)| permit);
-    replay_stored_warmup_body(&state, auth.tenant_id, &mut body, &mut body_permit).await?;
+    replay_stored_warmup_body(
+        &state,
+        auth.tenant_id,
+        auth.user_id,
+        &mut body,
+        &mut body_permit,
+    )
+    .await?;
     let routing = ResponsesRoutingFields::parse_input_tokens(&body)?;
     let conversation_id = conversation_resource_id(&body).map(str::to_string);
     let selected = select_responses_post_account(
@@ -562,8 +581,14 @@ pub async fn count_response_input_tokens(
             .and_then(|value| value.to_str().ok()),
     )
     .await?;
-    let (account, reservations) =
-        reserve_selected_responses_account(&state, auth.tenant_id, request_id.0, selected).await?;
+    let (account, reservations) = reserve_selected_responses_account(
+        &state,
+        auth.tenant_id,
+        auth.user_id,
+        request_id.0,
+        selected,
+    )
+    .await?;
     let client = state
         .http_proxy
         .client_for_provider_and_account(&account.provider, Some(account.account_id));
@@ -603,6 +628,7 @@ pub async fn count_response_input_tokens(
             ResponsesResourceKind::Conversation,
             ResponsesAffinityRoute {
                 tenant_id: auth.tenant_id,
+                user_id: auth.user_id,
                 provider: account.provider.clone(),
                 model: account.model.clone(),
                 account_id: account.account_id,
@@ -620,10 +646,10 @@ async fn select_responses_post_account(
     request_id: uuid::Uuid,
     body: &Value,
     routing: ResponsesRoutingFields,
-    openai_beta: Option<&str>,
+    _openai_beta: Option<&str>,
 ) -> Result<SelectedResponsesAccount> {
     if let Some(previous_response_id) = body.get("previous_response_id").and_then(Value::as_str) {
-        return resolve_response_account(state, previous_response_id, auth.tenant_id)
+        return resolve_response_account(state, previous_response_id, auth.tenant_id, auth.user_id)
             .await
             .map(|account| SelectedResponsesAccount {
                 account,
@@ -634,7 +660,7 @@ async fn select_responses_post_account(
     }
     let conversation_id = conversation_resource_id(body);
     if let Some(conversation_id) = conversation_id {
-        match resolve_response_account(state, conversation_id, auth.tenant_id).await {
+        match resolve_response_account(state, conversation_id, auth.tenant_id, auth.user_id).await {
             Ok(account) => {
                 return Ok(SelectedResponsesAccount {
                     account,
@@ -644,18 +670,12 @@ async fn select_responses_post_account(
                 });
             }
             Err(ApiError::NotFound(_)) => {
-                let account = discover_conversation_account(
-                    state,
-                    conversation_id,
-                    auth.tenant_id,
-                    openai_beta,
-                )
-                .await?;
-                let constraint = ResponsesReservationConstraint::discovered(&account);
-                return Ok(SelectedResponsesAccount {
-                    account,
-                    constraint: Some(constraint),
-                });
+                // Unknown conversations are not probed across the tenant's
+                // account pool: without a user-scoped affinity row, probing
+                // could disclose another user's upstream conversation.
+                return Err(ApiError::NotFound(format!(
+                    "Conversation not found: {conversation_id}"
+                )));
             }
             Err(error) => return Err(error),
         }
@@ -723,6 +743,7 @@ async fn select_responses_post_account(
 async fn reserve_selected_responses_account(
     state: &AppState,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     request_id: uuid::Uuid,
     selected: SelectedResponsesAccount,
 ) -> Result<(ResolvedResponsesAccount, ResponsesExecutionReservations)> {
@@ -731,6 +752,7 @@ async fn reserve_selected_responses_account(
     let reservations = ResponsesExecutionReservations::acquire(
         state,
         tenant_id,
+        user_id,
         request_id,
         &mut plan,
         selected.constraint.as_ref(),
@@ -773,7 +795,9 @@ pub async fn retrieve_response(
             "API-use permission is required for Responses resources".to_string(),
         ));
     }
-    if let Some(response) = local_response_affinity(&state, auth.tenant_id, &response_id).await? {
+    if let Some(response) =
+        local_response_affinity(&state, auth.tenant_id, auth.user_id, &response_id).await?
+    {
         if response_query_requests_stream(query.as_deref()) {
             return local_response_stream(response, query.as_deref());
         }
@@ -803,24 +827,29 @@ pub async fn delete_response(
         ));
     }
     if let Some(pool) = state.pool.as_deref()
-        && ResponseAffinity::has_pending_settlement(pool, auth.tenant_id, &response_id)
-            .await
-            .map_err(|error| {
-                ApiError::Internal(format!(
-                    "Failed to check Responses billing settlement: {error}"
-                ))
-            })?
+        && ResponseAffinity::has_pending_settlement_for_user(
+            pool,
+            auth.tenant_id,
+            auth.user_id,
+            &response_id,
+        )
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "Failed to check Responses billing settlement: {error}"
+            ))
+        })?
     {
         return Err(ApiError::Conflict(
             "This background response cannot be deleted until billing settlement completes"
                 .to_string(),
         ));
     }
-    if local_response_affinity(&state, auth.tenant_id, &response_id)
+    if local_response_affinity(&state, auth.tenant_id, auth.user_id, &response_id)
         .await?
         .is_some()
     {
-        delete_response_affinity(&state, &response_id, auth.tenant_id).await?;
+        delete_response_affinity(&state, &response_id, auth.tenant_id, auth.user_id).await?;
         return Ok(deleted_response(&response_id));
     }
     proxy_response_resource(
@@ -846,7 +875,7 @@ pub async fn cancel_response(
             "API-use permission is required for Responses resources".to_string(),
         ));
     }
-    if local_response_affinity(&state, auth.tenant_id, &response_id)
+    if local_response_affinity(&state, auth.tenant_id, auth.user_id, &response_id)
         .await?
         .is_some()
     {
@@ -879,12 +908,16 @@ pub async fn list_response_input_items(
         ));
     }
     if let Some(pool) = state.pool.as_deref()
-        && let Some(context_bytes) =
-            ResponseAffinity::find_active_local_context_size(pool, auth.tenant_id, &response_id)
-                .await
-                .map_err(|error| {
-                    ApiError::Internal(format!("Failed to inspect Responses input items: {error}"))
-                })?
+        && let Some(context_bytes) = ResponseAffinity::find_active_local_context_size_for_user(
+            pool,
+            auth.tenant_id,
+            auth.user_id,
+            &response_id,
+        )
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!("Failed to inspect Responses input items: {error}"))
+        })?
     {
         let mut context_permit = None;
         admit_stored_warmup_http_context(
@@ -892,13 +925,16 @@ pub async fn list_response_input_items(
             usize::try_from(context_bytes).unwrap_or(usize::MAX),
             &mut context_permit,
         )?;
-        if let Some(affinity) =
-            ResponseAffinity::find_active_local_state(pool, auth.tenant_id, &response_id)
-                .await
-                .map_err(|error| {
-                    ApiError::Internal(format!("Failed to load Responses input items: {error}"))
-                })?
-        {
+        if let Some(affinity) = ResponseAffinity::find_active_local_state_for_user(
+            pool,
+            auth.tenant_id,
+            auth.user_id,
+            &response_id,
+        )
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!("Failed to load Responses input items: {error}"))
+        })? {
             if let Some(account_id) = affinity.account_id {
                 authorize_non_pt_account(pool.write_conn(), auth.tenant_id, account_id).await?;
             }
@@ -1057,14 +1093,16 @@ fn paginate_local_input_items(
 async fn local_response_affinity(
     state: &AppState,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     response_id: &str,
 ) -> Result<Option<Value>> {
     let Some(pool) = state.pool.as_deref() else {
         return Ok(None);
     };
-    let row = ResponseAffinity::find_active_local_owned_response(
+    let row = ResponseAffinity::find_active_local_owned_response_for_user(
         pool.write_conn(),
         tenant_id,
+        user_id,
         response_id,
     )
     .await
@@ -1086,24 +1124,7 @@ pub(super) struct ResolvedResponsesAccount {
 
 #[derive(Clone)]
 enum ResponsesReservationConstraint {
-    Affinity {
-        resource_id: String,
-    },
-    ConnectionSnapshot {
-        account_id: uuid::Uuid,
-        endpoint: String,
-        api_key: String,
-    },
-}
-
-impl ResponsesReservationConstraint {
-    fn discovered(account: &ResolvedResponsesAccount) -> Self {
-        Self::ConnectionSnapshot {
-            account_id: account.account_id,
-            endpoint: account.endpoint.clone(),
-            api_key: account.api_key.clone(),
-        }
-    }
+    Affinity { resource_id: String },
 }
 
 struct SelectedResponsesAccount {
@@ -1115,182 +1136,6 @@ impl ResolvedResponsesAccount {
     fn into_target(self) -> ExecutionTarget {
         ExecutionTarget::new_provider(self.provider, self.account_id, self.endpoint, self.api_key)
     }
-}
-
-async fn discover_conversation_account(
-    state: &AppState,
-    conversation_id: &str,
-    tenant_id: uuid::Uuid,
-    openai_beta: Option<&str>,
-) -> Result<ResolvedResponsesAccount> {
-    let pool = state.pool.as_deref().ok_or_else(|| {
-        ApiError::ServiceUnavailable(
-            "Database is required to resolve an unknown conversation".to_string(),
-        )
-    })?;
-    // Fetch at most one row beyond the probe budget. This both bounds the
-    // database result and lets the discovery loop distinguish a confirmed
-    // miss from an eligible set that was intentionally truncated.
-    let candidate_limit = RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES.saturating_add(1);
-    let accounts = Account::find_tenant_discovery_candidates(
-        // Discovery immediately uses the returned endpoint/key for a direct
-        // upstream request. A lagging replica could otherwise resurrect a
-        // deleted/disabled account or miss a just-created owner.
-        pool.write_conn(),
-        tenant_id,
-        "openai",
-        AccountApiCapability::Responses.as_str(),
-        candidate_limit as u64,
-    )
-    .await
-    .map_err(|error| {
-        ApiError::Internal(format!(
-            "Failed to load conversation discovery accounts: {error}"
-        ))
-    })?;
-    discover_conversation_account_from_candidates(
-        accounts,
-        conversation_id,
-        RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES,
-        Duration::from_secs(state.gateway_config.request_timeout_secs)
-            .min(RESPONSES_CONVERSATION_DISCOVERY_MAX_DURATION),
-        |configured_account| async move {
-            authorize_non_pt_account(pool.write_conn(), tenant_id, configured_account.id).await?;
-            // Conversation discovery bypasses normal model routing. Register
-            // every real candidate before a successful discovery can construct
-            // a direct execution plan, so executor health callbacks are not
-            // rejected by the database-backed account allowlist.
-            state
-                .provider_health
-                .hydrate_account_health(&configured_account);
-            let protocol = ProtocolType::parse(&configured_account.provider).ok_or_else(|| {
-                ApiError::Internal(format!(
-                    "Conversation discovery account {} has an invalid protocol",
-                    configured_account.id
-                ))
-            })?;
-            let endpoint = if configured_account.endpoint.is_empty() {
-                protocol.default_endpoint().to_string()
-            } else {
-                configured_account.endpoint.clone()
-            };
-            let upstream_api_key = super::admin_account::decrypt_account_api_key(
-                &configured_account.upstream_api_key_encrypted,
-            )?;
-            let mut headers = vec![(
-                "Authorization".to_string(),
-                format!("Bearer {upstream_api_key}"),
-            )];
-            if let Some(openai_beta) = openai_beta {
-                headers.push(("openai-beta".to_string(), openai_beta.to_string()));
-            }
-            let response = state
-                .http_proxy
-                .client_for_provider_and_account(
-                    &configured_account.provider,
-                    Some(configured_account.id),
-                )
-                .request_json_passthrough(
-                    JsonRequestMethod::Get,
-                    &upstream_resource_url(&endpoint, "conversations", conversation_id, ""),
-                    headers,
-                    None,
-                    false,
-                )
-                .await
-                .map_err(crate::error::map_execution_error)?;
-            if (200..300).contains(&response.meta.status) {
-                let PassthroughBody::Full(body) = response.body else {
-                    return Err(ApiError::Provider(
-                        "Upstream conversation lookup unexpectedly returned a stream".to_string(),
-                    ));
-                };
-                let (body, mut admission) = body.into_parts();
-                admit_responses_json_parse(&body, &mut admission)?;
-                let body: Value = serde_json::from_str(&body).map_err(|error| {
-                    ApiError::Provider(format!(
-                        "Invalid upstream conversation lookup body: {error}"
-                    ))
-                })?;
-                let _admission = admission;
-                if !conversation_lookup_matches(&body, conversation_id) {
-                    return Ok(None);
-                }
-                return Ok(Some(ResolvedResponsesAccount {
-                    provider: configured_account.provider,
-                    model: None,
-                    account_id: configured_account.id,
-                    endpoint,
-                    api_key: upstream_api_key,
-                }));
-            }
-            if response.meta.status == StatusCode::NOT_FOUND.as_u16() {
-                return Ok(None);
-            }
-            Err(ApiError::Provider(format!(
-                "Upstream conversation lookup failed with HTTP {}",
-                response.meta.status
-            )))
-        },
-    )
-    .await
-}
-
-fn conversation_lookup_matches(body: &Value, expected_id: &str) -> bool {
-    body.get("object").and_then(Value::as_str) == Some("conversation")
-        && body.get("id").and_then(Value::as_str) == Some(expected_id)
-}
-
-async fn discover_conversation_account_from_candidates<I, F, Fut>(
-    candidates: I,
-    conversation_id: &str,
-    max_candidates: usize,
-    max_duration: Duration,
-    mut probe: F,
-) -> Result<ResolvedResponsesAccount>
-where
-    I: IntoIterator<Item = Account>,
-    F: FnMut(Account) -> Fut,
-    Fut: std::future::Future<Output = Result<Option<ResolvedResponsesAccount>>>,
-{
-    let discovery = async {
-        let mut candidates = candidates.into_iter();
-        let mut first_error = None;
-        for configured_account in candidates.by_ref().take(max_candidates) {
-            let account_id = configured_account.id;
-            match probe(configured_account).await {
-                Ok(Some(account)) => return Ok(account),
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        %account_id,
-                        error = %error,
-                        "conversation discovery candidate failed"
-                    );
-                    first_error.get_or_insert(error);
-                }
-            }
-        }
-        if candidates.next().is_some() {
-            return Err(ApiError::Conflict(format!(
-                "Conversation owner could not be resolved within the {max_candidates}-account discovery limit"
-            )));
-        }
-        if let Some(error) = first_error {
-            return Err(error);
-        }
-        Err(ApiError::NotFound(format!(
-            "Conversation not found: {conversation_id}"
-        )))
-    };
-
-    tokio::time::timeout(max_duration, discovery)
-        .await
-        .map_err(|_| {
-            ApiError::ServiceUnavailable(
-                "Conversation account discovery timed out; please try again".to_string(),
-            )
-        })?
 }
 
 /// Existing opaque resources and deferred work do not confer permission to
@@ -1315,6 +1160,7 @@ async fn resolve_response_account(
     state: &AppState,
     response_id: &str,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
 ) -> Result<ResolvedResponsesAccount> {
     if !valid_affinity_resource_id(response_id) {
         return Err(ApiError::NotFound(format!(
@@ -1327,7 +1173,7 @@ async fn resolve_response_account(
         // conversation discovery return its more specific database-required
         // error), while a cached affinity reaches the same service-unavailable
         // response as the historical resolver.
-        response_affinity(state, response_id, tenant_id).await?;
+        response_affinity(state, response_id, tenant_id, user_id).await?;
         return Err(ApiError::ServiceUnavailable(
             "Database not configured".to_string(),
         ));
@@ -1342,16 +1188,17 @@ async fn resolve_response_account(
     let txn = pool.begin().await.map_err(|error| {
         ApiError::Internal(format!("Failed to begin Responses account lookup: {error}"))
     })?;
-    let route_snapshot = ResponseAffinity::find_active_snapshot(&txn, tenant_id, response_id)
-        .await
-        .map_err(|error| {
-            ApiError::Internal(format!(
-                "Responses affinity database lookup failed: {error}"
-            ))
-        })?
-        .ok_or_else(|| {
-            ApiError::NotFound(format!("Responses resource not found: {response_id}"))
-        })?;
+    let route_snapshot =
+        ResponseAffinity::find_active_snapshot_for_user(&txn, tenant_id, user_id, response_id)
+            .await
+            .map_err(|error| {
+                ApiError::Internal(format!(
+                    "Responses affinity database lookup failed: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                ApiError::NotFound(format!("Responses resource not found: {response_id}"))
+            })?;
     let account_id = route_snapshot.account_id.ok_or_else(|| {
         ApiError::NotFound(format!("Responses resource not found: {response_id}"))
     })?;
@@ -1359,14 +1206,15 @@ async fn resolve_response_account(
         .await
         .map_err(|error| ApiError::Internal(format!("Failed to load Responses account: {error}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Response not found: {response_id}")))?;
-    let affinity = ResponseAffinity::find_active_for_key_share(&txn, tenant_id, response_id)
-        .await
-        .map_err(|error| {
-            ApiError::Internal(format!(
-                "Responses affinity database lookup failed: {error}"
-            ))
-        })?
-        .ok_or_else(|| ApiError::NotFound(format!("Response not found: {response_id}")))?;
+    let affinity =
+        ResponseAffinity::find_active_for_key_share_for_user(&txn, tenant_id, user_id, response_id)
+            .await
+            .map_err(|error| {
+                ApiError::Internal(format!(
+                    "Responses affinity database lookup failed: {error}"
+                ))
+            })?
+            .ok_or_else(|| ApiError::NotFound(format!("Response not found: {response_id}")))?;
     if affinity.account_id != Some(account_id) {
         return Err(ApiError::Conflict(
             "The Responses resource owner changed before execution".to_string(),
@@ -1421,13 +1269,18 @@ async fn resolve_response_account(
     // not trust stale cache entries for ownership decisions.
     let cached = ResponsesAffinity {
         tenant_id: affinity.tenant_id,
+        user_id,
         provider: affinity.provider.clone(),
         model: affinity.model,
         account_id,
         expires_at_unix: affinity.expires_at.timestamp(),
     };
-    if !cache_response_affinity_locally(state, affinity_storage_key(tenant_id, response_id), cached)
-        .await
+    if !cache_response_affinity_locally(
+        state,
+        affinity_storage_key_for_user(tenant_id, user_id, response_id),
+        cached,
+    )
+    .await
     {
         tracing::warn!("Responses affinity local map is full; skipping local cache entry");
     }
@@ -1452,17 +1305,24 @@ async fn proxy_response_resource(
             "API-use permission is required for Responses resources".to_string(),
         ));
     }
-    let forwarded_headers = forwarded_responses_headers(client_headers, auth.tenant_id)?;
-    let account = resolve_response_account(state, response_id, auth.tenant_id).await?;
+    let forwarded_headers =
+        forwarded_responses_headers(client_headers, auth.tenant_id, auth.user_id)?;
+    let account =
+        resolve_response_account(state, response_id, auth.tenant_id, auth.user_id).await?;
     let selected = SelectedResponsesAccount {
         account,
         constraint: Some(ResponsesReservationConstraint::Affinity {
             resource_id: response_id.to_string(),
         }),
     };
-    let (account, mut reservations) =
-        reserve_selected_responses_account(state, auth.tenant_id, uuid::Uuid::new_v4(), selected)
-            .await?;
+    let (account, mut reservations) = reserve_selected_responses_account(
+        state,
+        auth.tenant_id,
+        auth.user_id,
+        uuid::Uuid::new_v4(),
+        selected,
+    )
+    .await?;
     let mut url = upstream_resource_url(
         &account.endpoint,
         "responses",
@@ -1496,7 +1356,7 @@ async fn proxy_response_resource(
         .map_err(crate::error::map_execution_error)?;
     if operation.removes_affinity_on_success() && delete_response_is_confirmed(response.meta.status)
     {
-        delete_response_affinity(state, response_id, auth.tenant_id).await?;
+        delete_response_affinity(state, response_id, auth.tenant_id, auth.user_id).await?;
         if response.meta.status == 404 {
             reservations.release().await;
             return Ok(deleted_response(response_id));
@@ -2106,24 +1966,22 @@ fn responses_idempotency_claim_matches(
     claim: &ResponsesIdempotencyClaim,
     idempotency: &ResponsesIdempotency,
     user_id: uuid::Uuid,
-    produce_ai_key_id: uuid::Uuid,
+    _produce_ai_key_id: uuid::Uuid,
 ) -> bool {
     claim.request_fingerprint == idempotency.request_fingerprint
         && claim.billing_request_id == idempotency.billing_request_id
         && claim.user_id == user_id
-        && claim.produce_ai_key_id == produce_ai_key_id
 }
 
 fn responses_idempotency_metadata_matches(
     claim: &ResponsesIdempotencyClaimMetadata,
     idempotency: &ResponsesIdempotency,
     user_id: uuid::Uuid,
-    produce_ai_key_id: uuid::Uuid,
+    _produce_ai_key_id: uuid::Uuid,
 ) -> bool {
     claim.request_fingerprint == idempotency.request_fingerprint
         && claim.billing_request_id == idempotency.billing_request_id
         && claim.user_id == user_id
-        && claim.produce_ai_key_id == produce_ai_key_id
 }
 
 fn cached_responses_idempotency_body_bytes(
@@ -2277,6 +2135,7 @@ fn responses_idempotency(
     headers: &HeaderMap,
     request_path: &str,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     body: &Value,
 ) -> Result<Option<ResponsesIdempotency>> {
     let Some(value) = headers.get("idempotency-key") else {
@@ -2292,8 +2151,22 @@ fn responses_idempotency(
     }
 
     let key_hash = Sha256::digest(key.as_bytes());
-    let binding_id = format!("kc_idempotency_{key_hash:x}");
+    // Idempotency claims are private to the caller, not merely to the
+    // tenant.  Include the stable user identity in the opaque binding so a
+    // same-tenant caller cannot collide with, replay, or observe another
+    // user's claim.  API-key rotation for that user remains stable because
+    // the key ID is intentionally absent.
+    let mut binding_hasher = Sha256::new();
+    binding_hasher.update(b"keycompute-responses-idempotency-binding-v2");
+    binding_hasher.update(tenant_id.as_bytes());
+    binding_hasher.update(user_id.as_bytes());
+    binding_hasher.update(key_hash);
+    let binding_id = format!("kc_idempotency_{:x}", binding_hasher.finalize());
     let mut fingerprint_hasher = Sha256::new();
+    fingerprint_hasher.update(tenant_id.as_bytes());
+    fingerprint_hasher.update([0]);
+    fingerprint_hasher.update(user_id.as_bytes());
+    fingerprint_hasher.update([0]);
     fingerprint_hasher.update(request_path.as_bytes());
     fingerprint_hasher.update([0]);
     if let Some(beta) = headers.get("openai-beta") {
@@ -2314,6 +2187,7 @@ fn responses_idempotency(
     let mut billing_hasher = Sha256::new();
     billing_hasher.update(b"keycompute-responses-billing-id-v1");
     billing_hasher.update(tenant_id.as_bytes());
+    billing_hasher.update(user_id.as_bytes());
     billing_hasher.update(key_hash);
     let digest = billing_hasher.finalize();
     let mut bytes = [0_u8; 16];
@@ -2659,10 +2533,15 @@ async fn abandon_unstarted_responses_idempotency_execution(
     }
 }
 
-fn upstream_responses_idempotency_key(tenant_id: uuid::Uuid, client_key: &str) -> String {
+fn upstream_responses_idempotency_key(
+    tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    client_key: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"keycompute-responses-upstream-idempotency-v1");
     hasher.update(tenant_id.as_bytes());
+    hasher.update(user_id.as_bytes());
     hasher.update([0]);
     hasher.update(client_key.as_bytes());
     format!("kc_upstream_{:x}", hasher.finalize())
@@ -2671,6 +2550,7 @@ fn upstream_responses_idempotency_key(tenant_id: uuid::Uuid, client_key: &str) -
 fn forwarded_responses_headers(
     headers: &HeaderMap,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
 ) -> Result<BTreeMap<String, String>> {
     let mut forwarded = BTreeMap::new();
     for name in ["idempotency-key", "openai-beta"] {
@@ -2680,7 +2560,7 @@ fn forwarded_responses_headers(
             .filter(|value| !value.is_empty())
         {
             let value = if name == "idempotency-key" {
-                upstream_responses_idempotency_key(tenant_id, value)
+                upstream_responses_idempotency_key(tenant_id, user_id, value)
             } else {
                 value.to_string()
             };
@@ -2971,6 +2851,7 @@ mod tests {
         async fn delete(
             &self,
             tenant_id: uuid::Uuid,
+            _user_id: uuid::Uuid,
             reservation_id: &str,
         ) -> std::result::Result<(), String> {
             if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -2996,6 +2877,7 @@ mod tests {
         let first_call_started = cleanup.first_call_started.notified();
         let mut reservations = ResponsesExecutionReservations {
             tenant_id,
+            user_id: uuid::Uuid::new_v4(),
             reservation_ids: vec![reservation_id.clone()],
             cleanup: Some(cleanup.clone()),
         };
@@ -3559,7 +3441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn input_tokens_discovers_unknown_conversation_before_model_routing() {
+    async fn input_tokens_rejects_unknown_conversation_without_cross_account_discovery() {
         let state = AppState::new();
         let tenant_id = uuid::Uuid::new_v4();
         let auth = AuthExtractor::new(
@@ -3581,15 +3463,13 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
-            result,
-            Err(ApiError::ServiceUnavailable(message))
-                if message == "Database is required to resolve an unknown conversation"
-        ));
+        assert!(
+            matches!(result, Err(ApiError::NotFound(message)) if message.contains("Conversation"))
+        );
     }
 
     #[tokio::test]
-    async fn create_discovers_unknown_conversation_before_pricing_and_model_routing() {
+    async fn create_rejects_unknown_conversation_without_cross_account_discovery() {
         let state = AppState::new();
         let tenant_id = uuid::Uuid::new_v4();
         let auth = AuthExtractor::new(
@@ -3615,11 +3495,9 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(
-            result,
-            Err(ApiError::ServiceUnavailable(message))
-                if message == "Database is required to resolve an unknown conversation"
-        ));
+        assert!(
+            matches!(result, Err(ApiError::NotFound(message)) if message.contains("Responses resource") || message.contains("owned by this user"))
+        );
     }
 
     #[test]
@@ -3967,9 +3845,10 @@ mod tests {
         );
         let previous_response_id = "resp_upstream_parent";
         state.responses_affinity.write().await.insert(
-            affinity_storage_key(auth.tenant_id, previous_response_id),
+            affinity_storage_key_for_user(auth.tenant_id, auth.user_id, previous_response_id),
             ResponsesAffinity {
                 tenant_id: auth.tenant_id,
+                user_id: auth.user_id,
                 provider: "openai".to_string(),
                 model: Some("gpt-test".to_string()),
                 account_id: uuid::Uuid::new_v4(),
@@ -4425,6 +4304,7 @@ mod tests {
         let account_id = uuid::Uuid::new_v4();
         let affinity = |expires_at_unix| ResponsesAffinity {
             tenant_id,
+            user_id: uuid::Uuid::nil(),
             provider: "openai".to_string(),
             model: Some("gpt-test".to_string()),
             account_id,
@@ -4526,7 +4406,7 @@ mod tests {
         .await
         .unwrap();
 
-        let affinity = response_affinity(&state, "resp_json_without_model", tenant_id)
+        let affinity = response_affinity(&state, "resp_json_without_model", tenant_id, ctx.user_id)
             .await
             .unwrap();
         assert_eq!(affinity.model.as_deref(), Some("gpt-requested"));
@@ -4589,7 +4469,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            response_affinity(&state, "resp_compaction_result", tenant_id).await,
+            response_affinity(&state, "resp_compaction_result", tenant_id, tenant_id).await,
             Err(ApiError::NotFound(_))
         ));
     }
@@ -4691,7 +4571,7 @@ mod tests {
         tokio::pin!(stream);
 
         assert!(stream.next().await.is_some());
-        let affinity = response_affinity(&state, "resp_stream_pending", tenant_id)
+        let affinity = response_affinity(&state, "resp_stream_pending", tenant_id, ctx.user_id)
             .await
             .unwrap();
         assert_eq!(affinity.account_id, account_id);
@@ -4759,8 +4639,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_affinity_is_tenant_isolated_without_redis() {
+    async fn response_affinity_is_user_isolated_without_redis() {
         let state = AppState::new();
+        let tenant = uuid::Uuid::new_v4();
         let owner = uuid::Uuid::new_v4();
         let other = uuid::Uuid::new_v4();
         let account = uuid::Uuid::new_v4();
@@ -4769,7 +4650,8 @@ mod tests {
             "resp_affinity_test",
             ResponsesResourceKind::Response,
             ResponsesAffinityRoute {
-                tenant_id: owner,
+                tenant_id: tenant,
+                user_id: owner,
                 provider: "openai".to_string(),
                 model: Some("gpt-test".to_string()),
                 account_id: account,
@@ -4779,20 +4661,24 @@ mod tests {
         .await
         .unwrap();
 
-        let affinity = response_affinity(&state, "resp_affinity_test", owner)
+        let affinity = response_affinity(&state, "resp_affinity_test", tenant, owner)
             .await
             .unwrap();
         assert_eq!(affinity.account_id, account);
         assert!(matches!(
-            response_affinity(&state, "resp_affinity_test", other).await,
+            response_affinity(&state, "resp_affinity_test", tenant, other).await,
+            Err(ApiError::NotFound(_))
+        ));
+        assert!(matches!(
+            response_affinity(&state, "resp_affinity_test", uuid::Uuid::new_v4(), owner).await,
             Err(ApiError::NotFound(_))
         ));
 
-        delete_response_affinity(&state, "resp_affinity_test", owner)
+        delete_response_affinity(&state, "resp_affinity_test", tenant, owner)
             .await
             .unwrap();
         assert!(matches!(
-            response_affinity(&state, "resp_affinity_test", owner).await,
+            response_affinity(&state, "resp_affinity_test", tenant, owner).await,
             Err(ApiError::NotFound(_))
         ));
     }
@@ -4810,6 +4696,7 @@ mod tests {
             "resp_stateless",
             ResponsesAffinityRoute {
                 tenant_id,
+                user_id: tenant_id,
                 provider: "openai".to_string(),
                 model: Some("gpt-test".to_string()),
                 account_id: uuid::Uuid::new_v4(),
@@ -4824,6 +4711,7 @@ mod tests {
             "resp_stateless_background",
             ResponsesAffinityRoute {
                 tenant_id,
+                user_id: tenant_id,
                 provider: "openai".to_string(),
                 model: Some("gpt-test".to_string()),
                 account_id: uuid::Uuid::new_v4(),
@@ -4837,14 +4725,15 @@ mod tests {
         assert!(!database_less_settlement);
         assert!(state.responses_affinity.read().await.is_empty());
         assert!(matches!(
-            response_affinity(&state, "resp_stateless", tenant_id).await,
+            response_affinity(&state, "resp_stateless", tenant_id, tenant_id).await,
             Err(ApiError::NotFound(_))
         ));
     }
 
     #[tokio::test]
-    async fn conversation_affinity_is_tenant_isolated_without_redis() {
+    async fn conversation_affinity_is_user_isolated_without_redis() {
         let state = AppState::new();
+        let tenant = uuid::Uuid::new_v4();
         let owner = uuid::Uuid::new_v4();
         let other = uuid::Uuid::new_v4();
         let account = uuid::Uuid::new_v4();
@@ -4853,7 +4742,8 @@ mod tests {
             "conv_affinity_test",
             ResponsesResourceKind::Conversation,
             ResponsesAffinityRoute {
-                tenant_id: owner,
+                tenant_id: tenant,
+                user_id: owner,
                 provider: "openai".to_string(),
                 model: Some("gpt-test".to_string()),
                 account_id: account,
@@ -4864,32 +4754,20 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            response_affinity(&state, "conv_affinity_test", owner)
+            response_affinity(&state, "conv_affinity_test", tenant, owner)
                 .await
                 .unwrap()
                 .account_id,
             account
         );
         assert!(matches!(
-            response_affinity(&state, "conv_affinity_test", other).await,
+            response_affinity(&state, "conv_affinity_test", tenant, other).await,
             Err(ApiError::NotFound(_))
         ));
-    }
-
-    #[test]
-    fn conversation_discovery_accepts_only_the_requested_conversation_object() {
-        assert!(conversation_lookup_matches(
-            &json!({"id": "conv_expected", "object": "conversation"}),
-            "conv_expected",
+        assert!(matches!(
+            response_affinity(&state, "conv_affinity_test", uuid::Uuid::new_v4(), owner).await,
+            Err(ApiError::NotFound(_))
         ));
-        for body in [
-            json!({"id": "conv_other", "object": "conversation"}),
-            json!({"id": "conv_expected", "object": "response"}),
-            json!({"id": "conv_expected"}),
-            json!({"html": "generic compatibility endpoint page"}),
-        ] {
-            assert!(!conversation_lookup_matches(&body, "conv_expected"));
-        }
     }
 
     #[test]
@@ -4907,149 +4785,6 @@ mod tests {
         account.visibility = "tenant".to_string();
         account.tenant_id = other;
         assert!(!responses_account_is_visible_to_tenant(&account, owner));
-    }
-
-    #[tokio::test]
-    async fn conversation_discovery_never_exceeds_its_probe_budget() {
-        let tenant = uuid::Uuid::new_v4();
-        let accounts = (0..i32::try_from(RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES).unwrap()
-            + 2)
-            .map(|priority| conversation_test_account(tenant, priority))
-            .collect::<Vec<_>>();
-        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recorded_attempts = std::sync::Arc::clone(&attempts);
-
-        let result = discover_conversation_account_from_candidates(
-            accounts,
-            "conv_outside_budget",
-            RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES,
-            Duration::from_secs(1),
-            move |_| {
-                let recorded_attempts = std::sync::Arc::clone(&recorded_attempts);
-                async move {
-                    recorded_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    Ok(None)
-                }
-            },
-        )
-        .await;
-
-        assert!(
-            matches!(result, Err(ApiError::Conflict(message)) if message.contains("8-account"))
-        );
-        assert_eq!(
-            attempts.load(std::sync::atomic::Ordering::Relaxed),
-            RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES
-        );
-    }
-
-    #[tokio::test]
-    async fn conversation_discovery_continues_after_a_candidate_failure() {
-        let tenant = uuid::Uuid::new_v4();
-        let candidates = vec![
-            conversation_test_account(tenant, 3),
-            conversation_test_account(tenant, 2),
-            conversation_test_account(tenant, 1),
-        ];
-        let expected_account_id = candidates[2].id;
-        let attempts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let recorded_attempts = std::sync::Arc::clone(&attempts);
-
-        let resolved = discover_conversation_account_from_candidates(
-            candidates,
-            "conv_owned_by_last_candidate",
-            RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES,
-            Duration::from_secs(1),
-            move |account| {
-                let recorded_attempts = std::sync::Arc::clone(&recorded_attempts);
-                async move {
-                    recorded_attempts.lock().unwrap().push(account.priority);
-                    match account.priority {
-                        3 => Err(ApiError::Provider("stale credential".to_string())),
-                        2 => Ok(None),
-                        _ => Ok(Some(ResolvedResponsesAccount {
-                            provider: account.provider,
-                            model: None,
-                            account_id: account.id,
-                            endpoint: account.endpoint,
-                            api_key: "sk-test".to_string(),
-                        })),
-                    }
-                }
-            },
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(resolved.account_id, expected_account_id);
-        assert_eq!(*attempts.lock().unwrap(), vec![3, 2, 1]);
-    }
-
-    #[tokio::test]
-    async fn conversation_discovery_returns_the_first_error_when_no_candidate_matches() {
-        let tenant = uuid::Uuid::new_v4();
-        let candidates = vec![
-            conversation_test_account(tenant, 2),
-            conversation_test_account(tenant, 1),
-        ];
-
-        let result = discover_conversation_account_from_candidates(
-            candidates,
-            "conv_unavailable",
-            RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES,
-            Duration::from_secs(1),
-            |account| async move {
-                if account.priority == 2 {
-                    Err(ApiError::Provider("first failure".to_string()))
-                } else {
-                    Ok(None)
-                }
-            },
-        )
-        .await;
-        let error = match result {
-            Err(error) => error,
-            Ok(_) => panic!("conversation discovery unexpectedly resolved an account"),
-        };
-
-        assert!(matches!(
-            error,
-            ApiError::Provider(message) if message == "first failure"
-        ));
-    }
-
-    #[tokio::test]
-    async fn conversation_discovery_has_one_aggregate_timeout() {
-        let tenant = uuid::Uuid::new_v4();
-        let candidates = vec![
-            conversation_test_account(tenant, 2),
-            conversation_test_account(tenant, 1),
-        ];
-        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let recorded_attempts = std::sync::Arc::clone(&attempts);
-
-        let result = discover_conversation_account_from_candidates(
-            candidates,
-            "conv_slow",
-            RESPONSES_CONVERSATION_DISCOVERY_MAX_CANDIDATES,
-            Duration::from_millis(10),
-            move |_| {
-                let recorded_attempts = std::sync::Arc::clone(&recorded_attempts);
-                async move {
-                    recorded_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    Ok(None)
-                }
-            },
-        )
-        .await;
-
-        assert!(matches!(
-            result,
-            Err(ApiError::ServiceUnavailable(message))
-                if message == "Conversation account discovery timed out; please try again"
-        ));
-        assert_eq!(attempts.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     fn conversation_test_account(tenant_id: uuid::Uuid, priority: i32) -> Account {
@@ -5980,8 +5715,9 @@ mod tests {
         headers.insert("x-client-request-id", "trace/opaque.123".parse().unwrap());
         headers.insert("x-client-secret", "must-not-forward".parse().unwrap());
         let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
 
-        let forwarded = forwarded_responses_headers(&headers, tenant).unwrap();
+        let forwarded = forwarded_responses_headers(&headers, tenant, user).unwrap();
 
         assert_eq!(
             forwarded.get("openai-beta"),
@@ -5990,7 +5726,7 @@ mod tests {
         let upstream_key = forwarded.get("idempotency-key").unwrap();
         assert_eq!(
             upstream_key,
-            &upstream_responses_idempotency_key(tenant, "client-key")
+            &upstream_responses_idempotency_key(tenant, user, "client-key")
         );
         assert!(!upstream_key.contains("client-key"));
         assert_eq!(
@@ -6005,7 +5741,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-client-request-id", "x".repeat(512).parse().unwrap());
         assert!(
-            forwarded_responses_headers(&headers, uuid::Uuid::new_v4())
+            forwarded_responses_headers(&headers, uuid::Uuid::new_v4(), uuid::Uuid::new_v4())
                 .unwrap()
                 .contains_key("x-client-request-id")
         );
@@ -6013,35 +5749,42 @@ mod tests {
         headers.insert("x-client-request-id", "x".repeat(513).parse().unwrap());
 
         assert!(matches!(
-            forwarded_responses_headers(&headers, uuid::Uuid::new_v4()),
+            forwarded_responses_headers(&headers, uuid::Uuid::new_v4(), uuid::Uuid::new_v4()),
             Err(ApiError::BadRequest(message)) if message.contains("512")
         ));
     }
 
     #[test]
-    fn responses_upstream_idempotency_is_stable_and_tenant_scoped() {
+    fn responses_upstream_idempotency_is_stable_and_user_scoped() {
         let mut headers = HeaderMap::new();
         headers.insert("idempotency-key", "client-key".parse().unwrap());
         let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
 
-        let first = forwarded_responses_headers(&headers, tenant).unwrap();
-        let retry = forwarded_responses_headers(&headers, tenant).unwrap();
-        let other_tenant = forwarded_responses_headers(&headers, uuid::Uuid::new_v4()).unwrap();
+        let first = forwarded_responses_headers(&headers, tenant, user).unwrap();
+        let retry = forwarded_responses_headers(&headers, tenant, user).unwrap();
+        let other_user =
+            forwarded_responses_headers(&headers, tenant, uuid::Uuid::new_v4()).unwrap();
+        let other_tenant =
+            forwarded_responses_headers(&headers, uuid::Uuid::new_v4(), user).unwrap();
 
         assert_eq!(first["idempotency-key"], retry["idempotency-key"]);
+        assert_ne!(first["idempotency-key"], other_user["idempotency-key"]);
         assert_ne!(first["idempotency-key"], other_tenant["idempotency-key"]);
         assert!(!first["idempotency-key"].contains("client-key"));
     }
 
     #[test]
-    fn responses_idempotency_is_stable_canonical_and_tenant_scoped() {
+    fn responses_idempotency_is_stable_canonical_and_user_scoped() {
         let mut headers = HeaderMap::new();
         headers.insert("idempotency-key", "client-key".parse().unwrap());
         let tenant = uuid::Uuid::new_v4();
+        let user = uuid::Uuid::new_v4();
         let first = responses_idempotency(
             &headers,
             "/v1/responses",
             tenant,
+            user,
             &json!({"model": "gpt-test", "input": "hello"}),
         )
         .unwrap()
@@ -6050,6 +5793,7 @@ mod tests {
             &headers,
             "/v1/responses",
             tenant,
+            user,
             &serde_json::from_str(r#"{"input":"hello","model":"gpt-test"}"#).unwrap(),
         )
         .unwrap()
@@ -6058,6 +5802,7 @@ mod tests {
             &headers,
             "/v1/responses",
             uuid::Uuid::new_v4(),
+            user,
             &json!({"model": "gpt-test", "input": "hello"}),
         )
         .unwrap()
@@ -6066,6 +5811,7 @@ mod tests {
             &headers,
             "/v1/responses",
             tenant,
+            user,
             &json!({"model": "gpt-test", "input": "changed"}),
         )
         .unwrap()
@@ -6075,6 +5821,17 @@ mod tests {
         assert_eq!(first.request_fingerprint, reordered.request_fingerprint);
         assert_eq!(first.billing_request_id, reordered.billing_request_id);
         assert_ne!(first.billing_request_id, other_tenant.billing_request_id);
+        let other_user = responses_idempotency(
+            &headers,
+            "/v1/responses",
+            tenant,
+            uuid::Uuid::new_v4(),
+            &json!({"model": "gpt-test", "input": "hello"}),
+        )
+        .unwrap()
+        .unwrap();
+        assert_ne!(first.binding_id, other_user.binding_id);
+        assert_ne!(first.billing_request_id, other_user.billing_request_id);
         assert_ne!(first.request_fingerprint, changed.request_fingerprint);
         assert!(!first.binding_id.contains("client-key"));
 
@@ -6082,6 +5839,7 @@ mod tests {
             &headers,
             "/v1/responses",
             tenant,
+            user,
             &serde_json::from_str(
                 r#"{"input":[{"content":{"b":2,"a":1},"role":"user"}],"model":"gpt-test"}"#,
             )
@@ -6093,6 +5851,7 @@ mod tests {
             &headers,
             "/v1/responses",
             tenant,
+            user,
             &serde_json::from_str(
                 r#"{"model":"gpt-test","input":[{"role":"user","content":{"a":1,"b":2}}]}"#,
             )

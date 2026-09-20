@@ -5,12 +5,18 @@
 //! 注意：根据 MVP 架构约束，Billing 仅在 stream 结束后自动触发，
 //! 不提供手动触发接口。
 
-use crate::{error::Result, extractors::AuthExtractor, state::AppState};
+use crate::{
+    error::{ApiError, Result},
+    extractors::{AuthExtractor, ConsoleAuth},
+    state::AppState,
+};
 use axum::{
     Json,
     extract::{Query, State},
 };
 use chrono::{DateTime, Utc};
+use keycompute_auth::Permission;
+use keycompute_db::models::usage_log::UserUsageScope;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -69,9 +75,11 @@ pub struct BillingRecord {
 /// 列出计费记录
 pub async fn list_billing_records(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     Query(query): Query<ListBillingQuery>,
 ) -> Result<Json<BillingListResponse>> {
+    let scope = own_billing_scope(&auth)?;
+    validate_time_range(query.start_time, query.end_time)?;
     // 检查数据库是否配置
     let Some(pool) = state.pool.as_deref() else {
         return Err(crate::error::ApiError::Internal(
@@ -80,18 +88,20 @@ pub async fn list_billing_records(
     };
 
     // 分页参数
-    let limit = query.limit.unwrap_or(20).min(100);
-    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let offset = query.offset.unwrap_or(0).max(0);
 
     // 获取总数
-    let total = keycompute_db::UsageLog::count_by_tenant(pool, auth.tenant_id)
+    let total = scope
+        .count(pool, query.start_time, query.end_time)
         .await
         .map_err(|e| {
             crate::error::ApiError::Internal(format!("Failed to count billing records: {}", e))
         })?;
 
     // 从数据库查询计费记录
-    let logs = keycompute_db::UsageLog::find_by_tenant(pool, auth.tenant_id, limit, offset)
+    let logs = scope
+        .list(pool, query.start_time, query.end_time, limit, offset)
         .await
         .map_err(|e| {
             crate::error::ApiError::Internal(format!("Failed to query billing records: {}", e))
@@ -172,9 +182,10 @@ pub struct ModelStats {
 /// 获取计费统计
 pub async fn get_billing_stats(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     Query(query): Query<BillingStatsQuery>,
 ) -> Result<Json<BillingStatsResponse>> {
+    let scope = own_billing_scope(&auth)?;
     // 检查数据库是否配置
     let Some(pool) = state.pool.as_deref() else {
         return Err(crate::error::ApiError::Internal(
@@ -186,24 +197,22 @@ pub async fn get_billing_stats(
     let now = Utc::now();
     let start_time = query.start_time.unwrap_or(now - chrono::Duration::days(30));
     let end_time = query.end_time.unwrap_or(now);
+    validate_time_range(Some(start_time), Some(end_time))?;
 
     // 获取总体统计
-    let stats =
-        keycompute_db::UsageLog::get_stats_by_tenant(pool, auth.tenant_id, start_time, end_time)
-            .await
-            .map_err(|e| {
-                crate::error::ApiError::Internal(format!("Failed to query billing stats: {}", e))
-            })?;
+    let stats = scope.stats(pool, start_time, end_time).await.map_err(|e| {
+        crate::error::ApiError::Internal(format!("Failed to query billing stats: {}", e))
+    })?;
 
     // 获取按模型分组的统计
-    let model_stats = keycompute_db::UsageLog::get_stats_by_tenant_grouped_by_model(
-        pool,
-        auth.tenant_id,
-        start_time,
-        end_time,
-    )
-    .await
-    .map_err(|e| crate::error::ApiError::Internal(format!("Failed to query model stats: {}", e)))?;
+    let model_stats = if query.group_by_model.unwrap_or(true) {
+        scope
+            .by_model(pool, start_time, end_time)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to query model stats: {e}")))?
+    } else {
+        Vec::new()
+    };
 
     // 转换为响应格式
     let by_model: Vec<ModelStats> = model_stats
@@ -225,6 +234,26 @@ pub async fn get_billing_stats(
         currency: "CNY".to_string(),
         by_model,
     }))
+}
+
+/// Personal billing endpoints never widen their scope for an admin role.
+/// Platform-wide accounting is exposed only by explicitly protected admin APIs.
+fn own_billing_scope(auth: &AuthExtractor) -> Result<UserUsageScope> {
+    if !auth.has_permission(&Permission::ManageOwnBilling) {
+        return Err(ApiError::Forbidden("Own billing access required".into()));
+    }
+    Ok(UserUsageScope::new(auth.tenant_id, auth.user_id))
+}
+
+fn validate_time_range(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> Result<()> {
+    if let (Some(from), Some(to)) = (from, to)
+        && from >= to
+    {
+        return Err(ApiError::BadRequest(
+            "start_time must be before end_time".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// 费用计算请求

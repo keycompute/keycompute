@@ -1,14 +1,14 @@
 //! 用户自服务处理器
 //
 //! 处理用户管理自己资源的请求
-//! Admin 也可以访问这些端点，但会根据权限返回不同范围的数据
+//! All console roles use these endpoints for their own resources only.
 
 use crate::handlers::pagination::{
     has_explicit_pagination, normalize_list_pagination, total_pages,
 };
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::ConsoleAuth,
     state::AppState,
 };
 use axum::{
@@ -19,7 +19,7 @@ use chrono::{Duration, Utc};
 use keycompute_auth::{PasswordHasher, PasswordValidator, ProduceAiKeyValidator};
 use keycompute_db::models::{
     api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
-    usage_log::UsageLog,
+    usage_log::UserUsageScope,
     user::User,
     user_credential::UserCredential,
 };
@@ -42,7 +42,7 @@ pub struct CurrentUserResponse {
 ///
 /// GET /api/v1/me
 pub async fn get_current_user(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
 ) -> Result<Json<CurrentUserResponse>> {
     let pool = state
@@ -79,7 +79,7 @@ pub struct UpdateProfileRequest {
 ///
 /// PUT /api/v1/me/profile
 pub async fn update_profile(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
     Json(req): Json<UpdateProfileRequest>,
 ) -> Result<Json<CurrentUserResponse>> {
@@ -125,7 +125,7 @@ pub struct ChangePasswordRequest {
 ///
 /// PUT /api/v1/me/password
 pub async fn change_password(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<serde_json::Value>> {
@@ -234,10 +234,10 @@ pub struct ApiKeyPageResponse {
 ///
 /// GET /api/v1/keys
 /// - 普通用户：只返回自己的 Keys
-/// - Admin：可以返回所有 Keys（通过查询参数控制）
+/// - Admin: the same ownership restriction applies.
 /// - include_revoked: 是否包含已撤销的 Key（默认 false，只返回活跃的）
 pub async fn list_my_api_keys(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
     Query(params): Query<ApiKeyQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
@@ -329,7 +329,7 @@ pub struct CreateApiKeyRequest {
 /// - name: API Key 名称
 /// - never_expires: 是否永不过期（默认 false，即 6 个月后过期）
 pub async fn create_api_key(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<serde_json::Value>> {
@@ -384,7 +384,7 @@ pub async fn create_api_key(
 ///
 /// DELETE /api/v1/keys/{id}
 pub async fn delete_api_key(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     Path(key_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
@@ -471,9 +471,9 @@ pub struct UsagePageResponse {
 ///
 /// GET /api/v1/usage
 /// - 普通用户：只返回自己的用量
-/// - Admin：可以返回所有用量（通过查询参数控制）
+/// - Admin: the same ownership restriction applies.
 pub async fn get_my_usage(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
     Query(params): Query<UsageQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
@@ -487,14 +487,17 @@ pub async fn get_my_usage(
     let modern_pagination = params.page.is_some() || params.page_size.is_some();
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
-    let logs = UsageLog::find_by_user(
-        pool,
-        auth.user_id,
-        if has_pagination { page_size } else { 100 },
-        if has_pagination { offset } else { 0 },
-    )
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to fetch usage logs: {}", e)))?;
+    let scope = UserUsageScope::new(auth.tenant_id, auth.user_id);
+    let logs = scope
+        .list(
+            pool,
+            None,
+            None,
+            if has_pagination { page_size } else { 100 },
+            if has_pagination { offset } else { 0 },
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to fetch usage logs: {}", e)))?;
 
     let usage: Vec<UsageRecord> = logs
         .into_iter()
@@ -512,7 +515,8 @@ pub async fn get_my_usage(
         .collect();
 
     if modern_pagination {
-        let total = UsageLog::count_by_user(pool, auth.user_id)
+        let total = scope
+            .count(pool, None, None)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to count usage logs: {}", e)))?;
         Ok(Json(
@@ -549,7 +553,7 @@ pub struct UsageStatsResponse {
 ///
 /// GET /api/v1/usage/stats
 pub async fn get_my_usage_stats(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
 ) -> Result<Json<UsageStatsResponse>> {
     state
@@ -558,10 +562,10 @@ pub async fn get_my_usage_stats(
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
     let db = state.pool.clone().expect("database checked above");
     let key = crate::display_cache::DisplayCache::key(&auth, "usage-stats", "all-time");
-    let user_id = auth.user_id;
+    let scope = UserUsageScope::new(auth.tenant_id, auth.user_id);
     let value = state.display_cache.read(state.cache.clone(), state.console_admission.origin.clone(), auth.tenant_id, key, async move {
         let as_of = chrono::Utc::now().to_rfc3339();
-        let stats = UsageLog::get_user_stats(db.write_conn(), user_id).await
+        let stats = scope.all_time_stats(db.write_conn()).await
             .map_err(|e| ApiError::Internal(format!("Failed to fetch usage stats: {e}")))?;
         Ok(serde_json::json!({"total_requests":stats.total_requests,"total_tokens":stats.total_tokens,
             "total_input_tokens":stats.total_input_tokens,"total_output_tokens":stats.total_output_tokens,

@@ -74,6 +74,128 @@ pub struct UserUsageStats {
     pub total_cost: BigDecimal,
 }
 
+/// Mandatory tenant AND user scope for personal billing reads.
+/// Construct this from a validated identity, never from request query parameters.
+#[derive(Debug, Clone, Copy)]
+pub struct UserUsageScope {
+    tenant_id: Uuid,
+    user_id: Uuid,
+}
+
+impl UserUsageScope {
+    pub fn new(tenant_id: Uuid, user_id: Uuid) -> Self {
+        Self { tenant_id, user_id }
+    }
+
+    fn query(
+        &self,
+        select: &str,
+        suffix: &str,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        pagination: Option<(i64, i64)>,
+    ) -> Statement {
+        // select/suffix are internal constants. All identity and time values
+        // are bound parameters, shared by records, totals and aggregations.
+        let sql = format!(
+            "SELECT {select} FROM usage_logs WHERE tenant_id = $1 AND user_id = $2 \
+             AND ($3::timestamptz IS NULL OR created_at >= $3) \
+             AND ($4::timestamptz IS NULL OR created_at < $4) {suffix}"
+        );
+        let mut values = vec![
+            self.tenant_id.into(),
+            self.user_id.into(),
+            from.into(),
+            to.into(),
+        ];
+        if let Some((limit, offset)) = pagination {
+            values.extend([limit.into(), offset.into()]);
+        }
+        Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
+    }
+
+    pub async fn list(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UsageLog>, DbError> {
+        Ok(UsageLog::find_by_statement(self.query(
+            "*",
+            "ORDER BY created_at DESC, id DESC LIMIT $5 OFFSET $6",
+            from,
+            to,
+            Some((limit.clamp(1, 100), offset.max(0))),
+        ))
+        .all(db)
+        .await?)
+    }
+
+    pub async fn count(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+    ) -> Result<i64, DbError> {
+        let row = db
+            .query_one(self.query("COUNT(*)", "", from, to, None))
+            .await?
+            .ok_or_else(|| DbError::Other("count query failed".into()))?;
+        row.try_get_by_index(0).map_err(DbError::DatabaseError)
+    }
+
+    pub async fn stats(
+        &self,
+        db: &impl ConnectionTrait,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<UsageStats, DbError> {
+        UsageStats::find_by_statement(self.query(
+            "COUNT(*) AS total_requests, COALESCE(SUM(input_tokens),0)::bigint AS total_input_tokens, \
+             COALESCE(SUM(output_tokens),0)::bigint AS total_output_tokens, \
+             COALESCE(SUM(total_tokens),0)::bigint AS total_tokens, \
+             COALESCE(SUM(user_amount),0) AS total_amount",
+            "", Some(from), Some(to), None,
+        )).one(db).await?.ok_or_else(|| DbError::Other("stats query failed".into()))
+    }
+
+    /// All-time personal totals still require the resource tenant.
+    pub async fn all_time_stats(
+        &self,
+        db: &impl ConnectionTrait,
+    ) -> Result<UserUsageStats, DbError> {
+        UserUsageStats::find_by_statement(self.query(
+            "COUNT(*) AS total_requests, COALESCE(SUM(input_tokens),0)::bigint AS total_input_tokens, \
+             COALESCE(SUM(output_tokens),0)::bigint AS total_output_tokens, \
+             COALESCE(SUM(total_tokens),0)::bigint AS total_tokens, \
+             COALESCE(SUM(user_amount),0) AS total_cost",
+            "", None, None, None,
+        )).one(db).await?.ok_or_else(|| DbError::Other("stats query failed".into()))
+    }
+
+    pub async fn by_model(
+        &self,
+        db: &impl ConnectionTrait,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<ModelStatsRow>, DbError> {
+        Ok(ModelStatsRow::find_by_statement(self.query(
+            "model_name, COUNT(*) AS request_count, \
+             COALESCE(SUM(input_tokens),0)::bigint AS input_tokens, \
+             COALESCE(SUM(output_tokens),0)::bigint AS output_tokens, \
+             COALESCE(SUM(user_amount),0) AS amount",
+            "GROUP BY model_name ORDER BY request_count DESC, model_name",
+            Some(from),
+            Some(to),
+            None,
+        ))
+        .all(db)
+        .await?)
+    }
+}
+
 impl UsageLog {
     /// 创建用量日志
     pub async fn create(

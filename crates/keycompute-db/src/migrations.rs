@@ -423,7 +423,13 @@ mod tests {
             "uk_scoped_responses_idempotency",
             "idx_scoped_responses_pending",
             "PRIMARY KEY(response_id,seq)",
+            "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE",
+            "user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE",
+            "access_mode TEXT NOT NULL CHECK (access_mode IN ('passthrough','node_dispatch'))",
             "owner_id UUID NOT NULL",
+            "user_id UUID,",
+            "idx_usage_logs_user_tenant_created",
+            "idx_response_affinities_user",
         ] {
             assert!(
                 schema.contains(fragment),

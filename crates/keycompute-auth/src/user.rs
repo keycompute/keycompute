@@ -55,13 +55,13 @@ impl UserInfo {
         }
     }
 
-    /// 检查是否是管理员
-    pub fn is_admin(&self) -> bool {
+    /// Role metadata only; use AuthContext permissions for authorization.
+    pub fn has_admin_role(&self) -> bool {
         self.role == "admin" || self.role == "system"
     }
 
-    /// 检查是否是系统管理员
-    pub fn is_system_admin(&self) -> bool {
+    /// Highest-role metadata only; not an authenticated permission check.
+    pub fn has_system_role(&self) -> bool {
         self.role == "system"
     }
 }
@@ -367,7 +367,7 @@ mod tests {
         );
 
         assert_eq!(user.email, "test@example.com");
-        assert!(!user.is_admin());
+        assert!(!user.has_admin_role());
         assert!(user.active);
     }
 
@@ -381,7 +381,8 @@ mod tests {
             "admin",
         );
 
-        assert!(user.is_admin());
+        assert!(user.has_admin_role());
+        assert!(!user.has_system_role());
     }
 
     #[test]

@@ -225,6 +225,7 @@ pub(super) fn create_responses_stream(
                                             response_id,
                                             ResponsesAffinityRoute {
                                                 tenant_id: billing_ctx.tenant_id,
+                                                user_id: billing_ctx.user_id,
                                                 provider: actual_provider.clone(),
                                                 model: affinity_model.clone(),
                                                 account_id: actual_account_id,
@@ -255,6 +256,7 @@ pub(super) fn create_responses_stream(
                                                         ResponsesResourceKind::Conversation,
                                                         ResponsesAffinityRoute {
                                                             tenant_id: billing_ctx.tenant_id,
+                                                            user_id: billing_ctx.user_id,
                                                             provider: actual_provider,
                                                             model: affinity_model.clone(),
                                                             account_id: actual_account_id,
@@ -298,6 +300,7 @@ pub(super) fn create_responses_stream(
                                         ResponsesResourceKind::Conversation,
                                         ResponsesAffinityRoute {
                                             tenant_id: billing_ctx.tenant_id,
+                                            user_id: billing_ctx.user_id,
                                             provider: actual_provider,
                                             model: affinity_model.clone(),
                                             account_id: actual_account_id,

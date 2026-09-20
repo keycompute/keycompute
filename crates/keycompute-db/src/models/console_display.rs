@@ -25,6 +25,7 @@ async fn json_query(
 pub async fn usage_trend(
     db: &impl ConnectionTrait,
     user: Uuid,
+    tenant: Uuid,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
     grain: &str,
@@ -42,7 +43,13 @@ pub async fn usage_trend(
     json_query(
         db,
         TREND_SQL,
-        vec![user.into(), from.into(), to.into(), grain.into()],
+        vec![
+            user.into(),
+            from.into(),
+            to.into(),
+            grain.into(),
+            tenant.into(),
+        ],
     )
     .await
 }
@@ -54,7 +61,7 @@ WITH buckets AS (
 ), totals AS (
  SELECT date_trunc($4, created_at AT TIME ZONE 'UTC') AS bucket, COUNT(*) AS requests,
  COALESCE(SUM(total_tokens),0) AS total_tokens, COALESCE(SUM(user_amount),0) AS total_cost
- FROM usage_logs WHERE user_id=$1 AND created_at >= $2 AND created_at < $3 GROUP BY 1
+ FROM usage_logs WHERE user_id=$1 AND tenant_id=$5 AND created_at >= $2 AND created_at < $3 GROUP BY 1
 ) SELECT jsonb_build_object('from',$2::timestamptz,'to',$3::timestamptz,'granularity',$4::text,
  'as_of',statement_timestamp(),'buckets',COALESCE(jsonb_agg(jsonb_build_object(
  'start',to_char(b.bucket, 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),'requests',COALESCE(t.requests,0),
@@ -74,7 +81,7 @@ const DASHBOARD_SQL: &str = r#"
 SELECT jsonb_build_object('as_of',statement_timestamp(),
  'stats',(SELECT jsonb_build_object('total_requests',COUNT(*),'total_tokens',COALESCE(SUM(total_tokens),0),
  'total_input_tokens',COALESCE(SUM(input_tokens),0),'total_output_tokens',COALESCE(SUM(output_tokens),0),
- 'total_cost',COALESCE(SUM(user_amount),0)::text,'period','all_time') FROM usage_logs WHERE user_id=$1),
+ 'total_cost',COALESCE(SUM(user_amount),0)::text,'period','all_time') FROM usage_logs WHERE user_id=$1 AND tenant_id=$2),
  'active_key_count',(SELECT COUNT(*) FROM produce_ai_keys WHERE user_id=$1 AND tenant_id=$2
  AND NOT revoked AND (expires_at IS NULL OR expires_at>statement_timestamp())),
  'active_keys',(SELECT COALESCE(jsonb_agg(to_jsonb(k) ORDER BY k.created_at DESC,k.id DESC),'[]'::jsonb) FROM
@@ -83,9 +90,9 @@ SELECT jsonb_build_object('as_of',statement_timestamp(),
  ORDER BY created_at DESC,id DESC LIMIT 4) k),
  'recent_usage',(SELECT COALESCE(jsonb_agg(to_jsonb(u) ORDER BY u.created_at DESC,u.id DESC),'[]'::jsonb) FROM
  (SELECT id,request_id,model_name AS model,input_tokens,output_tokens,total_tokens,user_amount::text AS cost,status,created_at
- FROM usage_logs WHERE user_id=$1 ORDER BY created_at DESC,id DESC LIMIT 5) u),
+ FROM usage_logs WHERE user_id=$1 AND tenant_id=$2 ORDER BY created_at DESC,id DESC LIMIT 5) u),
  'recent_orders',(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.created_at DESC,p.id DESC),'[]'::jsonb) FROM
- (SELECT id,amount::text AS amount,currency,status,created_at FROM payment_orders WHERE user_id=$1
+ (SELECT id,amount::text AS amount,currency,status,created_at FROM payment_orders WHERE user_id=$1 AND tenant_id=$2
  ORDER BY created_at DESC,id DESC LIMIT 3) p))
 "#;
 

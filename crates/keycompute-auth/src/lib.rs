@@ -95,9 +95,10 @@ impl AuthContext {
         self.permissions.contains(permission)
     }
 
-    /// 是否是管理员
+    /// Whether this authenticated credential has platform-administration capability.
+    /// Role metadata alone must never grant access to an inference API key.
     pub fn is_admin(&self) -> bool {
-        self.role == "admin" || self.role == "system"
+        self.has_permission(&Permission::SystemAdmin)
     }
 
     /// 获取用户信息（如果已加载）
@@ -334,8 +335,8 @@ mod tests {
         let ctx = AuthContext::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
             .with_permissions(build_permissions(AuthType::ApiKey, "admin"));
 
-        // 角色检查仍然返回 true
-        assert!(ctx.is_admin());
+        // An inference credential has no administrative authority.
+        assert!(!ctx.is_admin());
         // 但权限检查只基于权限列表
         assert!(ctx.has_permission(&Permission::UseApi));
         assert!(!ctx.has_permission(&Permission::ManageUsers));

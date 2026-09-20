@@ -78,6 +78,7 @@ pub async fn usage_trend(
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
     let key = DisplayCache::key(&auth, "usage-trend", &format!("{from}/{to}/{grain}"));
     let user = auth.user_id;
+    let tenant = auth.tenant_id;
     let value = state
         .display_cache
         .read(
@@ -89,6 +90,7 @@ pub async fn usage_trend(
                 keycompute_db::models::console_display::usage_trend(
                     pool.write_conn(),
                     user,
+                    tenant,
                     from,
                     to,
                     &grain,
@@ -130,6 +132,7 @@ pub async fn dashboard(auth: AuthExtractor, State(state): State<AppState>) -> Re
                 value["trend"] = keycompute_db::models::console_display::usage_trend(
                     pool.write_conn(),
                     user,
+                    tenant,
                     from,
                     to,
                     &grain,

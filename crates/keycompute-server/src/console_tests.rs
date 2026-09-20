@@ -14,6 +14,7 @@ fn app(state: &AppState) -> Router {
         .route("/api/v1/test/read", get(|| async { StatusCode::OK }))
         .route("/api/v1/test/stats", get(|| async { StatusCode::OK }))
         .route("/api/v1/test/write", post(|| async { StatusCode::OK }))
+        .layer(from_fn_with_state(state.clone(), mutation_middleware))
         .layer(from_fn_with_state(state.clone(), middleware))
 }
 fn state(config: ConsoleConfig) -> AppState {
@@ -32,8 +33,11 @@ fn request(path: &str, tenant: Uuid, user: Uuid, key: Uuid) -> HttpRequest<Body>
         .uri(path)
         .body(Body::empty())
         .unwrap();
-    req.extensions_mut()
-        .insert(AuthExtractor::new(user, tenant, key, "user"));
+    req.extensions_mut().insert(
+        AuthExtractor::new(user, tenant, key, "user").with_permissions(
+            keycompute_auth::build_permissions(keycompute_auth::AuthType::Jwt, "user"),
+        ),
+    );
     req
 }
 #[tokio::test]
@@ -76,7 +80,7 @@ async fn aggregate_budget_cannot_be_bypassed_by_walking_classes_or_identities() 
     assert!(r.headers().contains_key("retry-after"));
 }
 #[tokio::test]
-async fn rotating_api_keys_does_not_reset_user_budget_and_tenants_are_isolated() {
+async fn console_identity_budget_is_user_scoped_and_tenants_are_isolated() {
     let s = state(ConsoleConfig {
         user_rpm: 2,
         tenant_rpm: 3,

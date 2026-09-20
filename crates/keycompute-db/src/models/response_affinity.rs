@@ -15,6 +15,9 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize, PartialEq)]
 pub struct ResponseAffinity {
     pub tenant_id: Uuid,
+    /// Immutable caller identity, not an upstream account or execution lease.
+    /// None denotes internal/unowned state that public resource APIs cannot use.
+    pub user_id: Option<Uuid>,
     pub response_id: String,
     pub provider: String,
     pub model: Option<String>,
@@ -164,10 +167,24 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 \
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 \
                AND NOT is_reservation AND deleted_at IS NULL AND expires_at > NOW() \
              FOR KEY SHARE",
             [tenant_id.into(), response_id.into()],
+        );
+        Ok(Self::find_by_statement(stmt).one(db).await?)
+    }
+
+    pub async fn find_active_for_key_share_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<Self>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND deleted_at IS NULL AND expires_at>NOW() FOR KEY SHARE",
+            [tenant_id.into(), user_id.into(), response_id.into()],
         );
         Ok(Self::find_by_statement(stmt).one(db).await?)
     }
@@ -188,9 +205,23 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                AND deleted_at IS NULL AND expires_at > NOW()",
             [tenant_id.into(), response_id.into()],
+        );
+        Ok(Self::find_by_statement(stmt).one(db).await?)
+    }
+
+    pub async fn find_active_snapshot_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<Self>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND deleted_at IS NULL AND expires_at>NOW()",
+            [tenant_id.into(), user_id.into(), response_id.into()],
         );
         Ok(Self::find_by_statement(stmt).one(db).await?)
     }
@@ -215,9 +246,30 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT TRUE AS pending FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                AND settlement IS NOT NULL LIMIT 1 FOR KEY SHARE",
             [tenant_id.into(), response_id.into()],
+        );
+        Ok(PendingSettlement::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .is_some_and(|row| row.pending))
+    }
+
+    pub async fn has_pending_settlement_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<bool, DbError> {
+        #[derive(FromQueryResult)]
+        struct PendingSettlement {
+            pending: bool,
+        }
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT TRUE AS pending FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND settlement IS NOT NULL LIMIT 1 FOR KEY SHARE",
+            [tenant_id.into(), user_id.into(), response_id.into()],
         );
         Ok(PendingSettlement::find_by_statement(stmt)
             .one(db)
@@ -327,10 +379,40 @@ impl ResponseAffinity {
              account_id = EXCLUDED.account_id, is_reservation = FALSE, \
              deleted_at = NULL, expires_at = EXCLUDED.expires_at, \
              updated_at = GREATEST(response_affinities.updated_at, clock_timestamp()) \
-             WHERE response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id \
+             WHERE response_affinities.user_id IS NULL AND response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id \
              RETURNING *",
             [
                 tenant_id.into(),
+                response_id.into(),
+                provider.into(),
+                model.into(),
+                account_id.into(),
+                expires_at.into(),
+            ],
+        );
+        Self::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .ok_or_else(|| Self::ownership_collision(response_id))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_route_in_tx_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+        provider: &str,
+        model: Option<&str>,
+        account_id: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<Self, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO response_affinities (tenant_id,user_id,response_id,provider,model,account_id,is_reservation,expires_at) VALUES ($1,$2,$3,$4,$5,$6,FALSE,$7) ON CONFLICT (tenant_id,response_id) DO UPDATE SET user_id=EXCLUDED.user_id,provider=EXCLUDED.provider,model=EXCLUDED.model,account_id=EXCLUDED.account_id,is_reservation=FALSE,expires_at=EXCLUDED.expires_at,updated_at=GREATEST(response_affinities.updated_at,clock_timestamp()) WHERE response_affinities.user_id=EXCLUDED.user_id AND response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id RETURNING *",
+            [
+                tenant_id.into(),
+                user_id.into(),
                 response_id.into(),
                 provider.into(),
                 model.into(),
@@ -399,6 +481,36 @@ impl ResponseAffinity {
         Self::upsert_route_with_settlement_visibility(
             db,
             tenant_id,
+            None,
+            response_id,
+            provider,
+            model,
+            Some(account_id),
+            expires_at,
+            settlement,
+            next_poll_at,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_route_with_settlement_in_tx_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+        provider: &str,
+        model: Option<&str>,
+        account_id: Uuid,
+        expires_at: DateTime<Utc>,
+        settlement: Value,
+        next_poll_at: DateTime<Utc>,
+    ) -> Result<Self, DbError> {
+        Self::upsert_route_with_settlement_visibility(
+            db,
+            tenant_id,
+            Some(user_id),
             response_id,
             provider,
             model,
@@ -470,6 +582,36 @@ impl ResponseAffinity {
         Self::upsert_route_with_settlement_visibility(
             db,
             tenant_id,
+            None,
+            response_id,
+            provider,
+            model,
+            account_id,
+            expires_at,
+            settlement,
+            next_poll_at,
+            Some(Utc::now()),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_hidden_settlement_in_tx_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: impl Into<Option<Uuid>>,
+        response_id: &str,
+        provider: &str,
+        model: Option<&str>,
+        account_id: Option<Uuid>,
+        expires_at: DateTime<Utc>,
+        settlement: Value,
+        next_poll_at: DateTime<Utc>,
+    ) -> Result<Self, DbError> {
+        Self::upsert_route_with_settlement_visibility(
+            db,
+            tenant_id,
+            user_id.into(),
             response_id,
             provider,
             model,
@@ -501,6 +643,7 @@ impl ResponseAffinity {
     async fn upsert_route_with_settlement_visibility(
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
+        user_id: Option<Uuid>,
         response_id: &str,
         provider: &str,
         model: Option<&str>,
@@ -510,29 +653,29 @@ impl ResponseAffinity {
         next_poll_at: DateTime<Utc>,
         deleted_at: Option<DateTime<Utc>>,
     ) -> Result<Self, DbError> {
+        // Late completion must retain an existing visibility decision. In
+        // particular, never clear a deletion tombstone, and never hide an
+        // existing visible response merely to append a settlement outbox.
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO response_affinities \
-             (tenant_id, response_id, provider, model, account_id, is_reservation, expires_at, \
-              settlement, settlement_next_poll_at, deleted_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, FALSE, $6, $7, $8, $9, clock_timestamp()) \
-             ON CONFLICT (tenant_id, response_id) DO UPDATE SET \
-             provider = EXCLUDED.provider, model = EXCLUDED.model, \
-             account_id = EXCLUDED.account_id, is_reservation = FALSE, \
-             settlement = EXCLUDED.settlement, \
-             settlement_next_poll_at = EXCLUDED.settlement_next_poll_at, \
-             settlement_lease_until = NULL, \
-             deleted_at = CASE \
-                 WHEN response_affinities.deleted_at IS NOT NULL \
-                 THEN response_affinities.deleted_at \
-                 WHEN EXCLUDED.deleted_at IS NULL THEN NULL \
-                 ELSE response_affinities.deleted_at END, \
-             expires_at = EXCLUDED.expires_at, \
-             updated_at = GREATEST(response_affinities.updated_at, clock_timestamp()) \
-             WHERE response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id \
-             RETURNING *",
+            r#"INSERT INTO response_affinities
+               (tenant_id, user_id, response_id, provider, model, account_id,
+                is_reservation, expires_at, settlement, settlement_next_poll_at,
+                deleted_at, updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,FALSE,$7,$8,$9,$10,clock_timestamp())
+               ON CONFLICT (tenant_id,response_id) DO UPDATE SET
+                 provider=EXCLUDED.provider, model=EXCLUDED.model,
+                 account_id=EXCLUDED.account_id, is_reservation=FALSE,
+                 settlement=EXCLUDED.settlement,
+                 settlement_next_poll_at=EXCLUDED.settlement_next_poll_at,
+                 settlement_lease_until=NULL, expires_at=EXCLUDED.expires_at,
+                 updated_at=GREATEST(response_affinities.updated_at,clock_timestamp())
+               WHERE response_affinities.user_id IS NOT DISTINCT FROM EXCLUDED.user_id
+                 AND response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id
+               RETURNING *"#,
             [
                 tenant_id.into(),
+                user_id.into(),
                 response_id.into(),
                 provider.into(),
                 model.into(),
@@ -577,9 +720,46 @@ impl ResponseAffinity {
              local_context_bytes = EXCLUDED.local_context_bytes, \
              deleted_at = NULL, expires_at = EXCLUDED.expires_at, \
              updated_at = GREATEST(response_affinities.updated_at, clock_timestamp()) \
-             WHERE response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id",
+             WHERE response_affinities.user_id IS NULL AND response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id",
             [
                 tenant_id.into(),
+                response_id.into(),
+                provider.into(),
+                model.into(),
+                account_id.into(),
+                local_response.into(),
+                local_context.into(),
+                local_context_bytes.into(),
+                expires_at.into(),
+            ],
+        );
+        if db.execute(stmt).await?.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(Self::ownership_collision(response_id))
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_local_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+        provider: &str,
+        account_id: Option<Uuid>,
+        local_response: Value,
+        local_context: Value,
+        local_context_bytes: i64,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), DbError> {
+        let model = local_response.get("model").and_then(Value::as_str);
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO response_affinities (tenant_id,user_id,response_id,provider,model,account_id,is_reservation,local_response,local_context,local_context_bytes,expires_at) VALUES ($1,$2,$3,$4,$5,$6,FALSE,$7,$8,$9,$10) ON CONFLICT (tenant_id,response_id) DO UPDATE SET user_id=EXCLUDED.user_id,provider=EXCLUDED.provider,model=EXCLUDED.model,account_id=EXCLUDED.account_id,is_reservation=FALSE,local_response=EXCLUDED.local_response,local_context=EXCLUDED.local_context,local_context_bytes=EXCLUDED.local_context_bytes,deleted_at=NULL,expires_at=EXCLUDED.expires_at,updated_at=GREATEST(response_affinities.updated_at,clock_timestamp()) WHERE response_affinities.deleted_at IS NULL AND response_affinities.user_id=EXCLUDED.user_id AND response_affinities.account_id IS NOT DISTINCT FROM EXCLUDED.account_id",
+            [
+                tenant_id.into(),
+                user_id.into(),
                 response_id.into(),
                 provider.into(),
                 model.into(),
@@ -671,6 +851,68 @@ impl ResponseAffinity {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub async fn upsert_local_with_quota_for_user(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+        provider: &str,
+        account_id: Option<Uuid>,
+        local_response: Value,
+        local_context: Value,
+        local_context_bytes: i64,
+        expires_at: DateTime<Utc>,
+        max_entries: u64,
+        max_bytes: u64,
+    ) -> Result<(), DbError> {
+        let txn = db.begin().await?;
+        let tenant = txn
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT id FROM tenants WHERE id=$1 FOR UPDATE",
+                [tenant_id.into()],
+            ))
+            .await?;
+        if tenant.is_none() {
+            txn.rollback().await?;
+            return Err(DbError::not_found("Tenant", tenant_id.to_string()));
+        }
+        let usage = LocalWarmupStorageUsage::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::BIGINT AS entry_count,COALESCE(SUM(local_context_bytes),0)::BIGINT AS total_bytes FROM response_affinities WHERE tenant_id=$1 AND response_id<>$2 AND NOT is_reservation AND deleted_at IS NULL AND expires_at>NOW() AND local_response IS NOT NULL",
+            [tenant_id.into(),response_id.into()],
+        )).one(&txn).await?.ok_or_else(|| DbError::Other("local warmup usage query returned no row".to_string()))?;
+        if !local_warmup_fits_quota(
+            usage.entry_count,
+            usage.total_bytes,
+            local_context_bytes,
+            max_entries,
+            max_bytes,
+        ) {
+            txn.rollback().await?;
+            return Err(DbError::ResourceLimitExceeded {
+                resource: "stored Responses warmups".to_string(),
+                limit: format!("{max_entries} entries or {max_bytes} bytes per tenant"),
+            });
+        }
+        Self::upsert_local_for_user(
+            &txn,
+            tenant_id,
+            user_id,
+            response_id,
+            provider,
+            account_id,
+            local_response,
+            local_context,
+            local_context_bytes,
+            expires_at,
+        )
+        .await?;
+        txn.commit().await?;
+        Ok(())
+    }
+
     fn ownership_collision(response_id: &str) -> DbError {
         DbError::DuplicateKey {
             entity: "response affinity ownership".to_string(),
@@ -697,7 +939,8 @@ impl ResponseAffinity {
              VALUES ($1, $2, $3, $4, TRUE, $5) \
              ON CONFLICT (tenant_id, response_id) DO UPDATE SET \
              provider = EXCLUDED.provider, account_id = EXCLUDED.account_id, \
-             is_reservation = TRUE, expires_at = EXCLUDED.expires_at, updated_at = NOW()",
+             is_reservation = TRUE, expires_at = EXCLUDED.expires_at, updated_at = NOW() \
+             WHERE response_affinities.user_id IS NULL",
             [
                 tenant_id.into(),
                 reservation_id.into(),
@@ -706,8 +949,39 @@ impl ResponseAffinity {
                 expires_at.into(),
             ],
         );
-        db.execute(stmt).await?;
-        Ok(())
+        if db.execute(stmt).await?.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(Self::ownership_collision(reservation_id))
+        }
+    }
+
+    pub async fn reserve_account_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        reservation_id: &str,
+        provider: &str,
+        account_id: Uuid,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO response_affinities (tenant_id,user_id,response_id,provider,account_id,is_reservation,expires_at) VALUES ($1,$2,$3,$4,$5,TRUE,$6) ON CONFLICT (tenant_id,response_id) DO UPDATE SET user_id=EXCLUDED.user_id,provider=EXCLUDED.provider,account_id=EXCLUDED.account_id,is_reservation=TRUE,expires_at=EXCLUDED.expires_at,updated_at=NOW() WHERE response_affinities.user_id=EXCLUDED.user_id",
+            [
+                tenant_id.into(),
+                user_id.into(),
+                reservation_id.into(),
+                provider.into(),
+                account_id.into(),
+                expires_at.into(),
+            ],
+        );
+        if db.execute(stmt).await?.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(Self::ownership_collision(reservation_id))
+        }
     }
 
     pub async fn delete_reservation(
@@ -718,8 +992,22 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 AND is_reservation",
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND is_reservation",
             [tenant_id.into(), reservation_id.into()],
+        );
+        Ok(db.execute(stmt).await?.rows_affected())
+    }
+
+    pub async fn delete_reservation_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        reservation_id: &str,
+    ) -> Result<u64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND is_reservation",
+            [tenant_id.into(), user_id.into(), reservation_id.into()],
         );
         Ok(db.execute(stmt).await?.rows_affected())
     }
@@ -734,11 +1022,20 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT * FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                AND deleted_at IS NULL AND expires_at > NOW() FOR KEY SHARE",
             [tenant_id.into(), response_id.into()],
         );
         Ok(Self::find_by_statement(stmt).one(db).await?)
+    }
+
+    pub async fn find_active_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<Self>, DbError> {
+        Self::find_active_snapshot_for_user(db, tenant_id, user_id, response_id).await
     }
 
     /// Load only the local response document. Retrieve/delete/cancel do not
@@ -763,10 +1060,26 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT account_id, local_response FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                AND deleted_at IS NULL AND expires_at > NOW() \
                AND local_response IS NOT NULL FOR KEY SHARE",
             [tenant_id.into(), response_id.into()],
+        );
+        Ok(LocalResponseDocument::find_by_statement(stmt)
+            .one(db)
+            .await?)
+    }
+
+    pub async fn find_active_local_owned_response_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<LocalResponseDocument>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT account_id,local_response FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND deleted_at IS NULL AND expires_at>NOW() AND local_response IS NOT NULL FOR KEY SHARE",
+            [tenant_id.into(), user_id.into(), response_id.into()],
         );
         Ok(LocalResponseDocument::find_by_statement(stmt)
             .one(db)
@@ -783,10 +1096,24 @@ impl ResponseAffinity {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT account_id, model, local_context FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                AND deleted_at IS NULL AND expires_at > NOW() \
                AND local_response IS NOT NULL AND local_context IS NOT NULL FOR KEY SHARE",
             [tenant_id.into(), response_id.into()],
+        );
+        Ok(LocalResponseState::find_by_statement(stmt).one(db).await?)
+    }
+
+    pub async fn find_active_local_state_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<LocalResponseState>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT account_id,model,local_context FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND deleted_at IS NULL AND expires_at>NOW() AND local_response IS NOT NULL AND local_context IS NOT NULL FOR KEY SHARE",
+            [tenant_id.into(), user_id.into(), response_id.into()],
         );
         Ok(LocalResponseState::find_by_statement(stmt).one(db).await?)
     }
@@ -808,11 +1135,32 @@ impl ResponseAffinity {
             DbBackend::Postgres,
             "SELECT local_context_bytes AS context_bytes \
              FROM response_affinities \
-             WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+             WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                AND deleted_at IS NULL AND expires_at > NOW() \
                AND local_response IS NOT NULL AND local_context IS NOT NULL \
              FOR KEY SHARE",
             [tenant_id.into(), response_id.into()],
+        );
+        Ok(LocalContextSize::find_by_statement(stmt)
+            .one(db)
+            .await?
+            .map(|row| u64::try_from(row.context_bytes).unwrap_or(u64::MAX)))
+    }
+
+    pub async fn find_active_local_context_size_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<u64>, DbError> {
+        #[derive(FromQueryResult)]
+        struct LocalContextSize {
+            context_bytes: i64,
+        }
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT local_context_bytes AS context_bytes FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND deleted_at IS NULL AND expires_at>NOW() AND local_response IS NOT NULL AND local_context IS NOT NULL FOR KEY SHARE",
+            [tenant_id.into(), user_id.into(), response_id.into()],
         );
         Ok(LocalContextSize::find_by_statement(stmt)
             .one(db)
@@ -833,14 +1181,14 @@ impl ResponseAffinity {
             DbBackend::Postgres,
             "WITH deleted_local AS ( \
                  DELETE FROM response_affinities \
-                 WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+                 WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                    AND account_id IS NULL RETURNING 1 \
              ), tombstoned_owned AS ( \
                  UPDATE response_affinities \
                  SET deleted_at = COALESCE(deleted_at, NOW()), local_response = NULL, \
                      local_context = NULL, local_context_bytes = NULL, \
                      updated_at = GREATEST(updated_at, clock_timestamp()) \
-                 WHERE tenant_id = $1 AND response_id = $2 AND NOT is_reservation \
+                 WHERE tenant_id = $1 AND user_id IS NULL AND response_id = $2 AND NOT is_reservation \
                    AND account_id IS NOT NULL RETURNING 1 \
              ) SELECT (SELECT COUNT(*) FROM deleted_local) + \
                       (SELECT COUNT(*) FROM tombstoned_owned) AS affected",
@@ -854,6 +1202,26 @@ impl ResponseAffinity {
                 DbError::Other("response deletion returned no result".to_string())
             })?;
         let affected: i64 = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
+        u64::try_from(affected)
+            .map_err(|_| DbError::Other("response deletion returned an invalid count".to_string()))
+    }
+
+    pub async fn delete_route_preserving_settlement_for_user(
+        db: &DbRouter,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<u64, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "WITH deleted_local AS (DELETE FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND account_id IS NULL RETURNING 1), tombstoned_owned AS (UPDATE response_affinities SET deleted_at=COALESCE(deleted_at,NOW()),local_response=NULL,local_context=NULL,local_context_bytes=NULL,updated_at=GREATEST(updated_at,clock_timestamp()) WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND account_id IS NOT NULL RETURNING 1) SELECT (SELECT COUNT(*) FROM deleted_local)+(SELECT COUNT(*) FROM tombstoned_owned) AS affected",
+            [tenant_id.into(), user_id.into(), response_id.into()],
+        );
+        let row =
+            db.write_conn().query_one(stmt).await?.ok_or_else(|| {
+                DbError::Other("response deletion returned no result".to_string())
+            })?;
+        let affected: i64 = row.try_get_by_index(0).map_err(DbError::DatabaseError)?;
         u64::try_from(affected)
             .map_err(|_| DbError::Other("response deletion returned an invalid count".to_string()))
     }

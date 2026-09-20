@@ -1259,9 +1259,10 @@ async fn exclusive_grant_blocks_existing_response_resources_and_continuations() 
         StatusCode::OK,
     );
     let response_id = format!("resp_{}", Uuid::new_v4().simple());
-    keycompute_db::ResponseAffinity::upsert_route(
+    keycompute_db::ResponseAffinity::upsert_route_in_tx_for_user(
         &f.db,
         f.user.tenant_id,
+        f.user.id,
         &response_id,
         "openai",
         Some(&f.models[0]),
@@ -1610,7 +1611,7 @@ async fn account_owned_local_warmups_obey_revocation_but_root_warmups_survive() 
     let owned = format!("resp_local_owned_{}", Uuid::new_v4().simple());
     let root = format!("resp_local_root_{}", Uuid::new_v4().simple());
     for (id, account_id) in [(&owned, Some(f.accounts[0].id)), (&root, None)] {
-        keycompute_db::ResponseAffinity::upsert_local(&f.db,f.user.tenant_id,id,"openai",account_id,
+        keycompute_db::ResponseAffinity::upsert_local_for_user(&f.db,f.user.tenant_id,f.user.id,id,"openai",account_id,
             json!({"id":id,"object":"response","model":f.models[0],"status":"completed","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}),
             json!({"upstream_previous_response_id":account_id.map(|_|"resp_parent"),"items":[{"id":"msg_root","type":"message","role":"user","content":[{"type":"input_text","text":"warmup"}]}]}),
             512,Utc::now()+ChronoDuration::hours(1)).await.unwrap();
@@ -1653,9 +1654,10 @@ async fn account_owned_local_warmups_obey_revocation_but_root_warmups_survive() 
         StatusCode::NOT_FOUND,
     );
     assert!(
-        keycompute_db::ResponseAffinity::find_active_local_response(
+        keycompute_db::ResponseAffinity::find_active_local_owned_response_for_user(
             &f.db,
             f.user.tenant_id,
+            f.user.id,
             &owned
         )
         .await

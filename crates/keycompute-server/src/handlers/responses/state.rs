@@ -251,6 +251,7 @@ pub(super) enum ResponsesResourceKind {
 
 pub(super) struct ResponsesAffinityRoute {
     pub(super) tenant_id: uuid::Uuid,
+    pub(super) user_id: uuid::Uuid,
     pub(super) provider: String,
     pub(super) model: Option<String>,
     pub(super) account_id: uuid::Uuid,
@@ -274,6 +275,7 @@ pub(super) trait ResponsesReservationCleanup: Send + Sync {
     async fn delete(
         &self,
         tenant_id: uuid::Uuid,
+        user_id: uuid::Uuid,
         reservation_id: &str,
     ) -> std::result::Result<(), String>;
 }
@@ -287,18 +289,25 @@ impl ResponsesReservationCleanup for DatabaseResponsesReservationCleanup {
     async fn delete(
         &self,
         tenant_id: uuid::Uuid,
+        user_id: uuid::Uuid,
         reservation_id: &str,
     ) -> std::result::Result<(), String> {
-        ResponseAffinity::delete_reservation(self.pool.as_ref(), tenant_id, reservation_id)
-            .await
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+        ResponseAffinity::delete_reservation_for_user(
+            self.pool.as_ref(),
+            tenant_id,
+            user_id,
+            reservation_id,
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
     }
 }
 
 #[derive(Default)]
 pub(super) struct ResponsesExecutionReservations {
     pub(super) tenant_id: uuid::Uuid,
+    pub(super) user_id: uuid::Uuid,
     pub(super) reservation_ids: Vec<String>,
     pub(super) cleanup: Option<Arc<dyn ResponsesReservationCleanup>>,
 }
@@ -313,6 +322,7 @@ impl Drop for ResponsesExecutionReservations {
             return;
         }
         let tenant_id = self.tenant_id;
+        let user_id = self.user_id;
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::warn!(
                 count = reservation_ids.len(),
@@ -323,7 +333,7 @@ impl Drop for ResponsesExecutionReservations {
         };
         runtime.spawn(async move {
             for reservation_id in reservation_ids {
-                if let Err(error) = cleanup.delete(tenant_id, &reservation_id).await {
+                if let Err(error) = cleanup.delete(tenant_id, user_id, &reservation_id).await {
                     tracing::warn!(
                         %error,
                         %reservation_id,
@@ -339,6 +349,7 @@ impl ResponsesExecutionReservations {
     pub(super) async fn acquire(
         state: &AppState,
         tenant_id: uuid::Uuid,
+        user_id: uuid::Uuid,
         request_id: uuid::Uuid,
         plan: &mut ExecutionPlan,
         constraint: Option<&ResponsesReservationConstraint>,
@@ -365,6 +376,7 @@ impl ResponsesExecutionReservations {
             + chrono::Duration::from_std(reservation_ttl).unwrap_or(chrono::Duration::hours(2));
         let mut reservations = Self {
             tenant_id,
+            user_id,
             reservation_ids: Vec::with_capacity(targets.len()),
             cleanup: Some(Arc::new(DatabaseResponsesReservationCleanup {
                 pool: Arc::clone(&pool),
@@ -381,6 +393,7 @@ impl ResponsesExecutionReservations {
             let snapshot = match reserve_responses_execution_target(
                 pool.as_ref(),
                 tenant_id,
+                user_id,
                 &reservation_id,
                 &provider,
                 account_id,
@@ -417,7 +430,10 @@ impl ResponsesExecutionReservations {
         // If this task is cancelled mid-await, Drop will retry every remaining
         // reservation on a detached cleanup task.
         while let Some(reservation_id) = self.reservation_ids.last().cloned() {
-            if let Err(error) = cleanup.delete(self.tenant_id, &reservation_id).await {
+            if let Err(error) = cleanup
+                .delete(self.tenant_id, self.user_id, &reservation_id)
+                .await
+            {
                 tracing::warn!(%error, %reservation_id, "failed to release Responses account reservation");
             }
             self.reservation_ids.pop();
@@ -432,9 +448,11 @@ impl ResponsesExecutionReservations {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn reserve_responses_execution_target(
     pool: &keycompute_db::DbRouter,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     reservation_id: &str,
     expected_provider: &str,
     account_id: uuid::Uuid,
@@ -503,14 +521,16 @@ pub(super) async fn reserve_responses_execution_target(
         }
     };
     if let Err(error) =
-        validate_responses_reservation_constraint(&txn, tenant_id, &snapshot, constraint).await
+        validate_responses_reservation_constraint(&txn, tenant_id, user_id, &snapshot, constraint)
+            .await
     {
         let _ = txn.rollback().await;
         return Err(error);
     }
-    if let Err(error) = ResponseAffinity::reserve_account(
+    if let Err(error) = ResponseAffinity::reserve_account_for_user(
         &txn,
         tenant_id,
+        user_id,
         reservation_id,
         expected_provider,
         account_id,
@@ -533,22 +553,28 @@ pub(super) async fn reserve_responses_execution_target(
 pub(super) async fn validate_responses_reservation_constraint(
     txn: &sea_orm::DatabaseTransaction,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
     snapshot: &ResolvedResponsesAccount,
     constraint: Option<&ResponsesReservationConstraint>,
 ) -> Result<()> {
     match constraint {
         None => Ok(()),
         Some(ResponsesReservationConstraint::Affinity { resource_id }) => {
-            let affinity = ResponseAffinity::find_active_for_key_share(txn, tenant_id, resource_id)
-                .await
-                .map_err(|error| {
-                    responses_state_unavailable("revalidate a Responses resource route", error)
-                })?
-                .ok_or_else(|| {
-                    ApiError::Conflict(
-                        "The Responses resource route changed before execution".to_string(),
-                    )
-                })?;
+            let affinity = ResponseAffinity::find_active_for_key_share_for_user(
+                txn,
+                tenant_id,
+                user_id,
+                resource_id,
+            )
+            .await
+            .map_err(|error| {
+                responses_state_unavailable("revalidate a Responses resource route", error)
+            })?
+            .ok_or_else(|| {
+                ApiError::Conflict(
+                    "The Responses resource route changed before execution".to_string(),
+                )
+            })?;
             if affinity.account_id != Some(snapshot.account_id)
                 || !affinity.provider.eq_ignore_ascii_case(&snapshot.provider)
             {
@@ -558,19 +584,6 @@ pub(super) async fn validate_responses_reservation_constraint(
             }
             Ok(())
         }
-        Some(ResponsesReservationConstraint::ConnectionSnapshot {
-            account_id,
-            endpoint,
-            api_key,
-        }) if *account_id == snapshot.account_id
-            && endpoint == &snapshot.endpoint
-            && api_key == &snapshot.api_key =>
-        {
-            Ok(())
-        }
-        Some(ResponsesReservationConstraint::ConnectionSnapshot { .. }) => Err(ApiError::Conflict(
-            "The discovered Responses connection changed before execution".to_string(),
-        )),
     }
 }
 
@@ -682,15 +695,20 @@ pub(super) fn validate_reserved_idempotency_connection(
     Ok(())
 }
 
-pub(super) fn affinity_storage_key(tenant_id: uuid::Uuid, response_id: &str) -> String {
-    format!("{tenant_id}:{response_id}")
+pub(super) fn affinity_storage_key_for_user(
+    tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    response_id: &str,
+) -> String {
+    format!("{tenant_id}:{user_id}:{response_id}")
 }
 
-pub(super) fn affinity_cache_key(tenant_id: uuid::Uuid, response_id: &str) -> String {
-    format!(
-        "responses:affinity:{}",
-        affinity_storage_key(tenant_id, response_id)
-    )
+pub(super) fn affinity_cache_key_for_user(
+    tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    response_id: &str,
+) -> String {
+    format!("responses:affinity:{tenant_id}:{user_id}:{response_id}")
 }
 
 pub(super) const RESPONSES_STATE_UNAVAILABLE_MESSAGE: &str =
@@ -751,7 +769,7 @@ pub(super) async fn cache_response_affinity_best_effort(
 ) {
     if !cache_response_affinity_locally(
         state,
-        affinity_storage_key(affinity.tenant_id, response_id),
+        affinity_storage_key_for_user(affinity.tenant_id, affinity.user_id, response_id),
         affinity.clone(),
     )
     .await
@@ -761,7 +779,7 @@ pub(super) async fn cache_response_affinity_best_effort(
     if let Err(error) = state
         .runtime_state
         .set(
-            &affinity_cache_key(affinity.tenant_id, response_id),
+            &affinity_cache_key_for_user(affinity.tenant_id, affinity.user_id, response_id),
             &affinity,
             RESPONSES_AFFINITY_TTL,
         )
@@ -785,6 +803,7 @@ pub(super) async fn save_response_affinity(
     }
     let affinity = ResponsesAffinity {
         tenant_id: route.tenant_id,
+        user_id: route.user_id,
         provider: route.provider,
         model: route.model,
         account_id: route.account_id,
@@ -820,9 +839,10 @@ pub(super) async fn save_response_affinity(
                         "lock the Responses tenant before persisting settlement",
                     )
                 })?;
-            ResponseAffinity::upsert_route_with_settlement_in_tx(
+            ResponseAffinity::upsert_route_with_settlement_in_tx_for_user(
                 &txn,
                 affinity.tenant_id,
+                affinity.user_id,
                 response_id,
                 &affinity.provider,
                 affinity.model.as_deref(),
@@ -866,9 +886,10 @@ pub(super) async fn save_response_affinity(
                         "lock the Responses tenant before persisting routing",
                     )
                 })?;
-            ResponseAffinity::upsert_route_in_tx(
+            ResponseAffinity::upsert_route_in_tx_for_user(
                 &txn,
                 affinity.tenant_id,
+                affinity.user_id,
                 response_id,
                 &affinity.provider,
                 affinity.model.as_deref(),
@@ -937,9 +958,10 @@ pub(super) async fn save_response_affinity_if_stored(
                     "lock the Responses tenant before persisting background settlement",
                 )
             })?;
-        ResponseAffinity::upsert_hidden_settlement_in_tx(
+        ResponseAffinity::upsert_hidden_settlement_in_tx_for_user(
             &txn,
             route.tenant_id,
+            Some(route.user_id),
             response_id,
             &route.provider,
             route.model.as_deref(),
@@ -1035,6 +1057,7 @@ pub(super) async fn persist_terminal_responses_outbox_with_tpm_timing(
             &target_id,
             ResponsesAffinityRoute {
                 tenant_id: ctx.tenant_id,
+                user_id: ctx.user_id,
                 provider: provider.clone(),
                 model: model.clone(),
                 account_id,
@@ -1117,9 +1140,10 @@ pub(super) async fn persist_immediate_terminal_settlement_outbox_inner(
             return false;
         }
     };
-    let result = ResponseAffinity::upsert_hidden_settlement_in_tx(
+    let result = ResponseAffinity::upsert_hidden_settlement_in_tx_for_user(
         &txn,
         tenant.id,
+        Some(ctx.user_id),
         &response_id,
         &provider,
         effective_response_affinity_model(None, ctx).as_deref(),
@@ -1212,6 +1236,7 @@ pub(super) async fn response_affinity(
     state: &AppState,
     response_id: &str,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
 ) -> Result<ResponsesAffinity> {
     if !valid_affinity_resource_id(response_id) {
         return Err(ApiError::NotFound(format!(
@@ -1219,13 +1244,12 @@ pub(super) async fn response_affinity(
         )));
     }
     let now = chrono::Utc::now().timestamp();
-    let storage_key = affinity_storage_key(tenant_id, response_id);
     let affinity = if let Some(pool) = state.pool.as_deref() {
         // The database is the ownership source of truth. Local/Redis entries
         // may outlive an administrative endpoint or credential replacement on
         // another replica; consulting them first could retarget an old opaque
         // resource ID to the account's new upstream connection.
-        ResponseAffinity::find_active(pool, tenant_id, response_id)
+        ResponseAffinity::find_active_for_user(pool.write_conn(), tenant_id, user_id, response_id)
             .await
             .map_err(|error| {
                 ApiError::Internal(format!(
@@ -1233,13 +1257,18 @@ pub(super) async fn response_affinity(
                 ))
             })?
             .and_then(|model| {
-                model.account_id.map(|account_id| ResponsesAffinity {
-                    tenant_id: model.tenant_id,
-                    provider: model.provider,
-                    model: model.model,
-                    account_id,
-                    expires_at_unix: model.expires_at.timestamp(),
-                })
+                (model.user_id == Some(user_id))
+                    .then(|| {
+                        model.account_id.map(|account_id| ResponsesAffinity {
+                            tenant_id: model.tenant_id,
+                            user_id,
+                            provider: model.provider,
+                            model: model.model,
+                            account_id,
+                            expires_at_unix: model.expires_at.timestamp(),
+                        })
+                    })
+                    .flatten()
             })
             .ok_or_else(|| {
                 ApiError::NotFound(format!("Responses resource not found: {response_id}"))
@@ -1249,28 +1278,44 @@ pub(super) async fn response_affinity(
             .responses_affinity
             .read()
             .await
-            .get(&storage_key)
+            .get(&affinity_storage_key_for_user(
+                tenant_id,
+                user_id,
+                response_id,
+            ))
             .cloned()
             && affinity.expires_at_unix > now
             && affinity.tenant_id == tenant_id
+            && affinity.user_id == user_id
         {
             affinity
         } else {
             state
                 .runtime_state
-                .get::<ResponsesAffinity>(&affinity_cache_key(tenant_id, response_id))
+                .get::<ResponsesAffinity>(&affinity_cache_key_for_user(
+                    tenant_id,
+                    user_id,
+                    response_id,
+                ))
                 .await
                 .map_err(|error| {
                     ApiError::Internal(format!("Responses affinity lookup failed: {error}"))
                 })?
                 .filter(|affinity| affinity.expires_at_unix > now)
                 .filter(|affinity| affinity.tenant_id == tenant_id)
+                .filter(|affinity| affinity.user_id == user_id)
                 .ok_or_else(|| {
                     ApiError::NotFound(format!("Responses resource not found: {response_id}"))
                 })?
         }
     };
-    if !cache_response_affinity_locally(state, storage_key, affinity.clone()).await {
+    if !cache_response_affinity_locally(
+        state,
+        affinity_storage_key_for_user(tenant_id, user_id, response_id),
+        affinity.clone(),
+    )
+    .await
+    {
         tracing::warn!("Responses affinity local map is full; skipping local cache entry");
     }
     Ok(affinity)
@@ -1313,13 +1358,19 @@ pub(super) async fn delete_response_affinity(
     state: &AppState,
     response_id: &str,
     tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
 ) -> Result<()> {
     let database_authoritative = if let Some(pool) = state.pool.as_deref() {
-        ResponseAffinity::delete_route_preserving_settlement(pool, tenant_id, response_id)
-            .await
-            .map_err(|error| {
-                responses_state_unavailable("delete Responses affinity from database", error)
-            })?;
+        ResponseAffinity::delete_route_preserving_settlement_for_user(
+            pool,
+            tenant_id,
+            user_id,
+            response_id,
+        )
+        .await
+        .map_err(|error| {
+            responses_state_unavailable("delete Responses affinity from database", error)
+        })?;
         true
     } else {
         false
@@ -1328,10 +1379,18 @@ pub(super) async fn delete_response_affinity(
         .responses_affinity
         .write()
         .await
-        .remove(&affinity_storage_key(tenant_id, response_id));
+        .remove(&affinity_storage_key_for_user(
+            tenant_id,
+            user_id,
+            response_id,
+        ));
     if let Err(error) = state
         .runtime_state
-        .delete(&affinity_cache_key(tenant_id, response_id))
+        .delete(&affinity_cache_key_for_user(
+            tenant_id,
+            user_id,
+            response_id,
+        ))
         .await
     {
         if !database_authoritative {

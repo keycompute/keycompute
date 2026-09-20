@@ -417,7 +417,11 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/v1/me/tips/history", get(get_my_tips_history))
         .route("/api/v1/me/tips/withdraw", post(create_tip_withdrawal))
         .route("/api/v1/me/tips/withdrawals", get(get_my_withdrawals))
-        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::console::mutation_middleware,
+        ));
 
     // ==================== 5. 管理功能 API（需要 Admin 权限） ====================
     // 用户管理（Admin 可以管理所有用户，普通用户只能看自己）
@@ -636,7 +640,7 @@ pub fn create_router(state: AppState) -> Router {
 
     // ==================== 6. 定价和账单 API ====================
     let billing_routes = Router::new()
-        // 账单记录（用户看自己的，Admin 看所有）
+        // Personal billing: every console role sees only its own current-tenant records.
         .route("/api/v1/billing/records", get(list_billing_records))
         .route("/api/v1/billing/stats", get(get_billing_stats))
         .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
@@ -678,7 +682,11 @@ pub fn create_router(state: AppState) -> Router {
         )
         // 获取我的余额
         .route("/api/v1/payments/balance", get(get_my_balance))
-        .layer(from_fn_with_state(state.clone(), rate_limit_middleware));
+        .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::console::mutation_middleware,
+        ));
 
     // 支付宝异步通知（不需要认证）
     let payment_notify_routes = Router::new()

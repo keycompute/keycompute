@@ -188,6 +188,39 @@ impl FromRequestParts<AppState> for AuthExtractor {
     }
 }
 
+/// Console-only identity. A validated inference API key is not a console session.
+/// Kept separate from AuthExtractor so self-service handlers remain protected
+/// even when mounted without the application's outer console middleware.
+#[derive(Debug, Clone)]
+pub struct ConsoleAuth(AuthExtractor);
+
+impl std::ops::Deref for ConsoleAuth {
+    type Target = AuthExtractor;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TryFrom<AuthExtractor> for ConsoleAuth {
+    type Error = ApiError;
+
+    fn try_from(auth: AuthExtractor) -> Result<Self> {
+        if !auth.has_permission(&Permission::AccessConsole) {
+            return Err(ApiError::Forbidden("Console session required".to_string()));
+        }
+        Ok(Self(auth))
+    }
+}
+
+impl FromRequestParts<AppState> for ConsoleAuth {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
+        Self::try_from(AuthExtractor::from_request_parts(parts, state).await?)
+    }
+}
+
 /// 请求 ID 提取器
 #[derive(Debug, Clone)]
 pub struct RequestId(pub Uuid);
@@ -514,5 +547,75 @@ mod tests {
         let jwt_admin = auth.with_permissions(vec![Permission::SystemAdmin]);
         assert!(jwt_admin.has_permission(&Permission::SystemAdmin));
         assert!(jwt_admin.is_admin());
+    }
+    #[test]
+    fn credential_authority_is_identical_before_and_after_extraction() {
+        use keycompute_auth::{AuthType, build_permissions};
+        for role in ["system", "admin", "user", "unknown"] {
+            for kind in [AuthType::Jwt, AuthType::ApiKey] {
+                let ctx = AuthContext::new(
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    if kind == AuthType::Jwt {
+                        Uuid::nil()
+                    } else {
+                        Uuid::new_v4()
+                    },
+                    role,
+                )
+                .with_permissions(build_permissions(kind, role));
+                let admin = ctx.is_admin();
+                let console = ctx.has_permission(&Permission::AccessConsole);
+                let extracted = AuthExtractor::from_auth_context(ctx);
+                assert_eq!(admin, extracted.is_admin(), "{kind:?}/{role}");
+                assert_eq!(ConsoleAuth::try_from(extracted).is_ok(), console);
+                assert_eq!(
+                    admin,
+                    kind == AuthType::Jwt && matches!(role, "admin" | "system")
+                );
+                assert_eq!(
+                    console,
+                    kind == AuthType::Jwt && matches!(role, "user" | "admin" | "system")
+                );
+            }
+        }
+        let unprivileged = AuthContext::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::nil(), "system");
+        assert!(
+            !unprivileged.is_admin(),
+            "role metadata is not a permission grant"
+        );
+        assert!(!AuthExtractor::from_auth_context(unprivileged).is_admin());
+    }
+
+    #[tokio::test]
+    async fn console_extractor_protects_handlers_even_without_outer_middleware() {
+        use axum::{
+            Router,
+            body::Body,
+            http::{Request, StatusCode},
+            routing::get,
+        };
+        use tower::ServiceExt;
+        let state = AppState::default();
+        let app = Router::new()
+            .route(
+                "/standalone-self-service",
+                get(crate::handlers::user::get_current_user),
+            )
+            .with_state(state);
+        for role in ["user", "admin", "system"] {
+            let mut request = Request::builder()
+                .uri("/standalone-self-service")
+                .body(Body::empty())
+                .unwrap();
+            request.extensions_mut().insert(
+                AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), role)
+                    .with_permissions(vec![Permission::UseApi]),
+            );
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::FORBIDDEN
+            );
+        }
     }
 }

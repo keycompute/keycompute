@@ -440,7 +440,29 @@ impl Fixture {
             .try_get("", "n")
             .unwrap()
     }
+    async fn wait_for_settlement(&self) {
+        // HTTP error delivery/EOF is deliberately earlier than detached
+        // financial finalization. Never delete fixture rows while a worker
+        // can still append a balance transaction referencing its ledger.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let requests = self.state.generation_admission.requests.status().active;
+                let accounts = self.state.generation_admission.accounts.status().active;
+                let row = self.db.query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT (SELECT COUNT(*) FROM balance_reservations WHERE user_id=$1 AND status='active') + (SELECT COUNT(*) FROM response_affinities WHERE tenant_id=$2 AND (settlement IS NOT NULL OR is_reservation)) AS pending",
+                    [self.user.id.into(), self.user.tenant_id.into()],
+                )).await.unwrap().unwrap();
+                let pending: i64 = row.try_get("", "pending").unwrap();
+                if requests == 0 && accounts == 0 && pending == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("fixture cleanup must wait for completed settlement and released admission");
+    }
     async fn finish(&mut self) {
+        self.wait_for_settlement().await;
         self.db
             .execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
@@ -1033,6 +1055,17 @@ async fn node_stream_generic_failure_after_head_closes_before_deadline() {
     );
     assert_eq!(f.tasks().await, 1);
     assert!(f.upstream.calls.lock().unwrap().is_empty());
+    f.wait_for_settlement().await;
+    let ledger = keycompute_db::models::usage_log::UsageLog::find_by_user(&f.db, f.user.id, 2, 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        ledger.len(),
+        1,
+        "observed failed streams must settle exactly once"
+    );
+    assert!(ledger[0].output_tokens > 0);
+    assert_eq!(ledger[0].status, "error");
     f.finish().await;
 }
 

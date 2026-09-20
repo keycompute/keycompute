@@ -22,6 +22,8 @@ pub enum AuthType {
 /// 权限枚举
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Permission {
+    /// Access authenticated console APIs. Never granted to inference API keys.
+    AccessConsole,
     /// 使用 API
     UseApi,
     /// 查看用量
@@ -54,6 +56,7 @@ impl Permission {
     /// 获取权限字符串表示
     pub fn as_str(&self) -> &'static str {
         match self {
+            Permission::AccessConsole => "console:access",
             Permission::UseApi => "api:use",
             Permission::ViewUsage => "usage:view",
             Permission::ManageApiKeys => "api_keys:manage",
@@ -73,6 +76,7 @@ impl Permission {
     /// 从字符串解析权限
     pub fn parse(s: &str) -> Option<Self> {
         match s {
+            "console:access" => Some(Permission::AccessConsole),
             "api:use" => Some(Permission::UseApi),
             "usage:view" => Some(Permission::ViewUsage),
             "api_keys:manage" => Some(Permission::ManageApiKeys),
@@ -181,17 +185,19 @@ fn build_jwt_permissions(role: &str) -> Vec<Permission> {
         }
         // 普通用户：可查看用量并管理自己的账单与支付订单
         "user" => vec![
+            Permission::AccessConsole,
             Permission::UseApi,
             Permission::ViewUsage,
             Permission::ManageOwnBilling,
         ],
-        // 未知角色：最小权限
-        _ => vec![Permission::UseApi],
+        // Unknown JWT roles are denied rather than granted inference access.
+        _ => vec![],
     }
 }
 
 fn build_admin_permissions() -> Vec<Permission> {
     vec![
+        Permission::AccessConsole,
         Permission::UseApi,
         Permission::ViewUsage,
         Permission::ManageApiKeys,
@@ -211,34 +217,16 @@ fn build_admin_permissions() -> Vec<Permission> {
 /// 注意：此模块已废弃，请使用 `build_permissions(AuthType::Jwt, role)` 代替
 #[deprecated(note = "请使用 build_permissions(AuthType::Jwt, role) 代替")]
 pub mod roles {
-    use super::Permission;
+    use super::{AuthType, Permission, build_permissions};
 
-    /// 普通用户权限
+    /// Ordinary console user; delegates to the canonical role mapping.
     pub fn user() -> Vec<Permission> {
-        vec![
-            Permission::UseApi,
-            Permission::ViewUsage,
-            Permission::ManageOwnBilling,
-        ]
+        build_permissions(AuthType::Jwt, "user")
     }
 
-    /// 系统管理员权限
+    /// Highest platform role; retained only as a compatibility helper.
     pub fn system_admin() -> Vec<Permission> {
-        vec![
-            Permission::UseApi,
-            Permission::ViewUsage,
-            Permission::ManageApiKeys,
-            Permission::ManageUsers,
-            Permission::ManageTenant,
-            Permission::ViewBilling,
-            Permission::ManageOwnBilling,
-            Permission::ManageBilling,
-            Permission::ManagePricing,
-            Permission::ManageProviders,
-            Permission::ManageSystemSettings,
-            Permission::ManageProtectedUsers,
-            Permission::SystemAdmin,
-        ]
+        build_permissions(AuthType::Jwt, "system")
     }
 }
 
@@ -381,9 +369,9 @@ mod tests {
 
     #[test]
     fn test_build_permissions_jwt_unknown_role() {
-        // JWT 认证 - 未知角色仅有 UseApi
+        // Unknown JWT roles fail closed.
         let perms = build_permissions(AuthType::Jwt, "unknown");
-        assert_eq!(perms, vec![Permission::UseApi]);
+        assert!(perms.is_empty());
     }
 
     #[test]
@@ -391,5 +379,23 @@ mod tests {
         assert_eq!(AuthType::ApiKey, AuthType::ApiKey);
         assert_eq!(AuthType::Jwt, AuthType::Jwt);
         assert_ne!(AuthType::ApiKey, AuthType::Jwt);
+    }
+    #[test]
+    fn console_access_is_granted_only_to_known_jwt_roles() {
+        assert_eq!(
+            Permission::parse("console:access"),
+            Some(Permission::AccessConsole)
+        );
+        assert_eq!(Permission::AccessConsole.as_str(), "console:access");
+        for role in ["user", "admin", "system"] {
+            assert!(build_permissions(AuthType::Jwt, role).contains(&Permission::AccessConsole));
+            assert_eq!(
+                build_permissions(AuthType::ApiKey, role),
+                vec![Permission::UseApi]
+            );
+        }
+        for role in ["", "unknown", "tenant_admin", "ADMIN"] {
+            assert!(build_permissions(AuthType::Jwt, role).is_empty());
+        }
     }
 }

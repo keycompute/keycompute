@@ -70,8 +70,9 @@ pub(in crate::handlers) async fn responses_inner(
 ) -> Result<axum::response::Response> {
     crate::admission::ensure_generation(&state, &mut auth).await?;
     let mut routing = ResponsesRoutingFields::parse(&body)?;
-    let idempotency = responses_idempotency(&headers, request_path, auth.tenant_id, &body)?;
-    let forwarded_headers = forwarded_responses_headers(&headers, auth.tenant_id)?;
+    let idempotency =
+        responses_idempotency(&headers, request_path, auth.tenant_id, auth.user_id, &body)?;
+    let forwarded_headers = forwarded_responses_headers(&headers, auth.tenant_id, auth.user_id)?;
     if routing.stream && idempotency.is_some() {
         return Err(ApiError::BadRequest(
             "Idempotency-Key is not supported for streaming Responses requests".to_string(),
@@ -155,6 +156,7 @@ pub(in crate::handlers) async fn responses_inner(
     let replayed_client_previous_response_id = match replay_stored_warmup_body(
         &state,
         auth.tenant_id,
+        auth.user_id,
         &mut body,
         &mut body_permit,
     )
@@ -193,57 +195,35 @@ pub(in crate::handlers) async fn responses_inner(
         .and_then(Value::as_str)
         .map(str::to_string);
     let conversation_id = conversation_resource_id(&body).map(str::to_string);
-    let mut conversation_needs_discovery = false;
-    let mut resolved_affinity_account =
-        if let Some(previous_response_id) = previous_response_id.as_deref() {
-            if root_local_warmup {
-                None
-            } else {
-                match resolve_response_account(&state, previous_response_id, auth.tenant_id).await {
-                    Ok(account) => Some(account),
-                    Err(error) => {
-                        pre_execution_guard
-                            .finish_failed(
-                                ErrorOrigin::Client,
-                                TraceErrorCategory::InvalidRequest,
-                                "previous_response_not_found",
-                            )
-                            .await;
-                        return Err(error);
-                    }
-                }
-            }
-        } else if let Some(conversation_id) = conversation_id.as_deref() {
-            match resolve_response_account(&state, conversation_id, auth.tenant_id).await {
+    let mut resolved_affinity_account = if let Some(previous_response_id) =
+        previous_response_id.as_deref()
+    {
+        if root_local_warmup {
+            None
+        } else {
+            match resolve_response_account(
+                &state,
+                previous_response_id,
+                auth.tenant_id,
+                auth.user_id,
+            )
+            .await
+            {
                 Ok(account) => Some(account),
-                Err(ApiError::NotFound(_)) => {
-                    conversation_needs_discovery = true;
-                    None
-                }
                 Err(error) => {
                     pre_execution_guard
                         .finish_failed(
                             ErrorOrigin::Client,
                             TraceErrorCategory::InvalidRequest,
-                            "conversation_lookup_failed",
+                            "previous_response_not_found",
                         )
                         .await;
                     return Err(error);
                 }
             }
-        } else {
-            None
-        };
-    if conversation_needs_discovery && let Some(conversation_id) = conversation_id.as_deref() {
-        resolved_affinity_account = match discover_conversation_account(
-            &state,
-            conversation_id,
-            auth.tenant_id,
-            headers
-                .get("openai-beta")
-                .and_then(|value| value.to_str().ok()),
-        )
-        .await
+        }
+    } else if let Some(conversation_id) = conversation_id.as_deref() {
+        match resolve_response_account(&state, conversation_id, auth.tenant_id, auth.user_id).await
         {
             Ok(account) => Some(account),
             Err(error) => {
@@ -251,13 +231,15 @@ pub(in crate::handlers) async fn responses_inner(
                     .finish_failed(
                         ErrorOrigin::Client,
                         TraceErrorCategory::InvalidRequest,
-                        "conversation_not_found",
+                        "conversation_lookup_failed",
                     )
                     .await;
                 return Err(error);
             }
-        };
-    }
+        }
+    } else {
+        None
+    };
     if let Err(error) = validate_idempotent_project_resource_owner(
         &body,
         idempotency.is_some(),
@@ -289,23 +271,12 @@ pub(in crate::handlers) async fn responses_inner(
             .await;
         return Err(error);
     }
-    let reservation_constraint = if let Some(resource_id) = previous_response_id.as_ref() {
-        Some(ResponsesReservationConstraint::Affinity {
+    let reservation_constraint = previous_response_id
+        .as_ref()
+        .or(conversation_id.as_ref())
+        .map(|resource_id| ResponsesReservationConstraint::Affinity {
             resource_id: resource_id.clone(),
-        })
-    } else if let Some(resource_id) = conversation_id.as_ref() {
-        if conversation_needs_discovery {
-            resolved_affinity_account
-                .as_ref()
-                .map(ResponsesReservationConstraint::discovered)
-        } else {
-            Some(ResponsesReservationConstraint::Affinity {
-                resource_id: resource_id.clone(),
-            })
-        }
-    } else {
-        None
-    };
+        });
 
     let provider = keycompute_pricing::resolve_pricing_provider(
         keycompute_types::ModelAccessMode::AccountPool,
@@ -456,6 +427,7 @@ pub(in crate::handlers) async fn responses_inner(
     let mut reservations = match ResponsesExecutionReservations::acquire(
         &state,
         auth.tenant_id,
+        auth.user_id,
         request_id.0,
         &mut plan,
         reservation_constraint.as_ref(),
@@ -508,6 +480,7 @@ pub(in crate::handlers) async fn responses_inner(
                     reservations = match ResponsesExecutionReservations::acquire(
                         &state,
                         auth.tenant_id,
+                        auth.user_id,
                         request_id.0,
                         &mut plan,
                         reservation_constraint.as_ref(),
@@ -1040,6 +1013,7 @@ pub(super) async fn create_responses_json(
                 response_id,
                 ResponsesAffinityRoute {
                     tenant_id: settlement_ctx.tenant_id,
+                    user_id: settlement_ctx.user_id,
                     provider: actual_provider.clone(),
                     model: affinity_model.clone(),
                     account_id: actual_account_id,
@@ -1058,6 +1032,7 @@ pub(super) async fn create_responses_json(
                             ResponsesResourceKind::Conversation,
                             ResponsesAffinityRoute {
                                 tenant_id: settlement_ctx.tenant_id,
+                                user_id: settlement_ctx.user_id,
                                 provider: actual_provider,
                                 model: affinity_model.clone(),
                                 account_id: actual_account_id,
