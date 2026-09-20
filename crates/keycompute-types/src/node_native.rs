@@ -13,6 +13,12 @@ pub enum NodeNativeOperation {
 }
 
 impl NodeNativeOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+        }
+    }
+
     pub fn local_path(self) -> &'static str {
         match self {
             Self::Chat => "/v1/chat/completions",
@@ -50,6 +56,10 @@ redacted_debug!(NodeNativeHttpResult);
 
 /// Counts serialized bytes without allocating a second body buffer.
 pub fn validate_native_body(body: &Value) -> Result<(), &'static str> {
+    native_body_size(body).map(|_| ())
+}
+
+pub fn native_body_size(body: &Value) -> Result<usize, &'static str> {
     struct Counter(usize);
     impl std::io::Write for Counter {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -63,7 +73,9 @@ pub fn validate_native_body(body: &Value) -> Result<(), &'static str> {
             Ok(())
         }
     }
-    serde_json::to_writer(Counter(0), body).map_err(|_| "native_body_too_large")
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, body).map_err(|_| "native_body_too_large")?;
+    Ok(counter.0)
 }
 
 pub fn native_response_header_allowed(name: &str, value: &str) -> bool {

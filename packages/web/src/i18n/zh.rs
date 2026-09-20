@@ -1043,6 +1043,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "node_gateway.subtitle",
         "管理本地节点接入、任务队列和 NodeDispatch 执行路径。",
     );
+    m.insert("node_gateway.native_unverified", "尚无已确认的原生模型能力");
     m.insert("node_gateway.request_title", "NodeDispatch 请求入口");
     m.insert(
         "node_gateway.request_entry_help",

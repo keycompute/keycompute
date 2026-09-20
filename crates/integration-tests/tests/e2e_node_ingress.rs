@@ -268,6 +268,14 @@ impl Fixture {
         let session = NodeSession::create(
             &db,
             &CreateNodeSessionRequest {
+                native_profiles_json: serde_json::json!([
+                    keycompute_types::node_capability::NativeModelProfile::plain_chat(
+                        shared.clone()
+                    ),
+                    keycompute_types::node_capability::NativeModelProfile::plain_chat(
+                        node_only.clone()
+                    )
+                ]),
                 native_operations_json: serde_json::json!(["chat"]),
                 node_id: node.id,
                 session_token_hash: hex::encode(Sha256::digest(Uuid::new_v4().as_bytes())),
@@ -1066,6 +1074,7 @@ async fn native_claim_uses_immutable_session_permission_not_node_metadata() {
     let old = NodeSession::create(
         &f.db,
         &CreateNodeSessionRequest {
+            native_profiles_json: json!([]),
             node_id: f.node.id,
             session_token_hash: hex::encode(Sha256::digest(Uuid::new_v4().as_bytes())),
             accepted_models_json: json!([f.shared]),
@@ -1258,5 +1267,408 @@ async fn native_capable_worker_can_claim_legacy_work_without_native_queue_starva
         .await
         .unwrap();
     assert_eq!(pending.await.unwrap().unwrap().model, f.shared);
+    f.finish().await;
+}
+
+fn native_caps(
+    model: &str,
+    features: Vec<keycompute_types::node_capability::NativeFeature>,
+) -> keycompute_types::node::NodeCapabilities {
+    let mut profile = keycompute_types::node_capability::NativeModelProfile::plain_chat(model);
+    profile.features = features;
+    keycompute_types::node::NodeCapabilities {
+        runtime: "ollama".into(),
+        models: vec![keycompute_types::node::NodeModelCapability {
+            model: model.into(),
+        }],
+        native_operations: vec![keycompute_types::node_native::NodeNativeOperation::Chat],
+        native_profiles: vec![profile],
+        runtime_version: Some("0.16.0-test".into()),
+    }
+}
+#[tokio::test]
+async fn native_tool_requirements_are_checked_before_route_and_again_at_claim() {
+    let mut f = Fixture::new().await;
+    let service = f.state.node_gateway.as_ref().unwrap();
+    let mut body = f.body(&f.shared, false);
+    body["tools"] =
+        json!([{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}]);
+    expect(
+        f.request(Method::POST, NT, Some(body.clone())).await,
+        StatusCode::SERVICE_UNAVAILABLE,
+    );
+    assert_eq!(f.tasks().await, 0);
+    let task = service
+        .store
+        .create_and_enqueue_task(
+            f.user.id,
+            f.shared.clone(),
+            keycompute_types::node::NodeTaskPayload {
+                request_id: Uuid::new_v4(),
+                chat: None,
+                image_generation: None,
+                image_edit: None,
+                native: Some(keycompute_types::node_native::NodeNativeRequest {
+                    operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+                    body: body.clone(),
+                    headers: vec![],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .store
+            .claim_task(task.id, f.node.id, f.session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .store
+            .claim_next_native_task(f.node.id, f.session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let caps = native_caps(
+        &f.shared,
+        vec![keycompute_types::node_capability::NativeFeature::Tools],
+    );
+    let upgraded = service
+        .store
+        .negotiate_capabilities(f.node.id, f.session.id, &caps)
+        .await
+        .unwrap();
+    let (selected, envelope) = service
+        .store
+        .claim_next_native_task(f.node.id, upgraded.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.id, task.id);
+    assert_eq!(envelope.payload.native.as_ref().unwrap().body, body);
+    service
+        .complete_task(
+            task.id,
+            envelope.lease_id,
+            f.node.id,
+            upgraded.session_id,
+            NodeTaskResult::NativeSucceeded {
+                response: keycompute_types::node_native::NodeNativeHttpResult {
+                    status: 200,
+                    headers: vec![],
+                    body: completion(&f.shared, "tools"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    assert!(f.calls.lock().unwrap().is_empty());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn capability_renewal_is_retry_safe_and_old_session_only_finishes_existing_work() {
+    let mut f = Fixture::new().await;
+    let secret = format!("isolated-session-{}", Uuid::new_v4());
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE node_sessions SET session_token_hash=$2 WHERE id=$1",
+        [
+            f.session.id.into(),
+            hex::encode(Sha256::digest(secret.as_bytes())).into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    let service = f.state.node_gateway.as_ref().unwrap();
+    let task = service
+        .store
+        .create_and_enqueue_task(
+            f.user.id,
+            f.shared.clone(),
+            keycompute_types::node::NodeTaskPayload {
+                request_id: Uuid::new_v4(),
+                chat: None,
+                image_generation: None,
+                image_edit: None,
+                native: Some(keycompute_types::node_native::NodeNativeRequest {
+                    operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+                    body: f.body(&f.shared, false),
+                    headers: vec![],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let (_, envelope) = service
+        .store
+        .claim_task(task.id, f.node.id, f.session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    // The predecessor is about to expire, while its issued lease remains valid.
+    // Renewal must retain completion authentication until the lease grace ends.
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE node_sessions SET expires_at=NOW()+INTERVAL '1 second' WHERE id=$1",
+        [f.session.id.into()],
+    ))
+    .await
+    .unwrap();
+    let old = f.session.native_profiles_json.clone();
+    let caps = native_caps(
+        &f.shared,
+        vec![keycompute_types::node_capability::NativeFeature::Tools],
+    );
+    let request = json!({"protocol_version":"node.v1","node_id":f.node.id,"session_id":f.session.id,"capabilities":caps});
+    let renewed = expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            "/node/v1/capabilities",
+            Some(&secret),
+            Some(request.clone()),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    let repeated = expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            "/node/v1/capabilities",
+            Some(&secret),
+            Some(request),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(renewed, repeated);
+    assert_ne!(renewed["session_id"], f.session.id.to_string());
+    let stored = NodeSession::find_by_id(&f.db, f.session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.native_profiles_json, old);
+    assert!(!stored.accepting_tasks);
+    assert!(stored.expires_at >= task.complete_grace_until);
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            "/node/v1/tasks/poll",
+            Some(&secret),
+            Some(
+                json!({"protocol_version":"node.v1","node_id":f.node.id,"session_id":f.session.id}),
+            ),
+        )
+        .await,
+        StatusCode::UNAUTHORIZED,
+    );
+    let result = NodeTaskResult::NativeSucceeded {
+        response: keycompute_types::node_native::NodeNativeHttpResult {
+            status: 200,
+            headers: vec![],
+            body: completion(&f.shared, "completed-old-lease"),
+        },
+    };
+    let complete = json!({"protocol_version":"node.v1","node_id":f.node.id,"session_id":f.session.id,"task_id":task.id,"lease_id":envelope.lease_id,"result":result});
+    expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            &format!("/node/v1/tasks/{}/complete", task.id),
+            Some(&secret),
+            Some(complete),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_byte_and_output_limits_are_enforced_by_sql_claim() {
+    let mut f = Fixture::new().await;
+    let service = f.state.node_gateway.as_ref().unwrap();
+    let task = service
+        .store
+        .create_and_enqueue_task(
+            f.user.id,
+            f.shared.clone(),
+            keycompute_types::node::NodeTaskPayload {
+                request_id: Uuid::new_v4(),
+                chat: None,
+                image_generation: None,
+                image_edit: None,
+                native: Some(keycompute_types::node_native::NodeNativeRequest {
+                    operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+                    body: f.body(&f.shared, false),
+                    headers: vec![],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let mut caps = native_caps(&f.shared, vec![]);
+    caps.native_profiles[0].max_request_bytes = 16;
+    let narrow = service
+        .store
+        .negotiate_capabilities(f.node.id, f.session.id, &caps)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .store
+            .claim_next_native_task(f.node.id, narrow.session_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        service
+            .store
+            .claim_task(task.id, f.node.id, narrow.session_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    caps.native_profiles[0].max_request_bytes = 1024 * 1024;
+    caps.native_profiles[0].max_output_tokens = Some(1);
+    let narrow = service
+        .store
+        .negotiate_capabilities(f.node.id, narrow.session_id, &caps)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .store
+            .claim_next_native_task(f.node.id, narrow.session_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    caps.native_profiles[0].max_output_tokens = Some(32);
+    let ready = service
+        .store
+        .negotiate_capabilities(f.node.id, narrow.session_id, &caps)
+        .await
+        .unwrap();
+    let (claimed, envelope) = service
+        .store
+        .claim_next_native_task(f.node.id, ready.session_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, task.id);
+    service
+        .complete_task(
+            task.id,
+            envelope.lease_id,
+            f.node.id,
+            ready.session_id,
+            NodeTaskResult::NativeSucceeded {
+                response: keycompute_types::node_native::NodeNativeHttpResult {
+                    status: 200,
+                    headers: vec![],
+                    body: completion(&f.shared, "bounded"),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    f.finish().await;
+}
+#[tokio::test]
+async fn heartbeat_cannot_expand_immutable_registered_model_scope() {
+    let mut f = Fixture::new().await;
+    let other = format!("not-registered-{}", f.shared);
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE nodes SET capabilities_json=$2 WHERE id=$1",
+        [
+            f.node.id.into(),
+            json!({"runtime":"ollama","models":[{"model":f.shared},{"model":other}]}).into(),
+        ],
+    ))
+    .await
+    .unwrap();
+    let result = f
+        .state
+        .node_gateway
+        .as_ref()
+        .unwrap()
+        .heartbeat(f.node.id, f.session.id, vec![other])
+        .await;
+    assert!(result.is_err());
+    let stored = NodeSession::find_by_id(&f.db, f.session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.accepted_models_json, f.session.accepted_models_json);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn a_native_backlog_does_not_starve_queued_legacy_work() {
+    let mut f = Fixture::new().await;
+    let service = f.state.node_gateway.as_ref().unwrap();
+    let redis = node_gateway::NodeGatewayRedis::new(
+        Arc::new(
+            keycompute_runtime::redis_store::RedisRuntimeStore::new(
+                &std::env::var("REDIS_URL").unwrap(),
+            )
+            .unwrap(),
+        ),
+        &keycompute_config::RedisConfig {
+            url: std::env::var("REDIS_URL").unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for native in [true, true, false] {
+        let payload = keycompute_types::node::NodeTaskPayload {
+            request_id: Uuid::new_v4(),
+            image_generation: None,
+            image_edit: None,
+            chat: (!native)
+                .then(|| keycompute_types::ChatCompletionRequest::new(&f.shared, vec![])),
+            native: native.then(|| keycompute_types::node_native::NodeNativeRequest {
+                operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+                body: f.body(&f.shared, false),
+                headers: vec![],
+            }),
+        };
+        let task = service
+            .store
+            .create_and_enqueue_task(f.user.id, f.shared.clone(), payload)
+            .await
+            .unwrap();
+        if !native {
+            redis.push_to_model_queue(&f.shared, task.id).await.unwrap();
+        }
+    }
+    let first = service
+        .poll_task(f.node.id, f.session.id, vec![f.shared.clone()])
+        .await
+        .unwrap()
+        .task
+        .unwrap();
+    let second = service
+        .poll_task(f.node.id, f.session.id, vec![f.shared.clone()])
+        .await
+        .unwrap()
+        .task
+        .unwrap();
+    assert!(first.payload.native.is_some());
+    assert!(
+        second.payload.chat.is_some(),
+        "legacy work must win the next alternating poll even with native backlog"
+    );
     f.finish().await;
 }

@@ -668,6 +668,7 @@ pub fn NodeGateway() -> Element {
                                                             span { class: "account-name", "{node.display_name}" }
                                                         }
                                                         div { class: "account-subline", "{node.client_instance_id}" }
+                                                        if let Some(version)=&node.runtime_version {div {class:"account-subline","Ollama {version}"}}
                                                     }
                                                 }
                                                 td {
@@ -677,6 +678,7 @@ pub fn NodeGateway() -> Element {
                                                     div { class: "account-models",
                                                         for model in accepted_models(&node.accepted_models_json).iter() {
                                                             span { class: "account-model-chip", "{model}" }
+                                                            div {class:"account-subline",{native_profile_description(&node.native_profiles_json,model,i18n.t("node_gateway.native_unverified"))}}
                                                         }
                                                         if accepted_models(&node.accepted_models_json).is_empty() {
                                                             span { class: "account-model-chip account-model-chip-muted",
@@ -967,6 +969,41 @@ fn TaskStatusBadge(status: String) -> Element {
     };
     rsx! {
         Badge { variant, "{label}" }
+    }
+}
+
+fn native_profile_description(
+    profiles: &serde_json::Value,
+    model: &str,
+    unverified: &str,
+) -> String {
+    let Some(profiles) = profiles.as_array() else {
+        return unverified.to_string();
+    };
+    let entries: Vec<String> = profiles
+        .iter()
+        .filter(|p| p["model"].as_str() == Some(model))
+        .map(|p| {
+            let operation = p["operation"].as_str().unwrap_or("unknown");
+            let features = p["features"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let request = p["max_request_bytes"].as_u64().unwrap_or(0);
+            let response = p["max_response_bytes"].as_u64().unwrap_or(0);
+            format!("{operation} · {features} · JSON {request}/{response} bytes")
+        })
+        .collect();
+    if entries.is_empty() {
+        unverified.into()
+    } else {
+        entries.join("; ")
     }
 }
 

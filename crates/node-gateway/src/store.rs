@@ -20,7 +20,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const ACTIVE_NODE_SESSION_FOR_UPDATE_SQL: &str = "SELECT * FROM node_sessions WHERE id = $1 AND node_id = $2 \
-     AND revoked_at IS NULL AND expires_at > NOW() FOR UPDATE";
+     AND revoked_at IS NULL AND expires_at > NOW() AND accepting_tasks=TRUE FOR UPDATE";
 
 // Lock the owning tenant before mutating node/session state. Tenant lifecycle
 // updates use the same row lock, so a heartbeat or task claim serializes with
@@ -146,6 +146,142 @@ impl NodeGatewayStore {
         Ok(format!("{:x}", hash_bytes))
     }
 
+    pub fn validate_capabilities(caps: &NodeCapabilities) -> Result<(), DbError> {
+        if caps.runtime != "ollama" || caps.models.len() > 256 || caps.native_operations.len() > 1 {
+            return Err(DbError::Other("invalid node capability declaration".into()));
+        }
+        let models: Vec<String> = caps.models.iter().map(|m| m.model.clone()).collect();
+        if models
+            .iter()
+            .any(|m| m.trim().is_empty() || m.chars().count() > 100)
+            || models
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != models.len()
+            || (!caps.native_profiles.is_empty()
+                && caps
+                    .runtime_version
+                    .as_ref()
+                    .is_none_or(|v| v.trim().is_empty() || v.len() > 64))
+        {
+            return Err(DbError::Other(
+                "invalid native model/runtime declaration".into(),
+            ));
+        }
+        keycompute_types::node_capability::validate_profiles(
+            &caps.native_profiles,
+            &models,
+            &caps.native_operations,
+        )
+        .map_err(|error| DbError::Other(error.into()))
+    }
+
+    /// Capability renewal issues a distinct immutable session. Identical
+    /// retries from the same authenticated predecessor return the same token.
+    pub async fn negotiate_capabilities(
+        &self,
+        node_id: Uuid,
+        session_id: Uuid,
+        caps: &NodeCapabilities,
+    ) -> Result<NodeRegisterResponse, DbError> {
+        Self::validate_capabilities(caps)?;
+        let tx = self.pool.begin().await?;
+        let tenant = Tenant::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            NODE_TENANT_FOR_UPDATE_SQL,
+            [node_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
+        if !tenant.is_active() {
+            return Err(DbError::Other("inactive node owner".into()));
+        }
+        let node = Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM nodes WHERE id=$1 FOR UPDATE",
+            [node_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
+        if node.is_excluded() {
+            return Err(DbError::Other("excluded node cannot negotiate".into()));
+        }
+        let predecessor=NodeSession::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT * FROM node_sessions WHERE id=$1 AND node_id=$2 AND expires_at>NOW() AND revoked_at IS NULL FOR UPDATE",[session_id.into(),node_id.into()])).one(&tx).await?
+            .ok_or_else(||DbError::not_found("active session",session_id.to_string()))?;
+        use hmac::{Hmac, Mac};
+        let encoded = serde_json::to_vec(caps)
+            .map_err(|_| DbError::Other("capability encoding failed".into()))?;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(self.config.registration_token_secret.as_bytes())
+                .map_err(|_| DbError::Other("session signing failed".into()))?;
+        mac.update(b"node-capability-session-v1");
+        mac.update(predecessor.id.as_bytes());
+        mac.update(&encoded);
+        let session_token = format!("ns_{}", hex::encode(mac.finalize().into_bytes()));
+        let hash = UserNodeGatewayToken::hash_token(&session_token);
+        let existing = NodeSession::find_by_token_hash(&tx, &hash).await?;
+        let session = if let Some(existing) = existing {
+            if existing.node_id != node_id
+                || existing.revoked_at.is_some()
+                || !existing.accepting_tasks
+                || existing.expires_at <= Utc::now()
+            {
+                return Err(DbError::Other("capability session unavailable".into()));
+            }
+            existing
+        } else {
+            if !predecessor.accepting_tasks {
+                return Err(DbError::Other(
+                    "session already replaced by a different capability declaration".into(),
+                ));
+            }
+            NodeSession::create(
+                &tx,
+                &CreateNodeSessionRequest {
+                    node_id,
+                    session_token_hash: hash,
+                    expires_at: Utc::now() + self.config.session_ttl(),
+                    accepted_models_json: serde_json::json!(
+                        caps.models
+                            .iter()
+                            .map(|m| m.model.clone())
+                            .collect::<Vec<_>>()
+                    ),
+                    native_operations_json: serde_json::json!(caps.native_operations),
+                    native_profiles_json: serde_json::json!(caps.native_profiles),
+                },
+            )
+            .await?
+        };
+        // Already-issued leases keep completion authorization on their old
+        // session; only new work and heartbeat renewal are disabled.
+        tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE node_sessions ns SET accepting_tasks=FALSE,expires_at=GREATEST(ns.expires_at,COALESCE((SELECT MAX(nt.complete_grace_until) FROM node_tasks nt WHERE nt.assigned_session_id=ns.id AND nt.status='leased'),ns.expires_at)) WHERE ns.node_id=$1 AND ns.id<>$2",
+            [node_id.into(), session.id.into()],
+        ))
+        .await?;
+        tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE nodes SET capabilities_json=$2,updated_at=NOW() WHERE id=$1",
+            [node_id.into(), serde_json::json!(caps).into()],
+        ))
+        .await?;
+        tx.commit().await?;
+        Ok(NodeRegisterResponse {
+            protocol_version: "node.v1".into(),
+            node_id,
+            session_id: session.id,
+            session_token,
+            heartbeat_interval_secs: self.config.heartbeat_interval_secs,
+            poll_timeout_secs: self.config.poll_timeout_secs,
+        })
+    }
+
     /// 注册节点
     ///
     /// 认证策略：
@@ -158,9 +294,7 @@ impl NodeGatewayStore {
         &self,
         req: &NodeRegisterRequest,
     ) -> Result<NodeRegisterResponse, DbError> {
-        if req.capabilities.native_operations.len() > 1 {
-            return Err(DbError::Other("duplicate native operations".into()));
-        }
+        Self::validate_capabilities(&req.capabilities)?;
         // 0. HMAC 签名验证（O(1) 内存操作，零 DB 查询）
         let token_id = UserNodeGatewayToken::validate_hmac_token(
             &req.registration_token,
@@ -303,14 +437,16 @@ impl NodeGatewayStore {
                 .map_err(|e| DbError::Other(e.to_string()))?,
             native_operations_json: serde_json::to_value(&req.capabilities.native_operations)
                 .map_err(|e| DbError::Other(e.to_string()))?,
+            native_profiles_json: serde_json::to_value(&req.capabilities.native_profiles)
+                .map_err(|e| DbError::Other(e.to_string()))?,
         };
 
         // 4.1 创建 session (在事务中)
         let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json, native_operations_json)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json,registered_models_json,native_operations_json,native_profiles_json)
+            VALUES ($1, $2, $3, $4, $4, $5,$6)
             RETURNING *
             "#,
             [
@@ -319,6 +455,7 @@ impl NodeGatewayStore {
                 create_session_req.expires_at.into(),
                 create_session_req.accepted_models_json.clone().into(),
                 create_session_req.native_operations_json.clone().into(),
+                create_session_req.native_profiles_json.clone().into(),
             ],
         ))
         .one(&tx)
@@ -476,16 +613,9 @@ impl NodeGatewayStore {
             .await?;
         } else {
             // 非 excluded 节点:校验并持久化 accepted_models
-            let capabilities: NodeCapabilities =
-                serde_json::from_value(node.capabilities_json.clone())
-                    .map_err(|e| DbError::Other(format!("Invalid capabilities_json: {}", e)))?;
-
-            let registered_models: Vec<String> = capabilities
-                .models
-                .iter()
-                .map(|m| m.model.clone())
-                .collect();
-
+            let registered_models: Vec<String> =
+                serde_json::from_value(session.registered_models_json.clone())
+                    .map_err(|_| DbError::Other("invalid session model scope".into()))?;
             // 校验 accepted_models 是 registered_models 的子集
             for model in &accepted_models {
                 if !registered_models.contains(model) {
@@ -653,6 +783,51 @@ impl NodeGatewayStore {
             }
             None => Ok(None),
         }
+    }
+
+    pub async fn claim_next_native_task(
+        &self,
+        node_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<(NodeTask, NodeTaskEnvelope)>, DbError> {
+        let tx = self.pool.begin().await?;
+        let tenant = Tenant::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            NODE_TENANT_FOR_UPDATE_SQL,
+            [node_id.into()],
+        ))
+        .one(&tx)
+        .await?;
+        if tenant.as_ref().is_none_or(|t| !t.is_active()) {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let lease_id = Uuid::new_v4();
+        let task = NodeTask::claim_next_native(&tx, node_id, session_id, lease_id).await?;
+        let result = if let Some(task) = task {
+            let payload: NodeTaskPayload = serde_json::from_value(task.payload_json.clone())
+                .map_err(|_| DbError::Other("invalid native task payload".into()))?;
+            payload.validate().map_err(|e| DbError::Other(e.into()))?;
+            if let Some(native) = &payload.native {
+                native
+                    .validate(&task.model)
+                    .map_err(|e| DbError::Other(e.into()))?;
+            }
+            Self::record_node_claim_savepoint(&tx, &task).await;
+            let envelope = NodeTaskEnvelope {
+                task_id: task.id,
+                lease_id,
+                model: task.model.clone(),
+                deadline_unix_ms: task.deadline_at.timestamp_millis(),
+                complete_grace_until_unix_ms: task.complete_grace_until.timestamp_millis(),
+                payload,
+            };
+            Some((task, envelope))
+        } else {
+            None
+        };
+        tx.commit().await?;
+        Ok(result)
     }
 
     /// Monitoring writes share the claim transaction but are isolated behind
@@ -1284,10 +1459,30 @@ impl NodeGatewayStore {
         task: &NodeTask,
         _node: &Node,
         _node_id: Uuid,
-        _session_id: Uuid,
+        session_id: Uuid,
         _lease_id: Uuid,
         response: keycompute_types::node_native::NodeNativeHttpResult,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
+        let session = NodeSession::find_by_id(tx, session_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("Session", session_id.to_string()))?;
+        let profiles: Vec<keycompute_types::node_capability::NativeModelProfile> =
+            serde_json::from_value(session.native_profiles_json)
+                .map_err(|_| DbError::Other("invalid native session profiles".into()))?;
+        let requirements: keycompute_types::node_capability::NativeRequirements =
+            serde_json::from_value(
+                task.native_requirements_json
+                    .clone()
+                    .ok_or_else(|| DbError::Other("native task requirements missing".into()))?,
+            )
+            .map_err(|_| DbError::Other("invalid native requirements".into()))?;
+        let profile = profiles
+            .iter()
+            .find(|p| p.permits(&requirements))
+            .ok_or_else(|| DbError::Other("native capability no longer authorized".into()))?;
+        profile
+            .validate_result(&response)
+            .map_err(|e| DbError::Other(e.into()))?;
         response
             .validate(&task.model)
             .map_err(|error| DbError::Other(format!("invalid native result: {error}")))?;
@@ -1300,7 +1495,7 @@ impl NodeGatewayStore {
             task,
             _node,
             _node_id,
-            _session_id,
+            session_id,
             _lease_id,
             response_json,
             "succeeded",

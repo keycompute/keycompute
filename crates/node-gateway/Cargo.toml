@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+hmac = "0.12"
+hex = "0.4"
+
 keycompute-types = { path = "../keycompute-types" }
 keycompute-db = { path = "../keycompute-db" }
 keycompute-config = { path = "../keycompute-config" }

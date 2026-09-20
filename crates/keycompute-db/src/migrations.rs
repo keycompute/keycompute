@@ -177,6 +177,10 @@ mod tests {
     fn native_worker_permissions_are_immutable_session_metadata() {
         let sql = include_str!("../migrations/001_init.sql");
         assert!(sql.contains("native_operations_json JSONB NOT NULL DEFAULT '[]'::jsonb"));
+        assert!(sql.contains("native_profiles_json JSONB NOT NULL DEFAULT '[]'::jsonb"));
+        assert!(sql.contains("registered_models_json JSONB NOT NULL DEFAULT '[]'::jsonb"));
+        assert!(sql.contains("accepting_tasks BOOLEAN NOT NULL DEFAULT TRUE"));
+        assert!(sql.contains("native_requirements_json JSONB"));
     }
 
     #[test]

@@ -259,6 +259,8 @@ impl NodeTestEnv {
             display_name: format!("Test NodeDispatch {}", client_id),
             registration_token: token.to_string(),
             capabilities: NodeCapabilities {
+                native_profiles: vec![],
+                runtime_version: None,
                 runtime: "ollama".to_string(),
                 native_operations: vec![],
                 models: vec![

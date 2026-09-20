@@ -696,6 +696,10 @@ pub fn create_router(state: AppState) -> Router {
     // ==================== 10. 节点网关 API（使用 session token 认证） ====================
     let node_routes = Router::new()
         .route("/node/v1/register", post(node_register))
+        .route(
+            "/node/v1/capabilities",
+            post(crate::handlers::node::node_capabilities),
+        )
         .route("/node/v1/heartbeat", post(node_heartbeat))
         .route("/node/v1/tasks/poll", post(node_poll))
         .route("/node/v1/tasks/{task_id}/complete", post(node_complete));

@@ -25,7 +25,7 @@ const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM nod
      INNER JOIN tenants t ON t.id = u.tenant_id \
      WHERE ns.session_token_hash = $1 \
        AND ns.revoked_at IS NULL \
-       AND ns.expires_at > NOW() \
+       AND ns.expires_at > NOW() AND ns.accepting_tasks=TRUE \
        AND t.status = 'active'";
 
 // Completion of a task that was already leased is allowed to drain after an

@@ -23,6 +23,7 @@ pub struct NodeTask {
     pub user_id: Uuid,
     pub model: String,
     pub payload_json: serde_json::Value,
+    pub native_requirements_json: Option<serde_json::Value>,
     pub status: String,
     pub assigned_node_id: Option<Uuid>,
     pub assigned_session_id: Option<Uuid>,
@@ -57,11 +58,33 @@ impl NodeTask {
         db: &impl ConnectionTrait,
         req: &CreateNodeTaskRequest,
     ) -> Result<NodeTask, DbError> {
+        let native = match req.payload_json.get("native").filter(|v| !v.is_null()) {
+            Some(value) => {
+                let request: keycompute_types::node_native::NodeNativeRequest =
+                    serde_json::from_value(value.clone())
+                        .map_err(|_| DbError::Other("invalid native payload".into()))?;
+                if request
+                    .body
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(req.model.as_str())
+                {
+                    return Err(DbError::Other("native model mismatch".into()));
+                }
+                let required =
+                    keycompute_types::node_capability::NativeRequirements::from_request(&request)
+                        .map_err(|error| DbError::Other(error.into()))?;
+                let value = serde_json::to_value(required)
+                    .map_err(|_| DbError::Other("invalid native requirements".into()))?;
+                Some(value)
+            }
+            None => None,
+        };
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, deadline_at, complete_grace_until)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, deadline_at, complete_grace_until,native_requirements_json)
+            VALUES ($1, $2, $3, $4, $5, $6, $7,$8)
             RETURNING *
             "#,
             [
@@ -72,6 +95,7 @@ impl NodeTask {
                 TASK_STATUS_QUEUED.into(),
                 req.deadline_at.into(),
                 req.complete_grace_until.into(),
+                native.into(),
             ],
         );
         let task = NodeTask::find_by_statement(stmt)
@@ -122,7 +146,8 @@ impl NodeTask {
     ) -> Result<Option<NodeTask>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"
+            format!(
+                r#"
             UPDATE node_tasks
             SET status = $1,
                 assigned_node_id = $2,
@@ -140,15 +165,21 @@ impl NodeTask {
                       SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
                       JOIN users owner ON owner.id=n.owner_user_id JOIN tenants t ON t.id=owner.tenant_id
                       WHERE ns.id=$3 AND ns.node_id=$2 AND n.status='online' AND t.status='active'
-                        AND ns.expires_at>NOW() AND ns.revoked_at IS NULL
+                        AND ns.expires_at>NOW() AND ns.revoked_at IS NULL AND ns.accepting_tasks=TRUE
                         AND n.capabilities_json->>'runtime'='ollama'
                         AND ns.accepted_models_json @> jsonb_build_array(node_tasks.model)
-                        AND ns.native_operations_json @> '["chat"]'::jsonb)
+                        AND ns.native_operations_json @> jsonb_build_array(node_tasks.native_requirements_json->>'operation')
+                        AND EXISTS(SELECT 1 FROM jsonb_array_elements(ns.native_profiles_json) p WHERE {profile_match}))
                     AND EXISTS (
                       SELECT 1 FROM users caller JOIN tenants ct ON ct.id=caller.tenant_id
                       WHERE caller.id=node_tasks.user_id AND ct.status='active')))
             RETURNING *
             "#,
+                profile_match = super::native_capability::profile_matches(
+                    "p",
+                    "node_tasks.native_requirements_json"
+                )
+            ),
             [
                 TASK_STATUS_LEASED.into(),
                 node_id.into(),
@@ -161,6 +192,46 @@ impl NodeTask {
         let task = NodeTask::find_by_statement(stmt).one(db).await?;
 
         Ok(task)
+    }
+
+    /// A native worker only removes work it can execute. Heterogeneous model
+    /// features/limits cannot cause incompatible workers to steal queue hints.
+    pub async fn claim_next_native(
+        db: &impl ConnectionTrait,
+        node_id: Uuid,
+        session_id: Uuid,
+        lease_id: Uuid,
+    ) -> Result<Option<Self>, DbError> {
+        let sql = format!(
+            r#"
+            UPDATE node_tasks SET status='leased',assigned_node_id=$1,assigned_session_id=$2,
+                lease_id=$3,claimed_at=NOW(),updated_at=NOW()
+            WHERE id=(
+                SELECT nt.id FROM node_tasks nt
+                JOIN users caller ON caller.id=nt.user_id JOIN tenants ct ON ct.id=caller.tenant_id
+                WHERE nt.status='queued' AND nt.deadline_at>NOW() AND ct.status='active'
+                  AND nt.native_requirements_json IS NOT NULL
+                  AND EXISTS(SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
+                    JOIN users owner ON owner.id=n.owner_user_id JOIN tenants ot ON ot.id=owner.tenant_id
+                    WHERE ns.id=$2 AND n.id=$1 AND n.status='online' AND ot.status='active'
+                      AND ns.expires_at>NOW() AND ns.revoked_at IS NULL AND ns.accepting_tasks=TRUE
+                      AND n.capabilities_json->>'runtime'='ollama'
+                      AND ns.accepted_models_json @> jsonb_build_array(nt.model)
+                      AND ns.native_operations_json @> jsonb_build_array(nt.native_requirements_json->>'operation')
+                      AND EXISTS(SELECT 1 FROM jsonb_array_elements(ns.native_profiles_json) p WHERE {profile_match}))
+                ORDER BY nt.queued_at,nt.id FOR UPDATE OF nt SKIP LOCKED LIMIT 1
+            ) RETURNING *
+        "#,
+            profile_match =
+                super::native_capability::profile_matches("p", "nt.native_requirements_json")
+        );
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [node_id.into(), session_id.into(), lease_id.into()],
+        ))
+        .one(db)
+        .await?)
     }
 
     /// 标记任务成功

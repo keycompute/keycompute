@@ -28,6 +28,13 @@ pub async fn node_register(
     State(state): State<AppState>,
     Json(request): Json<NodeRegisterRequest>,
 ) -> Result<Json<NodeRegisterResponse>> {
+    if request.protocol_version != "node.v1" {
+        return Err(ApiError::BadRequest(
+            "Unsupported node control protocol".into(),
+        ));
+    }
+    node_gateway::NodeGatewayStore::validate_capabilities(&request.capabilities)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
     let node_gateway = get_node_gateway(&state)?;
 
     let response = node_gateway
@@ -35,6 +42,37 @@ pub async fn node_register(
         .await
         .map_err(ApiError::from)?;
 
+    Ok(Json(response))
+}
+
+/// POST /node/v1/capabilities. Existing credentials authenticate the exchange;
+/// old sessions remain authorized only to finish their already leased tasks.
+pub async fn node_capabilities(
+    State(state): State<AppState>,
+    auth: NodeSessionCompletionAuth,
+    Json(body): Json<keycompute_types::node::NodeCapabilitiesRequest>,
+) -> Result<Json<NodeRegisterResponse>> {
+    if body.node_id != auth.node_id || body.session_id != auth.session_id {
+        return Err(ApiError::NodeIdentityMismatch {
+            expected_node_id: auth.node_id,
+            expected_session_id: auth.session_id,
+            actual_node_id: body.node_id,
+            actual_session_id: body.session_id,
+        });
+    }
+    if body.protocol_version != "node.v1" {
+        return Err(ApiError::BadRequest(
+            "Unsupported node control protocol".into(),
+        ));
+    }
+    node_gateway::NodeGatewayStore::validate_capabilities(&body.capabilities)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    let gateway = get_node_gateway(&state)?;
+    let response = gateway
+        .store
+        .negotiate_capabilities(auth.node_id, auth.session_id, &body.capabilities)
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(response))
 }
 

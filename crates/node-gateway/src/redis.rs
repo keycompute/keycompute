@@ -205,6 +205,26 @@ impl NodeGatewayRedis {
             .transpose()
     }
 
+    /// Nonblocking legacy check used before alternating native claims.
+    pub(crate) async fn try_pop_from_queues(
+        &self,
+        keys: &[String],
+    ) -> anyhow::Result<Option<Uuid>> {
+        if keys.is_empty() {
+            return Ok(None);
+        }
+        if keys.len() > 256 {
+            anyhow::bail!("too many model queues");
+        }
+        let mut connection = self.redis.pool().get().await?;
+        let result: Option<String> = deadpool_redis::redis::Script::new(
+            "for _,key in ipairs(KEYS) do local id=redis.call('RPOP',key); if id then return id end end; return nil"
+        ).prepare_invoke().key(keys).invoke_async(&mut connection).await?;
+        result
+            .map(|value| Uuid::parse_str(&value).map_err(anyhow::Error::from))
+            .transpose()
+    }
+
     pub(crate) async fn repush_native_task(
         &self,
         model: &str,

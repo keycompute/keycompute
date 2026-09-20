@@ -5,6 +5,7 @@
 pub mod account;
 pub mod api_key;
 pub mod distribution_record;
+pub mod native_capability;
 pub mod node;
 pub mod node_session;
 pub mod node_task;

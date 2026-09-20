@@ -142,6 +142,7 @@ pub struct NodeGatewayService {
     /// 节点网关应用配置（包含 registration_token_secret）
     pub config: NodeGatewayAppConfig,
     lifecycle: Arc<dyn RequestLifecycleRecorder>,
+    poll_rotation: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl NodeGatewayService {
@@ -160,6 +161,7 @@ impl NodeGatewayService {
             redis,
             config,
             lifecycle: Arc::new(NoopRequestLifecycleRecorder),
+            poll_rotation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -548,7 +550,11 @@ impl NodeGatewayService {
         .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
         let now = chrono::Utc::now();
-        if session.node_id != node_id || session.is_revoked() || session.expires_at <= now {
+        if session.node_id != node_id
+            || session.is_revoked()
+            || session.expires_at <= now
+            || !session.accepting_tasks
+        {
             // session 已撤销或过期,不允许 poll
             return Ok(NodePollResponse {
                 protocol_version: "node.v1".to_string(),
@@ -566,33 +572,70 @@ impl NodeGatewayService {
         fastrand::shuffle(&mut shuffled_models);
 
         let native_ready = session
-            .native_operations_json
+            .native_profiles_json
             .as_array()
-            .is_some_and(|ops| ops.iter().any(|value| value.as_str() == Some("chat")));
-        // One finite blocking wait considers every authorized queue. A new
-        // worker must not starve legacy work while its native queue is empty.
+            .is_some_and(|p| !p.is_empty());
         if native_ready {
-            let mut keys = Vec::with_capacity(shuffled_models.len().saturating_mul(2));
-            for model in &shuffled_models {
-                keys.push(NodeGatewayRedis::native_model_queue_key(model));
-                keys.push(NodeGatewayRedis::model_queue_key(model));
-            }
-            fastrand::shuffle(&mut keys);
-            while !keys.is_empty() {
+            let legacy_keys: Vec<String> = shuffled_models
+                .iter()
+                .map(|model| NodeGatewayRedis::model_queue_key(model))
+                .collect();
+            loop {
                 let remaining =
                     poll_deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     break;
                 }
-                let task_id = self.redis.pop_from_queues(&keys, remaining).await?;
-                let Some(task_id) = task_id else {
-                    break;
-                };
-                if let Some((task, envelope)) =
-                    self.store.claim_task(task_id, node_id, session_id).await?
+                // Alternate precedence across poll calls shared by this service.
+                // A continuous native backlog must not starve legacy tasks.
+                if self
+                    .poll_rotation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    % 2
+                    == 1
+                    && let Some(id) = self.redis.try_pop_from_queues(&legacy_keys).await?
+                    && let Some((task, envelope)) =
+                        self.store.claim_task(id, node_id, session_id).await?
                 {
-                    record_node_task_running();
                     self.record_claim(&task).await;
+                    record_node_task_running();
+                    return Ok(NodePollResponse {
+                        protocol_version: "node.v1".into(),
+                        task: Some(envelope),
+                        retry_after_ms: None,
+                    });
+                }
+                if let Some((task, envelope)) = self
+                    .store
+                    .claim_next_native_task(node_id, session_id)
+                    .await?
+                {
+                    self.record_claim(&task).await;
+                    let _ = self
+                        .redis
+                        .remove_from_model_queue(&task.model, task.id)
+                        .await;
+                    record_node_task_running();
+                    return Ok(NodePollResponse {
+                        protocol_version: "node.v1".into(),
+                        task: Some(envelope),
+                        retry_after_ms: None,
+                    });
+                }
+                // Bounded wait on legacy work also paces native metadata scans.
+                // Native tasks remain in PostgreSQL until a compatible profile claims them.
+                if legacy_keys.is_empty() {
+                    break;
+                }
+                if let Some(id) = self
+                    .redis
+                    .pop_from_queues(&legacy_keys, remaining.min(Duration::from_millis(500)))
+                    .await?
+                    && let Some((task, envelope)) =
+                        self.store.claim_task(id, node_id, session_id).await?
+                {
+                    self.record_claim(&task).await;
+                    record_node_task_running();
                     return Ok(NodePollResponse {
                         protocol_version: "node.v1".into(),
                         task: Some(envelope),
@@ -913,6 +956,7 @@ mod tests {
     fn terminal_test_task(lease_id: Option<Uuid>) -> NodeTask {
         let now = chrono::Utc::now();
         NodeTask {
+            native_requirements_json: None,
             id: Uuid::new_v4(),
             request_id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),

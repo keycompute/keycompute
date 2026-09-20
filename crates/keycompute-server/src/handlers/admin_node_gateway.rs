@@ -22,6 +22,8 @@ pub struct NodeGatewayNodeInfo {
     pub client_instance_id: String,
     pub status: String,
     pub accepted_models_json: serde_json::Value,
+    pub native_profiles_json: serde_json::Value,
+    pub runtime_version: Option<String>,
     pub consecutive_failure_count: i32,
     pub failure_threshold: i32,
     pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -111,6 +113,8 @@ const LIST_NODE_GATEWAY_NODES_SQL: &str = r#"
                 ELSE n.status
             END AS status,
             COALESCE(latest_session.accepted_models_json, '[]'::jsonb) AS accepted_models_json,
+            COALESCE(latest_session.native_profiles_json,'[]'::jsonb) AS native_profiles_json,
+            n.capabilities_json->>'runtime_version' AS runtime_version,
             n.consecutive_failure_count,
             n.failure_threshold,
             n.last_heartbeat_at,
@@ -118,9 +122,9 @@ const LIST_NODE_GATEWAY_NODES_SQL: &str = r#"
             t.token_preview
         FROM nodes n
         LEFT JOIN LATERAL (
-            SELECT accepted_models_json
+            SELECT accepted_models_json,native_profiles_json
             FROM node_sessions ns
-            WHERE ns.node_id = n.id
+            WHERE ns.node_id = n.id AND ns.accepting_tasks=TRUE AND ns.revoked_at IS NULL AND ns.expires_at>NOW()
             ORDER BY ns.last_seen_at DESC, ns.id DESC
             LIMIT 1
         ) latest_session ON TRUE
@@ -230,7 +234,7 @@ pub async fn list_node_gateway_nodes(
         [status.clone().into(), page_size.into(), offset.into()],
     );
     let nodes = NodeGatewayNodeInfo::find_by_statement(stmt)
-        .all(pool)
+        .all(pool.write_conn())
         .await?;
 
     let stmt = Statement::from_sql_and_values(

@@ -44,6 +44,10 @@ pub struct NodeCapabilities {
     /// Explicit native JSON operation support. Empty for legacy nodes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_operations: Vec<crate::node_native::NodeNativeOperation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_profiles: Vec<crate::node_capability::NativeModelProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_version: Option<String>,
 }
 
 // ============================================================================
@@ -62,6 +66,16 @@ pub struct NodeRegisterRequest {
     /// 注册 token
     pub registration_token: String,
     /// 节点能力声明
+    pub capabilities: NodeCapabilities,
+}
+
+/// Authenticated capability renegotiation creates a new immutable session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeCapabilitiesRequest {
+    pub protocol_version: String,
+    pub node_id: NodeId,
+    pub session_id: NodeSessionId,
     pub capabilities: NodeCapabilities,
 }
 

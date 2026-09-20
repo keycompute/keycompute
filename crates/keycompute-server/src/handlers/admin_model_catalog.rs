@@ -317,7 +317,7 @@ fn node_supply_sql() -> String {
         r#"
       SELECT DISTINCT n.id,m.model,
         EXISTS(SELECT 1 FROM node_sessions ns WHERE ns.node_id=n.id
-          AND {ready} AND ns.accepted_models_json @> jsonb_build_array(m.model)) AS ready
+          AND {ready} AND ns.accepted_models_json @> jsonb_build_array(m.model) AND {profile}) AS ready
       FROM nodes n JOIN users u ON u.id=n.owner_user_id JOIN tenants t ON t.id=u.tenant_id
       CROSS JOIN LATERAL (
         SELECT v->>'model' AS model FROM jsonb_array_elements(
@@ -327,7 +327,8 @@ fn node_supply_sql() -> String {
       ) m
       WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama'
     "#,
-        ready = node_gateway::node_index::READY_NODE_CONDITION
+        ready = node_gateway::node_index::READY_NODE_CONDITION,
+        profile = node_gateway::node_index::ready_profile_condition("m.model", "'chat'")
     )
 }
 async fn node_catalog(

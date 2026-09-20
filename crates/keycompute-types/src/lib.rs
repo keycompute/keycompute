@@ -11,6 +11,7 @@ pub mod memory;
 pub mod model_access;
 pub mod monitoring;
 pub mod node;
+pub mod node_capability;
 pub mod node_native;
 pub mod pricing;
 pub mod request;

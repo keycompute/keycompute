@@ -1310,10 +1310,13 @@ CREATE TABLE IF NOT EXISTS node_sessions (
     node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     session_token_hash TEXT NOT NULL UNIQUE,
     accepted_models_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    registered_models_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     native_operations_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    native_profiles_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    accepting_tasks BOOLEAN NOT NULL DEFAULT TRUE,
     revoked_at TIMESTAMPTZ
 );
 
@@ -1328,6 +1331,7 @@ CREATE TABLE IF NOT EXISTS node_tasks (
     user_id UUID NOT NULL,
     model TEXT NOT NULL,
     payload_json JSONB NOT NULL,
+    native_requirements_json JSONB,
     status TEXT NOT NULL,
     assigned_node_id UUID REFERENCES nodes(id) ON DELETE SET NULL,
     assigned_session_id UUID REFERENCES node_sessions(id) ON DELETE SET NULL,

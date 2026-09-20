@@ -1,84 +1,84 @@
-//! Node Capability Index 实现
-//!
-//! 基于 PostgreSQL 实现 NodeCapabilityIndex trait，用于路由决策时检查是否存在 ready 节点。
-
+//! Writer-fresh node profile lookup shared with model discovery.
 use async_trait::async_trait;
 use keycompute_db::DbRouter;
 use keycompute_routing::NodeCapabilityIndex;
+use keycompute_types::node_capability::NativeRequirements;
+use keycompute_types::{KeyComputeError, Result};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use std::sync::Arc;
-
-/// Shared readiness predicate for dispatch and mode-aware model discovery.
-/// Query aliases must be nodes `n`, node_sessions `ns`, and owner tenants `t`.
-pub const READY_NODE_CONDITION: &str = "n.status = 'online' AND t.status = 'active' AND ns.expires_at > NOW() AND ns.revoked_at IS NULL AND n.capabilities_json->>'runtime' = 'ollama' AND ns.native_operations_json @> '[\"chat\"]'::jsonb";
-
-fn ready_node_query() -> String {
+pub const READY_NODE_CONDITION: &str = "n.status = 'online' AND t.status = 'active' AND ns.expires_at > NOW() AND ns.revoked_at IS NULL AND ns.accepting_tasks=TRUE AND n.capabilities_json->>'runtime' = 'ollama'";
+pub fn ready_profile_condition(model: &str, operation: &str) -> String {
     format!(
-        "SELECT EXISTS (SELECT 1 FROM nodes n INNER JOIN node_sessions ns ON n.id = ns.node_id INNER JOIN users u ON u.id = n.owner_user_id INNER JOIN tenants t ON t.id = u.tenant_id WHERE {READY_NODE_CONDITION} AND ns.accepted_models_json @> $1::jsonb LIMIT 1)"
+        "ns.native_profiles_json @> jsonb_build_array(jsonb_build_object('version',1,'model',{model},'operation',{operation}))"
     )
 }
-
-/// 基于 PostgreSQL 的 Node 能力索引
 pub struct PostgresNodeIndex {
     pool: Arc<DbRouter>,
 }
-
 impl PostgresNodeIndex {
-    /// 创建新的 PostgresNodeIndex 实例
     pub fn new(pool: Arc<DbRouter>) -> Self {
         Self { pool }
     }
-}
-
-#[async_trait]
-impl NodeCapabilityIndex for PostgresNodeIndex {
-    /// 检查是否存在 ready 节点可以处理指定模型
-    async fn has_ready_node(&self, model: &str) -> keycompute_types::Result<bool> {
-        let model_json: serde_json::Value = serde_json::json!([model]);
-
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            ready_node_query(),
-            [model_json.into()],
+    async fn query(&self, required: serde_json::Value) -> Result<bool> {
+        let sql = format!(
+            r#"WITH required AS (SELECT $1::jsonb r)
+            SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id
+            JOIN users u ON u.id=n.owner_user_id JOIN tenants t ON t.id=u.tenant_id CROSS JOIN required
+            WHERE {READY_NODE_CONDITION} AND ns.accepted_models_json @> jsonb_build_array(r->>'model')
+              AND ns.native_operations_json @> jsonb_build_array(r->>'operation')
+              AND EXISTS(SELECT 1 FROM jsonb_array_elements(ns.native_profiles_json) p WHERE {profile}))"#,
+            profile = keycompute_db::models::native_capability::profile_matches("p", "r")
         );
-
-        // Routing is authorization-sensitive: a replica may still advertise a
-        // node after its tenant was closed. Read the readiness predicate from
-        // the writer so closure takes effect immediately.
         let row = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            self.pool.write_conn().query_one(stmt),
+            self.pool
+                .write_conn()
+                .query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    sql,
+                    [required.into()],
+                )),
         )
         .await
         .map_err(|_| {
-            keycompute_types::KeyComputeError::ServiceUnavailable(
-                "Node metadata lookup timed out".into(),
-            )
+            KeyComputeError::ServiceUnavailable("node capability lookup timed out".into())
         })?
         .map_err(|_| {
-            keycompute_types::KeyComputeError::ServiceUnavailable(
-                "Node metadata unavailable".into(),
-            )
-        })?
-        .ok_or_else(|| {
-            keycompute_types::KeyComputeError::ServiceUnavailable("Missing node metadata".into())
+            KeyComputeError::ServiceUnavailable("node capability lookup unavailable".into())
         })?;
-        row.try_get_by_index::<bool>(0).map_err(|_| {
-            keycompute_types::KeyComputeError::ServiceUnavailable("Invalid node metadata".into())
-        })
+        row.ok_or_else(|| {
+            KeyComputeError::ServiceUnavailable("node capability result unavailable".into())
+        })?
+        .try_get_by_index::<bool>(0)
+        .map_err(|_| KeyComputeError::ServiceUnavailable("node capability result invalid".into()))
     }
 }
-
+#[async_trait]
+impl NodeCapabilityIndex for PostgresNodeIndex {
+    async fn has_ready_node(&self, model: &str) -> Result<bool> {
+        self.query(serde_json::json!({"version":1,"model":model,"operation":"chat","features":[],"enforce_limits":false})).await
+    }
+    async fn has_ready_native(&self, needed: &NativeRequirements) -> Result<bool> {
+        let value = serde_json::to_value(needed)
+            .map_err(|_| KeyComputeError::InvalidRequest("invalid native requirements".into()))?;
+        self.query(value).await
+    }
+}
 #[cfg(test)]
 mod tests {
-    use super::ready_node_query;
-
+    use super::*;
     #[test]
-    fn ready_node_query_requires_an_active_owner_tenant() {
-        let ready_node_query = ready_node_query();
-        assert!(ready_node_query.contains("INNER JOIN tenants t"));
-        assert!(ready_node_query.contains("t.status = 'active'"));
-        assert!(ready_node_query.contains("ns.expires_at > NOW()"));
-        assert!(ready_node_query.contains("ns.revoked_at IS NULL"));
+    fn readiness_uses_session_and_owner_state() {
+        for field in [
+            "t.status = 'active'",
+            "ns.expires_at > NOW()",
+            "ns.revoked_at IS NULL",
+            "ns.accepting_tasks=TRUE",
+        ] {
+            assert!(READY_NODE_CONDITION.contains(field));
+        }
+        let sql = ready_profile_condition("m.model", "'chat'");
+        assert!(sql.contains("native_profiles_json"));
+        assert!(sql.contains("'version',1"));
     }
 }

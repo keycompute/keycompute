@@ -150,6 +150,11 @@ async fn main() -> anyhow::Result<()> {
                 let session = keycompute_db::models::node_session::NodeSession::create(
                     &db,
                     &keycompute_db::models::node_session::CreateNodeSessionRequest {
+                        native_profiles_json: serde_json::json!([
+                            keycompute_types::node_capability::NativeModelProfile::plain_chat(
+                                model
+                            )
+                        ]),
                         native_operations_json: serde_json::json!(["chat"]),
                         node_id: node.id,
                         session_token_hash: hex::encode(Sha256::digest(session_token.as_bytes())),

@@ -41,6 +41,10 @@ pub trait NodeCapabilityIndex: Send + Sync {
     ///
     /// 该方法为异步，因为实际实现需要执行数据库查询 (I/O 操作)。
     async fn has_ready_node(&self, model: &str) -> Result<bool>;
+    async fn has_ready_native(
+        &self,
+        requirements: &keycompute_types::node_capability::NativeRequirements,
+    ) -> Result<bool>;
 }
 
 /// 每个 Provider（协议）最多选入执行计划的账号数
@@ -241,16 +245,35 @@ impl RoutingEngine {
                         "NodeDispatch metadata service unavailable".into(),
                     )
                 })?;
-                let ready = tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    index.has_ready_node(&ctx.model),
-                )
-                .await
-                .map_err(|_| {
-                    KeyComputeError::ServiceUnavailable(
-                        "NodeDispatch readiness lookup timed out".into(),
+                let needed = if let Some(body) = &ctx.native_openai_chat_request {
+                    let native = keycompute_types::node_native::NodeNativeRequest {
+                        operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+                        body: (**body).clone(),
+                        headers: vec![],
+                    };
+                    Some(
+                        keycompute_types::node_capability::NativeRequirements::from_request(
+                            &native,
+                        )
+                        .map_err(|e| KeyComputeError::InvalidRequest(e.into()))?,
                     )
-                })??;
+                } else {
+                    None
+                };
+                let lookup = async {
+                    if let Some(needed) = &needed {
+                        index.has_ready_native(needed).await
+                    } else {
+                        index.has_ready_node(&ctx.model).await
+                    }
+                };
+                let ready = tokio::time::timeout(std::time::Duration::from_secs(3), lookup)
+                    .await
+                    .map_err(|_| {
+                        KeyComputeError::ServiceUnavailable(
+                            "Node capability lookup timed out".into(),
+                        )
+                    })??;
                 if !ready {
                     return Err(KeyComputeError::NoReadyNode(ctx.model.clone()));
                 }
@@ -850,6 +873,12 @@ mod tests {
     impl NodeCapabilityIndex for MockNodeIndex {
         async fn has_ready_node(&self, model: &str) -> Result<bool> {
             Ok(self.ready_models.contains(&model.to_string()))
+        }
+        async fn has_ready_native(
+            &self,
+            needed: &keycompute_types::node_capability::NativeRequirements,
+        ) -> Result<bool> {
+            self.has_ready_node(&needed.model).await
         }
     }
 

@@ -4653,6 +4653,8 @@ dependencies = [
  "chrono",
  "deadpool-redis",
  "fastrand",
+ "hex",
+ "hmac",
  "keycompute-config",
  "keycompute-db",
  "keycompute-observability",

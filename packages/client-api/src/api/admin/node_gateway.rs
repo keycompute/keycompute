@@ -130,6 +130,10 @@ pub struct NodeGatewayNodeInfo {
     pub client_instance_id: String,
     pub status: String,
     pub accepted_models_json: serde_json::Value,
+    #[serde(default)]
+    pub native_profiles_json: serde_json::Value,
+    #[serde(default)]
+    pub runtime_version: Option<String>,
     pub consecutive_failure_count: i32,
     pub failure_threshold: i32,
     pub last_heartbeat_at: Option<String>,

@@ -1206,6 +1206,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "node_gateway.subtitle",
         "Manage local node access, task queues, and the NodeDispatch execution path.",
     );
+    m.insert(
+        "node_gateway.native_unverified",
+        "No verified native model capability",
+    );
     m.insert("node_gateway.request_title", "NodeDispatch request entry");
     m.insert(
         "node_gateway.request_entry_help",
