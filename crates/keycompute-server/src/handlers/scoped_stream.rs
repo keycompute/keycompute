@@ -194,7 +194,8 @@ impl Owner {
         {
             Ok(task) => task,
             Err(error) => {
-                self.prehead_failure(&format!("node task enqueue failed: {error}"), 503)
+                tracing::warn!(request_id=%self.input.ctx.request_id,%error,"native task enqueue failed");
+                self.prehead_failure("Native task queue is temporarily unavailable", 503)
                     .await;
                 return;
             }
@@ -210,6 +211,11 @@ impl Owner {
 
         loop {
             if tokio::time::Instant::now() >= deadline {
+                // An unclaimed task has never produced a response head. Keep
+                // its deadline error explicit instead of dropping the oneshot
+                // and exposing a generic internal-error response.
+                self.send_error_head("Native stream execution timed out", 504)
+                    .await;
                 self.cancel_node(&gateway, task.id, "native_stream_deadline")
                     .await;
                 self.finish_node(observed, "incomplete", ClientResponseOutcome::TimedOut)

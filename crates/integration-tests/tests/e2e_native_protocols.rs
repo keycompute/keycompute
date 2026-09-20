@@ -1023,3 +1023,29 @@ async fn node_stream_generic_failure_after_head_closes_before_deadline() {
     assert!(f.upstream.calls.lock().unwrap().is_empty());
     f.finish().await;
 }
+
+#[tokio::test]
+async fn unclaimed_native_stream_returns_gateway_timeout_before_any_success_head() {
+    let mut f = Fixture::with_sse(true).await;
+    let mut payload = f.body(Op::Chat);
+    payload["stream"] = true.into();
+    let error = expect(
+        f.request(Method::POST, "/nt/v1/chat/completions", Some(payload))
+            .await,
+        StatusCode::GATEWAY_TIMEOUT,
+    );
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("timed out")
+    );
+    assert_eq!(f.tasks().await, 1);
+    assert!(f.upstream.calls.lock().unwrap().is_empty());
+    let row=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT (SELECT COUNT(*) FROM balance_reservations WHERE user_id=$1 AND status='active')::BIGINT AS reserved,(SELECT COUNT(*) FROM usage_logs WHERE user_id=$1)::BIGINT AS billed",
+        [f.user.id.into()])).await.unwrap().unwrap();
+    assert_eq!(row.try_get::<i64>("", "reserved").unwrap(), 0);
+    assert_eq!(row.try_get::<i64>("", "billed").unwrap(), 0);
+    f.finish().await;
+}
