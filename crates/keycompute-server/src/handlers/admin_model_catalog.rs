@@ -199,7 +199,7 @@ async fn account_pool_catalog(
           AND (h.updated_at>a.health_updated_at OR (h.updated_at=a.health_updated_at AND h.generation>=a.health_generation))
         WHERE (a.tenant_id=$1 OR a.visibility='global') AND a.pool_enabled
           AND a.provider=$2 AND a.api_capabilities @> ARRAY[$3]::TEXT[]
-          AND m.model<>'' AND LOWER(m.model) NOT LIKE 'node:%'
+          AND m.model<>''
           AND ($4::TEXT IS NULL OR m.model ILIKE '%'||$4||'%')
       ), grouped AS (
         SELECT model,COUNT(*)::BIGINT configured_targets,
@@ -325,7 +325,7 @@ fn node_supply_sql() -> String {
         UNION SELECT jsonb_array_elements_text(ns.accepted_models_json) FROM node_sessions ns
           WHERE ns.node_id=n.id AND ns.expires_at>NOW() AND ns.revoked_at IS NULL
       ) m
-      WHERE m.model IS NOT NULL AND m.model<>'' AND LOWER(m.model) NOT LIKE 'node:%' AND n.capabilities_json->>'runtime'='ollama'
+      WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama'
     "#,
         ready = node_gateway::node_index::READY_NODE_CONDITION
     )

@@ -45,20 +45,20 @@ aliases for NodeDispatch. Unsupported `/nt/v1` paths return a backend JSON
 error instead of being routed to `/v1` or the console SPA. Empty node capacity
 and metadata/readiness failures remain distinct errors.
 
-## Migration
+## Model lookup and errors
 
-The old `node:<model>` form is removed rather than silently aliased. Replace:
+The request URL is the only execution-mode selector. Model IDs are matched
+literally against that mode's available models, including colons and a leading
+`node:`. The server neither strips the prefix nor returns a migration-specific
+error. For example, `node:gemma3:270m` does not refer to `gemma3:270m` unless an
+upstream or worker actually declares that exact full name.
 
-```text
-POST /v1/chat/completions  model=node:gemma3:270m
-```
+An undeclared name follows the normal mode-specific failure path: account-pool
+and passthrough Chat return their ordinary model/grant-not-found errors; node
+Chat returns its ordinary no-ready-node error. Model-detail endpoints return
+normal not-found responses. If the full literal name is declared, discovery,
+execution and pricing use that name unchanged in the URL-selected mode.
 
-with:
-
-```text
-POST /nt/v1/chat/completions  model=gemma3:270m
-```
-
-The `node:` prefix remains valid only where it is an internal queue/module
-label; it is not a public API model name. Existing clients must update their
-base URL and model value together.
+To invoke the worker model `gemma3:270m`, use
+`POST /nt/v1/chat/completions` with `model=gemma3:270m`. Model text never switches
+an account request to a node or enables a fallback to another family.

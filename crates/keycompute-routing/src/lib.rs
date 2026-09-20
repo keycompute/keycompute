@@ -221,7 +221,6 @@ impl RoutingEngine {
             "route: starting"
         );
 
-        keycompute_types::validate_raw_model_id(&ctx.model)?;
         match ctx.access_mode {
             keycompute_types::ModelAccessMode::Passthrough => {
                 return Err(KeyComputeError::InvalidRequest(

@@ -68,13 +68,6 @@ fn pricing_provider_class(dimension: &str) -> &'static str {
     }
 }
 
-fn legacy_node_model_prefix(model: &str) -> bool {
-    model
-        .trim()
-        .get(..5)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("node:"))
-}
-
 fn pricing_col_count(is_admin: bool) -> u32 {
     if is_admin { 7 } else { 6 }
 }
@@ -540,12 +533,8 @@ fn CreatePricingModal(
             form_err.set(i18n.t("pricing.fill_all").to_string());
             return;
         }
-        // NodeDispatch prices use the raw model ID. The old node: spelling is
-        // rejected with migration help instead of being silently rewritten.
-        if p == "node" && legacy_node_model_prefix(m.trim()) {
-            form_err.set(i18n.t("pricing.node_legacy_prefix_help").to_string());
-            return;
-        }
+        // Keep the exact model ID. The billing dimension, not a name prefix,
+        // selects which execution mode this price belongs to.
         // tenant_id 保持原样（None 表示未选择，Some(id) 表示选择了具体租户）
         // 注意：由于已移除“全局默认”选项，用户无法创建全局默认定价
         let tid = tid.filter(|id| !id.is_empty());
@@ -878,7 +867,7 @@ fn EditPricingModal(
 
 #[cfg(test)]
 mod tests {
-    use super::{PAGE_SIZE, PricingListQuery, legacy_node_model_prefix, pricing_col_count};
+    use super::{PAGE_SIZE, PricingListQuery, pricing_col_count};
 
     #[test]
     fn empty_table_colspan_matches_visible_pricing_columns() {
@@ -910,14 +899,5 @@ mod tests {
 
         assert_eq!(query.page, 1);
         assert_eq!(query.search, "matched before editing");
-    }
-
-    #[test]
-    fn node_pricing_accepts_colon_names_but_rejects_only_legacy_prefix() {
-        assert!(!legacy_node_model_prefix("gemma3:270m"));
-        assert!(legacy_node_model_prefix("node:gemma3:270m"));
-        assert!(legacy_node_model_prefix("NODE:llama3"));
-        assert!(legacy_node_model_prefix(" node:llama3 "));
-        assert!(!legacy_node_model_prefix("provider:model"));
     }
 }

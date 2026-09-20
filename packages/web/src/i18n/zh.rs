@@ -918,10 +918,6 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("pricing.invalid_output_price", "输出单价格式不正确");
     m.insert("pricing.negative_input_price", "输入单价不能为负数");
     m.insert("pricing.negative_output_price", "输出单价不能为负数");
-    m.insert(
-        "pricing.node_legacy_prefix_help",
-        "NodeDispatch 定价使用原始模型 ID，例如 gemma3:270m。请删除已废弃的 node: 前缀；路由由 /nt/v1 选择。",
-    );
     m.insert("pricing.create_failed", "创建失败");
     m.insert("pricing.update_failed", "更新失败");
     m.insert("pricing.create_title", "新建定价");
@@ -1058,7 +1054,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "node_gateway.request_step_model",
-        "model 使用原始节点模型 ID，例如 gemma3:270m；不要添加已废弃的路由前缀。",
+        "model 使用节点声明的完整模型 ID，例如 gemma3:270m；执行模式仅由请求 URL 决定。",
     );
     m.insert(
         "node_gateway.request_step_stream",

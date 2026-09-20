@@ -70,7 +70,6 @@ pub async fn get_pricing(
     auth: AuthExtractor,
     Query(query): Query<PricingQuery>,
 ) -> Result<Json<PricingResponse>> {
-    keycompute_types::validate_raw_model_id(&query.model).map_err(ApiError::from)?;
     let provider = keycompute_pricing::resolve_pricing_provider(query.mode);
     let snapshot = state
         .pricing
@@ -92,7 +91,6 @@ pub async fn calculate_cost(
     auth: AuthExtractor,
     Json(request): Json<CostCalculationRequest>,
 ) -> Result<Json<CostCalculationResponse>> {
-    keycompute_types::validate_raw_model_id(&request.model).map_err(ApiError::from)?;
     let provider = keycompute_pricing::resolve_pricing_provider(request.mode);
     let snapshot = state
         .pricing

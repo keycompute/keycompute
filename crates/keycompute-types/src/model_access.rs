@@ -61,19 +61,6 @@ impl ModelAccessMode {
     }
 }
 
-/// Retired routing syntax must fail visibly. Other colons are model data.
-pub fn validate_raw_model_id(model: &str) -> crate::Result<()> {
-    if model
-        .get(..5)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("node:"))
-    {
-        return Err(crate::KeyComputeError::InvalidRequest(
-            "The node: routing prefix is no longer supported. Use /nt/v1/chat/completions and the raw model name without node:.".into(),
-        ));
-    }
-    Ok(())
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelAvailability {
@@ -191,14 +178,5 @@ mod ingress_contract_tests {
         assert!(!ModelAccessMode::uses_execution_rpm(
             "/v1/responses/input_tokens"
         ));
-    }
-    #[test]
-    fn legacy_prefix_is_rejected_without_rejecting_valid_model_colons() {
-        for model in ["node:llama", "NODE:llama", "Node:"] {
-            assert!(validate_raw_model_id(model).is_err());
-        }
-        for model in ["gemma3:270m", "org/model:latest", "mynode:llama", "模型"] {
-            assert!(validate_raw_model_id(model).is_ok());
-        }
     }
 }

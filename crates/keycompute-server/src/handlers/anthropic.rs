@@ -194,16 +194,6 @@ pub async fn messages(
         .await;
         return Err(error);
     }
-    if let Err(error) = keycompute_types::validate_raw_model_id(&request.model) {
-        finish_anthropic_unexecuted_trace(
-            &mut pre_execution_guard,
-            ErrorOrigin::Client,
-            TraceErrorCategory::InvalidRequest,
-            "deprecated_node_model_prefix",
-        )
-        .await;
-        return Err(ApiError::from(error));
-    }
     if let Err(error) = request.validate() {
         finish_anthropic_unexecuted_trace(
             &mut pre_execution_guard,

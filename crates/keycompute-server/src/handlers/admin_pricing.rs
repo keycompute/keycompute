@@ -246,7 +246,6 @@ fn parse_timestamp(raw: Option<&String>, field: &str) -> Result<Option<DateTime<
 
 fn validate_model_name(model_name: &str) -> Result<String> {
     let model_name = model_name.trim();
-    keycompute_types::validate_raw_model_id(model_name).map_err(ApiError::from)?;
     if model_name.is_empty()
         || model_name.chars().count() > 100
         || model_name.chars().any(|character| character.is_control())
@@ -738,6 +737,18 @@ mod tests {
             validate_active_pricing_tenant_status(None, tenant_id),
             Err(ApiError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn pricing_model_names_do_not_select_an_execution_mode() {
+        for model in [
+            "gemma3:270m",
+            "node:gemma3:270m",
+            "NODE:gemma3:270m",
+            "provider:model",
+        ] {
+            assert_eq!(validate_model_name(model).unwrap(), model);
+        }
     }
 
     #[test]

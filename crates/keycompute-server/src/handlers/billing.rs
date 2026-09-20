@@ -282,8 +282,6 @@ pub async fn calculate_cost(
 ) -> Result<Json<CalculateCostResponse>> {
     // 预览应按调用方租户解析。管理员可显式指定目标租户，普通用户不能越权。
     let tenant_id = resolve_preview_tenant(&auth, request.tenant_id)?;
-    keycompute_types::validate_raw_model_id(&request.model)
-        .map_err(crate::error::ApiError::from)?;
     let provider = keycompute_pricing::resolve_pricing_provider(request.mode);
     let pricing = state
         .pricing

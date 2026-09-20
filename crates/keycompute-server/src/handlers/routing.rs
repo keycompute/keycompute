@@ -159,7 +159,6 @@ pub async fn debug_routing(
 
     // 1. 构建 PricingSnapshot
     // Billing dimension is derived from the explicit access mode.
-    keycompute_types::validate_raw_model_id(&query.model).map_err(ApiError::from)?;
     let (entry, _) =
         super::admin_model_catalog::protocol_capability(query.mode, query.entry.as_deref(), None)?;
     if query.mode == keycompute_types::ModelAccessMode::NodeDispatch && state.node_gateway.is_none()

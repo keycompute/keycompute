@@ -31,7 +31,7 @@ JOIN tenants anchor ON anchor.id=pb.tenant_id JOIN tenants owner ON owner.id=a.t
 CROSS JOIN LATERAL unnest(a.models_supported) AS declared(model)
 LEFT JOIN account_model_health h ON h.account_id=a.id AND h.api_capability='chat_completions' AND h.model=declared.model
 WHERE (pb.tenant_id=$1 OR pb.is_global) AND ($2::TEXT IS NULL OR declared.model=$2)
-  AND declared.model<>'' AND LOWER(declared.model) NOT LIKE 'node:%'
+  AND declared.model<>''
 ORDER BY a.id,declared.model,(anchor.status='active') DESC,(pb.tenant_id=$1) DESC,pb.id
 "#;
 #[derive(Clone, FromQueryResult)]
@@ -207,7 +207,6 @@ pub(crate) async fn resolve_passthrough_binding_plan(
         || model.trim() != model
         || model.len() > 255
         || model.chars().any(char::is_control)
-        || model.to_ascii_lowercase().starts_with("node:")
     {
         return Err(KeyComputeError::InvalidRequest(
             "Invalid model for the passthrough endpoint".into(),

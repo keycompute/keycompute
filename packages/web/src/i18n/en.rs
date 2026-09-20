@@ -1035,10 +1035,6 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "pricing.negative_output_price",
         "Output price cannot be negative",
     );
-    m.insert(
-        "pricing.node_legacy_prefix_help",
-        "NodeDispatch pricing uses the raw model ID, for example gemma3:270m. Remove the deprecated node: prefix; routing is selected by /nt/v1.",
-    );
     m.insert("pricing.create_failed", "Create failed");
     m.insert("pricing.update_failed", "Update failed");
     m.insert("pricing.create_title", "Create Pricing");
@@ -1219,7 +1215,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "node_gateway.request_step_key",
         "Send a platform API key in the Authorization header.",
     );
-    m.insert("node_gateway.request_step_model", "Send the raw worker model ID in model, such as gemma3:270m; do not add the deprecated routing prefix.");
+    m.insert("node_gateway.request_step_model", "Send the exact worker model ID in model, such as gemma3:270m; only the request URL selects the execution mode.");
     m.insert(
         "node_gateway.request_step_stream",
         "Set stream=true only when you want the existing completion-buffered SSE response.",

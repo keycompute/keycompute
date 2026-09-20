@@ -420,7 +420,7 @@ pub async fn probe_passthrough_binding(
         .model
         .or_else(|| account.models_supported.first().cloned())
         .ok_or_else(|| ApiError::BadRequest("Account declares no models".into()))?;
-    if !account.models_supported.contains(&model) || model.to_lowercase().starts_with("node:") {
+    if !account.models_supported.contains(&model) {
         return Err(ApiError::BadRequest(
             "Diagnostic model must be declared by the selected account".into(),
         ));

@@ -743,16 +743,6 @@ async fn chat_completions_inner(
         .await;
         return Err(error);
     }
-    if let Some(error) = reject_legacy_node_model(&request.model) {
-        finish_unexecuted_trace(
-            &mut pre_execution_guard,
-            ErrorOrigin::Client,
-            TraceErrorCategory::InvalidRequest,
-            "deprecated_node_model_prefix",
-        )
-        .await;
-        return Err(error);
-    }
     // A live capability row is not enough when the task service is disabled.
     // Reject before pricing, execution RPM or TPM/balance reservations.
     if access_mode == ModelAccessMode::NodeDispatch && state.node_gateway.is_none() {
@@ -2684,9 +2674,6 @@ fn collect_models_by_protocol(
             })
     }) {
         for model in account.models_supported {
-            if model.to_ascii_lowercase().starts_with("node:") {
-                continue;
-            }
             model_set.insert(model.clone());
             provider_map.insert(model, account.provider.clone());
         }
@@ -2744,12 +2731,6 @@ fn resolve_list_protocol(protocol: Option<&str>) -> Result<&'static str> {
     }
 }
 
-fn reject_legacy_node_model(model: &str) -> Option<ApiError> {
-    keycompute_types::validate_raw_model_id(model)
-        .err()
-        .map(ApiError::from)
-}
-
 pub async fn list_models(
     auth: AuthExtractor,
     State(state): State<AppState>,
@@ -2766,7 +2747,6 @@ pub async fn retrieve_model(
     Query(query): Query<ListModelsQuery>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Model>> {
-    keycompute_types::validate_raw_model_id(&model_id).map_err(ApiError::from)?;
     discover_models(&auth, &state, &query, ModelAccessMode::AccountPool)
         .await?
         .into_iter()
@@ -2791,7 +2771,6 @@ pub async fn node_dispatch_retrieve_model(
     Query(query): Query<ListModelsQuery>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Model>> {
-    keycompute_types::validate_raw_model_id(&model_id).map_err(ApiError::from)?;
     discover_models(&auth, &state, &query, ModelAccessMode::NodeDispatch)
         .await?
         .into_iter()
@@ -2816,7 +2795,6 @@ pub async fn passthrough_binding_retrieve_model(
     Query(query): Query<ListModelsQuery>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Model>> {
-    keycompute_types::validate_raw_model_id(&model_id).map_err(ApiError::from)?;
     discover_models(&auth, &state, &query, ModelAccessMode::Passthrough)
         .await?
         .into_iter()
@@ -2894,9 +2872,7 @@ async fn discover_models(
                 continue;
             }
             for model in account.models_supported {
-                if !model.trim().is_empty()
-                    && keycompute_types::validate_raw_model_id(&model).is_ok()
-                {
+                if !model.trim().is_empty() {
                     entries.insert(model, protocol.clone());
                 }
             }

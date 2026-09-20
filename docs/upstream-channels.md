@@ -39,7 +39,7 @@ distinct; examples never manufacture an available model. A generated platform
 key identifies a caller, not a fixed execution mode. `/pt` is the passthrough URL
 prefix; `/nt/v1` is the NodeDispatch URL prefix and node model IDs remain raw.
 See [NodeDispatch](node-dispatch.md) for the supported public surface and
-explicit migration from the removed prefix-based routing form.
+literal model-name matching and ordinary mode-specific errors.
 
 For grant semantics, the four-option scope matrix, APIs, diagnostics, revocation
 and fresh-schema constraints, see [Passthrough bindings](passthrough-bindings.md).

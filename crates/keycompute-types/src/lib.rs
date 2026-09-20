@@ -25,7 +25,7 @@ pub use execution_plan::{
 };
 pub use model_access::{
     BindingAccountOption, BindingAccountOptions, ModelAccessMode, ModelAvailability,
-    ModelCatalogEntry, ModelCatalogPage, validate_raw_model_id,
+    ModelCatalogEntry, ModelCatalogPage,
 };
 pub use monitoring::*;
 pub use node::{

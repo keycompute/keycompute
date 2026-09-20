@@ -89,6 +89,9 @@ async fn http(
     if let Some(key) = key {
         request = request.header("authorization", format!("Bearer {key}"));
     }
+    if path == "/v1/messages" {
+        request = request.header("anthropic-version", "2023-06-01");
+    }
     let response = tokio::time::timeout(
         Duration::from_secs(20),
         app.oneshot(
@@ -153,6 +156,9 @@ impl Drop for Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
+        Self::with_model_prefix("").await
+    }
+    async fn with_model_prefix(prefix: &str) -> Self {
         let db = create_test_pool().await;
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
@@ -182,7 +188,7 @@ impl Fixture {
         let owner = create_test_user(&db, owner_tenant.id, "nt-worker", &run).await;
         keycompute_runtime::set_global_crypto("LXmXUgcaoZePsWayXJN2E5Wa9/zpkl/vOTwnLNy/oLc=")
             .unwrap();
-        let shared = format!("gemma3:{run}");
+        let shared = format!("{prefix}gemma3:{run}");
         let node_only = format!("node-only-{run}");
         let pool_only = format!("pool-only-{run}");
         let calls: Calls = Arc::default();
@@ -566,18 +572,50 @@ async fn families_have_independent_model_discovery_without_prefixes() {
 }
 
 #[tokio::test]
-async fn legacy_model_prefix_never_selects_node_from_another_family() {
+async fn undeclared_node_prefix_returns_the_same_errors_as_other_missing_models() {
     let mut f = Fixture::new().await;
-    for prefix in ["node:", "NODE:", "Node:"] {
-        for path in [POOL, PT, NT] {
-            let body = f.body(&format!("{prefix}{}", f.shared), false);
+    for (path, status) in [
+        (POOL, StatusCode::NOT_FOUND),
+        (PT, StatusCode::NOT_FOUND),
+        (NT, StatusCode::SERVICE_UNAVAILABLE),
+    ] {
+        let missing = format!("missing-{}", f.shared);
+        let normal = expect(
+            f.request(Method::POST, path, Some(f.body(&missing, false)))
+                .await,
+            status,
+        );
+        for prefix in ["node:", "NODE:", "Node:"] {
+            let model = format!("{prefix}{}", f.shared);
             let error = expect(
-                f.request(Method::POST, path, Some(body)).await,
-                StatusCode::BAD_REQUEST,
+                f.request(Method::POST, path, Some(f.body(&model, false)))
+                    .await,
+                status,
             );
+            assert_eq!(
+                error.to_string().replace(&model, "<model>"),
+                normal.to_string().replace(&missing, "<model>")
+            );
+            let text = error.to_string().to_lowercase();
             assert!(
-                error["error"].is_object() || error.get("message").is_some(),
-                "{error}"
+                !text.contains("migration")
+                    && !text.contains("routing prefix")
+                    && !text.contains("no longer supported")
+            );
+            let base = path.strip_suffix("/chat/completions").unwrap();
+            let absent = expect(
+                f.request(Method::GET, &format!("{base}/models/{missing}"), None)
+                    .await,
+                StatusCode::NOT_FOUND,
+            );
+            let detail = expect(
+                f.request(Method::GET, &format!("{base}/models/{model}"), None)
+                    .await,
+                StatusCode::NOT_FOUND,
+            );
+            assert_eq!(
+                detail.to_string().replace(&model, "<model>"),
+                absent.to_string().replace(&missing, "<model>")
             );
         }
     }
@@ -855,7 +893,7 @@ async fn disabled_node_service_fails_before_execution_budgets() {
 }
 
 #[tokio::test]
-async fn legacy_prefix_casing_is_never_advertised_as_an_account_model() {
+async fn declared_node_prefixes_are_normal_account_model_names() {
     let mut f = Fixture::new().await;
     let names = [
         format!("node:{}", f.shared),
@@ -871,7 +909,7 @@ async fn legacy_prefix_casing_is_never_advertised_as_an_account_model() {
     ))
     .await
     .unwrap();
-    for base in ["/v1", "/pt/v1"] {
+    for (base, channel) in [("/v1", "pool"), ("/pt/v1", "bound")] {
         let listed = expect(
             f.request(Method::GET, &format!("{base}/models"), None)
                 .await,
@@ -880,16 +918,28 @@ async fn legacy_prefix_casing_is_never_advertised_as_an_account_model() {
         let data = listed["data"].as_array().unwrap();
         assert!(data.iter().any(|m| m["id"] == f.shared));
         for model in &names {
-            assert!(!data.iter().any(|m| m["id"] == *model));
-            expect(
+            assert!(data.iter().any(|m| m["id"] == *model));
+            let detail = expect(
                 f.request(Method::GET, &format!("{base}/models/{model}"), None)
                     .await,
-                StatusCode::BAD_REQUEST,
+                StatusCode::OK,
             );
+            assert_eq!(detail["id"], *model);
+            let result = expect(
+                f.request(
+                    Method::POST,
+                    &format!("{base}/chat/completions"),
+                    Some(f.body(model, false)),
+                )
+                .await,
+                StatusCode::OK,
+            );
+            assert_eq!(result["model"], *model);
+            assert_eq!(result["choices"][0]["message"]["content"], channel);
         }
     }
     assert_eq!(f.tasks().await, 0);
-    assert!(f.calls.lock().unwrap().is_empty());
+    assert_eq!(f.calls.lock().unwrap().len(), 6);
     f.finish().await;
 }
 
@@ -921,6 +971,86 @@ async fn routing_debug_validates_mode_and_protocol_before_planning() {
     assert_eq!(response["primary"]["model"], f.shared);
     assert!(response["primary"]["account_id"].is_null());
     assert!(response["fallback_chain"].as_array().unwrap().is_empty());
+    assert_eq!(f.tasks().await, 0);
+    assert!(f.calls.lock().unwrap().is_empty());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn literal_node_prefixed_name_uses_the_url_selected_execution_family() {
+    let mut f = Fixture::with_model_prefix("node:").await;
+    for base in ["/v1", "/pt/v1", "/nt/v1"] {
+        let listed = expect(
+            f.request(Method::GET, &format!("{base}/models"), None)
+                .await,
+            StatusCode::OK,
+        );
+        assert!(
+            listed["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == f.shared)
+        );
+        let detail = expect(
+            f.request(Method::GET, &format!("{base}/models/{}", f.shared), None)
+                .await,
+            StatusCode::OK,
+        );
+        assert_eq!(detail["id"], f.shared);
+    }
+    for (path, channel) in [(POOL, "pool"), (PT, "bound")] {
+        let response = expect(
+            f.request(Method::POST, path, Some(f.body(&f.shared, false)))
+                .await,
+            StatusCode::OK,
+        );
+        assert_eq!(response["model"], f.shared);
+        assert_eq!(response["choices"][0]["message"]["content"], channel);
+    }
+    assert_eq!(f.tasks().await, 0);
+    let worker = f.worker();
+    let response = expect(
+        f.request(Method::POST, NT, Some(f.body(&f.shared, false)))
+            .await,
+        StatusCode::OK,
+    );
+    let task = worker.await.unwrap();
+    assert_eq!(response["model"], f.shared);
+    assert_eq!(task.model, f.shared);
+    assert_eq!(task.payload.chat.as_ref().unwrap().model, f.shared);
+    assert_eq!(f.tasks().await, 1);
+    assert_eq!(f.calls.lock().unwrap().len(), 2);
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn unknown_prefixed_models_use_normal_responses_and_messages_errors() {
+    let mut f = Fixture::new().await;
+    let missing = format!("missing-{}", f.shared);
+    let prefixed = format!("node:{}", f.shared);
+    for path in ["/v1/responses", "/v1/messages"] {
+        let payload = |model: &str| {
+            if path == "/v1/responses" {
+                json!({"model":model,"input":"Hello","max_output_tokens":16,"store":false})
+            } else {
+                json!({"model":model,"messages":[{"role":"user","content":"Hello"}],"max_tokens":16})
+            }
+        };
+        let ordinary = expect(
+            f.request(Method::POST, path, Some(payload(&missing))).await,
+            StatusCode::NOT_FOUND,
+        );
+        let response = expect(
+            f.request(Method::POST, path, Some(payload(&prefixed)))
+                .await,
+            StatusCode::NOT_FOUND,
+        );
+        assert_eq!(
+            response.to_string().replace(&prefixed, "<model>"),
+            ordinary.to_string().replace(&missing, "<model>")
+        );
+    }
     assert_eq!(f.tasks().await, 0);
     assert!(f.calls.lock().unwrap().is_empty());
     f.finish().await;
