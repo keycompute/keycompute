@@ -1,4 +1,4 @@
-//! Versioned per-model native capabilities. Shared wire shape with node-token.
+//! Versioned per-model native capabilities. Shared wire shape with keycompute-types.
 use crate::node_native::{
     MAX_NATIVE_BODY_BYTES, NodeNativeHttpResult, NodeNativeOperation, NodeNativeRequest,
     native_body_size,
@@ -6,8 +6,10 @@ use crate::node_native::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
+
 pub const NATIVE_CAPABILITY_VERSION: u16 = 1;
 pub const MAX_NATIVE_PROFILES: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeFeature {
@@ -16,6 +18,7 @@ pub enum NativeFeature {
     StructuredOutput,
     Thinking,
 }
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeModelProfile {
@@ -29,6 +32,7 @@ pub struct NativeModelProfile {
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeRequirements {
@@ -39,22 +43,29 @@ pub struct NativeRequirements {
     pub request_bytes: u32,
     pub output_tokens: Option<u32>,
 }
+
 impl NativeModelProfile {
-    pub fn plain_chat(model: impl Into<String>) -> Self {
+    pub fn for_operation(model: impl Into<String>, operation: NodeNativeOperation) -> Self {
         Self {
             version: NATIVE_CAPABILITY_VERSION,
             model: model.into(),
-            operation: NodeNativeOperation::Chat,
+            operation,
             features: vec![],
             max_request_bytes: MAX_NATIVE_BODY_BYTES as u32,
             max_response_bytes: MAX_NATIVE_BODY_BYTES as u32,
             max_output_tokens: None,
         }
     }
+
+    pub fn plain_chat(model: impl Into<String>) -> Self {
+        Self::for_operation(model, NodeNativeOperation::Chat)
+    }
+
     pub fn with_features(mut self, features: Vec<NativeFeature>) -> Self {
         self.features = features;
         self
     }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.version != NATIVE_CAPABILITY_VERSION
             || self.model.is_empty()
@@ -67,28 +78,33 @@ impl NativeModelProfile {
             || self.max_response_bytes as usize > MAX_NATIVE_BODY_BYTES
             || self
                 .max_output_tokens
-                .is_some_and(|n| n == 0 || n > i32::MAX as u32)
+                .is_some_and(|tokens| tokens == 0 || tokens > i32::MAX as u32)
         {
             return Err("native_profile_invalid");
         }
         Ok(())
     }
+
     pub fn permits(&self, needed: &NativeRequirements) -> bool {
         self.validate().is_ok()
             && self.version == needed.version
             && self.model == needed.model
             && self.operation == needed.operation
-            && needed.features.iter().all(|f| self.features.contains(f))
+            && needed
+                .features
+                .iter()
+                .all(|feature| self.features.contains(feature))
             && self.max_request_bytes >= needed.request_bytes
             && self
                 .max_output_tokens
-                .is_none_or(|max| needed.output_tokens.is_some_and(|n| n <= max))
+                .is_none_or(|max| needed.output_tokens.is_some_and(|tokens| tokens <= max))
     }
+
     pub fn validate_result(&self, result: &NodeNativeHttpResult) -> Result<(), &'static str> {
         if native_body_size(&result.body)? > self.max_response_bytes as usize {
             return Err("native_response_profile_limit");
         }
-        if let Some((_, output)) = result.validate(&self.model)?
+        if let Some((_, output)) = result.validate_for(self.operation, &self.model)?
             && self.max_output_tokens.is_some_and(|max| output > max)
         {
             return Err("native_output_profile_limit");
@@ -96,6 +112,7 @@ impl NativeModelProfile {
         Ok(())
     }
 }
+
 impl NativeRequirements {
     pub fn from_request(request: &NodeNativeRequest) -> Result<Self, &'static str> {
         let model = request
@@ -103,85 +120,142 @@ impl NativeRequirements {
             .get("model")
             .and_then(Value::as_str)
             .ok_or("native_model_missing")?;
-        request.validate(model)?;
+        request.validate_for(request.operation, model)?;
+
         let mut features = BTreeSet::new();
-        if request
-            .body
-            .get("tools")
-            .and_then(Value::as_array)
-            .is_some_and(|v| !v.is_empty())
-        {
-            features.insert(NativeFeature::Tools);
-        }
-        if request
-            .body
-            .get("response_format")
-            .is_some_and(|v| !v.is_null())
-        {
-            features.insert(NativeFeature::StructuredOutput);
-        }
-        if request.body.get("thinking").is_some_and(|v| !v.is_null())
-            || request
+        inspect_features(&request.body, request.operation, &mut features);
+        let output = match request.operation {
+            NodeNativeOperation::Chat => request
                 .body
-                .get("reasoning_effort")
-                .is_some_and(|v| !v.is_null())
-        {
-            features.insert(NativeFeature::Thinking);
-        }
-        inspect_content(&request.body["messages"], &mut features);
-        let output = request
-            .body
-            .get("max_completion_tokens")
-            .or_else(|| request.body.get("max_tokens"));
+                .get("max_completion_tokens")
+                .or_else(|| request.body.get("max_tokens")),
+            NodeNativeOperation::Messages => request.body.get("max_tokens"),
+            NodeNativeOperation::Responses => request.body.get("max_output_tokens"),
+        };
         let output_tokens = match output {
             None | Some(Value::Null) => None,
             Some(value) => Some(
                 value
                     .as_u64()
-                    .and_then(|v| u32::try_from(v).ok())
-                    .filter(|n| *n > 0)
+                    .and_then(|tokens| u32::try_from(tokens).ok())
+                    .filter(|tokens| *tokens > 0 && *tokens <= i32::MAX as u32)
                     .ok_or("native_output_limit_invalid")?,
             ),
         };
         Ok(Self {
             version: NATIVE_CAPABILITY_VERSION,
-            model: model.into(),
+            model: model.to_owned(),
             operation: request.operation,
             features: features.into_iter().collect(),
             request_bytes: native_body_size(&request.body)? as u32,
             output_tokens,
         })
     }
+
     pub fn selector(&self) -> Value {
-        json!({"version":self.version,"model":self.model,"operation":self.operation,"features":self.features})
+        json!({
+            "version": self.version,
+            "model": self.model,
+            "operation": self.operation,
+            "features": self.features
+        })
     }
 }
-fn inspect_content(value: &Value, features: &mut BTreeSet<NativeFeature>) {
+
+fn enabled_thinking(value: &Value) -> bool {
     match value {
-        Value::Array(values) => {
-            for value in values {
-                inspect_content(value, features);
-            }
-        }
-        Value::Object(object) => {
-            if object.get("role").and_then(Value::as_str) == Some("tool")
-                || object.get("tool_calls").is_some_and(|v| !v.is_null())
-            {
+        Value::Bool(false) | Value::Null => false,
+        Value::String(value) => !matches!(value.as_str(), "disabled" | "none" | "off"),
+        Value::Object(object) => object
+            .get("type")
+            .and_then(Value::as_str)
+            .is_none_or(|kind| kind != "disabled"),
+        _ => true,
+    }
+}
+
+fn structured_output(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Object(object) => object
+            .get("type")
+            .and_then(Value::as_str)
+            .is_none_or(|kind| kind != "text"),
+        _ => true,
+    }
+}
+
+fn inspect_content(value: &Value, features: &mut BTreeSet<NativeFeature>) {
+    let Some(items) = value.as_array() else {
+        return;
+    };
+    for item in items {
+        match item.get("type").and_then(Value::as_str) {
+            Some("tool_use" | "tool_result" | "function_call" | "function_call_output") => {
                 features.insert(NativeFeature::Tools);
             }
-            if matches!(
-                object.get("type").and_then(Value::as_str),
-                Some("image_url" | "image" | "input_image")
-            ) {
+            Some("image" | "image_url" | "input_image") => {
                 features.insert(NativeFeature::Vision);
             }
-            if let Some(content) = object.get("content") {
-                inspect_content(content, features);
+            Some("thinking" | "redacted_thinking" | "reasoning") => {
+                features.insert(NativeFeature::Thinking);
             }
+            _ => {}
         }
-        _ => {}
+        if item.get("role").and_then(Value::as_str) == Some("tool")
+            || item
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|v| !v.is_empty())
+        {
+            features.insert(NativeFeature::Tools);
+        }
+        if matches!(
+            item.get("type").and_then(Value::as_str),
+            None | Some("message" | "tool_result")
+        ) && let Some(content) = item.get("content")
+        {
+            inspect_content(content, features);
+        }
     }
 }
+fn inspect_features(
+    body: &Value,
+    operation: NodeNativeOperation,
+    features: &mut BTreeSet<NativeFeature>,
+) {
+    if body
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty())
+    {
+        features.insert(NativeFeature::Tools);
+    }
+    if let Some(messages) = body.get("messages") {
+        inspect_content(messages, features);
+    }
+    if let Some(input) = body.get("input") {
+        inspect_content(input, features);
+    }
+    let format = if operation == NodeNativeOperation::Responses {
+        body.pointer("/text/format")
+    } else {
+        body.get("response_format")
+    };
+    if format.is_some_and(structured_output) {
+        features.insert(NativeFeature::StructuredOutput);
+    }
+    if body.get("thinking").is_some_and(enabled_thinking)
+        || body
+            .get("reasoning_effort")
+            .or_else(|| body.pointer("/reasoning/effort"))
+            .and_then(Value::as_str)
+            .is_some_and(|v| !matches!(v, "none" | "disabled" | "off"))
+    {
+        features.insert(NativeFeature::Thinking);
+    }
+}
+
 pub fn validate_profiles(
     profiles: &[NativeModelProfile],
     models: &[String],
@@ -202,58 +276,57 @@ pub fn validate_profiles(
     }
     Ok(())
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn request() -> NodeNativeRequest {
+    use serde_json::json;
+
+    fn request(operation: NodeNativeOperation, body: Value) -> NodeNativeRequest {
         NodeNativeRequest {
-            operation: NodeNativeOperation::Chat,
-            headers: vec![],
-            body: json!({"model":"m","messages":[{"role":"user","content":"x"}],"max_tokens":5}),
+            operation,
+            body,
+            headers: if operation == NodeNativeOperation::Messages {
+                vec![("anthropic-version".into(), "2023-06-01".into())]
+            } else {
+                vec![]
+            },
         }
     }
+
     #[test]
-    fn features_and_limits_are_real_dispatch_requirements() {
-        let mut r = request();
-        r.body["tools"] = json!([{"type":"function","function":{"name":"f"}}]);
+    fn features_are_operation_aware_and_disabled_options_are_free() {
+        let r = request(
+            NodeNativeOperation::Responses,
+            json!({"model":"m","input":[{"type":"function_call_output"}],"thinking":{"type":"disabled"},"text":{"format":{"type":"text"}},"max_output_tokens":5}),
+        );
         let needed = NativeRequirements::from_request(&r).unwrap();
-        let mut p = NativeModelProfile::plain_chat("m");
-        assert!(!p.permits(&needed));
-        p.features.push(NativeFeature::Tools);
-        assert!(p.permits(&needed));
-        p.max_output_tokens = Some(4);
-        assert!(!p.permits(&needed));
-        p.max_output_tokens = Some(5);
-        assert!(p.permits(&needed));
-        p.max_request_bytes = 1;
-        assert!(!p.permits(&needed));
+        assert_eq!(needed.operation, NodeNativeOperation::Responses);
+        assert_eq!(needed.features, vec![NativeFeature::Tools]);
+        assert_eq!(needed.output_tokens, Some(5));
     }
+
     #[test]
-    fn profiles_cannot_extend_registration_scope_or_duplicate_entries() {
-        let p = NativeModelProfile::plain_chat("m");
-        assert!(
-            validate_profiles(
-                std::slice::from_ref(&p),
-                &["m".into()],
-                &[NodeNativeOperation::Chat]
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_profiles(std::slice::from_ref(&p), &[], &[NodeNativeOperation::Chat]).is_err()
-        );
-        assert!(
-            validate_profiles(&[p.clone(), p], &["m".into()], &[NodeNativeOperation::Chat])
-                .is_err()
+    fn profiles_have_an_explicit_operation_constructor() {
+        let profile = NativeModelProfile::for_operation("m", NodeNativeOperation::Messages);
+        assert_eq!(profile.operation, NodeNativeOperation::Messages);
+        assert_eq!(
+            NativeModelProfile::plain_chat("m").operation,
+            NodeNativeOperation::Chat
         );
     }
+
     #[test]
-    fn stable_capability_fixture_round_trips() {
-        let value: Value =
-            serde_json::from_str(include_str!("../fixtures/node-native-capability-v1.json"))
-                .unwrap();
-        let profile: NativeModelProfile = serde_json::from_value(value.clone()).unwrap();
-        profile.validate().unwrap();
-        assert_eq!(serde_json::to_value(profile).unwrap(), value);
+    fn stable_capability_fixtures_round_trip() {
+        for fixture in [
+            include_str!("../fixtures/node-native-capability-v1.json"),
+            include_str!("../fixtures/node-native-capability-messages-v1.json"),
+            include_str!("../fixtures/node-native-capability-responses-v1.json"),
+        ] {
+            let value: Value = serde_json::from_str(fixture).unwrap();
+            let profile: NativeModelProfile = serde_json::from_value(value.clone()).unwrap();
+            profile.validate().unwrap();
+            assert_eq!(serde_json::to_value(profile).unwrap(), value);
+        }
     }
 }

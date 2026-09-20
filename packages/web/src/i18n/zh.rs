@@ -1909,6 +1909,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert("models.pool", "账号池");
     m.insert("models.passthrough", "透传模式");
+    m.insert("models.native_stateless_help", "当前透传与节点 Responses 为无状态调用，示例使用 store=false；本阶段暂不启用 previous_response_id、conversation 和后台响应资源。");
     m.insert("models.node", "节点网关（NodeDispatch）");
     m.insert(
         "models.pool_desc",
@@ -2075,7 +2076,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "models.node_stream_help",
-        "原生节点 Chat 保留完整 JSON 请求和响应；当前版本需使用 stream=false，并由声明原生能力的节点执行。",
+        "原生节点 Chat、Messages 和 Responses 保留各自的 JSON 请求与响应；本阶段使用 stream=false，并由声明对应协议能力的节点执行。",
     );
 
     m

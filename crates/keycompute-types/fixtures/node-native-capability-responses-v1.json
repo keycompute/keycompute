@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "model": "org/model:latest",
+  "operation": "responses",
+  "features": ["tools", "structured_output"],
+  "max_request_bytes": 131072,
+  "max_response_bytes": 262144,
+  "max_output_tokens": 4096
+}

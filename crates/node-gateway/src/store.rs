@@ -147,7 +147,7 @@ impl NodeGatewayStore {
     }
 
     pub fn validate_capabilities(caps: &NodeCapabilities) -> Result<(), DbError> {
-        if caps.runtime != "ollama" || caps.models.len() > 256 || caps.native_operations.len() > 1 {
+        if caps.runtime != "ollama" || caps.models.len() > 256 || caps.native_operations.len() > 3 {
             return Err(DbError::Other("invalid node capability declaration".into()));
         }
         let models: Vec<String> = caps.models.iter().map(|m| m.model.clone()).collect();
@@ -1483,8 +1483,16 @@ impl NodeGatewayStore {
         profile
             .validate_result(&response)
             .map_err(|e| DbError::Other(e.into()))?;
+        let operation = serde_json::from_value::<keycompute_types::node_native::NodeNativeRequest>(
+            task.payload_json
+                .get("native")
+                .cloned()
+                .ok_or_else(|| DbError::Other("native task payload missing".into()))?,
+        )
+        .map_err(|_| DbError::Other("invalid native task payload".into()))?
+        .operation;
         response
-            .validate(&task.model)
+            .validate_for(operation, &task.model)
             .map_err(|error| DbError::Other(format!("invalid native result: {error}")))?;
         let response_json =
             serde_json::to_value(&response).map_err(|e| DbError::Other(e.to_string()))?;

@@ -98,17 +98,21 @@ curl --fail-with-body "$BASE_URL/pt/v1/models" \
 ```
 
 The requested model is matched against accessible bound accounts, not a
-per-model binding table. Distinct accessible accounts declaring the same model
+per-model binding table. Distinct accessible accounts declaring the same model and requested protocol capability
 are ambiguous. Supported management writes reject overlapping namespaces;
 runtime also returns `409 passthrough_binding_ambiguous` before health-based
 filtering, protecting against out-of-band account changes. It never chooses
 one by priority or silently uses the healthier account. Multiple grants to the
 same account are deduplicated. An ambiguous model is omitted from user discovery.
 
-The first supported passthrough surface is native OpenAI Chat Completions.
-All Chat-compatible models declared on the account are available without
-per-model configuration. This does not add `/pt` Responses, Anthropic Messages,
-embeddings or image-generation endpoints. Those are separate protocol features.
+Passthrough supports native OpenAI Chat Completions, nonstreaming Anthropic
+Messages, and nonstreaming stateless OpenAI Responses. Authorization still grants
+all account models; the selected account must also declare the requested protocol
+and API capability. Distinct operations can have separate account namespaces.
+Messages uses `/pt/v1/messages`; Responses uses `/pt/v1/responses` with `store=false`.
+Stored response resources, background jobs and native node streaming are added in
+separate stages; unsupported stateful fields are rejected, never deleted silently.
+Embeddings and image-generation endpoints are not implied by these grants.
 
 One incoming passthrough request makes at most one outbound generation attempt:
 no same-account retry, no account fallback and no compatibility retry.

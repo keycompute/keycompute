@@ -232,12 +232,12 @@ impl RoutingEngine {
                 ));
             }
             keycompute_types::ModelAccessMode::NodeDispatch => {
-                if ctx.native_anthropic_request.is_some()
-                    || ctx.native_openai_responses_request.is_some()
-                    || ctx.passthrough_binding.is_some()
-                {
+                let native_count = usize::from(ctx.native_openai_chat_request.is_some())
+                    + usize::from(ctx.native_anthropic_request.is_some())
+                    + usize::from(ctx.native_openai_responses_request.is_some());
+                if native_count > 1 || ctx.passthrough_binding.is_some() {
                     return Err(KeyComputeError::InvalidRequest(
-                        "NodeDispatch supports Chat Completions only".into(),
+                        "Conflicting NodeDispatch request provenance".into(),
                     ));
                 }
                 let index = self.node_index.as_ref().ok_or_else(|| {
@@ -245,11 +245,38 @@ impl RoutingEngine {
                         "NodeDispatch metadata service unavailable".into(),
                     )
                 })?;
-                let needed = if let Some(body) = &ctx.native_openai_chat_request {
+                let native = if let Some(body) = &ctx.native_openai_responses_request {
+                    Some((
+                        keycompute_types::node_native::NodeNativeOperation::Responses,
+                        (**body).clone(),
+                        ctx.native_openai_responses_headers
+                            .iter()
+                            .map(|(name, value)| (name.clone(), value.clone()))
+                            .collect(),
+                    ))
+                } else if let Some(body) = &ctx.native_anthropic_request {
+                    Some((
+                        keycompute_types::node_native::NodeNativeOperation::Messages,
+                        (**body).clone(),
+                        ctx.native_anthropic_headers
+                            .iter()
+                            .map(|(name, value)| (name.clone(), value.clone()))
+                            .collect(),
+                    ))
+                } else {
+                    ctx.native_openai_chat_request.as_ref().map(|body| {
+                        (
+                            keycompute_types::node_native::NodeNativeOperation::Chat,
+                            (**body).clone(),
+                            Vec::new(),
+                        )
+                    })
+                };
+                let needed = if let Some((operation, body, headers)) = native {
                     let native = keycompute_types::node_native::NodeNativeRequest {
-                        operation: keycompute_types::node_native::NodeNativeOperation::Chat,
-                        body: (**body).clone(),
-                        headers: vec![],
+                        operation,
+                        body,
+                        headers,
                     };
                     Some(
                         keycompute_types::node_capability::NativeRequirements::from_request(

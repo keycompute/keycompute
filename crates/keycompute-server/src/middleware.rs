@@ -265,18 +265,20 @@ fn generation_json_body_policy(method: &Method, path: &str) -> Option<Generation
                 working_set_limit_bytes: OPENAI_CHAT_REQUEST_WORKING_SET_LIMIT_BYTES,
             })
         }
-        "/v1/messages" => Some(GenerationJsonBodyPolicy {
+        "/v1/messages" | "/pt/v1/messages" | "/nt/v1/messages" => Some(GenerationJsonBodyPolicy {
             name: "Anthropic Messages",
             body_limit_bytes: ANTHROPIC_MESSAGES_BODY_LIMIT_BYTES,
             working_set_limit_bytes: ANTHROPIC_MESSAGES_REQUEST_WORKING_SET_LIMIT_BYTES,
         }),
-        "/v1/responses" | "/v1/responses/compact" | "/v1/responses/input_tokens" => {
-            Some(GenerationJsonBodyPolicy {
-                name: "Responses",
-                body_limit_bytes: OPENAI_RESPONSES_BODY_LIMIT_BYTES,
-                working_set_limit_bytes: OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES,
-            })
-        }
+        "/v1/responses"
+        | "/pt/v1/responses"
+        | "/nt/v1/responses"
+        | "/v1/responses/compact"
+        | "/v1/responses/input_tokens" => Some(GenerationJsonBodyPolicy {
+            name: "Responses",
+            body_limit_bytes: OPENAI_RESPONSES_BODY_LIMIT_BYTES,
+            working_set_limit_bytes: OPENAI_RESPONSES_REQUEST_WORKING_SET_LIMIT_BYTES,
+        }),
         _ => None,
     }
 }
@@ -1474,7 +1476,7 @@ fn hash_to_uuid(input: &str) -> Uuid {
 /// x-api-key 仅在 `/v1/messages` 路径被接受为限流身份（与认证提取器的
 /// 路径限制对称，避免其他端点以 x-api-key 身份消耗配额）。
 fn x_api_key_allowed_on_path(path: &str) -> bool {
-    path == "/v1/messages"
+    matches!(path, "/v1/messages" | "/pt/v1/messages" | "/nt/v1/messages")
 }
 
 /// Recovery is advisory and may race another caller. An unavailable metadata

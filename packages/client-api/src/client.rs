@@ -552,6 +552,22 @@ impl OpenAiClient {
         self.api_client.send_and_parse(builder.json(body)).await
     }
 
+    /// Messages uses the same platform key, with its required protocol header.
+    /// Mutating generation requests never opt into automatic retry.
+    pub async fn post_messages_json<T: DeserializeOwned, B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        api_key: &str,
+    ) -> Result<T> {
+        let builder = self
+            .request_with_api_key(Method::POST, path, api_key)
+            .await?
+            .header("anthropic-version", "2023-06-01")
+            .json(body);
+        self.api_client.send_and_parse(builder).await
+    }
+
     /// 发送 GET 请求并解析响应（含重试）
     pub async fn get_json<T: DeserializeOwned>(&self, path: &str, api_key: &str) -> Result<T> {
         let builder = self

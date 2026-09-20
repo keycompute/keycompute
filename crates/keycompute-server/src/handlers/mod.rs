@@ -47,6 +47,8 @@ pub use openai::{
     chat_completions, list_models, passthrough_binding_chat_completions,
     passthrough_binding_list_models, passthrough_binding_retrieve_model, retrieve_model,
 };
+pub(crate) mod scoped_native;
+pub use scoped_native::{node_dispatch_messages, passthrough_binding_messages};
 
 // OpenAI Responses 兼容入口
 pub use responses::{
@@ -54,6 +56,7 @@ pub use responses::{
     list_response_input_items, responses, retrieve_response,
 };
 pub use responses_websocket::responses_websocket;
+pub use scoped_native::{node_dispatch_responses, passthrough_binding_responses};
 
 // Anthropic Messages 兼容入口
 pub use anthropic::messages;

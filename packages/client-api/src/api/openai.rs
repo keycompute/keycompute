@@ -43,6 +43,36 @@ impl OpenAiApi {
             .await
     }
 
+    /// Native Responses JSON is not reduced to the Chat DTO.
+    pub async fn responses_in_mode(
+        &self,
+        mode: crate::api::admin::ModelAccessMode,
+        body: &serde_json::Value,
+        api_key: &str,
+    ) -> Result<serde_json::Value> {
+        let path = match mode {
+            crate::api::admin::ModelAccessMode::AccountPool => "/v1/responses",
+            crate::api::admin::ModelAccessMode::Passthrough => "/pt/v1/responses",
+            crate::api::admin::ModelAccessMode::NodeDispatch => "/nt/v1/responses",
+        };
+        self.client.post_json(path, body, api_key).await
+    }
+
+    /// Native Messages JSON, including tool blocks, is preserved intact.
+    pub async fn messages_in_mode(
+        &self,
+        mode: crate::api::admin::ModelAccessMode,
+        body: &serde_json::Value,
+        api_key: &str,
+    ) -> Result<serde_json::Value> {
+        let path = match mode {
+            crate::api::admin::ModelAccessMode::AccountPool => "/v1/messages",
+            crate::api::admin::ModelAccessMode::Passthrough => "/pt/v1/messages",
+            crate::api::admin::ModelAccessMode::NodeDispatch => "/nt/v1/messages",
+        };
+        self.client.post_messages_json(path, body, api_key).await
+    }
+
     /// 获取模型列表
     ///
     /// 不指定协议，网关按 openai 入口过滤模型（见 `list_models_for_protocol`）。

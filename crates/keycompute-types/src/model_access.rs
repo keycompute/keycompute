@@ -25,7 +25,11 @@ impl ModelAccessMode {
             || matches!(
                 path,
                 "/v1/messages"
+                    | "/pt/v1/messages"
+                    | "/nt/v1/messages"
                     | "/v1/responses"
+                    | "/pt/v1/responses"
+                    | "/nt/v1/responses"
                     | "/v1/responses/compact"
                     | "/v1/responses/input_tokens"
             )
@@ -58,6 +62,18 @@ impl ModelAccessMode {
             Self::Passthrough => "/pt/v1/chat/completions",
             Self::NodeDispatch => "/nt/v1/chat/completions",
         }
+    }
+
+    /// Return the public family selected by a generation endpoint.  Resource
+    /// paths intentionally return `None`; their query cannot switch protocol
+    /// families.
+    pub fn from_generation_path(path: &str) -> Option<Self> {
+        Self::from_chat_path(path).or(match path {
+            "/v1/messages" | "/v1/responses" => Some(Self::AccountPool),
+            "/pt/v1/messages" | "/pt/v1/responses" => Some(Self::Passthrough),
+            "/nt/v1/messages" | "/nt/v1/responses" => Some(Self::NodeDispatch),
+            _ => None,
+        })
     }
 }
 

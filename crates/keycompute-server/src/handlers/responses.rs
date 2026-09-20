@@ -90,7 +90,7 @@ const _: () = assert!(
 const STORED_WARMUPS_PER_TENANT: u64 = 128;
 const STORED_WARMUP_BYTES_PER_TENANT: u64 = 512 * 1024 * 1024;
 
-mod request;
+pub(super) mod request;
 pub(super) use request::validate_responses_request;
 use request::{
     ResponsesRoutingFields, response_affinity_storage_enabled, response_store_enabled,
@@ -2708,7 +2708,7 @@ fn forwarded_responses_headers(
     Ok(forwarded)
 }
 
-fn context_messages(body: &Value) -> Vec<Message> {
+pub(super) fn context_messages(body: &Value) -> Vec<Message> {
     let mut messages = Vec::new();
     if let Some(instructions) = body.get("instructions")
         && !instructions.is_null()

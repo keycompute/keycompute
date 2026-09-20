@@ -105,15 +105,16 @@ impl PassthroughBinding {
         let active=txn.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
             "SELECT 1 FROM tenants owner JOIN tenants target ON target.id=$2 WHERE owner.id=$1 AND owner.status='active' AND target.status='active'",
             [account.tenant_id.into(),tenant_id.into()])).await?.is_some();
-        if !active
-            || !account.enabled
-            || account.provider != "openai"
-            || !account
+        let supported = match account.provider.as_str() {
+            "openai" => account
                 .api_capabilities
                 .iter()
-                .any(|v| v == "chat_completions")
-        {
-            return Err(DbError::Other("account and tenant must be active and the account must support OpenAI Chat Completions".into()));
+                .any(|v| matches!(v.as_str(), "chat_completions" | "responses")),
+            "anthropic" => account.api_capabilities.iter().any(|v| v == "messages"),
+            _ => false,
+        };
+        if !active || !account.enabled || !supported {
+            return Err(DbError::Other("account and tenant must be active and the account must declare a supported native API capability".into()));
         }
         // An authenticated system administrator is explicitly granting access;
         // legacy account visibility is not a prerequisite for the new grant.
@@ -139,6 +140,8 @@ impl PassthroughBinding {
           JOIN accounts selected ON selected.id=$1
           WHERE other.account_id<>$1 AND ($4::UUID IS NULL OR other.id<>$4)
             AND (other.is_global OR $3 OR other.tenant_id=$2)
+            AND other_account.provider=selected.provider
+            AND other_account.api_capabilities && selected.api_capabilities
             AND other_account.models_supported && selected.models_supported
           LIMIT 1"#,
                 [

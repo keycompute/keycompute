@@ -327,8 +327,17 @@ impl NodeGatewayService {
             let response: keycompute_types::node_native::NodeNativeHttpResult =
                 serde_json::from_value(value)
                     .map_err(|_| DbError::Other("invalid native result".into()))?;
+            let operation =
+                serde_json::from_value::<keycompute_types::node_native::NodeNativeRequest>(
+                    task.payload_json
+                        .get("native")
+                        .cloned()
+                        .ok_or_else(|| DbError::Other("native task payload missing".into()))?,
+                )
+                .map_err(|_| DbError::Other("invalid native task payload".into()))?
+                .operation;
             response
-                .validate(model)
+                .validate_for(operation, model)
                 .map_err(|error| DbError::Other(error.into()))?;
             return Ok(NativeOutcome::Complete(response));
         }
@@ -873,9 +882,36 @@ fn decode_chat_task_result(task: &NodeTask) -> Result<ChatCompletionResponse, No
                         invalid_node_result_failure(),
                     )
                 })?;
-                native.validate(&task.model).map_err(|error| {
-                    NodeExecutionError::other(anyhow::anyhow!(error), invalid_node_result_failure())
-                })?;
+                let operation =
+                    serde_json::from_value::<keycompute_types::node_native::NodeNativeRequest>(
+                        task.payload_json.get("native").cloned().ok_or_else(|| {
+                            NodeExecutionError::other(
+                                anyhow::anyhow!("native task payload missing"),
+                                invalid_node_result_failure(),
+                            )
+                        })?,
+                    )
+                    .map_err(|error| {
+                        NodeExecutionError::other(
+                            anyhow::anyhow!("invalid native task payload: {error}"),
+                            invalid_node_result_failure(),
+                        )
+                    })?
+                    .operation;
+                if operation != keycompute_types::node_native::NodeNativeOperation::Chat {
+                    return Err(NodeExecutionError::other(
+                        anyhow::anyhow!("non-Chat result requested through legacy Chat API"),
+                        invalid_node_result_failure(),
+                    ));
+                }
+                native
+                    .validate_for(operation, &task.model)
+                    .map_err(|error| {
+                        NodeExecutionError::other(
+                            anyhow::anyhow!(error),
+                            invalid_node_result_failure(),
+                        )
+                    })?;
                 native.body
             } else {
                 result_json

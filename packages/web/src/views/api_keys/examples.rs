@@ -112,6 +112,32 @@ pub fn responses_examples(
     model: &str,
     env_comment: &str,
 ) -> ApiExamples {
+    responses_examples_inner(api_url, api_key, model, env_comment, false)
+}
+
+pub fn stateless_responses_examples(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    env_comment: &str,
+) -> ApiExamples {
+    responses_examples_inner(api_url, api_key, model, env_comment, true)
+}
+
+fn responses_examples_inner(
+    api_url: &str,
+    api_key: &str,
+    model: &str,
+    env_comment: &str,
+    stateless: bool,
+) -> ApiExamples {
+    let python_state = if stateless { "    store=False,\n" } else { "" };
+    let json_state = if stateless {
+        "    \"store\": false,\n"
+    } else {
+        ""
+    };
+    let js_state = if stateless { "  store: false,\n" } else { "" };
     let api_url = api_url.trim_end_matches('/');
     let websocket_url = if let Some(rest) = api_url.strip_prefix("https://") {
         format!("wss://{rest}/responses")
@@ -137,7 +163,7 @@ client = OpenAI(
 )
 
 response = client.responses.create(
-    model="{}",
+{python_state}    model="{}",
     input="Hello",
 )
 
@@ -153,7 +179,7 @@ const client = new OpenAI({{
 }});
 
 const response = await client.responses.create({{
-  model: "{}",
+{js_state}  model: "{}",
   input: "Hello",
 }});
 
@@ -165,13 +191,16 @@ console.log(response.output_text);"#,
     -H "Authorization: Bearer {}" \
     -H "Content-Type: application/json" \
   -d '{{
-    "model": "{}",
+{json_state}    "model": "{}",
     "input": "Hello"
   }}'"#,
             api_url, api_key, model
         ),
-        websocket: format!(
-            r#"from websocket import create_connection
+        websocket: if stateless {
+            String::new()
+        } else {
+            format!(
+                r#"from websocket import create_connection
 import json
 
 ws = create_connection(
@@ -195,8 +224,9 @@ while True:
         break
 
 ws.close()"#,
-            websocket_url, api_key, model
-        ),
+                websocket_url, api_key, model
+            )
+        },
     }
 }
 
@@ -474,5 +504,19 @@ mod tests {
     fn pick_responses_model_never_falls_back_to_a_chat_only_model() {
         assert_eq!(pick_responses_model(&[model("gpt-5")]), "gpt-5");
         assert_eq!(pick_responses_model(&[]), DEFAULT_RESPONSES_MODEL);
+    }
+    #[test]
+    fn scoped_stateless_responses_examples_do_not_promise_state_or_websockets() {
+        let examples = stateless_responses_examples(
+            "https://example.test/nt/v1",
+            "test-key",
+            "raw-model",
+            "test",
+        );
+        assert!(examples.curl.contains("/nt/v1/responses"));
+        assert!(examples.curl.contains("\"store\": false"));
+        assert!(examples.python.contains("store=False"));
+        assert!(examples.node.contains("store: false"));
+        assert!(examples.websocket.is_empty());
     }
 }

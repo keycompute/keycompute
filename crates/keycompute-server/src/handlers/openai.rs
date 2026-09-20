@@ -6,10 +6,7 @@
 #[cfg(test)]
 use super::ImmediateSettlementServices;
 pub(crate) use crate::passthrough_binding::install_model_health_observer;
-use crate::passthrough_binding::{
-    DbPassthroughBindingValidator, list_routable_passthrough_bindings,
-    resolve_passthrough_binding_plan,
-};
+use crate::passthrough_binding::{DbPassthroughBindingValidator, resolve_passthrough_binding_plan};
 use crate::{
     error::{ApiError, Result},
     extractors::{AuthExtractor, ClientRequestId, RequestId, RequestReceivedAt},
@@ -2763,16 +2760,22 @@ async fn discover_models(
     )?;
     if mode == ModelAccessMode::Passthrough {
         return Ok(
-            list_routable_passthrough_bindings(state, auth.tenant_id, None)
-                .await?
-                .into_iter()
-                .map(|(id, owned_by)| Model {
-                    id,
-                    owned_by,
-                    object: "model".into(),
-                    created: chrono::Utc::now().timestamp(),
-                })
-                .collect(),
+            crate::passthrough_binding::list_routable_passthrough_bindings_for(
+                state,
+                auth.tenant_id,
+                None,
+                keycompute_types::AccountApiCapability::parse(&capability)
+                    .expect("validated capability"),
+            )
+            .await?
+            .into_iter()
+            .map(|(id, owned_by)| Model {
+                id,
+                owned_by,
+                object: "model".into(),
+                created: chrono::Utc::now().timestamp(),
+            })
+            .collect(),
         );
     }
     let db = state
@@ -2783,7 +2786,7 @@ async fn discover_models(
     let entries: std::collections::BTreeMap<String, String> = if mode
         == ModelAccessMode::NodeDispatch
     {
-        super::admin_model_catalog::ready_node_models(state, auth.tenant_id)
+        super::admin_model_catalog::ready_node_models_for(state, auth.tenant_id, &capability)
             .await?
             .into_iter()
             .map(|m| (m, "node".into()))

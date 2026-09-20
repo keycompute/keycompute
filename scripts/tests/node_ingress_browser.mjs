@@ -70,10 +70,10 @@ try {
     assert.match(example, /gemma3:270m/);
     assert.ok(!example.includes('node:gemma3:270m'));
     assert.ok(calls.includes(family + '/models'));
-    if (index !== 0) assert.equal(await guide.locator('select').first().locator('option').count(), 1);
+    assert.equal(await guide.locator('select').first().locator('option').count(), 3);
   }
   check('invocation_examples_and_model_discovery_follow_each_url_family');
-  check('node_model_ids_remain_raw_and_no_unsupported_protocol_is_offered');
+  check('node_model_ids_remain_raw_and_native_protocol_choices_are_available');
   await page.goto(base + '/admin/upstreams/nodes');
   await page.locator('.node-gateway-dispatch-guide').waitFor();
   assert.equal(await page.locator('.upstream-tab').count(), 3);

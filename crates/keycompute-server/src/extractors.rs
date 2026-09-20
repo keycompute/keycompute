@@ -115,9 +115,12 @@ impl AuthExtractor {
                 .strip_prefix("Bearer ")
                 .ok_or_else(|| ApiError::Auth("Invalid Authorization format".to_string()))?
         } else {
-            if path != Some("/v1/messages") {
+            if !matches!(
+                path,
+                Some("/v1/messages" | "/pt/v1/messages" | "/nt/v1/messages")
+            ) {
                 return Err(ApiError::Auth(
-                    "x-api-key authentication is only valid for /v1/messages".to_string(),
+                    "x-api-key authentication is only valid for Messages API paths".to_string(),
                 ));
             }
             headers

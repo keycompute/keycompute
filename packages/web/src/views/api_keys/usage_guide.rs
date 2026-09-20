@@ -1,6 +1,8 @@
 //! Available for existing keys as well as newly created keys; examples never
 //! manufacture a model or mix a late response from another access mode.
-use super::examples::{anthropic_examples, openai_examples, responses_examples};
+use super::examples::{
+    anthropic_examples, openai_examples, responses_examples, stateless_responses_examples,
+};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::{
@@ -28,6 +30,16 @@ pub fn mode_base(root: &str, mode: ModelAccessMode) -> String {
         }
     )
 }
+/// Anthropic SDK appends /v1/messages; retain only the selected family prefix.
+pub fn mode_root(root: &str, mode: ModelAccessMode) -> String {
+    let root = root.trim_end_matches('/');
+    match mode {
+        ModelAccessMode::AccountPool => root.to_string(),
+        ModelAccessMode::Passthrough => format!("{root}/pt"),
+        ModelAccessMode::NodeDispatch => format!("{root}/nt"),
+    }
+}
+
 #[component]
 pub fn ModelUsageGuide(api_key: Option<String>) -> Element {
     let i = use_i18n();
@@ -94,8 +106,9 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
         ModelAccessMode::AccountPool => crate::services::api_client::public_openai_api_base_url(),
         ModelAccessMode::Passthrough | ModelAccessMode::NodeDispatch => mode_base(&root, mode),
     };
+    let protocol_root = mode_root(&root, mode);
     let displayed_base = if surface() == "messages" {
-        root.clone()
+        protocol_root.clone()
     } else {
         base.clone()
     };
@@ -103,14 +116,25 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
         .clone()
         .unwrap_or_else(|| "YOUR_PLATFORM_KEY".to_string());
     let examples = selected.as_ref().map(|model| match surface().as_str() {
-        "responses" => responses_examples(
-            &base,
-            &credential,
-            model,
-            i.t("api_keys.example_env_comment"),
-        ),
+        "responses" => {
+            if mode == ModelAccessMode::AccountPool {
+                responses_examples(
+                    &base,
+                    &credential,
+                    model,
+                    i.t("api_keys.example_env_comment"),
+                )
+            } else {
+                stateless_responses_examples(
+                    &base,
+                    &credential,
+                    model,
+                    i.t("api_keys.example_env_comment"),
+                )
+            }
+        }
         "messages" => anthropic_examples(
-            &root,
+            &protocol_root,
             &credential,
             model,
             i.t("api_keys.example_env_comment"),
@@ -125,11 +149,13 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
     rsx! {
         p {{mode_description(i,mode)}}
         if mode==ModelAccessMode::NodeDispatch {p {class:"form-hint",{i.t("models.node_stream_help")}}}
+        if mode!=ModelAccessMode::AccountPool && surface()=="responses" {p {class:"form-hint",{i.t("models.native_stateless_help")}}}
         if api_key.is_none() {p {class:"form-hint",{i.t("models.placeholder_key")}}}
         label {class:"form-label",{i.t("models.api_surface")}}
         select {class:"input-field",aria_label:i.t("models.api_surface"),value:"{surface}",onchange:move|e|{surface.set(e.value());model.set(String::new());tab.set("curl".into());copied.set(false);},
             option {value:"chat_completions","OpenAI · Chat Completions"}
-            if mode==ModelAccessMode::AccountPool {option {value:"responses","OpenAI · Responses"} option {value:"messages","Anthropic · Messages"}}
+            option {value:"responses","OpenAI · Responses"}
+            option {value:"messages","Anthropic · Messages"}
         }
         p {code {"Base URL: {displayed_base}"}}
         match result {
@@ -171,6 +197,30 @@ mod tests {
         assert_eq!(
             mode_base("https://example.test/ai/", ModelAccessMode::NodeDispatch),
             "https://example.test/ai/nt/v1"
+        );
+    }
+    #[test]
+    fn anthropic_sdk_roots_preserve_the_family_and_proxy_prefix() {
+        assert_eq!(
+            mode_root(
+                "https://example.test/gateway/",
+                ModelAccessMode::Passthrough
+            ),
+            "https://example.test/gateway/pt"
+        );
+        assert_eq!(
+            mode_root(
+                "https://example.test/gateway/",
+                ModelAccessMode::NodeDispatch
+            ),
+            "https://example.test/gateway/nt"
+        );
+        assert_eq!(
+            mode_root(
+                "https://example.test/gateway/",
+                ModelAccessMode::AccountPool
+            ),
+            "https://example.test/gateway"
         );
     }
 }

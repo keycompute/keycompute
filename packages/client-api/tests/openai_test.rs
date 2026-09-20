@@ -322,3 +322,37 @@ async fn test_invalid_api_key() {
 
     assert!(result.is_err());
 }
+
+#[tokio::test]
+async fn native_protocol_clients_preserve_json_and_selected_family() {
+    use client_api::api::admin::ModelAccessMode;
+    use wiremock::matchers::header;
+    let (client, mock_server) = create_openai_test_client().await;
+    let api = OpenAiApi::new(&client);
+    for (mode, prefix) in [
+        (ModelAccessMode::AccountPool, ""),
+        (ModelAccessMode::Passthrough, "/pt"),
+        (ModelAccessMode::NodeDispatch, "/nt"),
+    ] {
+        let messages = serde_json::json!({"model":"raw:model","max_tokens":32,"system":[{"type":"text","text":"system"}],"messages":[],"tools":[{"name":"f","input_schema":{"type":"object"}}],"extension":{"nested":[null,1]}});
+        Mock::given(method("POST")).and(path(format!("{prefix}/v1/messages")))
+            .and(header("anthropic-version","2023-06-01")).and(header("authorization","Bearer test-platform-key"))
+            .and(body_json(messages.clone())).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"message","content":[{"type":"tool_use","input":{"x":1}}],"extension":true}))).expect(1).mount(&mock_server).await;
+        let response = api
+            .messages_in_mode(mode, &messages, "test-platform-key")
+            .await
+            .unwrap();
+        assert_eq!(response["extension"], true);
+        assert_eq!(response["content"][0]["input"]["x"], 1);
+        let responses = serde_json::json!({"model":"raw:model","input":[{"type":"function_call_output","call_id":"call-1","output":"result"}],"instructions":"stay native","store":false,"extension":{"nested":[null,1]}});
+        Mock::given(method("POST")).and(path(format!("{prefix}/v1/responses")))
+            .and(body_json(responses.clone())).respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id":"response","output":[{"type":"function_call","arguments":"{}"}],"extension":true}))).expect(1).mount(&mock_server).await;
+        let response = api
+            .responses_in_mode(mode, &responses, "test-platform-key")
+            .await
+            .unwrap();
+        assert_eq!(response["extension"], true);
+        assert_eq!(response["output"][0]["arguments"], "{}");
+    }
+    mock_server.verify().await;
+}

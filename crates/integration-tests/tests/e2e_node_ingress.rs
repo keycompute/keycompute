@@ -565,13 +565,25 @@ async fn families_have_independent_model_discovery_without_prefixes() {
     for path in [
         "/v1/models?mode=node_dispatch",
         "/nt/v1/models?mode=account_pool",
-        "/nt/v1/models?protocol=anthropic",
-        "/nt/v1/models?capability=responses",
         "/pt/v1/models?mode=node_dispatch",
     ] {
         expect(
             f.request(Method::GET, path, None).await,
             StatusCode::BAD_REQUEST,
+        );
+    }
+    for path in [
+        "/nt/v1/models?protocol=anthropic",
+        "/nt/v1/models?capability=responses",
+    ] {
+        let listed = expect(f.request(Method::GET, path, None).await, StatusCode::OK);
+        assert!(
+            !listed["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == f.shared),
+            "Chat-only worker must not advertise new operations"
         );
     }
     assert_eq!(f.tasks().await, 0);
@@ -700,12 +712,7 @@ async fn nt_authentication_and_unsupported_endpoints_never_create_work() {
         http(f.app.clone(), Method::GET, "/nt/v1/models", None, None).await,
         StatusCode::UNAUTHORIZED,
     );
-    for path in [
-        "/nt/v1/responses",
-        "/nt/v1/messages",
-        "/nt/v1/images/generations",
-        "/nt/v1/embeddings",
-    ] {
+    for path in ["/nt/v1/images/generations", "/nt/v1/embeddings"] {
         let response = f
             .request(Method::POST, path, Some(f.body(&f.shared, false)))
             .await;
@@ -955,7 +962,7 @@ async fn declared_node_prefixes_are_normal_account_model_names() {
 async fn routing_debug_validates_mode_and_protocol_before_planning() {
     let mut f = Fixture::new().await;
     for mode in ["node_dispatch", "passthrough"] {
-        for entry in ["anthropic", "invalid"] {
+        for entry in ["invalid"] {
             let path = format!(
                 "/api/v1/debug/routing?mode={mode}&entry={entry}&model={}",
                 f.shared
@@ -965,6 +972,20 @@ async fn routing_debug_validates_mode_and_protocol_before_planning() {
                 StatusCode::BAD_REQUEST,
             );
         }
+    }
+    for mode in ["node_dispatch", "passthrough"] {
+        let path = format!(
+            "/api/v1/debug/routing?mode={mode}&entry=anthropic&model={}",
+            f.shared
+        );
+        let result = expect(
+            http(f.app.clone(), Method::GET, &path, Some(&f.admin), None).await,
+            StatusCode::OK,
+        );
+        assert_eq!(
+            result["routed"], false,
+            "the fixture has no Messages execution capability"
+        );
     }
     let path = format!(
         "/api/v1/debug/routing?mode=node_dispatch&entry=openai&model={}",

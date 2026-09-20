@@ -59,4 +59,15 @@ mod tests {
             "/nt/v1/models/gemma3:270m"
         );
     }
+    #[test]
+    fn native_discovery_requests_the_selected_operation_not_chat_defaults() {
+        assert_eq!(
+            models_path("node_dispatch", "anthropic", "messages"),
+            "/nt/v1/models?protocol=anthropic&capability=messages"
+        );
+        assert_eq!(
+            models_path("passthrough", "openai", "responses"),
+            "/pt/v1/models?protocol=openai&capability=responses"
+        );
+    }
 }

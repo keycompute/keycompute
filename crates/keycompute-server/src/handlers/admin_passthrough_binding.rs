@@ -91,6 +91,8 @@ pub struct RevisionQuery {
 #[derive(Debug, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct PassthroughBindingProbeRequest {
+    #[serde(default)]
+    pub api_capability: Option<String>,
     pub model: Option<String>,
     pub timeout_ms: Option<u64>,
 }
@@ -188,7 +190,7 @@ impl From<InfoRow> for PassthroughBindingInfo {
         }
     }
 }
-const INFO_SELECT: &str = "SELECT pb.*,a.endpoint,a.upstream_api_key_encrypted,a.name AS account_name,t.name AS tenant_name,a.provider,a.models_supported,CASE WHEN a.provider<>'openai' OR NOT ('chat_completions'=ANY(a.api_capabilities)) OR NOT a.enabled OR t.status<>'active' OR owner.status<>'active' THEN 'unavailable' ELSE a.health_status END AS health_status,a.health_reason AS health_reason_code FROM passthrough_bindings pb JOIN accounts a ON a.id=pb.account_id JOIN tenants t ON t.id=pb.tenant_id JOIN tenants owner ON owner.id=a.tenant_id";
+const INFO_SELECT: &str = "SELECT pb.*,a.endpoint,a.upstream_api_key_encrypted,a.name AS account_name,t.name AS tenant_name,a.provider,a.models_supported,CASE WHEN NOT ((a.provider='openai' AND a.api_capabilities && ARRAY['chat_completions','responses']::TEXT[]) OR (a.provider='anthropic' AND 'messages'=ANY(a.api_capabilities))) OR NOT a.enabled OR t.status<>'active' OR owner.status<>'active' THEN 'unavailable' ELSE a.health_status END AS health_status,a.health_reason AS health_reason_code FROM passthrough_bindings pb JOIN accounts a ON a.id=pb.account_id JOIN tenants t ON t.id=pb.tenant_id JOIN tenants owner ON owner.id=a.tenant_id";
 async fn info(state: &AppState, id: Uuid) -> Result<PassthroughBindingInfo> {
     let row = tokio::time::timeout(
         TIMEOUT,
@@ -342,7 +344,7 @@ pub async fn passthrough_binding_options(
         pool_enabled: bool,
         models: Vec<String>,
     }
-    let filter = "FROM accounts a JOIN tenants t ON t.id=a.tenant_id WHERE a.enabled AND t.status='active' AND a.provider='openai' AND a.api_capabilities @> ARRAY['chat_completions']::TEXT[] AND ($1::TEXT IS NULL OR a.name ILIKE '%'||$1||'%' ESCAPE '\\')";
+    let filter = "FROM accounts a JOIN tenants t ON t.id=a.tenant_id WHERE a.enabled AND t.status='active' AND ((a.provider='openai' AND a.api_capabilities && ARRAY['chat_completions','responses']::TEXT[]) OR (a.provider='anthropic' AND 'messages'=ANY(a.api_capabilities))) AND ($1::TEXT IS NULL OR a.name ILIKE '%'||$1||'%' ESCAPE '\\')";
     let read = async {
         let total = Total::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -405,15 +407,26 @@ pub async fn probe_passthrough_binding(
     let (binding, account) = tokio::time::timeout(TIMEOUT, load)
         .await
         .map_err(|_| ApiError::ServiceUnavailable("Probe lookup timed out".into()))??;
-    if !account.enabled
-        || account.provider != "openai"
-        || !account
+    let capability = req.api_capability.as_deref().unwrap_or_else(|| {
+        if account.provider == "anthropic" {
+            "messages"
+        } else if account
             .api_capabilities
             .iter()
-            .any(|v| v == "chat_completions")
-    {
+            .any(|c| c == "chat_completions")
+        {
+            "chat_completions"
+        } else {
+            "responses"
+        }
+    });
+    let valid = matches!(
+        (account.provider.as_str(), capability),
+        ("openai", "chat_completions" | "responses") | ("anthropic", "messages")
+    );
+    if !account.enabled || !valid || !account.api_capabilities.iter().any(|v| v == capability) {
         return Err(ApiError::BadRequest(
-            "Account must be enabled and OpenAI Chat capable".into(),
+            "Account must be enabled and support the selected native API capability".into(),
         ));
     }
     let model = req
@@ -426,14 +439,16 @@ pub async fn probe_passthrough_binding(
         ));
     }
     let version = account.upstream_config_version;
-    let prior =
-        AccountModelHealth::ensure_snapshot(db, account.id, "chat_completions", &model, version)
-            .await
-            .map_err(map)?
-            .ok_or_else(|| ApiError::Conflict("Account changed before diagnostic".into()))?;
+    let prior = AccountModelHealth::ensure_snapshot(db, account.id, capability, &model, version)
+        .await
+        .map_err(map)?
+        .ok_or_else(|| ApiError::Conflict("Account changed before diagnostic".into()))?;
     let checked = crate::passthrough_binding::database_now(db).await?;
     let endpoint = if account.endpoint.is_empty() {
-        ProtocolType::Openai.default_endpoint().to_string()
+        ProtocolType::parse(&account.provider)
+            .expect("validated protocol")
+            .default_endpoint()
+            .to_string()
     } else {
         normalize_base_url(&account.endpoint)
             .map_err(|_| ApiError::BadRequest("Invalid upstream endpoint".into()))?
@@ -456,16 +471,42 @@ pub async fn probe_passthrough_binding(
         temperature: None,
         top_p: None,
         native_openai_chat_request: None,
-        native_anthropic_request: None,
-        native_anthropic_headers: Default::default(),
+        native_anthropic_request: (capability=="messages").then(|| Arc::new(serde_json::json!({"model":model,"messages":[{"role":"user","content":"ping"}],"max_tokens":1,"stream":false}))),
+        native_anthropic_headers: if capability=="messages" {[("anthropic-version".into(),"2023-06-01".into())].into()} else {Default::default()},
     };
-    let adapter = crate::providers::get_provider_definition("openai")
+    let adapter = crate::providers::get_provider_definition(&account.provider)
         .map(|p| (p.create_adapter)())
-        .ok_or_else(|| ApiError::ServiceUnavailable("OpenAI adapter unavailable".into()))?;
+        .ok_or_else(|| ApiError::ServiceUnavailable("Protocol adapter unavailable".into()))?;
     let client = state
         .http_proxy
-        .client_for_provider_and_account("openai", Some(account.id));
-    let result = tokio::time::timeout(timeout, adapter.chat(client.as_ref(), request)).await;
+        .client_for_provider_and_account(&account.provider, Some(account.id));
+    let operation = async {
+        if capability == "responses" {
+            use futures::StreamExt;
+            let mut stream=adapter.stream_responses_with_meta(client.as_ref(),request,llm_protocol_provider::NativeResponsesRequest {
+                body:Arc::new(serde_json::json!({"model":model,"input":"ping","max_output_tokens":16,"stream":false,"store":false})),path:"/responses".into(),headers:Default::default(),
+            }).await.map_err(|failure|keycompute_types::KeyComputeError::UpstreamFailure {
+                status:failure.status,stable_code:failure.stable_error_code,retryable:false,summary:String::new(),
+            })?.body;
+            while let Some(event) = stream.next().await {
+                match event? {
+                    llm_protocol_provider::StreamEvent::Done => return Ok(()),
+                    llm_protocol_provider::StreamEvent::Error { .. } => {
+                        return Err(keycompute_types::KeyComputeError::ProviderError(
+                            "Diagnostic failed".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            Err(keycompute_types::KeyComputeError::ProviderError(
+                "Diagnostic ended without completion".into(),
+            ))
+        } else {
+            adapter.chat(client.as_ref(), request).await.map(|_| ())
+        }
+    };
+    let result = tokio::time::timeout(timeout, operation).await;
     let (status, reason) = match result {
         Ok(Ok(_)) => ("healthy", None),
         Err(_) => ("unhealthy", Some("upstream_timeout".to_string())),
@@ -486,7 +527,7 @@ pub async fn probe_passthrough_binding(
             db,
             &AccountModelHealthProbe {
                 account_id: account.id,
-                api_capability: "chat_completions".into(),
+                api_capability: capability.into(),
                 model: model.clone(),
                 status: status.into(),
                 reason_code: reason.clone(),
@@ -507,6 +548,6 @@ pub async fn probe_passthrough_binding(
         )
     })?;
     Ok(Json(
-        serde_json::json!({"binding_id":binding.id,"account_id":account.id,"model":model,"status":status,"reason_code":reason,"checked_at":checked.to_rfc3339(),"expires_at":expires.to_rfc3339(),"generation":saved.generation,"scope":"single_model_diagnostic"}),
+        serde_json::json!({"binding_id":binding.id,"account_id":account.id,"model":model,"status":status,"reason_code":reason,"checked_at":checked.to_rfc3339(),"expires_at":expires.to_rfc3339(),"generation":saved.generation,"scope":"single_model_diagnostic","api_capability":capability}),
     ))
 }

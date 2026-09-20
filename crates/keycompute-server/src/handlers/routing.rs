@@ -118,12 +118,16 @@ pub struct PricingInfo {
 /// 提取为纯函数便于单元测试：handler 级测试需构造完整 AppState，
 /// 成本高且不必要。
 ///
-/// 注意：此处注入的哨兵 body（空 messages）仅用于让 route() 判定入口
-/// 协议；route() 当前只检查 native_anthropic_request 是否存在、不解析
-/// 内容。若将来 route() 开始读取请求体，此哨兵必须替换为真实结构。
+/// Diagnostics construct a minimal valid non-streaming native request when
+/// the protocol requires a payload for capability matching. Never execute it.
 fn apply_debug_entry_protocol(ctx: &mut RequestContext, entry: Option<&str>) {
     if entry.is_some_and(|e| e.eq_ignore_ascii_case("anthropic")) {
-        ctx.native_anthropic_request = Some(Arc::new(serde_json::json!({ "messages": [] })));
+        ctx.native_anthropic_request = Some(Arc::new(serde_json::json!({
+            "model":ctx.model,"messages":[{"role":"user","content":"routing diagnostic"}],
+            "max_tokens":1,"stream":false
+        })));
+        ctx.native_anthropic_headers
+            .insert("anthropic-version".into(), "2023-06-01".into());
     }
 }
 
@@ -159,7 +163,7 @@ pub async fn debug_routing(
 
     // 1. 构建 PricingSnapshot
     // Billing dimension is derived from the explicit access mode.
-    let (entry, _) =
+    let (entry, capability) =
         super::admin_model_catalog::protocol_capability(query.mode, query.entry.as_deref(), None)?;
     if query.mode == keycompute_types::ModelAccessMode::NodeDispatch && state.node_gateway.is_none()
     {
@@ -248,10 +252,12 @@ pub async fn debug_routing(
 
     // 5. 执行路由（只读）
     match if query.mode == keycompute_types::ModelAccessMode::Passthrough {
-        crate::passthrough_binding::resolve_passthrough_binding_plan(
+        crate::passthrough_binding::resolve_passthrough_binding_plan_for(
             &state,
             auth.tenant_id,
             &query.model,
+            keycompute_types::AccountApiCapability::parse(&capability)
+                .expect("validated capability"),
         )
         .await
         .map(|(plan, _, _)| plan)
@@ -317,7 +323,11 @@ pub async fn debug_routing(
         }
         Err(
             keycompute_types::KeyComputeError::RoutingFailed(_)
-            | keycompute_types::KeyComputeError::NoReadyNode(_),
+            | keycompute_types::KeyComputeError::NoReadyNode(_)
+            | keycompute_types::KeyComputeError::PassthroughBinding(
+                keycompute_types::PassthroughBindingError::NotFound
+                | keycompute_types::PassthroughBindingError::ModelNotSupported,
+            ),
         ) => {
             // 路由失败，但仍返回诊断信息
             let message = routing_debug_failure_message(&query.model, query.mode);

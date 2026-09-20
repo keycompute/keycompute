@@ -2204,6 +2204,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert("models.pool", "Account pool");
     m.insert("models.passthrough", "Passthrough");
+    m.insert("models.native_stateless_help", "Scoped Responses currently runs without stored response resources. Examples use store=false; previous_response_id, conversation and background are not enabled in this phase.");
     m.insert("models.node", "Node Gateway (NodeDispatch)");
     m.insert(
         "models.pool_desc",
@@ -2344,7 +2345,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "models.placeholder_key",
         "Examples use a placeholder key; replace it with your saved platform key.",
     );
-    m.insert("models.node_stream_help", "Native node Chat preserves the complete JSON request and response. This version requires stream=false and a native-capable worker.");
+    m.insert("models.node_stream_help", "Native node Chat, Messages and Responses preserve their JSON requests and responses. This phase requires stream=false and a worker advertising the selected protocol capability.");
 
     m
 });

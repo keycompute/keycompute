@@ -7,9 +7,10 @@ use keycompute_db::{Account, DbRouter, models::passthrough_binding::AccountModel
 use keycompute_routing::{AccountStateStore, ProviderHealthStore};
 use keycompute_runtime::{EncryptedApiKey, decrypt_api_key};
 use keycompute_types::{
-    AccountModelHealthObserver, AccountModelHealthSnapshot, AccountSelection, ExecutionPlan,
-    ExecutionTarget, KeyComputeError, ModelHealthObservation, PassthroughBindingError as Failure,
-    PassthroughBindingSelection, PassthroughBindingValidator, RequestContext, Result,
+    AccountApiCapability, AccountModelHealthObserver, AccountModelHealthSnapshot, AccountSelection,
+    ExecutionPlan, ExecutionTarget, KeyComputeError, ModelHealthObservation,
+    PassthroughBindingError as Failure, PassthroughBindingSelection, PassthroughBindingValidator,
+    RequestContext, Result,
 };
 use llm_protocol_provider::{ProtocolType, normalize_base_url};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
@@ -29,9 +30,9 @@ SELECT DISTINCT ON (a.id,declared.model) a.*, pb.id AS binding_id,pb.revision AS
 FROM passthrough_bindings pb JOIN accounts a ON a.id=pb.account_id
 JOIN tenants anchor ON anchor.id=pb.tenant_id JOIN tenants owner ON owner.id=a.tenant_id
 CROSS JOIN LATERAL unnest(a.models_supported) AS declared(model)
-LEFT JOIN account_model_health h ON h.account_id=a.id AND h.api_capability='chat_completions' AND h.model=declared.model
+LEFT JOIN account_model_health h ON h.account_id=a.id AND h.api_capability=$3 AND h.model=declared.model
 WHERE (pb.tenant_id=$1 OR pb.is_global) AND ($2::TEXT IS NULL OR declared.model=$2)
-  AND declared.model<>''
+  AND declared.model<>'' AND a.provider=$4 AND a.api_capabilities @> ARRAY[$3]::TEXT[]
 ORDER BY a.id,declared.model,(anchor.status='active') DESC,(pb.tenant_id=$1) DESC,pb.id
 "#;
 #[derive(Clone, FromQueryResult)]
@@ -56,14 +57,29 @@ pub(crate) struct DbPassthroughBindingValidator {
     pool: Arc<DbRouter>,
     account_states: Arc<AccountStateStore>,
     account_health: Arc<ProviderHealthStore>,
+    capability: AccountApiCapability,
 }
 impl DbPassthroughBindingValidator {
     pub(crate) fn new(state: &AppState) -> Result<Self> {
+        Self::for_capability(state, AccountApiCapability::ChatCompletions)
+    }
+    pub(crate) fn for_capability(
+        state: &AppState,
+        capability: AccountApiCapability,
+    ) -> Result<Self> {
         Ok(Self {
             pool: state.pool.clone().ok_or(Failure::DependencyUnavailable)?,
             account_states: Arc::clone(&state.account_states),
             account_health: Arc::clone(&state.provider_health),
+            capability,
         })
+    }
+    fn protocol(&self) -> &'static str {
+        if self.capability == AccountApiCapability::Messages {
+            "anthropic"
+        } else {
+            "openai"
+        }
     }
     async fn snapshots(&self, tenant: Uuid, model: Option<&str>) -> Result<Vec<Snapshot>> {
         let rows = tokio::time::timeout(
@@ -73,7 +89,12 @@ impl DbPassthroughBindingValidator {
                 .query_all(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     SNAPSHOT_SQL,
-                    [tenant.into(), model.into()],
+                    [
+                        tenant.into(),
+                        model.into(),
+                        self.capability.as_str().into(),
+                        self.protocol().into(),
+                    ],
                 )),
         )
         .await
@@ -96,8 +117,11 @@ impl DbPassthroughBindingValidator {
         if !b.caller_active || !b.owner_active || !b.anchor_active || !a.enabled {
             return Err(Failure::Unavailable.into());
         }
-        if a.provider != "openai"
-            || !a.api_capabilities.iter().any(|v| v == "chat_completions")
+        if a.provider != self.protocol()
+            || !a
+                .api_capabilities
+                .iter()
+                .any(|v| v == self.capability.as_str())
             || !a.models_supported.contains(&b.binding_model)
         {
             return Err(Failure::ModelNotSupported.into());
@@ -127,7 +151,7 @@ impl DbPassthroughBindingValidator {
                     .model_generation
                     .map(|generation| AccountModelHealthSnapshot {
                         account_id: row.account.id,
-                        api_capability: "chat_completions".into(),
+                        api_capability: self.capability.as_str().into(),
                         model: row.binding.binding_model.clone(),
                         account_config_version: row.account.upstream_config_version,
                         generation,
@@ -143,7 +167,7 @@ impl DbPassthroughBindingValidator {
             AccountModelHealth::ensure_snapshot(
                 self.pool.write_conn(),
                 row.account.id,
-                "chat_completions",
+                self.capability.as_str(),
                 &row.binding.binding_model,
                 row.account.upstream_config_version,
             ),
@@ -178,7 +202,15 @@ pub(crate) fn connection_metadata(endpoint: &str, encrypted_key: &str) -> Result
     Ok((endpoint, key))
 }
 fn connection(a: &Account) -> Result<(String, String)> {
-    connection_metadata(&a.endpoint, &a.upstream_api_key_encrypted)
+    let endpoint = if a.endpoint.is_empty() {
+        ProtocolType::parse(&a.provider)
+            .ok_or(Failure::Unavailable)?
+            .default_endpoint()
+            .to_string()
+    } else {
+        a.endpoint.clone()
+    };
+    connection_metadata(&endpoint, &a.upstream_api_key_encrypted)
 }
 
 fn unique_account(rows: Vec<Snapshot>) -> Result<Snapshot> {
@@ -203,6 +235,21 @@ pub(crate) async fn resolve_passthrough_binding_plan(
     tenant: Uuid,
     model: &str,
 ) -> Result<(ExecutionPlan, PassthroughBindingSelection, DateTime<Utc>)> {
+    resolve_passthrough_binding_plan_for(
+        state,
+        tenant,
+        model,
+        AccountApiCapability::ChatCompletions,
+    )
+    .await
+}
+
+pub(crate) async fn resolve_passthrough_binding_plan_for(
+    state: &AppState,
+    tenant: Uuid,
+    model: &str,
+    capability: AccountApiCapability,
+) -> Result<(ExecutionPlan, PassthroughBindingSelection, DateTime<Utc>)> {
     if model.is_empty()
         || model.trim() != model
         || model.len() > 255
@@ -212,7 +259,7 @@ pub(crate) async fn resolve_passthrough_binding_plan(
             "Invalid model for the passthrough endpoint".into(),
         ));
     }
-    let service = DbPassthroughBindingValidator::new(state)?;
+    let service = DbPassthroughBindingValidator::for_capability(state, capability)?;
     // Do not filter unhealthy or disabled candidates before detecting an
     // ambiguous namespace: that would create an implicit fallback policy.
     let row = unique_account(service.snapshots(tenant, Some(model)).await?)?;
@@ -222,23 +269,29 @@ pub(crate) async fn resolve_passthrough_binding_plan(
         binding_id: row.binding.binding_id,
         binding_revision: row.binding.binding_revision,
     };
-    let target = ExecutionTarget::new_upstream_account("openai", row.account.id, endpoint, key)
-        .with_selection(AccountSelection::PassthroughBinding {
-            binding_id: binding.binding_id,
-            binding_revision: binding.binding_revision,
-        });
+    let target = ExecutionTarget::new_upstream_account(
+        row.account.provider.clone(),
+        row.account.id,
+        endpoint,
+        key,
+    )
+    .with_selection(AccountSelection::PassthroughBinding {
+        binding_id: binding.binding_id,
+        binding_revision: binding.binding_revision,
+    });
     Ok((
         ExecutionPlan::new(target),
         binding,
         row.account.upstream_config_version,
     ))
 }
-pub(crate) async fn list_routable_passthrough_bindings(
+pub(crate) async fn list_routable_passthrough_bindings_for(
     state: &AppState,
     tenant: Uuid,
     model: Option<&str>,
+    capability: AccountApiCapability,
 ) -> Result<Vec<(String, String)>> {
-    let service = DbPassthroughBindingValidator::new(state)?;
+    let service = DbPassthroughBindingValidator::for_capability(state, capability)?;
     let mut groups: BTreeMap<String, Vec<Snapshot>> = BTreeMap::new();
     for row in service.snapshots(tenant, model).await? {
         groups
@@ -302,7 +355,7 @@ impl PassthroughBindingValidator for DbPassthroughBindingValidator {
         }
         self.eligible(&row)?;
         let (expected_endpoint, key) = connection(&row.account)?;
-        if provider != "openai"
+        if provider != self.protocol()
             || endpoint != &expected_endpoint
             || upstream_api_key.expose() != key
         {
@@ -504,9 +557,14 @@ impl DbPassthroughBindingValidator {
                 ModelCatalogEntry {
                     model: model.clone(),
                     request_model: model,
-                    protocol: "openai".into(),
-                    capability: "chat_completions".into(),
-                    request_path: "/pt/v1/chat/completions".into(),
+                    protocol: self.protocol().into(),
+                    capability: self.capability.as_str().into(),
+                    request_path: match self.capability {
+                        AccountApiCapability::Messages => "/pt/v1/messages",
+                        AccountApiCapability::Responses => "/pt/v1/responses",
+                        AccountApiCapability::ChatCompletions => "/pt/v1/chat/completions",
+                    }
+                    .into(),
                     status,
                     reason_code: reason.into(),
                     configured_targets: count,

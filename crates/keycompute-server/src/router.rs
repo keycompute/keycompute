@@ -131,7 +131,9 @@ use crate::{
         node_register,
         passthrough_binding_chat_completions,
         passthrough_binding_list_models,
+        passthrough_binding_messages,
         passthrough_binding_options,
+        passthrough_binding_responses,
         passthrough_binding_retrieve_model,
         probe_monitoring_targets,
         probe_passthrough_binding,
@@ -244,6 +246,8 @@ pub fn create_router(state: AppState) -> Router {
             "/pt/v1/chat/completions",
             post(passthrough_binding_chat_completions),
         )
+        .route("/pt/v1/messages", post(passthrough_binding_messages))
+        .route("/pt/v1/responses", post(passthrough_binding_responses))
         .route("/pt/v1/models", get(passthrough_binding_list_models))
         .route(
             "/pt/v1/models/{model}",
@@ -276,6 +280,14 @@ pub fn create_router(state: AppState) -> Router {
         .route(
             "/nt/v1/chat/completions",
             post(crate::handlers::openai::node_dispatch_chat_completions),
+        )
+        .route(
+            "/nt/v1/messages",
+            post(crate::handlers::scoped_native::node_dispatch_messages),
+        )
+        .route(
+            "/nt/v1/responses",
+            post(crate::handlers::scoped_native::node_dispatch_responses),
         )
         .route(
             "/nt/v1/models",

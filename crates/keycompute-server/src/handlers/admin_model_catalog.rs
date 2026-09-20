@@ -61,7 +61,7 @@ fn target_tenant(auth: &AuthExtractor, requested: Option<Uuid>) -> Result<Uuid> 
 }
 
 pub(crate) fn protocol_capability(
-    mode: ModelAccessMode,
+    _mode: ModelAccessMode,
     protocol: Option<&str>,
     capability: Option<&str>,
 ) -> Result<(String, String)> {
@@ -80,13 +80,6 @@ pub(crate) fn protocol_capability(
     if !valid {
         return Err(ApiError::BadRequest(
             "Unsupported protocol/capability combination".into(),
-        ));
-    }
-    if !matches!(mode, ModelAccessMode::AccountPool)
-        && (protocol != "openai" || capability != "chat_completions")
-    {
-        return Err(ApiError::BadRequest(
-            "passthrough and node_dispatch only support openai/chat_completions".into(),
         ));
     }
     Ok((protocol, capability))
@@ -145,10 +138,26 @@ pub async fn model_catalog(
             .await?
         }
         ModelAccessMode::Passthrough => {
-            passthrough_catalog(&state, tenant_id, q.as_deref(), page_size, offset).await?
+            passthrough_catalog(
+                &state,
+                tenant_id,
+                &capability,
+                q.as_deref(),
+                page_size,
+                offset,
+            )
+            .await?
         }
         ModelAccessMode::NodeDispatch => {
-            node_catalog(&state, tenant_id, q.as_deref(), page_size, offset).await?
+            node_catalog(
+                &state,
+                tenant_id,
+                &capability,
+                q.as_deref(),
+                page_size,
+                offset,
+            )
+            .await?
         }
     };
     Ok(Json(ModelCatalogPage {
@@ -302,17 +311,21 @@ async fn account_pool_catalog(
 async fn passthrough_catalog(
     state: &AppState,
     tenant: Uuid,
+    capability: &str,
     q: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<ModelCatalogEntry>, i64)> {
-    let result = crate::passthrough_binding::DbPassthroughBindingValidator::new(state)?
-        .catalog_page(tenant, q, offset / limit + 1, limit)
-        .await?;
+    let result = crate::passthrough_binding::DbPassthroughBindingValidator::for_capability(
+        state,
+        keycompute_types::AccountApiCapability::parse(capability).expect("validated capability"),
+    )?
+    .catalog_page(tenant, q, offset / limit + 1, limit)
+    .await?;
     Ok((result.entries, result.total as i64))
 }
 
-fn node_supply_sql() -> String {
+fn node_supply_sql(operation: keycompute_types::node_native::NodeNativeOperation) -> String {
     format!(
         r#"
       SELECT DISTINCT n.id,m.model,
@@ -328,12 +341,16 @@ fn node_supply_sql() -> String {
       WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama'
     "#,
         ready = node_gateway::node_index::READY_NODE_CONDITION,
-        profile = node_gateway::node_index::ready_profile_condition("m.model", "'chat'")
+        profile = node_gateway::node_index::ready_profile_condition(
+            "m.model",
+            &format!("'{}'", operation.as_str())
+        )
     )
 }
 async fn node_catalog(
     state: &AppState,
     tenant: Uuid,
+    capability: &str,
     q: Option<&str>,
     limit: i64,
     offset: i64,
@@ -343,6 +360,7 @@ async fn node_catalog(
         .as_deref()
         .ok_or_else(|| ApiError::ServiceUnavailable("Node catalog unavailable".into()))?
         .write_conn();
+    let operation = operation_for_capability(capability);
     let sql = format!(
         r#"WITH supply AS ({}), grouped AS (
         SELECT model,COUNT(DISTINCT id)::BIGINT configured_targets,
@@ -350,7 +368,7 @@ async fn node_catalog(
         FROM supply WHERE ($2::TEXT IS NULL OR model ILIKE '%'||$2||'%') GROUP BY model
       ), paged AS (SELECT * FROM grouped ORDER BY model LIMIT $3 OFFSET $4)
       SELECT totals.total,paged.* FROM (SELECT count(*)::BIGINT total FROM grouped) totals LEFT JOIN paged ON TRUE ORDER BY model"#,
-        node_supply_sql()
+        node_supply_sql(operation)
     );
     let result = tokio::time::timeout(
         DB_TIMEOUT,
@@ -387,9 +405,9 @@ async fn node_catalog(
         entries.push(ModelCatalogEntry {
             model: r.model.clone(),
             request_model: r.model.clone(),
-            protocol: "openai".into(),
-            capability: "chat_completions".into(),
-            request_path: "/nt/v1/chat/completions".into(),
+            protocol: operation.protocol().into(),
+            capability: capability.into(),
+            request_path: format!("/nt{}", operation.local_path()),
             status: if ready {
                 ModelAvailability::Ready
             } else {
@@ -409,7 +427,21 @@ async fn node_catalog(
     Ok((entries, total))
 }
 
-pub(crate) async fn ready_node_models(state: &AppState, tenant: Uuid) -> Result<Vec<String>> {
+fn operation_for_capability(
+    capability: &str,
+) -> keycompute_types::node_native::NodeNativeOperation {
+    use keycompute_types::node_native::NodeNativeOperation as Op;
+    match capability {
+        "messages" => Op::Messages,
+        "responses" => Op::Responses,
+        _ => Op::Chat,
+    }
+}
+pub(crate) async fn ready_node_models_for(
+    state: &AppState,
+    tenant: Uuid,
+    capability: &str,
+) -> Result<Vec<String>> {
     if state.node_gateway.is_none() {
         return Ok(Vec::new());
     }
@@ -420,7 +452,7 @@ pub(crate) async fn ready_node_models(state: &AppState, tenant: Uuid) -> Result<
         .write_conn();
     let sql = format!(
         "WITH supply AS ({}) SELECT DISTINCT model FROM supply WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active') ORDER BY model",
-        node_supply_sql()
+        node_supply_sql(operation_for_capability(capability))
     );
     #[derive(FromQueryResult)]
     struct NodeModel {
@@ -447,12 +479,26 @@ mod tests {
                 .1,
             "messages"
         );
-        assert!(
-            protocol_capability(ModelAccessMode::Passthrough, None, Some("responses")).is_err()
+        assert_eq!(
+            protocol_capability(ModelAccessMode::Passthrough, None, Some("responses"))
+                .unwrap()
+                .1,
+            "responses"
         );
-        assert!(
-            protocol_capability(ModelAccessMode::NodeDispatch, Some("anthropic"), None).is_err()
+        assert_eq!(
+            protocol_capability(ModelAccessMode::NodeDispatch, Some("anthropic"), None)
+                .unwrap()
+                .1,
+            "messages"
         );
+        for mode in [
+            ModelAccessMode::AccountPool,
+            ModelAccessMode::Passthrough,
+            ModelAccessMode::NodeDispatch,
+        ] {
+            assert!(protocol_capability(mode, Some("anthropic"), Some("responses")).is_err());
+            assert!(protocol_capability(mode, Some("openai"), Some("messages")).is_err());
+        }
         assert_eq!(escaped_q(Some("a_%")), Some("a\\_\\%".into()));
     }
 }

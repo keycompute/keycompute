@@ -159,8 +159,7 @@ impl NodeTask {
               AND status = $6
               AND deadline_at >= NOW()
               AND (payload_json->'native' IS NULL OR payload_json->'native'='null'::jsonb
-                OR (payload_json->'native'->>'operation'='chat'
-                    AND payload_json->'native'->'body'->>'model'=node_tasks.model
+                OR (payload_json->'native'->'body'->>'model'=node_tasks.model
                     AND EXISTS (
                       SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
                       JOIN users owner ON owner.id=n.owner_user_id JOIN tenants t ON t.id=owner.tenant_id

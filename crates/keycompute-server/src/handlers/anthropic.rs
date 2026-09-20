@@ -66,7 +66,7 @@ pub struct AnthropicInputMessage {
 }
 
 impl AnthropicMessagesRequest {
-    fn validate(&self) -> Result<()> {
+    pub(super) fn validate(&self) -> Result<()> {
         if self.model.trim().is_empty() {
             return Err(ApiError::BadRequest("model must not be empty".to_string()));
         }
@@ -118,7 +118,7 @@ impl AnthropicMessagesRequest {
     /// 实际请求大小（工具定义、缓存内容未计入）；这是刻意的泄露防护权衡。
     /// 正常上游以 message_start 的精确 usage 覆盖估算，异常上游（无 usage）
     /// 时计费会偏低，属于可接受的已知局限。
-    fn context_messages(&self) -> Vec<Message> {
+    pub(super) fn context_messages(&self) -> Vec<Message> {
         let mut messages = Vec::new();
         if let Some(system) = &self.system {
             messages.push(Message {
@@ -1095,7 +1095,9 @@ fn value_text(value: &Value) -> String {
 
 /// 只透传影响 Anthropic 协议语义的头部。认证、客户端身份、宿主名及任意
 /// 非白名单头都由网关自行管理，防止请求伪造或意外泄露。
-fn forwarded_anthropic_headers(headers: &HeaderMap) -> std::collections::BTreeMap<String, String> {
+pub(super) fn forwarded_anthropic_headers(
+    headers: &HeaderMap,
+) -> std::collections::BTreeMap<String, String> {
     let mut forwarded = std::collections::BTreeMap::new();
     if let Some(version) = headers
         .get("anthropic-version")
@@ -1119,7 +1121,7 @@ fn forwarded_anthropic_headers(headers: &HeaderMap) -> std::collections::BTreeMa
 /// `anthropic-version` 是 Messages API 的必需协议头。网关不能在客户端遗漏
 /// 该头时静默选用自己的默认版本，否则同一 API key 的不同客户端会得到不可
 /// 预测的字段与行为差异。
-fn validate_anthropic_headers(headers: &HeaderMap) -> Result<()> {
+pub(super) fn validate_anthropic_headers(headers: &HeaderMap) -> Result<()> {
     match headers
         .get("anthropic-version")
         .and_then(|value| value.to_str().ok())

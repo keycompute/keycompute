@@ -2143,6 +2143,14 @@ fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result
         ));
     }
 
+    let native_count = usize::from(ctx.native_openai_chat_request.is_some())
+        + usize::from(ctx.native_openai_responses_request.is_some())
+        + usize::from(ctx.native_anthropic_request.is_some());
+    let expected_protocol = if ctx.native_anthropic_request.is_some() {
+        "anthropic"
+    } else {
+        "openai"
+    };
     let mut bound_selection = None;
     for (index, target) in plan.all_targets().enumerate() {
         if let ExecutionTarget::UpstreamAccount {
@@ -2161,7 +2169,7 @@ fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result
                 || binding_id.is_nil()
                 || *binding_revision <= 0
                 || account_id.is_nil()
-                || provider != "openai"
+                || provider != expected_protocol
                 || endpoint.trim().is_empty()
                 || upstream_api_key.is_empty()
             {
@@ -2174,7 +2182,11 @@ fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result
         }
     }
     if let Some(selection) = bound_selection {
-        let native = ctx.native_openai_chat_request.as_deref();
+        let native = ctx
+            .native_openai_chat_request
+            .as_deref()
+            .or(ctx.native_openai_responses_request.as_deref())
+            .or(ctx.native_anthropic_request.as_deref());
         let native_model_matches = native
             .and_then(|body| body.get("model"))
             .and_then(serde_json::Value::as_str)
@@ -2184,16 +2196,14 @@ fn validate_execution_plan(ctx: &RequestContext, plan: &ExecutionPlan) -> Result
             Some(serde_json::Value::Bool(stream)) => *stream == ctx.stream,
             _ => false,
         };
-        if !native_model_matches
+        if native_count != 1
+            || !native_model_matches
             || !native_stream_matches
             || !plan.fallback_chain.is_empty()
             || ctx.passthrough_binding != Some(selection)
             || ctx.passthrough_binding_validator.is_none()
             || ctx.account_model_health_observer.is_none()
             || ctx.passthrough_binding_account_config_version.is_none()
-            || ctx.native_openai_chat_request.is_none()
-            || ctx.native_openai_responses_request.is_some()
-            || ctx.native_anthropic_request.is_some()
         {
             return Err(PassthroughBindingError::InvalidPlan.into());
         }

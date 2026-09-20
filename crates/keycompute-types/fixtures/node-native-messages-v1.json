@@ -1,0 +1,13 @@
+{
+  "operation": "messages",
+  "headers": [["anthropic-version", "2023-06-01"]],
+  "body": {
+    "model": "node:literal",
+    "system": [{"type": "text", "text": "Be concise"}],
+    "messages": [{"role": "user", "content": [{"type": "text", "text": "Inspect"}, {"type": "tool_result", "tool_use_id": "call_1", "content": "found"}]}],
+    "max_tokens": 42,
+    "tools": [{"name": "lookup", "description": "Look up", "input_schema": {"type": "object"}}],
+    "thinking": {"type": "enabled"},
+    "unknown_extension": {"nested": true}
+  }
+}
