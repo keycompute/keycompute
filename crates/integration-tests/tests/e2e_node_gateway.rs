@@ -117,6 +117,7 @@ fn chat_task_payload(request_id: Uuid) -> NodeTaskPayload {
         )),
         image_generation: None,
         image_edit: None,
+        native: None,
     }
 }
 
@@ -130,6 +131,7 @@ fn image_generation_task_payload(request_id: Uuid) -> NodeTaskPayload {
             size: None,
         }),
         image_edit: None,
+        native: None,
     }
 }
 
@@ -258,6 +260,7 @@ impl NodeTestEnv {
             registration_token: token.to_string(),
             capabilities: NodeCapabilities {
                 runtime: "ollama".to_string(),
+                native_operations: vec![],
                 models: vec![
                     NodeModelCapability {
                         model: "deepseek-chat".to_string(),
@@ -457,6 +460,7 @@ async fn test_sweeper_preserves_trace_quality_after_wait_timeout() -> anyhow::Re
             size: None,
         }),
         image_edit: None,
+        native: None,
     };
     let task = NodeTask::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
@@ -922,6 +926,7 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
         }),
         image_generation: None,
         image_edit: None,
+        native: None,
     };
 
     let _task = env
@@ -990,6 +995,7 @@ async fn completion_committed_after_client_deadline_returns_timeout_for_handler(
         }),
         image_generation: None,
         image_edit: None,
+        native: None,
     };
 
     let waiting = tokio::spawn(async move {
@@ -1635,6 +1641,7 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
             size: Some("1024x1024".to_string()),
         }),
         image_edit: None,
+        native: None,
     };
 
     // 验证 payload 合法性
@@ -1804,6 +1811,7 @@ async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
 
     // 2. 创建图片编辑任务 payload
     let payload = NodeTaskPayload {
+        native: None,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: None,
@@ -1952,6 +1960,7 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
             size: None,
         }),
         image_edit: None,
+        native: None,
     };
 
     // 空 prompt 在 payload 验证层是合法的（验证只检查互斥性）
@@ -1975,6 +1984,7 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
             size: None,
         }),
         image_edit: None,
+        native: None,
     };
 
     assert!(payload_short.validate().is_ok());
@@ -2087,6 +2097,7 @@ async fn test_image_url_inaccessible() -> anyhow::Result<()> {
             size: None,
         }),
         image_edit: None,
+        native: None,
     };
 
     // 3. 手动构造 leased 任务
@@ -2198,6 +2209,7 @@ async fn test_node_task_timeout() -> anyhow::Result<()> {
             size: None,
         }),
         image_edit: None,
+        native: None,
     };
 
     // 3. 创建已超时的任务（deadline_at 设为过去时间）
@@ -2374,6 +2386,7 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
             size: None,
         }),
         image_edit: None,
+        native: None,
     };
 
     // 3. 手动构造 leased 任务

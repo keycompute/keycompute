@@ -158,6 +158,9 @@ impl NodeGatewayStore {
         &self,
         req: &NodeRegisterRequest,
     ) -> Result<NodeRegisterResponse, DbError> {
+        if req.capabilities.native_operations.len() > 1 {
+            return Err(DbError::Other("duplicate native operations".into()));
+        }
         // 0. HMAC 签名验证（O(1) 内存操作，零 DB 查询）
         let token_id = UserNodeGatewayToken::validate_hmac_token(
             &req.registration_token,
@@ -298,14 +301,16 @@ impl NodeGatewayStore {
             expires_at,
             accepted_models_json: serde_json::to_value(&accepted_models)
                 .map_err(|e| DbError::Other(e.to_string()))?,
+            native_operations_json: serde_json::to_value(&req.capabilities.native_operations)
+                .map_err(|e| DbError::Other(e.to_string()))?,
         };
 
         // 4.1 创建 session (在事务中)
         let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json, native_operations_json)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *
             "#,
             [
@@ -313,6 +318,7 @@ impl NodeGatewayStore {
                 create_session_req.session_token_hash.as_str().into(),
                 create_session_req.expires_at.into(),
                 create_session_req.accepted_models_json.clone().into(),
+                create_session_req.native_operations_json.clone().into(),
             ],
         ))
         .one(&tx)
@@ -567,6 +573,14 @@ impl NodeGatewayStore {
         model: String,
         payload: NodeTaskPayload,
     ) -> Result<NodeTask, DbError> {
+        payload
+            .validate()
+            .map_err(|error| DbError::Other(error.into()))?;
+        if let Some(native) = &payload.native {
+            native
+                .validate(&model)
+                .map_err(|error| DbError::Other(error.into()))?;
+        }
         let now = Utc::now();
         let deadline_at = now + self.config.task_deadline();
         let complete_grace_until = deadline_at + self.config.complete_grace();
@@ -1140,6 +1154,18 @@ impl NodeGatewayStore {
                 )
                 .await
             }
+            NodeTaskResult::NativeSucceeded { response } => {
+                self.handle_native_success_submission(
+                    &tx,
+                    &task,
+                    &node,
+                    authenticated_node_id,
+                    authenticated_session_id,
+                    lease_id,
+                    response,
+                )
+                .await
+            }
             NodeTaskResult::Failed {
                 code,
                 message,
@@ -1251,6 +1277,38 @@ impl NodeGatewayStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_native_success_submission(
+        &self,
+        tx: &DatabaseTransaction,
+        task: &NodeTask,
+        _node: &Node,
+        _node_id: Uuid,
+        _session_id: Uuid,
+        _lease_id: Uuid,
+        response: keycompute_types::node_native::NodeNativeHttpResult,
+    ) -> Result<NodeTaskCompleteResponse, DbError> {
+        response
+            .validate(&task.model)
+            .map_err(|error| DbError::Other(format!("invalid native result: {error}")))?;
+        let response_json =
+            serde_json::to_value(&response).map_err(|e| DbError::Other(e.to_string()))?;
+        let result_for_hash = NodeTaskResult::NativeSucceeded { response };
+        // Native completion uses the same immutable task transition and ACK path.
+        self.handle_success_submission_inner(
+            tx,
+            task,
+            _node,
+            _node_id,
+            _session_id,
+            _lease_id,
+            response_json,
+            "succeeded",
+            result_for_hash,
+        )
+        .await
+    }
+
     /// 成功提交的公共逻辑：更新任务状态、清零失败计数、写入 submission ACK
     #[allow(clippy::too_many_arguments)]
     async fn handle_success_submission_inner(
@@ -1265,6 +1323,14 @@ impl NodeGatewayStore {
         result_kind: &str,
         result_for_hash: NodeTaskResult,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
+        let native_error = matches!(&result_for_hash, NodeTaskResult::NativeSucceeded { response } if response.status >= 400);
+        let terminal_status = if native_error {
+            TASK_STATUS_FAILED
+        } else {
+            TASK_STATUS_SUCCEEDED
+        };
+        let terminal_action = if native_error { "failed" } else { "succeeded" };
+        let result_kind = if native_error { "failed" } else { result_kind };
         let updated_task = NodeTask::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
@@ -1282,7 +1348,7 @@ impl NodeGatewayStore {
             RETURNING *
             "#,
             [
-                TASK_STATUS_SUCCEEDED.into(),
+                terminal_status.into(),
                 response_json.clone().into(),
                 task.id.into(),
                 node_id.into(),
@@ -1316,7 +1382,7 @@ impl NodeGatewayStore {
         };
 
         // 清零节点连续失败计数（仅非 excluded 节点）
-        if !node.is_excluded() {
+        if !node.is_excluded() && !native_error {
             tx.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 r#"
@@ -1339,7 +1405,7 @@ impl NodeGatewayStore {
             session_id,
             result_kind: result_kind.to_string(),
             request_hash,
-            action: "succeeded".to_string(),
+            action: terminal_action.to_string(),
         };
 
         NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
@@ -1373,7 +1439,11 @@ impl NodeGatewayStore {
         .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))?;
 
         Ok(NodeTaskCompleteResponse {
-            action: NodeTaskCompleteAction::Succeeded,
+            action: if native_error {
+                NodeTaskCompleteAction::Failed
+            } else {
+                NodeTaskCompleteAction::Succeeded
+            },
             task_status: updated_task.status,
             node_status: updated_node.status,
             server_failure_count: updated_node.consecutive_failure_count as u32,
@@ -1401,13 +1471,20 @@ impl NodeGatewayStore {
             "is_client_error": is_client_error,
         });
 
-        let updated_task = if is_client_error {
+        let native_task = task
+            .payload_json
+            .get("native")
+            .is_some_and(|value| !value.is_null());
+        // Once native inference was leased, an uncertain outcome must never
+        // create a second generation on another worker.
+        let updated_task = if is_client_error || native_task {
             NodeTask::find_by_statement(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 r#"
                 UPDATE node_tasks
                 SET status = 'failed',
                     failure_count = failure_count + 1,
+                    finished_at = NOW(),
                     error_json = $1,
                     updated_at = NOW()
                 WHERE id = $2
@@ -1603,6 +1680,7 @@ fn parse_action(action: &str) -> Result<NodeTaskCompleteAction, DbError> {
 fn result_matches_payload(payload: &NodeTaskPayload, result: &NodeTaskResult) -> bool {
     match result {
         NodeTaskResult::Succeeded { .. } => payload.is_chat(),
+        NodeTaskResult::NativeSucceeded { .. } => payload.is_native(),
         NodeTaskResult::ImageSucceeded { .. } => {
             payload.is_image_generation() || payload.is_image_edit()
         }
@@ -1641,6 +1719,7 @@ mod tests {
             chat: Some(ChatCompletionRequest::new("test-model", Vec::new())),
             image_generation: None,
             image_edit: None,
+            native: None,
         };
         let image_payload = NodeTaskPayload {
             request_id: Uuid::new_v4(),
@@ -1651,6 +1730,7 @@ mod tests {
                 size: None,
             }),
             image_edit: None,
+            native: None,
         };
         let chat_result: NodeTaskResult = serde_json::from_value(serde_json::json!({
             "status": "succeeded",

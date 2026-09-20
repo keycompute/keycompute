@@ -41,6 +41,9 @@ pub struct NodeCapabilities {
     pub runtime: String,
     /// 支持的模型列表
     pub models: Vec<NodeModelCapability>,
+    /// Explicit native JSON operation support. Empty for legacy nodes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub native_operations: Vec<crate::node_native::NodeNativeOperation>,
 }
 
 // ============================================================================
@@ -175,6 +178,9 @@ pub struct NodeTaskPayload {
     /// 图片编辑请求（可选）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_edit: Option<ImageEditRequest>,
+    /// Native JSON task. Kept separate so legacy clients cannot claim it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native: Option<crate::node_native::NodeNativeRequest>,
 }
 
 impl NodeTaskPayload {
@@ -193,11 +199,16 @@ impl NodeTaskPayload {
         self.image_edit.is_some()
     }
 
+    pub fn is_native(&self) -> bool {
+        self.native.is_some()
+    }
+
     /// 校验 payload 合法性：至多设置一种任务类型，且不能全部为空。
     pub fn validate(&self) -> Result<(), &'static str> {
         let count = self.chat.is_some() as u8
             + self.image_generation.is_some() as u8
-            + self.image_edit.is_some() as u8;
+            + self.image_edit.is_some() as u8
+            + self.native.is_some() as u8;
         if count > 1 {
             return Err("NodeTaskPayload: more than one task type set");
         }
@@ -242,6 +253,10 @@ pub enum NodeTaskResult {
     ImageSucceeded {
         /// 图片生成响应
         image_response: ImageGenerationResponse,
+    },
+    /// Native JSON response preserving provider status, headers and body.
+    NativeSucceeded {
+        response: crate::node_native::NodeNativeHttpResult,
     },
     /// 任务失败
     Failed {

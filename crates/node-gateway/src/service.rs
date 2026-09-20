@@ -90,6 +90,50 @@ impl NodeExecutionError {
     }
 }
 
+enum NativeOutcome {
+    Pending,
+    Complete(keycompute_types::node_native::NodeNativeHttpResult),
+    Failed(NodeExecutionError),
+}
+
+async fn wait_native_result<Q, QF, N, NF>(
+    duration: Duration,
+    query: Q,
+    notify: N,
+) -> Option<Result<keycompute_types::node_native::NodeNativeHttpResult, NodeExecutionError>>
+where
+    Q: Fn() -> QF,
+    QF: std::future::Future<Output = Result<NativeOutcome, DbError>>,
+    N: Fn() -> NF,
+    NF: std::future::Future<Output = anyhow::Result<Option<String>>>,
+{
+    let deadline = tokio::time::Instant::now() + duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining.min(Duration::from_secs(3)), query()).await {
+            Ok(Ok(NativeOutcome::Complete(value))) => return Some(Ok(value)),
+            Ok(Ok(NativeOutcome::Failed(error))) => return Some(Err(error)),
+            _ => {}
+        }
+        let next = (tokio::time::Instant::now() + Duration::from_secs(1)).min(deadline);
+        if matches!(
+            tokio::time::timeout_at(deadline, notify()).await,
+            Ok(Ok(Some(_)))
+        ) {
+            continue;
+        }
+        tokio::time::sleep_until(next).await;
+    }
+    match tokio::time::timeout(Duration::from_secs(3), query()).await {
+        Ok(Ok(NativeOutcome::Complete(value))) => Some(Ok(value)),
+        Ok(Ok(NativeOutcome::Failed(error))) => Some(Err(error)),
+        _ => None,
+    }
+}
+
 /// Node Gateway Service
 #[derive(Clone)]
 pub struct NodeGatewayService {
@@ -145,6 +189,12 @@ impl NodeGatewayService {
         model: String,
         payload: NodeTaskPayload,
     ) -> Result<ChatCompletionResponse, NodeExecutionError> {
+        if payload.is_native() {
+            return Err(NodeExecutionError::gateway_internal(
+                anyhow::anyhow!("native task requires native result path"),
+                "invalid_native_task",
+            ));
+        }
         let deadline_secs = self.config.task_deadline_secs;
         // 1. 创建任务并入队
         let task = match self
@@ -212,6 +262,82 @@ impl NodeGatewayService {
                 ))
             }
         }
+    }
+
+    /// Wait without abandoning settlement ownership on a transient read failure.
+    pub async fn enqueue_native_and_wait(
+        &self,
+        user_id: Uuid,
+        model: String,
+        payload: NodeTaskPayload,
+    ) -> Result<keycompute_types::node_native::NodeNativeHttpResult, NodeExecutionError> {
+        if !payload.is_native() {
+            return Err(NodeExecutionError::gateway_internal(
+                anyhow::anyhow!("native payload required"),
+                "invalid_native_task",
+            ));
+        }
+        let task = self
+            .store
+            .create_and_enqueue_task(user_id, model.clone(), payload)
+            .await
+            .map_err(|error| {
+                NodeExecutionError::gateway_internal(error.into(), "node_task_create_failed")
+            })?;
+        let _ = self
+            .lifecycle
+            .set_route(task.request_id, RouteType::Node, RequestStatus::Queued)
+            .await;
+        let _ = self.redis.push_to_native_model_queue(&model, task.id).await;
+        if let Some(result) = wait_native_result(
+            self.config.task_deadline(),
+            || self.query_native_outcome(task.id, &model),
+            || self.redis.wait_for_result(task.id, 1),
+        )
+        .await
+        {
+            return result;
+        }
+        self.finish_wait_timeout_trace(&task).await;
+        Err(NodeExecutionError::other(
+            anyhow::anyhow!("native task deadline elapsed"),
+            node_wait_timeout_failure(),
+        ))
+    }
+
+    async fn query_native_outcome(
+        &self,
+        task_id: Uuid,
+        model: &str,
+    ) -> Result<NativeOutcome, DbError> {
+        let task = NodeTask::find_by_id(self.store.pool().write_conn(), task_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
+        if !task.is_terminal() {
+            return Ok(NativeOutcome::Pending);
+        }
+        let _ = tokio::time::timeout(
+            Duration::from_millis(250),
+            self.synchronize_terminal_trace(&task),
+        )
+        .await;
+        if let Some(value) = task.result_json.clone() {
+            let response: keycompute_types::node_native::NodeNativeHttpResult =
+                serde_json::from_value(value)
+                    .map_err(|_| DbError::Other("invalid native result".into()))?;
+            response
+                .validate(model)
+                .map_err(|error| DbError::Other(error.into()))?;
+            return Ok(NativeOutcome::Complete(response));
+        }
+        Ok(NativeOutcome::Failed(
+            decode_chat_task_result(&task).err().unwrap_or_else(|| {
+                NodeExecutionError::gateway_internal(
+                    anyhow::anyhow!("native result missing"),
+                    "node_native_result_missing",
+                )
+            }),
+        ))
     }
 
     /// 在发起请求的进程内关闭超时 trace，确保本地 active gauge 和生命周期
@@ -422,7 +548,7 @@ impl NodeGatewayService {
         .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
         let now = chrono::Utc::now();
-        if session.is_revoked() || session.expires_at < now {
+        if session.node_id != node_id || session.is_revoked() || session.expires_at <= now {
             // session 已撤销或过期,不允许 poll
             return Ok(NodePollResponse {
                 protocol_version: "node.v1".to_string(),
@@ -438,6 +564,48 @@ impl NodeGatewayService {
         // 随机打乱模型顺序，避免固定顺序导致的队列饥饿问题
         let mut shuffled_models = accepted_models;
         fastrand::shuffle(&mut shuffled_models);
+
+        let native_ready = session
+            .native_operations_json
+            .as_array()
+            .is_some_and(|ops| ops.iter().any(|value| value.as_str() == Some("chat")));
+        // One finite blocking wait considers every authorized queue. A new
+        // worker must not starve legacy work while its native queue is empty.
+        if native_ready {
+            let mut keys = Vec::with_capacity(shuffled_models.len().saturating_mul(2));
+            for model in &shuffled_models {
+                keys.push(NodeGatewayRedis::native_model_queue_key(model));
+                keys.push(NodeGatewayRedis::model_queue_key(model));
+            }
+            fastrand::shuffle(&mut keys);
+            while !keys.is_empty() {
+                let remaining =
+                    poll_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let task_id = self.redis.pop_from_queues(&keys, remaining).await?;
+                let Some(task_id) = task_id else {
+                    break;
+                };
+                if let Some((task, envelope)) =
+                    self.store.claim_task(task_id, node_id, session_id).await?
+                {
+                    record_node_task_running();
+                    self.record_claim(&task).await;
+                    return Ok(NodePollResponse {
+                        protocol_version: "node.v1".into(),
+                        task: Some(envelope),
+                        retry_after_ms: None,
+                    });
+                }
+            }
+            return Ok(NodePollResponse {
+                protocol_version: "node.v1".into(),
+                task: None,
+                retry_after_ms: Some(1000),
+            });
+        }
 
         for model in shuffled_models {
             // 检查是否已超过 poll 总超时时间
@@ -458,30 +626,7 @@ impl NodeGatewayService {
                     match self.store.claim_task(task_id, node_id, session_id).await? {
                         Some((task, envelope)) => {
                             record_node_task_running();
-                            if let Err(error) = self
-                                .lifecycle
-                                .start_attempt(AttemptTraceStart {
-                                    request_id: task.request_id,
-                                    attempt_kind: classify_node_attempt_kind(task.failure_count),
-                                    route_type: RouteType::Node,
-                                    model: task.model.clone(),
-                                    provider_name: None,
-                                    account_id: None,
-                                    node_task_id: Some(task.id),
-                                    node_id: task.assigned_node_id,
-                                    session_id: task.assigned_session_id,
-                                    lease_id: task.lease_id,
-                                    started_at: task.claimed_at.unwrap_or_else(chrono::Utc::now),
-                                })
-                                .await
-                            {
-                                tracing::warn!(request_id=%task.request_id, task_id=%task.id, %error, "failed to record node claim");
-                                if let Err(partial_error) =
-                                    self.lifecycle.mark_trace_partial(task.request_id).await
-                                {
-                                    tracing::warn!(request_id=%task.request_id, task_id=%task.id, %partial_error, "failed to mark node trace partial after claim trace failure");
-                                }
-                            }
+                            self.record_claim(&task).await;
                             return Ok(NodePollResponse {
                                 protocol_version: "node.v1".to_string(),
                                 task: Some(envelope),
@@ -511,6 +656,31 @@ impl NodeGatewayService {
             task: None,
             retry_after_ms: Some(1000), // 建议 1 秒后重试
         })
+    }
+
+    async fn record_claim(&self, task: &NodeTask) {
+        if let Err(error) = self
+            .lifecycle
+            .start_attempt(AttemptTraceStart {
+                request_id: task.request_id,
+                attempt_kind: classify_node_attempt_kind(task.failure_count),
+                route_type: RouteType::Node,
+                model: task.model.clone(),
+                provider_name: None,
+                account_id: None,
+                node_task_id: Some(task.id),
+                node_id: task.assigned_node_id,
+                session_id: task.assigned_session_id,
+                lease_id: task.lease_id,
+                started_at: task.claimed_at.unwrap_or_else(chrono::Utc::now),
+            })
+            .await
+        {
+            tracing::warn!(request_id=%task.request_id, task_id=%task.id, %error, "failed to record node claim");
+            if let Err(partial_error) = self.lifecycle.mark_trace_partial(task.request_id).await {
+                tracing::warn!(request_id=%task.request_id, task_id=%task.id, %partial_error, "failed to mark node trace partial after claim trace failure");
+            }
+        }
     }
 
     /// 完成任务提交
@@ -644,13 +814,30 @@ impl NodeGatewayService {
 fn decode_chat_task_result(task: &NodeTask) -> Result<ChatCompletionResponse, NodeExecutionError> {
     match task.status.as_str() {
         "succeeded" => {
-            let response = serde_json::from_value(task.result_json.clone().ok_or_else(|| {
+            let result_json = task.result_json.clone().ok_or_else(|| {
                 NodeExecutionError::other(
                     anyhow::anyhow!("Task succeeded but no result_json"),
                     invalid_node_result_failure(),
                 )
-            })?)
-            .map_err(|error| {
+            })?;
+            let value = if task.payload_json.get("native").is_some() {
+                let native = serde_json::from_value::<
+                    keycompute_types::node_native::NodeNativeHttpResult,
+                >(result_json)
+                .map_err(|error| {
+                    NodeExecutionError::other(
+                        anyhow::Error::from(error),
+                        invalid_node_result_failure(),
+                    )
+                })?;
+                native.validate(&task.model).map_err(|error| {
+                    NodeExecutionError::other(anyhow::anyhow!(error), invalid_node_result_failure())
+                })?;
+                native.body
+            } else {
+                result_json
+            };
+            let response = serde_json::from_value(value).map_err(|error| {
                 NodeExecutionError::other(anyhow::Error::from(error), invalid_node_result_failure())
             })?;
             Ok(response)
@@ -904,5 +1091,79 @@ mod tests {
         mark_node_request_missing_attempt(&lifecycle, &task).await;
 
         assert!(recorder.events().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod native_wait_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    fn response() -> keycompute_types::node_native::NodeNativeHttpResult {
+        keycompute_types::node_native::NodeNativeHttpResult {
+            status: 200,
+            headers: vec![],
+            body: serde_json::json!({"test":"completed"}),
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn transient_writer_error_keeps_waiting_for_the_same_task() {
+        let reads = AtomicUsize::new(0);
+        let result = wait_native_result(
+            Duration::from_secs(3),
+            || async {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(DbError::Other("temporary query outage".into()))
+                } else {
+                    Ok(NativeOutcome::Complete(response()))
+                }
+            },
+            || async { Ok(None) },
+        )
+        .await;
+        assert_eq!(result.unwrap().unwrap().body["test"], "completed");
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn completion_notification_reloads_immediately_before_deadline() {
+        let reads = AtomicUsize::new(0);
+        let started = tokio::time::Instant::now();
+        let result = wait_native_result(
+            Duration::from_secs(1),
+            || async {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(NativeOutcome::Pending)
+                } else {
+                    Ok(NativeOutcome::Complete(response()))
+                }
+            },
+            || async {
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                Ok(Some("succeeded".into()))
+            },
+        )
+        .await;
+        assert!(result.unwrap().is_ok());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn deadline_race_returns_an_already_committed_result() {
+        let reads = AtomicUsize::new(0);
+        let result = wait_native_result(
+            Duration::from_secs(1),
+            || async {
+                if reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Ok(NativeOutcome::Pending)
+                } else {
+                    Ok(NativeOutcome::Complete(response()))
+                }
+            },
+            || async {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                Ok(None)
+            },
+        )
+        .await;
+        assert!(result.unwrap().is_ok());
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
     }
 }

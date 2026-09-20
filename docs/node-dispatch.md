@@ -26,8 +26,9 @@ curl --fail-with-body "$BASE_URL/nt/v1/chat/completions" \
   -d '{"model":"gemma3:270m","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-The response uses the existing completion-buffered SSE behavior when `stream`
-is enabled. It is not native token-by-token worker streaming. Registration
+Native Chat carries the original JSON through an explicitly native-capable
+worker. This protocol version accepts non-streaming requests only; `stream:true`
+is rejected explicitly, never silently rewritten. Registration
 tokens are for `/node/v1/register`; the exchanged session token is for worker
 heartbeat/poll/complete calls, not for public inference.
 

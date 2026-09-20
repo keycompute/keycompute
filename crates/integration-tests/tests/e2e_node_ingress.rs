@@ -268,6 +268,7 @@ impl Fixture {
         let session = NodeSession::create(
             &db,
             &CreateNodeSessionRequest {
+                native_operations_json: serde_json::json!(["chat"]),
                 node_id: node.id,
                 session_token_hash: hex::encode(Sha256::digest(Uuid::new_v4().as_bytes())),
                 expires_at: Utc::now() + ChronoDuration::hours(1),
@@ -386,14 +387,18 @@ impl Fixture {
             })
             .await
             .expect("no Node task arrived");
-            let response = serde_json::from_value(completion(&task.model, "node-worker")).unwrap();
+            let response = keycompute_types::node_native::NodeNativeHttpResult {
+                status: 200,
+                headers: vec![],
+                body: completion(&task.model, "node-worker"),
+            };
             service
                 .complete_task(
                     task.task_id,
                     task.lease_id,
                     node,
                     session,
-                    NodeTaskResult::Succeeded { response },
+                    NodeTaskResult::NativeSucceeded { response },
                 )
                 .await
                 .unwrap();
@@ -470,7 +475,7 @@ async fn urls_isolate_same_model_and_keep_node_pricing_raw() {
     assert_eq!(body["choices"][0]["message"]["content"], "node-worker");
     let task = worker.await.unwrap();
     assert_eq!(task.model, f.shared);
-    assert_eq!(task.payload.chat.unwrap().model, f.shared);
+    assert_eq!(task.payload.native.unwrap().body["model"], f.shared);
     assert!(f.calls.lock().unwrap().is_empty());
     assert_eq!(f.tasks().await, 1);
     f.assert_ledger(id, "1", "node").await;
@@ -511,20 +516,15 @@ async fn urls_isolate_same_model_and_keep_node_pricing_raw() {
 }
 
 #[tokio::test]
-async fn node_stream_uses_nt_and_preserves_raw_model_and_billing() {
+async fn native_streaming_is_rejected_explicitly_until_event_transport_is_enabled() {
     let mut f = Fixture::new().await;
-    let worker = f.worker();
-    let result = f
-        .request(Method::POST, NT, Some(f.body(&f.shared, true)))
-        .await;
-    let id = result.request_id.unwrap();
-    let body = expect(result, StatusCode::OK);
-    let stream = body.as_str().unwrap();
-    assert!(stream.contains("[DONE]"));
-    assert!(stream.contains(&f.shared));
-    assert!(!stream.contains(&format!("node:{}", f.shared)));
-    worker.await.unwrap();
-    f.assert_ledger(id, "1", "node").await;
+    let body = expect(
+        f.request(Method::POST, NT, Some(f.body(&f.shared, true)))
+            .await,
+        StatusCode::BAD_REQUEST,
+    );
+    assert!(body.to_string().contains("native_streaming_unsupported"));
+    assert_eq!(f.tasks().await, 0);
     assert!(f.calls.lock().unwrap().is_empty());
     f.finish().await;
 }
@@ -1018,7 +1018,10 @@ async fn literal_node_prefixed_name_uses_the_url_selected_execution_family() {
     let task = worker.await.unwrap();
     assert_eq!(response["model"], f.shared);
     assert_eq!(task.model, f.shared);
-    assert_eq!(task.payload.chat.as_ref().unwrap().model, f.shared);
+    assert_eq!(
+        task.payload.native.as_ref().unwrap().body["model"],
+        f.shared
+    );
     assert_eq!(f.tasks().await, 1);
     assert_eq!(f.calls.lock().unwrap().len(), 2);
     f.finish().await;
@@ -1053,5 +1056,207 @@ async fn unknown_prefixed_models_use_normal_responses_and_messages_errors() {
     }
     assert_eq!(f.tasks().await, 0);
     assert!(f.calls.lock().unwrap().is_empty());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_claim_uses_immutable_session_permission_not_node_metadata() {
+    let mut f = Fixture::new().await;
+    let service = f.state.node_gateway.as_ref().unwrap();
+    let old = NodeSession::create(
+        &f.db,
+        &CreateNodeSessionRequest {
+            node_id: f.node.id,
+            session_token_hash: hex::encode(Sha256::digest(Uuid::new_v4().as_bytes())),
+            accepted_models_json: json!([f.shared]),
+            native_operations_json: json!([]),
+            expires_at: Utc::now() + ChronoDuration::hours(1),
+        },
+    )
+    .await
+    .unwrap();
+    f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE nodes SET capabilities_json=capabilities_json || '{\"native_operations\":[\"chat\"]}'::jsonb WHERE id=$1",[f.node.id.into()])).await.unwrap();
+    let payload = keycompute_types::node::NodeTaskPayload {
+        request_id: Uuid::new_v4(),
+        chat: None,
+        image_generation: None,
+        image_edit: None,
+        native: Some(keycompute_types::node_native::NodeNativeRequest {
+            operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+            body: f.body(&f.shared, false),
+            headers: vec![],
+        }),
+    };
+    let task = service
+        .store
+        .create_and_enqueue_task(f.user.id, f.shared.clone(), payload)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .store
+            .claim_task(task.id, f.node.id, old.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (_, envelope) = service
+        .store
+        .claim_task(task.id, f.node.id, f.session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(envelope.payload.native.is_some());
+    let response = keycompute_types::node_native::NodeNativeHttpResult {
+        status: 200,
+        headers: vec![],
+        body: completion(&f.shared, "native"),
+    };
+    let result = NodeTaskResult::NativeSucceeded { response };
+    service
+        .complete_task(
+            task.id,
+            envelope.lease_id,
+            f.node.id,
+            f.session.id,
+            result.clone(),
+        )
+        .await
+        .unwrap();
+    let repeated = service
+        .complete_task(task.id, envelope.lease_id, f.node.id, f.session.id, result)
+        .await
+        .unwrap();
+    assert_eq!(repeated.task_status, "succeeded");
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn uncertain_native_execution_failure_is_terminal_and_cannot_be_requeued() {
+    let mut f = Fixture::new().await;
+    let service = f.state.node_gateway.as_ref().unwrap();
+    let task = service
+        .store
+        .create_and_enqueue_task(
+            f.user.id,
+            f.shared.clone(),
+            keycompute_types::node::NodeTaskPayload {
+                request_id: Uuid::new_v4(),
+                chat: None,
+                image_generation: None,
+                image_edit: None,
+                native: Some(keycompute_types::node_native::NodeNativeRequest {
+                    operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+                    body: f.body(&f.shared, false),
+                    headers: vec![],
+                }),
+            },
+        )
+        .await
+        .unwrap();
+    let (_, envelope) = service
+        .store
+        .claim_task(task.id, f.node.id, f.session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let response = service
+        .complete_task(
+            task.id,
+            envelope.lease_id,
+            f.node.id,
+            f.session.id,
+            NodeTaskResult::Failed {
+                code: "native_timeout".into(),
+                message: "completion unknown".into(),
+                is_client_error: false,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.task_status, "failed");
+    assert_eq!(
+        response.action,
+        keycompute_types::node::NodeTaskCompleteAction::Failed
+    );
+    assert!(
+        keycompute_db::models::node_task::NodeTask::requeue(&f.db, task.id)
+            .await
+            .is_err()
+    );
+    assert!(
+        service
+            .store
+            .claim_task(task.id, f.node.id, f.session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let row = keycompute_db::models::node_task::NodeTask::find_by_id(&f.db, task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, "failed");
+    assert!(row.finished_at.is_some());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_capable_worker_can_claim_legacy_work_without_native_queue_starvation() {
+    let mut f = Fixture::new().await;
+    let service = f.state.node_gateway.as_ref().unwrap().clone();
+    let model = f.shared.clone();
+    let user = f.user.id;
+    let producer = service.clone();
+    let pending = tokio::spawn(async move {
+        producer
+            .enqueue_and_wait(
+                user,
+                model.clone(),
+                keycompute_types::node::NodeTaskPayload {
+                    request_id: Uuid::new_v4(),
+                    native: None,
+                    image_generation: None,
+                    image_edit: None,
+                    chat: Some(keycompute_types::ChatCompletionRequest::new(model, vec![])),
+                },
+            )
+            .await
+    });
+    let ready = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if f.tasks().await > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(ready.is_ok());
+    let envelope = tokio::time::timeout(
+        Duration::from_secs(3),
+        service.poll_task(f.node.id, f.session.id, vec![f.shared.clone()]),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .task
+    .unwrap();
+    assert!(envelope.payload.native.is_none());
+    assert!(envelope.payload.chat.is_some());
+    service
+        .complete_task(
+            envelope.task_id,
+            envelope.lease_id,
+            f.node.id,
+            f.session.id,
+            NodeTaskResult::Succeeded {
+                response: serde_json::from_value(completion(&f.shared, "legacy")).unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(pending.await.unwrap().unwrap().model, f.shared);
     f.finish().await;
 }

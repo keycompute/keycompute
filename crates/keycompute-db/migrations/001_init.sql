@@ -1310,6 +1310,7 @@ CREATE TABLE IF NOT EXISTS node_sessions (
     node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     session_token_hash TEXT NOT NULL UNIQUE,
     accepted_models_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    native_operations_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -1318,6 +1319,7 @@ CREATE TABLE IF NOT EXISTS node_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_node_sessions_node_id_expires_at ON node_sessions(node_id, expires_at);
 CREATE INDEX IF NOT EXISTS idx_node_sessions_accepted_models ON node_sessions USING GIN (accepted_models_json);
+CREATE INDEX IF NOT EXISTS idx_node_sessions_native_operations ON node_sessions USING GIN (native_operations_json);
 
 -- node_tasks: 节点任务生命周期表
 CREATE TABLE IF NOT EXISTS node_tasks (

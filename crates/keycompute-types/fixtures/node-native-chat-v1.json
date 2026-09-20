@@ -1,0 +1,23 @@
+{
+  "operation": "chat",
+  "headers": [],
+  "body": {
+    "model": "node:literal",
+    "messages": [
+      {"role": "system", "content": "Use tools when needed"},
+      {"role": "user", "content": [{"type": "text", "text": "Inspect"}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8=", "detail": "auto"}}]},
+      {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"id\":1}"}}]},
+      {"role": "tool", "tool_call_id": "call_1", "content": "found"}
+    ],
+    "stream": false,
+    "stop": ["END", "STOP"],
+    "temperature": 0.2,
+    "top_p": 0.9,
+    "n": 2,
+    "max_tokens": 42,
+    "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {"id": {"type": "integer"}}}}}],
+    "tool_choice": "auto",
+    "unknown_extension": {"nested": [null, {"future": true}]},
+    "seed": null
+  }
+}

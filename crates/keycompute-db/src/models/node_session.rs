@@ -15,6 +15,7 @@ pub struct NodeSession {
     pub node_id: Uuid,
     pub session_token_hash: String,
     pub accepted_models_json: serde_json::Value,
+    pub native_operations_json: serde_json::Value,
     pub issued_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
@@ -28,6 +29,7 @@ pub struct CreateNodeSessionRequest {
     pub session_token_hash: String,
     pub expires_at: DateTime<Utc>,
     pub accepted_models_json: serde_json::Value,
+    pub native_operations_json: serde_json::Value,
 }
 
 impl NodeSession {
@@ -39,14 +41,15 @@ impl NodeSession {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_sessions (node_id, session_token_hash, accepted_models_json, expires_at)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO node_sessions (node_id, session_token_hash, accepted_models_json, native_operations_json, expires_at)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *
             "#,
             [
                 req.node_id.into(),
                 req.session_token_hash.as_str().into(),
                 req.accepted_models_json.clone().into(),
+                req.native_operations_json.clone().into(),
                 req.expires_at.into(),
             ],
         );

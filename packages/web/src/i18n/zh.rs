@@ -1058,7 +1058,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "node_gateway.request_step_stream",
-        "仅在需要现有的完成后缓冲 SSE 响应时设置 stream=true。",
+        "当前原生节点 Chat 需使用 stream=false；不支持的流式请求会在执行前拒绝。",
     );
     m.insert(
         "node_gateway.request_auth_note",
@@ -2074,7 +2074,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "models.node_stream_help",
-        "节点模式采用任务派发，不等同于上游原生逐 token 推送；仅展示当前支持的 Chat 能力。",
+        "原生节点 Chat 保留完整 JSON 请求和响应；当前版本需使用 stream=false，并由声明原生能力的节点执行。",
     );
 
     m

@@ -133,6 +133,20 @@ impl NodeTask {
             WHERE id = $5
               AND status = $6
               AND deadline_at >= NOW()
+              AND (payload_json->'native' IS NULL OR payload_json->'native'='null'::jsonb
+                OR (payload_json->'native'->>'operation'='chat'
+                    AND payload_json->'native'->'body'->>'model'=node_tasks.model
+                    AND EXISTS (
+                      SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
+                      JOIN users owner ON owner.id=n.owner_user_id JOIN tenants t ON t.id=owner.tenant_id
+                      WHERE ns.id=$3 AND ns.node_id=$2 AND n.status='online' AND t.status='active'
+                        AND ns.expires_at>NOW() AND ns.revoked_at IS NULL
+                        AND n.capabilities_json->>'runtime'='ollama'
+                        AND ns.accepted_models_json @> jsonb_build_array(node_tasks.model)
+                        AND ns.native_operations_json @> '["chat"]'::jsonb)
+                    AND EXISTS (
+                      SELECT 1 FROM users caller JOIN tenants ct ON ct.id=caller.tenant_id
+                      WHERE caller.id=node_tasks.user_id AND ct.status='active')))
             RETURNING *
             "#,
             [
@@ -250,6 +264,7 @@ impl NodeTask {
                 failure_count = failure_count + 1,
                 updated_at = NOW()
             WHERE id = $2
+              AND NOT (claimed_at IS NOT NULL AND payload_json->'native' IS NOT NULL AND payload_json->'native'<>'null'::jsonb)
             RETURNING *
             "#,
             [TASK_STATUS_QUEUED.into(), task_id.into()],

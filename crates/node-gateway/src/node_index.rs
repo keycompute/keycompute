@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 /// Shared readiness predicate for dispatch and mode-aware model discovery.
 /// Query aliases must be nodes `n`, node_sessions `ns`, and owner tenants `t`.
-pub const READY_NODE_CONDITION: &str = "n.status = 'online' AND t.status = 'active' AND ns.expires_at > NOW() AND ns.revoked_at IS NULL AND n.capabilities_json->>'runtime' = 'ollama'";
+pub const READY_NODE_CONDITION: &str = "n.status = 'online' AND t.status = 'active' AND ns.expires_at > NOW() AND ns.revoked_at IS NULL AND n.capabilities_json->>'runtime' = 'ollama' AND ns.native_operations_json @> '[\"chat\"]'::jsonb";
 
 fn ready_node_query() -> String {
     format!(

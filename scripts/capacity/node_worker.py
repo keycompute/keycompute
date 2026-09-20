@@ -39,7 +39,10 @@ def main():
                 if not task:time.sleep(min(5,max(.1,result.get('retry_after_ms',1000)/1000)));continue
                 with Model.lock:Model.accepted+=1
                 time.sleep(min(1,settings['stream_ms']/1000))
-                completion=dict(identity,task_id=task['task_id'],lease_id=task['lease_id'],result={'status':'succeeded','response':response_body('node',settings.get('response_bytes',0))})
+                body=response_body('node',settings.get('response_bytes',0));body['model']=task['model']
+                native=task.get('payload',{}).get('native')
+                result_body=({'status':'native_succeeded','response':{'status':200,'headers':[],'body':body}} if native is not None else {'status':'succeeded','response':body})
+                completion=dict(identity,task_id=task['task_id'],lease_id=task['lease_id'],result=result_body)
                 answer=post('/node/v1/tasks/'+task['task_id']+'/complete',completion,token)
                 if answer.get('action')!='succeeded':raise RuntimeError('Node completion not accepted')
                 with Model.lock:Model.completed+=1

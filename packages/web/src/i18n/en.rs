@@ -1218,7 +1218,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("node_gateway.request_step_model", "Send the exact worker model ID in model, such as gemma3:270m; only the request URL selects the execution mode.");
     m.insert(
         "node_gateway.request_step_stream",
-        "Set stream=true only when you want the existing completion-buffered SSE response.",
+        "Native node Chat currently requires stream=false; unsupported streaming is rejected before execution.",
     );
     m.insert(
         "node_gateway.request_auth_note",
@@ -2340,7 +2340,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "models.placeholder_key",
         "Examples use a placeholder key; replace it with your saved platform key.",
     );
-    m.insert("models.node_stream_help", "Node mode dispatches tasks rather than a native upstream token stream. Only supported Chat capability is shown.");
+    m.insert("models.node_stream_help", "Native node Chat preserves the complete JSON request and response. This version requires stream=false and a native-capable worker.");
 
     m
 });

@@ -112,6 +112,17 @@ impl NodeGatewayRedis {
         key: &str,
         blocking_timeout: Duration,
     ) -> anyhow::Result<Option<(String, String)>> {
+        self.blocking_pop_keys(pool, &[key.to_string()], blocking_timeout)
+            .await
+    }
+
+    async fn blocking_pop_keys(
+        &self,
+        pool: &Pool,
+        keys: &[String],
+        blocking_timeout: Duration,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        anyhow::ensure!(!keys.is_empty(), "blocking queue list is empty");
         anyhow::ensure!(
             !blocking_timeout.is_zero(),
             "Redis blocking timeout must be positive"
@@ -134,7 +145,7 @@ impl NodeGatewayRedis {
             .set_response_timeout(response_timeout);
         let result = timeout_at(
             response_deadline,
-            connection.connection().brpop(key, remaining.as_secs_f64()),
+            connection.connection().brpop(keys, remaining.as_secs_f64()),
         )
         .await?;
         if result.is_ok() {
@@ -146,8 +157,70 @@ impl NodeGatewayRedis {
         Ok(result?)
     }
 
-    fn model_queue_key(model: &str) -> String {
+    pub(crate) fn model_queue_key(model: &str) -> String {
         format!("queue:node:model:{model}")
+    }
+
+    pub(crate) fn native_model_queue_key(model: &str) -> String {
+        format!("queue:node:native:model:{model}")
+    }
+
+    pub async fn push_to_native_model_queue(
+        &self,
+        model: &str,
+        task_id: Uuid,
+    ) -> Result<(), anyhow::Error> {
+        let mut conn = self.redis.pool().get().await?;
+        let _: () = conn
+            .lpush(Self::native_model_queue_key(model), &[task_id.to_string()])
+            .await?;
+        Ok(())
+    }
+
+    pub async fn pop_from_native_model_queue_with_timeout(
+        &self,
+        model: &str,
+        timeout: Duration,
+    ) -> anyhow::Result<Option<Uuid>> {
+        let result = self
+            .blocking_pop(
+                &self.poll_pool,
+                &Self::native_model_queue_key(model),
+                timeout,
+            )
+            .await?;
+        result
+            .map(|(_, id)| Uuid::parse_str(&id).map_err(anyhow::Error::from))
+            .transpose()
+    }
+
+    pub(crate) async fn pop_from_queues(
+        &self,
+        keys: &[String],
+        budget: Duration,
+    ) -> anyhow::Result<Option<Uuid>> {
+        self.blocking_pop_keys(&self.poll_pool, keys, budget)
+            .await?
+            .map(|(_, id)| Uuid::parse_str(&id).map_err(anyhow::Error::from))
+            .transpose()
+    }
+
+    pub(crate) async fn repush_native_task(
+        &self,
+        model: &str,
+        task_id: Uuid,
+    ) -> anyhow::Result<()> {
+        let mut conn = self.redis.pool().get().await?;
+        let key = Self::native_model_queue_key(model);
+        let _: () = deadpool_redis::redis::pipe()
+            .atomic()
+            .lrem(&key, 0, task_id.to_string())
+            .ignore()
+            .lpush(&key, task_id.to_string())
+            .ignore()
+            .query_async(&mut conn)
+            .await?;
+        Ok(())
     }
 
     /// 推送任务到模型队列
@@ -272,6 +345,10 @@ impl NodeGatewayRedis {
         let queue_key = Self::model_queue_key(model);
         let mut conn = self.redis.pool().get().await?;
         let removed: u64 = conn.lrem(&queue_key, 0, task_id.to_string()).await?;
+        let native_removed: u64 = conn
+            .lrem(Self::native_model_queue_key(model), 0, task_id.to_string())
+            .await?;
+        let removed = removed.saturating_add(native_removed);
         if removed > 0 {
             tracing::debug!(
                 task_id = %task_id,

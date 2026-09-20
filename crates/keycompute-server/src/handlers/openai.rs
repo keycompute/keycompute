@@ -422,6 +422,7 @@ fn project_chat_message_role(role: &str) -> MessageRole {
 /// Rehydrate the subset of native Chat messages that the Node task protocol
 /// can represent. Provider routing continues to use the lightweight
 /// projection, while Node routing must retain supported inline image bytes.
+#[cfg(test)]
 fn node_chat_messages(body: &Value) -> Result<Vec<Message>> {
     let messages = body
         .get("messages")
@@ -757,6 +758,26 @@ async fn chat_completions_inner(
             "NodeDispatch task service is unavailable".into(),
         ));
     }
+    let node_native_body = if access_mode == ModelAccessMode::NodeDispatch {
+        let native = keycompute_types::node_native::NodeNativeRequest {
+            operation: keycompute_types::node_native::NodeNativeOperation::Chat,
+            body: (*native_chat_request).clone(),
+            headers: Vec::new(),
+        };
+        if let Err(error) = native.validate(&request.model) {
+            finish_unexecuted_trace(
+                &mut pre_execution_guard,
+                ErrorOrigin::Client,
+                TraceErrorCategory::InvalidRequest,
+                "unsupported_node_native_request",
+            )
+            .await;
+            return Err(ApiError::BadRequest(error.into()));
+        }
+        Some(native)
+    } else {
+        None
+    };
     // 1. 构建 PricingSnapshot
     // 注意：此时 provider 尚未确定（路由在之后执行）
     let provider = keycompute_pricing::resolve_pricing_provider(access_mode);
@@ -888,34 +909,6 @@ async fn chat_completions_inner(
         tracing::warn!(request_id=%request_id.0, %error, "failed to record request route");
     }
 
-    // Node tasks have a narrower message protocol than the OpenAI-compatible
-    // provider path. Validate that projection before charging execution RPM;
-    // an unsupported payload is a client error and never reaches an upstream.
-    let node_messages = if matches!(&plan.primary, ExecutionTarget::NodeDispatch { .. }) {
-        match ctx
-            .native_openai_chat_request
-            .as_deref()
-            .ok_or_else(|| {
-                ApiError::Internal("native Chat request missing for Node route".to_string())
-            })
-            .and_then(node_chat_messages)
-        {
-            Ok(messages) => Some(messages),
-            Err(error) => {
-                finish_unexecuted_trace(
-                    &mut pre_execution_guard,
-                    ErrorOrigin::Client,
-                    TraceErrorCategory::InvalidRequest,
-                    "unsupported_node_chat_payload",
-                )
-                .await;
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
-
     let generation_rate_limit_config =
         match crate::middleware::authenticated_rate_limit_config_for_target(
             &state,
@@ -995,23 +988,15 @@ async fn chat_completions_inner(
                 ));
             };
 
-            let node_messages = node_messages.expect("Node payload was validated before admission");
-
-            // 构建 NodeTaskPayload
             let payload = keycompute_types::node::NodeTaskPayload {
                 request_id: ctx.request_id,
-                chat: Some(keycompute_types::ChatCompletionRequest {
-                    model: model.clone(),
-                    messages: node_messages,
-                    stream: Some(request.stream), // 传递 stream 标志
-                    max_tokens: request.effective_max_tokens(),
-                    temperature: request.temperature,
-                    top_p: request.top_p,
-                    n: request.n,
-                    stop: None,
-                }),
+                chat: None,
                 image_generation: None,
                 image_edit: None,
+                native: Some(
+                    node_native_body
+                        .ok_or_else(|| ApiError::Internal("native node request missing".into()))?,
+                ),
             };
 
             // 防御性校验 payload 互斥性
@@ -1098,14 +1083,19 @@ async fn chat_completions_inner(
                 worker_body_permit,
                 async move {
                     let result = worker_node_gateway
-                        .enqueue_and_wait(node_user_id, node_model, payload)
+                        .enqueue_native_and_wait(node_user_id, node_model.clone(), payload)
                         .await;
                     match &result {
-                        Ok(response) => {
+                        Ok(response) if response.status == 200 => {
+                            // The store and result reader both validated these counts.
+                            let (input, output) = response
+                                .validate(&node_model)
+                                .expect("validated native result")
+                                .expect("200 has usage");
                             worker_balance_reservation.transfer_to_settlement();
                             worker_tpm_reservation.transfer_to_settlement();
-                            worker_ctx.set_input_tokens(response.usage.prompt_tokens);
-                            worker_ctx.add_output_tokens(response.usage.completion_tokens);
+                            worker_ctx.set_input_tokens(input);
+                            worker_ctx.add_output_tokens(output);
                             finalize_openai_billing(
                                 &settlement,
                                 &worker_ctx,
@@ -1115,7 +1105,7 @@ async fn chat_completions_inner(
                             )
                             .await;
                         }
-                        Err(_) => {
+                        _ => {
                             worker_balance_reservation.release().await;
                             worker_tpm_reservation.release().await;
                         }
@@ -1141,18 +1131,10 @@ async fn chat_completions_inner(
                 }
             };
 
-            let output_bytes = response
-                .choices
-                .iter()
-                .map(|choice| {
-                    choice
-                        .message
-                        .content
-                        .len()
-                        .saturating_mul(8)
-                        .saturating_add(1024)
-                })
-                .fold(0usize, usize::saturating_add);
+            let output_bytes = serde_json::to_vec(&response.body)
+                .map_err(|_| ApiError::Internal("Node response serialization failed".into()))?
+                .len()
+                .saturating_mul(8);
             let mut node_admission = None;
             if !llm_protocol_provider::admit_payload(
                 &mut node_admission,
@@ -1166,80 +1148,34 @@ async fn chat_completions_inner(
                     "Process Node response memory capacity exhausted".into(),
                 ));
             }
-            if request.stream {
-                // 流式路径：获取完整响应后模拟流式输出
-                // 将完整响应转换为模拟流式输出
-                let stream = simulate_node_stream_with_admission(
-                    response,
-                    Arc::new(ctx.clone_without_request_payloads()),
-                    model.clone(),
-                    request.stream_options,
-                    Arc::clone(&lifecycle),
-                    node_admission,
-                );
-                // The spawned stream task now owns client-delivery completion.
-                client_response_guard.disarm();
-                Ok(Sse::new(stream).into_response())
-            } else {
-                // 非流式路径：保持现有逻辑
-                // 将 ChatCompletionResponse 转换为 OpenAI 格式
-                let openai_response = ChatCompletionResponse {
-                    id: format!(
-                        "chatcmpl-{}-kc",
-                        uuid::Uuid::new_v4()
-                            .to_string()
-                            .replace("-", "")
-                            .to_lowercase()
-                    ),
-                    object: "chat.completion".to_string(),
-                    created: chrono::Utc::now().timestamp(),
-                    model: model.clone(),
-                    choices: vec![ChatCompletionChoice {
-                        index: 0,
-                        message: ChatCompletionMessage {
-                            role: "assistant".to_string(),
-                            content: response
-                                .choices
-                                .first()
-                                .map(|c| Value::String(c.message.content.clone())),
-                            tool_calls: None,
-                            tool_call_id: None,
-                            name: None,
-                        },
-                        finish_reason: response
-                            .choices
-                            .first()
-                            .and_then(|c| c.finish_reason.clone()),
-                        logprobs: None,
-                    }],
-                    usage: CompletionUsage {
-                        prompt_tokens: response.usage.prompt_tokens as u32,
-                        completion_tokens: response.usage.completion_tokens as u32,
-                        total_tokens: response.usage.total_tokens as u32,
-                        prompt_tokens_details: None,
-                        completion_tokens_details: None,
-                    },
-                    system_fingerprint: None,
-                };
-
-                if let Err(error) =
-                    super::record_final_client_first_content(&lifecycle, ctx.request_id).await
-                {
-                    tracing::warn!(request_id=%ctx.request_id,%error,"failed to record Node client first content");
-                }
-
-                super::finish_client_response_trace(
-                    &lifecycle,
-                    &ctx,
-                    ClientResponseOutcome::Succeeded,
-                )
-                .await;
-
-                client_response_guard.disarm();
-                let body = serde_json::to_value(openai_response)
-                    .map_err(|_| ApiError::Internal("Node response serialization failed".into()))?;
-                crate::admission::json_with_admission(body, node_admission)
+            let successful = response.status == 200;
+            if successful {
+                let _ = super::record_final_client_first_content(&lifecycle, ctx.request_id).await;
             }
+            super::finish_client_response_trace(
+                &lifecycle,
+                &ctx,
+                if successful {
+                    ClientResponseOutcome::Succeeded
+                } else {
+                    ClientResponseOutcome::ResponseFailed
+                },
+            )
+            .await;
+            client_response_guard.disarm();
+            let mut outgoing =
+                crate::admission::json_with_admission(response.body, node_admission)?;
+            *outgoing.status_mut() = axum::http::StatusCode::from_u16(response.status)
+                .map_err(|_| ApiError::Internal("invalid node status".into()))?;
+            for (name, value) in response.headers {
+                if let (Ok(name), Ok(value)) = (
+                    axum::http::HeaderName::from_bytes(name.as_bytes()),
+                    axum::http::HeaderValue::from_str(&value),
+                ) {
+                    outgoing.headers_mut().insert(name, value);
+                }
+            }
+            Ok(outgoing)
         }
         ExecutionTarget::UpstreamAccount {
             provider,
@@ -2925,6 +2861,7 @@ fn simulate_node_stream(
     simulate_node_stream_with_admission(response, ctx, model, stream_options, lifecycle, None)
 }
 
+#[cfg(test)]
 fn simulate_node_stream_with_admission(
     response: keycompute_types::ChatCompletionResponse,
     ctx: Arc<RequestContext>,

@@ -172,7 +172,16 @@ impl NodeGatewaySweeper {
     /// 补推 queued 任务到 Redis。数据库事务提交后才执行外部副作用。
     async fn repush_queued_tasks(&self, tasks_to_repush: &[NodeTask]) {
         for task in tasks_to_repush {
-            if let Err(e) = self.redis.repush_queued_task(&task.model, task.id).await {
+            let result = if task
+                .payload_json
+                .get("native")
+                .is_some_and(|value| !value.is_null())
+            {
+                self.redis.repush_native_task(&task.model, task.id).await
+            } else {
+                self.redis.repush_queued_task(&task.model, task.id).await
+            };
+            if let Err(e) = result {
                 tracing::warn!("Failed to repush task {} to queue: {}", task.id, e);
             }
         }

@@ -174,6 +174,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_worker_permissions_are_immutable_session_metadata() {
+        let sql = include_str!("../migrations/001_init.sql");
+        assert!(sql.contains("native_operations_json JSONB NOT NULL DEFAULT '[]'::jsonb"));
+    }
+
+    #[test]
     fn versions_are_strictly_ordered_and_checksums_are_stable() {
         assert_eq!(MIGRATIONS.len(), 1);
         assert_eq!(MIGRATIONS[0].version, 1);
