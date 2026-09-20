@@ -179,8 +179,17 @@ mod ingress_contract_tests {
             assert!(ModelAccessMode::uses_execution_rpm(mode.chat_path()));
             assert!(mode.models_path().ends_with("/models"));
         }
-        for bad in [
+        for native in [
             "/nt/v1/responses",
+            "/nt/v1/messages",
+            "/pt/v1/responses",
+            "/pt/v1/messages",
+        ] {
+            assert_eq!(ModelAccessMode::from_chat_path(native), None);
+            assert!(ModelAccessMode::is_generation_path(native));
+            assert!(ModelAccessMode::uses_execution_rpm(native));
+        }
+        for bad in [
             "/nt/v1/chat/completions/extra",
             "/nt/v1/models",
             "node:gemma3",
