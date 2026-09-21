@@ -407,3 +407,24 @@ pub async fn list_test_members(
     )
     .await
 }
+
+/// Test-only fixture creation through the production scoped key mutation API.
+pub async fn create_test_api_key(
+    db: &(impl ConnectionTrait + TransactionTrait),
+    req: &keycompute_db::CreateProduceAiKeyRequest,
+) -> Result<keycompute_db::ProduceAiKey, keycompute_db::DbError> {
+    let member = keycompute_db::TenantMembership::find_any(db, req.tenant_id, req.user_id)
+        .await?
+        .ok_or_else(|| keycompute_db::DbError::not_found("membership", req.user_id))?;
+    let role = member.tenant_role()?;
+    let scope = keycompute_types::TenantScope::checked(req.tenant_id, req.user_id, role)
+        .map_err(keycompute_db::DbError::Other)?;
+    let actor = keycompute_db::AuditContext {
+        actor_user_id: req.user_id,
+        credential_kind: keycompute_types::CredentialKind::Jwt,
+        actor_platform_role: keycompute_types::PlatformRole::None,
+        actor_tenant_role: Some(role),
+        request_id: None,
+    };
+    keycompute_db::ProduceAiKey::create_owned(db, scope, req, &actor).await
+}

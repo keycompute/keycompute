@@ -12,9 +12,7 @@ use integration_tests::db::{
     TestDataGuard, create_test_tenant, create_test_user, initialize_test_schema,
 };
 use keycompute_billing::balance::BalanceService;
-use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey,
-};
+use keycompute_db::{Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter};
 use keycompute_server::{AppState, AppStateConfig, create_router, state::RateLimitBackendConfig};
 use sea_orm::{ConnectOptions, ConnectionTrait, Database, DbBackend, Statement};
 use serde::Serialize;
@@ -355,7 +353,7 @@ async fn sustained_real_http_database_redis_and_billing_profile() {
                 Uuid::new_v4().simple(),
                 &Uuid::new_v4().simple().to_string()[..16]
             );
-            ProduceAiKey::create(
+            integration_tests::db::create_test_api_key(
                 &db,
                 &CreateProduceAiKeyRequest {
                     tenant_id: tenant.id,

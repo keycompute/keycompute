@@ -3,8 +3,7 @@ use anyhow::{Context, ensure};
 use integration_tests::db::{create_test_tenant, create_test_user};
 use keycompute_billing::balance::BalanceService;
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, CreateUserRequest, DbRouter,
-    ProduceAiKey, User,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, CreateUserRequest, DbRouter, User,
 };
 use sea_orm::{ConnectionTrait, Database, DbBackend, Statement};
 use serde_json::{Value, json};
@@ -103,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
                         Uuid::new_v4().simple(),
                         &Uuid::new_v4().simple().to_string()[..16]
                     );
-                    ProduceAiKey::create(
+                    integration_tests::db::create_test_api_key(
                         &db,
                         &CreateProduceAiKeyRequest {
                             tenant_id: tenant.id,

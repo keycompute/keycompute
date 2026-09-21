@@ -16,8 +16,8 @@ use integration_tests::{
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey,
-    ResponseAffinity, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ResponseAffinity,
+    UserBalance,
 };
 use keycompute_server::{AppState, create_router};
 use rust_decimal::Decimal;
@@ -108,7 +108,7 @@ async fn unexpected_upstream(
 }
 async fn key(db: &DatabaseConnection, user: &TenantActor) -> String {
     let raw = ProduceAiKeyValidator::generate_key();
-    ProduceAiKey::create(
+    integration_tests::db::create_test_api_key(
         db,
         &CreateProduceAiKeyRequest {
             tenant_id: user.tenant_id,

@@ -145,7 +145,7 @@ impl ProduceAiKeyValidator {
             })?;
 
         let Some(candidate) = candidate else {
-            tracing::warn!(key_hash = %key_hash, "Produce AI key not found");
+            tracing::warn!("Produce AI key not found");
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         };
 
@@ -233,8 +233,8 @@ impl ProduceAiKeyValidator {
         // while the transaction was waiting for the user lock.
         let produce_ai_key = ProduceAiKey::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM produce_ai_keys WHERE id = $1 FOR SHARE",
-            [candidate.id.into()],
+            "SELECT * FROM produce_ai_keys WHERE id = $1 AND tenant_id=$2 AND user_id=$3 AND produce_ai_key_hash=$4 FOR SHARE",
+            [candidate.id.into(), tenant.id.into(), user.id.into(), key_hash.into()],
         ))
         .one(&tx)
         .await

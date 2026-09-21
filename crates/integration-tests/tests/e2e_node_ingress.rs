@@ -20,7 +20,7 @@ use keycompute_db::models::{
     pricing_model::{BillingDimension, CreatePricingRequest, PricingModel, PricingScopeType},
 };
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, UserBalance,
 };
 use keycompute_ratelimit::RateLimitKey;
 use keycompute_server::{
@@ -339,7 +339,7 @@ impl Fixture {
         );
         let admin = scoped_jwt(&state, &user).await;
         let key = ProduceAiKeyValidator::generate_key();
-        let key_id = ProduceAiKey::create(
+        let key_id = integration_tests::db::create_test_api_key(
             &db,
             &CreateProduceAiKeyRequest {
                 tenant_id: user.tenant_id,

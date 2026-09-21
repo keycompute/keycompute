@@ -17,8 +17,7 @@ use keycompute_auth::{
 };
 use keycompute_db::{
     AuditContext, CreateTenantMembershipRequest, CreateUserRequest, DbRouter, Tenant,
-    TenantMembership, User,
-    models::api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
+    TenantMembership, User, models::api_key::CreateProduceAiKeyRequest,
 };
 use keycompute_server::{
     AppState, create_router,
@@ -211,7 +210,7 @@ impl Fixture {
     }
     async fn key(&self, user: Uuid, tenant: Uuid) -> String {
         let key = ProduceAiKeyValidator::generate_key();
-        ProduceAiKey::create(
+        integration_tests::db::create_test_api_key(
             &self.db,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant,

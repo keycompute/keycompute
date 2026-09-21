@@ -19,7 +19,7 @@ use keycompute_db::models::{
     passthrough_binding::{CreatePassthroughBindingRequest, PassthroughBinding},
 };
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, UserBalance,
 };
 use keycompute_server::{
     AppState, create_router,
@@ -326,7 +326,7 @@ impl Fixture {
             .await
             .unwrap();
         let key = ProduceAiKeyValidator::generate_key();
-        ProduceAiKey::create(
+        integration_tests::db::create_test_api_key(
             &db,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,

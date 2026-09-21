@@ -19,7 +19,7 @@ use keycompute_db::models::{
     passthrough_binding::{CreatePassthroughBindingRequest, PassthroughBinding},
 };
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, UserBalance,
 };
 use keycompute_server::{
     AppState, create_router,
@@ -346,7 +346,7 @@ impl Fixture {
             .await
             .unwrap();
         let key = ProduceAiKeyValidator::generate_key();
-        ProduceAiKey::create(
+        integration_tests::db::create_test_api_key(
             &db,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,
@@ -704,7 +704,7 @@ async fn resource_scope_is_user_tenant_family_and_current_passthrough_grant() {
     );
     // Rotating only the owning user's inference key keeps the stable owner.
     let rotated = ProduceAiKeyValidator::generate_key();
-    ProduceAiKey::create(
+    integration_tests::db::create_test_api_key(
         &f.db,
         &CreateProduceAiKeyRequest {
             tenant_id: f.user.tenant_id,

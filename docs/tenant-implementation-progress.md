@@ -153,6 +153,42 @@ This completes the Usage read subgate, not phase 3 or the release gate.
 API-key management, provider resources, accepted-work lookups and later
 route/audit/job stages remain open.
 
+## Phase 3 — scoped API-key management (partial delivery)
+
+Key read APIs now have explicit personal, tenant and platform scopes, with
+current actor checks in SQL and a metadata projection that excludes key hashes.
+Personal endpoints never expand for administrators. Platform target tenants
+are mandatory; platform authority does not derive from a tenant role.
+The old unscoped create/list/find-ID/revoke/delete APIs were removed; hash
+candidate lookup remains solely for credential validation, which rechecks the
+key's tenant, user, hash and current state under locks. Last-used sampling also
+binds the validated tenant/user without introducing a global write lock.
+
+Create, revoke and removal acquire compatible tenant/user/membership locks,
+recheck live authority, constrain the key write by tenant plus owner plus ID,
+and commit a secret-free audit event in the same transaction. Real HTTP
+request IDs are retained. Existing self-service revoke-then-remove semantics
+and the complete platform member-key response are preserved. Tenant-admin
+queries/mutations support other owners only inside that tenant, without
+changing key or billing ownership. Platform mutations require a real active
+root and a non-empty reason. Test fixture creation uses scoped production APIs.
+
+Two unit tests plus seven PostgreSQL/HTTP regressions cover projection,
+foreign IDs, current roles, per-tenant authority, actual inference-key denial,
+request-ID auditing, audit-write rollback, and authority changes while a
+mutation waits for locks. Existing authentication concurrency and key-parent
+lifecycle tests pass. Final workspace: **2,421 passed, 0 failed,
+30 default ignored**, excluding desktop/mobile; strict all-target,
+all-feature workspace Clippy, formatting, whitespace and source hashes passed.
+The nine new tests are included in that total. Repeated review found no further
+actionable defect in this key-management slice. No production changes occurred.
+
+This does not complete phase 3. Provider/account/binding/pricing management,
+other financial and accepted-work scopes, and route/audit/job adoption remain.
+CI status is tracked separately from the successful local verification; the
+preceding integration CI failure must not be described as resolved merely by
+these local results or by adding failure-report diagnostics.
+
 ## Remaining phase gates
 
 Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security and client acceptance. Phase 9: verified offline cutover and release.

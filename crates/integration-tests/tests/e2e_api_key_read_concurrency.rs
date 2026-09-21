@@ -54,7 +54,7 @@ impl Fixture {
 
 async fn create_key(pool: &DatabaseConnection, user: &TenantActor) -> (ProduceAiKey, String) {
     let token = ProduceAiKeyValidator::generate_key();
-    let key = ProduceAiKey::create(
+    let key = integration_tests::db::create_test_api_key(
         pool,
         &CreateProduceAiKeyRequest {
             tenant_id: user.tenant_id,
@@ -157,7 +157,7 @@ async fn validators_can_overlap_even_for_the_same_key() {
     let validations = (0..8).map(|_| f.validator.validate(&f.token));
     let result =
         tokio::time::timeout(TEST_TIMEOUT, futures::future::try_join_all(validations)).await;
-    let key = ProduceAiKey::find_by_id(&f.pool, f.key.id)
+    let key = ProduceAiKey::find_owned(&f.pool, f.user.scope(), f.key.id)
         .await
         .expect("key query should succeed")
         .expect("key should exist");
@@ -338,7 +338,7 @@ async fn last_used_is_best_effort_sampled_and_never_rewinds() {
                 .validate(&f.token)
                 .await
                 .expect("key should authenticate");
-            let row = ProduceAiKey::find_by_id(&f.pool, f.key.id)
+            let row = ProduceAiKey::find_owned(&f.pool, f.user.scope(), f.key.id)
                 .await
                 .expect("key query should succeed")
                 .expect("key should exist");
@@ -359,7 +359,7 @@ async fn last_used_is_best_effort_sampled_and_never_rewinds() {
             .await
             .expect("key should authenticate");
     }
-    let row = ProduceAiKey::find_by_id(&f.pool, f.key.id)
+    let row = ProduceAiKey::find_owned(&f.pool, f.user.scope(), f.key.id)
         .await
         .expect("key query should succeed")
         .expect("key should exist");
@@ -385,7 +385,7 @@ async fn last_used_is_best_effort_sampled_and_never_rewinds() {
         .validate(&f.token)
         .await
         .expect("telemetry must not affect authorization");
-    let row = ProduceAiKey::find_by_id(&f.pool, f.key.id)
+    let row = ProduceAiKey::find_owned(&f.pool, f.user.scope(), f.key.id)
         .await
         .expect("key query should succeed")
         .expect("key should exist");
@@ -416,7 +416,7 @@ async fn authentication_lock_timeout_fails_closed_and_allows_retry() {
         matches!(&error, KeyComputeError::DatabaseError(message) if message.contains("lock timeout")),
         "unexpected authentication failure: {error}"
     );
-    let row = ProduceAiKey::find_by_id(&f.pool, f.key.id)
+    let row = ProduceAiKey::find_owned(&f.pool, f.user.scope(), f.key.id)
         .await
         .expect("key query should succeed")
         .expect("key should exist");

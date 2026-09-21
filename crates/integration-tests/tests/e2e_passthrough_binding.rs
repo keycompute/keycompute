@@ -14,8 +14,8 @@ use integration_tests::db::{
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey,
-    UpdateAccountRequest, User, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, UpdateAccountRequest, User,
+    UserBalance,
     models::passthrough_binding::{
         AccountModelHealth, AccountModelHealthProbe, CreatePassthroughBindingRequest,
         PassthroughBinding,
@@ -327,7 +327,7 @@ impl Fixture {
             .unwrap();
         let admin = scoped_jwt(&state, &user).await;
         let key = ProduceAiKeyValidator::generate_key();
-        let key_id = ProduceAiKey::create(
+        let key_id = integration_tests::db::create_test_api_key(
             &db,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,
@@ -1359,7 +1359,7 @@ async fn private_account_grants_apply_scope_and_pool_matrix_to_discovery_and_exe
         .await
         .unwrap();
         let key = ProduceAiKeyValidator::generate_key();
-        ProduceAiKey::create(
+        integration_tests::db::create_test_api_key(
             &f.db,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,

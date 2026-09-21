@@ -22,7 +22,7 @@ const SAMPLE_INTERVAL: ChronoDuration = ChronoDuration::minutes(1);
 const RECORD_LAST_USED_SQL: &str = r#"
 WITH writable AS (
     SELECT id FROM produce_ai_keys
-    WHERE id = $1
+    WHERE id = $1 AND tenant_id=$3 AND user_id=$4
       AND (last_used_at IS NULL OR last_used_at <= $2::timestamptz - INTERVAL '1 minute')
     FOR NO KEY UPDATE SKIP LOCKED
 )
@@ -30,7 +30,7 @@ UPDATE produce_ai_keys AS k
 SET last_used_at = GREATEST(k.last_used_at, $2::timestamptz),
     updated_at = GREATEST(k.updated_at, NOW())
 FROM writable
-WHERE k.id = writable.id
+WHERE k.id = writable.id AND k.tenant_id=$3 AND k.user_id=$4
 "#;
 
 fn sample_due(last_used_at: Option<DateTime<Utc>>, observed_at: DateTime<Utc>) -> bool {
@@ -59,12 +59,19 @@ pub(super) fn record(pool: Arc<DbRouter>, key: &ProduceAiKey) {
         return;
     };
     let key_id = key.id;
+    let tenant_id = key.tenant_id;
+    let user_id = key.user_id;
     runtime.spawn(async move {
         let _permit = permit;
         let statement = Statement::from_sql_and_values(
             DbBackend::Postgres,
             RECORD_LAST_USED_SQL,
-            [key_id.into(), observed_at.into()],
+            [
+                key_id.into(),
+                observed_at.into(),
+                tenant_id.into(),
+                user_id.into(),
+            ],
         );
         // Include pool acquisition, SQL execution and commit in the budget.
         // SKIP LOCKED does not skip table-level locks, so also enforce short

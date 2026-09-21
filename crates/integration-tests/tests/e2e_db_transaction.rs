@@ -7,9 +7,7 @@ use integration_tests::common::generate_test_id;
 use integration_tests::db::{
     cleanup_test_data, create_test_pool, create_test_tenant, create_test_user,
 };
-use keycompute_db::{
-    CreateProduceAiKeyRequest, CreateUsageLogRequest, ProduceAiKey, Tenant, UsageLog, User,
-};
+use keycompute_db::{CreateProduceAiKeyRequest, CreateUsageLogRequest, Tenant, UsageLog, User};
 use sea_orm::TransactionTrait;
 use uuid::Uuid;
 
@@ -123,7 +121,7 @@ mod tests {
 
         // 3. 创建 API Key
         let key_hash = format!("hash-full-chain-{}", Uuid::new_v4().simple());
-        let api_key = ProduceAiKey::create(
+        let api_key = integration_tests::db::create_test_api_key(
             &pool,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,

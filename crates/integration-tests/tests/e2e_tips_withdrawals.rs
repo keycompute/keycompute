@@ -11,7 +11,7 @@ use integration_tests::common::{VerificationChain, resolve_database_url};
 use keycompute_db::models::system_setting::setting_keys::NODE_TIP_RATIO;
 use keycompute_db::models::{
     AuditContext,
-    api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
+    api_key::CreateProduceAiKeyRequest,
     node::*,
     node_tip::*,
     node_tip_withdrawal::*,
@@ -117,7 +117,7 @@ impl TipWithdrawalTestEnv {
         .await?;
 
         // 为测试用户创建 API Key（用于创建 usage_log）
-        let api_key = ProduceAiKey::create(
+        let api_key = integration_tests::db::create_test_api_key(
             &pool,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,

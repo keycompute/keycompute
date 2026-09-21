@@ -28,7 +28,7 @@ use keycompute_db::models::user::User;
 use keycompute_db::models::user_credential::UserCredential;
 use keycompute_types::PlatformRole;
 use rust_decimal::Decimal;
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -871,11 +871,16 @@ pub async fn list_all_api_keys(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let keys = ProduceAiKey::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT * FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC,id DESC",
-        [target.tenant_id.into(),user_id.into()],
-    )).all(pool.write_conn()).await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?;
+    let keys = ProduceAiKey::list_platform_member(
+        pool.write_conn(),
+        platform_manage(&auth)?,
+        target.tenant_id,
+        user_id,
+    )
+    .await
+    .map_err(|_| {
+        ApiError::ServiceUnavailable("API key storage is temporarily unavailable".into())
+    })?;
 
     let result: Vec<serde_json::Value> = keys
         .into_iter()

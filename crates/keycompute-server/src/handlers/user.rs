@@ -8,12 +8,12 @@ use crate::handlers::pagination::{
 };
 use crate::{
     error::{ApiError, Result},
-    extractors::{ConsoleAuth, GlobalConsoleAuth},
+    extractors::{ConsoleAuth, GlobalConsoleAuth, RequestId},
     state::AppState,
 };
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
 };
 use chrono::{Duration, Utc};
 use keycompute_auth::{PasswordHasher, PasswordValidator, ProduceAiKeyValidator};
@@ -378,10 +378,11 @@ pub struct CreateApiKeyRequest {
 /// - never_expires: 是否永不过期（默认 false，即 6 个月后过期）
 pub async fn create_api_key(
     auth: ConsoleAuth,
+    request_id: Option<Extension<RequestId>>,
     State(state): State<AppState>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    auth.require_owner(
+    let scope = auth.require_owner(
         auth.user_id,
         keycompute_auth::AuthorizationAction::ManagePersonalResource,
     )?;
@@ -417,14 +418,14 @@ pub async fn create_api_key(
         expires_at,
     };
 
-    let saved_key = ProduceAiKey::create(pool, &create_req)
-        .await
-        .map_err(|error| match error {
-            keycompute_db::DbError::UserTenantMismatch { .. } => ApiError::Conflict(
-                "User tenant changed; refresh authentication and retry".to_string(),
-            ),
-            other => ApiError::Internal(format!("Failed to create API key: {}", other)),
-        })?;
+    let saved_key = ProduceAiKey::create_owned(
+        pool.write_conn(),
+        scope,
+        &create_req,
+        &key_audit(&auth, request_id.map(|Extension(id)| id.0)),
+    )
+    .await
+    .map_err(key_mutation_error)?;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -443,6 +444,7 @@ pub async fn create_api_key(
 /// DELETE /api/v1/keys/{id}
 pub async fn delete_api_key(
     auth: ConsoleAuth,
+    request_id: Option<Extension<RequestId>>,
     Path(key_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
@@ -456,46 +458,47 @@ pub async fn delete_api_key(
         auth.user_id,
         keycompute_auth::AuthorizationAction::ManagePersonalResource,
     )?;
-    let key = ProduceAiKey::find_owned(pool.write_conn(), scope, key_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find API key: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("API Key not found: {}", key_id)))?;
-
-    // 验证所有权（只有创建者才能删除）
-    if key.user_id != auth.user_id {
-        return Err(ApiError::Auth(
-            "You do not have permission to delete this API key".to_string(),
-        ));
+    let outcome = ProduceAiKey::remove_owned(
+        pool.write_conn(),
+        scope,
+        key_id,
+        &key_audit(&auth, request_id.map(|Extension(id)| id.0)),
+    )
+    .await
+    .map_err(key_mutation_error)?;
+    match outcome {
+        keycompute_db::models::api_key::KeyRemoval::Deleted(id) => Ok(Json(serde_json::json!({
+            "success": true, "message": "API Key deleted", "key_id": id, "deleted": true,
+        }))),
+        keycompute_db::models::api_key::KeyRemoval::Revoked(key) => Ok(Json(serde_json::json!({
+            "success": true, "message": "API Key revoked", "key_id": key.id,
+            "revoked_at": key.revoked_at.map(|time| time.to_rfc3339()), "deleted": false,
+        }))),
     }
+}
 
-    // 行为约定：
-    // - 活跃 Key：先撤销（保留审计痕迹）
-    // - 已撤销 Key：允许物理删除（便于用户清理列表）
-    if key.revoked {
-        key.delete(pool)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to delete API key: {}", e)))?;
-
-        return Ok(Json(serde_json::json!({
-            "success": true,
-            "message": "API Key deleted",
-            "key_id": key.id,
-            "deleted": true,
-        })));
+fn key_audit(auth: &ConsoleAuth, request_id: Option<Uuid>) -> keycompute_db::AuditContext {
+    keycompute_db::AuditContext {
+        actor_user_id: auth.user_id,
+        credential_kind: auth.credential_kind,
+        actor_platform_role: auth.platform_role,
+        actor_tenant_role: auth.tenant_role,
+        request_id,
     }
-
-    let revoked = key
-        .revoke(pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to revoke API key: {}", e)))?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "API Key revoked",
-        "key_id": revoked.id,
-        "revoked_at": revoked.revoked_at.map(|t| t.to_rfc3339()),
-        "deleted": false,
-    })))
+}
+fn key_mutation_error(error: keycompute_db::DbError) -> ApiError {
+    match error {
+        keycompute_db::DbError::NotFound { .. } => ApiError::NotFound("API Key not found".into()),
+        keycompute_db::DbError::Other(message)
+            if message == "key management authorization denied" =>
+        {
+            ApiError::Forbidden("Key management permission is no longer available".into())
+        }
+        keycompute_db::DbError::Other(message) if message.starts_with("invalid key") => {
+            ApiError::BadRequest(message)
+        }
+        _ => ApiError::ServiceUnavailable("API key storage is temporarily unavailable".into()),
+    }
 }
 
 /// 用量记录

@@ -64,7 +64,7 @@ async fn jwt(state: &AppState, user: &User, tenant_id: Uuid) -> String {
 
 async fn inference_key(db: &DatabaseConnection, user: &TenantActor) -> (ProduceAiKey, String) {
     let key = ProduceAiKeyValidator::generate_key();
-    let row = ProduceAiKey::create(
+    let row = integration_tests::db::create_test_api_key(
         db,
         &CreateProduceAiKeyRequest {
             tenant_id: user.tenant_id,
@@ -96,7 +96,7 @@ async fn inference_credentials_cannot_access_console_or_mutate_keys() {
             identity.tenant_role,
             Some(keycompute_types::TenantRole::Member)
         );
-        let before = ProduceAiKey::find_by_user(&db, user.id)
+        let before = ProduceAiKey::list_owned(&db, user.scope(), true, 1000, 0)
             .await
             .unwrap()
             .len();
@@ -134,7 +134,7 @@ async fn inference_credentials_cannot_access_console_or_mutate_keys() {
             assert_eq!(response.headers()["cache-control"], "no-store");
         }
         assert_eq!(
-            ProduceAiKey::find_by_user(&db, user.id)
+            ProduceAiKey::list_owned(&db, user.scope(), true, 1000, 0)
                 .await
                 .unwrap()
                 .len(),

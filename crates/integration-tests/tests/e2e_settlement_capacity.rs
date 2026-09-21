@@ -4,8 +4,7 @@ use integration_tests::db::{
 };
 use keycompute_billing::{BillingService, balance::BalanceService};
 use keycompute_db::{
-    CreateProduceAiKeyRequest, CreateUsageLogRequest, DbRouter, ProduceAiKey, UsageLog,
-    models::node_tip::NodeTip,
+    CreateProduceAiKeyRequest, CreateUsageLogRequest, DbRouter, UsageLog, models::node_tip::NodeTip,
 };
 use keycompute_types::{PricingSnapshot, RequestContext};
 use rust_decimal::Decimal;
@@ -15,7 +14,7 @@ use tokio::task::JoinSet;
 use uuid::Uuid;
 
 async fn ledger(db: &sea_orm::DatabaseConnection, tenant: Uuid, user: Uuid) -> UsageLog {
-    let key = ProduceAiKey::create(
+    let key = integration_tests::db::create_test_api_key(
         db,
         &CreateProduceAiKeyRequest {
             tenant_id: tenant,

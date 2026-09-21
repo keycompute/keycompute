@@ -48,9 +48,20 @@ async fn captured_connection() -> (DatabaseConnection, Arc<Mutex<Vec<String>>>) 
 async fn paginated_queries_use_unique_created_at_tie_breakers() {
     let (db, statements) = captured_connection().await;
 
-    ProduceAiKey::find_by_user_page(&db, Uuid::new_v4(), true, 20, 20)
-        .await
-        .unwrap();
+    ProduceAiKey::list_owned(
+        &db,
+        keycompute_types::TenantScope::checked(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            keycompute_types::TenantRole::Member,
+        )
+        .unwrap(),
+        true,
+        20,
+        20,
+    )
+    .await
+    .unwrap();
     keycompute_db::models::usage_log::UserUsageScope::new(
         keycompute_types::TenantScope::checked(
             Uuid::new_v4(),
@@ -101,7 +112,7 @@ async fn paginated_queries_use_unique_created_at_tie_breakers() {
 
     let statements = statements.lock().unwrap();
     assert_eq!(statements.len(), 6);
-    assert!(statements[0].contains("ORDER BY created_at DESC, id DESC"));
+    assert!(statements[0].contains("ORDER BY k.created_at DESC, k.id DESC"));
     assert!(statements[1].contains("ORDER BY l.created_at DESC, l.id DESC"));
     assert!(statements[2].contains("ORDER BY created_at DESC, id DESC"));
     assert!(statements[3].contains("ORDER BY created_at DESC, id DESC"));

@@ -30,7 +30,7 @@ mod tests {
 
         // 2. 创建 API Key
         let key_hash = format!("hash-{}", Uuid::new_v4().simple());
-        let api_key = ProduceAiKey::create(
+        let api_key = integration_tests::db::create_test_api_key(
             &pool,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,
@@ -50,10 +50,7 @@ mod tests {
             api_key.is_ok(),
         );
 
-        let Ok(api_key) = api_key else {
-            chain.print_report();
-            return;
-        };
+        let api_key = api_key.expect("key fixture creation must succeed before assertions");
 
         // 3. 查找 API Key (by hash)
         let found = ProduceAiKey::find_by_hash(&pool, &key_hash).await;
@@ -78,7 +75,19 @@ mod tests {
         );
 
         // 5. 撤销 API Key
-        let revoked = api_key.revoke(&pool).await;
+        let revoked = ProduceAiKey::revoke_owned(
+            &pool,
+            user.scope(),
+            api_key.id,
+            &keycompute_db::AuditContext {
+                actor_user_id: user.id,
+                credential_kind: keycompute_types::CredentialKind::Jwt,
+                actor_platform_role: keycompute_types::PlatformRole::None,
+                actor_tenant_role: Some(user.tenant_role),
+                request_id: None,
+            },
+        )
+        .await;
         chain.add_step(
             "keycompute-db",
             "ProduceAiKey::revoke",
@@ -136,8 +145,9 @@ mod tests {
             produce_ai_key_preview: "sk-race-****".to_string(),
             expires_at: None,
         };
-        let create_task =
-            tokio::spawn(async move { ProduceAiKey::create(&create_pool, &create_req).await });
+        let create_task = tokio::spawn(async move {
+            integration_tests::db::create_test_api_key(&create_pool, &create_req).await
+        });
 
         #[derive(Debug, FromQueryResult)]
         struct Waiting {
@@ -148,7 +158,7 @@ mod tests {
             let row = pool
                 .query_one(Statement::from_string(
                     DbBackend::Postgres,
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND (query ILIKE '%produce_ai_keys%' OR query ILIKE '%FROM tenants WHERE id = $1 FOR KEY SHARE%')) AS waiting".to_string(),
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND (query ILIKE '%produce_ai_keys%' OR query ILIKE '%FROM tenants WHERE id = $1 FOR SHARE%')) AS waiting".to_string(),
                 ))
                 .await
                 .expect("lock wait probe should succeed")

@@ -7,7 +7,7 @@ use integration_tests::common::generate_test_id;
 use integration_tests::db::{
     cleanup_test_data, create_test_pool, create_test_tenant, create_test_user,
 };
-use keycompute_db::{CreateProduceAiKeyRequest, CreateUsageLogRequest, ProduceAiKey, UsageLog};
+use keycompute_db::{CreateProduceAiKeyRequest, CreateUsageLogRequest, UsageLog};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -28,7 +28,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "usage", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "usage", &test_id).await;
         let key_hash = format!("hash-usage-{}", Uuid::new_v4().simple());
-        let api_key = ProduceAiKey::create(
+        let api_key = integration_tests::db::create_test_api_key(
             &pool,
             &CreateProduceAiKeyRequest {
                 tenant_id: tenant.id,
