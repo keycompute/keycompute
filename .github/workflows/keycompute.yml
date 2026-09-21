@@ -323,7 +323,22 @@ jobs:
       # These tests exercise the full data pipeline across all crates and verify
       # the DbRouter read-write separation against streaming replicas.
       - name: Run Integration Tests
-        run: cargo test --package integration-tests --verbose
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+          set +e
+          cargo test --package integration-tests --verbose 2>&1 | tee "$RUNNER_TEMP/integration-tests.log"
+          pipeline_status=("${PIPESTATUS[@]}")
+          set -e
+          result=${pipeline_status[0]}
+          if [ "$result" -eq 0 ] && [ "${pipeline_status[1]}" -ne 0 ]; then
+            result=${pipeline_status[1]}
+          fi
+          if [ "$result" -ne 0 ]; then
+            python3 scripts/ci/report-test-failure.py "$RUNNER_TEMP/integration-tests.log" || true
+          fi
+          exit "$result"
 
       - name: Full-chain HTTP load harness smoke
         env:
