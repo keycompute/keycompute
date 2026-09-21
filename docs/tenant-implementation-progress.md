@@ -1,3 +1,15 @@
+# Current contract and acceptance status
+
+The current acceptance contract is the latest phase **0–8** plan. Older
+phase-numbered entries below are historical delivery records. The current
+phase-1 field/provenance alignment is open; provider/binding/pricing scopes,
+platform/tenant route separation, member/invitation APIs, complete resource
+management, client UI and final deployment remain unaccepted.
+
+Latest confirmed baseline: `14e88eb`, CI #105 success. The current checkout
+was clean when this contract update began. Earlier `/tmp` provider/pricing
+drafts are no longer present and are not an implementation dependency.
+
 # Tenant subsystem implementation status
 
 ## Phase 1 — global identity and membership foundation

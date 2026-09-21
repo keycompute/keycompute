@@ -43,3 +43,4 @@ node_tip_withdrawals	user_tenant_resource
 scoped_conversations	user_tenant_resource
 scoped_responses	user_tenant_resource
 scoped_response_events	parent_scoped_child
+identity_admin_fence	platform_control
