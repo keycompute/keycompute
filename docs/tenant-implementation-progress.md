@@ -189,6 +189,43 @@ CI status is tracked separately from the successful local verification; the
 preceding integration CI failure must not be described as resolved merely by
 these local results or by adding failure-report diagnostics.
 
+## Phase 3 — scoped wallet display reads (partial delivery)
+
+Ordinary wallet display APIs now require explicit personal, tenant-admin or
+root/platform scopes. Personal requests bind the selected tenant and the actor
+as owner regardless of administrator status. Tenant batch queries require the
+current active tenant administrator and may inspect retained balances of
+suspended or revoked members without reactivating them. Platform queries require
+an actual active root plus a non-nil target tenant, including support reads of
+inactive tenants. Operators and fabricated or stale management scopes are denied.
+
+All wallet ownership joins bind tenant plus user. Batches are capped before
+querying, deduplicated, and fail as a whole if any requested owner is foreign or
+missing. A missing wallet becomes an uninitialized zero snapshot only for a
+real member visible to the caller's scope. Query authorization and ownership
+checks occur in the same primary SELECT. Display reads never create a wallet,
+lock a balance, update timestamps, reclaim reservations, or perform financial
+operations. The former tuple-only display query APIs were removed and both
+the billing service and personal balance handler use the new scoped APIs.
+
+Review preserved the six existing read-only regressions and added two query
+unit tests plus three real-PostgreSQL tests for independent wallets, lifecycle
+changes, retained funds, missing targets, and scope restrictions. The focused
+15-test run and an additional 8-thread rerun of all nine wallet display tests
+passed. Final workspace, excluding desktop/mobile: **2,426 passed,
+0 failed, 30 default ignored**; strict all-target/all-feature Clippy with
+`-D warnings`, formatting and candidate-file source hashes passed. Validation
+used committed main plus exactly the six wallet files, excluding unrelated
+unaccepted provider/pricing prototypes. The five new tests are included in the
+workspace total. Final review found no additional actionable issue in this
+wallet display slice. No production data, credentials or services changed.
+
+This closes only the wallet display-read subgate, not financial mutations,
+settlement/recovery, or phase 3. Provider/account/binding/pricing drafts remain
+unaccepted: independent review still requires closure of handler authority,
+mutation-actor/credential binding, and default/group lock-order regressions.
+They are not included in this wallet delivery or counted as completed phases.
+
 ## Remaining phase gates
 
 Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security and client acceptance. Phase 9: verified offline cutover and release.

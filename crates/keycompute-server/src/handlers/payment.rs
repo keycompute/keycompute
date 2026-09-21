@@ -472,7 +472,7 @@ pub async fn get_my_balance(
     auth: AuthExtractor,
     State(state): State<AppState>,
 ) -> Result<Json<UserBalanceResponse>> {
-    require_own_billing_permission(&auth)?;
+    let scope = require_own_billing_permission(&auth)?;
 
     let balance_service = state
         .billing
@@ -480,7 +480,7 @@ pub async fn get_my_balance(
         .ok_or_else(|| payment_internal_error("get_balance", "balance service unavailable"))?;
 
     let balance = balance_service
-        .find_display_snapshot(auth.tenant_id, auth.user_id)
+        .find_owned_display_snapshot(scope)
         .await
         .map_err(|e| payment_internal_error("get_balance", e))?;
 

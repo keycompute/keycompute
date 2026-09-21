@@ -172,12 +172,11 @@ impl BalanceService {
     /// Read one authoritative, read-only display snapshot from the primary.
     /// This is intentionally not a spending authorization and never performs
     /// balance materialization, expiry reclamation, or row locking.
-    pub async fn find_display_snapshot(
+    pub async fn find_owned_display_snapshot(
         &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
+        scope: keycompute_types::TenantScope,
     ) -> Result<UserBalanceDisplaySnapshot> {
-        UserBalance::find_display_snapshot(self.pool.write_conn(), tenant_id, user_id)
+        UserBalance::find_owned_display_snapshot(self.pool.write_conn(), scope)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to read balance snapshot: {e}"))
@@ -187,12 +186,12 @@ impl BalanceService {
     /// Read a bounded batch of authoritative display snapshots from the
     /// primary. Missing balance rows are explicit zero snapshots; backend and
     /// ownership failures are propagated to the caller.
-    pub async fn find_display_snapshots(
+    pub async fn find_display_snapshots_in_tenant(
         &self,
-        tenant_id: Uuid,
+        scope: keycompute_types::TenantScope,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalanceDisplaySnapshot>> {
-        UserBalance::find_display_snapshots(self.pool.write_conn(), tenant_id, user_ids)
+        UserBalance::find_display_snapshots_in_tenant(self.pool.write_conn(), scope, user_ids)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to read balance snapshots: {e}"))

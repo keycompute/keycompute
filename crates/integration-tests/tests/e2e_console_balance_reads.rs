@@ -12,6 +12,7 @@ use integration_tests::{
 use keycompute_billing::balance::BalanceService;
 use keycompute_db::{DbError, DbRouter, Tenant, UserBalance};
 use keycompute_server::{AppState, create_router};
+use keycompute_types::{TenantRole, TenantScope};
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 use std::time::Duration;
@@ -248,40 +249,52 @@ async fn display_does_not_reclaim_expired_reservations_but_money_helper_still_do
 #[tokio::test]
 async fn snapshot_rejects_wrong_owner_missing_user_and_bounded_batch_without_zero_fallback() {
     let mut f = Fixture::new(false).await;
+    let admin_scope =
+        TenantScope::checked(f.tenant.id, f.tenant.owner_user_id, TenantRole::Admin).unwrap();
     assert!(matches!(
-        UserBalance::find_display_snapshot(&f.pool, Uuid::new_v4(), f.user.id).await,
+        UserBalance::find_owned_display_snapshot(
+            &f.pool,
+            TenantScope::checked(Uuid::new_v4(), f.user.id, TenantRole::Member).unwrap()
+        )
+        .await,
         Err(DbError::NotFound { .. })
     ));
     assert!(
-        UserBalance::find_display_snapshot(&f.pool, f.tenant.id, Uuid::new_v4())
-            .await
-            .unwrap_err()
-            .is_not_found()
+        UserBalance::find_owned_display_snapshot(
+            &f.pool,
+            TenantScope::checked(f.tenant.id, Uuid::new_v4(), TenantRole::Member).unwrap()
+        )
+        .await
+        .unwrap_err()
+        .is_not_found()
     );
     let snapshots = f
         .service
-        .find_display_snapshots(f.tenant.id, &[f.user.id, f.user.id])
+        .find_display_snapshots_in_tenant(admin_scope, &[f.user.id, f.user.id])
         .await
         .unwrap();
     assert_eq!(snapshots.len(), 1);
     assert!(!snapshots[&f.user.id].initialized);
     assert!(
         f.service
-            .find_display_snapshots(f.tenant.id, &[f.user.id, Uuid::new_v4()])
+            .find_display_snapshots_in_tenant(admin_scope, &[f.user.id, Uuid::new_v4()])
             .await
             .is_err()
     );
     let unavailable = DatabaseConnection::Disconnected;
-    let error =
-        UserBalance::find_display_snapshots(&unavailable, f.tenant.id, &vec![f.user.id; 1001])
-            .await
-            .unwrap_err();
+    let error = UserBalance::find_display_snapshots_in_tenant(
+        &unavailable,
+        admin_scope,
+        &vec![f.user.id; 1001],
+    )
+    .await
+    .unwrap_err();
     assert!(
         error.to_string().contains("1000"),
         "batch cap must apply before a DB query"
     );
     assert!(
-        UserBalance::find_display_snapshot(&unavailable, f.tenant.id, f.user.id)
+        UserBalance::find_owned_display_snapshot(&unavailable, f.user.scope())
             .await
             .is_err()
     );

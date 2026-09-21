@@ -8,8 +8,10 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+#[path = "user_balance_scope.rs"]
+mod display_scope;
 
 /// 交易类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,8 +75,8 @@ pub struct UserBalance {
 /// This is deliberately separate from [`UserBalance::get_or_create`] and the
 /// reclamation helpers: constructing it never starts a transaction, takes a
 /// row lock, reclaims a reservation, or writes a balance row.  `initialized`
-/// is false only when the user is valid and owned by the requested tenant but
-/// has not yet received a balance row.
+/// is false only when the requested membership is visible to the caller's scope
+/// but has not yet received a balance row. Users remain global identities.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserBalanceDisplaySnapshot {
     pub user_id: Uuid,
@@ -1551,110 +1553,9 @@ impl UserBalance {
         Ok(balance)
     }
 
-    /// Read one display snapshot. Service callers must supply the primary;
-    /// this generic model helper also accepts a caller-owned read transaction.
-    /// The ordinary SELECT performs no mutation or row locking.
-    ///
-    /// Read one authoritative display snapshot using an ordinary primary
-    /// `SELECT`.  This method intentionally performs no transaction
-    /// materialization, row locking, reservation reclamation, or writes.
-    pub async fn find_display_snapshot(
-        db: &impl ConnectionTrait,
-        tenant_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<UserBalanceDisplaySnapshot, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-                SELECT
-                    u.id AS user_id,
-                    m.tenant_id AS owner_tenant_id,
-                    ub.id AS balance_id,
-                    ub.tenant_id AS balance_tenant_id,
-                    ub.available_balance,
-                    ub.frozen_balance,
-                    ub.total_recharged,
-                    ub.total_consumed,
-                    statement_timestamp() AS as_of
-                FROM users u
-                JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=$2 AND m.status='active'
-                JOIN tenants t ON t.id = m.tenant_id AND t.status='active'
-                LEFT JOIN user_balances ub ON ub.user_id = u.id AND ub.tenant_id=m.tenant_id
-                WHERE u.id = $1
-            "#,
-            [user_id.into(), tenant_id.into()],
-        );
-        let row = DisplayBalanceRow::find_by_statement(stmt)
-            .one(db)
-            .await?
-            .ok_or_else(|| DbError::not_found("user", user_id))?;
-        row.into_snapshot(tenant_id)
-    }
-
-    /// Read a bounded batch of authoritative display snapshots from the
-    /// primary using one ordinary `SELECT`.  Missing balance rows become
-    /// `initialized = false`; missing users and tenant/balance ownership
-    /// mismatches remain errors instead of being rendered as zero.
-    pub async fn find_display_snapshots(
-        db: &impl ConnectionTrait,
-        tenant_id: Uuid,
-        user_ids: &[Uuid],
-    ) -> Result<HashMap<Uuid, UserBalanceDisplaySnapshot>, DbError> {
-        // Bound allocations even for direct model callers, before deduplication.
-        if user_ids.len() > 1_000 {
-            return Err(DbError::Other(
-                "display balance batch exceeds 1000 users".into(),
-            ));
-        }
-        if user_ids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let requested: Vec<Uuid> = user_ids
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-                SELECT
-                    u.id AS user_id,
-                    m.tenant_id AS owner_tenant_id,
-                    ub.id AS balance_id,
-                    ub.tenant_id AS balance_tenant_id,
-                    ub.available_balance,
-                    ub.frozen_balance,
-                    ub.total_recharged,
-                    ub.total_consumed,
-                    statement_timestamp() AS as_of
-                FROM users u
-                JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=$2 AND m.status='active'
-                JOIN tenants t ON t.id = m.tenant_id AND t.status='active'
-                LEFT JOIN user_balances ub ON ub.user_id = u.id AND ub.tenant_id=m.tenant_id
-                WHERE u.id = ANY($1)
-            "#,
-            [requested.clone().into(), tenant_id.into()],
-        );
-        let rows = DisplayBalanceRow::find_by_statement(stmt).all(db).await?;
-        let mut snapshots = HashMap::with_capacity(rows.len());
-        for row in rows {
-            let snapshot = row.into_snapshot_unchecked_owner()?;
-            snapshots.insert(snapshot.user_id, snapshot);
-        }
-
-        // The batch endpoint is called after an authorized user query.  If a
-        // user disappears between those two ordinary reads, surface that
-        // race instead of silently manufacturing a zero balance.
-        if let Some(missing) = requested.iter().find(|id| !snapshots.contains_key(id)) {
-            return Err(DbError::not_found("user", missing.to_string()));
-        }
-        Ok(snapshots)
-    }
-
     /// Find a balance after atomically reclaiming any expired request
-    /// reservations. This is the user-facing read path; the simpler
-    /// `find_by_user` remains available inside existing transactions.
+    /// reservations for financial/runtime operations. Ordinary console reads
+    /// must use the scoped display snapshot APIs and never reclaim funds.
     pub async fn find_by_user_reclaiming_expired(
         db: &(impl ConnectionTrait + TransactionTrait),
         tenant_id: Uuid,
