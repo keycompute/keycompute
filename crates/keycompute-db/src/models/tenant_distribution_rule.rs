@@ -5,12 +5,49 @@ use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, Transactio
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeneficiaryScope {
+    Everyone,
+    TenantMember,
+}
+impl BeneficiaryScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Everyone => "everyone",
+            Self::TenantMember => "tenant_member",
+        }
+    }
+}
+impl std::str::FromStr for BeneficiaryScope {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "everyone" => Ok(Self::Everyone),
+            "tenant_member" => Ok(Self::TenantMember),
+            other => Err(format!("unknown beneficiary scope: {other}")),
+        }
+    }
+}
+impl sea_orm::TryGetable for BeneficiaryScope {
+    fn try_get_by<I: sea_orm::ColIdx>(
+        res: &sea_orm::QueryResult,
+        idx: I,
+    ) -> Result<Self, sea_orm::TryGetError> {
+        let value: String = res.try_get_by(idx)?;
+        value
+            .parse()
+            .map_err(|_| sea_orm::TryGetError::Null("invalid beneficiary scope".into()))
+    }
+}
+
 /// 租户分销规则模型
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct TenantDistributionRule {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub beneficiary_id: Uuid,
+    pub beneficiary_scope: BeneficiaryScope,
+    pub beneficiary_id: Option<Uuid>,
     pub name: String,
     pub description: Option<String>,
     pub commission_rate: BigDecimal,
@@ -26,7 +63,8 @@ pub struct TenantDistributionRule {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateDistributionRuleRequest {
     pub tenant_id: Uuid,
-    pub beneficiary_id: Uuid,
+    pub beneficiary_scope: BeneficiaryScope,
+    pub beneficiary_id: Option<Uuid>,
     pub name: String,
     pub description: Option<String>,
     pub commission_rate: BigDecimal,
@@ -87,7 +125,8 @@ impl TenantDistributionRule {
             .await?
             .into_iter()
             .filter(|r| {
-                r.beneficiary_id == Uuid::nil() && r.priority == Self::GLOBAL_OVERRIDE_PRIORITY
+                r.beneficiary_scope == BeneficiaryScope::Everyone
+                    && r.priority == Self::GLOBAL_OVERRIDE_PRIORITY
             })
             .collect();
 
@@ -141,7 +180,8 @@ impl TenantDistributionRule {
                     &txn,
                     &CreateDistributionRuleRequest {
                         tenant_id,
-                        beneficiary_id: Uuid::nil(),
+                        beneficiary_scope: BeneficiaryScope::Everyone,
+                        beneficiary_id: None,
                         name: name.to_string(),
                         description: None,
                         commission_rate,
@@ -160,12 +200,8 @@ impl TenantDistributionRule {
         let count_row = txn
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT COUNT(*) FROM tenant_distribution_rules WHERE tenant_id = $1 AND beneficiary_id = $2 AND priority = $3 AND is_active = TRUE",
-                [
-                    tenant_id.into(),
-                    Uuid::nil().into(),
-                    Self::GLOBAL_OVERRIDE_PRIORITY.into(),
-                ],
+                "SELECT COUNT(*) FROM tenant_distribution_rules WHERE tenant_id = $1 AND beneficiary_scope = 'everyone' AND beneficiary_id IS NULL AND priority = $2 AND is_active = TRUE",
+                [tenant_id.into(), Self::GLOBAL_OVERRIDE_PRIORITY.into()],
             ))
             .await?
             .ok_or_else(|| DbError::Other("count query failed".to_string()))?;
@@ -193,14 +229,15 @@ impl TenantDistributionRule {
             DbBackend::Postgres,
             r#"
             INSERT INTO tenant_distribution_rules (
-                tenant_id, beneficiary_id, name, description, commission_rate,
+                tenant_id, beneficiary_scope, beneficiary_id, name, description, commission_rate,
                 priority, effective_from, effective_until
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             RETURNING *
             "#,
             [
                 req.tenant_id.into(),
+                req.beneficiary_scope.as_str().into(),
                 req.beneficiary_id.into(),
                 req.name.as_str().into(),
                 req.description.clone().into(),

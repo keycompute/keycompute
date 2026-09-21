@@ -15,7 +15,7 @@ use axum::{
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use keycompute_db::models::pricing_model::{
-    CreatePricingRequest, GLOBAL_DEFAULT_TENANT_ID, PricingModel, UpdatePricingRequest,
+    CreatePricingRequest, PricingModel, PricingScopeType, UpdatePricingRequest,
 };
 use keycompute_db::models::tenant::Tenant;
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
@@ -58,10 +58,11 @@ async fn set_pricing_default_in_transaction(
     let before = target.clone();
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE pricing_models SET is_default = FALSE, version = version + 1, updated_at = NOW() WHERE model_name = $1 AND billing_dimension = $2 AND tenant_id = $3 AND is_default = TRUE AND id <> $4",
+        "UPDATE pricing_models SET is_default = FALSE, version = version + 1, updated_at = NOW() WHERE model_name = $1 AND billing_dimension = $2 AND scope_type = $3 AND (($4::UUID IS NULL AND tenant_id IS NULL) OR ($4::UUID IS NOT NULL AND tenant_id = $4)) AND is_default = TRUE AND id <> $5",
         [
             target.model_name.as_str().into(),
             target.billing_dimension.as_str().into(),
+            target.scope_type.as_str().into(),
             target.tenant_id.into(),
             pricing_id.into(),
         ],
@@ -98,7 +99,7 @@ pub async fn make_pricing_default(
     Path(pricing_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -130,7 +131,8 @@ pub async fn make_pricing_default(
 #[derive(Debug, Serialize)]
 pub struct PricingInfo {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub scope_type: String,
+    pub tenant_id: Option<Uuid>,
     pub model_name: String,
     pub billing_dimension: String,
     pub currency: String,
@@ -151,6 +153,8 @@ pub struct PricingListQueryParams {
     pub page_size: Option<i64>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub scope_type: Option<PricingScopeType>,
+    pub tenant_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,12 +169,13 @@ pub struct PricingListResponse {
 /// 创建定价请求（管理员）
 #[derive(Debug, Deserialize)]
 pub struct CreatePricingAdminRequest {
+    pub scope_type: PricingScopeType,
     /// 模型名称
     pub model_name: String,
     /// 计费维度: node 或 provideraccount
     #[serde(rename = "billing_dimension")]
     pub billing_dimension: String,
-    /// 租户ID（管理接口只允许显式的非 nil 租户；全局默认由系统初始化）
+    /// Tenant ID is required when scope_type is tenant and forbidden for platform.
     pub tenant_id: Option<Uuid>,
     /// 货币（默认 CNY）
     #[serde(default = "default_currency")]
@@ -294,14 +299,15 @@ async fn record_pricing_audit(
         DbBackend::Postgres,
         r#"
         INSERT INTO pricing_audit_events
-            (actor_user_id, action, pricing_id, tenant_id, model_name,
+            (actor_user_id, action, pricing_id, scope_type, tenant_id, model_name,
              billing_dimension, before_state, after_state)
-        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
         "#,
         [
             actor_user_id.into(),
             action.into(),
             row.id.into(),
+            row.scope_type.as_str().into(),
             row.tenant_id.into(),
             row.model_name.as_str().into(),
             row.billing_dimension.as_str().into(),
@@ -339,7 +345,7 @@ pub async fn list_pricing(
     State(state): State<AppState>,
     Query(params): Query<PricingListQueryParams>,
 ) -> Result<Json<PricingListResponse>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -351,13 +357,36 @@ pub async fn list_pricing(
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
     let writer = pool.write_conn();
-    let pricing_models =
-        PricingModel::find_all_filtered(writer, params.search.as_deref(), page_size, offset)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
-    let total = PricingModel::count_all_filtered(writer, params.search.as_deref())
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count pricing: {}", e)))?;
+    let scope_type = params.scope_type.unwrap_or(PricingScopeType::Tenant);
+    let scope_tenant = match scope_type {
+        PricingScopeType::Platform => {
+            if params.tenant_id.is_some() {
+                return Err(ApiError::BadRequest(
+                    "platform pricing cannot specify tenant_id".into(),
+                ));
+            }
+            None
+        }
+        PricingScopeType::Tenant => Some(params.tenant_id.unwrap_or(auth.tenant_id)),
+    };
+    let pricing_models = PricingModel::find_all_filtered(
+        writer,
+        scope_type,
+        scope_tenant,
+        params.search.as_deref(),
+        page_size,
+        offset,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
+    let total = PricingModel::count_all_filtered(
+        writer,
+        scope_type,
+        scope_tenant,
+        params.search.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Failed to count pricing: {}", e)))?;
 
     let pricing_list: Vec<PricingInfo> = pricing_models
         .into_iter()
@@ -365,6 +394,7 @@ pub async fn list_pricing(
             let is_effective = p.is_effective();
             PricingInfo {
                 id: p.id,
+                scope_type: p.scope_type.to_string(),
                 tenant_id: p.tenant_id,
                 model_name: p.model_name,
                 billing_dimension: p.billing_dimension.as_str().to_string(),
@@ -398,7 +428,7 @@ pub async fn create_pricing(
     State(state): State<AppState>,
     Json(req): Json<CreatePricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -433,29 +463,22 @@ pub async fn create_pricing(
         ));
     }
 
-    // 禁止创建新的全局默认定价（tenant_id 不能为 None 或 GLOBAL_DEFAULT_TENANT_ID）
-    if req.tenant_id.is_none() || req.tenant_id == Some(GLOBAL_DEFAULT_TENANT_ID) {
-        tracing::warn!(
-            tenant_id = ?req.tenant_id,
-            model_name = %req.model_name,
-            "Attempted to create new global default pricing, which is not allowed"
-        );
-        return Err(ApiError::BadRequest(
-            "Cannot create new global default pricing. Global defaults are managed by system initialization only.".to_string(),
-        ));
-    }
-
-    // Pricing is a tenant-owned configuration resource. Do not allow an
-    // administrator to attach a new pricing model to a closed or missing
-    // tenant, even when the caller itself is the active system tenant.
-    let tenant_id = req
-        .tenant_id
-        .expect("global pricing IDs are rejected immediately above");
+    let tenant_id = match (req.scope_type, req.tenant_id) {
+        (PricingScopeType::Platform, None) => None,
+        (PricingScopeType::Tenant, Some(id)) if !id.is_nil() => Some(id),
+        _ => {
+            return Err(ApiError::BadRequest(
+                "pricing scope and tenant_id do not match".into(),
+            ));
+        }
+    };
     let txn = pool
         .begin()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to begin pricing creation: {e}")))?;
-    ensure_active_pricing_tenant(&txn, tenant_id).await?;
+    if let Some(tenant_id) = tenant_id {
+        ensure_active_pricing_tenant(&txn, tenant_id).await?;
+    }
 
     // A create request may make the new row the default. Clear only the
     // matching tenant/model/dimension scope in this same transaction so the
@@ -463,10 +486,11 @@ pub async fn create_pricing(
     if req.is_default {
         txn.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE pricing_models SET is_default = FALSE, version = version + 1, updated_at = NOW() WHERE model_name = $1 AND billing_dimension = $2 AND tenant_id = $3 AND is_default = TRUE",
+            "UPDATE pricing_models SET is_default = FALSE, version = version + 1, updated_at = NOW() WHERE model_name = $1 AND billing_dimension = $2 AND scope_type = $3 AND (($4::UUID IS NULL AND tenant_id IS NULL) OR ($4::UUID IS NOT NULL AND tenant_id = $4)) AND is_default = TRUE",
             [
                 req.model_name.trim().into(),
                 billing_dimension.as_str().into(),
+                req.scope_type.as_str().into(),
                 tenant_id.into(),
             ],
         ))
@@ -475,7 +499,8 @@ pub async fn create_pricing(
     }
 
     let db_req = CreatePricingRequest {
-        tenant_id: req.tenant_id,
+        scope_type: req.scope_type,
+        tenant_id,
         model_name,
         billing_dimension,
         currency: Some(currency),
@@ -518,7 +543,7 @@ pub async fn update_pricing(
     State(state): State<AppState>,
     Json(req): Json<UpdatePricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -617,7 +642,7 @@ pub async fn delete_pricing(
     Path(pricing_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -636,12 +661,11 @@ pub async fn delete_pricing(
         .map_err(|e| ApiError::Internal(format!("Failed to find pricing: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("Pricing not found: {}", pricing_id)))?;
 
-    // 禁止删除全局默认定价（tenant_id 为 GLOBAL_DEFAULT_TENANT_ID）
-    if existing.tenant_id == GLOBAL_DEFAULT_TENANT_ID {
+    if existing.scope_type == PricingScopeType::Platform {
         tracing::warn!(
             pricing_id = %pricing_id,
             model_name = %existing.model_name,
-            tenant_id = %existing.tenant_id,
+            scope_type = %existing.scope_type,
             "Attempted to delete global default pricing, which is not allowed"
         );
         return Err(ApiError::BadRequest(
@@ -679,7 +703,7 @@ pub async fn set_default_pricing(
     State(state): State<AppState>,
     Json(req): Json<SetDefaultPricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 

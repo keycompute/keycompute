@@ -206,12 +206,33 @@ mod tests {
             ),
             tenant1_users
                 .as_ref()
-                .map(|v| v.len() == 1)
+                .map(|v| v.len() == 2)
                 .unwrap_or(false)
                 && tenant2_users
                     .as_ref()
-                    .map(|v| v.len() == 1)
+                    .map(|v| v.len() == 2)
                     .unwrap_or(false),
+        );
+
+        let expected1 = std::collections::HashSet::from([tenant1.owner_user_id, user1.id]);
+        let expected2 = std::collections::HashSet::from([tenant2.owner_user_id, user2.id]);
+        assert_eq!(
+            tenant1_users
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|u| u.id)
+                .collect::<std::collections::HashSet<_>>(),
+            expected1
+        );
+        assert_eq!(
+            tenant2_users
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|u| u.id)
+                .collect::<std::collections::HashSet<_>>(),
+            expected2
         );
 
         // 4. 验证跨租户访问被阻止

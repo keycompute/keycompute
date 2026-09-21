@@ -2,17 +2,30 @@
 //!
 //! 处理 Produce AI Key（用户访问系统的 API Key）的验证和解析。
 
-use keycompute_db::{DbRouter, ProduceAiKey, Tenant, User};
-use keycompute_types::{KeyComputeError, Result};
+use keycompute_db::{DbRouter, ProduceAiKey, Tenant, TenantMembership};
+use keycompute_types::{
+    AuthorizationSubject, CredentialKind, KeyComputeError, PlatformRole, Result,
+};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AuthContext;
-use crate::permission::{AuthType, build_permissions};
+use crate::permission::permissions_for;
 
 mod last_used;
+
+#[derive(Debug, FromQueryResult, Deserialize)]
+struct UserIdentitySnapshot {
+    id: Uuid,
+    email: String,
+    name: Option<String>,
+    platform_role: String,
+    token_version: i32,
+    status: String,
+}
 
 /// Produce AI Key 验证器
 #[derive(Clone)]
@@ -176,18 +189,17 @@ impl ProduceAiKeyValidator {
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         };
 
-        // SHARE also protects user ownership/role from ordinary UPDATEs and
-        // remains compatible with child-table foreign-key KEY SHARE checks.
-        let user = User::find_by_statement(Statement::from_sql_and_values(
+        // SHARE also protects the global user identity while the membership
+        // row is checked below. Tenant membership is the only tenant scope.
+        let user = UserIdentitySnapshot::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM users WHERE id = $1 FOR SHARE",
+            "SELECT id,email,name,platform_role,token_version,status FROM users WHERE id=$1 FOR SHARE",
             [candidate.user_id.into()],
         ))
         .one(&tx)
         .await
         .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to lock user: {e}")))?;
 
-        // 用户已被删除但 key 记录残留（孤儿 key），对外统一返回通用错误，避免泄露内部状态
         let Some(user) = user else {
             tracing::warn!(
                 produce_ai_key_id = %candidate.id,
@@ -196,6 +208,24 @@ impl ProduceAiKeyValidator {
             );
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         };
+        if user.status != "active" {
+            return Err(KeyComputeError::AuthError("User is suspended".into()));
+        }
+
+        let membership = TenantMembership::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR SHARE",
+            [candidate.tenant_id.into(), user.id.into()],
+        )).one(&tx).await.map_err(|error| KeyComputeError::DatabaseError(
+            format!("Failed to lock tenant membership: {error}")))?
+            .ok_or_else(|| KeyComputeError::AuthError("Invalid API key".into()))?;
+        let tenant_role = membership.tenant_role().map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Invalid tenant membership role: {e}"))
+        })?;
+        let platform_role = user
+            .platform_role
+            .parse::<PlatformRole>()
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Invalid platform role: {e}")))?;
 
         // Re-read the key under the same transaction after obtaining the
         // user lock. This is the linearization point for revocation and
@@ -234,27 +264,18 @@ impl ProduceAiKeyValidator {
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         }
 
-        // 验证用户租户 ID 与 Produce AI Key 租户 ID 一致
-        if user.tenant_id != produce_ai_key.tenant_id {
+        // The composite tenant/user relationship is enforced by the
+        // membership lookup and by the database foreign key. Re-check the
+        // current key binding after locking the parent rows.
+        if produce_ai_key.tenant_id != tenant.id
+            || membership.tenant_id != tenant.id
+            || membership.user_id != user.id
+        {
             tracing::warn!(
                 user_id = %user.id,
-                user_tenant_id = %user.tenant_id,
-                produce_ai_key_tenant_id = %produce_ai_key.tenant_id,
-                "User tenant does not match Produce AI key tenant"
-            );
-            return Err(KeyComputeError::AuthError("Invalid API key".into()));
-        }
-
-        // The tenant lock was taken from the key's tenant ID. Require both
-        // current bindings to point at that same locked parent before using
-        // its lifecycle state.
-        if user.tenant_id != tenant.id {
-            tracing::warn!(
-                user_id = %user.id,
-                user_tenant_id = %user.tenant_id,
                 key_tenant_id = %produce_ai_key.tenant_id,
                 locked_tenant_id = %tenant.id,
-                "Produce AI key tenant changed while validating"
+                "Produce AI key tenant binding changed while validating"
             );
             return Err(KeyComputeError::AuthError("Invalid API key".into()));
         }
@@ -279,27 +300,40 @@ impl ProduceAiKeyValidator {
 
         tracing::info!(
             user_id = %user.id,
-            tenant_id = %user.tenant_id,
+            tenant_id = %tenant.id,
             produce_ai_key_id = %produce_ai_key.id,
-            role = %user.role,
+            role = %tenant_role,
             "Produce AI key validated successfully"
         );
 
-        // 构建权限列表
-        // API Key 认证仅有 UseApi 权限，用于转发请求到上游 LLM Provider
-        // 不包含任何系统管理权限（用户管理、计量计费、模块管理、系统设置等）
-        let permissions = build_permissions(AuthType::ApiKey, &user.role);
+        // API keys are inference credentials only. The subject still carries
+        // the authoritative platform and tenant roles for downstream scope
+        // checks, while the capability list contains UseApi only.
+        let permissions = permissions_for(CredentialKind::ApiKey, platform_role, Some(tenant_role));
+        let subject = AuthorizationSubject::tenant(user.id, tenant.id, tenant_role, platform_role);
 
         Ok(AuthContext {
             user_id: user.id,
-            tenant_id: user.tenant_id,
+            selected_tenant_id: Some(tenant.id),
+            platform_role,
+            tenant_role: Some(tenant_role),
+            credential_kind: CredentialKind::ApiKey,
             produce_ai_key_id: produce_ai_key.id,
-            role: user.role,
             permissions,
-            token_version: 0,
-            user_info: None,
-            tenant_info: None,
-        })
+            token_version: user.token_version,
+            membership_version: Some(membership.version),
+            authz_version: Some(tenant.authz_version),
+            user_info: Some(crate::UserInfo::new(
+                user.id,
+                user.email,
+                user.name.unwrap_or_default(),
+                platform_role,
+                keycompute_types::UserStatus::Active,
+                user.token_version,
+            )),
+            tenant_info: Some(crate::TenantInfo::from_db_tenant(&tenant)),
+        }
+        .with_authorization_subject(subject))
     }
 
     /// 检查是否已配置数据库连接

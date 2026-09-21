@@ -11,18 +11,32 @@ use axum::{
     http::{HeaderMap, request::Parts},
 };
 use chrono::{DateTime, Utc};
-use keycompute_auth::{AuthContext, Permission};
+use keycompute_auth::{AuthContext, Permission, PermissionChecker};
+use keycompute_types::{CredentialKind, PlatformRole, TenantRole};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::future::Future;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Authentication storage failures are temporary unavailability, not invalid
+/// credentials, and must not reveal database errors to an unauthenticated caller.
+pub(crate) fn authentication_error(error: keycompute_types::KeyComputeError) -> ApiError {
+    match error {
+        keycompute_types::KeyComputeError::DatabaseError(_)
+        | keycompute_types::KeyComputeError::ServiceUnavailable(_) => {
+            ApiError::ServiceUnavailable("Authentication service is temporarily unavailable".into())
+        }
+        error => ApiError::from(error),
+    }
+}
+
 const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM node_sessions ns \
      INNER JOIN nodes n ON n.id = ns.node_id \
-     INNER JOIN users u ON u.id = n.owner_user_id \
-     INNER JOIN tenants t ON t.id = u.tenant_id \
+     INNER JOIN tenants t ON t.id = n.tenant_id \
+     INNER JOIN tenant_memberships m ON m.tenant_id=n.tenant_id AND m.user_id=n.owner_user_id AND m.status='active' \
+     INNER JOIN users u ON u.id=n.owner_user_id AND u.status='active' \
      WHERE ns.session_token_hash = $1 \
        AND ns.revoked_at IS NULL \
        AND ns.expires_at > NOW() AND ns.accepting_tasks=TRUE \
@@ -35,8 +49,7 @@ const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM nod
 // in-flight result before the handler can apply those checks.
 const NODE_SESSION_COMPLETION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM node_sessions ns \
      INNER JOIN nodes n ON n.id = ns.node_id \
-     INNER JOIN users u ON u.id = n.owner_user_id \
-     INNER JOIN tenants t ON t.id = u.tenant_id \
+     INNER JOIN tenants t ON t.id = n.tenant_id \
      WHERE ns.session_token_hash = $1 \
        AND ns.revoked_at IS NULL \
        AND ns.expires_at > NOW()";
@@ -44,18 +57,25 @@ const NODE_SESSION_COMPLETION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM
 /// 认证提取器
 ///
 /// 从请求头中提取 JWT 或 API Key，并解析用户信息与权限
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AuthExtractor {
     /// 用户 ID
     pub user_id: Uuid,
     /// 租户 ID
     pub tenant_id: Uuid,
+    /// Verified platform scope.
+    pub platform_role: PlatformRole,
+    /// Verified role in tenant_id.
+    pub tenant_role: Option<TenantRole>,
+    /// Credential kind used for this request.
+    pub credential_kind: CredentialKind,
     /// Produce AI Key ID
     pub produce_ai_key_id: Uuid,
-    /// 用户角色
-    pub role: String,
     /// 用户权限列表
     pub permissions: Vec<Permission>,
+    pub token_version: i32,
+    pub membership_version: i64,
+    pub authz_version: i64,
     /// A resource permit, not an authorization decision; never serialized.
     #[serde(skip)]
     pub generation_permit: Option<keycompute_runtime::admission::AdmissionPermit>,
@@ -67,14 +87,19 @@ impl AuthExtractor {
         user_id: Uuid,
         tenant_id: Uuid,
         produce_ai_key_id: Uuid,
-        role: impl Into<String>,
+        credential_kind: CredentialKind,
     ) -> Self {
         Self {
             user_id,
             tenant_id,
+            platform_role: PlatformRole::None,
+            tenant_role: None,
+            credential_kind,
             produce_ai_key_id,
-            role: role.into(),
             permissions: Vec::new(),
+            token_version: 0,
+            membership_version: 1,
+            authz_version: 1,
             generation_permit: None,
         }
     }
@@ -138,32 +163,80 @@ impl AuthExtractor {
         let auth_context = auth_service
             .verify_token(token)
             .await
-            .map_err(ApiError::from)?;
+            .map_err(authentication_error)?;
 
-        Ok(Self::from_auth_context(auth_context))
+        Self::from_auth_context(auth_context)
     }
 
     /// 从 AuthContext 创建
-    pub fn from_auth_context(ctx: AuthContext) -> Self {
-        Self {
+    pub fn from_auth_context(ctx: AuthContext) -> Result<Self> {
+        Ok(Self {
             user_id: ctx.user_id,
-            tenant_id: ctx.tenant_id,
+            tenant_id: ctx.selected_tenant_id.ok_or_else(|| {
+                ApiError::Auth("tenant selection required for inference".to_string())
+            })?,
+            platform_role: ctx.platform_role,
+            tenant_role: ctx.tenant_role,
+            credential_kind: ctx.credential_kind,
             produce_ai_key_id: ctx.produce_ai_key_id,
-            role: ctx.role,
             permissions: ctx.permissions,
+            token_version: ctx.token_version,
+            membership_version: ctx
+                .membership_version
+                .ok_or_else(|| ApiError::Auth("membership version required".into()))?,
+            authz_version: ctx
+                .authz_version
+                .ok_or_else(|| ApiError::Auth("tenant version required".into()))?,
             generation_permit: None,
-        }
+        })
     }
 
-    /// 检查是否具有系统管理权限。
-    pub fn is_admin(&self) -> bool {
-        self.has_permission(&Permission::SystemAdmin)
+    pub fn authorization_context(&self) -> AuthContext {
+        AuthContext {
+            user_id: self.user_id,
+            selected_tenant_id: Some(self.tenant_id),
+            platform_role: self.platform_role,
+            tenant_role: self.tenant_role,
+            credential_kind: self.credential_kind,
+            produce_ai_key_id: self.produce_ai_key_id,
+            permissions: self.permissions.clone(),
+            token_version: self.token_version,
+            membership_version: Some(self.membership_version),
+            authz_version: Some(self.authz_version),
+            user_info: None,
+            tenant_info: None,
+        }
+    }
+    pub fn require_platform(
+        &self,
+        action: keycompute_auth::AuthorizationAction,
+    ) -> Result<keycompute_types::PlatformScope> {
+        self.authorization_context()
+            .require_platform(action)
+            .map_err(ApiError::from)
+    }
+    pub fn require_tenant(
+        &self,
+        action: keycompute_auth::AuthorizationAction,
+    ) -> Result<keycompute_types::TenantScope> {
+        self.authorization_context()
+            .require_tenant(action)
+            .map_err(ApiError::from)
+    }
+    pub fn require_owner(
+        &self,
+        owner: Uuid,
+        action: keycompute_auth::AuthorizationAction,
+    ) -> Result<keycompute_types::TenantScope> {
+        self.authorization_context()
+            .require_owner(owner, action)
+            .map_err(ApiError::from)
     }
 
     /// 使用认证阶段根据 AuthType 构建的权限集合做授权判断。
     /// API Key 即使归属于 admin 用户，也不会因 role 字符串获得后台权限。
     pub fn has_permission(&self, permission: &Permission) -> bool {
-        self.permissions.contains(permission)
+        PermissionChecker::check(self.credential_kind, &self.permissions, permission)
     }
 }
 
@@ -206,7 +279,9 @@ impl TryFrom<AuthExtractor> for ConsoleAuth {
     type Error = ApiError;
 
     fn try_from(auth: AuthExtractor) -> Result<Self> {
-        if !auth.has_permission(&Permission::AccessConsole) {
+        if auth.credential_kind != CredentialKind::Jwt
+            || !auth.has_permission(&Permission::AccessConsole)
+        {
             return Err(ApiError::Forbidden("Console session required".to_string()));
         }
         Ok(Self(auth))
@@ -218,6 +293,62 @@ impl FromRequestParts<AppState> for ConsoleAuth {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
         Self::try_from(AuthExtractor::from_request_parts(parts, state).await?)
+    }
+}
+
+/// Global console identity. It intentionally has no tenant requirement and is
+/// used for profile, membership listing, tenant selection, and invitations.
+/// Tenant-scoped handlers must continue to extract [`ConsoleAuth`].
+#[derive(Debug, Clone)]
+pub struct GlobalConsoleAuth(pub AuthContext);
+
+impl std::ops::Deref for GlobalConsoleAuth {
+    type Target = AuthContext;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TryFrom<AuthContext> for GlobalConsoleAuth {
+    type Error = ApiError;
+    fn try_from(ctx: AuthContext) -> Result<Self> {
+        if ctx.credential_kind != CredentialKind::Jwt
+            || !ctx.has_permission(&Permission::AccessConsole)
+        {
+            return Err(ApiError::Forbidden(
+                "Global console session required".to_string(),
+            ));
+        }
+        Ok(Self(ctx))
+    }
+}
+
+impl FromRequestParts<AppState> for GlobalConsoleAuth {
+    type Rejection = ApiError;
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self> {
+        if let Some(auth) = parts.extensions.get::<Self>().cloned() {
+            return Ok(auth);
+        }
+        if let Some(ctx) = parts.extensions.get::<AuthContext>().cloned() {
+            return Self::try_from(ctx);
+        }
+        if let Some(auth) = parts.extensions.get::<AuthExtractor>() {
+            return Self::try_from(auth.authorization_context());
+        }
+        let value = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| ApiError::Auth("Authentication required".into()))?;
+        let token = value
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| ApiError::Auth("Invalid Authorization format".into()))?;
+        let ctx = state
+            .auth
+            .verify_token(token)
+            .await
+            .map_err(authentication_error)?;
+        Self::try_from(ctx)
     }
 }
 
@@ -481,8 +612,13 @@ mod tests {
 
     #[tokio::test]
     async fn auth_extractor_reuses_server_validated_extension() {
-        let expected = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user")
-            .with_permissions(vec![Permission::UseApi]);
+        let expected = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        )
+        .with_permissions(vec![Permission::UseApi]);
         let request = axum::http::Request::builder()
             .uri("/v1/responses")
             .extension(expected.clone())
@@ -497,7 +633,6 @@ mod tests {
         assert_eq!(actual.user_id, expected.user_id);
         assert_eq!(actual.tenant_id, expected.tenant_id);
         assert_eq!(actual.produce_ai_key_id, expected.produce_ai_key_id);
-        assert_eq!(actual.role, expected.role);
         assert_eq!(actual.permissions, expected.permissions);
     }
 
@@ -539,52 +674,16 @@ mod tests {
     }
 
     #[test]
-    fn admin_role_without_system_permission_is_not_authorized() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
-        assert!(!auth.has_permission(&Permission::SystemAdmin));
-        assert!(!auth.is_admin());
-
-        let jwt_admin = auth.with_permissions(vec![Permission::SystemAdmin]);
-        assert!(jwt_admin.has_permission(&Permission::SystemAdmin));
-        assert!(jwt_admin.is_admin());
-    }
-    #[test]
-    fn credential_authority_is_identical_before_and_after_extraction() {
-        use keycompute_auth::{AuthType, build_permissions};
-        for role in ["system", "admin", "user", "unknown"] {
-            for kind in [AuthType::Jwt, AuthType::ApiKey] {
-                let ctx = AuthContext::new(
-                    Uuid::new_v4(),
-                    Uuid::new_v4(),
-                    if kind == AuthType::Jwt {
-                        Uuid::nil()
-                    } else {
-                        Uuid::new_v4()
-                    },
-                    role,
-                )
-                .with_permissions(build_permissions(kind, role));
-                let admin = ctx.is_admin();
-                let console = ctx.has_permission(&Permission::AccessConsole);
-                let extracted = AuthExtractor::from_auth_context(ctx);
-                assert_eq!(admin, extracted.is_admin(), "{kind:?}/{role}");
-                assert_eq!(ConsoleAuth::try_from(extracted).is_ok(), console);
-                assert_eq!(
-                    admin,
-                    kind == AuthType::Jwt && matches!(role, "admin" | "system")
-                );
-                assert_eq!(
-                    console,
-                    kind == AuthType::Jwt && matches!(role, "user" | "admin" | "system")
-                );
-            }
-        }
-        let unprivileged = AuthContext::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::nil(), "system");
-        assert!(
-            !unprivileged.is_admin(),
-            "role metadata is not a permission grant"
+    fn api_keys_never_get_console_permission() {
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
         );
-        assert!(!AuthExtractor::from_auth_context(unprivileged).is_admin());
+        assert!(!auth.has_permission(&Permission::AccessConsole));
+        let console = auth.with_permissions(vec![Permission::AccessConsole]);
+        assert!(ConsoleAuth::try_from(console).is_ok());
     }
 
     #[tokio::test]
@@ -603,14 +702,24 @@ mod tests {
                 get(crate::handlers::user::get_current_user),
             )
             .with_state(state);
-        for role in ["user", "admin", "system"] {
+        for platform in [
+            PlatformRole::None,
+            PlatformRole::Operator,
+            PlatformRole::Root,
+        ] {
             let mut request = Request::builder()
                 .uri("/standalone-self-service")
                 .body(Body::empty())
                 .unwrap();
+            let _ = platform; // Ownership role cannot change credential purpose.
             request.extensions_mut().insert(
-                AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), role)
-                    .with_permissions(vec![Permission::UseApi]),
+                AuthExtractor::new(
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    CredentialKind::ApiKey,
+                )
+                .with_permissions(vec![Permission::UseApi]),
             );
             assert_eq!(
                 app.clone().oneshot(request).await.unwrap().status(),

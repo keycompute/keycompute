@@ -112,7 +112,15 @@ impl DisplayCache {
             auth.tenant_id.to_string(),
             auth.user_id.to_string(),
             auth.produce_ai_key_id.to_string(),
-            auth.role.clone(),
+            auth.platform_role.as_str().to_string(),
+            auth.tenant_role
+                .map(|role| role.as_str())
+                .unwrap_or("absent")
+                .to_string(),
+            auth.credential_kind.as_str().to_string(),
+            auth.token_version.to_string(),
+            auth.membership_version.to_string(),
+            auth.authz_version.to_string(),
             format!("{:?}", auth.permissions),
             resource.to_owned(),
             query.to_owned(),
@@ -120,7 +128,7 @@ impl DisplayCache {
             h.update((p.len() as u64).to_be_bytes());
             h.update(p.as_bytes());
         }
-        format!("console-display:v2:{:x}", h.finalize())
+        format!("console-display:v3:{:x}", h.finalize())
     }
     pub async fn read<F>(
         &self,

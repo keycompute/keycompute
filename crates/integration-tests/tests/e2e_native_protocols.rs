@@ -10,7 +10,7 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use integration_tests::db::{
-    TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
+    TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::models::{
@@ -19,15 +19,13 @@ use keycompute_db::models::{
     passthrough_binding::{CreatePassthroughBindingRequest, PassthroughBinding},
 };
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, CreateUserRequest, DbRouter,
-    ProduceAiKey, User, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, UserBalance,
 };
 use keycompute_server::{
     AppState, create_router,
     state::{AppStateConfig, RateLimitBackendConfig},
 };
 use keycompute_types::{
-    UserRole,
     node::{NodeTaskEnvelope, NodeTaskResult},
     node_capability::{NativeFeature, NativeModelProfile},
     node_native::{NodeNativeHttpResult, NodeNativeOperation as Op},
@@ -170,7 +168,7 @@ struct Fixture {
     cleanup: TestDataGuard,
     state: AppState,
     app: Router,
-    user: User,
+    user: TenantActor,
     key: String,
     model: String,
     node: Node,
@@ -193,21 +191,11 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "native-multi", &run).await;
-        let user = User::create(
-            &db,
-            &CreateUserRequest {
-                tenant_id: tenant.id,
-                email: format!("native-{run}@example.invalid"),
-                name: Some("Native protocol fixture".into()),
-                role: Some(UserRole::Admin),
-            },
-        )
-        .await
-        .unwrap();
+        let user = create_test_user(&db, tenant.id, "native", &run).await;
         UserBalance::recharge(
             &db,
-            user.id,
             tenant.id,
+            user.id,
             Decimal::from(100),
             None,
             Some("isolated protocol tests"),
@@ -274,6 +262,7 @@ impl Fixture {
         let node = Node::create(
             &db,
             &CreateNodeRequest {
+                tenant_id: owner.tenant_id,
                 owner_user_id: owner.id,
                 client_instance_id: format!("native-{run}"),
                 display_name: "Native fixture".into(),
@@ -463,22 +452,6 @@ impl Fixture {
     }
     async fn finish(&mut self) {
         self.wait_for_settlement().await;
-        self.db
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "DELETE FROM node_tasks WHERE user_id=$1",
-                [self.user.id.into()],
-            ))
-            .await
-            .unwrap();
-        self.db
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "DELETE FROM nodes WHERE id=$1",
-                [self.node.id.into()],
-            ))
-            .await
-            .unwrap();
         self.cleanup.cleanup().await.unwrap();
     }
 }

@@ -127,6 +127,7 @@ impl AdminApi {
         idempotency_key: &str,
         token: &str,
     ) -> Result<UpdateBalanceResponse> {
+        validate_target_tenant(req.tenant_id)?;
         self.client
             .post_json_with_idempotency_key(
                 &format!("/api/v1/users/{}/balance", id),
@@ -146,6 +147,7 @@ impl AdminApi {
         idempotency_key: &str,
         token: &str,
     ) -> Result<UpdateBalanceResponse> {
+        validate_target_tenant(req.tenant_id)?;
         self.client
             .post_json_with_idempotency_key(
                 &format!("/api/v1/users/{}/balance/freeze", id),
@@ -165,6 +167,7 @@ impl AdminApi {
         idempotency_key: &str,
         token: &str,
     ) -> Result<UpdateBalanceResponse> {
+        validate_target_tenant(req.tenant_id)?;
         self.client
             .post_json_with_idempotency_key(
                 &format!("/api/v1/users/{}/balance/unfreeze", id),
@@ -180,9 +183,10 @@ impl AdminApi {
     pub async fn list_user_balance_reservations(
         &self,
         id: &str,
+        tenant_id: uuid::Uuid,
         token: &str,
     ) -> Result<UserBalanceReservationsResponse> {
-        self.list_user_balance_reservations_page(id, None, None, token)
+        self.list_user_balance_reservations_page(id, tenant_id, None, None, token)
             .await
     }
 
@@ -191,12 +195,14 @@ impl AdminApi {
     pub async fn list_user_balance_reservations_page(
         &self,
         id: &str,
+        tenant_id: uuid::Uuid,
         cursor: Option<&str>,
         limit: Option<u64>,
         token: &str,
     ) -> Result<UserBalanceReservationsResponse> {
+        validate_target_tenant(tenant_id)?;
         let mut path = format!("/api/v1/users/{}/balance/reservations", id);
-        let mut query = Vec::new();
+        let mut query = vec![format!("tenant_id={tenant_id}")];
         if let Some(cursor) = cursor {
             query.push(format!("cursor={}", urlencoding::encode(cursor)));
         }
@@ -219,6 +225,7 @@ impl AdminApi {
         req: &ReleaseBalanceReservationRequest,
         token: &str,
     ) -> Result<ReleaseBalanceReservationResponse> {
+        validate_target_tenant(req.tenant_id)?;
         self.client
             .post_json(
                 &format!(
@@ -232,9 +239,18 @@ impl AdminApi {
     }
 
     /// 获取用户的 API Keys
-    pub async fn list_user_api_keys(&self, id: &str, token: &str) -> Result<Vec<ApiKeyInfo>> {
+    pub async fn list_user_api_keys(
+        &self,
+        id: &str,
+        tenant_id: uuid::Uuid,
+        token: &str,
+    ) -> Result<Vec<ApiKeyInfo>> {
+        validate_target_tenant(tenant_id)?;
         self.client
-            .get_json(&format!("/api/v1/users/{}/api-keys", id), Some(token))
+            .get_json(
+                &format!("/api/v1/users/{}/api-keys?tenant_id={tenant_id}", id),
+                Some(token),
+            )
             .await
     }
 
@@ -797,4 +813,13 @@ impl AdminApi {
             )
             .await
     }
+}
+
+fn validate_target_tenant(tenant_id: uuid::Uuid) -> Result<()> {
+    if tenant_id.is_nil() {
+        return Err(crate::ClientError::Other(
+            "A nonzero target tenant UUID is required".into(),
+        ));
+    }
+    Ok(())
 }

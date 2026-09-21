@@ -242,18 +242,12 @@ pub async fn login_handler(
         _ => ApiError::Internal(format!("Login failed: {}", e)),
     })?;
 
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "user_id": response.user_id.to_string(),
-            "tenant_id": response.tenant_id.to_string(),
-            "email": response.email,
-            "role": response.role,
-            "access_token": response.jwt_token,
-            "token_type": "Bearer",
-            "expires_in": response.expires_in
-        })),
-    ))
+    let session = state
+        .auth
+        .session_response(response.jwt_token, response.expires_in)
+        .await
+        .map_err(ApiError::from)?;
+    Ok((StatusCode::OK, Json(session)))
 }
 
 /// 忘记密码
@@ -387,18 +381,12 @@ pub async fn refresh_token_handler(
         .await
         .map_err(|e| ApiError::Auth(format!("Token refresh failed: {}", e)))?;
 
-    Ok((
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "user_id": response.user_id.to_string(),
-            "tenant_id": response.tenant_id.to_string(),
-            "email": response.email,
-            "role": response.role,
-            "access_token": response.jwt_token,
-            "token_type": "Bearer",
-            "expires_in": response.expires_in
-        })),
-    ))
+    let session = state
+        .auth
+        .session_response(response.jwt_token, response.expires_in)
+        .await
+        .map_err(ApiError::from)?;
+    Ok((StatusCode::OK, Json(session)))
 }
 
 /// 刷新 Token 请求

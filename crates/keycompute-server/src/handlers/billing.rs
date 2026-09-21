@@ -293,7 +293,10 @@ pub struct CalculateCostResponse {
 
 fn resolve_preview_tenant(auth: &AuthExtractor, requested_tenant: Option<Uuid>) -> Result<Uuid> {
     match requested_tenant {
-        Some(tenant_id) if tenant_id != auth.tenant_id && !auth.is_admin() => {
+        Some(tenant_id)
+            if tenant_id != auth.tenant_id
+                && !auth.has_permission(&keycompute_auth::Permission::ManageUsers) =>
+        {
             Err(crate::error::ApiError::Forbidden(
                 "Cannot calculate pricing for another tenant".to_string(),
             ))
@@ -361,7 +364,12 @@ mod tests {
     fn preview_tenant_cannot_be_overridden_by_regular_users() {
         let own_tenant = Uuid::new_v4();
         let other_tenant = Uuid::new_v4();
-        let auth = AuthExtractor::new(Uuid::new_v4(), own_tenant, Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            own_tenant,
+            Uuid::new_v4(),
+            keycompute_types::CredentialKind::Jwt,
+        );
 
         assert_eq!(resolve_preview_tenant(&auth, None).unwrap(), own_tenant);
         assert_eq!(
@@ -377,8 +385,13 @@ mod tests {
     #[test]
     fn admin_can_preview_an_explicit_tenant() {
         let target_tenant = Uuid::new_v4();
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
-            .with_permissions(vec![keycompute_auth::Permission::SystemAdmin]);
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            keycompute_types::CredentialKind::Jwt,
+        )
+        .with_permissions(vec![keycompute_auth::Permission::ManageUsers]);
 
         assert_eq!(
             resolve_preview_tenant(&auth, Some(target_tenant)).unwrap(),

@@ -178,12 +178,13 @@ async fn expiry_bytes_entries_and_identity_are_bounded() {
         2
     );
     let id = Uuid::new_v4();
-    let mut a = AuthExtractor::new(id, id, Uuid::nil(), "user");
+    let mut a = AuthExtractor::new(id, id, Uuid::nil(), keycompute_types::CredentialKind::Jwt);
     let k = DisplayCache::key(&a, "summary", "q");
     a.user_id = Uuid::new_v4();
     assert_ne!(k, DisplayCache::key(&a, "summary", "q"));
     a.user_id = id;
-    a.permissions.push(keycompute_auth::Permission::SystemAdmin);
+    a.permissions
+        .push(keycompute_auth::Permission::ManageTenant);
     assert_ne!(k, DisplayCache::key(&a, "summary", "q"));
 }
 #[tokio::test]

@@ -40,9 +40,10 @@ pub trait NodeCapabilityIndex: Send + Sync {
     /// 检查是否存在 ready 节点可以处理指定模型
     ///
     /// 该方法为异步，因为实际实现需要执行数据库查询 (I/O 操作)。
-    async fn has_ready_node(&self, model: &str) -> Result<bool>;
+    async fn has_ready_node(&self, tenant_id: Uuid, model: &str) -> Result<bool>;
     async fn has_ready_native(
         &self,
+        tenant_id: Uuid,
         requirements: &keycompute_types::node_capability::NativeRequirements,
     ) -> Result<bool>;
 }
@@ -289,9 +290,9 @@ impl RoutingEngine {
                 };
                 let lookup = async {
                     if let Some(needed) = &needed {
-                        index.has_ready_native(needed).await
+                        index.has_ready_native(ctx.tenant_id, needed).await
                     } else {
-                        index.has_ready_node(&ctx.model).await
+                        index.has_ready_node(ctx.tenant_id, &ctx.model).await
                     }
                 };
                 let ready = tokio::time::timeout(std::time::Duration::from_secs(3), lookup)
@@ -898,14 +899,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl NodeCapabilityIndex for MockNodeIndex {
-        async fn has_ready_node(&self, model: &str) -> Result<bool> {
+        async fn has_ready_node(&self, _tenant_id: Uuid, model: &str) -> Result<bool> {
             Ok(self.ready_models.contains(&model.to_string()))
         }
         async fn has_ready_native(
             &self,
+            tenant_id: Uuid,
             needed: &keycompute_types::node_capability::NativeRequirements,
         ) -> Result<bool> {
-            self.has_ready_node(&needed.model).await
+            self.has_ready_node(tenant_id, &needed.model).await
         }
     }
 

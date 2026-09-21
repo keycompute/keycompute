@@ -163,31 +163,31 @@ async fn test_user_service_no_database() {
 
     // 1. 加载用户（模拟数据）
     let user_id = Uuid::new_v4();
-    let user = service.load_user(user_id).await.unwrap();
+    let user = service.load_user(user_id).await;
     chain.add_step(
         "keycompute-auth",
         "UserService::load_user",
-        format!("User loaded: {}", user.email),
-        user.id == user_id,
+        format!("Global lookup rejected without a primary database: {user:?}"),
+        user.is_err(),
     );
 
     // 2. 加载租户（模拟数据）
     let tenant_id = Uuid::new_v4();
-    let tenant = service.load_tenant(tenant_id).await.unwrap();
+    let tenant = service.load_tenant(tenant_id).await;
     chain.add_step(
         "keycompute-auth",
         "UserService::load_tenant",
-        format!("Tenant loaded: {}", tenant.name),
-        tenant.id == tenant_id,
+        format!("Tenant lookup rejected without a primary database: {tenant:?}"),
+        tenant.is_err(),
     );
 
     // 3. 加载用户和租户
-    let (user, tenant) = service.load_user_and_tenant(user_id).await.unwrap();
+    let pair = service.load_user_and_tenant(user_id, tenant_id).await;
     chain.add_step(
         "keycompute-auth",
         "UserService::load_user_and_tenant",
-        format!("User {} in tenant {}", user.email, tenant.name),
-        user.id == user_id,
+        format!("Scoped lookup rejected without a primary database: {pair:?}"),
+        pair.is_err(),
     );
 
     chain.print_report();
@@ -205,44 +205,55 @@ fn test_user_info_functionality() {
 
     // 1. 创建普通用户
     let user_id = Uuid::new_v4();
-    let tenant_id = Uuid::new_v4();
-    let user = UserInfo::new(user_id, tenant_id, "user@test.com", "Test User", "user");
+    let user = UserInfo::new(
+        user_id,
+        "user@test.com",
+        "Test User",
+        keycompute_types::PlatformRole::None,
+        keycompute_types::UserStatus::Active,
+        0,
+    );
 
     chain.add_step(
         "keycompute-auth",
         "UserInfo::new",
         format!("User created: {}", user.email),
-        user.email == "user@test.com" && !user.has_admin_role(),
+        user.email == "user@test.com" && user.platform_role == keycompute_types::PlatformRole::None,
     );
 
     // 2. 创建管理员用户
     let admin = UserInfo::new(
         Uuid::new_v4(),
-        tenant_id,
         "admin@test.com",
         "Admin",
-        "admin",
+        keycompute_types::PlatformRole::None,
+        keycompute_types::UserStatus::Active,
+        0,
     );
     chain.add_step(
         "keycompute-auth",
         "UserInfo::has_admin_role",
-        format!("Admin check: {}", admin.has_admin_role()),
-        admin.has_admin_role(),
+        format!(
+            "Tenant role is not represented on global identity: {}",
+            admin.platform_role
+        ),
+        admin.platform_role == keycompute_types::PlatformRole::None,
     );
 
     // 3. 创建系统管理员
     let system_admin = UserInfo::new(
         Uuid::new_v4(),
-        tenant_id,
         "system@test.com",
         "System Admin",
-        "system",
+        keycompute_types::PlatformRole::Root,
+        keycompute_types::UserStatus::Active,
+        0,
     );
     chain.add_step(
         "keycompute-auth",
         "UserInfo::system_admin",
-        format!("System admin check: {}", system_admin.has_system_role()),
-        system_admin.has_system_role(),
+        format!("Platform root role: {}", system_admin.platform_role),
+        system_admin.platform_role == keycompute_types::PlatformRole::Root,
     );
 
     chain.print_report();
@@ -270,7 +281,10 @@ fn test_tenant_info_with_config() {
         default_rpm_limit: 100,
         default_tpm_limit: 50000,
     };
-    let tenant_with_config = tenant.with_config(config);
+    let tenant_with_config = TenantInfo {
+        config,
+        ..tenant.clone()
+    };
 
     chain.add_step(
         "keycompute-auth",
@@ -310,7 +324,7 @@ fn test_jwt_full_flow() {
     let user_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
     let token = validator
-        .generate_token(user_id, tenant_id, "admin")
+        .generate_identity_token(user_id, Some(tenant_id), 0, Some(1), Some(1), 3600)
         .unwrap();
 
     chain.add_step(
@@ -325,19 +339,17 @@ fn test_jwt_full_flow() {
     chain.add_step(
         "keycompute-auth",
         "JwtValidator::validate",
-        format!("Validated user: {}, role: {}", ctx.user_id, ctx.role),
-        ctx.user_id == user_id && ctx.role == "admin",
+        format!("Validated identity: {}", ctx.user_id),
+        ctx.user_id == user_id && ctx.selected_tenant_id == Some(tenant_id),
     );
 
     // 4. 检查权限
     chain.add_step(
         "keycompute-auth",
         "AuthContext::has_permission",
-        format!(
-            "Has SystemAdmin: {}",
-            ctx.has_permission(&Permission::SystemAdmin)
-        ),
-        ctx.has_permission(&Permission::SystemAdmin),
+        "Identity-only JWT has no authority claims".to_string(),
+        !ctx.permissions
+            .contains(&keycompute_auth::Permission::ManageUsers),
     );
 
     // 5. 刷新 Token
@@ -431,8 +443,8 @@ async fn test_produce_ai_key_validation_flow_requires_database() {
 
 /// 测试 AuthService 完整流程
 ///
-/// 注意：无数据库连接时，API Key 验证会失败（安全默认行为）
-/// JWT 验证不需要数据库，可以正常工作
+/// 注意：无数据库连接时，所有 AuthService verification paths fail closed.
+/// `JwtValidator::validate` remains available for structural parsing.
 #[tokio::test]
 async fn test_auth_service_integration() {
     let mut chain = VerificationChain::new();
@@ -459,12 +471,12 @@ async fn test_auth_service_integration() {
         api_result.is_err(),
     );
 
-    // 3. 验证 JWT（不需要数据库）
+    // 3. 结构性验证 JWT（不需要数据库）
     let user_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
     let jwt_validator = JwtValidator::new("jwt-secret", "keycompute");
     let token = jwt_validator
-        .generate_token(user_id, tenant_id, "user")
+        .generate_identity_token(user_id, Some(tenant_id), 0, Some(1), Some(1), 3600)
         .unwrap();
     let jwt_ctx = auth_service.verify_jwt(&token).unwrap();
 
@@ -484,16 +496,13 @@ async fn test_auth_service_integration() {
         detected_result.is_err(),
     );
 
-    // 5. 自动检测 Token 类型 - JWT（应该成功）
-    let jwt_detected = auth_service.verify_token(&token).await.unwrap();
+    // 5. AuthService verification always requires current primary identity state.
+    let jwt_detected = auth_service.verify_token(&token).await;
     chain.add_step(
         "keycompute-auth",
         "AuthService::verify_token (JWT)",
-        format!(
-            "JWT auto-detected and validated, user: {}",
-            jwt_detected.user_id
-        ),
-        jwt_detected.user_id == user_id,
+        "JWT rejected without primary identity storage".to_string(),
+        jwt_detected.is_err(),
     );
 
     chain.print_report();
@@ -507,12 +516,10 @@ async fn test_auth_service_integration() {
 /// 测试权限检查
 #[test]
 fn test_permission_system() {
-    use keycompute_auth::{AuthType, build_permissions};
-
     let mut chain = VerificationChain::new();
 
     // 1. 权限字符串转换
-    let use_api = Permission::from_str("api:use").unwrap();
+    let use_api = Permission::parse("api:use").unwrap();
     chain.add_step(
         "keycompute-auth",
         "Permission::from_str",
@@ -522,10 +529,16 @@ fn test_permission_system() {
 
     // 2. 权限检查
     let user_perms = vec![Permission::UseApi, Permission::ViewUsage];
-    let has_api =
-        keycompute_auth::PermissionChecker::check("user", &user_perms, &Permission::UseApi);
-    let has_manage =
-        keycompute_auth::PermissionChecker::check("user", &user_perms, &Permission::ManageUsers);
+    let has_api = keycompute_auth::PermissionChecker::check(
+        keycompute_types::CredentialKind::Jwt,
+        &user_perms,
+        &Permission::UseApi,
+    );
+    let has_manage = keycompute_auth::PermissionChecker::check(
+        keycompute_types::CredentialKind::Jwt,
+        &user_perms,
+        &Permission::ManageUsers,
+    );
 
     chain.add_step(
         "keycompute-auth",
@@ -534,11 +547,17 @@ fn test_permission_system() {
         has_api && !has_manage,
     );
 
-    // 3. 管理员权限（基于权限列表而非角色）
-    // 权限检查完全基于权限列表，admin 角色如果没有 ManageUsers 权限应该返回 false
-    let admin_perms = build_permissions(AuthType::Jwt, "admin");
-    let admin_has_manage =
-        keycompute_auth::PermissionChecker::check("admin", &admin_perms, &Permission::ManageUsers);
+    // 3. Platform root and tenant admin are distinct authority sources.
+    let admin_perms = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::Jwt,
+        keycompute_types::PlatformRole::Root,
+        None,
+    );
+    let admin_has_manage = keycompute_auth::PermissionChecker::check(
+        keycompute_types::CredentialKind::Jwt,
+        &admin_perms,
+        &Permission::ManageUsers,
+    );
     chain.add_step(
         "keycompute-auth",
         "PermissionChecker::admin",
@@ -549,13 +568,21 @@ fn test_permission_system() {
         admin_has_manage,
     );
 
-    // 4. 角色权限（使用新的 build_permissions 函数）
-    let user_role = build_permissions(AuthType::Jwt, "user");
-    let admin_role = build_permissions(AuthType::Jwt, "admin");
+    // 4. Tenant membership capabilities come from the verified membership.
+    let user_role = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::Jwt,
+        keycompute_types::PlatformRole::None,
+        Some(keycompute_types::TenantRole::Member),
+    );
+    let admin_role = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::Jwt,
+        keycompute_types::PlatformRole::None,
+        Some(keycompute_types::TenantRole::Admin),
+    );
 
     chain.add_step(
         "keycompute-auth",
-        "roles::jwt",
+        "membership::jwt",
         format!(
             "User role: {} perms, Admin: {} perms",
             user_role.len(),

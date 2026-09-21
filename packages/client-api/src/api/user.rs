@@ -4,7 +4,10 @@
 
 use crate::client::ApiClient;
 use crate::error::Result;
+use keycompute_types::{PlatformRole, UserStatus};
 use serde::{Deserialize, Serialize};
+
+use super::auth::{SelectedTenant, SessionCapabilities, TenantMembership};
 
 pub use super::common::MessageResponse;
 
@@ -56,9 +59,20 @@ pub struct CurrentUserResponse {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
-    pub role: String,
-    pub tenant_id: String,
+    #[serde(default)]
+    pub platform_role: Option<PlatformRole>,
+    #[serde(default)]
+    pub status: Option<UserStatus>,
+    #[serde(default)]
+    pub token_version: Option<i32>,
+    #[serde(default)]
+    pub memberships: Vec<TenantMembership>,
+    #[serde(default)]
+    pub selected_tenant: Option<SelectedTenant>,
+    #[serde(default)]
+    pub capabilities: SessionCapabilities,
     pub created_at: String,
+    #[serde(default)]
     pub updated_at: Option<String>,
 }
 

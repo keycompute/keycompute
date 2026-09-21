@@ -1,6 +1,6 @@
 //! 用户管理相关类型
 
-use keycompute_types::{AssignableUserRole, UserRole};
+use keycompute_types::{PlatformRole, UserStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::api::common::encode_query_value;
@@ -8,10 +8,8 @@ use crate::api::common::encode_query_value;
 /// 用户查询参数
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UserQueryParams {
-    /// 租户 ID 过滤
-    pub tenant_id: Option<String>,
-    /// 角色过滤
-    pub role: Option<UserRole>,
+    /// Global platform role filter.
+    pub platform_role: Option<PlatformRole>,
     /// 搜索关键词（邮箱或名称）
     pub search: Option<String>,
     /// 页码（从 1 开始）
@@ -27,13 +25,8 @@ impl UserQueryParams {
         Self::default()
     }
 
-    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
-        self.tenant_id = Some(tenant_id.into());
-        self
-    }
-
-    pub fn with_role(mut self, role: UserRole) -> Self {
-        self.role = Some(role);
+    pub fn with_platform_role(mut self, role: PlatformRole) -> Self {
+        self.platform_role = Some(role);
         self
     }
 
@@ -54,11 +47,11 @@ impl UserQueryParams {
 
     pub fn to_query_string(&self) -> String {
         let mut params = Vec::new();
-        if let Some(ref tenant_id) = self.tenant_id {
-            params.push(format!("tenant_id={}", encode_query_value(tenant_id)));
-        }
-        if let Some(ref role) = self.role {
-            params.push(format!("role={}", encode_query_value(role.as_str())));
+        if let Some(role) = self.platform_role {
+            params.push(format!(
+                "platform_role={}",
+                encode_query_value(role.as_str())
+            ));
         }
         if let Some(ref search) = self.search {
             params.push(format!("search={}", encode_query_value(search)));
@@ -79,27 +72,15 @@ pub struct UserDetail {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
-    pub role: String,
-    pub tenant_id: String,
-    /// 租户名称（后端始终返回，默认 "Unknown"）
-    pub tenant_name: String,
-    /// 用户可用余额（后端始终返回，默认 0.0）
     #[serde(default)]
-    pub balance: f64,
-    /// 用户冻结余额（后端始终返回，默认 0.0）
+    pub platform_role: Option<PlatformRole>,
     #[serde(default)]
-    pub frozen_balance: f64,
-    #[serde(default = "default_balance_initialized")]
-    pub balance_initialized: bool,
+    pub status: Option<UserStatus>,
     #[serde(default)]
-    pub balance_as_of: String,
+    pub memberships: Option<Vec<super::super::auth::TenantMembership>>,
     pub created_at: String,
     pub updated_at: String,
     pub last_login_at: Option<String>,
-}
-
-fn default_balance_initialized() -> bool {
-    true
 }
 
 /// 用户列表响应（带分页信息）
@@ -117,11 +98,8 @@ pub struct UserListResponse {
 pub struct UpdateUserRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role: Option<AssignableUserRole>,
-    /// 目标租户 ID；省略时保持当前租户。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tenant_id: Option<String>,
+    // Security changes are intentionally a separate server-authorized API;
+    // this profile request cannot claim a platform role or tenant.
 }
 
 impl UpdateUserRequest {
@@ -133,31 +111,10 @@ impl UpdateUserRequest {
         self.name = Some(name.into());
         self
     }
-
-    pub fn with_role(mut self, role: AssignableUserRole) -> Self {
-        self.role = Some(role);
-        self
-    }
-
-    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
-        self.tenant_id = Some(tenant_id.into());
-        self
-    }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct UpdateUserResponse {
-    pub success: bool,
-    pub message: String,
-    pub user_id: String,
-    pub email: String,
-    pub name: Option<String>,
-    pub role: String,
-    #[serde(default)]
-    pub tenant_id: Option<String>,
-    #[serde(default)]
-    pub tenant_name: Option<String>,
-}
+/// Global profile returned directly by the server.
+pub type UpdateUserResponse = UserDetail;
 
 /// 更新余额请求
 ///
@@ -165,6 +122,7 @@ pub struct UpdateUserResponse {
 /// freeze/unfreeze 始终使用正数金额。
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateBalanceRequest {
+    pub tenant_id: uuid::Uuid,
     /// 金额（字符串格式避免浮点精度问题）
     /// 正数为充值，负数为扣减
     pub amount: String,
@@ -174,24 +132,27 @@ pub struct UpdateBalanceRequest {
 
 impl UpdateBalanceRequest {
     /// 创建充值请求
-    pub fn add(amount: f64, reason: impl Into<String>) -> Self {
+    pub fn add(tenant_id: uuid::Uuid, amount: f64, reason: impl Into<String>) -> Self {
         Self {
+            tenant_id,
             amount: format_amount(amount),
             reason: reason.into(),
         }
     }
 
     /// 创建扣减请求
-    pub fn subtract(amount: f64, reason: impl Into<String>) -> Self {
+    pub fn subtract(tenant_id: uuid::Uuid, amount: f64, reason: impl Into<String>) -> Self {
         Self {
+            tenant_id,
             amount: format_amount(-amount), // 负数
             reason: reason.into(),
         }
     }
 
     /// 创建通用请求（使用正数金额，适用于 freeze/unfreeze 等场景）
-    pub fn new(amount: f64, reason: impl Into<String>) -> Self {
+    pub fn new(tenant_id: uuid::Uuid, amount: f64, reason: impl Into<String>) -> Self {
         Self {
+            tenant_id,
             amount: format_amount(amount),
             reason: reason.into(),
         }
@@ -271,14 +232,20 @@ pub struct UserBalanceReservationsResponse {
 /// 管理员按请求释放余额预留的请求。
 #[derive(Debug, Clone, Serialize)]
 pub struct ReleaseBalanceReservationRequest {
+    pub tenant_id: uuid::Uuid,
     /// 最新余额预留列表返回的不透明版本。
     pub expected_version: String,
     pub reason: String,
 }
 
 impl ReleaseBalanceReservationRequest {
-    pub fn new(expected_version: impl Into<String>, reason: impl Into<String>) -> Self {
+    pub fn new(
+        tenant_id: uuid::Uuid,
+        expected_version: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
+            tenant_id,
             expected_version: expected_version.into(),
             reason: reason.into(),
         }
@@ -335,24 +302,22 @@ mod tests {
     #[test]
     fn test_update_balance_request() {
         // 充值
-        let req = UpdateBalanceRequest::add(100.0, "Admin recharge");
+        let req = UpdateBalanceRequest::add(uuid::Uuid::from_u128(1), 100.0, "Admin recharge");
         assert_eq!(req.amount, "100");
         assert_eq!(req.reason, "Admin recharge");
 
         // 扣减
-        let req = UpdateBalanceRequest::subtract(50.0, "Admin deduction");
+        let req = UpdateBalanceRequest::subtract(uuid::Uuid::from_u128(1), 50.0, "Admin deduction");
         assert_eq!(req.amount, "-50");
         assert_eq!(req.reason, "Admin deduction");
     }
 
     #[test]
-    fn update_user_request_serializes_optional_tenant_id() {
-        let request = UpdateUserRequest::new()
-            .with_name("Alice")
-            .with_tenant_id("tenant-2");
+    fn update_user_request_serializes_profile_only() {
+        let request = UpdateUserRequest::new().with_name("Alice");
         assert_eq!(
             serde_json::to_value(request).expect("request should serialize"),
-            serde_json::json!({"name": "Alice", "tenant_id": "tenant-2"})
+            serde_json::json!({"name": "Alice"})
         );
 
         let unchanged = UpdateUserRequest::new();
@@ -363,18 +328,21 @@ mod tests {
     }
 
     #[test]
-    fn update_user_response_accepts_legacy_payload_without_tenant_fields() {
+    fn update_user_response_matches_global_server_profile() {
         let response: UpdateUserResponse = serde_json::from_value(serde_json::json!({
-            "success": true,
-            "message": "User updated",
-            "user_id": "user-1",
+            "id": "user-1",
             "email": "user@example.com",
             "name": "Alice",
-            "role": "user"
+            "platform_role": "none",
+            "status": "active",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_login_at": null
         }))
-        .expect("legacy update response should remain readable");
-
-        assert_eq!(response.tenant_id, None);
-        assert_eq!(response.tenant_name, None);
+        .expect("global profile response should deserialize");
+        assert_eq!(response.id, "user-1");
+        assert_eq!(response.platform_role, Some(PlatformRole::None));
+        assert_eq!(response.status, Some(UserStatus::Active));
+        assert!(response.memberships.is_none());
     }
 }

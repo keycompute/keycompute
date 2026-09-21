@@ -1417,9 +1417,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.edit_title", "编辑用户");
     m.insert("users.display_name", "显示名称");
     m.insert("users.display_name_placeholder", "留空则不修改");
-    m.insert("users.role_user", "user（普通用户）");
-    m.insert("users.role_admin", "admin（管理员）");
-    m.insert("users.role_system", "system（受保护）");
+    m.insert("users.role_none", "none（无平台权限）");
+    m.insert("users.role_operator", "operator（平台运营）");
+    m.insert("users.role_root", "root（平台最高权限）");
     m.insert("users.delete_confirm_title", "确认删除");
     m.insert("users.delete_confirm_prefix", "确定要删除用户");
     m.insert("users.delete_confirm_suffix", "吗？此操作不可撤销。");

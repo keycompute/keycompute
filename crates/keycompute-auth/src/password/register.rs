@@ -14,7 +14,7 @@ use keycompute_db::{
     DbRouter, PendingRegistration, Tenant, UpsertPendingRegistrationRequest, User, UserCredential,
 };
 use keycompute_emailserver::EmailService;
-use keycompute_types::{KeyComputeError, Result, UserRole};
+use keycompute_types::{KeyComputeError, Result};
 use rand::Rng;
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
@@ -350,10 +350,16 @@ impl RegistrationService {
             return Err(KeyComputeError::VerificationError("验证码错误".to_string()));
         }
 
-        let tenant = self.get_or_create_default_tenant_in_tx(&tx).await?;
         let password_hash = self.password_hasher.hash(&req.password)?;
         let user = self
-            .create_user_in_tx(&tx, tenant.id, &email, req.name.clone())
+            .create_user_in_tx(&tx, &email, req.name.clone())
+            .await?;
+        let tenant = self
+            .create_personal_tenant_in_tx(
+                &tx,
+                user.id,
+                req.name.as_deref().unwrap_or("Personal tenant"),
+            )
             .await?;
         self.create_verified_credential_in_tx(&tx, user.id, &password_hash)
             .await?;
@@ -407,40 +413,36 @@ impl RegistrationService {
         })
     }
 
-    /// 获取或创建默认租户
-    async fn get_or_create_default_tenant_in_tx(&self, tx: &DatabaseTransaction) -> Result<Tenant> {
-        let default_slug = "default";
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"INSERT INTO tenants (name, slug, description) VALUES ($1, $2, $3) ON CONFLICT (slug) DO UPDATE SET slug = EXCLUDED.slug RETURNING *"#,
-            [
-                "Default Tenant".into(),
-                default_slug.into(),
-                Some("Default tenant for new users").into(),
-            ],
-        );
-        let tenant = Tenant::find_by_statement(stmt)
-            .one(tx)
-            .await
-            .map_err(|e| {
-                KeyComputeError::DatabaseError(format!("Failed to create default tenant: {}", e))
-            })?
-            .ok_or_else(|| {
-                KeyComputeError::DatabaseError(
-                    "Failed to create default tenant: no row returned".to_string(),
-                )
-            })?;
-
-        // Registration always lands in the default tenant. If an administrator
-        // has closed it, fail closed instead of creating a user that can never
-        // authenticate or access tenant-scoped resources.
-        if !tenant.is_active() {
-            return Err(KeyComputeError::ServiceUnavailable(
-                "Registration is temporarily unavailable".to_string(),
-            ));
-        }
-
-        Ok(tenant)
+    async fn create_personal_tenant_in_tx(
+        &self,
+        tx: &DatabaseTransaction,
+        owner_user_id: Uuid,
+        label: &str,
+    ) -> Result<Tenant> {
+        let slug = format!("personal-{}", owner_user_id.simple());
+        let request = keycompute_db::CreateTenantRequest {
+            name: format!("{}'s tenant", label),
+            slug,
+            description: Some("Personal tenant".into()),
+            default_rpm_limit: None,
+            default_tpm_limit: None,
+        };
+        Tenant::create_owned(
+            tx,
+            &request,
+            owner_user_id,
+            &keycompute_db::AuditContext {
+                actor_user_id: owner_user_id,
+                credential_kind: keycompute_types::CredentialKind::System,
+                actor_platform_role: keycompute_types::PlatformRole::None,
+                actor_tenant_role: None,
+                request_id: None,
+            },
+        )
+        .await
+        .map_err(|e| {
+            KeyComputeError::DatabaseError(format!("Failed to create personal tenant: {e}"))
+        })
     }
 
     fn validate_registration_code(&self, code: &str) -> Result<()> {
@@ -484,27 +486,16 @@ impl RegistrationService {
     async fn create_user_in_tx(
         &self,
         tx: &DatabaseTransaction,
-        tenant_id: Uuid,
         email: &str,
         name: Option<String>,
     ) -> Result<User> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"INSERT INTO users (tenant_id, email, name, role) VALUES ($1, $2, $3, $4) RETURNING *"#,
-            [
-                tenant_id.into(),
-                email.into(),
-                name.clone().into(),
-                UserRole::User.as_str().into(),
-            ],
-        );
-        let user = User::find_by_statement(stmt)
-            .one(tx)
+        let request = keycompute_db::CreateUserRequest {
+            email: email.to_string(),
+            name,
+        };
+        let user = User::create(tx, &request)
             .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to create user: {}", e)))?
-            .ok_or_else(|| {
-                KeyComputeError::DatabaseError("Failed to create user: no row returned".to_string())
-            })?;
+            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to create user: {e}")))?;
         Ok(user)
     }
 
@@ -546,7 +537,7 @@ impl RegistrationService {
 
         let stmt1 = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO user_balances (tenant_id, user_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW()"#,
+            r#"INSERT INTO user_balances (tenant_id, user_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (tenant_id, user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW()"#,
             [tenant_id.into(), user_id.into(), amount.into()],
         );
         tx.execute(stmt1).await.map_err(|e| {

@@ -20,6 +20,7 @@ pub const TASK_STATUS_EXPIRED: &str = "expired";
 pub struct NodeTask {
     pub id: Uuid,
     pub request_id: Uuid,
+    pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub model: String,
     pub payload_json: serde_json::Value,
@@ -44,6 +45,7 @@ pub struct NodeTask {
 /// 创建节点任务请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateNodeTaskRequest {
+    pub tenant_id: Uuid,
     pub request_id: Uuid,
     pub user_id: Uuid,
     pub model: String,
@@ -83,8 +85,12 @@ impl NodeTask {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, deadline_at, complete_grace_until,native_requirements_json)
-            VALUES ($1, $2, $3, $4, $5, $6, $7,$8)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, deadline_at, complete_grace_until,native_requirements_json)
+            SELECT $1, m.tenant_id, $2, $3, $4, $5, $6, $7, $8
+            FROM tenant_memberships m
+            JOIN tenants t ON t.id=m.tenant_id AND t.status='active'
+            JOIN users u ON u.id=m.user_id AND u.status='active'
+            WHERE m.tenant_id=$9 AND m.user_id = $2 AND m.status = 'active'
             RETURNING *
             "#,
             [
@@ -96,6 +102,7 @@ impl NodeTask {
                 req.deadline_at.into(),
                 req.complete_grace_until.into(),
                 native.into(),
+                req.tenant_id.into(),
             ],
         );
         let task = NodeTask::find_by_statement(stmt)
@@ -158,11 +165,22 @@ impl NodeTask {
             WHERE id = $5
               AND status = $6
               AND deadline_at >= NOW()
+              AND EXISTS (
+                SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id
+                JOIN tenant_memberships owner_m ON owner_m.tenant_id=n.tenant_id AND owner_m.user_id=n.owner_user_id AND owner_m.status='active'
+                JOIN users owner_u ON owner_u.id=n.owner_user_id AND owner_u.status='active'
+                JOIN tenant_memberships caller_m ON caller_m.tenant_id=node_tasks.tenant_id AND caller_m.user_id=node_tasks.user_id AND caller_m.status='active'
+                JOIN users caller_u ON caller_u.id=node_tasks.user_id AND caller_u.status='active'
+                JOIN tenants current_t ON current_t.id=n.tenant_id AND current_t.status='active'
+                WHERE n.id=$2 AND ns.id=$3 AND n.tenant_id=node_tasks.tenant_id AND n.status='online'
+                  AND ns.accepted_models_json @> jsonb_build_array(node_tasks.model)
+                  AND ns.revoked_at IS NULL AND ns.expires_at>NOW() AND ns.accepting_tasks=TRUE
+              )
               AND (payload_json->'native' IS NULL OR payload_json->'native'='null'::jsonb
                 OR (payload_json->'native'->'body'->>'model'=node_tasks.model
                     AND EXISTS (
                       SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
-                      JOIN users owner ON owner.id=n.owner_user_id JOIN tenants t ON t.id=owner.tenant_id
+                      JOIN tenants t ON t.id=n.tenant_id
                       WHERE ns.id=$3 AND ns.node_id=$2 AND n.status='online' AND t.status='active'
                         AND ns.expires_at>NOW() AND ns.revoked_at IS NULL AND ns.accepting_tasks=TRUE
                         AND n.capabilities_json->>'runtime'='ollama'
@@ -170,7 +188,10 @@ impl NodeTask {
                         AND ns.native_operations_json @> jsonb_build_array(node_tasks.native_requirements_json->>'operation')
                         AND EXISTS(SELECT 1 FROM jsonb_array_elements(ns.native_profiles_json) p WHERE {profile_match}))
                     AND EXISTS (
-                      SELECT 1 FROM users caller JOIN tenants ct ON ct.id=caller.tenant_id
+                      SELECT 1 FROM users caller
+                      JOIN tenant_memberships cm ON cm.tenant_id=node_tasks.tenant_id
+                        AND cm.user_id=caller.id AND cm.status='active'
+                      JOIN tenants ct ON ct.id=node_tasks.tenant_id
                       WHERE caller.id=node_tasks.user_id AND ct.status='active')))
             RETURNING *
             "#,
@@ -207,12 +228,16 @@ impl NodeTask {
                 lease_id=$3,claimed_at=NOW(),updated_at=NOW()
             WHERE id=(
                 SELECT nt.id FROM node_tasks nt
-                JOIN users caller ON caller.id=nt.user_id JOIN tenants ct ON ct.id=caller.tenant_id
+                JOIN tenant_memberships cm ON cm.tenant_id=nt.tenant_id
+                  AND cm.user_id=nt.user_id AND cm.status='active'
+                JOIN tenants ct ON ct.id=nt.tenant_id
                 WHERE nt.status='queued' AND nt.deadline_at>NOW() AND ct.status='active'
                   AND nt.native_requirements_json IS NOT NULL
                   AND EXISTS(SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
-                    JOIN users owner ON owner.id=n.owner_user_id JOIN tenants ot ON ot.id=owner.tenant_id
-                    WHERE ns.id=$2 AND n.id=$1 AND n.status='online' AND ot.status='active'
+                    JOIN tenants ot ON ot.id=n.tenant_id
+                    WHERE ns.id=$2 AND n.id=$1 AND n.tenant_id=nt.tenant_id AND n.status='online' AND ot.status='active'
+                      AND EXISTS(SELECT 1 FROM users u WHERE u.id=nt.user_id AND u.status='active')
+                      AND EXISTS(SELECT 1 FROM tenant_memberships om JOIN users ou ON ou.id=om.user_id AND ou.status='active' WHERE om.tenant_id=n.tenant_id AND om.user_id=n.owner_user_id AND om.status='active')
                       AND ns.expires_at>NOW() AND ns.revoked_at IS NULL AND ns.accepting_tasks=TRUE
                       AND n.capabilities_json->>'runtime'='ollama'
                       AND ns.accepted_models_json @> jsonb_build_array(nt.model)

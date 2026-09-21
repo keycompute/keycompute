@@ -1634,9 +1634,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "users.display_name_placeholder",
         "Leave blank to keep unchanged",
     );
-    m.insert("users.role_user", "user (standard)");
-    m.insert("users.role_admin", "admin (administrator)");
-    m.insert("users.role_system", "system (protected)");
+    m.insert("users.role_none", "none (no platform authority)");
+    m.insert("users.role_operator", "operator (platform operations)");
+    m.insert("users.role_root", "root (platform security)");
     m.insert("users.delete_confirm_title", "Confirm Deletion");
     m.insert("users.delete_confirm_prefix", "Delete user");
     m.insert(

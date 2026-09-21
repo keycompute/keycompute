@@ -1127,7 +1127,10 @@ pub async fn rate_limit_middleware(
         };
 
         match state.auth.verify_token(token).await {
-            Ok(auth_context) => AuthExtractor::from_auth_context(auth_context),
+            Ok(auth_context) => match AuthExtractor::from_auth_context(auth_context) {
+                Ok(a) => a,
+                Err(_) => return next.run(req).await,
+            },
             Err(keycompute_types::KeyComputeError::AuthError(_)) => {
                 return next.run(req).await;
             }
@@ -1558,7 +1561,11 @@ pub async fn require_permission(
     // 权限在认证时已根据认证类型(API Key/JWT)和角色正确构建
     let user_permissions = auth.permissions.clone();
 
-    if !PermissionChecker::check(&auth.role, &user_permissions, &required_permission) {
+    if !PermissionChecker::check(
+        auth.credential_kind,
+        &user_permissions,
+        &required_permission,
+    ) {
         return Err(ApiError::Auth(format!(
             "Permission denied: requires {:?}",
             required_permission
@@ -1590,7 +1597,7 @@ pub fn permission_middleware(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response>> + Send>>
 + Clone {
     move |state: State<AppState>, auth: AuthExtractor, req: Request, next: Next| {
-        let perm = permission.clone();
+        let perm = permission;
         Box::pin(async move { require_permission(state, auth, req, next, perm).await })
     }
 }
@@ -1620,93 +1627,53 @@ pub async fn admin_auth_middleware(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // Reuse the identity established by the outer console middleware (or by a
-    // preceding auth layer) instead of verifying the same token a second time.
-    let auth_extractor = if let Some(auth) = req.extensions().get::<AuthExtractor>().cloned() {
-        auth
+    let context = if let Some(context) = req
+        .extensions()
+        .get::<keycompute_auth::AuthContext>()
+        .cloned()
+    {
+        context
+    } else if let Some(auth) = req.extensions().get::<AuthExtractor>() {
+        auth.authorization_context()
     } else {
-        // 1. 从请求头中解析并验证 Bearer token。
-        let headers = req.headers();
-        let auth_header = match headers.get("Authorization").and_then(|h| h.to_str().ok()) {
-            Some(h) => h,
-            None => {
-                warn!("Admin route accessed without authentication");
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    serde_json::json!({
-                        "error": {"message": "Authentication required", "type": "auth_required", "code": "unauthorized"}
-                    })
-                    .to_string(),
-                )
-                    .into_response();
-            }
+        let Some(token) = req
+            .headers()
+            .get("Authorization")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+        else {
+            return ApiError::Auth("Authentication required".into()).into_response();
         };
-        let token = match auth_header.strip_prefix("Bearer ") {
-            Some(token) => token,
-            None => {
-                warn!("Invalid authorization header format");
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    serde_json::json!({
-                        "error": {"message": "Invalid authorization format. Expected: Bearer <token>", "type": "auth_invalid_format", "code": "unauthorized"}
-                    })
-                    .to_string(),
-                )
-                    .into_response();
-            }
-        };
-        let auth_context = match state.auth.verify_token(token).await {
-            Ok(ctx) => ctx,
-            Err(keycompute_types::KeyComputeError::AuthError(error)) => {
-                warn!(%error, "Authentication failed for admin route");
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    serde_json::json!({
-                        "error": {"message": "Authentication failed", "type": "auth_failed", "code": "unauthorized"}
-                    })
-                    .to_string(),
-                )
-                    .into_response();
-            }
-            Err(error) => {
-                error!(%error, "Authentication backend failed for admin route");
+        match state.auth.verify_token(token).await {
+            Ok(context) => context,
+            Err(keycompute_types::KeyComputeError::DatabaseError(_))
+            | Err(keycompute_types::KeyComputeError::ServiceUnavailable(_)) => {
                 return authentication_service_unavailable_response();
             }
-        };
-        AuthExtractor::from_auth_context(auth_context)
+            Err(error) => return ApiError::from(error).into_response(),
+        }
     };
-
-    // 2. 基于权限（而非角色字符串）进行管理访问控制。
-    //
-    // 关键：API Key 认证即使归属 admin/system 用户，也仅拥有 UseApi 权限
-    // （见 build_api_key_permissions）。若这里按 role 字符串判断，admin 用户的
-    // API Key 就能越权访问管理接口。改为检查 SystemAdmin 权限即可正确区分：
-    // 只有 JWT 后台登录的 admin/system 才具备 SystemAdmin 权限。
-    if !auth_extractor.has_permission(&Permission::SystemAdmin) {
-        warn!(
-            user_id = %auth_extractor.user_id,
-            role = %auth_extractor.role,
-            "Request without admin permission attempted to access admin route"
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            serde_json::json!({
-                "error": {
-                    "message": "Admin permission required",
-                    "type": "permission_denied",
-                    "code": "forbidden"
-                }
-            })
-            .to_string(),
-        )
-            .into_response();
+    if let Err(error) =
+        context.require_platform(keycompute_auth::AuthorizationAction::ManagePlatform)
+    {
+        return ApiError::from(error).into_response();
     }
-
-    // 3. 认证成功，注入认证信息到请求扩展供 Handler 使用。
-    req.extensions_mut().insert(auth_extractor);
-
-    // 6. 继续处理请求
-    info!("Admin authentication successful");
+    let global = match crate::extractors::GlobalConsoleAuth::try_from(context.clone()) {
+        Ok(global) => global,
+        Err(error) => return error.into_response(),
+    };
+    req.extensions_mut().insert(context.clone());
+    req.extensions_mut().insert(global);
+    // Tenant-dependent handlers still require an explicit active membership;
+    // platform identity/lifecycle handlers use the global context directly.
+    if context.selected_tenant_id.is_some() {
+        match AuthExtractor::from_auth_context(context) {
+            Ok(auth) => {
+                req.extensions_mut().insert(auth);
+            }
+            Err(error) => return error.into_response(),
+        }
+    }
     crate::console::run_with_mutation_fence(&state, req, next).await
 }
 
@@ -1773,7 +1740,7 @@ pub(crate) async fn enforce_authenticated_maintenance_mode(
     auth: &AuthExtractor,
 ) -> Result<()> {
     let is_maintenance = maintenance_mode_enabled(state).await;
-    let is_system_admin = auth.has_permission(&Permission::SystemAdmin);
+    let is_system_admin = auth.has_permission(&Permission::ManageProtectedUsers);
     if maintenance_mode_allows_request(is_maintenance, is_system_admin) {
         if is_maintenance {
             info!(
@@ -1830,14 +1797,14 @@ pub async fn maintenance_mode_middleware(
     // 维护模式已启用，检查是否为管理员
     // 从请求头提取认证信息
     let is_system_admin = if let Some(auth) = req.extensions().get::<AuthExtractor>() {
-        auth.has_permission(&Permission::SystemAdmin)
+        auth.has_permission(&Permission::ManageProtectedUsers)
     } else if let Some(auth_header) = req
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok())
         && let Some(token) = auth_header.strip_prefix("Bearer ")
         && let Ok(auth_context) = state.auth.verify_token(token).await
-        && auth_context.has_permission(&Permission::SystemAdmin)
+        && auth_context.has_permission(&Permission::ManageProtectedUsers)
     {
         info!(
             user_id = %auth_context.user_id,
@@ -1848,7 +1815,7 @@ pub async fn maintenance_mode_middleware(
         false
     };
     if maintenance_mode_allows_request(is_maintenance, is_system_admin) {
-        // 管理员绕过维护模式（基于权限判断，API Key 无 SystemAdmin 权限，无法绕过）
+        // 管理员绕过维护模式（基于权限判断，API Key 无 ManageProtectedUsers 权限，无法绕过）
         return next.run(req).await;
     }
 
@@ -1906,6 +1873,7 @@ mod tests {
         routing::{get, post},
     };
     use keycompute_auth::JwtValidator;
+    use keycompute_types::CredentialKind;
     use std::{
         convert::Infallible,
         sync::{
@@ -2051,7 +2019,7 @@ mod tests {
                         Uuid::new_v4(),
                         Uuid::new_v4(),
                         Uuid::new_v4(),
-                        "user",
+                        keycompute_types::CredentialKind::Jwt,
                     ))
                     .body(Body::from(payload))
                     .unwrap(),
@@ -2107,7 +2075,7 @@ mod tests {
                             Uuid::new_v4(),
                             Uuid::new_v4(),
                             Uuid::new_v4(),
-                            "user",
+                            keycompute_types::CredentialKind::Jwt,
                         ))
                         .body(body)
                         .unwrap(),
@@ -2165,7 +2133,7 @@ mod tests {
                         Uuid::new_v4(),
                         Uuid::new_v4(),
                         Uuid::new_v4(),
-                        "user",
+                        keycompute_types::CredentialKind::Jwt,
                     ))
                     .body(body)
                     .unwrap(),
@@ -2226,7 +2194,12 @@ mod tests {
         let state = AppState::with_pool(keycompute_db::DbRouter::single(
             sea_orm::DatabaseConnection::Disconnected,
         ));
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
 
         let result = enforce_authenticated_rate_limit(&state, &auth).await;
@@ -2292,7 +2265,12 @@ mod tests {
     #[tokio::test]
     async fn enforce_rate_limit_with_config_uses_defaults_without_pool() {
         let state = AppState::new();
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
         let config = authenticated_rate_limit_config_for_account(
             &state,
@@ -2317,7 +2295,12 @@ mod tests {
         let state = AppState::with_pool(keycompute_db::DbRouter::single(
             sea_orm::DatabaseConnection::Disconnected,
         ));
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
 
         let config_result = authenticated_rate_limit_config_for_account(
@@ -2383,7 +2366,12 @@ mod tests {
     #[tokio::test]
     async fn rate_limit_middleware_reuses_cached_auth_and_records_rpm() {
         let state = AppState::new();
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
         let app = Router::new()
             .route("/rate-limited", post(|| async { StatusCode::NO_CONTENT }))
@@ -2444,7 +2432,12 @@ mod tests {
     #[tokio::test]
     async fn chat_route_rpm_is_not_enforced_by_transport_middleware() {
         let state = AppState::new();
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
         let config = RateLimitConfig::default();
         for _ in 0..config.rpm_limit {
@@ -2484,7 +2477,12 @@ mod tests {
     #[tokio::test]
     async fn generic_rest_rpm_rejection_keeps_generic_rate_limit_contract() {
         let state = AppState::new();
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
         let config = RateLimitConfig::default();
         for _ in 0..config.rpm_limit {
@@ -2591,7 +2589,12 @@ mod tests {
     #[tokio::test]
     async fn chat_route_tpm_rejection_uses_canonical_openai_rate_limit_response() {
         let state = AppState::new();
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
         state
             .rate_limiter
@@ -2652,7 +2655,14 @@ mod tests {
         ));
         let jwt = JwtConfig::default();
         let token = JwtValidator::new(&jwt.secret, &jwt.issuer)
-            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
+            .generate_identity_token(
+                Uuid::new_v4(),
+                Some(Uuid::new_v4()),
+                0,
+                Some(1),
+                Some(1),
+                3600,
+            )
             .unwrap();
         let app = Router::new()
             .route("/rate-limited", get(|| async { StatusCode::NO_CONTENT }))
@@ -2679,21 +2689,14 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_defers_all_tpm_admission_until_the_generation_handler() {
-        let secret = "responses-idempotency-tpm-secret";
-        let issuer = "keycompute-test";
-        let state = AppState::with_config(AppStateConfig {
-            jwt: JwtConfig {
-                secret: secret.to_string(),
-                issuer: issuer.to_string(),
-                expiry_secs: 3600,
-            },
-            ..AppStateConfig::default()
-        });
-        let token = JwtValidator::new(secret, issuer)
-            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
-            .unwrap();
+        let fixture = crate::test_support::TestIdentity::member().await;
+        let state = fixture.state.clone();
+        let token = fixture.token.clone();
         let auth = state.auth.verify_token(&token).await.unwrap();
-        let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
+        let tenant_id = auth
+            .selected_tenant_id
+            .expect("scoped response test token must carry a selected tenant");
+        let rate_key = RateLimitKey::new(tenant_id, auth.user_id, auth.produce_ai_key_id);
         state
             .rate_limiter
             .record_token_usage(&rate_key, keycompute_ratelimit::DEFAULT_TPM_LIMIT)
@@ -2744,12 +2747,18 @@ mod tests {
             u64::from(keycompute_ratelimit::DEFAULT_TPM_LIMIT),
             "the transport middleware must not mutate TPM state"
         );
+        fixture.finish().await;
     }
 
     #[tokio::test]
     async fn websocket_event_transport_check_records_only_rpm() {
         let state = AppState::with_config(AppStateConfig::default());
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        );
         let rate_key = RateLimitKey::new(auth.tenant_id, auth.user_id, auth.produce_ai_key_id);
         state
             .rate_limiter
@@ -3431,7 +3440,7 @@ mod tests {
     #[test]
     fn test_permission_middleware_creation() {
         // 测试权限中间件可以正确创建
-        let _middleware = permission_middleware(Permission::SystemAdmin);
+        let _middleware = permission_middleware(Permission::ManageProtectedUsers);
     }
 
     #[test]
@@ -3446,14 +3455,19 @@ mod tests {
     fn test_extract_auth_from_extensions_present() {
         // 测试从扩展中提取已注入的 AuthExtractor
         let mut req: Request<Body> = Request::new(Body::empty());
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
-            .with_permissions(vec![Permission::SystemAdmin]);
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        )
+        .with_permissions(vec![Permission::ManageProtectedUsers]);
         req.extensions_mut().insert(auth.clone());
 
         let result = extract_auth_from_extensions(&req);
         assert!(result.is_some());
         let extracted = result.unwrap();
-        assert!(extracted.is_admin());
+        assert!(extracted.has_permission(&Permission::ManageProtectedUsers));
     }
 
     #[test]
@@ -3576,23 +3590,18 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_upgrade_header_does_not_bypass_post_rate_limiting() {
-        let secret = "responses-upgrade-rate-limit-secret";
-        let issuer = "keycompute-test";
-        let state = AppState::with_config(AppStateConfig {
-            jwt: JwtConfig {
-                secret: secret.to_string(),
-                issuer: issuer.to_string(),
-                expiry_secs: 3600,
-            },
-            ..AppStateConfig::default()
-        });
-        let token = JwtValidator::new(secret, issuer)
-            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
-            .unwrap();
+        let fixture = crate::test_support::TestIdentity::member().await;
+        let state = fixture.state.clone();
+        let token = fixture.token.clone();
         let app = Router::new()
             .route(
                 "/v1/responses",
-                axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+                axum::routing::post(
+                    |auth: AuthExtractor, State(state): State<AppState>| async move {
+                        enforce_authenticated_rate_limit(&state, &auth).await?;
+                        Ok::<_, ApiError>(StatusCode::NO_CONTENT)
+                    },
+                ),
             )
             .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
             .with_state(state);
@@ -3626,7 +3635,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        fixture.finish().await;
     }
 
     #[tokio::test]
@@ -3663,19 +3673,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_valid_jwt_requests_are_rate_limited() {
-        let secret = "middleware-rate-limit-test-secret";
-        let issuer = "keycompute-test";
-        let state = AppState::with_config(AppStateConfig {
-            jwt: JwtConfig {
-                secret: secret.to_string(),
-                issuer: issuer.to_string(),
-                expiry_secs: 3600,
-            },
-            ..AppStateConfig::default()
-        });
-        let token = JwtValidator::new(secret, issuer)
-            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
-            .unwrap();
+        let fixture = crate::test_support::TestIdentity::member().await;
+        let state = fixture.state.clone();
+        let token = fixture.token.clone();
         let app = Router::new()
             .route("/rate-limited", get(|| async { StatusCode::NO_CONTENT }))
             .layer(from_fn_with_state(state.clone(), rate_limit_middleware))
@@ -3711,6 +3711,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        fixture.finish().await;
     }
 
     #[test]
@@ -3727,66 +3728,56 @@ mod tests {
 
     #[tokio::test]
     async fn test_admin_auth_middleware_gates_admin_payment_routes_by_permission() {
-        let secret = "admin-route-permission-test-secret";
-        let issuer = "keycompute-test";
-        let state = AppState::with_config(AppStateConfig {
-            jwt: JwtConfig {
-                secret: secret.to_string(),
-                issuer: issuer.to_string(),
-                expiry_secs: 3600,
-            },
-            ..AppStateConfig::default()
-        });
-        let app = Router::new()
-            .route(
-                "/api/v1/admin/payments/orders",
-                get(|| async { StatusCode::NO_CONTENT }),
-            )
-            .layer(from_fn_with_state(state.clone(), admin_auth_middleware))
-            .with_state(state);
-        let request = |auth_header: Option<String>| {
-            let mut builder = Request::builder().uri("/api/v1/admin/payments/orders");
-            if let Some(value) = auth_header {
-                builder = builder.header("Authorization", value);
-            }
-            builder.body(Body::empty()).unwrap()
-        };
-        let validator = JwtValidator::new(secret, issuer);
-
-        // 无认证：401
-        let response = app.clone().oneshot(request(None)).await.unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-        // 普通用户 JWT：无 SystemAdmin 权限，403
-        let user_token = validator
-            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "user")
-            .unwrap();
-        let response = app
-            .clone()
-            .oneshot(request(Some(format!("Bearer {user_token}"))))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
-
-        // API Key 格式凭据：无数据库可验证，认证失败 401（绝不放行）
-        let response = app
-            .clone()
-            .oneshot(request(Some(
-                "Bearer sk-0123456789abcdef0123456789abcdef0123456789abcdef".to_string(),
-            )))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-
-        // admin JWT：持有 SystemAdmin，放行到 handler
-        let admin_token = validator
-            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "admin")
-            .unwrap();
-        let response = app
-            .oneshot(request(Some(format!("Bearer {admin_token}"))))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        use keycompute_types::{PlatformRole, TenantRole};
+        for role in [
+            PlatformRole::None,
+            PlatformRole::Operator,
+            PlatformRole::Root,
+        ] {
+            let fixture =
+                crate::test_support::TestIdentity::with_roles(role, TenantRole::Admin).await;
+            let app = Router::new()
+                .route(
+                    "/api/v1/admin/payments/orders",
+                    get(|| async { StatusCode::NO_CONTENT }),
+                )
+                .layer(from_fn_with_state(
+                    fixture.state.clone(),
+                    admin_auth_middleware,
+                ))
+                .with_state(fixture.state.clone());
+            let request = |token: Option<&str>| {
+                let mut req = Request::builder().uri("/api/v1/admin/payments/orders");
+                if let Some(token) = token {
+                    req = req.header("Authorization", format!("Bearer {token}"));
+                }
+                req.body(Body::empty()).unwrap()
+            };
+            assert_eq!(
+                app.clone().oneshot(request(None)).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(Some(
+                        "sk-0123456789abcdef0123456789abcdef0123456789abcdef"
+                    )))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let response = app.oneshot(request(Some(&fixture.token))).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if role == PlatformRole::Root {
+                    StatusCode::NO_CONTENT
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+            fixture.finish().await;
+        }
     }
 
     #[tokio::test]
@@ -3796,7 +3787,14 @@ mod tests {
         ));
         let jwt = JwtConfig::default();
         let token = JwtValidator::new(&jwt.secret, &jwt.issuer)
-            .generate_token(Uuid::new_v4(), Uuid::new_v4(), "admin")
+            .generate_identity_token(
+                Uuid::new_v4(),
+                Some(Uuid::new_v4()),
+                0,
+                Some(1),
+                Some(1),
+                3600,
+            )
             .unwrap();
         let app = Router::new()
             .route(

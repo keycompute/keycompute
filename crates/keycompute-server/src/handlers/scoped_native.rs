@@ -413,6 +413,7 @@ pub(crate) async fn generate_with_state(
             let execution = if managed.is_some() {
                 gateway
                     .enqueue_native_cancellable_and_wait(
+                        worker_ctx.tenant_id,
                         worker_ctx.user_id,
                         model,
                         payload,
@@ -421,7 +422,12 @@ pub(crate) async fn generate_with_state(
                     .await
             } else {
                 gateway
-                    .enqueue_native_and_wait(worker_ctx.user_id, model, payload)
+                    .enqueue_native_and_wait(
+                        worker_ctx.tenant_id,
+                        worker_ctx.user_id,
+                        model,
+                        payload,
+                    )
                     .await
             };
             match execution {

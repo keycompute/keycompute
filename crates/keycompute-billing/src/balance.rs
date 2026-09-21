@@ -132,8 +132,12 @@ impl BalanceService {
     ///
     /// 返回 `None` 表示用户没有余额记录。查询前会原子回收已过期的请求预留，
     /// 因而调用方看到的是当前可用余额。
-    pub async fn find_by_user(&self, user_id: Uuid) -> Result<Option<UserBalance>> {
-        UserBalance::find_by_user_reclaiming_expired(self.pool.as_ref(), user_id)
+    pub async fn find_by_user(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<UserBalance>> {
+        UserBalance::find_by_user_reclaiming_expired(self.pool.as_ref(), tenant_id, user_id)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find balance: {}", e)))
     }
@@ -143,9 +147,10 @@ impl BalanceService {
     /// 返回 HashMap<user_id, UserBalance>，用于避免 N+1 查询
     pub async fn find_by_users(
         &self,
+        tenant_id: Uuid,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalance>> {
-        UserBalance::find_by_users_reclaiming_expired(self.pool.as_ref(), user_ids)
+        UserBalance::find_by_users_reclaiming_expired(self.pool.as_ref(), tenant_id, user_ids)
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find balances: {}", e)))
     }
@@ -154,9 +159,10 @@ impl BalanceService {
     /// separated. Expired request reservations are reclaimed first.
     pub async fn find_breakdown_by_user(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<UserBalanceBreakdown>> {
-        UserBalance::find_breakdown_by_user(self.pool.as_ref(), user_id)
+        UserBalance::find_breakdown_by_user(self.pool.as_ref(), tenant_id, user_id)
             .await
             .map_err(|error| {
                 KeyComputeError::DatabaseError(format!("Failed to find balance breakdown: {error}"))
@@ -183,9 +189,10 @@ impl BalanceService {
     /// ownership failures are propagated to the caller.
     pub async fn find_display_snapshots(
         &self,
+        tenant_id: Uuid,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalanceDisplaySnapshot>> {
-        UserBalance::find_display_snapshots(self.pool.write_conn(), user_ids)
+        UserBalance::find_display_snapshots(self.pool.write_conn(), tenant_id, user_ids)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to read balance snapshots: {e}"))
@@ -196,17 +203,24 @@ impl BalanceService {
     /// keyset-paginated page of active request reservations.
     pub async fn find_breakdown_page_by_user(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         cursor: Option<BalanceReservationPageCursor>,
         limit: u64,
     ) -> Result<Option<UserBalanceBreakdownPage>> {
-        UserBalance::find_breakdown_page_by_user(self.pool.as_ref(), user_id, cursor, limit)
-            .await
-            .map_err(|error| {
-                KeyComputeError::DatabaseError(format!(
-                    "Failed to find balance reservation page: {error}"
-                ))
-            })
+        UserBalance::find_breakdown_page_by_user(
+            self.pool.as_ref(),
+            tenant_id,
+            user_id,
+            cursor,
+            limit,
+        )
+        .await
+        .map_err(|error| {
+            KeyComputeError::DatabaseError(format!(
+                "Failed to find balance reservation page: {error}"
+            ))
+        })
     }
 
     /// Reclaim expired reservations without requiring a balance read or a new
@@ -228,15 +242,15 @@ impl BalanceService {
     /// sentinel value for an implicit reservation size.
     pub async fn reserve_request(
         &self,
-        user_id: Uuid,
         tenant_id: Uuid,
+        user_id: Uuid,
         request_id: Uuid,
         amount: Decimal,
         reservation_ttl: Duration,
     ) -> Result<BalanceReservation> {
         self.reserve_request_with_owner_token(
-            user_id,
             tenant_id,
+            user_id,
             request_id,
             Uuid::new_v4(),
             amount,
@@ -251,8 +265,8 @@ impl BalanceService {
     /// successful result is delivered.
     pub async fn reserve_request_with_owner_token(
         &self,
-        user_id: Uuid,
         tenant_id: Uuid,
+        user_id: Uuid,
         request_id: Uuid,
         owner_token: Uuid,
         amount: Decimal,
@@ -313,16 +327,24 @@ impl BalanceService {
     /// normal durable billing settlement path.
     pub async fn release_request_reservation(
         &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
         request_id: Uuid,
         owner_token: Uuid,
     ) -> Result<bool> {
-        BalanceReservation::release(self.pool.as_ref(), request_id, owner_token)
-            .await
-            .map_err(|error| {
-                KeyComputeError::DatabaseError(format!(
-                    "Failed to release request balance reservation: {error}"
-                ))
-            })
+        BalanceReservation::release(
+            self.pool.as_ref(),
+            tenant_id,
+            user_id,
+            request_id,
+            owner_token,
+        )
+        .await
+        .map_err(|error| {
+            KeyComputeError::DatabaseError(format!(
+                "Failed to release request balance reservation: {error}"
+            ))
+        })
     }
 
     /// Release one request-owned reservation under an administrator's audit
@@ -331,6 +353,7 @@ impl BalanceService {
     /// an exact retry replays successfully without releasing funds twice.
     pub async fn admin_release_request_reservation(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         request_id: Uuid,
         expected_owner_token: Uuid,
@@ -350,6 +373,7 @@ impl BalanceService {
         }
         BalanceReservation::admin_release(
             self.pool.as_ref(),
+            tenant_id,
             user_id,
             request_id,
             expected_owner_token,
@@ -365,8 +389,12 @@ impl BalanceService {
     }
 
     /// Apply a usage-ledger charge to a matching active reservation.
+    // Original tenant, owner, request and reservation capability remain explicit.
+    #[allow(clippy::too_many_arguments)]
     pub async fn settle_request_reservation(
         &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
         request_id: Uuid,
         expected_owner_token: Option<Uuid>,
         amount: Decimal,
@@ -375,6 +403,8 @@ impl BalanceService {
     ) -> Result<Option<(UserBalance, BalanceTransaction)>> {
         BalanceReservation::settle(
             self.pool.as_ref(),
+            tenant_id,
+            user_id,
             request_id,
             expected_owner_token,
             amount,
@@ -403,8 +433,8 @@ impl BalanceService {
     /// - 交易记录
     pub async fn recharge(
         &self,
-        user_id: Uuid,
         tenant_id: Uuid,
+        user_id: Uuid,
         amount: Decimal,
         order_id: Option<Uuid>,
         description: Option<&str>,
@@ -416,8 +446,8 @@ impl BalanceService {
         }
         let result = UserBalance::recharge(
             self.pool.as_ref(),
-            user_id,
             tenant_id,
+            user_id,
             amount,
             order_id,
             description,
@@ -457,6 +487,7 @@ impl BalanceService {
     /// - `ValidationError`: 余额不足或用户不存在
     pub async fn consume(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         usage_log_id: Option<Uuid>,
@@ -472,6 +503,7 @@ impl BalanceService {
         }
         let result = UserBalance::consume(
             self.pool.as_ref(),
+            tenant_id,
             user_id,
             amount,
             usage_log_id,
@@ -508,6 +540,7 @@ impl BalanceService {
     /// 将可用余额转移到冻结余额
     pub async fn freeze(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
@@ -517,7 +550,8 @@ impl BalanceService {
                 "Balance freeze amount must be greater than zero".to_string(),
             ));
         }
-        let result = UserBalance::freeze(self.pool.as_ref(), user_id, amount, description).await;
+        let result =
+            UserBalance::freeze(self.pool.as_ref(), tenant_id, user_id, amount, description).await;
 
         match result {
             Ok((balance, transaction)) => {
@@ -560,6 +594,7 @@ impl BalanceService {
     /// - `ValidationError`: 冻结余额不足或用户不存在
     pub async fn unfreeze(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
@@ -569,7 +604,9 @@ impl BalanceService {
                 "Balance unfreeze amount must be greater than zero".to_string(),
             ));
         }
-        let result = UserBalance::unfreeze(self.pool.as_ref(), user_id, amount, description).await;
+        let result =
+            UserBalance::unfreeze(self.pool.as_ref(), tenant_id, user_id, amount, description)
+                .await;
 
         match result {
             Ok((balance, transaction)) => {
@@ -674,11 +711,12 @@ impl BalanceService {
     /// - `offset`: 偏移量（用于分页）
     pub async fn list_transactions(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<BalanceTransaction>> {
-        BalanceTransaction::find_by_user(self.pool.as_ref(), user_id, limit, offset)
+        BalanceTransaction::find_by_user(self.pool.as_ref(), tenant_id, user_id, limit, offset)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to list transactions: {}", e))

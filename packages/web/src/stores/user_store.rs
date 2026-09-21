@@ -1,3 +1,5 @@
+use client_api::api::auth::{SelectedTenant, SessionCapabilities, TenantMembership};
+use client_api::{PlatformRole, UserStatus};
 use dioxus::prelude::*;
 
 /// 当前用户信息
@@ -6,8 +8,11 @@ pub struct UserInfo {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
-    pub role: String,
-    pub tenant_id: String,
+    pub platform_role: Option<PlatformRole>,
+    pub status: Option<UserStatus>,
+    pub memberships: Vec<TenantMembership>,
+    pub selected_tenant: Option<SelectedTenant>,
+    pub capabilities: SessionCapabilities,
 }
 
 impl UserInfo {
@@ -15,9 +20,30 @@ impl UserInfo {
         self.name.as_deref().unwrap_or(&self.email)
     }
 
-    #[allow(dead_code)]
-    pub fn is_admin(&self) -> bool {
-        self.role == "admin" || self.role == "system"
+    pub fn has_platform_permission(&self, permission: &str) -> bool {
+        self.capabilities
+            .platform
+            .iter()
+            .any(|value| value == permission)
+    }
+
+    pub fn has_tenant_permission(&self, permission: &str) -> bool {
+        self.capabilities
+            .tenant
+            .iter()
+            .any(|value| value == permission)
+    }
+
+    pub fn can_manage_console(&self) -> bool {
+        self.has_platform_permission("console:access")
+            || self.has_platform_permission("users:manage")
+            || self.has_tenant_permission("tenant:manage")
+    }
+
+    pub fn active_tenant_id(&self) -> Option<&str> {
+        self.selected_tenant
+            .as_ref()
+            .map(|tenant| tenant.id.as_str())
     }
 
     pub fn avatar_char(&self) -> char {
@@ -70,11 +96,10 @@ impl UserStore {
         (self.info)()
     }
 
-    #[allow(dead_code)]
-    pub fn is_admin(&self) -> bool {
+    pub fn can_manage_console(&self) -> bool {
         (self.info)()
             .as_ref()
-            .map(|u| u.is_admin())
+            .map(UserInfo::can_manage_console)
             .unwrap_or(false)
     }
 }

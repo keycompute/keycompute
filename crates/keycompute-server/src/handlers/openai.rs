@@ -1101,7 +1101,12 @@ async fn chat_completions_inner(
                 worker_body_permit,
                 async move {
                     let result = worker_node_gateway
-                        .enqueue_native_and_wait(node_user_id, node_model.clone(), payload)
+                        .enqueue_native_and_wait(
+                            worker_ctx.tenant_id,
+                            node_user_id,
+                            node_model.clone(),
+                            payload,
+                        )
                         .await;
                     match &result {
                         Ok(response) if response.status == 200 => {
@@ -3452,7 +3457,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         );
         let request = serde_json::from_value(serde_json::json!({
             "model": "gpt-test",

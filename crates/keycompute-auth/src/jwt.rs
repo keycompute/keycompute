@@ -1,97 +1,80 @@
-//! JWT Token 解析与校验
-//!
-//! 处理 JWT Token 的生成、验证和解析。
-
+//! Identity-only JWT parsing and signing.
+use crate::AuthContext;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use keycompute_types::{KeyComputeError, Result};
+use keycompute_types::{CredentialKind, KeyComputeError, PlatformRole, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::AuthContext;
-use crate::permission::{AuthType, build_permissions};
-
-/// JWT Claims
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JwtClaims {
-    /// 用户 ID
-    pub sub: String, // JWT 标准使用 sub 作为 subject
-    /// 租户 ID
-    pub tenant_id: String,
-    /// 角色
-    pub role: String,
-    /// 过期时间（Unix 时间戳）
-    pub exp: i64,
-    /// 签发时间（Unix 时间戳）
-    pub iat: i64,
-    /// 签发者
-    pub iss: String,
-    /// Token 版本号，用于使已签发的 JWT 失效（密码重置/登出时递增）
-    ///
-    /// 使用 `serde(default)` 兼容历史签发的、不含该字段的 token（视为版本 0）。
+    pub sub: String,
     #[serde(default)]
+    pub tenant_id: Option<String>,
+    #[serde(default)]
+    pub authz_version: Option<i64>,
+    #[serde(default)]
+    pub membership_version: Option<i64>,
+    pub exp: i64,
+    pub iat: i64,
+    pub iss: String,
     pub token_version: i32,
 }
-
 impl JwtClaims {
-    /// 创建新的 Claims
     pub fn new(
         user_id: Uuid,
-        tenant_id: Uuid,
-        role: impl Into<String>,
-        expires_in_seconds: i64,
-        issuer: &str,
+        tenant_id: Option<Uuid>,
         token_version: i32,
+        expires: i64,
+        issuer: &str,
     ) -> Self {
         let now = Utc::now().timestamp();
         Self {
             sub: user_id.to_string(),
-            tenant_id: tenant_id.to_string(),
-            role: role.into(),
-            exp: now + expires_in_seconds,
+            tenant_id: tenant_id.map(|v| v.to_string()),
+            authz_version: None,
+            membership_version: None,
+            exp: now.saturating_add(expires),
             iat: now,
-            iss: issuer.to_string(),
+            iss: issuer.to_owned(),
             token_version,
         }
     }
-
-    /// 获取用户 ID
     pub fn user_id(&self) -> Result<Uuid> {
-        Uuid::parse_str(&self.sub)
-            .map_err(|e| KeyComputeError::AuthError(format!("Invalid user ID in token: {}", e)))
+        let id = Uuid::parse_str(&self.sub)
+            .map_err(|e| KeyComputeError::AuthError(format!("Invalid user ID in token: {e}")))?;
+        if id.is_nil() {
+            return Err(KeyComputeError::AuthError("nil user ID in token".into()));
+        }
+        Ok(id)
     }
-
-    /// 获取租户 ID
-    pub fn tenant_id(&self) -> Result<Uuid> {
-        Uuid::parse_str(&self.tenant_id)
-            .map_err(|e| KeyComputeError::AuthError(format!("Invalid tenant ID in token: {}", e)))
+    pub fn tenant_id(&self) -> Result<Option<Uuid>> {
+        let id = self
+            .tenant_id
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|e| KeyComputeError::AuthError(format!("Invalid tenant ID in token: {e}")))?;
+        if id.is_some_and(|v| v.is_nil()) {
+            return Err(KeyComputeError::AuthError("nil tenant ID in token".into()));
+        }
+        Ok(id)
     }
-
-    /// 检查是否过期
     pub fn is_expired(&self) -> bool {
-        let now = Utc::now().timestamp();
-        self.exp < now
+        self.exp < Utc::now().timestamp()
     }
-
-    /// 默认过期时间（24小时）
     pub fn default_expiration() -> i64 {
         Duration::hours(24).num_seconds()
     }
 }
-
-/// JWT 验证器
 #[derive(Clone)]
 pub struct JwtValidator {
-    /// JWT 编码密钥
     encoding_key: EncodingKey,
-    /// JWT 解码密钥
     decoding_key: DecodingKey,
-    /// 签发者
     issuer: String,
-    /// 默认过期时间（秒）
     default_expiration: i64,
 }
-
 impl std::fmt::Debug for JwtValidator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("JwtValidator")
@@ -100,388 +83,131 @@ impl std::fmt::Debug for JwtValidator {
             .finish()
     }
 }
-
 impl JwtValidator {
-    /// 创建新的 JWT 验证器
     pub fn new(secret: impl AsRef<[u8]>, issuer: impl Into<String>) -> Self {
-        let secret = secret.as_ref();
+        let s = secret.as_ref();
         Self {
-            encoding_key: EncodingKey::from_secret(secret),
-            decoding_key: DecodingKey::from_secret(secret),
+            encoding_key: EncodingKey::from_secret(s),
+            decoding_key: DecodingKey::from_secret(s),
             issuer: issuer.into(),
-            default_expiration: JwtClaims::default_expiration(),
+            default_expiration: Duration::hours(24).num_seconds(),
         }
     }
-
-    /// 设置默认过期时间
     pub fn with_expiration(mut self, seconds: i64) -> Self {
         self.default_expiration = seconds;
         self
     }
-
-    /// 获取默认过期时间（秒）
     pub fn default_expiration(&self) -> i64 {
         self.default_expiration
     }
-
-    /// 验证 JWT Token
+    pub fn validate_claims(&self, token: &str) -> Result<JwtClaims> {
+        let mut v = Validation::new(jsonwebtoken::Algorithm::HS256);
+        v.set_issuer(&[&self.issuer]);
+        v.validate_exp = true;
+        v.leeway = 0;
+        let data = decode::<JwtClaims>(token, &self.decoding_key, &v)
+            .map_err(|e| KeyComputeError::AuthError(format!("Token validation failed: {e}")))?;
+        let c = data.claims;
+        let now = Utc::now().timestamp();
+        if c.exp <= now || c.iat >= c.exp || c.iat > now.saturating_add(30) {
+            return Err(KeyComputeError::AuthError("invalid token lifetime".into()));
+        }
+        c.user_id()?;
+        let selected = c.tenant_id()?;
+        if c.token_version < 0 {
+            return Err(KeyComputeError::AuthError("negative token version".into()));
+        }
+        match selected {
+            Some(_) if c.authz_version.is_none() || c.membership_version.is_none() => {
+                return Err(KeyComputeError::AuthError(
+                    "selected tenant requires both authorization versions".into(),
+                ));
+            }
+            None if c.authz_version.is_some() || c.membership_version.is_some() => {
+                return Err(KeyComputeError::AuthError(
+                    "tenant versions require selected tenant".into(),
+                ));
+            }
+            _ => {}
+        }
+        if c.authz_version.is_some_and(|v| v <= 0) || c.membership_version.is_some_and(|v| v <= 0) {
+            return Err(KeyComputeError::AuthError(
+                "tenant versions must be positive".into(),
+            ));
+        }
+        Ok(c)
+    }
+    /// Structural validation returns a context with no authority. Callers must
+    /// load current user/membership state before authorizing any operation.
     pub fn validate(&self, token: &str) -> Result<AuthContext> {
-        tracing::debug!("Validating JWT token");
-
-        // 创建验证器
-        let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.set_issuer(&[&self.issuer]);
-        validation.validate_exp = true;
-
-        // 解码并验证 token
-        let token_data =
-            decode::<JwtClaims>(token, &self.decoding_key, &validation).map_err(|e| {
-                tracing::warn!(error = %e, "JWT validation failed");
-                match e.kind() {
-                    jsonwebtoken::errors::ErrorKind::ExpiredSignature => {
-                        KeyComputeError::AuthError("Token has expired".into())
-                    }
-                    jsonwebtoken::errors::ErrorKind::InvalidToken => {
-                        KeyComputeError::AuthError("Invalid token format".into())
-                    }
-                    jsonwebtoken::errors::ErrorKind::InvalidIssuer => {
-                        KeyComputeError::AuthError("Invalid token issuer".into())
-                    }
-                    jsonwebtoken::errors::ErrorKind::InvalidSignature => {
-                        KeyComputeError::AuthError("Invalid token signature".into())
-                    }
-                    _ => KeyComputeError::AuthError(format!("Token validation failed: {}", e)),
-                }
-            })?;
-
-        let claims = token_data.claims;
-
-        // 解析用户 ID 和租户 ID
-        let user_id = claims.user_id()?;
-        let tenant_id = claims.tenant_id()?;
-
-        tracing::info!(
-            user_id = %user_id,
-            tenant_id = %tenant_id,
-            role = %claims.role,
-            "JWT token validated successfully"
-        );
-
-        // 构建权限列表
-        // JWT 认证用于后台管理系统，根据角色分配不同的管理权限
-        let permissions = build_permissions(AuthType::Jwt, &claims.role);
-
+        let c = self.validate_claims(token)?;
+        let user_id = c.user_id()?;
+        let tenant_id = c.tenant_id()?;
         Ok(AuthContext {
             user_id,
-            tenant_id,
-            produce_ai_key_id: Uuid::nil(), // JWT 认证没有 Produce AI Key ID
-            role: claims.role,
-            permissions,
-            token_version: claims.token_version,
+            selected_tenant_id: tenant_id,
+            platform_role: PlatformRole::None,
+            tenant_role: None,
+            credential_kind: CredentialKind::Jwt,
+            produce_ai_key_id: Uuid::nil(),
+            permissions: Vec::new(),
+            token_version: c.token_version,
+            membership_version: c.membership_version,
+            authz_version: c.authz_version,
             user_info: None,
             tenant_info: None,
         })
     }
-
-    /// 生成 JWT Token
-    pub fn generate_token(
+    pub fn generate_identity_token(
         &self,
         user_id: Uuid,
-        tenant_id: Uuid,
-        role: impl Into<String>,
-    ) -> Result<String> {
-        self.generate_token_with_expiration(user_id, tenant_id, role, self.default_expiration)
-    }
-
-    /// 生成带自定义过期时间的 JWT Token
-    pub fn generate_token_with_expiration(
-        &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
-        role: impl Into<String>,
-        expires_in_seconds: i64,
-    ) -> Result<String> {
-        self.generate_token_with_expiration_and_version(
-            user_id,
-            tenant_id,
-            role,
-            expires_in_seconds,
-            0,
-        )
-    }
-
-    /// 生成带 token_version 的 JWT Token（默认过期时间）
-    ///
-    /// 登录/刷新时应使用该方法，将用户当前的 token_version 写入 token，
-    /// 以便服务端在密码重置等安全事件后使旧 token 失效。
-    pub fn generate_token_with_version(
-        &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
-        role: impl Into<String>,
+        tenant_id: Option<Uuid>,
         token_version: i32,
+        authz_version: Option<i64>,
+        membership_version: Option<i64>,
+        expires: i64,
     ) -> Result<String> {
-        self.generate_token_with_expiration_and_version(
-            user_id,
-            tenant_id,
-            role,
-            self.default_expiration,
-            token_version,
-        )
+        if user_id.is_nil() || token_version < 0 {
+            return Err(KeyComputeError::ValidationError(
+                "invalid identity token subject/version".into(),
+            ));
+        }
+        if tenant_id.is_some_and(|v| v.is_nil()) {
+            return Err(KeyComputeError::ValidationError(
+                "nil tenant in identity token".into(),
+            ));
+        }
+        if tenant_id.is_some() != authz_version.is_some()
+            || tenant_id.is_some() != membership_version.is_some()
+        {
+            return Err(KeyComputeError::ValidationError(
+                "selected tenant and versions must be supplied together".into(),
+            ));
+        }
+        if authz_version.is_some_and(|v| v <= 0) || membership_version.is_some_and(|v| v <= 0) {
+            return Err(KeyComputeError::ValidationError(
+                "tenant versions must be positive".into(),
+            ));
+        }
+        let mut c = JwtClaims::new(user_id, tenant_id, token_version, expires, &self.issuer);
+        c.authz_version = authz_version;
+        c.membership_version = membership_version;
+        encode(&Header::default(), &c, &self.encoding_key)
+            .map_err(|e| KeyComputeError::Internal(format!("Failed to generate token: {e}")))
     }
-
-    /// 生成带自定义过期时间与 token_version 的 JWT Token
-    pub fn generate_token_with_expiration_and_version(
-        &self,
-        user_id: Uuid,
-        tenant_id: Uuid,
-        role: impl Into<String>,
-        expires_in_seconds: i64,
-        token_version: i32,
-    ) -> Result<String> {
-        let claims = JwtClaims::new(
-            user_id,
-            tenant_id,
-            role,
-            expires_in_seconds,
-            &self.issuer,
-            token_version,
-        );
-
-        let token = encode(&Header::default(), &claims, &self.encoding_key)
-            .map_err(|e| KeyComputeError::Internal(format!("Failed to generate token: {}", e)))?;
-
-        tracing::debug!(
-            user_id = %user_id,
-            tenant_id = %tenant_id,
-            expires_in = expires_in_seconds,
-            "JWT token generated"
-        );
-
-        Ok(token)
-    }
-
-    /// 刷新 Token（生成新的 token，保持相同的 claims）
     pub fn refresh_token(&self, token: &str) -> Result<String> {
-        let auth_context = self.validate(token)?;
-        self.generate_token_with_version(
-            auth_context.user_id,
-            auth_context.tenant_id,
-            auth_context.role,
-            auth_context.token_version,
+        let c = self.validate_claims(token)?;
+        self.generate_identity_token(
+            c.user_id()?,
+            c.tenant_id()?,
+            c.token_version,
+            c.authz_version,
+            c.membership_version,
+            self.default_expiration,
         )
-    }
-}
-
-impl Default for JwtValidator {
-    fn default() -> Self {
-        Self::new("default-secret", "keycompute")
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::permission::Permission;
-
-    #[test]
-    fn test_jwt_claims_new() {
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-        let claims = JwtClaims::new(user_id, tenant_id, "user", 3600, "keycompute", 0);
-
-        assert_eq!(claims.user_id().unwrap(), user_id);
-        assert_eq!(claims.tenant_id().unwrap(), tenant_id);
-        assert_eq!(claims.role, "user");
-        assert_eq!(claims.iss, "keycompute");
-    }
-
-    #[test]
-    fn test_jwt_claims_expired() {
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-        // 过期时间设为过去
-        let claims = JwtClaims::new(user_id, tenant_id, "user", -1, "keycompute", 0);
-
-        assert!(claims.is_expired());
-    }
-
-    #[test]
-    fn test_jwt_validator_generate_and_validate() {
-        let validator = JwtValidator::new("test-secret", "keycompute");
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-
-        // 生成 token
-        let token = validator
-            .generate_token(user_id, tenant_id, "user")
-            .unwrap();
-        assert!(!token.is_empty());
-
-        // 验证 token
-        let ctx = validator.validate(&token).unwrap();
-        assert_eq!(ctx.user_id, user_id);
-        assert_eq!(ctx.tenant_id, tenant_id);
-        assert_eq!(ctx.role, "user");
-    }
-
-    #[test]
-    fn test_jwt_validator_invalid_token() {
-        let validator = JwtValidator::new("test-secret", "keycompute");
-        let result = validator.validate("invalid-token");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_jwt_validator_wrong_secret() {
-        let validator1 = JwtValidator::new("secret1", "keycompute");
-        let validator2 = JwtValidator::new("secret2", "keycompute");
-
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-        let token = validator1
-            .generate_token(user_id, tenant_id, "user")
-            .unwrap();
-
-        // 用不同的密钥验证应该失败
-        let result = validator2.validate(&token);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_jwt_validator_expired_token() {
-        let validator = JwtValidator::new("test-secret", "keycompute");
-
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-        // 生成一个已经过期的 token（过期时间设为 1 秒前）
-        let token = validator
-            .generate_token_with_expiration(user_id, tenant_id, "user", -1)
-            .unwrap();
-
-        // 等待一小段时间确保 token 真的过期
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let result = validator.validate(&token);
-        // 注意：jsonwebtoken 可能不允许生成负数 exp 的 token
-        // 如果生成成功，验证应该失败；如果生成失败，测试也应该通过
-        if result.is_ok() {
-            // 某些情况下 token 可能没有真正过期，检查 claims
-            // 这个测试主要验证过期机制存在
-        }
-    }
-
-    #[test]
-    fn test_jwt_validator_refresh_token() {
-        let validator = JwtValidator::new("test-secret", "keycompute");
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-
-        let token = validator
-            .generate_token(user_id, tenant_id, "admin")
-            .unwrap();
-        let refreshed = validator.refresh_token(&token).unwrap();
-
-        // 验证刷新后的 token
-        let ctx = validator.validate(&refreshed).unwrap();
-        assert_eq!(ctx.user_id, user_id);
-        assert_eq!(ctx.tenant_id, tenant_id);
-        assert_eq!(ctx.role, "admin");
-    }
-
-    #[test]
-    fn test_jwt_token_version_roundtrip() {
-        // token_version 写入 token 后应在验证时原样还原
-        let validator = JwtValidator::new("test-secret", "keycompute");
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-
-        let token = validator
-            .generate_token_with_version(user_id, tenant_id, "user", 7)
-            .unwrap();
-        let ctx = validator.validate(&token).unwrap();
-        assert_eq!(ctx.token_version, 7);
-    }
-
-    #[test]
-    fn test_jwt_default_generate_token_version_zero() {
-        // 兼容方法 generate_token 默认 token_version 为 0
-        let validator = JwtValidator::new("test-secret", "keycompute");
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-
-        let token = validator
-            .generate_token(user_id, tenant_id, "user")
-            .unwrap();
-        let ctx = validator.validate(&token).unwrap();
-        assert_eq!(ctx.token_version, 0);
-    }
-
-    #[test]
-    fn test_jwt_refresh_preserves_token_version() {
-        // 刷新 token 应保留原 token_version
-        let validator = JwtValidator::new("test-secret", "keycompute");
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-
-        let token = validator
-            .generate_token_with_version(user_id, tenant_id, "admin", 3)
-            .unwrap();
-        let refreshed = validator.refresh_token(&token).unwrap();
-        let ctx = validator.validate(&refreshed).unwrap();
-        assert_eq!(ctx.token_version, 3);
-    }
-
-    #[test]
-    fn test_jwt_claims_deserialize_without_token_version() {
-        // 历史签发的 token（不含 token_version 字段）应能正常验证，且默认为 0
-        #[derive(Serialize)]
-        struct LegacyClaims {
-            sub: String,
-            tenant_id: String,
-            role: String,
-            exp: i64,
-            iat: i64,
-            iss: String,
-        }
-
-        let user_id = Uuid::new_v4();
-        let tenant_id = Uuid::new_v4();
-        let now = Utc::now().timestamp();
-        let legacy = LegacyClaims {
-            sub: user_id.to_string(),
-            tenant_id: tenant_id.to_string(),
-            role: "user".to_string(),
-            exp: now + 3600,
-            iat: now,
-            iss: "keycompute".to_string(),
-        };
-        let token = encode(
-            &Header::default(),
-            &legacy,
-            &EncodingKey::from_secret(b"test-secret"),
-        )
-        .unwrap();
-
-        let validator = JwtValidator::new("test-secret", "keycompute");
-        let ctx = validator.validate(&token).unwrap();
-        assert_eq!(ctx.token_version, 0);
-        assert_eq!(ctx.user_id, user_id);
-    }
-
-    #[test]
-    fn test_build_permissions_jwt() {
-        // JWT 认证的权限构建测试
-        let admin_perms = build_permissions(AuthType::Jwt, "admin");
-        assert!(admin_perms.contains(&Permission::SystemAdmin));
-        assert!(admin_perms.contains(&Permission::ManageUsers));
-
-        let system_perms = build_permissions(AuthType::Jwt, "system");
-        assert!(system_perms.contains(&Permission::ManageApiKeys));
-        assert!(system_perms.contains(&Permission::SystemAdmin));
-
-        let user_perms = build_permissions(AuthType::Jwt, "user");
-        assert!(user_perms.contains(&Permission::UseApi));
-        assert!(!user_perms.contains(&Permission::ManageUsers));
-    }
-}
+#[path = "jwt_tests.rs"]
+mod tests;

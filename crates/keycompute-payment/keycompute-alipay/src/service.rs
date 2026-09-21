@@ -564,33 +564,40 @@ impl PaymentService {
         Ok(())
     }
 
-    /// 获取用户余额
-    pub async fn get_user_balance(&self, user_id: Uuid) -> Result<UserBalanceInfo, PaymentError> {
+    /// Read one member's wallet in an explicit tenant. A missing wallet is a
+    /// zero display balance, not a synthetic globally owned database record.
+    pub async fn get_user_balance(
+        &self,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<UserBalanceInfo, PaymentError> {
         let balance = keycompute_db::UserBalance::find_by_user_reclaiming_expired(
             self.pool.as_ref(),
+            tenant_id,
             user_id,
         )
         .await
-        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?
-        .unwrap_or_else(|| keycompute_db::UserBalance {
-            id: Uuid::nil(),
-            tenant_id: Uuid::nil(),
-            user_id,
-            available_balance: Decimal::ZERO,
-            frozen_balance: Decimal::ZERO,
-            total_recharged: Decimal::ZERO,
-            total_consumed: Decimal::ZERO,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        });
+        .map_err(|e| PaymentError::DatabaseError(e.to_string()))?;
 
-        Ok(UserBalanceInfo {
-            user_id: balance.user_id,
-            available_balance: balance.available_balance,
-            frozen_balance: balance.frozen_balance,
-            total_balance: balance.total_balance(),
-            total_recharged: balance.total_recharged,
-            total_consumed: balance.total_consumed,
+        Ok(match balance {
+            Some(balance) => UserBalanceInfo {
+                tenant_id,
+                user_id,
+                available_balance: balance.available_balance,
+                frozen_balance: balance.frozen_balance,
+                total_balance: balance.total_balance(),
+                total_recharged: balance.total_recharged,
+                total_consumed: balance.total_consumed,
+            },
+            None => UserBalanceInfo {
+                tenant_id,
+                user_id,
+                available_balance: Decimal::ZERO,
+                frozen_balance: Decimal::ZERO,
+                total_balance: Decimal::ZERO,
+                total_recharged: Decimal::ZERO,
+                total_consumed: Decimal::ZERO,
+            },
         })
     }
 
@@ -675,6 +682,7 @@ pub struct SyncResult {
 /// 用户余额信息
 #[derive(Debug, Clone, Serialize)]
 pub struct UserBalanceInfo {
+    pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub available_balance: Decimal,
     pub frozen_balance: Decimal,

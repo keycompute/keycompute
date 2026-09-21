@@ -60,14 +60,14 @@ pub fn Tenants() -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
-    let is_admin = user_store
+    let can_manage_console = user_store
         .info
         .read()
         .as_ref()
-        .map(|u| u.is_admin())
+        .map(|u| u.can_manage_console())
         .unwrap_or(false);
 
-    if !is_admin {
+    if !can_manage_console {
         return rsx! {
             NoPermissionView { resource: i18n.t("page.tenants").to_string() }
         };

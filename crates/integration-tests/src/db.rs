@@ -6,10 +6,11 @@ use keycompute_db::{
     CreateTenantRequest, CreateUserRequest, PendingRegistration, Tenant,
     UpsertPendingRegistrationRequest, User, initialize_schema,
 };
-use keycompute_types::UserRole;
+use keycompute_types::TenantRole;
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait,
 };
+use std::ops::Deref;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -23,39 +24,46 @@ pub async fn initialize_test_schema(db: &DatabaseConnection) -> Result<(), keyco
     SCHEMA_INITIALIZED
         .get_or_try_init(|| async {
             initialize_schema(db).await?;
-            // 清理已存在的 system 用户（`uq_users_single_system_role` 全局唯一索引要求）。
-            // main.rs 的 initialize_default_admin 或历史测试可能遗留了 system 用户，
-            // 导致后续测试无法创建自己的 system 用户。清理失败不致命：
-            // 仅依赖 system 用户唯一性的测试会受影响。
-            if let Err(error) = remove_leftover_system_users(db).await {
-                eprintln!("warning: failed to clean leftover system users: {error}");
+            let tx = db.begin().await?;
+            tx.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT pg_advisory_xact_lock($1)",
+                [981754117i64.into()],
+            ))
+            .await?;
+            if User::count_all(&tx).await? == 0 {
+                let root = User::bootstrap_root(
+                    &tx,
+                    "tenant-test-root@fixture.invalid",
+                    Some("Test identity anchor"),
+                )
+                .await?;
+                let actor = keycompute_db::AuditContext {
+                    actor_user_id: root.id,
+                    credential_kind: keycompute_types::CredentialKind::System,
+                    actor_platform_role: keycompute_types::PlatformRole::Root,
+                    actor_tenant_role: None,
+                    request_id: None,
+                };
+                Tenant::create_owned(
+                    &tx,
+                    &CreateTenantRequest {
+                        name: "Default".into(),
+                        slug: "default".into(),
+                        description: None,
+                        default_rpm_limit: None,
+                        default_tpm_limit: None,
+                    },
+                    root.id,
+                    &actor,
+                )
+                .await?;
             }
-            Ok(())
+            tx.commit().await?;
+            Ok::<(), keycompute_db::DbError>(())
         })
         .await
         .map(|_| ())
-}
-
-/// 在单个事务内临时禁用保护触发器并删除遗留的 system 用户。
-///
-/// 必须在同一事务内完成禁用-删除-启用：PostgreSQL 的 DDL 是事务性的，
-/// `ALTER TABLE` 持有的 ACCESS EXCLUSIVE 锁会阻塞其他会话直到提交，
-/// 因此并发测试永远不会观察到“触发器被禁用”的窗口。若改用逐条
-/// 自动提交的语句，其他并行用例（如角色提升/降级拒绝测试）会在
-/// 禁用窗口内穿透保护导致 flaky 失败。
-async fn remove_leftover_system_users(db: &DatabaseConnection) -> Result<(), sea_orm::DbErr> {
-    let tx = db.begin().await?;
-    tx.execute_unprepared("ALTER TABLE users DISABLE TRIGGER trg_prevent_system_user_delete")
-        .await?;
-    tx.execute_unprepared("ALTER TABLE users DISABLE TRIGGER trg_prevent_system_role_change")
-        .await?;
-    tx.execute_unprepared("DELETE FROM users WHERE role = 'system'")
-        .await?;
-    tx.execute_unprepared("ALTER TABLE users ENABLE TRIGGER trg_prevent_system_role_change")
-        .await?;
-    tx.execute_unprepared("ALTER TABLE users ENABLE TRIGGER trg_prevent_system_user_delete")
-        .await?;
-    tx.commit().await
 }
 
 pub async fn create_test_pool() -> DatabaseConnection {
@@ -86,87 +94,86 @@ pub async fn cleanup_test_data(
     pool: &DatabaseConnection,
     run_id: &str,
 ) -> Result<(), sea_orm::DbErr> {
+    // Test cleanup is explicit and dependency-ordered: production foreign keys
+    // deliberately retain accepted work instead of cascading it away.
+    if run_id.len() < 8
+        || !run_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(sea_orm::DbErr::Custom("invalid test namespace".into()));
+    }
     let slug_pattern = format!("test-%-{}", run_id);
     let email_pattern = format!("%{}%", run_id);
-
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM pending_registrations WHERE email LIKE $1",
-        [email_pattern.into()],
-    ))
-    .await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM pricing_models WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
-        [slug_pattern.clone().into()],
-    ))
-    .await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM distribution_records WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
+    let tx = pool.begin().await?;
+    tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+        .await?;
+    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "DELETE FROM node_tips WHERE usage_log_id IN (SELECT u.id FROM usage_logs u JOIN tenants t ON t.id=u.tenant_id WHERE t.slug LIKE $1)",
         [slug_pattern.clone().into()],
     )).await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM balance_reservations WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
-        [slug_pattern.clone().into()],
-    ))
-    .await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM admin_balance_operations WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
-        [slug_pattern.clone().into()],
-    ))
-    .await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM balance_transactions WHERE user_id IN (SELECT id FROM users WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1))",
-        [slug_pattern.clone().into()],
-    )).await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM usage_logs WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
-        [slug_pattern.clone().into()],
-    ))
-    .await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM user_balances WHERE user_id IN (SELECT id FROM users WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1))",
-        [slug_pattern.clone().into()],
-    )).await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM produce_ai_keys WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
-        [slug_pattern.clone().into()],
-    )).await?;
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM users WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
-        [slug_pattern.clone().into()],
-    ))
-    .await?;
-    // Bindings refer to accounts with RESTRICT, including global accounts
-    // bound by another tenant created in the same isolated test namespace.
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM passthrough_bindings WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1) OR account_id IN (SELECT id FROM accounts WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1))",
+    for table in [
+        "scoped_responses",
+        "scoped_conversations",
+        "response_affinities",
+        "responses_idempotency_claims",
+        "node_tasks",
+        "user_node_gateway_tokens",
+        "nodes",
+        "gateway_requests",
+        "pricing_models",
+        "distribution_records",
+        "tenant_distribution_rules",
+        "balance_reservations",
+        "admin_balance_operations",
+        "balance_transactions",
+        "usage_logs",
+        "user_balances",
+        "payment_orders",
+        "produce_ai_keys",
+        "tenant_invitations",
+    ] {
+        // Table names are internal constants; namespace values are parameters.
+        tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!(
+                "DELETE FROM {table} WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)"
+            ),
+            [slug_pattern.clone().into()],
+        ))
+        .await?;
+    }
+    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "DELETE FROM passthrough_bindings WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1) OR account_id IN (SELECT a.id FROM accounts a JOIN tenants t ON t.id=a.tenant_id WHERE t.slug LIKE $1)",
         [slug_pattern.clone().into()],
     )).await?;
-    // accounts 使用租户 RESTRICT 外键，需先显式删除，避免残留账号阻止租户清理。
-    pool.execute(Statement::from_sql_and_values(
+    tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "DELETE FROM accounts WHERE tenant_id IN (SELECT id FROM tenants WHERE slug LIKE $1)",
         [slug_pattern.clone().into()],
     ))
     .await?;
-    pool.execute(Statement::from_sql_and_values(
+    tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "DELETE FROM tenants WHERE slug LIKE $1",
         [slug_pattern.into()],
     ))
     .await?;
-
-    Ok(())
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "DELETE FROM pending_registrations WHERE email LIKE $1",
+        [email_pattern.clone().into()],
+    ))
+    .await?;
+    // Historical audit snapshots intentionally survive fixture removal, just
+    // as they survive real resource deletion. Never disable their protections.
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "DELETE FROM users WHERE email LIKE $1 AND email LIKE '%@example.com'",
+        [email_pattern.into()],
+    ))
+    .await?;
+    tx.commit().await
 }
 
 /// Owns the data namespace for one integration-test run and cleans it up on
@@ -219,8 +226,24 @@ impl Drop for TestDataGuard {
 
 /// 创建测试租户
 pub async fn create_test_tenant(pool: &DatabaseConnection, suffix: &str, test_id: &str) -> Tenant {
-    Tenant::create(
+    // Every tenant fixture has a real global owner and an explicit active
+    // admin membership.  Keep both inserts in one transaction so the deferred
+    // owner invariant is checked only after the membership exists.
+    let owner = User::create(
         pool,
+        &CreateUserRequest {
+            email: format!("test-owner-{}-{}@example.com", suffix, test_id),
+            name: Some(format!("Test Owner {}", suffix)),
+        },
+    )
+    .await
+    .expect("failed to create global fixture owner");
+    let tx = pool
+        .begin()
+        .await
+        .expect("tenant fixture transaction should start");
+    let tenant = Tenant::create_owned(
+        &tx,
         &CreateTenantRequest {
             name: format!("Test Tenant {}", suffix),
             slug: format!("test-tenant-{}-{}", suffix, test_id),
@@ -228,9 +251,21 @@ pub async fn create_test_tenant(pool: &DatabaseConnection, suffix: &str, test_id
             default_rpm_limit: Some(100),
             default_tpm_limit: Some(50000),
         },
+        owner.id,
+        &keycompute_db::AuditContext {
+            actor_user_id: owner.id,
+            credential_kind: keycompute_types::CredentialKind::Jwt,
+            actor_platform_role: keycompute_types::PlatformRole::None,
+            actor_tenant_role: None,
+            request_id: None,
+        },
     )
     .await
-    .expect("Failed to create test tenant")
+    .expect("failed to create owned test tenant");
+    tx.commit()
+        .await
+        .expect("tenant fixture transaction should commit");
+    tenant
 }
 
 /// 创建测试用户
@@ -239,18 +274,53 @@ pub async fn create_test_user(
     tenant_id: Uuid,
     suffix: &str,
     test_id: &str,
-) -> User {
-    User::create(
+) -> TenantActor {
+    let user = User::create(
         pool,
         &CreateUserRequest {
-            tenant_id,
             email: format!("test-{}-{}@example.com", suffix, test_id),
             name: Some(format!("Test User {}", suffix)),
-            role: Some(UserRole::User),
         },
     )
     .await
-    .expect("Failed to create test user")
+    .expect("Failed to create test user");
+    let tx = pool
+        .begin()
+        .await
+        .expect("membership fixture transaction should start");
+    tx.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships (tenant_id,user_id,role,status) VALUES ($1,$2,'member','active')",
+        [tenant_id.into(), user.id.into()],
+    ))
+    .await
+    .expect("membership fixture insert should succeed");
+    tx.commit()
+        .await
+        .expect("membership fixture transaction should commit");
+    TenantActor {
+        user,
+        tenant_id,
+        tenant_role: TenantRole::Member,
+    }
+}
+
+/// A test-only scoped identity. Production `User` is intentionally global;
+/// tests keep the fixture's known tenant beside it instead of selecting an
+/// arbitrary membership from the database.
+#[derive(Debug, Clone)]
+pub struct TenantActor {
+    pub user: User,
+    pub tenant_id: Uuid,
+    pub tenant_role: TenantRole,
+}
+
+impl Deref for TenantActor {
+    type Target = User;
+
+    fn deref(&self) -> &Self::Target {
+        &self.user
+    }
 }
 
 /// 创建测试中的待完成注册记录
@@ -266,16 +336,44 @@ pub async fn create_test_pending_registration(
     pending
 }
 
-/// 通过邮箱删除用户
+/// Remove a freshly registered test identity and its personal workspace.
+/// Foreign keys continue to reject any unexpected retained business activity.
 pub async fn delete_user_by_email(
     pool: &DatabaseConnection,
     email: &str,
 ) -> Result<(), sea_orm::DbErr> {
-    pool.execute(Statement::from_sql_and_values(
+    let tx = pool.begin().await?;
+    tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+        .await?;
+    let Some(row) = tx
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM users WHERE email=$1 AND platform_role='none' FOR UPDATE",
+            [email.into()],
+        ))
+        .await?
+    else {
+        return tx.rollback().await;
+    };
+    let user: Uuid = row.try_get_by_index(0)?;
+    let slug = format!("personal-{}", user.simple());
+    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "DELETE FROM balance_transactions WHERE user_id=$1 AND tenant_id IN (SELECT id FROM tenants WHERE owner_user_id=$1 AND slug=$2) AND transaction_type='recharge' AND description='Initial quota from system'",
+        [user.into(),slug.clone().into()],
+    )).await?;
+    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "DELETE FROM user_balances WHERE user_id=$1 AND tenant_id IN (SELECT id FROM tenants WHERE owner_user_id=$1 AND slug=$2)",
+        [user.into(),slug.clone().into()],
+    )).await?;
+    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "DELETE FROM tenants WHERE owner_user_id=$1 AND slug=$2 AND NOT EXISTS (SELECT 1 FROM tenant_memberships m WHERE m.tenant_id=tenants.id AND m.user_id<>$1)",
+        [user.into(),slug.into()],
+    )).await?;
+    tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "DELETE FROM users WHERE email = $1",
-        [email.into()],
+        "DELETE FROM users WHERE id=$1",
+        [user.into()],
     ))
     .await?;
-    Ok(())
+    tx.commit().await
 }

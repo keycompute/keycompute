@@ -342,8 +342,8 @@ async fn sustained_real_http_database_redis_and_billing_profile() {
             let user = create_test_user(&db, tenant.id, &format!("load-{t}-{u}"), &run).await;
             balance
                 .recharge(
-                    user.id,
                     tenant.id,
+                    user.id,
                     rust_decimal::Decimal::from(100000),
                     None,
                     None,

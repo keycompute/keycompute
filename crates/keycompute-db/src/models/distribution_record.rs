@@ -13,6 +13,7 @@ pub struct DistributionRecord {
     pub id: Uuid,
     pub usage_log_id: Uuid,
     pub tenant_id: Uuid,
+    pub beneficiary_scope: String,
     pub beneficiary_id: Uuid,
     pub share_amount: BigDecimal,
     pub share_ratio: BigDecimal,
@@ -28,6 +29,7 @@ pub struct DistributionRecord {
 pub struct CreateDistributionRecordRequest {
     pub usage_log_id: Uuid,
     pub tenant_id: Uuid,
+    pub beneficiary_scope: String,
     pub beneficiary_id: Uuid,
     pub share_amount: BigDecimal,
     pub share_ratio: BigDecimal,
@@ -67,15 +69,16 @@ impl DistributionRecord {
             DbBackend::Postgres,
             r#"
             INSERT INTO distribution_records (
-                usage_log_id, tenant_id, beneficiary_id,
+                usage_log_id, tenant_id, beneficiary_scope, beneficiary_id,
                 share_amount, share_ratio, level, status
             )
-            VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
             RETURNING *
             "#,
             [
                 req.usage_log_id.into(),
                 req.tenant_id.into(),
+                req.beneficiary_scope.as_str().into(),
                 req.beneficiary_id.into(),
                 req.share_amount.clone().into(),
                 req.share_ratio.clone().into(),
@@ -122,16 +125,17 @@ impl DistributionRecord {
                     DbBackend::Postgres,
                     r#"
                 INSERT INTO distribution_records (
-                    usage_log_id, tenant_id, beneficiary_id,
+                    usage_log_id, tenant_id, beneficiary_scope, beneficiary_id,
                     share_amount, share_ratio, level, status
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, 'pending')
-                ON CONFLICT (usage_log_id, beneficiary_id, level) DO NOTHING
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+                ON CONFLICT (usage_log_id, beneficiary_scope, beneficiary_id, level) DO NOTHING
                 RETURNING *
                 "#,
                     [
                         req.usage_log_id.into(),
                         req.tenant_id.into(),
+                        req.beneficiary_scope.as_str().into(),
                         req.beneficiary_id.into(),
                         req.share_amount.clone().into(),
                         req.share_ratio.clone().into(),
@@ -155,8 +159,8 @@ impl DistributionRecord {
                 match DistributionRecord::find_by_statement(
                     Statement::from_sql_and_values(
                         DbBackend::Postgres,
-                        "SELECT * FROM distribution_records WHERE usage_log_id = $1 AND beneficiary_id = $2 AND level = $3",
-                        [req.usage_log_id.into(), req.beneficiary_id.into(), req.level.as_str().into()],
+                        "SELECT * FROM distribution_records WHERE usage_log_id = $1 AND beneficiary_scope = $2 AND beneficiary_id = $3 AND level = $4",
+                        [req.usage_log_id.into(), req.beneficiary_scope.as_str().into(), req.beneficiary_id.into(), req.level.as_str().into()],
                     ),
                 )
                 .one(txn)

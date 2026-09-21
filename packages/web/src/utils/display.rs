@@ -62,12 +62,11 @@ pub fn distribution_status_label(status: &str, i18n: &I18n) -> String {
     }
 }
 
-pub fn user_role_label(role: &str, i18n: &I18n) -> String {
+pub fn platform_role_label(role: Option<client_api::PlatformRole>, i18n: &I18n) -> String {
     match role {
-        "user" => i18n.t("users.role_user").to_string(),
-        "admin" => i18n.t("users.role_admin").to_string(),
-        "system" => i18n.t("users.role_system").to_string(),
-        _ => role.to_string(),
+        Some(client_api::PlatformRole::Root) => i18n.t("users.role_root").to_string(),
+        Some(client_api::PlatformRole::Operator) => i18n.t("users.role_operator").to_string(),
+        Some(client_api::PlatformRole::None) | None => "—".to_string(),
     }
 }
 
@@ -85,8 +84,8 @@ pub fn short_id(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        payment_provider_message, payment_provider_status_label, payment_status_label, short_id,
-        user_role_label,
+        payment_provider_message, payment_provider_status_label, payment_status_label,
+        platform_role_label, short_id,
     };
     use crate::i18n::{I18n, Lang};
 
@@ -103,7 +102,10 @@ mod tests {
             Some("Configuration loaded; provider verification is still required before use.")
         );
         assert_eq!(payment_provider_message("available", &en), None);
-        assert_eq!(user_role_label("system", &zh), "system（受保护）");
+        assert_eq!(
+            platform_role_label(Some(client_api::PlatformRole::Root), &zh),
+            "root（平台最高权限）"
+        );
     }
 
     #[test]

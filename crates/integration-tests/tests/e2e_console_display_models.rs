@@ -39,7 +39,8 @@ async fn trend_counts_all_rows_zero_fills_and_uses_half_open_utc_bounds() {
     usage(&db, tenant, user, "2026-01-02T12:00:00Z", 100).await;
     usage(&db, tenant, user, "2025-12-31T23:59:59Z", 1).await;
     usage(&db, tenant, user, "2026-01-04T00:00:00Z", 1).await;
-    usage(&db, tenant, Uuid::new_v4(), "2026-01-01T00:00:00Z", 5).await;
+    let peer = create_test_user(&db, tenant, "display-peer", &generate_test_id()).await;
+    usage(&db, tenant, peer.id, "2026-01-01T00:00:00Z", 5).await;
     let value = console_display::usage_trend(
         &db,
         user,

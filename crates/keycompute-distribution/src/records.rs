@@ -161,6 +161,7 @@ impl DistributionService {
             let req = CreateDistributionRecordRequest {
                 usage_log_id: record.usage_log_id,
                 tenant_id: record.tenant_id,
+                beneficiary_scope: "tenant_member".to_string(),
                 beneficiary_id: record.beneficiary_id,
                 share_amount: decimal_to_bigdecimal(&record.share_amount)?,
                 share_ratio: decimal_to_bigdecimal(&record.share_ratio)?,

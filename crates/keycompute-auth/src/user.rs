@@ -1,97 +1,52 @@
-//! User/Tenant 加载
-//!
-//! 用户和租户信息的加载与管理。
-
-use keycompute_db::{DbRouter, Tenant, User};
-use keycompute_types::{KeyComputeError, Result};
+//! Primary-backed global identity and selected tenant loading.
+use keycompute_db::{DbRouter, Tenant};
+use keycompute_types::{KeyComputeError, PlatformRole, Result, UserStatus};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// 用户信息
 #[derive(Debug, Clone)]
 pub struct UserInfo {
-    /// 用户 ID
     pub id: Uuid,
-    /// 租户 ID
-    pub tenant_id: Uuid,
-    /// 邮箱
     pub email: String,
-    /// 名称
     pub name: String,
-    /// 角色
-    pub role: String,
-    /// 是否激活
-    pub active: bool,
+    pub platform_role: PlatformRole,
+    pub status: UserStatus,
+    pub token_version: i32,
 }
-
 impl UserInfo {
-    /// 创建新的用户信息
     pub fn new(
         id: Uuid,
-        tenant_id: Uuid,
         email: impl Into<String>,
         name: impl Into<String>,
-        role: impl Into<String>,
+        platform_role: PlatformRole,
+        status: UserStatus,
+        token_version: i32,
     ) -> Self {
         Self {
             id,
-            tenant_id,
             email: email.into(),
             name: name.into(),
-            role: role.into(),
-            active: true,
+            platform_role,
+            status,
+            token_version,
         }
-    }
-
-    /// 从数据库 User 模型转换
-    pub fn from_db_user(user: &User) -> Self {
-        Self {
-            id: user.id,
-            tenant_id: user.tenant_id,
-            email: user.email.clone(),
-            name: user.name.clone().unwrap_or_default(),
-            role: user.role.clone(),
-            active: true,
-        }
-    }
-
-    /// Role metadata only; use AuthContext permissions for authorization.
-    pub fn has_admin_role(&self) -> bool {
-        self.role == "admin" || self.role == "system"
-    }
-
-    /// Highest-role metadata only; not an authenticated permission check.
-    pub fn has_system_role(&self) -> bool {
-        self.role == "system"
     }
 }
-
-/// 租户信息
 #[derive(Debug, Clone)]
 pub struct TenantInfo {
-    /// 租户 ID
     pub id: Uuid,
-    /// 租户名称
     pub name: String,
-    /// 租户 slug（唯一标识）
     pub slug: String,
-    /// 是否激活
     pub active: bool,
-    /// 配置
     pub config: TenantConfig,
 }
-
-/// 租户配置
 #[derive(Debug, Clone, Default)]
 pub struct TenantConfig {
-    /// 默认 RPM 限制
     pub default_rpm_limit: u32,
-    /// 默认 TPM 限制
     pub default_tpm_limit: u32,
 }
-
 impl TenantInfo {
-    /// 创建新的租户信息
     pub fn new(id: Uuid, name: impl Into<String>, slug: impl Into<String>) -> Self {
         Self {
             id,
@@ -101,347 +56,188 @@ impl TenantInfo {
             config: TenantConfig::default(),
         }
     }
-
-    /// 从数据库 Tenant 模型转换
-    pub fn from_db_tenant(tenant: &Tenant) -> Self {
+    pub fn from_db_tenant(t: &Tenant) -> Self {
         Self {
-            id: tenant.id,
-            name: tenant.name.clone(),
-            slug: tenant.slug.clone(),
-            active: tenant.status == "active",
+            id: t.id,
+            name: t.name.clone(),
+            slug: t.slug.clone(),
+            active: t.status == "active",
             config: TenantConfig {
-                default_rpm_limit: tenant.default_rpm_limit as u32,
-                default_tpm_limit: tenant.default_tpm_limit as u32,
+                default_rpm_limit: t.default_rpm_limit.max(0) as u32,
+                default_tpm_limit: t.default_tpm_limit.max(0) as u32,
             },
         }
     }
-
-    /// 设置配置
-    pub fn with_config(mut self, config: TenantConfig) -> Self {
-        self.config = config;
-        self
-    }
-
-    /// 检查租户是否激活
     pub fn is_active(&self) -> bool {
         self.active
     }
 }
 
-/// 用户服务
-#[derive(Clone)]
-pub struct UserService {
-    /// 数据库连接池（可选）
-    pool: Option<Arc<DbRouter>>,
+#[derive(Debug, FromQueryResult)]
+struct IdentityRow {
+    id: Uuid,
+    email: String,
+    name: Option<String>,
+    platform_role: String,
+    status: String,
+    token_version: i32,
 }
-
-impl std::fmt::Debug for UserService {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UserService")
-            .field("pool", &self.pool.as_deref().map(|_| "DatabaseConnection"))
-            .finish()
-    }
-}
-
-impl UserService {
-    /// 创建新的用户服务（无数据库连接）
-    pub fn new() -> Self {
-        Self { pool: None }
-    }
-
-    /// 创建带数据库连接的用户服务
-    pub fn with_pool(pool: Arc<DbRouter>) -> Self {
-        Self { pool: Some(pool) }
-    }
-
-    /// 根据 ID 加载用户
-    pub async fn load_user(&self, user_id: Uuid) -> Result<UserInfo> {
-        tracing::debug!(user_id = %user_id, "Loading user");
-
-        if let Some(pool) = self.pool.as_deref() {
-            let user = User::find_by_id(pool, user_id)
-                .await
-                .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to load user: {}", e)))?
-                .ok_or_else(|| {
-                    KeyComputeError::AuthError(format!("User not found: {}", user_id))
-                })?;
-
-            tracing::info!(user_id = %user.id, tenant_id = %user.tenant_id, role = %user.role, "User loaded");
-            return Ok(UserInfo::from_db_user(&user));
-        }
-
-        // 无数据库连接，返回模拟数据
-        tracing::warn!("No database connection, returning mock user");
-        Ok(UserInfo::new(
-            user_id,
-            Uuid::new_v4(),
-            "user@example.com",
-            "Test User",
-            "user",
-        ))
-    }
-
-    /// 加载用户当前的 token_version
-    ///
-    /// 用于 JWT 失效校验。无数据库连接时返回 `None`（跳过校验，保持结构性验证行为）。
-    ///
-    /// 该读取强制走主库（`write_conn`）：这是安全敏感校验，若走读副本，
-    /// 复制延迟会形成一个窗口，使密码重置/登出后本应失效的旧 token 仍被放行。
-    pub async fn load_token_version(&self, user_id: Uuid) -> Result<Option<i32>> {
-        if let Some(pool) = self.pool.as_deref() {
-            let version = User::find_token_version(pool.write_conn(), user_id)
-                .await
-                .map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to load token version: {}", e))
-                })?
-                .ok_or_else(|| {
-                    KeyComputeError::AuthError(format!("User not found: {}", user_id))
-                })?;
-            return Ok(Some(version));
-        }
-
-        Ok(None)
-    }
-
-    /// 根据 ID 加载租户
-    pub async fn load_tenant(&self, tenant_id: Uuid) -> Result<TenantInfo> {
-        tracing::debug!(tenant_id = %tenant_id, "Loading tenant");
-
-        if let Some(pool) = self.pool.as_deref() {
-            // Tenant lifecycle is authorization-sensitive. Read from the
-            // writer so a just-closed tenant cannot remain usable during
-            // replica lag.
-            let tenant = Tenant::find_by_id(pool.write_conn(), tenant_id)
-                .await
-                .map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to load tenant: {}", e))
-                })?
-                .ok_or_else(|| {
-                    KeyComputeError::AuthError(format!("Tenant not found: {}", tenant_id))
-                })?;
-
-            // 检查租户状态：具体状态值属于内部信息只进日志，不拼入错误消息
-            if tenant.status != "active" {
-                tracing::warn!(tenant_id = %tenant.id, status = %tenant.status, "Tenant is not active");
-                return Err(KeyComputeError::AuthError("Tenant is not active".into()));
-            }
-
-            tracing::info!(tenant_id = %tenant.id, name = %tenant.name, status = %tenant.status, "Tenant loaded");
-            return Ok(TenantInfo::from_db_tenant(&tenant));
-        }
-
-        // 无数据库连接，返回模拟数据
-        tracing::warn!("No database connection, returning mock tenant");
-        Ok(TenantInfo::new(tenant_id, "Test Tenant", "test-tenant"))
-    }
-
-    /// 根据 Produce AI Key ID 加载用户信息
-    pub async fn load_by_produce_ai_key(&self, produce_ai_key_id: Uuid) -> Result<UserInfo> {
-        tracing::debug!(produce_ai_key_id = %produce_ai_key_id, "Loading user by Produce AI key");
-
-        if let Some(pool) = self.pool.as_deref() {
-            // 通过 Produce AI Key 查找用户
-            use keycompute_db::ProduceAiKey;
-            let produce_ai_key = ProduceAiKey::find_by_id(pool, produce_ai_key_id)
-                .await
-                .map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to load Produce AI key: {}", e))
-                })?
-                .ok_or_else(|| {
-                    KeyComputeError::AuthError(format!(
-                        "Produce AI key not found: {}",
-                        produce_ai_key_id
-                    ))
-                })?;
-
-            // 检查 Produce AI Key 是否有效
-            if !produce_ai_key.is_valid() {
-                return Err(KeyComputeError::AuthError(
-                    "Produce AI key is revoked or expired".into(),
-                ));
-            }
-
-            // 加载用户
-            return self.load_user(produce_ai_key.user_id).await;
-        }
-
-        // 无数据库连接，返回模拟数据
-        Ok(UserInfo::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            "api@example.com",
-            "API User",
-            "user",
-        ))
-    }
-
-    /// 加载用户并验证租户归属
-    pub async fn load_user_with_tenant_validation(
-        &self,
-        user_id: Uuid,
-        expected_tenant_id: Uuid,
-    ) -> Result<UserInfo> {
-        let user = self.load_user(user_id).await?;
-
-        if user.tenant_id != expected_tenant_id {
-            tracing::warn!(
-                user_id = %user_id,
-                expected_tenant_id = %expected_tenant_id,
-                actual_tenant_id = %user.tenant_id,
-                "User does not belong to expected tenant"
-            );
-            return Err(KeyComputeError::AuthError(
-                "User does not belong to the expected tenant".into(),
-            ));
-        }
-
-        Ok(user)
-    }
-
-    /// 加载用户和租户信息
-    pub async fn load_user_and_tenant(&self, user_id: Uuid) -> Result<(UserInfo, TenantInfo)> {
-        let user = self.load_user(user_id).await?;
-        let tenant = self.load_tenant(user.tenant_id).await?;
-        Ok((user, tenant))
-    }
-}
-
-impl Default for UserService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// One primary MVCC snapshot for JWT identity and tenant lifecycle checks.
-/// Never cached across requests, and never reused for later WebSocket events.
-#[derive(Debug, sea_orm::FromQueryResult)]
-pub(crate) struct JwtIdentitySnapshot {
+#[derive(Debug, FromQueryResult)]
+pub struct JwtIdentitySnapshot {
+    pub user_id: Uuid,
+    pub email: String,
+    pub user_name: Option<String>,
     pub tenant_id: Uuid,
+    pub membership_version: i64,
+    pub authz_version: i64,
     pub token_version: i32,
-    pub role: String,
+    pub platform_role: String,
+    pub tenant_role: String,
     pub tenant_name: String,
     pub tenant_slug: String,
     pub active: bool,
     pub default_rpm_limit: i32,
     pub default_tpm_limit: i32,
 }
-impl UserService {
-    pub(crate) async fn load_jwt_identity(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Option<JwtIdentitySnapshot>> {
-        use sea_orm::{DbBackend, FromQueryResult, Statement};
-        let Some(pool) = self.pool.as_deref() else {
-            return Ok(None);
-        };
-        let statement = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT u.tenant_id, u.token_version, u.role, t.name AS tenant_name, t.slug AS tenant_slug, \
-             t.status = 'active' AS active, t.default_rpm_limit, t.default_tpm_limit \
-             FROM users u INNER JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1",
-            [user_id.into()],
-        );
-        JwtIdentitySnapshot::find_by_statement(statement)
-            .one(pool.write_conn())
-            .await
-            .map_err(|error| {
-                KeyComputeError::DatabaseError(format!("Failed to load JWT identity: {error}"))
-            })?
-            .map(Some)
-            .ok_or_else(|| KeyComputeError::AuthError("User or tenant no longer exists".into()))
+#[derive(Clone)]
+pub struct UserService {
+    pool: Option<Arc<DbRouter>>,
+}
+impl std::fmt::Debug for UserService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserService")
+            .field("pool", &self.pool.is_some())
+            .finish()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_user_info() {
-        let user = UserInfo::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            "test@example.com",
-            "Test User",
-            "user",
-        );
-
-        assert_eq!(user.email, "test@example.com");
-        assert!(!user.has_admin_role());
-        assert!(user.active);
+impl UserService {
+    pub(crate) fn primary_pool(&self) -> Result<&Arc<DbRouter>> {
+        self.pool.as_ref().ok_or_else(|| {
+            KeyComputeError::ServiceUnavailable("identity storage unavailable".into())
+        })
     }
 
-    #[test]
-    fn test_user_info_admin() {
-        let user = UserInfo::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            "admin@example.com",
-            "Admin User",
-            "admin",
-        );
-
-        assert!(user.has_admin_role());
-        assert!(!user.has_system_role());
+    pub fn new() -> Self {
+        Self { pool: None }
     }
-
-    #[test]
-    fn test_tenant_info() {
-        let tenant = TenantInfo::new(Uuid::new_v4(), "Test", "test");
-        assert_eq!(tenant.name, "Test");
-        assert_eq!(tenant.slug, "test");
-        assert!(tenant.active);
-        assert!(tenant.is_active());
+    pub fn with_pool(pool: Arc<DbRouter>) -> Self {
+        Self { pool: Some(pool) }
     }
-
-    #[test]
-    fn test_tenant_config() {
-        let config = TenantConfig {
-            default_rpm_limit: 100,
-            default_tpm_limit: 10000,
+    pub async fn load_user(&self, user_id: Uuid) -> Result<UserInfo> {
+        let Some(pool) = &self.pool else {
+            return Err(KeyComputeError::AuthError(
+                "authentication service not configured".into(),
+            ));
         };
-        let tenant = TenantInfo::new(Uuid::new_v4(), "Test", "test").with_config(config);
-        assert_eq!(tenant.config.default_rpm_limit, 100);
-        assert_eq!(tenant.config.default_tpm_limit, 10000);
+        let row = IdentityRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id,email,name,platform_role,status,token_version FROM users WHERE id=$1",
+            [user_id.into()],
+        ))
+        .one(pool.write_conn())
+        .await
+        .map_err(|e| KeyComputeError::DatabaseError(e.to_string()))?
+        .ok_or_else(|| KeyComputeError::AuthError("User not found".into()))?;
+        let role = row
+            .platform_role
+            .parse()
+            .map_err(|e: String| KeyComputeError::DatabaseError(e))?;
+        let status = row
+            .status
+            .parse()
+            .map_err(|e: String| KeyComputeError::DatabaseError(e))?;
+        if status != UserStatus::Active {
+            return Err(KeyComputeError::AuthError("User is suspended".into()));
+        }
+        Ok(UserInfo::new(
+            row.id,
+            row.email,
+            row.name.unwrap_or_default(),
+            role,
+            status,
+            row.token_version,
+        ))
     }
-
-    #[tokio::test]
-    async fn test_user_service_no_db() {
-        let service = UserService::new();
-        let user_id = Uuid::new_v4();
-
-        let user = service.load_user(user_id).await;
-        assert!(user.is_ok());
-        assert_eq!(user.unwrap().id, user_id);
+    pub async fn load_token_version(&self, user_id: Uuid) -> Result<Option<i32>> {
+        let Some(pool) = &self.pool else {
+            return Ok(None);
+        };
+        let row = pool
+            .write_conn()
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT token_version FROM users WHERE id=$1 AND status='active'",
+                [user_id.into()],
+            ))
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(e.to_string()))?;
+        row.map(|r| r.try_get_by_index(0))
+            .transpose()
+            .map_err(|e| KeyComputeError::DatabaseError(e.to_string()))
     }
-
-    #[tokio::test]
-    async fn test_user_service_load_tenant_no_db() {
-        let service = UserService::new();
-        let tenant_id = Uuid::new_v4();
-
-        let tenant = service.load_tenant(tenant_id).await;
-        assert!(tenant.is_ok());
-        assert_eq!(tenant.unwrap().id, tenant_id);
+    pub async fn load_jwt_identity(
+        &self,
+        user_id: Uuid,
+        tenant_id: Option<Uuid>,
+    ) -> Result<Option<JwtIdentitySnapshot>> {
+        let Some(tid) = tenant_id else {
+            return Ok(None);
+        };
+        let Some(pool) = &self.pool else {
+            return Ok(None);
+        };
+        let row=JwtIdentitySnapshot::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT u.id AS user_id,u.email,u.name AS user_name,m.tenant_id,m.version AS membership_version,t.authz_version,u.token_version,u.platform_role,m.role AS tenant_role,t.name AS tenant_name,t.slug AS tenant_slug,(u.status='active' AND m.status='active' AND t.status='active') AS active,t.default_rpm_limit,t.default_tpm_limit FROM users u JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=$2 JOIN tenants t ON t.id=m.tenant_id WHERE u.id=$1",[user_id.into(),tid.into()])).one(pool.write_conn()).await.map_err(|e|KeyComputeError::DatabaseError(e.to_string()))?;
+        Ok(row)
     }
-
-    #[tokio::test]
-    async fn test_user_service_load_user_and_tenant_no_db() {
-        let service = UserService::new();
-        let user_id = Uuid::new_v4();
-
-        let result = service.load_user_and_tenant(user_id).await;
-        assert!(result.is_ok());
-        let (user, _tenant) = result.unwrap();
-        assert_eq!(user.id, user_id);
+    pub async fn load_tenant(&self, tenant_id: Uuid) -> Result<TenantInfo> {
+        let Some(pool) = &self.pool else {
+            return Err(KeyComputeError::AuthError(
+                "authentication service not configured".into(),
+            ));
+        };
+        let t = Tenant::find_by_id(pool.write_conn(), tenant_id)
+            .await
+            .map_err(|e| KeyComputeError::DatabaseError(e.to_string()))?
+            .ok_or_else(|| KeyComputeError::AuthError("Tenant not found".into()))?;
+        let info = TenantInfo::from_db_tenant(&t);
+        if !info.active {
+            return Err(KeyComputeError::AuthError("Tenant is not active".into()));
+        }
+        Ok(info)
     }
-
-    #[tokio::test]
-    async fn test_user_service_load_token_version_no_db() {
-        // 无数据库连接时返回 None（跳过 token_version 校验）
-        let service = UserService::new();
-        let result = service.load_token_version(Uuid::new_v4()).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None);
+    pub async fn load_user_with_tenant_validation(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+    ) -> Result<UserInfo> {
+        let user = self.load_user(user_id).await?;
+        let Some(pool) = &self.pool else {
+            return Err(KeyComputeError::AuthError(
+                "authentication service not configured".into(),
+            ));
+        };
+        let exists=pool.write_conn().query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT 1 FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 AND status='active'",[tenant_id.into(),user_id.into()])).await.map_err(|e|KeyComputeError::DatabaseError(e.to_string()))?.is_some();
+        if !exists {
+            return Err(KeyComputeError::AuthError(
+                "User is not an active tenant member".into(),
+            ));
+        }
+        Ok(user)
+    }
+    pub async fn load_user_and_tenant(
+        &self,
+        user_id: Uuid,
+        tenant_id: Uuid,
+    ) -> Result<(UserInfo, TenantInfo)> {
+        Ok((
+            self.load_user_with_tenant_validation(user_id, tenant_id)
+                .await?,
+            self.load_tenant(tenant_id).await?,
+        ))
+    }
+}
+impl Default for UserService {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -486,10 +486,10 @@ mod tests {
     fn test_password_reset_identity_matches_trimmed_and_case_insensitive() {
         let user = User {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
             email: "test@example.com".to_string(),
             name: Some("Test User".to_string()),
-            role: "user".to_string(),
+            platform_role: "none".to_string(),
+            status: "active".to_string(),
             token_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -502,10 +502,10 @@ mod tests {
     fn test_password_reset_identity_rejects_missing_or_mismatched_name() {
         let user = User {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
             email: "test@example.com".to_string(),
             name: None,
-            role: "user".to_string(),
+            platform_role: "none".to_string(),
+            status: "active".to_string(),
             token_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),

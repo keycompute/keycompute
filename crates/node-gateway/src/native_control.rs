@@ -19,6 +19,7 @@ impl NodeGatewayStore {
     /// the same capability again in the atomic lease claim.
     pub async fn cancellable_native_ready(
         &self,
+        tenant_id: uuid::Uuid,
         native: &NodeNativeRequest,
     ) -> Result<bool, DbError> {
         let mut required =
@@ -27,7 +28,7 @@ impl NodeGatewayStore {
             required.features.push(NativeFeature::Cancellation);
         }
         PostgresNodeIndex::new(self.pool_arc())
-            .has_ready_native(&required)
+            .has_ready_native(tenant_id, &required)
             .await
             .map_err(|e| DbError::Other(e.to_string()))
     }
@@ -45,15 +46,15 @@ impl NodeGatewayStore {
                 (nt.status='leased' AND nt.deadline_at>NOW()
                  AND ns.revoked_at IS NULL AND ns.expires_at>NOW()
                  AND n.status='online' AND owner_t.status='active' AND caller_t.status='active'
-                 AND (trace.tenant_id IS NULL OR trace.tenant_id=caller.tenant_id)
+                 AND (trace.tenant_id IS NULL OR trace.tenant_id=nt.tenant_id)
                  AND (managed.id IS NULL OR (managed.status IN ('queued','in_progress') AND managed.deleted_at IS NULL))) AS active
             FROM node_tasks nt
             JOIN node_sessions ns ON ns.id=nt.assigned_session_id AND ns.node_id=nt.assigned_node_id
             JOIN nodes n ON n.id=ns.node_id
-            JOIN users owner ON owner.id=n.owner_user_id
-            JOIN tenants owner_t ON owner_t.id=owner.tenant_id
-            JOIN users caller ON caller.id=nt.user_id
-            JOIN tenants caller_t ON caller_t.id=caller.tenant_id
+            JOIN tenants owner_t ON owner_t.id=n.tenant_id
+            JOIN tenant_memberships cm ON cm.tenant_id=nt.tenant_id
+              AND cm.user_id=nt.user_id AND cm.status='active'
+            JOIN tenants caller_t ON caller_t.id=nt.tenant_id
             LEFT JOIN gateway_requests trace ON trace.request_id=nt.request_id
             LEFT JOIN scoped_responses managed ON managed.request_id=nt.request_id
             WHERE nt.id=$1 AND nt.assigned_node_id=$2 AND nt.assigned_session_id=$3

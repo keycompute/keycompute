@@ -20,8 +20,11 @@ fn profile(name: &str) -> UserInfo {
         id: name.into(),
         name: Some(name.into()),
         email: format!("{name}@example.test"),
-        role: "user".into(),
-        tenant_id: "tenant".into(),
+        platform_role: None,
+        status: None,
+        memberships: Vec::new(),
+        selected_tenant: None,
+        capabilities: Default::default(),
     }
 }
 

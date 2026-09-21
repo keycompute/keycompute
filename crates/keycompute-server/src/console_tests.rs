@@ -34,9 +34,12 @@ fn request(path: &str, tenant: Uuid, user: Uuid, key: Uuid) -> HttpRequest<Body>
         .body(Body::empty())
         .unwrap();
     req.extensions_mut().insert(
-        AuthExtractor::new(user, tenant, key, "user").with_permissions(
-            keycompute_auth::build_permissions(keycompute_auth::AuthType::Jwt, "user"),
-        ),
+        AuthExtractor::new(user, tenant, key, keycompute_types::CredentialKind::Jwt)
+            .with_permissions(keycompute_auth::permissions_for(
+                keycompute_types::CredentialKind::Jwt,
+                keycompute_types::PlatformRole::None,
+                Some(keycompute_types::TenantRole::Member),
+            )),
     );
     req
 }
@@ -107,6 +110,21 @@ async fn console_identity_budget_is_user_scoped_and_tenants_are_isolated() {
             .status(),
         StatusCode::TOO_MANY_REQUESTS
     );
+    assert_eq!(
+        a.clone()
+            .oneshot(request(
+                "/api/v1/test/read",
+                t,
+                Uuid::new_v4(),
+                Uuid::new_v4()
+            ))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    // A request rejected by the per-user guard never reaches the tenant
+    // counter; the admitted third request above now fills the tenant budget.
     assert_eq!(
         a.clone()
             .oneshot(request(

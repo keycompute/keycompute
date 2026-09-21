@@ -10,7 +10,7 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use integration_tests::db::{
-    TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
+    TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::models::{
@@ -19,15 +19,13 @@ use keycompute_db::models::{
     passthrough_binding::{CreatePassthroughBindingRequest, PassthroughBinding},
 };
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, CreateUserRequest, DbRouter,
-    ProduceAiKey, User, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, UserBalance,
 };
 use keycompute_server::{
     AppState, create_router,
     state::{AppStateConfig, RateLimitBackendConfig},
 };
 use keycompute_types::{
-    UserRole,
     node::{NodeTaskEnvelope, NodeTaskResult},
     node_capability::{NativeFeature, NativeModelProfile},
     node_native::{NodeNativeHttpResult, NodeNativeOperation as Op},
@@ -45,6 +43,22 @@ use std::{
 use tokio::task::JoinHandle;
 use tower::ServiceExt;
 use uuid::Uuid;
+
+async fn scoped_jwt(state: &AppState, user: &TenantActor) -> String {
+    let global = state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(user.id, None, user.token_version, None, None, 3600)
+        .unwrap();
+    let context = state.auth.verify_token(&global).await.unwrap();
+    state
+        .auth
+        .select_tenant(&context, Some(user.tenant_id))
+        .await
+        .unwrap()
+        .access_token
+}
 #[derive(Clone, Debug)]
 struct Call {
     path: String,
@@ -173,7 +187,7 @@ struct Fixture {
     cleanup: TestDataGuard,
     state: AppState,
     app: Router,
-    user: User,
+    user: TenantActor,
     key: String,
     model: String,
     node: Node,
@@ -196,21 +210,11 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "resource-state", &run).await;
-        let user = User::create(
-            &db,
-            &CreateUserRequest {
-                tenant_id: tenant.id,
-                email: format!("native-{run}@example.invalid"),
-                name: Some("Native protocol fixture".into()),
-                role: Some(UserRole::Admin),
-            },
-        )
-        .await
-        .unwrap();
+        let user = create_test_user(&db, tenant.id, "native", &run).await;
         UserBalance::recharge(
             &db,
-            user.id,
             tenant.id,
+            user.id,
             Decimal::from(100),
             None,
             Some("isolated protocol tests"),
@@ -277,6 +281,7 @@ impl Fixture {
         let node = Node::create(
             &db,
             &CreateNodeRequest {
+                tenant_id: owner.tenant_id,
                 owner_user_id: owner.id,
                 client_instance_id: format!("native-{run}"),
                 display_name: "Native fixture".into(),
@@ -445,22 +450,6 @@ impl Fixture {
             .unwrap()
     }
     async fn finish(&mut self) {
-        self.db
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "DELETE FROM node_tasks WHERE user_id=$1",
-                [self.user.id.into()],
-            ))
-            .await
-            .unwrap();
-        self.db
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "DELETE FROM nodes WHERE id=$1",
-                [self.node.id.into()],
-            ))
-            .await
-            .unwrap();
         self.cleanup.cleanup().await.unwrap();
     }
 }
@@ -674,13 +663,7 @@ async fn resource_scope_is_user_tenant_family_and_current_passthrough_grant() {
         &Uuid::new_v4().to_string(),
     )
     .await;
-    let token = f
-        .state
-        .auth
-        .get_jwt_validator()
-        .unwrap()
-        .generate_token_with_version(user.id, user.tenant_id, &user.role, user.token_version)
-        .unwrap();
+    let token = scoped_jwt(&f.state, &user).await;
     expect(
         http(f.app.clone(), Method::GET, &path, Some(&token), None).await,
         StatusCode::NOT_FOUND,
@@ -688,19 +671,13 @@ async fn resource_scope_is_user_tenant_family_and_current_passthrough_grant() {
     // Raising the peer's platform role cannot grant access to private content.
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE users SET role='admin',token_version=token_version+1 WHERE id=$1",
-        [user.id.into()],
+        "UPDATE tenant_memberships SET role='admin' WHERE tenant_id=$1 AND user_id=$2",
+        [user.tenant_id.into(), user.id.into()],
     ))
     .await
     .unwrap();
-    let admin = User::find_by_id(&f.db, user.id).await.unwrap().unwrap();
-    let token = f
-        .state
-        .auth
-        .get_jwt_validator()
-        .unwrap()
-        .generate_token_with_version(admin.id, admin.tenant_id, &admin.role, admin.token_version)
-        .unwrap();
+    let admin = user.clone();
+    let token = scoped_jwt(&f.state, &admin).await;
     for (method, target) in [
         (Method::GET, path.clone()),
         (Method::DELETE, path.clone()),

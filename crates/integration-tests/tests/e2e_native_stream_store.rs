@@ -43,7 +43,7 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(pool.clone(), run.clone());
         let owner_tenant = create_test_tenant(&pool, "native-stream-owner", &run).await;
-        let caller_tenant = create_test_tenant(&pool, "native-stream-caller", &run).await;
+        let caller_tenant = owner_tenant.clone(); // Shared use is limited to this tenant.
         let owner = create_test_user(&pool, owner_tenant.id, "native-stream-owner", &run).await;
         let caller = create_test_user(&pool, caller_tenant.id, "native-stream-caller", &run).await;
         let mut profile =
@@ -63,6 +63,7 @@ impl Fixture {
         let node = Node::create(
             &pool,
             &CreateNodeRequest {
+                tenant_id: owner.tenant_id,
                 owner_user_id: owner.id,
                 client_instance_id: format!("native-stream-{run}"),
                 display_name: "native stream test node".into(),
@@ -108,7 +109,12 @@ impl Fixture {
     async fn leased_task(&self) -> (NodeTask, Uuid) {
         let task = self
             .store
-            .create_and_enqueue_task(self.caller_id, MODEL.into(), payload(Uuid::new_v4()))
+            .create_and_enqueue_task(
+                self.node.tenant_id,
+                self.caller_id,
+                MODEL.into(),
+                payload(Uuid::new_v4()),
+            )
             .await
             .unwrap();
         let (leased, envelope) = self
@@ -436,7 +442,12 @@ async fn stream_profile_and_preheader_native_error_variants_are_distinct() -> an
     let no_sse = Fixture::new(false).await;
     let task = no_sse
         .store
-        .create_and_enqueue_task(no_sse.caller_id, MODEL.into(), payload(Uuid::new_v4()))
+        .create_and_enqueue_task(
+            no_sse.node.tenant_id,
+            no_sse.caller_id,
+            MODEL.into(),
+            payload(Uuid::new_v4()),
+        )
         .await?;
     assert!(
         no_sse
@@ -596,4 +607,87 @@ async fn advertised_native_response_budget_is_enforced() -> anyhow::Result<()> {
         1
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
+    let mut a = Fixture::new(true).await;
+    let mut b = Fixture::new(true).await;
+    let first = a
+        .store
+        .create_and_enqueue_task(
+            a.node.tenant_id,
+            a.caller_id,
+            MODEL.into(),
+            payload(Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+    assert!(
+        b.store
+            .claim_task(first.id, b.node.id, b.session.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a private node must not lease another tenant's task"
+    );
+    let unchanged = NodeTask::find_by_id(&a.pool, first.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.status, "queued");
+    assert!(unchanged.assigned_node_id.is_none());
+    a.pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        [b.node.tenant_id.into(),a.caller_id.into()],
+    )).await.unwrap();
+    let second = b
+        .store
+        .create_and_enqueue_task(
+            b.node.tenant_id,
+            a.caller_id,
+            MODEL.into(),
+            payload(Uuid::new_v4()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.tenant_id, b.node.tenant_id);
+    assert_eq!(second.user_id, a.caller_id);
+    assert!(
+        a.store
+            .claim_task(second.id, a.node.id, a.session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        b.store
+            .claim_task(second.id, b.node.id, b.session.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        a.store
+            .claim_task(first.id, a.node.id, a.session.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    // Independent registration applications are allowed per tenant, not per
+    // global user, and cannot collapse to an arbitrary first membership.
+    for tenant in [a.node.tenant_id, b.node.tenant_id] {
+        keycompute_db::UserNodeGatewayToken::create_with_id(
+            &a.pool,
+            Uuid::new_v4(),
+            tenant,
+            a.caller_id,
+            &Uuid::new_v4().to_string(),
+            "test-preview",
+        )
+        .await
+        .unwrap();
+    }
+    b._cleanup.cleanup().await.unwrap();
+    a._cleanup.cleanup().await.unwrap();
 }

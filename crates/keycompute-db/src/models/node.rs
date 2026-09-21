@@ -17,6 +17,7 @@ pub const NODE_STATUS_EXCLUDED: &str = "excluded";
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct Node {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub owner_user_id: Uuid,
     pub client_instance_id: String,
     pub display_name: String,
@@ -32,6 +33,7 @@ pub struct Node {
 /// 创建节点请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateNodeRequest {
+    pub tenant_id: Uuid,
     pub owner_user_id: Uuid,
     pub client_instance_id: String,
     pub display_name: String,
@@ -47,8 +49,12 @@ impl Node {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO nodes (owner_user_id, client_instance_id, display_name, status, capabilities_json)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO nodes (tenant_id, owner_user_id, client_instance_id, display_name, status, capabilities_json)
+            SELECT m.tenant_id, $1, $2, $3, $4, $5
+            FROM tenant_memberships m
+            JOIN tenants t ON t.id=m.tenant_id AND t.status='active'
+            JOIN users u ON u.id=m.user_id AND u.status='active'
+            WHERE m.tenant_id=$6 AND m.user_id = $1 AND m.status = 'active'
             RETURNING *
             "#,
             [
@@ -57,6 +63,7 @@ impl Node {
                 req.display_name.as_str().into(),
                 NODE_STATUS_OFFLINE.into(),
                 req.capabilities_json.clone().into(),
+                req.tenant_id.into(),
             ],
         );
         let node = Node::find_by_statement(stmt)
@@ -70,13 +77,18 @@ impl Node {
     /// 根据 owner_user_id 和 client_instance_id 查询节点
     pub async fn find_by_owner_and_client(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         owner_user_id: Uuid,
         client_instance_id: &str,
     ) -> Result<Option<Node>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM nodes WHERE owner_user_id = $1 AND client_instance_id = $2",
-            [owner_user_id.into(), client_instance_id.into()],
+            "SELECT * FROM nodes WHERE tenant_id=$3 AND owner_user_id = $1 AND client_instance_id = $2",
+            [
+                owner_user_id.into(),
+                client_instance_id.into(),
+                tenant_id.into(),
+            ],
         );
         let node = Node::find_by_statement(stmt).one(db).await?;
 

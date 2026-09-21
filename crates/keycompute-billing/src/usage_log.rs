@@ -374,6 +374,7 @@ impl BillingService {
                 ctx.request_id,
                 ctx.billing_request_id,
                 ctx.balance_reservation_owner_token(),
+                ctx.tenant_id,
                 user_id,
                 user_amount,
                 usage_log.id,
@@ -413,6 +414,7 @@ impl BillingService {
         request_id: Uuid,
         billing_request_id: Uuid,
         expected_owner_token: Option<Uuid>,
+        tenant_id: Uuid,
         user_id: Uuid,
         user_amount: Decimal,
         usage_log_id: Uuid,
@@ -433,6 +435,8 @@ impl BillingService {
         let description = format!("API调用: {model_name}");
         let reserved = balance
             .settle_request_reservation(
+                tenant_id,
+                user_id,
                 billing_request_id,
                 expected_owner_token,
                 user_amount,
@@ -444,7 +448,13 @@ impl BillingService {
             Some(result) => Ok(result),
             None => {
                 balance
-                    .consume(user_id, user_amount, Some(usage_log_id), Some(&description))
+                    .consume(
+                        tenant_id,
+                        user_id,
+                        user_amount,
+                        Some(usage_log_id),
+                        Some(&description),
+                    )
                     .await
             }
         };
@@ -593,7 +603,7 @@ impl BillingService {
 
         // 按优先级匹配规则（rules 已按 priority DESC, created_at ASC 排序）：
         // 1. 优先匹配特定受益人的规则（per-user override）
-        // 2. 否则使用最高优先级的全局规则（beneficiary_id == nil，对所有用户生效）
+        // 2. 否则使用最高优先级的显式 everyone 规则。
         // 3. 都无匹配时使用配置默认值
         //
         // 优先级约定（Priority Convention）：
@@ -602,11 +612,15 @@ impl BillingService {
         //   -   5: 系统初始化的二级分销默认规则
         //   -   0: 默认优先级（per-user 规则）
         // Billing 匹配：L1 = 最高优先级全局规则（find），L2 = 最低优先级全局规则（rfind，排除 L1）
-        let nil_id = Uuid::nil();
-        let l1_global_rule = rules.iter().find(|r| r.beneficiary_id == nil_id);
+        let l1_global_rule = rules
+            .iter()
+            .find(|r| r.beneficiary_scope == keycompute_db::BeneficiaryScope::Everyone);
         let level1_ratio = rules
             .iter()
-            .find(|r| r.beneficiary_id == l1_id)
+            .find(|r| {
+                r.beneficiary_scope == keycompute_db::BeneficiaryScope::TenantMember
+                    && r.beneficiary_id == Some(l1_id)
+            })
             .or(l1_global_rule)
             .and_then(|r| bigdecimal_to_decimal(&r.commission_rate).ok())
             .unwrap_or(default_level1_ratio);
@@ -615,7 +629,10 @@ impl BillingService {
             .and_then(|l2_id| {
                 rules
                     .iter()
-                    .find(|r| r.beneficiary_id == l2_id)
+                    .find(|r| {
+                        r.beneficiary_scope == keycompute_db::BeneficiaryScope::TenantMember
+                            && r.beneficiary_id == Some(l2_id)
+                    })
                     .and_then(|r| bigdecimal_to_decimal(&r.commission_rate).ok())
             })
             .or_else(|| {
@@ -625,7 +642,10 @@ impl BillingService {
                 let l1_rule_id = l1_global_rule.map(|r| r.id);
                 rules
                     .iter()
-                    .rfind(|r| r.beneficiary_id == nil_id && Some(r.id) != l1_rule_id)
+                    .rfind(|r| {
+                        r.beneficiary_scope == keycompute_db::BeneficiaryScope::Everyone
+                            && Some(r.id) != l1_rule_id
+                    })
                     .and_then(|r| bigdecimal_to_decimal(&r.commission_rate).ok())
             })
             .unwrap_or(default_level2_ratio);

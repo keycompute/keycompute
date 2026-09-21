@@ -89,11 +89,11 @@ async fn tip_probe_preserves_successful_node_replay_and_skips_other_completions(
     );
     let node = Uuid::new_v4();
     db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO nodes(id,owner_user_id,client_instance_id,display_name,status,capabilities_json) VALUES($1,$2,$3,'test','online','{}')",
-        [node.into(),owner.id.into(),run.clone().into()])).await.unwrap();
+        "INSERT INTO nodes(id,tenant_id,owner_user_id,client_instance_id,display_name,status,capabilities_json) VALUES($1,$4,$2,$3,'test','online','{}')",
+        [node.into(),owner.id.into(),run.clone().into(),tenant.id.into()])).await.unwrap();
     db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO node_tasks(request_id,user_id,model,payload_json,status,assigned_node_id,deadline_at,complete_grace_until) VALUES($1,$2,'test','{}','queued',$3,NOW()+INTERVAL '1 minute',NOW()+INTERVAL '2 minutes')",
-        [log.request_id.into(),user.id.into(),node.into()])).await.unwrap();
+        "INSERT INTO node_tasks(request_id,tenant_id,user_id,model,payload_json,status,assigned_node_id,deadline_at,complete_grace_until) VALUES($1,$4,$2,'test','{}','queued',$3,NOW()+INTERVAL '1 minute',NOW()+INTERVAL '2 minutes')",
+        [log.request_id.into(),user.id.into(),node.into(),tenant.id.into()])).await.unwrap();
     assert!(
         NodeTip::create_from_usage_log(&db, log.id)
             .await
@@ -154,7 +154,7 @@ async fn hot_user_settlements_do_not_starve_another_users_writer_and_replay_once
     let other = create_test_user(&admin, tenant.id, "other", &run).await;
     let seed = BalanceService::new(DbRouter::single(admin.clone()));
     for id in [hot.id, other.id] {
-        seed.recharge(id, tenant.id, 100.into(), None, None)
+        seed.recharge(tenant.id, id, 100.into(), None, None)
             .await
             .unwrap();
     }
@@ -219,7 +219,7 @@ async fn hot_user_settlements_do_not_starve_another_users_writer_and_replay_once
         .replay_saved_usage_effects(&context(&a), &a, a.user_id)
         .await
         .unwrap();
-    let balance = keycompute_db::UserBalance::find_by_user(&admin, hot.id)
+    let balance = keycompute_db::UserBalance::find_by_user(&admin, tenant.id, hot.id)
         .await
         .unwrap()
         .unwrap();

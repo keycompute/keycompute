@@ -1,6 +1,5 @@
 //! 管理功能模块集成测试
 
-use client_api::AssignableUserRole;
 use client_api::api::admin::{
     AccountQueryParams, AdminApi, CalculateCostRequest, CreateAccountRequest, CreatePricingRequest,
     PendingTokenQueryParams, ReleaseBalanceReservationRequest, UpdateBalanceRequest,
@@ -114,7 +113,7 @@ async fn test_list_all_users_success() {
     let users = result.unwrap();
     assert_eq!(users.users.len(), 2);
     assert_eq!(users.users[0].email, "admin@example.com");
-    assert_eq!(users.users[0].role, "admin");
+    assert_eq!(users.users[0].platform_role, None);
 }
 
 #[tokio::test]
@@ -156,38 +155,33 @@ async fn test_update_user_success() {
     Mock::given(method("PUT"))
         .and(path("/api/v1/users/user_001"))
         .and(body_json(serde_json::json!({
-            "name": "Updated Name",
-            "role": "admin",
-            "tenant_id": "tenant_002"
+            "name": "Updated Name"
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "success": true,
-            "message": "User updated successfully",
-            "user_id": "user_001",
+            "id": "user_001",
             "email": "updated@example.com",
             "name": "Updated Name",
-            "role": "admin",
-            "tenant_id": "tenant_002",
-            "tenant_name": "Target Tenant"
+            "platform_role": "none",
+            "status": "active",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_login_at": null
         })))
         .mount(&mock_server)
         .await;
 
-    let req = UpdateUserRequest::new()
-        .with_name("Updated Name")
-        .with_role(AssignableUserRole::Admin)
-        .with_tenant_id("tenant_002");
+    let req = UpdateUserRequest::new().with_name("Updated Name");
     let result = admin_api
         .update_user("user_001", &req, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(result.is_ok());
     let user = result.unwrap();
-    assert!(user.success);
-    assert_eq!(user.user_id, "user_001");
+    assert_eq!(user.id, "user_001");
     assert_eq!(user.name, Some("Updated Name".to_string()));
-    assert_eq!(user.tenant_id.as_deref(), Some("tenant_002"));
-    assert_eq!(user.tenant_name.as_deref(), Some("Target Tenant"));
+    assert_eq!(user.platform_role, Some(client_api::PlatformRole::None));
+    assert_eq!(user.status, Some(client_api::UserStatus::Active));
+    assert!(user.memberships.is_none());
 }
 
 #[tokio::test]
@@ -232,7 +226,7 @@ async fn test_update_user_balance_success() {
         .mount(&mock_server)
         .await;
 
-    let req = UpdateBalanceRequest::add(50.0, "Admin recharge");
+    let req = UpdateBalanceRequest::add(uuid::Uuid::from_u128(1), 50.0, "Admin recharge");
     let result = admin_api
         .update_user_balance(
             "user_001",
@@ -258,6 +252,7 @@ async fn freeze_user_balance_sends_idempotency_key() {
         .and(path("/api/v1/users/user_001/balance/freeze"))
         .and(header("idempotency-key", "balance-op-freeze-001"))
         .and(body_json(serde_json::json!({
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
             "amount": "2",
             "reason": "manual hold"
         })))
@@ -279,7 +274,7 @@ async fn freeze_user_balance_sends_idempotency_key() {
     let response = admin_api
         .freeze_user_balance(
             "user_001",
-            &UpdateBalanceRequest::new(2.0, "manual hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual hold"),
             "balance-op-freeze-001",
             fixtures::TEST_ACCESS_TOKEN,
         )
@@ -298,6 +293,7 @@ async fn unfreeze_user_balance_sends_idempotency_key() {
         .and(path("/api/v1/users/user_001/balance/unfreeze"))
         .and(header("idempotency-key", "balance-op-unfreeze-001"))
         .and(body_json(serde_json::json!({
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
             "amount": "2",
             "reason": "release hold"
         })))
@@ -319,7 +315,7 @@ async fn unfreeze_user_balance_sends_idempotency_key() {
     let response = admin_api
         .unfreeze_user_balance(
             "user_001",
-            &UpdateBalanceRequest::new(2.0, "release hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "release hold"),
             "balance-op-unfreeze-001",
             fixtures::TEST_ACCESS_TOKEN,
         )
@@ -336,6 +332,10 @@ async fn test_list_user_balance_reservations_returns_exact_breakdown() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/users/user_001/balance/reservations"))
+        .and(query_param(
+            "tenant_id",
+            "00000000-0000-0000-0000-000000000001",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "user_id": "user_001",
             "available_balance": "988.78",
@@ -357,7 +357,11 @@ async fn test_list_user_balance_reservations_returns_exact_breakdown() {
         .await;
 
     let response = admin_api
-        .list_user_balance_reservations("user_001", fixtures::TEST_ACCESS_TOKEN)
+        .list_user_balance_reservations(
+            "user_001",
+            uuid::Uuid::from_u128(1),
+            fixtures::TEST_ACCESS_TOKEN,
+        )
         .await
         .expect("balance reservation breakdown should deserialize");
 
@@ -380,6 +384,10 @@ async fn test_list_user_balance_reservations_page_forwards_cursor_and_limit() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/users/user_001/balance/reservations"))
+        .and(query_param(
+            "tenant_id",
+            "00000000-0000-0000-0000-000000000001",
+        ))
         .and(query_param("cursor", "opaque+/cursor="))
         .and(query_param("limit", "25"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -398,6 +406,7 @@ async fn test_list_user_balance_reservations_page_forwards_cursor_and_limit() {
     let response = admin_api
         .list_user_balance_reservations_page(
             "user_001",
+            uuid::Uuid::from_u128(1),
             Some("opaque+/cursor="),
             Some(25),
             fixtures::TEST_ACCESS_TOKEN,
@@ -419,6 +428,7 @@ async fn test_release_user_balance_reservation_uses_scoped_request_id_and_reason
             "/api/v1/users/user_001/balance/reservations/request_001/release",
         ))
         .and(body_json(serde_json::json!({
+            "tenant_id": "00000000-0000-0000-0000-000000000001",
             "expected_version": "8b9232cc-fb67-4bc4-a578-c0c6095f2e5e",
             "reason": "Release a provider-rate-limit orphan"
         })))
@@ -440,6 +450,7 @@ async fn test_release_user_balance_reservation_uses_scoped_request_id_and_reason
         .await;
 
     let request = ReleaseBalanceReservationRequest::new(
+        uuid::Uuid::from_u128(1),
         "8b9232cc-fb67-4bc4-a578-c0c6095f2e5e",
         "Release a provider-rate-limit orphan",
     );

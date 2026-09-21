@@ -4,7 +4,7 @@
 //! 架构约束：不写任何状态，不参与路由或执行。
 
 use keycompute_cache::CacheService;
-use keycompute_db::{DbRouter, PricingModel};
+use keycompute_db::{DbRouter, PricingModel, PricingScopeType};
 use keycompute_types::{KeyComputeError, ModelAccessMode, PricingSnapshot, Result};
 use lru::LruCache;
 use rust_decimal::Decimal;
@@ -57,13 +57,13 @@ fn find_global_default<'a>(
     defaults
         .iter()
         .find(|pricing| {
-            pricing.tenant_id == Uuid::nil()
+            pricing.scope_type == PricingScopeType::Platform
                 && pricing.model_name == model_name
                 && pricing.billing_dimension.as_str() == provider
         })
         .or_else(|| {
             defaults.iter().find(|pricing| {
-                pricing.tenant_id == Uuid::nil() && pricing.model_name == model_name
+                pricing.scope_type == PricingScopeType::Platform && pricing.model_name == model_name
             })
         })
 }
@@ -235,10 +235,9 @@ impl PricingService {
     /// - `provider`: 计费维度（"node" 或 "provideraccount"）
     ///
     /// # 缓存策略
-    /// 采用多级缓存 Key 查找策略：
-    /// 1. `tenant_id:model:billing_dimension` - 租户特定定价
-    /// 2. `nil:model:billing_dimension` - 系统默认定价（按计费维度）
-    /// 3. 兜底到硬编码默认价格
+    /// 每个缓存项保存该租户已解析的有效价格：
+    /// `tenant_id:model:billing_dimension`，不能用其他租户预热的平台价格
+    /// 跳过本租户定价查询。主库依次解析租户覆盖、平台价格和内置默认价格。
     pub async fn create_snapshot(
         &self,
         model_name: &str,
@@ -246,74 +245,24 @@ impl PricingService {
         provider: Option<&str>,
     ) -> Result<PricingSnapshot> {
         let provider = provider.unwrap_or(DEFAULT_PRICING_PROVIDER);
-        let nil_tenant = Uuid::nil();
-
-        // 构建多级缓存 key（优先级从高到低）
-        let cache_keys = [
-            Self::cache_key(tenant_id, model_name, provider),
-            Self::cache_key(&nil_tenant, model_name, provider),
-        ];
-
-        // 按优先级检查缓存（使用写锁，因为 LruCache::get 需要更新访问顺序）
+        let key = Self::cache_key(tenant_id, model_name, provider);
         {
             let mut cache = self.cache.write().await;
-            for key in &cache_keys {
-                if let Some(entry) = cache.get(key)
-                    && !entry.is_expired(self.cache_ttl_secs)
-                {
-                    tracing::debug!(
-                        model = %model_name,
-                        tenant_id = %tenant_id,
-                        provider = %provider,
-                        cache_key = %key,
-                        "Pricing snapshot from cache"
-                    );
-                    return Ok(entry.snapshot.clone());
-                }
+            if let Some(entry) = cache.get(&key)
+                && !entry.is_expired(self.cache_ttl_secs)
+            {
+                return Ok(entry.snapshot.clone());
             }
         }
 
-        // 尝试从 L2 分布式缓存加载（带防击穿保护）
-        if let Some(dist_cache) = &self.dist_cache {
-            let dist_key = format!("pricing:{}", cache_keys[0]);
-            let nil_dist_key = format!("pricing:{}", cache_keys[1]);
-            let model = model_name.to_owned();
-            let tid = *tenant_id;
-            let prov = provider.to_owned();
-
-            // nil_tenant 快速路径：检查 nil 默认定价是否已在 L2 中
-            // 必须先确认租户特定 key 不存在（防止自定义定价被覆盖）
-            if dist_key == nil_dist_key
-                && let Ok(Some(nil_snapshot)) =
-                    dist_cache.get::<PricingSnapshot>(&nil_dist_key).await
-            {
-                let mut cache = self.cache.write().await;
-                cache.put(cache_keys[1].clone(), CacheEntry::new(nil_snapshot.clone()));
-                return Ok(nil_snapshot);
-            } else if dist_key != nil_dist_key
-                && let Ok(Some(cached)) = dist_cache
-                    .get::<(PricingSnapshot, PricingSource)>(&dist_key)
-                    .await
-            {
-                // 租户特定 key 已存在于 L2 → 直接读取并填充 L1，无需回源 DB
-                let mut cache = self.cache.write().await;
-                cache.put(cache_keys[0].clone(), CacheEntry::new(cached.0.clone()));
-                return Ok(cached.0);
-            } else if dist_key != nil_dist_key
-                && let Ok(Some(nil_snapshot)) =
-                    dist_cache.get::<PricingSnapshot>(&nil_dist_key).await
-            {
-                // nil key 存在且租户特定 key 不存在 → 安全使用默认定价
-                let mut cache = self.cache.write().await;
-                cache.put(cache_keys[0].clone(), CacheEntry::new(nil_snapshot.clone()));
-                cache.put(cache_keys[1].clone(), CacheEntry::new(nil_snapshot.clone()));
-                return Ok(nil_snapshot);
-            }
-
-            let result: std::result::Result<
-                (PricingSnapshot, PricingSource),
-                keycompute_cache::CacheError,
-            > = dist_cache
+        // Absence of a tenant cache entry does not prove absence of a tenant
+        // pricing override. A platform cache warmed by another tenant must
+        // never short-circuit this tenant's database resolution.
+        if let (Some(dist_cache), Some(pool)) = (&self.dist_cache, &self.pool) {
+            // Version the namespace to discard snapshots populated by the old
+            // platform-first fallback. Only tenant-resolved entries are read.
+            let dist_key = format!("pricing:v2:tenant:{key}");
+            let result = dist_cache
                 .get_or_insert_with_lock::<(PricingSnapshot, PricingSource), _, String>(
                     &dist_key,
                     Duration::from_secs(self.cache_ttl_secs),
@@ -321,112 +270,53 @@ impl PricingService {
                     Duration::from_millis(DEFAULT_LOCK_RETRY_MS),
                     DEFAULT_LOCK_MAX_RETRIES,
                     async {
-                        let pool = self.pool.as_ref().ok_or_else(|| "No DB pool".to_string())?;
-                        let s = self
-                            .load_from_database_with_source(pool.write_conn(), &model, &tid, &prov)
+                        let resolved = self
+                            .load_from_database_with_source(
+                                pool.write_conn(),
+                                model_name,
+                                tenant_id,
+                                provider,
+                            )
                             .await
-                            .map_err(|e| e.to_string())?;
-                        Ok((s.snapshot, s.source))
+                            .map_err(|error| error.to_string())?;
+                        Ok((resolved.snapshot, resolved.source))
                     },
                 )
                 .await;
-
             match result {
-                Ok((snapshot, source)) => {
-                    // 填充本地 L1 缓存
-                    {
-                        let mut cache = self.cache.write().await;
-                        cache.put(cache_keys[0].clone(), CacheEntry::new(snapshot.clone()));
-                    }
-                    //  仅当定价来源是默认（非租户特定）时，写入 nil_tenant key
-                    //  避免租户自定义定价泄露给其他租户
-                    if source != PricingSource::TenantSpecific {
-                        let _ = dist_cache
-                            .set(
-                                &nil_dist_key,
-                                &snapshot,
-                                Duration::from_secs(self.cache_ttl_secs),
-                            )
-                            .await
-                            .inspect_err(|e| {
-                                tracing::warn!("Failed to cache nil_tenant pricing in L2: {}", e);
-                            });
-                    }
+                Ok((snapshot, _source)) => {
+                    self.cache
+                        .write()
+                        .await
+                        .put(key, CacheEntry::new(snapshot.clone()));
                     return Ok(snapshot);
                 }
-                Err(e) if matches!(&e, keycompute_cache::CacheError::FallbackFailed(_)) => {
-                    // DB 查询失败（如无定价记录），使用硬编码默认值
-                    tracing::warn!(
-                        model = %model_name,
-                        tenant_id = %tenant_id,
-                        error = %e,
-                        "Distributed cache fallback failed, using hardcoded default"
-                    );
-                    let snapshot = self.get_default_pricing(model_name);
-                    {
-                        let mut cache = self.cache.write().await;
-                        // 同时填充租户特定 key 和 nil key，避免下次同一租户再次查 L2
-                        cache.put(cache_keys[0].clone(), CacheEntry::new(snapshot.clone()));
-                        cache.put(cache_keys[1].clone(), CacheEntry::new(snapshot.clone()));
-                    }
-                    return Ok(snapshot);
+                Err(keycompute_cache::CacheError::FallbackFailed(error)) => {
+                    // A database outage is not evidence that no custom price
+                    // exists. Do not silently charge a hardcoded fallback.
+                    return Err(KeyComputeError::DatabaseError(error));
                 }
-                Err(e) => {
-                    // Redis 错误或不可用，降级到直接 DB 查询
-                    tracing::warn!(
-                        "Distributed cache error, falling back to direct DB query: {}",
-                        e
-                    );
+                Err(error) => {
+                    tracing::warn!(%error, "Pricing cache unavailable; resolving on primary database");
                 }
             }
         }
 
-        // 降级路径：直接 DB 查询（分布式缓存不可用或出错时）
-        let snapshot_with_source = if let Some(pool) = &self.pool {
+        let resolved = if let Some(pool) = &self.pool {
             self.load_from_database_with_source(pool.write_conn(), model_name, tenant_id, provider)
                 .await?
         } else {
-            // 无数据库连接时使用默认价格
             SnapshotWithSource {
                 snapshot: self.get_default_pricing(model_name),
                 source: PricingSource::HardcodedDefault,
             }
         };
-
-        // 缓存策略：根据来源决定缓存方式
-        {
-            let mut cache = self.cache.write().await;
-            let snapshot = snapshot_with_source.snapshot.clone();
-
-            match snapshot_with_source.source {
-                PricingSource::TenantSpecific => {
-                    // 租户特定定价：仅缓存到租户 key
-                    // 绝不写入 nil_tenant key，避免租户自定义定价泄漏给其他租户
-                    let primary_key = cache_keys[0].clone();
-                    cache.put(primary_key, CacheEntry::new(snapshot));
-                }
-                PricingSource::DatabaseDefault => {
-                    // 数据库默认定价：缓存到 nil tenant key
-                    let default_key = cache_keys[1].clone();
-                    cache.put(default_key, CacheEntry::new(snapshot));
-                }
-                PricingSource::HardcodedDefault => {
-                    // 硬编码默认定价：缓存到 nil tenant key
-                    let default_key = cache_keys[1].clone();
-                    cache.put(default_key, CacheEntry::new(snapshot));
-                }
-            }
-        }
-
-        tracing::debug!(
-            model = %model_name,
-            tenant_id = %tenant_id,
-            provider = %provider,
-            source = ?snapshot_with_source.source,
-            price = ?snapshot_with_source.snapshot,
-            "Created pricing snapshot (direct DB)"
-        );
-        Ok(snapshot_with_source.snapshot)
+        let snapshot = resolved.snapshot;
+        self.cache
+            .write()
+            .await
+            .put(key, CacheEntry::new(snapshot.clone()));
+        Ok(snapshot)
     }
 
     /// 更新 RequestContext 的定价快照（路由后调用）
@@ -514,8 +404,8 @@ impl PricingService {
 
         if let Some(p) = pricing {
             // 判断结果是租户特定定价还是全局默认定价
-            // find_by_model 可能通过 (tenant_id = nil AND is_default = TRUE) 子句返回默认记录
-            let is_global_default = p.tenant_id == Uuid::nil();
+            // find_by_model may return an explicit platform default.
+            let is_global_default = p.scope_type == PricingScopeType::Platform;
             let source = if is_global_default {
                 PricingSource::DatabaseDefault
             } else {
@@ -534,7 +424,7 @@ impl PricingService {
         }
 
         // 尝试查找默认定价（按计费维度匹配）
-        let defaults = PricingModel::find_global_defaults(pool)
+        let defaults = PricingModel::find_defaults(pool, PricingScopeType::Platform, None)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
@@ -632,19 +522,19 @@ impl PricingService {
 
     /// 预热缓存（从数据库加载所有默认定价）
     ///
-    /// 使用 nil UUID 作为租户 ID，适用于默认定价场景
+    /// 使用显式 platform scope 预热默认定价
     pub async fn warmup_cache(&self) -> Result<()> {
         let Some(pool) = &self.pool else {
             return Ok(());
         };
 
-        let defaults = PricingModel::find_global_defaults(pool.write_conn())
-            .await
-            .map_err(|e| {
-                KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
-            })?;
+        let defaults =
+            PricingModel::find_defaults(pool.write_conn(), PricingScopeType::Platform, None)
+                .await
+                .map_err(|e| {
+                    KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
+                })?;
 
-        let nil_tenant = Uuid::nil();
         let mut cache = self.cache.write().await;
         for p in defaults {
             let snapshot = PricingSnapshot {
@@ -653,8 +543,8 @@ impl PricingService {
                 input_price_per_1k: bigdecimal_to_decimal(&p.input_price_per_1k)?,
                 output_price_per_1k: bigdecimal_to_decimal(&p.output_price_per_1k)?,
             };
-            // 使用 nil tenant_id 和计费维度作为缓存 key
-            let key = Self::cache_key(&nil_tenant, &p.model_name, p.billing_dimension.as_str());
+            // 使用 platform scope 和计费维度作为缓存 key
+            let key = format!("platform:{}:{}", p.model_name, p.billing_dimension.as_str());
             cache.put(key, CacheEntry::new(snapshot));
         }
 
@@ -726,20 +616,20 @@ mod tests {
         assert!(key.contains("00000000-0000-0000-0000-000000000001"));
     }
 
-    /// 测试 nil tenant 的缓存 key
+    /// 测试 platform scope 的缓存 key
     #[test]
-    fn test_cache_key_nil_tenant() {
-        let nil_tenant = Uuid::nil();
-        let key = PricingService::cache_key(&nil_tenant, "gpt-4o", "provideraccount");
+    fn test_cache_key_platform() {
+        let key = format!("platform:{}:{}", "gpt-4o", "provideraccount");
 
-        assert!(key.starts_with("00000000-0000-0000-0000-000000000000"));
+        assert!(key.starts_with("platform:"));
     }
 
     #[test]
     fn tenant_defaults_are_never_selected_as_global_fallbacks() {
         let tenant_default = PricingModel {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            scope_type: PricingScopeType::Tenant,
+            tenant_id: Some(Uuid::new_v4()),
             model_name: "gpt-4o".to_string(),
             billing_dimension:
                 keycompute_db::models::pricing_model::BillingDimension::ProviderAccount,
@@ -926,9 +816,9 @@ mod tests {
         assert!(snapshot.output_price_per_1k > Decimal::ZERO);
     }
 
-    /// 测试缓存命中 - 相同模型不同租户应命中默认缓存
+    /// 即使有效价格相同，不同租户也保留独立的已解析缓存。
     #[tokio::test]
-    async fn test_cache_hit_default_pricing() {
+    async fn test_default_pricing_cache_is_resolved_per_tenant() {
         let service = PricingService::new();
         let tenant1 = Uuid::new_v4();
         let tenant2 = Uuid::new_v4();
@@ -939,7 +829,7 @@ mod tests {
             .await
             .unwrap();
 
-        // 第二次请求，不同租户，应命中 nil_tenant 缓存
+        // 第二次请求属于不同租户，必须独立解析，不能复用平台缓存。
         let snapshot2 = service
             .create_snapshot("gpt-4o", &tenant2, None)
             .await
@@ -949,14 +839,16 @@ mod tests {
         assert_eq!(snapshot1.input_price_per_1k, snapshot2.input_price_per_1k);
         assert_eq!(snapshot1.output_price_per_1k, snapshot2.output_price_per_1k);
 
-        // 验证缓存中有 nil_tenant 的条目
         let cache = service.cache.write().await;
-        let nil_tenant = Uuid::nil();
-        let default_key = PricingService::cache_key(&nil_tenant, "gpt-4o", "provideraccount");
-        assert!(
-            cache.contains(&default_key),
-            "缓存应包含 nil_tenant 的默认定价"
-        );
+        assert_eq!(cache.len(), 2);
+        for tenant in [&tenant1, &tenant2] {
+            assert!(cache.contains(&PricingService::cache_key(
+                tenant,
+                "gpt-4o",
+                "provideraccount"
+            )));
+        }
+        assert!(!cache.contains(&"platform:gpt-4o:provideraccount".to_owned()));
     }
 
     /// 测试清除缓存
@@ -1036,17 +928,13 @@ mod tests {
         // 验证 model-0 被淘汰（最旧的条目）
         {
             let cache = service.cache.write().await;
-            let nil_tenant = Uuid::nil();
-            let key0 = PricingService::cache_key(&nil_tenant, "model-0", "provideraccount");
+            let key0 = PricingService::cache_key(&tenant, "model-0", "provideraccount");
             assert!(!cache.contains(&key0), "model-0 应该被 LRU 淘汰");
 
             // 验证最新的 3 个条目存在
             for i in 1..4 {
-                let key = PricingService::cache_key(
-                    &nil_tenant,
-                    &format!("model-{}", i),
-                    "provideraccount",
-                );
+                let key =
+                    PricingService::cache_key(&tenant, &format!("model-{i}"), "provideraccount");
                 assert!(cache.contains(&key), "model-{} 应该在缓存中", i);
             }
         }

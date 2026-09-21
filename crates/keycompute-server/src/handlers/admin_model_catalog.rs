@@ -43,7 +43,7 @@ struct NodeCatalogRow {
 }
 
 fn require_admin(auth: &AuthExtractor) -> Result<()> {
-    if !auth.has_permission(&Permission::SystemAdmin) {
+    if !auth.has_permission(&Permission::ManageProviders) {
         return Err(ApiError::Forbidden("Admin permission required".into()));
     }
     Ok(())
@@ -53,7 +53,9 @@ fn target_tenant(auth: &AuthExtractor, requested: Option<Uuid>) -> Result<Uuid> 
     match requested {
         None => Ok(auth.tenant_id),
         Some(id) if id == auth.tenant_id => Ok(id),
-        Some(_) if auth.is_admin() => Ok(requested.expect("matched Some")),
+        Some(_) if auth.has_permission(&Permission::ManageProviders) => {
+            Ok(requested.expect("matched Some"))
+        }
         Some(_) => Err(ApiError::Forbidden(
             "Cross-tenant catalog access is not permitted".into(),
         )),
@@ -331,7 +333,7 @@ fn node_supply_sql(operation: keycompute_types::node_native::NodeNativeOperation
       SELECT DISTINCT n.id,m.model,
         EXISTS(SELECT 1 FROM node_sessions ns WHERE ns.node_id=n.id
           AND {ready} AND ns.accepted_models_json @> jsonb_build_array(m.model) AND {profile}) AS ready
-      FROM nodes n JOIN users u ON u.id=n.owner_user_id JOIN tenants t ON t.id=u.tenant_id
+      FROM nodes n JOIN tenants t ON t.id=n.tenant_id
       CROSS JOIN LATERAL (
         SELECT v->>'model' AS model FROM jsonb_array_elements(
           CASE WHEN jsonb_typeof(n.capabilities_json->'models')='array' THEN n.capabilities_json->'models' ELSE '[]'::JSONB END) v
@@ -464,7 +466,7 @@ pub(crate) async fn ready_node_models_with_requirements(
     }
     let feature_filter = " AND ns.native_operations_json @> jsonb_build_array($2::TEXT) AND ns.native_profiles_json @> jsonb_build_array(jsonb_build_object('version',1,'model',m.model,'operation',$2::TEXT,'features',$3::JSONB))";
     let sql = format!(
-        "WITH supply AS (SELECT DISTINCT n.id,m.model, EXISTS(SELECT 1 FROM node_sessions ns WHERE ns.node_id=n.id AND {ready} AND ns.accepted_models_json @> jsonb_build_array(m.model) AND {profile}{feature_filter}) AS ready FROM nodes n JOIN users u ON u.id=n.owner_user_id JOIN tenants t ON t.id=u.tenant_id CROSS JOIN LATERAL (SELECT v->>'model' AS model FROM jsonb_array_elements(CASE WHEN jsonb_typeof(n.capabilities_json->'models')='array' THEN n.capabilities_json->'models' ELSE '[]'::JSONB END) v UNION SELECT jsonb_array_elements_text(ns.accepted_models_json) FROM node_sessions ns WHERE ns.node_id=n.id AND ns.expires_at>NOW() AND ns.revoked_at IS NULL) m WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama') SELECT DISTINCT model FROM supply WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active') ORDER BY model",
+        "WITH supply AS (SELECT DISTINCT n.id,m.model, EXISTS(SELECT 1 FROM node_sessions ns WHERE ns.node_id=n.id AND {ready} AND ns.accepted_models_json @> jsonb_build_array(m.model) AND {profile}{feature_filter}) AS ready FROM nodes n JOIN tenants t ON t.id=n.tenant_id CROSS JOIN LATERAL (SELECT v->>'model' AS model FROM jsonb_array_elements(CASE WHEN jsonb_typeof(n.capabilities_json->'models')='array' THEN n.capabilities_json->'models' ELSE '[]'::JSONB END) v UNION SELECT jsonb_array_elements_text(ns.accepted_models_json) FROM node_sessions ns WHERE ns.node_id=n.id AND ns.expires_at>NOW() AND ns.revoked_at IS NULL) m WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama') SELECT DISTINCT model FROM supply WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active') ORDER BY model",
         ready = node_gateway::node_index::READY_NODE_CONDITION,
         profile = node_gateway::node_index::ready_profile_condition(
             "m.model",

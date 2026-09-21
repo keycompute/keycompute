@@ -8,9 +8,11 @@
 
 use integration_tests::db::initialize_test_schema;
 use keycompute_cache::CacheService;
-use keycompute_db::{CreatePricingRequest, PricingModel, models::pricing_model::BillingDimension};
+use keycompute_db::{
+    CreatePricingRequest, PricingModel,
+    models::pricing_model::{BillingDimension, PricingScopeType},
+};
 use keycompute_pricing::PricingService;
-use keycompute_types::PricingSnapshot;
 use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -200,37 +202,29 @@ async fn test_pricing_cache_model_isolation() {
 /// 3. L2 nil_tenant key 存储的是 ¥0.10/¥0.30（默认），而非 ¥0.20/¥0.50（租户特定）
 #[tokio::test]
 async fn test_cross_tenant_pricing_isolation_with_db() {
-    // 1. 建立 DB 和 Redis 连接
-    let Some(db) = try_create_db_pool().await else {
-        return;
-    };
-
-    let Some(cache) = try_create_cache().await else {
-        return;
-    };
-
-    let test_id = generate_test_id();
-    let model_name = format!("test-cross-pricing-{}", test_id);
-    let provider = "provideraccount";
-    let tenant_a = Uuid::new_v4();
-    let tenant_b = Uuid::new_v4();
-
     use bigdecimal::BigDecimal;
     use chrono::Utc;
-
-    // 2. 初始化测试数据库结构
-    initialize_test_schema(&db)
+    use integration_tests::db::{cleanup_test_data, create_test_tenant};
+    let db = try_create_db_pool()
         .await
-        .expect("Schema initialization should succeed");
-
-    // 3. 种子数据：默认定价 ¥0.10 input / ¥0.30 output（nil tenant）
-    let default_pricing = PricingModel::create(
+        .expect("isolated PostgreSQL is required");
+    let cache = try_create_cache()
+        .await
+        .expect("isolated Redis is required");
+    initialize_test_schema(&db).await.unwrap();
+    let run = generate_test_id();
+    let tenant_a = create_test_tenant(&db, "pricing-a", &run).await;
+    let tenant_b = create_test_tenant(&db, "pricing-b", &run).await;
+    let model = format!("pricing-scope-{run}");
+    let provider = "provideraccount";
+    let default = PricingModel::create(
         &db,
         &CreatePricingRequest {
-            tenant_id: Some(Uuid::nil()),
-            model_name: model_name.clone(),
+            scope_type: PricingScopeType::Platform,
+            tenant_id: None,
+            model_name: model.clone(),
             billing_dimension: BillingDimension::ProviderAccount,
-            currency: Some("CNY".to_string()),
+            currency: Some("CNY".into()),
             input_price_per_1k: BigDecimal::from_str("0.10").unwrap(),
             output_price_per_1k: BigDecimal::from_str("0.30").unwrap(),
             is_default: Some(true),
@@ -239,16 +233,15 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
         },
     )
     .await
-    .expect("Default pricing should be created");
-
-    // 4. 种子数据：Tenant A 自定义定价 ¥0.20 input / ¥0.50 output
-    let tenant_a_pricing = PricingModel::create(
+    .unwrap();
+    PricingModel::create(
         &db,
         &CreatePricingRequest {
-            tenant_id: Some(tenant_a),
-            model_name: model_name.clone(),
+            scope_type: PricingScopeType::Tenant,
+            tenant_id: Some(tenant_a.id),
+            model_name: model.clone(),
             billing_dimension: BillingDimension::ProviderAccount,
-            currency: Some("CNY".to_string()),
+            currency: Some("CNY".into()),
             input_price_per_1k: BigDecimal::from_str("0.20").unwrap(),
             output_price_per_1k: BigDecimal::from_str("0.50").unwrap(),
             is_default: Some(false),
@@ -257,90 +250,78 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
         },
     )
     .await
-    .expect("Tenant A pricing should be created");
-
-    // 5. 创建带 DB + L2 缓存的 PricingService
-    let pool = keycompute_db::DbRouter::single(db);
-    let pricing = PricingService::with_pool(Arc::clone(&pool)).with_dist_cache(Arc::clone(&cache));
-
-    // 6. Tenant A 查询 → 应返回 ¥0.20 input / ¥0.50 output
-    let snap_a = pricing
-        .create_snapshot(&model_name, &tenant_a, Some(provider))
+    .unwrap();
+    let pool = keycompute_db::DbRouter::single(db.clone());
+    let pricing = PricingService::with_pool(pool.clone()).with_dist_cache(cache.clone());
+    // Warm the platform/default result FIRST. A must still resolve its custom
+    // price rather than treating an L1 or L2 cache miss as no tenant override.
+    let b = pricing
+        .create_snapshot(&model, &tenant_b.id, Some(provider))
         .await
-        .expect("Tenant A should get pricing");
-    assert_eq!(
-        snap_a.input_price_per_1k,
-        rust_decimal::Decimal::from_str("0.2").unwrap(),
-        "Tenant A should get custom pricing (0.20 input)"
-    );
-    assert_eq!(
-        snap_a.output_price_per_1k,
-        rust_decimal::Decimal::from_str("0.5").unwrap(),
-        "Tenant A should get custom pricing (0.50 output)"
-    );
-
-    // 7. Tenant B 查询 → 应返回 ¥0.10 input / ¥0.30 output（默认定价）
-    //    如果修复失效，Tenant B 会错误地得到 Tenant A 的 ¥0.20/¥0.50
-    let snap_b = pricing
-        .create_snapshot(&model_name, &tenant_b, Some(provider))
+        .unwrap();
+    let a = pricing
+        .create_snapshot(&model, &tenant_a.id, Some(provider))
         .await
-        .expect("Tenant B should get pricing");
+        .unwrap();
     assert_eq!(
-        snap_b.input_price_per_1k,
-        rust_decimal::Decimal::from_str("0.1").unwrap(),
-        "Tenant B should get DEFAULT pricing (0.10 input), NOT tenant A's custom 0.20"
+        b.input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.1").unwrap()
     );
     assert_eq!(
-        snap_b.output_price_per_1k,
-        rust_decimal::Decimal::from_str("0.3").unwrap(),
-        "Tenant B should get DEFAULT pricing (0.30 output), NOT tenant A's custom 0.50"
+        a.input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.2").unwrap()
     );
-
-    // 8. 验证 L2 nil_tenant key 存储的是默认定价，而非 Tenant A 的定价
-    //    nil_dist_key = "pricing:{nil_uuid}:{model}:{provider}"
-    //
-    //    注意：此检查依赖顺序执行（Tenant A 先查询 → Tenant B 后查询）。
-    //    Tenant A 的查询不会将 nil_tenant key（因其 source=TenantSpecific），
-    //    而 Tenant B 的查询会写入 nil_tenant key（因其 source=DatabaseDefault）。
-    //    如果执行顺序颠倒（Tenant B 先查询），nil_tenant key 在 Tenant A 查询时
-    //    就已经存在且存储的正确值，断言依然通过——所以实际顺序不重要，
-    //    但 nil_tenant key 的写入时间点会变化。
-    let nil_dist_key = format!("pricing:{}:{}:{}", Uuid::nil(), model_name, provider);
-    let cached_nil: Option<PricingSnapshot> = match cache
-        .get::<PricingSnapshot>(&nil_dist_key)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!(
-                "NOTE: Cannot read L2 nil_tenant key (Redis error: {}), skipping L2 verification",
-                e
-            );
-            None
-        }
-    };
-
-    if let Some(nil_pricing) = cached_nil {
-        // nil key 存在 → 必须存默认定价，不能是 Tenant A 的定价
-        assert_eq!(
-            nil_pricing.input_price_per_1k,
-            rust_decimal::Decimal::from_str("0.1").unwrap(),
-            "L2 nil_tenant key must contain DEFAULT pricing (0.10), not tenant A's custom 0.20"
+    assert_eq!(
+        a.output_price_per_1k,
+        rust_decimal::Decimal::from_str("0.5").unwrap()
+    );
+    for tenant in [tenant_a.id, tenant_b.id] {
+        let key = format!("pricing:v2:tenant:{tenant}:{model}:{provider}");
+        assert!(
+            cache
+                .get::<serde_json::Value>(&key)
+                .await
+                .unwrap()
+                .is_some(),
+            "real Redis entry must exist"
         );
-        assert_eq!(
-            nil_pricing.output_price_per_1k,
-            rust_decimal::Decimal::from_str("0.3").unwrap(),
-            "L2 nil_tenant key must contain DEFAULT pricing (0.30), not tenant A's custom 0.50"
-        );
-    } else {
-        // nil key 不存在也是可接受的（当默认定价也是 HardcodedDefault 时）
-        // 但在本测试中 DB 中有默认定价数据，应由 Tenant B 的查询触发写入
-        // 如果这里失败，说明第一个租户（Tenant A）的查询没有触发 nil key 写入
-        eprintln!("NOTE: L2 nil_tenant key not found - Tenant B may need to query first");
     }
-
-    // 9. 清理：删除种子数据
-    let conn = pool.write_conn();
-    tenant_a_pricing.delete(conn).await.ok();
-    default_pricing.delete(conn).await.ok();
+    // Independently constructed instances must use correctly tenant-keyed L2.
+    let second = PricingService::with_pool(pool.clone()).with_dist_cache(cache.clone());
+    assert_eq!(
+        second
+            .create_snapshot(&model, &tenant_a.id, Some(provider))
+            .await
+            .unwrap()
+            .input_price_per_1k,
+        a.input_price_per_1k
+    );
+    assert_eq!(
+        second
+            .create_snapshot(&model, &tenant_b.id, Some(provider))
+            .await
+            .unwrap()
+            .input_price_per_1k,
+        b.input_price_per_1k
+    );
+    // Also check local-only caching in both orderings, with no Redis fallback.
+    for order in [[tenant_b.id, tenant_a.id], [tenant_a.id, tenant_b.id]] {
+        let local = PricingService::with_pool(pool.clone());
+        for tenant in order {
+            let got = local
+                .create_snapshot(&model, &tenant, Some(provider))
+                .await
+                .unwrap();
+            assert_eq!(
+                got.input_price_per_1k,
+                if tenant == tenant_a.id {
+                    a.input_price_per_1k
+                } else {
+                    b.input_price_per_1k
+                }
+            );
+        }
+    }
+    default.delete(pool.write_conn()).await.unwrap();
+    cleanup_test_data(&db, &run).await.unwrap();
 }

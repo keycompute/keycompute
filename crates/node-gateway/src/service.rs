@@ -187,6 +187,7 @@ impl NodeGatewayService {
     /// 入队并等待任务完成（核心接口）
     pub async fn enqueue_and_wait(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         model: String,
         payload: NodeTaskPayload,
@@ -201,7 +202,7 @@ impl NodeGatewayService {
         // 1. 创建任务并入队
         let task = match self
             .store
-            .create_and_enqueue_task(user_id, model.clone(), payload)
+            .create_and_enqueue_task(tenant_id, user_id, model.clone(), payload)
             .await
         {
             Ok(task) => task,
@@ -269,13 +270,14 @@ impl NodeGatewayService {
     /// Create a native streaming task; result events use the durable stream cursor.
     pub async fn enqueue_native_stream(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         model: String,
         payload: NodeTaskPayload,
     ) -> Result<NodeTask, DbError> {
         let task = self
             .store
-            .create_and_enqueue_task(user_id, model.clone(), payload)
+            .create_and_enqueue_task(tenant_id, user_id, model.clone(), payload)
             .await?;
         let _ = self
             .lifecycle
@@ -303,6 +305,7 @@ impl NodeGatewayService {
     /// Wait without abandoning settlement ownership on a transient read failure.
     pub async fn enqueue_native_and_wait(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         model: String,
         payload: NodeTaskPayload,
@@ -315,7 +318,7 @@ impl NodeGatewayService {
         }
         let task = self
             .store
-            .create_and_enqueue_task(user_id, model.clone(), payload)
+            .create_and_enqueue_task(tenant_id, user_id, model.clone(), payload)
             .await
             .map_err(|error| {
                 NodeExecutionError::gateway_internal(error.into(), "node_task_create_failed")
@@ -1026,6 +1029,7 @@ mod tests {
     fn terminal_test_task(lease_id: Option<Uuid>) -> NodeTask {
         let now = chrono::Utc::now();
         NodeTask {
+            tenant_id: Uuid::new_v4(),
             native_requirements_json: None,
             id: Uuid::new_v4(),
             request_id: Uuid::new_v4(),
@@ -1287,6 +1291,7 @@ impl NodeGatewayService {
     /// workers. Cancelling the request never starts a replacement inference.
     pub async fn enqueue_native_cancellable_and_wait(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         model: String,
         payload: NodeTaskPayload,
@@ -1303,7 +1308,7 @@ impl NodeGatewayService {
         }
         let task = self
             .store
-            .create_cancellable_native_task(user_id, model.clone(), payload)
+            .create_cancellable_native_task(tenant_id, user_id, model.clone(), payload)
             .await
             .map_err(|e| {
                 NodeExecutionError::gateway_internal(e.into(), "node_task_create_failed")

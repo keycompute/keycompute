@@ -69,35 +69,63 @@ mod tests {
     }
 
     async fn create_responses_test_tenant(pool: &DatabaseConnection, label: &str) -> Uuid {
-        let tenant_id = Uuid::new_v4();
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)",
-            [
-                tenant_id.into(),
-                label.into(),
-                format!("responses-test-{}", Uuid::new_v4().simple()).into(),
-            ],
-        ))
+        let tx = pool.begin().await.expect("tenant transaction should begin");
+        let existing = tx.query_one(Statement::from_string(DbBackend::Postgres,
+            "SELECT id FROM users WHERE platform_role='root' AND status='active' ORDER BY id LIMIT 1".to_string(),
+        )).await.unwrap();
+        let owner = if let Some(row) = existing {
+            keycompute_db::User::find_by_id(&tx, row.try_get_by_index::<Uuid>(0).unwrap())
+                .await
+                .unwrap()
+                .unwrap()
+        } else {
+            keycompute_db::User::bootstrap_root(
+                &tx,
+                &format!("root-{}@example.test", Uuid::new_v4().simple()),
+                Some("Responses test root"),
+            )
+            .await
+            .unwrap()
+        };
+        let tenant = keycompute_db::Tenant::create_owned(
+            &tx,
+            &keycompute_db::CreateTenantRequest {
+                name: label.to_string(),
+                slug: format!("responses-test-{}", Uuid::new_v4().simple()),
+                description: None,
+                default_rpm_limit: None,
+                default_tpm_limit: None,
+            },
+            owner.id,
+            &keycompute_db::AuditContext {
+                actor_user_id: owner.id,
+                credential_kind: keycompute_types::CredentialKind::System,
+                actor_platform_role: keycompute_types::PlatformRole::Root,
+                actor_tenant_role: None,
+                request_id: None,
+            },
+        )
         .await
         .expect("Responses test tenant should be created");
-        tenant_id
+        tx.commit().await.expect("tenant transaction should commit");
+        tenant.id
+    }
+
+    async fn tenant_owner(db: &impl ConnectionTrait, tenant: Uuid) -> Uuid {
+        db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT owner_user_id FROM tenants WHERE id=$1",
+            [tenant.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap()
     }
 
     async fn create_account_test_tenant(pool: &DatabaseConnection, label: &str) -> Uuid {
-        let tenant_id = Uuid::new_v4();
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "INSERT INTO tenants (id, name, slug) VALUES ($1, $2, $3)",
-            [
-                tenant_id.into(),
-                label.into(),
-                format!("account-test-{}", Uuid::new_v4().simple()).into(),
-            ],
-        ))
-        .await
-        .expect("Account health test tenant should be created");
-        tenant_id
+        create_responses_test_tenant(pool, label).await
     }
 
     async fn create_responses_test_account(
@@ -134,6 +162,8 @@ mod tests {
         received_at: chrono::DateTime<chrono::Utc>,
         finished_at: chrono::DateTime<chrono::Utc>,
     ) {
+        let tenant_id = create_responses_test_tenant(pool, "trace ownership fixture").await;
+        let user_id = tenant_owner(pool, tenant_id).await;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO gateway_requests (
@@ -144,8 +174,8 @@ mod tests {
                       'provider_account','succeeded',$5,$6,'pending','actual')"#,
             [
                 request_id.into(),
-                Uuid::new_v4().into(),
-                Uuid::new_v4().into(),
+                tenant_id.into(),
+                user_id.into(),
                 Uuid::new_v4().into(),
                 received_at.into(),
                 finished_at.into(),
@@ -165,6 +195,8 @@ mod tests {
         let node_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
         let lease_id = Uuid::new_v4();
+        let tenant_id = create_responses_test_tenant(pool, "trace ownership fixture").await;
+        let user_id = tenant_owner(pool, tenant_id).await;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO gateway_requests (
@@ -174,8 +206,8 @@ mod tests {
                       'node','running',$5,'pending','actual')"#,
             [
                 request_id.into(),
-                Uuid::new_v4().into(),
-                Uuid::new_v4().into(),
+                tenant_id.into(),
+                user_id.into(),
                 Uuid::new_v4().into(),
                 received_at.into(),
             ],
@@ -1769,7 +1801,7 @@ mod tests {
             idempotency_id,
             "connection-update-fingerprint",
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            tenant_owner(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -1873,7 +1905,20 @@ mod tests {
             create_responses_test_account(&pool, tenant_id, "claim-replacement", 1).await;
         let binding_id = "kc_idempotency_deleted_account";
         let billing_request_id = Uuid::new_v4();
-        let user_id = Uuid::new_v4();
+        let user = keycompute_db::User::create(
+            &pool,
+            &keycompute_db::CreateUserRequest {
+                email: format!("debt-{}@example.test", Uuid::new_v4().simple()),
+                name: Some("Debt test user".to_string()),
+            },
+        )
+        .await
+        .expect("debt test user should be created");
+        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+            [tenant_id.into(),user.id.into()],
+        )).await.unwrap();
+        let user_id = user.id;
         let key_id = Uuid::new_v4();
         let root_warmup_id = "resp_ws_deleted_account_root";
         keycompute_db::ResponseAffinity::upsert_local(
@@ -1973,7 +2018,7 @@ mod tests {
             binding_id,
             "different-fingerprint",
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            tenant_owner(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-other"),
@@ -2372,7 +2417,7 @@ mod tests {
         drop(concurrent_pool);
 
         let billing_request_id = Uuid::new_v4();
-        let user_id = Uuid::new_v4();
+        let user_id = tenant_owner(&pool, tenant_id).await;
         let key_id = Uuid::new_v4();
         let (first_binding, first_inserted) = keycompute_db::ResponsesIdempotencyClaim::bind(
             &pool,
@@ -2394,7 +2439,7 @@ mod tests {
             "kc_idempotency_test",
             "fingerprint-b",
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            tenant_owner(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-other"),
@@ -2456,7 +2501,7 @@ mod tests {
         let tenant_id =
             create_responses_test_tenant(&pool, "Responses idempotency identity quota test").await;
         let account = create_responses_test_account(&pool, tenant_id, "identity-quota", 0).await;
-        let user_id = Uuid::new_v4();
+        let user_id = tenant_owner(&pool, tenant_id).await;
         let key_id = Uuid::new_v4();
         let first_token = Uuid::new_v4();
         let second_token = Uuid::new_v4();
@@ -2603,7 +2648,7 @@ mod tests {
         let account = create_responses_test_account(&pool, tenant_id, "rollback", 0).await;
         let binding_id = "kc_idempotency_rolled_back";
         let billing_request_id = Uuid::new_v4();
-        let user_id = Uuid::new_v4();
+        let user_id = tenant_owner(&pool, tenant_id).await;
         let key_id = Uuid::new_v4();
         let txn = pool.begin().await.expect("claim transaction should begin");
         let (_, inserted) = keycompute_db::ResponsesIdempotencyClaim::bind(
@@ -2673,7 +2718,7 @@ mod tests {
             binding_id,
             "fingerprint",
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            tenant_owner(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -2836,7 +2881,7 @@ mod tests {
             ambiguous_binding,
             "ambiguous-fingerprint",
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            tenant_owner(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -2908,7 +2953,7 @@ mod tests {
                 binding_id,
                 &format!("fingerprint-{binding_id}"),
                 Uuid::new_v4(),
-                Uuid::new_v4(),
+                tenant_owner(&pool, tenant_id).await,
                 Uuid::new_v4(),
                 "openai",
                 Some("gpt-test"),
@@ -3006,7 +3051,7 @@ mod tests {
             oversized_binding,
             "fingerprint-oversized",
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            tenant_owner(&pool, tenant_id).await,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -3175,17 +3220,22 @@ mod tests {
             .expect("isolated billing schema should migrate");
         let tenant_id = create_responses_test_tenant(&pool, "Responses debt test").await;
         let account = create_responses_test_account(&pool, tenant_id, "debt", 0).await;
-        let user_id = Uuid::new_v4();
+        let user = keycompute_db::User::create(
+            &pool,
+            &keycompute_db::CreateUserRequest {
+                email: format!("debt-{}@example.test", Uuid::new_v4().simple()),
+                name: Some("Debt test user".to_string()),
+            },
+        )
+        .await
+        .expect("debt test user should be created");
+        let user_id = user.id;
         let key_id = Uuid::new_v4();
         let billing_request_id = Uuid::new_v4();
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO users (id, tenant_id, email) VALUES ($1, $2, $3)",
-            [
-                user_id.into(),
-                tenant_id.into(),
-                format!("debt-{}@example.com", Uuid::new_v4().simple()).into(),
-            ],
+            "INSERT INTO tenant_memberships (tenant_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')",
+            [tenant_id.into(), user_id.into()],
         ))
         .await
         .unwrap();
@@ -3254,6 +3304,7 @@ mod tests {
 
         let (balance, transaction) = keycompute_db::UserBalance::consume(
             &pool,
+            tenant_id,
             user_id,
             Decimal::new(25, 2),
             Some(usage_log_id),
@@ -3266,6 +3317,7 @@ mod tests {
 
         let (replayed_balance, replayed_transaction) = keycompute_db::UserBalance::consume(
             &pool,
+            tenant_id,
             user_id,
             Decimal::new(25, 2),
             Some(usage_log_id),
@@ -3278,6 +3330,7 @@ mod tests {
         assert!(
             keycompute_db::UserBalance::consume(
                 &pool,
+                tenant_id,
                 user_id,
                 Decimal::new(1, 2),
                 None,
@@ -3505,29 +3558,24 @@ mod tests {
             .await
             .expect("baseline migration should succeed");
 
-        let tenant_id = Uuid::new_v4();
-        let user_id = Uuid::new_v4();
+        let tenant_id = create_responses_test_tenant(&pool, "billing replay").await;
+        let user = keycompute_db::User::create(
+            &pool,
+            &keycompute_db::CreateUserRequest {
+                email: format!("billing-replay-{}@example.test", Uuid::new_v4().simple()),
+                name: Some("Billing replay user".to_string()),
+            },
+        )
+        .await
+        .expect("billing replay user should be created");
+        let user_id = user.id;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO tenants (id,name,slug) VALUES ($1,'billing replay',$2)",
-            [
-                tenant_id.into(),
-                format!("billing-replay-{tenant_id}").into(),
-            ],
+            "INSERT INTO tenant_memberships (tenant_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')",
+            [tenant_id.into(), user_id.into()],
         ))
         .await
-        .expect("tenant should be inserted");
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "INSERT INTO users (id,tenant_id,email) VALUES ($1,$2,$3)",
-            [
-                user_id.into(),
-                tenant_id.into(),
-                format!("billing-replay-{user_id}@example.test").into(),
-            ],
-        ))
-        .await
-        .expect("user should be inserted");
+        .expect("billing replay membership should be created");
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "INSERT INTO user_balances (tenant_id,user_id,available_balance) VALUES ($1,$2,100)",
@@ -3584,7 +3632,7 @@ mod tests {
             .await
             .expect("crash replay should be idempotent");
 
-        let balance = keycompute_db::UserBalance::find_by_user(&pool, user_id)
+        let balance = keycompute_db::UserBalance::find_by_user(&pool, tenant_id, user_id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -3729,6 +3777,17 @@ mod tests {
 
         insert_terminal_pending_trace(&pool, failed_request_id, received_at, finished_at).await;
         insert_terminal_pending_trace(&pool, succeeded_request_id, received_at, finished_at).await;
+        let owner = pool
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT tenant_id,user_id FROM gateway_requests WHERE request_id=$1",
+                [succeeded_request_id.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let trace_tenant: Uuid = owner.try_get_by_index(0).unwrap();
+        let trace_user: Uuid = owner.try_get_by_index(1).unwrap();
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO usage_logs (
@@ -3740,8 +3799,8 @@ mod tests {
                       'provider_reported','success',$6,$7)"#,
             [
                 succeeded_request_id.into(),
-                Uuid::new_v4().into(),
-                Uuid::new_v4().into(),
+                trace_tenant.into(),
+                trace_user.into(),
                 Uuid::new_v4().into(),
                 Uuid::new_v4().into(),
                 received_at.into(),
@@ -3782,6 +3841,9 @@ mod tests {
     #[serial_test::serial]
     async fn stale_request_reconciliation_uses_last_lifecycle_activity() {
         let pool = create_test_pool().await;
+        let trace_tenant = create_responses_test_tenant(&pool, "trace fixture").await;
+        let trace_user = tenant_owner(&pool, trace_tenant).await;
+
         let router = keycompute_db::DbRouter::single(pool.clone());
         let request_id = Uuid::new_v4();
         let now = chrono::Utc::now();
@@ -3797,8 +3859,8 @@ mod tests {
                       'provider_account','running',$5,$6,'pending','actual')"#,
             [
                 request_id.into(),
-                Uuid::new_v4().into(),
-                Uuid::new_v4().into(),
+                trace_tenant.into(),
+                trace_user.into(),
                 Uuid::new_v4().into(),
                 received_at.into(),
                 now.into(),
@@ -3860,6 +3922,9 @@ mod tests {
     #[tokio::test]
     async fn repeated_terminal_completion_is_idempotent() {
         let pool = create_test_pool().await;
+        let trace_tenant = create_responses_test_tenant(&pool, "trace fixture").await;
+        let trace_user = tenant_owner(&pool, trace_tenant).await;
+
         let router = keycompute_db::DbRouter::single(pool.clone());
         // This test checks persistent idempotency, not the production 250 ms
         // tracing latency budget. Concurrent schema tests can exceed that
@@ -3873,8 +3938,8 @@ mod tests {
             .start_request(RequestTraceStart {
                 request_id,
                 client_request_id: None,
-                tenant_id: Uuid::new_v4(),
-                user_id: Uuid::new_v4(),
+                tenant_id: trace_tenant,
+                user_id: trace_user,
                 produce_ai_key_id: Uuid::new_v4(),
                 protocol: "openai".to_string(),
                 request_path: "/v1/chat/completions".to_string(),
@@ -4296,6 +4361,17 @@ mod tests {
             now - chrono::Duration::minutes(2),
         )
         .await;
+        let owner = pool
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT tenant_id,user_id FROM gateway_requests WHERE request_id=$1",
+                [request_id.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let trace_tenant: Uuid = owner.try_get_by_index(0).unwrap();
+        let trace_user: Uuid = owner.try_get_by_index(1).unwrap();
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "UPDATE gateway_requests SET updated_at=$1 WHERE request_id=$2",
@@ -4309,17 +4385,18 @@ mod tests {
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"INSERT INTO node_tasks (
-                id,request_id,user_id,model,payload_json,status,result_json,queued_at,
+                id,request_id,tenant_id,user_id,model,payload_json,status,result_json,queued_at,
                 finished_at,deadline_at,complete_grace_until
-            ) VALUES ($1,$2,$3,'test-model','{}','image_succeeded','{}',$4,$5,$6,$7)"#,
+            ) VALUES ($1,$2,$8,$3,'test-model','{}','image_succeeded','{}',$4,$5,$6,$7)"#,
             [
                 task_id.into(),
                 request_id.into(),
-                Uuid::new_v4().into(),
+                trace_user.into(),
                 (now - chrono::Duration::minutes(2)).into(),
                 (now - chrono::Duration::minutes(1)).into(),
                 (now + chrono::Duration::minutes(1)).into(),
                 (now + chrono::Duration::minutes(2)).into(),
+                trace_tenant.into(),
             ],
         ))
         .await
@@ -4449,6 +4526,9 @@ mod tests {
     #[tokio::test]
     async fn unrelated_intermediate_writes_do_not_block_request_flush() {
         let pool = create_test_pool().await;
+        let trace_tenant = create_responses_test_tenant(&pool, "trace fixture").await;
+        let trace_user = tenant_owner(&pool, trace_tenant).await;
+
         // This test measures request-local worker isolation, not connection
         // establishment latency. Keep enough ready connections for the lock
         // transaction, four blocked writers, and the healthy writer.
@@ -4477,8 +4557,8 @@ mod tests {
                 .start_request(RequestTraceStart {
                     request_id,
                     client_request_id: None,
-                    tenant_id: Uuid::new_v4(),
-                    user_id: Uuid::new_v4(),
+                    tenant_id: trace_tenant,
+                    user_id: trace_user,
                     produce_ai_key_id: Uuid::new_v4(),
                     protocol: "openai".to_string(),
                     request_path: "/v1/chat/completions".to_string(),

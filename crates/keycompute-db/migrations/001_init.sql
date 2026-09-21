@@ -1,9 +1,30 @@
 -- KeyCompute 001_init：新库完整结构。
 -- 仅用于空数据库初始化，不包含旧版本升级、数据回填或兼容迁移逻辑。
 
+-- users: 用户表
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid() CHECK (id <> '00000000-0000-0000-0000-000000000000'),
+    email VARCHAR(255) NOT NULL UNIQUE,
+    name VARCHAR(255),
+    platform_role VARCHAR(20) NOT NULL DEFAULT 'none'
+        CONSTRAINT chk_users_platform_role_allowed CHECK (platform_role IN ('root', 'operator', 'none')),
+    status VARCHAR(20) NOT NULL DEFAULT 'active'
+        CONSTRAINT chk_users_status_allowed CHECK (status IN ('active', 'suspended')),
+    -- 安全事件或权限变化时递增，使此前签发的 JWT 立即失效
+    token_version INTEGER NOT NULL DEFAULT 0 CHECK (token_version >= 0),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_normalized ON users(lower(btrim(email)));
+
+CREATE INDEX IF NOT EXISTS idx_users_platform_role ON users(platform_role);
+
 -- tenants: 租户/组织表
 CREATE TABLE IF NOT EXISTS tenants (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     name VARCHAR(255) NOT NULL,
     slug VARCHAR(100) NOT NULL UNIQUE,
     description TEXT,
@@ -12,79 +33,100 @@ CREATE TABLE IF NOT EXISTS tenants (
     default_rpm_limit INTEGER NOT NULL DEFAULT 60,
     default_tpm_limit INTEGER NOT NULL DEFAULT 100000,
     responses_idempotency_claim_count BIGINT NOT NULL DEFAULT 0,
+    authz_version BIGINT NOT NULL DEFAULT 1 CHECK (authz_version > 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_tenants_responses_idempotency_claim_count CHECK (
         responses_idempotency_claim_count BETWEEN 0 AND 100000
     ),
-    CONSTRAINT ck_tenants_status CHECK (status IN ('active', 'inactive'))
+    CONSTRAINT ck_tenants_status CHECK (status IN ('active', 'inactive')),
+    CONSTRAINT ck_tenants_limits CHECK (default_rpm_limit >= 0 AND default_tpm_limit >= 0),
+    CONSTRAINT ck_tenants_real_id CHECK (id <> '00000000-0000-0000-0000-000000000000')
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
 CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
 
--- users: 用户表
-CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+-- Tenant membership is the sole source of tenant role and tenant ownership.
+CREATE TABLE IF NOT EXISTS tenant_memberships (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email VARCHAR(255) NOT NULL UNIQUE,
-    name VARCHAR(255),
-    role VARCHAR(50) NOT NULL DEFAULT 'user'
-        CONSTRAINT chk_users_role_allowed CHECK (role IN ('system', 'admin', 'user')),
-    -- 安全事件或权限变化时递增，使此前签发的 JWT 立即失效
-    token_version INTEGER NOT NULL DEFAULT 0,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    role VARCHAR(20) NOT NULL DEFAULT 'member'
+        CONSTRAINT chk_tenant_memberships_role CHECK (role IN ('admin', 'member')),
+    status VARCHAR(20) NOT NULL DEFAULT 'active'
+        CONSTRAINT chk_tenant_memberships_status CHECK (status IN ('active', 'suspended', 'revoked')),
+    version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, user_id)
 );
+CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user ON tenant_memberships(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_role ON tenant_memberships(tenant_id, role, status);
 
-CREATE INDEX IF NOT EXISTS idx_users_tenant_id ON users(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_users_single_system_role ON users (role) WHERE role = 'system';
+CREATE TABLE IF NOT EXISTS tenant_invitations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    invited_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    email VARCHAR(255) NOT NULL,
+    role VARCHAR(20) NOT NULL DEFAULT 'member'
+        CONSTRAINT chk_tenant_invitations_role CHECK (role IN ('admin', 'member')),
+    token_hash VARCHAR(64) NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CONSTRAINT chk_tenant_invitations_status CHECK (status IN ('pending', 'accepted', 'expired', 'revoked')),
+    expires_at TIMESTAMPTZ NOT NULL,
+    accepted_by_user_id UUID REFERENCES users(id) ON DELETE RESTRICT,
+    accepted_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_invitation_email CHECK (email=lower(btrim(email)) AND position('@' in email)>1),
+    CONSTRAINT ck_invitation_lifecycle CHECK (
+        (status='accepted' AND accepted_at IS NOT NULL AND accepted_by_user_id IS NOT NULL AND revoked_at IS NULL) OR
+        (status='revoked' AND accepted_at IS NULL AND accepted_by_user_id IS NULL AND revoked_at IS NOT NULL) OR
+        (status IN ('pending','expired') AND accepted_at IS NULL AND accepted_by_user_id IS NULL AND revoked_at IS NULL)
+    )
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_invitations_pending_email
+    ON tenant_invitations(tenant_id, lower(email)) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_tenant_invitations_token ON tenant_invitations(token_hash);
 
-CREATE OR REPLACE FUNCTION prevent_system_role_change()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF OLD.role = 'system' AND NEW.role <> 'system' THEN
-        RAISE EXCEPTION 'system user role cannot be changed';
-    END IF;
-
-    IF OLD.role <> 'system' AND NEW.role = 'system' THEN
-        RAISE EXCEPTION 'system role cannot be assigned by update';
-    END IF;
-
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_prevent_system_role_change ON users;
-CREATE TRIGGER trg_prevent_system_role_change
-BEFORE UPDATE OF role ON users
-FOR EACH ROW
-EXECUTE FUNCTION prevent_system_role_change();
-
-CREATE OR REPLACE FUNCTION prevent_system_user_delete()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF OLD.role = 'system' THEN
-        RAISE EXCEPTION 'system user cannot be deleted';
-    END IF;
-
-    RETURN OLD;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trg_prevent_system_user_delete ON users;
-CREATE TRIGGER trg_prevent_system_user_delete
-BEFORE DELETE ON users
-FOR EACH ROW
-EXECUTE FUNCTION prevent_system_user_delete();
+CREATE TABLE IF NOT EXISTS tenant_audit_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    scope_type VARCHAR(20) NOT NULL DEFAULT 'tenant' CHECK (scope_type IN ('platform','tenant')),
+    tenant_id UUID,
+    actor_user_id UUID NOT NULL,
+    action VARCHAR(100) NOT NULL CHECK (BTRIM(action) <> ''),
+    resource_type VARCHAR(100) NOT NULL CHECK (BTRIM(resource_type) <> ''),
+    resource_id TEXT,
+    request_id UUID,
+    credential_kind VARCHAR(32) NOT NULL DEFAULT 'jwt'
+        CHECK (credential_kind IN ('jwt','api_key','node','system')),
+    actor_platform_role VARCHAR(20) NOT NULL
+        CHECK (actor_platform_role IN ('root','operator','none')),
+    result VARCHAR(20) NOT NULL DEFAULT 'success' CHECK (result IN ('success','denied','failure')),
+    actor_tenant_role VARCHAR(20)
+        CHECK (actor_tenant_role IN ('admin','member')),
+    details JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(details) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_audit_scope_tenant CHECK ((scope_type='platform' AND tenant_id IS NULL) OR (scope_type='tenant' AND tenant_id IS NOT NULL)),
+    CONSTRAINT ck_audit_ids_real CHECK (
+        actor_user_id <> '00000000-0000-0000-0000-000000000000'
+        AND (tenant_id IS NULL OR tenant_id <> '00000000-0000-0000-0000-000000000000')
+    ),
+    CONSTRAINT ck_audit_details_size CHECK (octet_length(details::text) <= 16384)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_audit_events_tenant_time
+    ON tenant_audit_events(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tenant_audit_events_actor_time
+    ON tenant_audit_events(actor_user_id, created_at DESC);
 
 -- produce_ai_keys: Produce AI Key 表（用户访问系统的 API Key）
 CREATE TABLE IF NOT EXISTS produce_ai_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 删除用户或租户时同步删除密钥，避免认证命中孤儿记录
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    user_id UUID NOT NULL,
     name VARCHAR(255) NOT NULL,
     produce_ai_key_hash VARCHAR(255) NOT NULL UNIQUE,
     produce_ai_key_preview VARCHAR(20) NOT NULL,
@@ -93,7 +135,11 @@ CREATE TABLE IF NOT EXISTS produce_ai_keys (
     expires_at TIMESTAMPTZ,
     last_used_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_produce_ai_keys_membership
+        FOREIGN KEY (tenant_id, user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id)
+        ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_tenant ON produce_ai_keys(tenant_id);
@@ -239,7 +285,7 @@ CREATE INDEX IF NOT EXISTS idx_account_model_health_status
 -- 应用层租户配额约束且仅在 replay 窗口内保留；永久身份数量也受应用层
 -- 租户配额约束。过期后仍保留身份绑定，防止同一键被重新用于其他请求。
 CREATE TABLE IF NOT EXISTS responses_idempotency_claims (
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     binding_id VARCHAR(128) NOT NULL,
     request_fingerprint VARCHAR(64) NOT NULL,
     billing_request_id UUID NOT NULL,
@@ -295,7 +341,8 @@ CREATE TABLE IF NOT EXISTS responses_idempotency_claims (
             AND upstream_dispatched_at IS NOT NULL
             AND completed_at IS NOT NULL
         )
-    )
+    ),
+    CONSTRAINT fk_responses_idempotency_claims_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_response_expiry
@@ -309,7 +356,7 @@ CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_tenant_replay
 -- response_affinities: OpenAI resp_*/conv_* 资源到创建账号的租户+用户绑定。
 -- 后续资源操作及 conversation 请求必须继续命中同一上游账号和调用者。
 CREATE TABLE IF NOT EXISTS response_affinities (
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     -- Immutable caller identity snapshot, intentionally not a cascading user FK:
     -- accepted requests must still persist settlement after a user is removed.
     -- NULL is for internal/unowned rows; public paths require an exact user ID.
@@ -376,7 +423,8 @@ CREATE TABLE IF NOT EXISTS response_affinities (
                 )
             )
         )
-    )
+    ),
+    CONSTRAINT fk_response_affinities_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_response_affinities_account
@@ -398,10 +446,8 @@ CREATE INDEX IF NOT EXISTS idx_response_affinities_settlement_recovery
 -- pricing_models: 模型定价表
 CREATE TABLE IF NOT EXISTS pricing_models (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- Global defaults use the nil UUID.  Keeping one non-null representation
-    -- avoids the NULL-vs-nil split that otherwise makes lookup and mutations
-    -- disagree about the global scope.
-    tenant_id UUID NOT NULL,
+    scope_type VARCHAR(20) NOT NULL DEFAULT 'tenant',
+    tenant_id UUID REFERENCES tenants(id) ON DELETE RESTRICT,
     model_name VARCHAR(100) NOT NULL,
     billing_dimension VARCHAR(50) NOT NULL,
     currency VARCHAR(10) NOT NULL DEFAULT 'CNY',
@@ -413,7 +459,11 @@ CREATE TABLE IF NOT EXISTS pricing_models (
     effective_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, model_name, billing_dimension),
+    UNIQUE NULLS NOT DISTINCT (tenant_id, model_name, billing_dimension),
+    CONSTRAINT ck_pricing_models_scope CHECK (
+        (scope_type = 'platform' AND tenant_id IS NULL)
+        OR (scope_type = 'tenant' AND tenant_id IS NOT NULL)
+    ),
     CONSTRAINT ck_pricing_models_billing_dimension CHECK (
         billing_dimension IN ('node', 'provideraccount')
     ),
@@ -438,7 +488,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uk_pricing_models_default_scope
     WHERE is_default = TRUE;
 
 COMMENT ON COLUMN pricing_models.billing_dimension IS '计费维度: node 或 provideraccount';
-COMMENT ON COLUMN pricing_models.tenant_id IS '租户范围；全局默认使用 UUID nil，而不是 NULL';
+COMMENT ON COLUMN pricing_models.scope_type IS '定价范围：platform 或 tenant';
 COMMENT ON COLUMN pricing_models.version IS '管理端乐观并发版本号';
 
 -- 定价管理审计事件。事件表不引用业务行，避免删除定价后丢失变更证据。
@@ -447,12 +497,17 @@ CREATE TABLE IF NOT EXISTS pricing_audit_events (
     actor_user_id UUID NOT NULL,
     action VARCHAR(32) NOT NULL,
     pricing_id UUID NOT NULL,
-    tenant_id UUID NOT NULL,
+    scope_type VARCHAR(20) NOT NULL DEFAULT 'tenant',
+    tenant_id UUID,
     model_name VARCHAR(100) NOT NULL,
     billing_dimension VARCHAR(50) NOT NULL,
     before_state JSONB,
     after_state JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_pricing_audit_scope CHECK (
+        (scope_type = 'platform' AND tenant_id IS NULL)
+        OR (scope_type = 'tenant' AND tenant_id IS NOT NULL)
+    ),
     CONSTRAINT ck_pricing_audit_action CHECK (
         action IN ('create', 'update', 'delete', 'make_default')
     )
@@ -486,7 +541,12 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     status VARCHAR(20) NOT NULL,
     started_at TIMESTAMPTZ NOT NULL,
     finished_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Distribution records carry the tenant explicitly.  Keep a matching
+    -- unique key so PostgreSQL can enforce that they reference a usage row in
+    -- the same tenant rather than merely an existing global UUID.
+    CONSTRAINT uk_usage_logs_tenant_id_id UNIQUE (tenant_id, id),
+    CONSTRAINT fk_usage_logs_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_tenant ON usage_logs(tenant_id);
@@ -533,7 +593,8 @@ CREATE TABLE IF NOT EXISTS gateway_requests (
     CONSTRAINT ck_gateway_requests_trace_quality CHECK (trace_quality IN ('actual', 'derived', 'partial')),
     CONSTRAINT ck_gateway_requests_terminal_time CHECK ((status IN ('succeeded', 'failed', 'timed_out', 'cancelled')) = (finished_at IS NOT NULL)),
     CONSTRAINT ck_gateway_requests_first_content_time CHECK (client_first_content_at IS NULL OR client_first_content_at >= received_at),
-    CONSTRAINT ck_gateway_requests_finished_time CHECK (finished_at IS NULL OR finished_at >= received_at)
+    CONSTRAINT ck_gateway_requests_finished_time CHECK (finished_at IS NULL OR finished_at >= received_at),
+    CONSTRAINT fk_gateway_requests_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS gateway_request_attempts (
@@ -608,8 +669,9 @@ CREATE INDEX IF NOT EXISTS idx_gateway_attempt_upstream_id ON gateway_request_at
 CREATE TABLE IF NOT EXISTS distribution_records (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     usage_log_id UUID NOT NULL REFERENCES usage_logs(id) ON DELETE CASCADE,
-    tenant_id UUID NOT NULL,
-    beneficiary_id UUID NOT NULL,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    beneficiary_scope VARCHAR(20) NOT NULL DEFAULT 'tenant_member',
+    beneficiary_id UUID,
     share_amount DECIMAL(20, 10) NOT NULL,
     share_ratio DECIMAL(5, 4) NOT NULL,
     -- 分销层级；参与唯一约束以提供写入幂等性
@@ -618,7 +680,19 @@ CREATE TABLE IF NOT EXISTS distribution_records (
     settled_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uk_distribution_records_unique
-        UNIQUE (usage_log_id, beneficiary_id, level)
+        UNIQUE NULLS NOT DISTINCT (usage_log_id, beneficiary_scope, beneficiary_id, level),
+    CONSTRAINT ck_distribution_records_beneficiary CHECK (
+        (beneficiary_scope = 'everyone' AND beneficiary_id IS NULL)
+        OR (beneficiary_scope = 'tenant_member' AND beneficiary_id IS NOT NULL)
+    ),
+    CONSTRAINT fk_distribution_records_beneficiary_membership
+        FOREIGN KEY (tenant_id, beneficiary_id)
+        REFERENCES tenant_memberships(tenant_id, user_id)
+        ON DELETE RESTRICT,
+    CONSTRAINT fk_distribution_records_usage_tenant
+        FOREIGN KEY (tenant_id, usage_log_id)
+        REFERENCES usage_logs(tenant_id, id)
+        ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_distribution_records_tenant_id ON distribution_records(tenant_id);
@@ -632,7 +706,8 @@ COMMENT ON CONSTRAINT uk_distribution_records_unique ON distribution_records IS
 CREATE TABLE IF NOT EXISTS tenant_distribution_rules (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    beneficiary_id UUID NOT NULL,
+    beneficiary_scope VARCHAR(20) NOT NULL DEFAULT 'tenant_member',
+    beneficiary_id UUID,
     name VARCHAR(255) NOT NULL DEFAULT '默认分销规则',
     description TEXT,
     commission_rate DECIMAL(5, 4) NOT NULL,
@@ -642,7 +717,15 @@ CREATE TABLE IF NOT EXISTS tenant_distribution_rules (
     effective_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, beneficiary_id, effective_from)
+    UNIQUE NULLS NOT DISTINCT (tenant_id, beneficiary_scope, beneficiary_id, effective_from),
+    CONSTRAINT ck_tenant_distribution_rules_beneficiary CHECK (
+        (beneficiary_scope = 'everyone' AND beneficiary_id IS NULL)
+        OR (beneficiary_scope = 'tenant_member' AND beneficiary_id IS NOT NULL)
+    ),
+    CONSTRAINT fk_tenant_distribution_rules_beneficiary_membership
+        FOREIGN KEY (tenant_id, beneficiary_id)
+        REFERENCES tenant_memberships(tenant_id, user_id)
+        ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenant_distribution_rules_tenant ON tenant_distribution_rules(tenant_id);
@@ -757,9 +840,9 @@ CREATE INDEX IF NOT EXISTS idx_user_referrals_status ON user_referrals(status);
 CREATE TABLE IF NOT EXISTS payment_orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 租户ID
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     -- 用户ID
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL,
     -- 商户订单号（外部订单号）
     out_trade_no VARCHAR(64) NOT NULL UNIQUE,
     -- 通用渠道交易号展示字段
@@ -803,7 +886,8 @@ CREATE TABLE IF NOT EXISTS payment_orders (
     -- 创建时间
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     -- 更新时间
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_payment_orders_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 -- 创建索引
@@ -901,9 +985,9 @@ ON CONFLICT (payment_method) DO NOTHING;
 CREATE TABLE IF NOT EXISTS user_balances (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 租户ID
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     -- 用户ID
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE UNIQUE,
+    user_id UUID NOT NULL,
     -- 可用余额（单位：元，10 位小数与计费精度对齐）
     available_balance DECIMAL(20, 10) NOT NULL DEFAULT 0,
     -- 冻结余额（单位：元）
@@ -920,12 +1004,14 @@ CREATE TABLE IF NOT EXISTS user_balances (
     -- records auditable debt. Frozen funds and cumulative counters may not.
     CONSTRAINT ck_user_balances_frozen_nonnegative CHECK (frozen_balance >= 0),
     CONSTRAINT ck_user_balances_total_recharged_nonnegative CHECK (total_recharged >= 0),
-    CONSTRAINT ck_user_balances_total_consumed_nonnegative CHECK (total_consumed >= 0)
+    CONSTRAINT ck_user_balances_total_consumed_nonnegative CHECK (total_consumed >= 0),
+    CONSTRAINT fk_user_balances_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 -- 创建索引
 CREATE INDEX IF NOT EXISTS idx_user_balances_tenant_id ON user_balances(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_user_balances_user_id ON user_balances(user_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_balances_tenant_user ON user_balances(tenant_id,user_id);
 
 -- 添加注释
 COMMENT ON TABLE user_balances IS '用户余额表';
@@ -942,8 +1028,8 @@ CREATE TABLE IF NOT EXISTS balance_reservations (
     -- 每次处理器取得同一逻辑请求的预留所有权时轮换。旧处理器只能用
     -- 自己持有的 token 释放，不能误释放幂等重试重新接管的预留。
     owner_token UUID NOT NULL DEFAULT gen_random_uuid(),
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    user_id UUID NOT NULL,
     amount DECIMAL(20, 10) NOT NULL CHECK (amount >= 0),
     status VARCHAR(20) NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'settled', 'released', 'expired')),
@@ -970,7 +1056,8 @@ CREATE TABLE IF NOT EXISTS balance_reservations (
         (status = 'settled' AND usage_log_id IS NOT NULL AND settled_at IS NOT NULL)
         OR
         (status <> 'settled' AND usage_log_id IS NULL AND settled_at IS NULL)
-    )
+    ),
+    CONSTRAINT fk_balance_reservations_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_balance_reservations_user_id
@@ -1100,9 +1187,9 @@ COMMENT ON COLUMN balance_reservation_events.reservation_id IS '原预留 UUID �
 CREATE TABLE IF NOT EXISTS balance_transactions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 租户ID
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     -- 用户ID
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL,
     -- 关联订单ID（可选）
     order_id UUID REFERENCES payment_orders(id),
     -- 关联使用日志ID（可选）
@@ -1120,7 +1207,8 @@ CREATE TABLE IF NOT EXISTS balance_transactions (
     -- 备注
     description TEXT,
     -- 创建时间
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_balance_transactions_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 -- 创建索引
@@ -1175,7 +1263,8 @@ CREATE TABLE IF NOT EXISTS admin_balance_operations (
         (completed_at IS NOT NULL AND balance_transaction_id IS NOT NULL
             AND balance_before IS NOT NULL AND balance_after IS NOT NULL
             AND frozen_balance_after IS NOT NULL AND frozen_balance_after >= 0)
-    )
+    ),
+    CONSTRAINT fk_admin_balance_operations_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_admin_balance_operations_user_created
@@ -1199,9 +1288,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
     -- 设置键名（唯一）
     key VARCHAR(100) UNIQUE NOT NULL,
     -- 设置值（以字符串形式存储）
-    value TEXT NOT NULL
-        CONSTRAINT chk_system_settings_default_user_role
-        CHECK (key <> 'default_user_role' OR value = 'user'),
+    value TEXT NOT NULL,
     -- 值类型：string, bool, int, decimal, json
     value_type VARCHAR(20) NOT NULL DEFAULT 'string',
     -- 设置描述
@@ -1225,7 +1312,6 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
     
     -- 注册设置
     ('default_user_quota', '10.00', 'decimal', '新用户默认配额（元）'),
-    ('default_user_role', 'user', 'string', '新用户默认角色'),
     
     -- 限流设置
     ('default_rpm_limit', '60', 'int', '默认 RPM 限制'),
@@ -1293,6 +1379,7 @@ CREATE TRIGGER trigger_update_system_settings_updated_at
 -- nodes: 节点注册信息表
 CREATE TABLE IF NOT EXISTS nodes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     owner_user_id UUID NOT NULL,
     client_instance_id TEXT NOT NULL,
     display_name TEXT NOT NULL,
@@ -1303,7 +1390,11 @@ CREATE TABLE IF NOT EXISTS nodes (
     last_heartbeat_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (owner_user_id, client_instance_id)
+    CONSTRAINT fk_nodes_owner_membership
+        FOREIGN KEY (tenant_id, owner_user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id)
+        ON DELETE CASCADE,
+    UNIQUE (tenant_id, owner_user_id, client_instance_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
@@ -1336,6 +1427,7 @@ CREATE INDEX IF NOT EXISTS idx_node_sessions_native_operations ON node_sessions 
 CREATE TABLE IF NOT EXISTS node_tasks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id UUID NOT NULL UNIQUE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id UUID NOT NULL,
     model TEXT NOT NULL,
     payload_json JSONB NOT NULL,
@@ -1354,7 +1446,11 @@ CREATE TABLE IF NOT EXISTS node_tasks (
     deadline_at TIMESTAMPTZ NOT NULL,
     complete_grace_until TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_node_tasks_caller_membership
+        FOREIGN KEY (tenant_id, user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id)
+        ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_node_tasks_status_model_deadline ON node_tasks(status, model, deadline_at);
@@ -1452,7 +1548,8 @@ CREATE INDEX IF NOT EXISTS idx_node_sessions_node_id_last_seen_at ON node_sessio
 
 CREATE TABLE IF NOT EXISTS user_node_gateway_tokens (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    user_id UUID NOT NULL,
     -- token 的 SHA-256 hash（冗余存储，用于额外校验）
     token_hash TEXT NOT NULL UNIQUE,
     -- token 预览（前 16 位，用于 UI 展示，例如 "kcng-a1b2c3d4e5f6"）
@@ -1473,7 +1570,9 @@ CREATE TABLE IF NOT EXISTS user_node_gateway_tokens (
     revoke_reason TEXT,
     -- 签发时间（用户申请时间）
     issued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT fk_node_registration_membership FOREIGN KEY (tenant_id,user_id)
+        REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
 -- 索引
@@ -1490,7 +1589,7 @@ CREATE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_consumed_node_issued
     WHERE consumed_node_id IS NOT NULL;
 -- token_hash 上有 UNIQUE 约束，已自动创建唯一索引，无需额外 B-tree 索引
 -- 确保每用户同一时间仅有一个活跃 token（pending 或 approved），防止并发 POST 创建多个
-CREATE UNIQUE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_one_active ON user_node_gateway_tokens(user_id) WHERE status IN ('pending', 'approved');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_node_gateway_tokens_one_active ON user_node_gateway_tokens(tenant_id,user_id) WHERE status IN ('pending', 'approved');
 
 -- 注释
 COMMENT ON TABLE user_node_gateway_tokens IS '用户节点网关注册令牌表（审批制 + HMAC 签名 + 一次性使用）';
@@ -1519,13 +1618,13 @@ CREATE TABLE IF NOT EXISTS node_tips (
     -- 关联的计费记录
     usage_log_id UUID NOT NULL
         CONSTRAINT uk_node_tips_usage_log_id UNIQUE
-        REFERENCES usage_logs(id) ON DELETE CASCADE,
+        REFERENCES usage_logs(id) ON DELETE RESTRICT,
     -- 提供服务的节点 ID
-    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,
     -- 节点所有者（同时也是 tips 受益人）
-    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     -- 消费该服务的用户（付费方）
-    consumer_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    consumer_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     -- 小费金额（10 位小数，与 usage_logs.user_amount DECIMAL(20,10) 对齐）
     tip_amount DECIMAL(20, 10) NOT NULL,
     -- 币种
@@ -1569,7 +1668,7 @@ COMMENT ON COLUMN node_tips.bill_amount IS '原始计费金额（快照，审计
 CREATE TABLE IF NOT EXISTS node_tip_withdrawals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- 申请人
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     -- 提现方式：alipay / balance
     withdrawal_type VARCHAR(20) NOT NULL
         CONSTRAINT chk_node_tip_withdrawals_type CHECK (withdrawal_type IN ('alipay', 'balance')),
@@ -1615,8 +1714,8 @@ COMMENT ON COLUMN node_tip_withdrawals.admin_remark IS '管理员备注（审批
 -- Platform-owned Responses state; it never shares the upstream resource namespace.
 CREATE TABLE IF NOT EXISTS scoped_conversations (
     id TEXT PRIMARY KEY,
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     access_mode TEXT NOT NULL CHECK (access_mode IN ('passthrough','node_dispatch')),
     account_id UUID,
     model TEXT,
@@ -1627,15 +1726,16 @@ CREATE TABLE IF NOT EXISTS scoped_conversations (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     expires_at TIMESTAMPTZ NOT NULL,
-    deleted_at TIMESTAMPTZ
+    deleted_at TIMESTAMPTZ,
+    CONSTRAINT fk_scoped_conversations_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 CREATE INDEX IF NOT EXISTS idx_scoped_conversations_scope
     ON scoped_conversations(tenant_id,user_id,access_mode,created_at);
 CREATE INDEX IF NOT EXISTS idx_scoped_conversations_expiry ON scoped_conversations(expires_at);
 CREATE TABLE IF NOT EXISTS scoped_responses (
     id TEXT PRIMARY KEY,
-    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     access_mode TEXT NOT NULL CHECK (access_mode IN ('passthrough','node_dispatch')),
     account_id UUID,
     model TEXT NOT NULL,
@@ -1663,7 +1763,8 @@ CREATE TABLE IF NOT EXISTS scoped_responses (
     heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deadline_at TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
-    deleted_at TIMESTAMPTZ
+    deleted_at TIMESTAMPTZ,
+    CONSTRAINT fk_scoped_responses_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_scoped_responses_idempotency
     ON scoped_responses(tenant_id,user_id,access_mode,idempotency_hash)
@@ -1680,3 +1781,268 @@ CREATE TABLE IF NOT EXISTS scoped_response_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY(response_id,seq)
 );
+
+-- Administrative writes acquire a real versioned fence BEFORE row locks.
+-- Updating (not merely locking) this row also fences REPEATABLE READ snapshots:
+-- the loser must retry its whole transaction after a serialization failure.
+-- Order: fence -> tenant parents (UUID order) -> users -> memberships/invitations.
+CREATE TABLE IF NOT EXISTS identity_admin_fence (
+    id BOOLEAN PRIMARY KEY CHECK (id),
+    version BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO identity_admin_fence(id) VALUES (TRUE) ON CONFLICT (id) DO NOTHING;
+CREATE OR REPLACE FUNCTION serialize_identity_admin() RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE;
+    RETURN NULL;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS identity_users_insert_fence ON users;
+CREATE TRIGGER identity_users_insert_fence BEFORE INSERT OR DELETE ON users
+    FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
+DROP TRIGGER IF EXISTS identity_users_update_fence ON users;
+CREATE TRIGGER identity_users_update_fence BEFORE UPDATE OF platform_role,status ON users
+    FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
+DROP TRIGGER IF EXISTS identity_tenants_fence ON tenants;
+CREATE TRIGGER identity_tenants_fence BEFORE INSERT OR DELETE ON tenants
+    FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
+DROP TRIGGER IF EXISTS identity_tenants_update_fence ON tenants;
+CREATE TRIGGER identity_tenants_update_fence
+    BEFORE UPDATE OF owner_user_id, name, slug, description, status,
+        default_rpm_limit, default_tpm_limit ON tenants
+    FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
+DROP TRIGGER IF EXISTS identity_memberships_fence ON tenant_memberships;
+CREATE TRIGGER identity_memberships_fence BEFORE INSERT OR DELETE ON tenant_memberships
+    FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
+DROP TRIGGER IF EXISTS identity_memberships_update_fence ON tenant_memberships;
+CREATE TRIGGER identity_memberships_update_fence
+    BEFORE UPDATE OF tenant_id, user_id, role, status ON tenant_memberships
+    FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
+
+CREATE OR REPLACE FUNCTION version_user_authority() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id THEN
+        RAISE EXCEPTION 'user identity is immutable' USING ERRCODE='23514';
+    END IF;
+    IF ROW(NEW.platform_role,NEW.status) IS DISTINCT FROM ROW(OLD.platform_role,OLD.status) THEN
+        NEW.token_version := OLD.token_version+1;
+    ELSIF NEW.token_version < OLD.token_version THEN
+        RAISE EXCEPTION 'token version cannot decrease' USING ERRCODE='23514';
+    END IF;
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS user_authority_version ON users;
+CREATE TRIGGER user_authority_version BEFORE UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION version_user_authority();
+
+CREATE OR REPLACE FUNCTION version_tenant_authority() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id THEN
+        RAISE EXCEPTION 'tenant identity is immutable' USING ERRCODE='23514';
+    END IF;
+    IF ROW(NEW.owner_user_id,NEW.name,NEW.slug,NEW.description,NEW.status,NEW.default_rpm_limit,NEW.default_tpm_limit)
+       IS DISTINCT FROM ROW(OLD.owner_user_id,OLD.name,OLD.slug,OLD.description,OLD.status,OLD.default_rpm_limit,OLD.default_tpm_limit) THEN
+        NEW.authz_version := OLD.authz_version+1;
+    ELSIF NEW.authz_version < OLD.authz_version THEN
+        RAISE EXCEPTION 'tenant version cannot decrease' USING ERRCODE='23514';
+    END IF;
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS tenant_authority_version ON tenants;
+CREATE TRIGGER tenant_authority_version BEFORE UPDATE ON tenants
+    FOR EACH ROW EXECUTE FUNCTION version_tenant_authority();
+
+CREATE OR REPLACE FUNCTION version_membership_authority() RETURNS TRIGGER AS $$
+DECLARE target_tenant UUID;
+BEGIN
+    target_tenant := CASE WHEN TG_OP='DELETE' THEN OLD.tenant_id ELSE NEW.tenant_id END;
+    IF TG_OP='DELETE' THEN
+        IF EXISTS (SELECT 1 FROM tenants WHERE id=target_tenant) THEN
+            RAISE EXCEPTION 'memberships must be revoked, not deleted' USING ERRCODE='23514';
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF TG_OP='UPDATE' THEN
+        IF ROW(NEW.tenant_id,NEW.user_id) IS DISTINCT FROM ROW(OLD.tenant_id,OLD.user_id) THEN
+            RAISE EXCEPTION 'membership identity is immutable' USING ERRCODE='23514';
+        END IF;
+        IF ROW(NEW.role,NEW.status) IS DISTINCT FROM ROW(OLD.role,OLD.status) THEN
+            NEW.version := OLD.version+1;
+        ELSE
+            NEW.version := OLD.version;
+        END IF;
+    END IF;
+    NEW.updated_at := NOW();
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS membership_authority_version ON tenant_memberships;
+CREATE TRIGGER membership_authority_version BEFORE INSERT OR UPDATE OR DELETE ON tenant_memberships
+    FOR EACH ROW EXECUTE FUNCTION version_membership_authority();
+
+-- A restored membership never restores credentials issued before suspension.
+CREATE OR REPLACE FUNCTION revoke_membership_credentials() RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.status IS DISTINCT FROM NEW.status AND NEW.status <> 'active' THEN
+        UPDATE produce_ai_keys
+           SET revoked=TRUE, revoked_at=COALESCE(revoked_at,NOW()), updated_at=NOW()
+         WHERE tenant_id=NEW.tenant_id AND user_id=NEW.user_id AND NOT revoked;
+        UPDATE user_node_gateway_tokens
+           SET status='rejected', actioned_at=NOW(), revoke_reason='membership deactivated', updated_at=NOW()
+         WHERE tenant_id=NEW.tenant_id AND user_id=NEW.user_id AND status IN ('pending','approved');
+        UPDATE node_sessions SET accepting_tasks=FALSE
+         WHERE node_id IN (SELECT id FROM nodes WHERE tenant_id=NEW.tenant_id AND owner_user_id=NEW.user_id);
+    END IF;
+    IF NEW.status <> 'active' OR (OLD.role='admin' AND NEW.role<>'admin') THEN
+        UPDATE tenant_invitations
+           SET status='revoked', revoked_at=NOW(), updated_at=NOW()
+         WHERE tenant_id=NEW.tenant_id AND status='pending'
+           AND (invited_by_user_id=NEW.user_id OR (
+               NEW.status <> 'active' AND email=(
+                   SELECT lower(btrim(email)) FROM users WHERE id=NEW.user_id
+               )
+           ));
+        -- Deactivation also invalidates invitations addressed to this member.
+        -- A pre-existing token must not undo an explicit suspend/revoke.
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS membership_credentials_revoked ON tenant_memberships;
+CREATE TRIGGER membership_credentials_revoked AFTER UPDATE OF role,status ON tenant_memberships
+    FOR EACH ROW EXECUTE FUNCTION revoke_membership_credentials();
+
+-- Validate final transaction state, permitting atomic create and transfer.
+CREATE OR REPLACE FUNCTION assert_identity_invariants() RETURNS TRIGGER AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM tenants t WHERE NOT EXISTS (
+            SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id
+            WHERE m.tenant_id=t.id AND m.user_id=t.owner_user_id
+              AND m.role='admin' AND m.status='active' AND u.status='active'
+        )
+    ) THEN
+        RAISE EXCEPTION 'tenant owner must be an active user and active admin; last admin cannot be removed' USING ERRCODE='23514';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM users WHERE platform_role='root' AND status='active') THEN
+        RAISE EXCEPTION 'at least one active root is required' USING ERRCODE='23514';
+    END IF;
+    RETURN NULL;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS identity_users_guard ON users;
+CREATE CONSTRAINT TRIGGER identity_users_guard AFTER INSERT OR UPDATE OF platform_role,status OR DELETE ON users
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();
+DROP TRIGGER IF EXISTS identity_tenants_guard ON tenants;
+CREATE CONSTRAINT TRIGGER identity_tenants_guard AFTER INSERT OR UPDATE OF owner_user_id,status OR DELETE ON tenants
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();
+DROP TRIGGER IF EXISTS identity_memberships_guard ON tenant_memberships;
+CREATE CONSTRAINT TRIGGER identity_memberships_guard AFTER INSERT OR UPDATE OF role,status OR DELETE ON tenant_memberships
+    DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();
+
+CREATE OR REPLACE FUNCTION reject_tenant_audit_mutation() RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'tenant audit events are immutable' USING ERRCODE='42501';
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS tenant_audit_immutable ON tenant_audit_events;
+CREATE TRIGGER tenant_audit_immutable BEFORE UPDATE OR DELETE ON tenant_audit_events
+    FOR EACH ROW EXECUTE FUNCTION reject_tenant_audit_mutation();
+DROP TRIGGER IF EXISTS tenant_audit_no_truncate ON tenant_audit_events;
+CREATE TRIGGER tenant_audit_no_truncate BEFORE TRUNCATE ON tenant_audit_events
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_tenant_audit_mutation();
+
+CREATE OR REPLACE FUNCTION assert_node_task_scope()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.assigned_node_id IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1 FROM nodes n
+           WHERE n.id = NEW.assigned_node_id AND n.tenant_id = NEW.tenant_id
+       ) THEN
+        RAISE EXCEPTION 'node task % crosses tenant boundary', NEW.id
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.assigned_session_id IS NOT NULL
+       AND NOT EXISTS (
+           SELECT 1
+           FROM node_sessions ns
+           JOIN nodes n ON n.id = ns.node_id
+           WHERE ns.id = NEW.assigned_session_id AND n.tenant_id = NEW.tenant_id
+       ) THEN
+        RAISE EXCEPTION 'node task % session crosses tenant boundary', NEW.id
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS node_task_scope_guard ON node_tasks;
+CREATE TRIGGER node_task_scope_guard
+    BEFORE INSERT OR UPDATE OF tenant_id, assigned_node_id, assigned_session_id
+    ON node_tasks FOR EACH ROW EXECUTE FUNCTION assert_node_task_scope();
+
+-- Membership changes never move accepted financial obligations or resources.
+CREATE OR REPLACE FUNCTION guard_resource_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.tenant_id,NEW.user_id) IS DISTINCT FROM ROW(OLD.tenant_id,OLD.user_id) THEN
+        RAISE EXCEPTION 'resource tenant and owner are immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS resource_identity_immutable ON payment_orders;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON payment_orders
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON user_balances;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON user_balances
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON usage_logs;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON usage_logs
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON balance_transactions;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON balance_transactions
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON balance_reservations;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON balance_reservations
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON node_tasks;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON node_tasks
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON produce_ai_keys;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON produce_ai_keys
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON scoped_responses;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON scoped_responses
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON scoped_conversations;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON scoped_conversations
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+
+CREATE OR REPLACE FUNCTION revoke_suspended_user_credentials() RETURNS TRIGGER AS $$
+BEGIN
+    IF OLD.status IS DISTINCT FROM NEW.status AND NEW.status='suspended' THEN
+        UPDATE produce_ai_keys SET revoked=TRUE,revoked_at=COALESCE(revoked_at,NOW()),updated_at=NOW()
+          WHERE user_id=NEW.id AND NOT revoked;
+        UPDATE user_node_gateway_tokens SET status='rejected',actioned_at=NOW(),revoke_reason='user suspended',updated_at=NOW()
+          WHERE user_id=NEW.id AND status IN ('pending','approved');
+        UPDATE node_sessions SET accepting_tasks=FALSE WHERE node_id IN (SELECT id FROM nodes WHERE owner_user_id=NEW.id);
+        UPDATE tenant_invitations SET status='revoked',revoked_at=NOW(),updated_at=NOW()
+          WHERE status='pending' AND (
+              invited_by_user_id=NEW.id OR email=lower(btrim(NEW.email))
+          );
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS user_credentials_revoked ON users;
+CREATE TRIGGER user_credentials_revoked AFTER UPDATE OF status ON users
+    FOR EACH ROW EXECUTE FUNCTION revoke_suspended_user_credentials();
+DROP TRIGGER IF EXISTS resource_identity_immutable ON user_node_gateway_tokens;
+CREATE TRIGGER resource_identity_immutable BEFORE UPDATE OF tenant_id,user_id ON user_node_gateway_tokens
+    FOR EACH ROW EXECUTE FUNCTION guard_resource_identity();
+CREATE OR REPLACE FUNCTION guard_node_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.tenant_id,NEW.owner_user_id) IS DISTINCT FROM ROW(OLD.tenant_id,OLD.owner_user_id) THEN
+        RAISE EXCEPTION 'node tenant and owner are immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS node_identity_immutable ON nodes;
+CREATE TRIGGER node_identity_immutable BEFORE UPDATE OF tenant_id,owner_user_id ON nodes
+    FOR EACH ROW EXECUTE FUNCTION guard_node_identity();

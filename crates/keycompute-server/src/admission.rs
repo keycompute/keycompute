@@ -255,7 +255,12 @@ mod tests {
     #[tokio::test]
     async fn generation_admission_holds_slot_through_body_delivery_and_context_clones() {
         let state = state();
-        let mut auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user");
+        let mut auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            keycompute_types::CredentialKind::Jwt,
+        );
         ensure_generation(&state, &mut auth).await.unwrap();
         ensure_generation(&state, &mut auth).await.unwrap(); // no double admission
         let response = retain_response(
@@ -324,7 +329,7 @@ mod tests {
                         Uuid::new_v4(),
                         Uuid::new_v4(),
                         Uuid::new_v4(),
-                        "user",
+                        keycompute_types::CredentialKind::Jwt,
                     ))
                     .body(body)
                     .unwrap(),

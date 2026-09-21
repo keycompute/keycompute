@@ -19,9 +19,12 @@ async fn hot_user_queue_does_not_consume_another_users_writer_connection() {
     let tenant = create_test_tenant(&admin, "capacity", &id).await;
     let a = create_test_user(&admin, tenant.id, "hot", &id).await;
     let b = create_test_user(&admin, tenant.id, "other", &id).await;
+    let tenant_id = tenant.id;
+    let a_id = a.id;
+    let b_id = b.id;
     let seed = BalanceService::new(DbRouter::single(admin.clone()));
-    for user in [a.id, b.id] {
-        seed.recharge(user, tenant.id, Decimal::from(100), None, None)
+    for user_id in [a_id, b_id] {
+        seed.recharge(tenant_id, user_id, Decimal::from(100), None, None)
             .await
             .unwrap();
     }
@@ -49,8 +52,8 @@ async fn hot_user_queue_does_not_consume_another_users_writer_connection() {
     tasks.spawn(async move {
         first
             .reserve_request(
-                a.id,
-                tenant.id,
+                tenant_id,
+                a_id,
                 Uuid::new_v4(),
                 Decimal::ONE,
                 Duration::from_secs(60),
@@ -71,8 +74,8 @@ async fn hot_user_queue_does_not_consume_another_users_writer_connection() {
     tasks.spawn(async move {
         second
             .reserve_request(
-                a.id,
-                tenant.id,
+                tenant_id,
+                a_id,
                 Uuid::new_v4(),
                 Decimal::ONE,
                 Duration::from_secs(60),
@@ -83,8 +86,8 @@ async fn hot_user_queue_does_not_consume_another_users_writer_connection() {
     let other = tokio::time::timeout(
         Duration::from_millis(750),
         service.reserve_request(
-            b.id,
-            tenant.id,
+            tenant_id,
+            b_id,
             Uuid::new_v4(),
             Decimal::ONE,
             Duration::from_secs(60),
@@ -93,7 +96,7 @@ async fn hot_user_queue_does_not_consume_another_users_writer_connection() {
     .await
     .expect("hot-user queue consumed the remaining writer connection")
     .unwrap();
-    assert_eq!(other.user_id, b.id);
+    assert_eq!(other.user_id, b_id);
     assert!(
         tasks.try_join_next().is_none(),
         "hot reservation escaped its still-held row lock"
@@ -102,7 +105,7 @@ async fn hot_user_queue_does_not_consume_another_users_writer_connection() {
     while let Some(result) = tasks.join_next().await {
         result.unwrap().unwrap();
     }
-    let balance = UserBalance::find_by_user(&admin, a.id)
+    let balance = UserBalance::find_by_user(&admin, tenant_id, a_id)
         .await
         .unwrap()
         .unwrap();
@@ -120,10 +123,13 @@ async fn concurrent_request_identity_conflicts_roll_back_the_balance_move() {
     let tenant = create_test_tenant(&db, "atomic-reserve", &id).await;
     let a = create_test_user(&db, tenant.id, "a", &id).await;
     let b = create_test_user(&db, tenant.id, "b", &id).await;
+    let tenant_id = tenant.id;
+    let a_id = a.id;
+    let b_id = b.id;
     let service = BalanceService::new(DbRouter::single(db.clone()));
-    for user in [a.id, b.id] {
+    for user_id in [a_id, b_id] {
         service
-            .recharge(user, tenant.id, Decimal::from(100), None, None)
+            .recharge(tenant_id, user_id, Decimal::from(100), None, None)
             .await
             .unwrap();
     }
@@ -137,8 +143,8 @@ async fn concurrent_request_identity_conflicts_roll_back_the_balance_move() {
             barrier.wait().await;
             service
                 .reserve_request(
+                    tenant_id,
                     user,
-                    tenant.id,
                     request,
                     Decimal::from(10),
                     Duration::from_secs(60),
@@ -161,8 +167,8 @@ async fn concurrent_request_identity_conflicts_roll_back_the_balance_move() {
     let winner = winner.unwrap();
     let replay = service
         .reserve_request_with_owner_token(
+            tenant_id,
             winner.user_id,
-            tenant.id,
             request,
             winner.owner_token,
             Decimal::from(10),
@@ -171,8 +177,14 @@ async fn concurrent_request_identity_conflicts_roll_back_the_balance_move() {
         .await
         .unwrap();
     assert_eq!(winner.id, replay.id);
-    let first = UserBalance::find_by_user(&db, a.id).await.unwrap().unwrap();
-    let second = UserBalance::find_by_user(&db, b.id).await.unwrap().unwrap();
+    let first = UserBalance::find_by_user(&db, tenant_id, a_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = UserBalance::find_by_user(&db, tenant_id, b_id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         first.available_balance + second.available_balance,
         Decimal::from(190)
@@ -183,13 +195,13 @@ async fn concurrent_request_identity_conflicts_roll_back_the_balance_move() {
     );
     assert!(
         service
-            .release_request_reservation(request, winner.owner_token)
+            .release_request_reservation(tenant_id, winner.user_id, request, winner.owner_token,)
             .await
             .unwrap()
     );
     assert!(
         !service
-            .release_request_reservation(request, winner.owner_token)
+            .release_request_reservation(tenant_id, winner.user_id, request, winner.owner_token,)
             .await
             .unwrap()
     );

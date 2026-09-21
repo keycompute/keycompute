@@ -48,7 +48,7 @@ pub fn process_snapshot(state: &AppState) -> Value {
     })
 }
 pub async fn capacity(State(state): State<AppState>, auth: AuthExtractor) -> Result<Json<Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::PlatformDiagnostics) {
         return Err(ApiError::Forbidden(
             "System administration permission is required".into(),
         ));
@@ -58,11 +58,12 @@ pub async fn capacity(State(state): State<AppState>, auth: AuthExtractor) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keycompute_types::CredentialKind;
     #[tokio::test]
     async fn role_text_cannot_bypass_capacity_permission() {
         let state = AppState::new();
         let id = uuid::Uuid::new_v4();
-        let mut auth = AuthExtractor::new(id, id, id, "admin");
+        let mut auth = AuthExtractor::new(id, id, id, CredentialKind::Jwt);
         auth.permissions = vec![keycompute_auth::Permission::UseApi];
         assert!(matches!(
             capacity(State(state.clone()), auth).await,

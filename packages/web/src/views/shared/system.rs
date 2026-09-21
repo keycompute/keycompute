@@ -269,14 +269,14 @@ pub fn SystemDiagnostics() -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
-    let is_admin = user_store
+    let can_manage_console = user_store
         .info
         .read()
         .as_ref()
-        .map(|u| u.is_admin())
+        .map(|u| u.can_manage_console())
         .unwrap_or(false);
 
-    if !is_admin {
+    if !can_manage_console {
         return rsx! {
             NoPermissionView { resource: i18n.t("page.monitoring").to_string() }
         };
@@ -286,7 +286,7 @@ pub fn SystemDiagnostics() -> Element {
         .info
         .read()
         .as_ref()
-        .map(|user| user.tenant_id.clone())
+        .and_then(|user| user.active_tenant_id().map(str::to_owned))
         .unwrap_or_default();
 
     // 这两项来自网关进程内状态，不依赖监控聚合表。保持为独立资源，确保数据库

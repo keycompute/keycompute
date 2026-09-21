@@ -14,6 +14,9 @@ pub struct AuthState {
     pub session_id: Uuid,
     pub token_revision: u64,
     pub persistent: bool,
+    /// The server-selected tenant for this session. `None` is a valid global
+    /// identity and must never be replaced with a fabricated tenant.
+    pub selected_tenant_id: Option<String>,
 }
 
 impl AuthState {
@@ -25,6 +28,7 @@ impl AuthState {
             session_id: Uuid::new_v4(),
             token_revision: 0,
             persistent: false,
+            selected_tenant_id: None,
         }
     }
 
@@ -69,9 +73,25 @@ impl AuthStore {
         *self.state.write() = next;
     }
 
+    /// Login using the complete server session response, preserving an
+    /// intentionally empty selected tenant for global users.
+    pub fn login_with_session(
+        &mut self,
+        response: &client_api::api::auth::AuthResponse,
+        persist: bool,
+    ) {
+        self.login_with_persist(response.access_token.clone(), persist);
+        self.state.write().selected_tenant_id = response
+            .selected_tenant
+            .as_ref()
+            .map(|tenant| tenant.id.clone());
+    }
+
     pub fn logout(&mut self) {
         Self::clear_storage();
-        crate::services::api_client::get_client().clear_token();
+        let client = crate::services::api_client::get_client();
+        client.clear_token();
+        client.invalidate_console_reads();
         *self.state.write() = AuthState::default();
     }
 
@@ -84,7 +104,9 @@ impl AuthStore {
             return false;
         }
         Self::clear_storage();
-        crate::services::api_client::get_client().clear_token();
+        let client = crate::services::api_client::get_client();
+        client.clear_token();
+        client.invalidate_console_reads();
         *current = AuthState::default();
         true
     }

@@ -1,5 +1,6 @@
+use client_api::PlatformRole;
 use client_api::{
-    AdminApi, AssignableUserRole, ClientError, UserRole,
+    AdminApi, ClientError,
     api::admin::{
         ReleaseBalanceReservationRequest, UpdateBalanceRequest, UpdateUserRequest,
         UserBalanceReservationsResponse, UserDetail, UserQueryParams,
@@ -18,11 +19,10 @@ use ui::{
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::api_client::{get_client, user_error_message, with_auto_refresh};
-use crate::services::tenant_service;
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
 use crate::stores::user_store::{UserInfo, UserStore};
-use crate::utils::display::{short_id, user_role_label};
+use crate::utils::display::{platform_role_label, short_id};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 
@@ -241,7 +241,7 @@ fn manual_balance_operation_api_namespace(config: &client_api::ClientConfig) -> 
 }
 
 type BalanceDetailsLoadResult = Result<Option<UserBalanceReservationsResponse>, ClientError>;
-type BalanceDetailsRequestKey = (Option<String>, Option<String>, u64);
+type BalanceDetailsRequestKey = (Option<String>, Option<String>, u64, Option<uuid::Uuid>);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BalanceReservationPagination {
@@ -302,6 +302,12 @@ impl BalanceReservationPagination {
 /// and the dependency watcher may not have marked it pending during the render
 /// that changes the selected user. The request key rejects both stale states;
 /// the response ID is a final guard against a mismatched server response.
+fn wallet_tenant(value: &str) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(value.trim())
+        .ok()
+        .filter(|id| !id.is_nil())
+}
+
 fn current_balance_details_result(
     current_request: &BalanceDetailsRequestKey,
     state: UseResourceState,
@@ -331,6 +337,7 @@ struct UserListQuery {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(any(target_arch = "wasm32", test), derive(Deserialize, Serialize))]
 struct ManualBalanceOperationIdentity {
+    tenant_id: uuid::Uuid,
     user_id: String,
     action: String,
     amount: String,
@@ -722,6 +729,7 @@ impl ManualBalanceOperationPersistence for ManualBalanceOperationStorage {
 impl ManualBalanceOperationIdentity {
     fn new(user_id: &str, action: &str, request: &UpdateBalanceRequest) -> Self {
         Self {
+            tenant_id: request.tenant_id,
             user_id: user_id.to_string(),
             action: action.to_string(),
             amount: request.amount.clone(),
@@ -1160,21 +1168,16 @@ impl UserListQuery {
     }
 }
 
-fn user_can_manage_tenants(user: Option<&UserInfo>) -> bool {
-    user.map(UserInfo::is_admin).unwrap_or(false)
+fn user_can_manage_platform_users(user: Option<&UserInfo>) -> bool {
+    user.is_some_and(|value| value.has_platform_permission("users:manage"))
 }
 
 #[component]
 pub fn Users() -> Element {
     let user_store = use_context::<UserStore>();
-    let is_admin = user_store
-        .info
-        .read()
-        .as_ref()
-        .map(|u| u.is_admin())
-        .unwrap_or(false);
+    let can_manage_console = user_can_manage_platform_users(user_store.info.read().as_ref());
 
-    if is_admin {
+    if can_manage_console {
         rsx! {
             AdminUsersView {}
         }
@@ -1198,24 +1201,20 @@ fn AdminUsersView() -> Element {
     let current_user = user_store.info.read().clone();
     let can_current_user_manage_roles = current_user
         .as_ref()
-        .map(|u| u.role == UserRole::System.as_str())
+        .map(|u| {
+            u.platform_role == Some(PlatformRole::Root)
+                && u.has_platform_permission("protected_users:manage")
+        })
         .unwrap_or(false);
-    // Both admin and system JWTs carry tenant:manage. Only system carries
-    // protected_users:manage, which remains required for moving admin users.
-    let can_current_user_manage_tenants = user_can_manage_tenants(current_user.as_ref());
     let current_user_id = current_user
         .as_ref()
         .map(|u| u.id.clone())
-        .unwrap_or_default();
-    let current_user_tenant_id = current_user
-        .as_ref()
-        .map(|u| u.tenant_id.clone())
         .unwrap_or_default();
     let api_client = get_client();
     let balance_operation_scope = ManualBalanceOperationScope::new(
         manual_balance_operation_api_namespace(api_client.config()),
         current_user_id.clone(),
-        current_user_tenant_id,
+        "platform",
     );
     let initial_balance_operation_scope = balance_operation_scope.clone();
     let balance_operation_storage = ManualBalanceOperationStorage;
@@ -1227,8 +1226,6 @@ fn AdminUsersView() -> Element {
     // 编辑弹窗状态
     let mut edit_user = use_signal(|| Option::<UserDetail>::None);
     let mut edit_name = use_signal(String::new);
-    let mut edit_role = use_signal(String::new);
-    let mut edit_tenant_id = use_signal(String::new);
     let mut edit_saving = use_signal(|| false);
 
     // 删除确认状态
@@ -1236,6 +1233,7 @@ fn AdminUsersView() -> Element {
     let mut delete_saving = use_signal(|| false);
 
     // 余额管理弹窗状态
+    let mut balance_tenant = use_signal(String::new);
     let mut balance_user = use_signal(|| Option::<UserDetail>::None);
     let mut balance_action = use_signal(|| "recharge".to_string());
     let mut balance_amount = use_signal(String::new);
@@ -1287,17 +1285,6 @@ fn AdminUsersView() -> Element {
         }
     });
 
-    // 租户列表仅提供活跃租户，避免把用户迁移到已停用的租户。
-    let mut tenants = use_resource(move || async move {
-        // Tenant selection is an authenticated management action; reuse the
-        // refresh path used by the user list so an expired token does not
-        // silently turn into an empty selector.
-        with_auto_refresh(auth_store, |token| async move {
-            tenant_service::list_active(&token).await
-        })
-        .await
-    });
-
     let users_request_key = query();
     let users_result = current_keyed_value(
         &users_request_key,
@@ -1321,33 +1308,37 @@ fn AdminUsersView() -> Element {
             balance_user().map(|user| user.id),
             balance_reservation_pagination().current_cursor(),
             balance_reservation_page_size(),
+            wallet_tenant(&balance_tenant()),
         );
+        let selected_tenant = request_key.3;
         let selected_user_id = request_key.0.clone();
         let selected_cursor = request_key.1.clone();
         let reservation_page_size = balance_reservation_page_size();
         let auth = auth_store.clone();
         async move {
-            let result = if let Some(user_id) = selected_user_id {
-                with_auto_refresh(auth, move |token| {
-                    let user_id = user_id.clone();
-                    let cursor = selected_cursor.clone();
-                    async move {
-                        let client = get_client();
-                        AdminApi::new(&client)
-                            .list_user_balance_reservations_page(
-                                &user_id,
-                                cursor.as_deref(),
-                                Some(reservation_page_size),
-                                &token,
-                            )
-                            .await
-                            .map(Some)
-                    }
-                })
-                .await
-            } else {
-                Ok(None)
-            };
+            let result =
+                if let (Some(user_id), Some(tenant_id)) = (selected_user_id, selected_tenant) {
+                    with_auto_refresh(auth, move |token| {
+                        let user_id = user_id.clone();
+                        let cursor = selected_cursor.clone();
+                        async move {
+                            let client = get_client();
+                            AdminApi::new(&client)
+                                .list_user_balance_reservations_page(
+                                    &user_id,
+                                    tenant_id,
+                                    cursor.as_deref(),
+                                    Some(reservation_page_size),
+                                    &token,
+                                )
+                                .await
+                                .map(Some)
+                        }
+                    })
+                    .await
+                } else {
+                    Ok(None)
+                };
             KeyedResourceValue::new(request_key, result)
         }
     });
@@ -1357,6 +1348,7 @@ fn AdminUsersView() -> Element {
             balance_user().map(|user| user.id),
             balance_reservation_pagination().current_cursor(),
             balance_reservation_page_size(),
+            wallet_tenant(&balance_tenant()),
         );
         current_balance_details_result(
             &request_key,
@@ -1369,40 +1361,18 @@ fn AdminUsersView() -> Element {
     let on_edit_save = move |_| {
         let Some(u) = edit_user() else { return };
         let name_val = edit_name();
-        let role_val = edit_role();
-        let tenant_id_val = edit_tenant_id();
-        let can_edit_role = can_current_user_manage_roles_for_edit
-            && u.id != current_user_id_for_edit
-            && u.role != "system";
-        let role = if !can_edit_role || role_val.trim().is_empty() {
-            None
-        } else {
-            match role_val.parse::<AssignableUserRole>() {
-                Ok(role) => Some(role),
-                Err(err) => {
-                    ui_store.show_error(err);
-                    return;
-                }
-            }
-        };
+        let _ = (
+            &u,
+            &current_user_id_for_edit,
+            &can_current_user_manage_roles_for_edit,
+        );
         let id = u.id.clone();
-        let tenant_id = if tenant_id_val.trim().is_empty() {
-            None
-        } else {
-            Some(tenant_id_val)
-        };
         edit_saving.set(true);
         spawn(async move {
             let client = get_client();
             let mut req = UpdateUserRequest::new();
             if !name_val.trim().is_empty() {
                 req = req.with_name(name_val);
-            }
-            if let Some(role) = role {
-                req = req.with_role(role);
-            }
-            if let Some(tenant_id) = tenant_id {
-                req = req.with_tenant_id(tenant_id);
             }
             let result = with_auto_refresh(auth_store, move |token| {
                 let id = id.clone();
@@ -1433,13 +1403,13 @@ fn AdminUsersView() -> Element {
     let on_delete_confirm = move |_| {
         let Some(u) = delete_user() else { return };
         if u.id == current_user_id_for_delete
-            || u.role == UserRole::System.as_str()
-            || (u.role == UserRole::Admin.as_str() && !can_current_user_delete_admins)
+            || u.platform_role == Some(PlatformRole::Root)
+            || (u.platform_role == Some(PlatformRole::Operator) && !can_current_user_delete_admins)
         {
             // 区分不同类型的禁止删除原因
             let msg = if u.id == current_user_id_for_delete {
                 i18n.t("users.delete_self_forbidden")
-            } else if u.role == UserRole::System.as_str() {
+            } else if u.platform_role == Some(PlatformRole::Root) {
                 i18n.t("users.cannot_modify_system")
             } else {
                 i18n.t("users.delete_admin_forbidden")
@@ -1475,6 +1445,12 @@ fn AdminUsersView() -> Element {
             return;
         }
         let Some(u) = balance_user() else { return };
+        let Some(tenant_id) = wallet_tenant(&balance_tenant()) else {
+            balance_error.set(
+                "Enter a nonzero target tenant UUID; membership is verified by the server.".into(),
+            );
+            return;
+        };
         let action = balance_action();
         let amount_str = balance_amount();
         let reason = normalize_manual_balance_reason(&balance_reason());
@@ -1528,9 +1504,9 @@ fn AdminUsersView() -> Element {
 
         let id = u.id.clone();
         let req = match action.as_str() {
-            "recharge" => UpdateBalanceRequest::add(amount, &reason),
-            "deduct" => UpdateBalanceRequest::subtract(amount, &reason),
-            "freeze" | "unfreeze" => UpdateBalanceRequest::new(amount, &reason),
+            "recharge" => UpdateBalanceRequest::add(tenant_id, amount, &reason),
+            "deduct" => UpdateBalanceRequest::subtract(tenant_id, amount, &reason),
+            "freeze" | "unfreeze" => UpdateBalanceRequest::new(tenant_id, amount, &reason),
             _ => {
                 balance_error.set(i18n.t("users.balance_action_invalid").to_string());
                 return;
@@ -1743,10 +1719,15 @@ fn AdminUsersView() -> Element {
             return;
         }
 
+        let Some(tenant_id) = wallet_tenant(&balance_tenant()) else {
+            return;
+        };
+        let release_epoch = balance_operation_tracker.read().modal_epoch;
         let user_id = user.id;
         release_saving.set(true);
         spawn(async move {
-            let req = ReleaseBalanceReservationRequest::new(expected_version, reason.trim());
+            let req =
+                ReleaseBalanceReservationRequest::new(tenant_id, expected_version, reason.trim());
             let result = with_auto_refresh(auth_store, move |token| {
                 let client = get_client();
                 let user_id = user_id.clone();
@@ -1759,6 +1740,12 @@ fn AdminUsersView() -> Element {
                 }
             })
             .await;
+            release_saving.set(false);
+            if release_epoch != balance_operation_tracker.read().modal_epoch
+                || wallet_tenant(&balance_tenant()) != Some(tenant_id)
+            {
+                return;
+            }
             match result {
                 Ok(_) => {
                     ui_store.show_success(i18n.t("users.balance_reservation_released"));
@@ -1802,19 +1789,6 @@ fn AdminUsersView() -> Element {
     } else {
         i18n.t("users.confirm_delete")
     };
-    let can_edit_selected_role = edit_user()
-        .as_ref()
-        .map(|u| can_current_user_manage_roles && u.id != current_user_id && u.role != "system")
-        .unwrap_or(false);
-    let can_edit_selected_tenant = edit_user()
-        .as_ref()
-        .map(|u| {
-            can_current_user_manage_tenants
-                && u.id != current_user_id
-                && u.role != "system"
-                && (u.role != UserRole::Admin.as_str() || can_current_user_manage_roles)
-        })
-        .unwrap_or(false);
     let balance_saving = balance_operation_tracker.read().is_active();
     let balance_repeat_confirmation = balance_operation_tracker.read().has_terminal_confirmation();
     let balance_modal_busy = balance_saving || release_saving();
@@ -1826,7 +1800,6 @@ fn AdminUsersView() -> Element {
         i18n.t("form.confirm")
     };
     let displayed_balance_details = current_balance_details();
-    let fmt_balance = |v: f64| crate::utils::format_money(v);
 
     rsx! {
         div { class: "page-container users-page",
@@ -1894,34 +1867,21 @@ fn AdminUsersView() -> Element {
                                             }
                                         }
                                         td {
-                                            Badge { variant: BadgeVariant::Info, {user_role_label(&u.role, &i18n)} }
+                                            Badge { variant: BadgeVariant::Info, {platform_role_label(u.platform_role, &i18n)} }
                                         }
                                         td {
-                                            code { title: "{u.tenant_id}", {short_id(&u.tenant_id)} }
-                                        }
-                                        td {
-                                            div { class: "balance-cell",
-                                                span {
-                                                    class: "balance-available",
-                                                    title: if u.balance_as_of.is_empty() {
-                                                        i18n.t("common.balance_snapshot").to_string()
-                                                    } else {
-                                                        format!("{}: {}", i18n.t("common.balance_snapshot"), u.balance_as_of)
-                                                    },
-                                                    "{fmt_balance(u.balance)}"
-                                                }
-                                                if u.frozen_balance > 0.0 {
-                                                    span { class: "balance-frozen text-secondary",
-                                                        "({i18n.t(\"users.frozen_short\")} {fmt_balance(u.frozen_balance)})"
-                                                    }
-                                                }
+                                            if let Some(memberships) = &u.memberships {
+                                                span { "{memberships.len()} memberships" }
+                                            } else {
+                                                span { "—" }
                                             }
                                         }
+                                        td { "Select a wallet tenant" }
                                         td { {format_time(&u.created_at)} }
                                         td {
                                             div { class: "btn-group",
                                                 // 仅 system 角色可编辑 system 用户；admin 可编辑其他用户
-                                                if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
+                                                if u.platform_role != Some(PlatformRole::Root) || can_current_user_manage_roles {
                                                     Button {
                                                         variant: ButtonVariant::Ghost,
                                                         size: ButtonSize::Small,
@@ -1929,8 +1889,6 @@ fn AdminUsersView() -> Element {
                                                             let uu = u.clone();
                                                             move |_| {
                                                                 edit_name.set(uu.name.clone().unwrap_or_default());
-                                                                edit_role.set(uu.role.clone());
-                                                                edit_tenant_id.set(String::new());
                                                                 edit_user.set(Some(uu.clone()));
                                                             }
                                                         },
@@ -1938,7 +1896,7 @@ fn AdminUsersView() -> Element {
                                                     }
                                                 }
                                                 // 仅 system 角色可管理 system 用户的余额；admin 可管理其他用户
-                                                if u.role != UserRole::System.as_str() || can_current_user_manage_roles {
+                                                if u.platform_role != Some(PlatformRole::Root) || can_current_user_manage_roles {
                                                     Button {
                                                         variant: ButtonVariant::Ghost,
                                                         size: ButtonSize::Small,
@@ -1952,6 +1910,7 @@ fn AdminUsersView() -> Element {
                                                                 {
                                                                     return;
                                                                 }
+                                                                balance_tenant.set(String::new());
                                                                 balance_action.set("recharge".to_string());
                                                                 balance_amount.set(String::new());
                                                                 balance_reason.set(String::new());
@@ -1967,8 +1926,8 @@ fn AdminUsersView() -> Element {
                                                         {i18n.t("users.balance_manage")}
                                                     }
                                                 }
-                                                if u.id != current_user_id && u.role != UserRole::System.as_str()
-                                                    && (u.role != UserRole::Admin.as_str() || can_current_user_manage_roles)
+                                                if u.id != current_user_id && u.platform_role != Some(PlatformRole::Root)
+                                                    && (u.platform_role != Some(PlatformRole::Operator) || can_current_user_manage_roles)
                                                 {
                                                     Button {
                                                         variant: ButtonVariant::Danger,
@@ -2048,87 +2007,7 @@ fn AdminUsersView() -> Element {
                                     oninput: move |e| *edit_name.write() = e.value(),
                                 }
                             }
-                            div { class: "form-group",
-                                label { class: "form-label", {i18n.t("table.role")} }
-                                if can_edit_selected_role {
-                                    select {
-                                        class: "input-field",
-                                        value: "{edit_role}",
-                                        onchange: move |e| *edit_role.write() = e.value(),
-                                        option { value: "user", "{i18n.t(\"users.role_user\")}" }
-                                        option { value: "admin", "{i18n.t(\"users.role_admin\")}" }
-                                    }
-                                } else {
-                                    input {
-                                        class: "input-field",
-                                        value: "{edit_role}",
-                                        readonly: true,
-                                    }
-                                }
-                            }
-                            if can_edit_selected_tenant {
-                                div { class: "form-group",
-                                    label { class: "form-label", {i18n.t("users.tenant")} }
-                                    {
-                                        let tenant_result = tenants();
-                                        let tenant_list = tenant_result
-                                            .as_ref()
-                                            .and_then(|result| result.as_ref().ok())
-                                            .cloned()
-                                            .unwrap_or_default()
-                                            .into_iter()
-                                            .filter(|tenant| tenant.slug != "system")
-                                            .collect::<Vec<_>>();
-                                        // `use_resource` retains its previous value while a
-                                        // restart is pending. Read the state as well so a retry
-                                        // does not keep showing the stale error or an enabled
-                                        // retry button while the new request is running.
-                                        let tenant_loading = tenants.state().cloned()
-                                            == dioxus::prelude::UseResourceState::Pending
-                                            || tenant_result.is_none();
-                                        let tenant_error = if tenant_loading {
-                                            None
-                                        } else {
-                                            tenant_result
-                                                .as_ref()
-                                                .and_then(|result| result.as_ref().err())
-                                                .map(user_error_message)
-                                        };
-                                        let selected_tenant_id = edit_tenant_id();
-                                        let current_tenant_name = edit_user()
-                                            .as_ref()
-                                            .map(|user| user.tenant_name.clone())
-                                            .unwrap_or_else(|| i18n.t("users.tenant_unknown").to_string());
-                                        rsx! {
-                                            select {
-                                                class: "input-field",
-                                                value: "{selected_tenant_id}",
-                                                disabled: tenant_loading || tenant_error.is_some(),
-                                                onchange: move |event| edit_tenant_id.set(event.value()),
-                                                option { value: "", "{i18n.t(\"users.tenant_keep\")} ({current_tenant_name})" }
-                                                for tenant in &tenant_list {
-                                                    option { value: "{tenant.id}", "{tenant.name} ({short_id(&tenant.id)})" }
-                                                }
-                                            }
-                                            if tenant_loading {
-                                                small { class: "form-hint", {i18n.t("table.loading")} }
-                                            }
-                                            if let Some(ref error) = tenant_error {
-                                                div { class: "form-hint form-hint-error",
-                                                    small { class: "text-error", "{i18n.t(\"common.load_failed\")}: {error}" }
-                                                    button {
-                                                        class: "btn btn-ghost btn-sm",
-                                                        r#type: "button",
-                                                        onclick: move |_| tenants.restart(),
-                                                        {i18n.t("common.retry")}
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    small { class: "form-hint", {i18n.t("users.tenant_hint")} }
-                                }
-                            }
+                            p { "Global profile only. Tenant memberships are managed separately." }
                         }
                         div { class: "modal-footer",
                             Button {
@@ -2232,6 +2111,24 @@ fn AdminUsersView() -> Element {
                             }
                         }
                         div { class: "modal-body",
+                            div { class: "form-group",
+                                label { class: "form-label", "Target wallet tenant UUID" }
+                                input {
+                                    class: "input-field",
+                                    value: "{balance_tenant}",
+                                    oninput: move |event| {
+                                        balance_tenant.set(event.value());
+                                        balance_operation_tracker.write().advance_modal();
+                                        balance_reservation_pagination.write().reset();
+                                        release_request_id.set(None);
+                                        release_expected_version.set(None);
+                                        release_reason.set(String::new());
+                                        balance_error.set(String::new());
+                                    },
+                                }
+                                small { "Enter the target user's tenant UUID explicitly. The server verifies membership. In-flight operations retain their original tenant." }
+                            }
+
                             // 弹窗内联错误提示
                             if !balance_error().is_empty() {
                                 div { class: "modal-inline-error", "{balance_error}" }
@@ -2571,12 +2468,15 @@ mod search_tests {
         is_conflict_error, manual_balance_binding_from_snapshot,
         manual_balance_operation_api_namespace, normalize_manual_balance_reason,
         persist_manual_balance_binding_in_snapshot, rotate_manual_balance_binding_in_snapshot,
-        user_can_manage_tenants,
+        user_can_manage_platform_users,
     };
     use crate::utils::resource::KeyedResourceValue;
     use client_api::{
-        ClientConfig, ClientError,
-        api::admin::{UpdateBalanceRequest, UserBalanceReservationsResponse},
+        ClientConfig, ClientError, PlatformRole,
+        api::{
+            admin::{UpdateBalanceRequest, UserBalanceReservationsResponse},
+            auth::SessionCapabilities,
+        },
     };
     use dioxus::prelude::UseResourceState;
     use std::{
@@ -2590,25 +2490,46 @@ mod search_tests {
     const TEST_KEY_3: &str = "00000000-0000-4000-8000-000000000003";
 
     fn user_with_role(role: &str) -> crate::stores::user_store::UserInfo {
+        let platform_role = match role {
+            "root" => Some(PlatformRole::Root),
+            "operator" => Some(PlatformRole::Operator),
+            _ => None,
+        };
+        let permissions = if role == "root" {
+            vec!["users:manage".into()]
+        } else {
+            Vec::new()
+        };
         crate::stores::user_store::UserInfo {
             id: "user-1".to_string(),
             email: "user@example.com".to_string(),
             name: None,
-            role: role.to_string(),
-            tenant_id: "tenant-1".to_string(),
+            platform_role,
+            status: None,
+            memberships: Vec::new(),
+            selected_tenant: None,
+            capabilities: SessionCapabilities {
+                platform: permissions,
+                tenant: Vec::new(),
+            },
         }
     }
 
     #[test]
-    fn tenant_management_visibility_matches_admin_roles() {
-        let admin = user_with_role("admin");
-        let system = user_with_role("system");
-        let user = user_with_role("user");
-
-        assert!(user_can_manage_tenants(Some(&admin)));
-        assert!(user_can_manage_tenants(Some(&system)));
-        assert!(!user_can_manage_tenants(Some(&user)));
-        assert!(!user_can_manage_tenants(None));
+    fn platform_user_page_requires_its_platform_capability() {
+        let operator = user_with_role("operator");
+        let root = user_with_role("root");
+        let mut member = user_with_role("none");
+        assert!(!user_can_manage_platform_users(Some(&operator)));
+        assert!(user_can_manage_platform_users(Some(&root)));
+        assert!(!user_can_manage_platform_users(Some(&member)));
+        member.capabilities.tenant.push("users:manage".into());
+        member.capabilities.tenant.push("tenant:manage".into());
+        assert!(!user_can_manage_platform_users(Some(&member)));
+        let mut role_only = root;
+        role_only.capabilities.platform.clear();
+        assert!(!user_can_manage_platform_users(Some(&role_only)));
+        assert!(!user_can_manage_platform_users(None));
     }
 
     #[derive(Default)]
@@ -2948,6 +2869,7 @@ mod search_tests {
                 Some(request_user_id.to_string()),
                 None,
                 super::BALANCE_RESERVATION_PAGE_SIZE,
+                Some(uuid::Uuid::from_u128(1)),
             ),
             Ok(Some(balance_details(response_user_id))),
         )
@@ -2987,7 +2909,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let storage = Arc::new(LockedMemoryBalanceOperationStorage::default());
         let start = Arc::new(Barrier::new(3));
@@ -3023,7 +2945,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let storage = Arc::new(LockedMemoryBalanceOperationStorage::default());
         let mut seed = ManualBalanceOperationTracker::new(scope.clone());
@@ -3154,7 +3076,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let storage = MemoryBalanceOperationStorage::default();
         let mut first_tab = ManualBalanceOperationTracker::new(scope.clone());
@@ -3220,7 +3142,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let storage = MemoryBalanceOperationStorage::default();
         let mut old_tab = ManualBalanceOperationTracker::new(scope.clone());
@@ -3309,8 +3231,8 @@ mod search_tests {
 
     #[test]
     fn balance_operation_identity_uses_the_server_reason_normalization() {
-        let padded = UpdateBalanceRequest::new(2.0, "  incident hold\n");
-        let normalized = UpdateBalanceRequest::new(2.0, "incident hold");
+        let padded = UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "  incident hold\n");
+        let normalized = UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold");
 
         assert_eq!(
             normalize_manual_balance_reason(&padded.reason),
@@ -3328,6 +3250,7 @@ mod search_tests {
             Some("user-1".to_string()),
             None,
             super::BALANCE_RESERVATION_PAGE_SIZE,
+            Some(uuid::Uuid::from_u128(1)),
         );
 
         assert!(
@@ -3346,6 +3269,7 @@ mod search_tests {
             Some("user-2".to_string()),
             None,
             super::BALANCE_RESERVATION_PAGE_SIZE,
+            Some(uuid::Uuid::from_u128(1)),
         );
 
         assert!(
@@ -3382,6 +3306,7 @@ mod search_tests {
                 Some("user-1".to_string()),
                 None,
                 super::BALANCE_RESERVATION_PAGE_SIZE,
+                Some(uuid::Uuid::from_u128(1)),
             ),
             Ok(Some(balance_details("user-1"))),
         );
@@ -3389,6 +3314,7 @@ mod search_tests {
             Some("user-1".to_string()),
             Some("opaque-page-2".to_string()),
             super::BALANCE_RESERVATION_PAGE_SIZE,
+            Some(uuid::Uuid::from_u128(1)),
         );
 
         assert!(
@@ -3409,6 +3335,7 @@ mod search_tests {
             Some("user-1".to_string()),
             None,
             super::BALANCE_RESERVATION_PAGE_SIZE * 2,
+            Some(uuid::Uuid::from_u128(1)),
         );
 
         assert!(
@@ -3459,7 +3386,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
         tracker.advance_modal();
@@ -3491,7 +3418,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let mut mounted = ManualBalanceOperationTracker::new(scope.clone());
         let first = mounted
@@ -3525,7 +3452,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "manual recharge"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual recharge"),
         );
         let mut original = ManualBalanceOperationTracker::new(original_scope.clone());
         let first = original
@@ -3555,7 +3482,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "manual recharge"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual recharge"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(original_scope.clone());
         let active = tracker
@@ -3582,7 +3509,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "deduct",
-            &UpdateBalanceRequest::new(2.0, "manual adjustment"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual adjustment"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope.clone());
         let first = tracker
@@ -3634,7 +3561,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "manual recharge"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual recharge"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
         let key_factory_called = std::cell::Cell::new(false);
@@ -3666,7 +3593,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "manual recharge"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual recharge"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
 
@@ -3694,7 +3621,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "manual recharge"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual recharge"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope.clone());
 
@@ -3717,7 +3644,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope.clone());
         let submission = tracker
@@ -3750,7 +3677,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let mut original = ManualBalanceOperationTracker::new(scope.clone());
         let submission = original
@@ -3788,12 +3715,12 @@ mod search_tests {
         let first_identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "first"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "first"),
         );
         let second_identity = ManualBalanceOperationIdentity::new(
             "user-2",
             "freeze",
-            &UpdateBalanceRequest::new(3.0, "second"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 3.0, "second"),
         );
         let mut first_tab = ManualBalanceOperationTracker::new(scope.clone());
         let mut second_tab = ManualBalanceOperationTracker::new(scope.clone());
@@ -3836,7 +3763,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope.clone());
         let first = tracker
@@ -3868,12 +3795,12 @@ mod search_tests {
         let first_identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(2.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "incident hold"),
         );
         let changed_identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "freeze",
-            &UpdateBalanceRequest::new(3.0, "incident hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 3.0, "incident hold"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
         tracker.advance_modal();
@@ -3933,12 +3860,12 @@ mod search_tests {
         let first_identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "first"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "first"),
         );
         let second_identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(3.0, "second"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 3.0, "second"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
 
@@ -4024,7 +3951,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "unfreeze",
-            &UpdateBalanceRequest::new(2.0, "release hold"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "release hold"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
         let active = tracker
@@ -4057,7 +3984,7 @@ mod search_tests {
         let identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "manual recharge"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "manual recharge"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
         tracker.advance_modal();
@@ -4088,12 +4015,12 @@ mod search_tests {
         let old_identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(2.0, "first"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 2.0, "first"),
         );
         let new_identity = ManualBalanceOperationIdentity::new(
             "user-1",
             "recharge",
-            &UpdateBalanceRequest::new(3.0, "second"),
+            &UpdateBalanceRequest::new(uuid::Uuid::from_u128(1), 3.0, "second"),
         );
         let mut tracker = ManualBalanceOperationTracker::new(scope);
         let old = tracker
@@ -4135,7 +4062,7 @@ fn UserSelfView() -> Element {
         .unwrap_or_default();
     let role = user_info
         .as_ref()
-        .map(|u| u.role.clone())
+        .and_then(|u| u.platform_role.map(|role| role.to_string()))
         .unwrap_or_default();
 
     rsx! {

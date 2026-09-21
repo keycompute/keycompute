@@ -140,7 +140,11 @@ for required_text in \
     'ON CONFLICT (user_id) DO UPDATE SET' \
     'token_version = token_version + 1' \
     'active balance reservations exceed frozen balance' \
-    'system admin has a reservation attached to another tenant' \
+    'WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id' \
+    'configured recovery email is not a platform root' \
+    'system workspace belongs to another root; refuse to change its wallet' \
+    'INSERT INTO tenant_memberships(tenant_id,user_id,role,status)' \
+    'INSERT INTO tenant_audit_events(scope_type,tenant_id,actor_user_id,credential_kind,actor_platform_role,' \
     'cannot initialize balance while active reservations exist' \
     'cannot reset balance while active reservations exist' \
     'tenant_distribution_rules' \

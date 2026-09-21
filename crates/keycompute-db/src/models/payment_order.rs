@@ -1,11 +1,9 @@
 //! 支付订单模型
 
-use crate::{DbError, Tenant, User};
+use crate::{DbError, Tenant, TenantMembership, User};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{
-    ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -200,16 +198,16 @@ impl PaymentOrder {
         Tenant::find_by_id_for_key_share(&tx, req.tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("tenant", req.tenant_id))?;
-        let user = User::find_by_id_for_update(&tx, req.user_id)
+        User::find_by_id_for_update(&tx, req.user_id)
             .await?
             .ok_or_else(|| DbError::not_found("user", req.user_id))?;
-        if user.tenant_id != req.tenant_id {
-            return Err(DbError::UserTenantMismatch {
+        TenantMembership::find(&tx, req.tenant_id, req.user_id)
+            .await?
+            .ok_or_else(|| DbError::UserTenantMismatch {
                 user_id: req.user_id,
                 requested_tenant_id: req.tenant_id,
-                actual_tenant_id: user.tenant_id,
-            });
-        }
+                actual_tenant_id: req.tenant_id,
+            })?;
 
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -287,50 +285,6 @@ impl PaymentOrder {
         );
         let order = PaymentOrder::find_by_statement(stmt).one(db).await?;
         Ok(order)
-    }
-
-    /// Move a user's still-pending orders to a new tenant.
-    ///
-    /// Pending orders are mutable ownership records: a user can finish
-    /// paying them after an administrator moves the user. Keeping the old
-    /// tenant ID would make the order disappear from the user's new payment
-    /// history and would allow source-tenant deletion to cascade-delete an
-    /// order that may already be paid at the provider. Callers should invoke
-    /// this before locking the user's balance; payment callbacks lock the
-    /// order first and then the balance, so that order avoids a lock cycle.
-    pub async fn reassign_pending_for_user(
-        db: &DatabaseTransaction,
-        user_id: Uuid,
-        source_tenant_id: Uuid,
-        target_tenant_id: Uuid,
-    ) -> Result<u64, DbError> {
-        #[derive(Debug, FromQueryResult)]
-        struct PendingOrderId {
-            id: Uuid,
-        }
-
-        // Lock orders in a stable order before taking the balance lock. This
-        // matches `credit_paid`'s order -> balance lock sequence and keeps a
-        // concurrent callback from forming a cycle while this move waits.
-        let pending = PendingOrderId::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT id FROM payment_orders WHERE user_id = $1 AND tenant_id = $2 AND status = 'pending' ORDER BY id FOR UPDATE",
-            [user_id.into(), source_tenant_id.into()],
-        ))
-        .all(db)
-        .await?;
-        if pending.is_empty() {
-            return Ok(0);
-        }
-        let order_ids: Vec<Uuid> = pending.into_iter().map(|order| order.id).collect();
-        let result = db
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "UPDATE payment_orders SET tenant_id = $1, updated_at = NOW() WHERE id = ANY($2) AND status = 'pending'",
-                [target_tenant_id.into(), order_ids.into()],
-            ))
-            .await?;
-        Ok(result.rows_affected())
     }
 
     /// Atomically record a verified provider event, mark the order paid, and credit its balance.
@@ -448,8 +402,8 @@ impl PaymentOrder {
         }
         crate::UserBalance::recharge_in_tx(
             &tx,
-            locked.user_id,
             locked.tenant_id,
+            locked.user_id,
             locked.amount,
             Some(locked.id),
             Some(description),

@@ -1186,7 +1186,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         );
         let request = serde_json::from_value(json!({
             "model": "claude-test",
@@ -1384,7 +1384,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         );
         assert!(matches!(
             require_messages_api_permission(&auth),

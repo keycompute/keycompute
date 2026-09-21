@@ -1,6 +1,8 @@
 use super::query::escape_like_pattern;
+use super::tenant_audit_event::{AuditContext, TenantAuditEvent, lock_identity_admin};
 use crate::DbError;
 use chrono::{DateTime, Utc};
+use keycompute_types::{AuditResult, AuditScopeType, CredentialKind, TenantStatus};
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
 };
@@ -11,6 +13,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct Tenant {
     pub id: Uuid,
+    pub owner_user_id: Uuid,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -22,6 +25,7 @@ pub struct Tenant {
     /// Internal safety counter for permanent Responses idempotency identities.
     #[serde(skip)]
     pub responses_idempotency_claim_count: i64,
+    pub authz_version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -95,7 +99,7 @@ pub struct CreateTenantRequest {
 pub struct UpdateTenantRequest {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub status: Option<String>,
+    pub status: Option<TenantStatus>,
     pub default_rpm_limit: Option<i32>,
     pub default_tpm_limit: Option<i32>,
 }
@@ -154,32 +158,110 @@ const TENANT_ACCOUNT_LOCK_SQL: &str =
     "SELECT id FROM accounts WHERE tenant_id = $1 ORDER BY id FOR UPDATE";
 
 impl Tenant {
-    /// 创建新租户
-    pub async fn create(
-        db: &impl ConnectionTrait,
+    /// Create an organization and its owner membership in one transaction.
+    /// System credentials are only accepted for self-owned bootstrap/registration.
+    pub async fn create_owned(
+        tx: &DatabaseTransaction,
         req: &CreateTenantRequest,
+        owner_user_id: Uuid,
+        actor: &AuditContext,
     ) -> Result<Tenant, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            INSERT INTO tenants (name, slug, description, default_rpm_limit, default_tpm_limit)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING *
-            "#,
-            [
-                req.name.as_str().into(),
-                req.slug.as_str().into(),
-                req.description.clone().into(),
-                req.default_rpm_limit.unwrap_or(60).into(),
-                req.default_tpm_limit.unwrap_or(100000).into(),
-            ],
-        );
-        let tenant = Tenant::find_by_statement(stmt)
-            .one(db)
+        lock_identity_admin(tx).await?;
+        if owner_user_id.is_nil()
+            || req.name.trim().is_empty()
+            || req.name.len() > 255
+            || req.slug.is_empty()
+            || req.slug.len() > 100
+            || !req
+                .slug
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+            || req.default_rpm_limit.is_some_and(|limit| limit < 0)
+            || req.default_tpm_limit.is_some_and(|limit| limit < 0)
+        {
+            return Err(DbError::Other(
+                "invalid tenant owner, name, slug or limits".into(),
+            ));
+        }
+        let actor = if actor.actor_user_id == owner_user_id
+            && matches!(
+                actor.credential_kind,
+                CredentialKind::System | CredentialKind::Jwt
+            ) {
+            let owner = super::user::User::find_by_id(tx, owner_user_id)
+                .await?
+                .filter(|user| user.status == "active")
+                .ok_or_else(|| DbError::Other("active tenant owner required".into()))?;
+            AuditContext {
+                actor_platform_role: owner.platform_role()?,
+                actor_tenant_role: None,
+                ..*actor
+            }
+        } else {
+            actor.require_root(tx).await?
+        };
+        super::user::User::find_by_id_for_no_key_update(tx, owner_user_id)
             .await?
-            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
-
+            .filter(|user| user.status == "active")
+            .ok_or_else(|| DbError::Other("active tenant owner required".into()))?;
+        let tenant = Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenants(owner_user_id,name,slug,description,default_rpm_limit,default_tpm_limit) VALUES($1,$2,$3,$4,COALESCE($5,60),COALESCE($6,100000)) RETURNING *",
+            [owner_user_id.into(), req.name.trim().into(), req.slug.as_str().into(),
+                req.description.clone().into(), req.default_rpm_limit.into(), req.default_tpm_limit.into()],
+        )).one(tx).await?.ok_or_else(|| DbError::Other("tenant insert returned no row".into()))?;
+        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'admin','active')",
+            [tenant.id.into(), owner_user_id.into()],
+        )).await?;
+        TenantAuditEvent::append(
+            tx,
+            AuditScopeType::Tenant,
+            Some(tenant.id),
+            &actor,
+            "tenant.create",
+            "tenant",
+            Some(&tenant.id.to_string()),
+            AuditResult::Success,
+            serde_json::json!({"owner_user_id":owner_user_id}),
+        )
+        .await?;
         Ok(tenant)
+    }
+
+    /// The existing owner transfers ownership only to another active admin.
+    pub async fn transfer_ownership(
+        tx: &DatabaseTransaction,
+        tenant_id: Uuid,
+        new_owner: Uuid,
+        actor: &AuditContext,
+    ) -> Result<Tenant, DbError> {
+        lock_identity_admin(tx).await?;
+        let actor = actor.require_tenant_admin(tx, tenant_id).await?;
+        let tenant = Self::find_by_id(tx, tenant_id)
+            .await?
+            .ok_or_else(|| DbError::not_found("Tenant", tenant_id))?;
+        if tenant.owner_user_id != actor.actor_user_id {
+            return Err(DbError::Other(
+                "only the tenant owner may transfer ownership".into(),
+            ));
+        }
+        super::tenant_membership::TenantMembership::find(tx, tenant_id, new_owner)
+            .await?
+            .filter(|member| member.role == "admin")
+            .ok_or_else(|| DbError::Other("new owner must be an active administrator".into()))?;
+        let updated = Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenants SET owner_user_id=$2 WHERE id=$1 RETURNING *",
+            [tenant_id.into(), new_owner.into()],
+        ))
+        .one(tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Tenant", tenant_id))?;
+        TenantAuditEvent::append(tx, AuditScopeType::Tenant, Some(tenant_id), &actor,
+            "tenant.transfer_owner", "tenant", Some(&tenant_id.to_string()), AuditResult::Success,
+            serde_json::json!({"previous_owner_user_id":tenant.owner_user_id,"owner_user_id":new_owner})).await?;
+        Ok(updated)
     }
 
     /// 根据 ID 查找租户
@@ -231,7 +313,7 @@ impl Tenant {
     pub async fn count_users(db: &impl ConnectionTrait, tenant_id: Uuid) -> Result<i64, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT COUNT(*)::BIGINT AS total FROM users WHERE tenant_id = $1",
+            "SELECT COUNT(*)::BIGINT AS total FROM tenant_memberships WHERE tenant_id = $1 AND status = 'active'",
             [tenant_id.into()],
         );
         Ok(EntityCount::find_by_statement(stmt)
@@ -430,7 +512,7 @@ impl Tenant {
             [
                 req.name.clone().into(),
                 req.description.clone().into(),
-                req.status.clone().into(),
+                req.status.map(|status| status.as_str()).into(),
                 req.default_rpm_limit.into(),
                 req.default_tpm_limit.into(),
                 self.id.into(),
@@ -476,6 +558,7 @@ impl Tenant {
     /// between the blocker check and the cascade. The child-row locks acquired
     /// by [`Self::find_deletion_blockers`] are then held through the delete.
     pub async fn delete_in_tx(&self, db: &DatabaseTransaction) -> Result<(), DbError> {
+        lock_identity_admin(db).await?;
         // Serialize the existence check, child-row snapshot, and cascade with
         // tenant-scoped inserts that acquire a foreign-key key-share lock.
         // Keep the historical no-op behavior when the tenant row is already

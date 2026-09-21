@@ -20,6 +20,7 @@ pub const TOKEN_STATUS_CONSUMED: &str = "consumed";
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct UserNodeGatewayToken {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub token_hash: String,
     pub token_preview: String,
@@ -38,6 +39,7 @@ pub struct UserNodeGatewayToken {
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct PendingTokenWithUser {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub token_preview: String,
     pub status: String,
@@ -51,7 +53,7 @@ struct PendingTokenCount {
 }
 
 const LIST_PENDING_WITH_USERS_SQL: &str = r#"
-    SELECT t.id, t.user_id, t.token_preview, t.status, t.issued_at,
+    SELECT t.id, t.tenant_id, t.user_id, t.token_preview, t.status, t.issued_at,
            COALESCE(u.email, 'deleted_user') AS user_email
     FROM user_node_gateway_tokens t
     LEFT JOIN users u ON t.user_id = u.id
@@ -68,6 +70,7 @@ const LIST_PENDING_WITH_USERS_SQL: &str = r#"
 #[derive(Debug, Clone, Serialize)]
 pub struct UserNodeGatewayTokenResponse {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub token_preview: String,
     pub status: String,
@@ -82,6 +85,7 @@ impl From<UserNodeGatewayToken> for UserNodeGatewayTokenResponse {
     fn from(t: UserNodeGatewayToken) -> Self {
         Self {
             id: t.id,
+            tenant_id: t.tenant_id,
             user_id: t.user_id,
             token_preview: t.token_preview,
             status: t.status,
@@ -168,15 +172,17 @@ impl UserNodeGatewayToken {
     pub async fn create_with_id(
         db: &impl ConnectionTrait,
         token_id: Uuid,
+        tenant_id: Uuid,
         user_id: Uuid,
         token_hash: &str,
         token_preview: &str,
     ) -> Result<UserNodeGatewayToken, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO user_node_gateway_tokens (id, user_id, token_hash, token_preview) VALUES ($1, $2, $3, $4) RETURNING *"#,
+            r#"INSERT INTO user_node_gateway_tokens (id, tenant_id, user_id, token_hash, token_preview) VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
             [
                 token_id.into(),
+                tenant_id.into(),
                 user_id.into(),
                 token_hash.into(),
                 token_preview.into(),
@@ -210,12 +216,13 @@ impl UserNodeGatewayToken {
     /// 查找用户最近一次申请的 token（任意状态）
     pub async fn find_latest_by_user(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<UserNodeGatewayToken>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_node_gateway_tokens WHERE user_id = $1 ORDER BY issued_at DESC LIMIT 1",
-            [user_id.into()],
+            "SELECT * FROM user_node_gateway_tokens WHERE tenant_id = $1 AND user_id = $2 ORDER BY issued_at DESC LIMIT 1",
+            [tenant_id.into(), user_id.into()],
         );
         let token = UserNodeGatewayToken::find_by_statement(stmt)
             .one(db)
@@ -227,12 +234,13 @@ impl UserNodeGatewayToken {
     /// 检查用户是否已有阻止新申请的令牌
     pub async fn find_blocking_token(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<UserNodeGatewayToken>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"SELECT * FROM user_node_gateway_tokens WHERE user_id = $1 AND (status IN ('pending', 'approved', 'consumed') OR (status = 'rejected' AND revoke_reason IS NOT NULL)) ORDER BY issued_at DESC LIMIT 1"#,
-            [user_id.into()],
+            r#"SELECT * FROM user_node_gateway_tokens WHERE tenant_id = $1 AND user_id = $2 AND (status IN ('pending', 'approved', 'consumed') OR (status = 'rejected' AND revoke_reason IS NOT NULL)) ORDER BY issued_at DESC LIMIT 1"#,
+            [tenant_id.into(), user_id.into()],
         );
         let token = UserNodeGatewayToken::find_by_statement(stmt)
             .one(db)
@@ -244,12 +252,13 @@ impl UserNodeGatewayToken {
     /// 查找用户所有历史 token
     pub async fn find_all_by_user(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Vec<UserNodeGatewayToken>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_node_gateway_tokens WHERE user_id = $1 ORDER BY issued_at DESC",
-            [user_id.into()],
+            "SELECT * FROM user_node_gateway_tokens WHERE tenant_id = $1 AND user_id = $2 ORDER BY issued_at DESC",
+            [tenant_id.into(), user_id.into()],
         );
         let tokens = UserNodeGatewayToken::find_by_statement(stmt)
             .all(db)
@@ -410,7 +419,7 @@ impl UserNodeGatewayToken {
     ) -> Result<bool, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"UPDATE user_node_gateway_tokens SET status = 'approved', revoke_reason = NULL, actioned_at = NOW(), updated_at = NOW() WHERE id = $1 AND status = 'rejected' AND revoke_reason IS NOT NULL AND NOT EXISTS (SELECT 1 FROM user_node_gateway_tokens t2 WHERE t2.user_id = (SELECT user_id FROM user_node_gateway_tokens WHERE id = $1) AND t2.status IN ('pending', 'approved') AND t2.id != $1)"#,
+            r#"UPDATE user_node_gateway_tokens SET status = 'approved', revoke_reason = NULL, actioned_at = NOW(), updated_at = NOW() WHERE id = $1 AND status = 'rejected' AND revoke_reason IS NOT NULL AND revoke_reason NOT IN ('membership deactivated','user suspended') AND NOT EXISTS (SELECT 1 FROM user_node_gateway_tokens t2 WHERE (t2.tenant_id,t2.user_id) = (SELECT tenant_id,user_id FROM user_node_gateway_tokens WHERE id = $1) AND t2.status IN ('pending', 'approved') AND t2.id != $1)"#,
             [token_id.into()],
         );
         let result = db.execute(stmt).await?;

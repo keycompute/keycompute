@@ -29,7 +29,7 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 static PROBES: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
 fn admin(a: &AuthExtractor) -> Result<()> {
-    if !a.is_admin() || !a.has_permission(&Permission::ManageProviders) {
+    if !a.has_permission(&Permission::ManageProviders) {
         return Err(ApiError::Forbidden(
             "System administrator permission required".into(),
         ));

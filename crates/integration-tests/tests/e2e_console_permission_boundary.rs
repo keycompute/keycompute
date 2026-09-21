@@ -7,18 +7,17 @@ use axum::{
 use chrono::{Duration, Utc};
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_auth::{Permission, ProduceAiKeyValidator};
 use keycompute_db::{
-    CreateUserRequest, DbRouter, User,
+    DbRouter, User,
     models::{
         api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
         usage_log::{CreateUsageLogRequest, UsageLog},
     },
 };
 use keycompute_server::{AppState, create_router};
-use keycompute_types::UserRole;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -47,16 +46,23 @@ async fn json_body(response: Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap()
 }
 
-fn jwt(state: &AppState, user: &User) -> String {
-    state
+async fn jwt(state: &AppState, user: &User, tenant_id: Uuid) -> String {
+    let global = state
         .auth
         .get_jwt_validator()
         .unwrap()
-        .generate_token_with_version(user.id, user.tenant_id, &user.role, user.token_version)
+        .generate_identity_token(user.id, None, user.token_version, None, None, 3600)
+        .unwrap();
+    let context = state.auth.verify_token(&global).await.unwrap();
+    state
+        .auth
+        .select_tenant(&context, Some(tenant_id))
+        .await
         .unwrap()
+        .access_token
 }
 
-async fn inference_key(db: &DatabaseConnection, user: &User) -> (ProduceAiKey, String) {
+async fn inference_key(db: &DatabaseConnection, user: &TenantActor) -> (ProduceAiKey, String) {
     let key = ProduceAiKeyValidator::generate_key();
     let row = ProduceAiKey::create(
         db,
@@ -81,22 +87,15 @@ async fn inference_credentials_cannot_access_console_or_mutate_keys() {
     let mut guard = TestDataGuard::new(db.clone(), run.clone());
     let tenant = create_test_tenant(&db, "credential-boundary", &run).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
-    for role in [UserRole::User, UserRole::Admin] {
-        let user = User::create(
-            &db,
-            &CreateUserRequest {
-                tenant_id: tenant.id,
-                email: format!("boundary-{}-{run}@example.com", role.as_str()),
-                name: None,
-                role: Some(role),
-            },
-        )
-        .await
-        .unwrap();
+    {
+        let user = create_test_user(&db, tenant.id, "boundary", &run).await;
         let (key, raw_key) = inference_key(&db, &user).await;
         let identity = state.auth.verify_token(&raw_key).await.unwrap();
         assert_eq!(identity.permissions, vec![Permission::UseApi]);
-        assert!(!identity.is_admin());
+        assert_eq!(
+            identity.tenant_role,
+            Some(keycompute_types::TenantRole::Member)
+        );
         let before = ProduceAiKey::find_by_user(&db, user.id)
             .await
             .unwrap()
@@ -130,7 +129,7 @@ async fn inference_credentials_cannot_access_console_or_mutate_keys() {
             assert_eq!(
                 response.status(),
                 StatusCode::FORBIDDEN,
-                "{role}: {method} {path}"
+                "inference identity: {method} {path}"
             );
             assert_eq!(response.headers()["cache-control"], "no-store");
         }
@@ -147,7 +146,7 @@ async fn inference_credentials_cannot_access_console_or_mutate_keys() {
         );
         assert_eq!(
             User::find_by_id(&db, user.id).await.unwrap().unwrap().name,
-            None
+            Some("Test User boundary".to_string())
         );
         // Valid inference credentials still have their intended model-list access.
         for path in ["/v1/models", "/pt/v1/models", "/nt/v1/models"] {
@@ -171,7 +170,7 @@ async fn ordinary_jwt_retains_self_service_and_public_routes_stay_public() {
     let tenant = create_test_tenant(&db, "jwt-console", &run).await;
     let user = create_test_user(&db, tenant.id, "jwt-console", &run).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
-    let token = jwt(&state, &user);
+    let token = jwt(&state, &user, tenant.id).await;
     for path in [
         "/api/v1/me",
         "/api/v1/keys",
@@ -273,13 +272,20 @@ async fn personal_billing_scopes_records_counts_totals_and_models_identically() 
     let other_tenant = create_test_tenant(&db, "bill-other", &run).await;
     let user = create_test_user(&db, tenant.id, "bill-owner", &run).await;
     let peer = create_test_user(&db, tenant.id, "bill-peer", &run).await;
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        [other_tenant.id.into(), user.id.into()],
+    ))
+    .await
+    .unwrap();
     let state = AppState::with_pool(DbRouter::single(db.clone()));
     let own = usage(&db, tenant.id, user.id, "own-model", 0).await;
     usage(&db, tenant.id, user.id, "old-own-model", 70).await;
     usage(&db, tenant.id, peer.id, "peer-private-model", 0).await;
     // Historical ledger row: same global user, different resource tenant.
     usage(&db, other_tenant.id, user.id, "other-tenant-model", 0).await;
-    let token = jwt(&state, &user);
+    let token = jwt(&state, &user, tenant.id).await;
     let page = json_body(
         request(
             &state,
@@ -321,17 +327,24 @@ async fn personal_billing_scopes_records_counts_totals_and_models_identically() 
     .await;
     assert_eq!(filtered["total"], 1);
     assert_eq!(filtered["records"].as_array().unwrap().len(), 1);
-    for role in ["user", "admin"] {
-        // The endpoint remains personal even when this identity gains an admin role.
+    for tenant_role in [
+        keycompute_types::TenantRole::Member,
+        keycompute_types::TenantRole::Admin,
+    ] {
+        // Personal billing stays scoped to the selected membership. Role
+        // mutation is a membership operation, never a global user mutation.
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE users SET role=$2 WHERE id=$1",
-            [user.id.into(), role.into()],
+            "UPDATE tenant_memberships SET role=$3 WHERE tenant_id=$1 AND user_id=$2",
+            [
+                tenant.id.into(),
+                user.id.into(),
+                tenant_role.as_str().into(),
+            ],
         ))
         .await
         .unwrap();
-        let current = User::find_by_id(&db, user.id).await.unwrap().unwrap();
-        let token = jwt(&state, &current);
+        let token = jwt(&state, &user, tenant.id).await;
         let response = request(&state, "GET", "/api/v1/billing/stats", &token, Value::Null).await;
         assert_eq!(response.status(), StatusCode::OK);
         let stats = json_body(response).await;
@@ -425,7 +438,7 @@ async fn denied_platform_commands_do_not_invalidate_display_snapshots() {
     let tenant = create_test_tenant(&db, "denied-command", &run).await;
     let user = create_test_user(&db, tenant.id, "denied-command", &run).await;
     let state = AppState::with_pool(DbRouter::single(db));
-    let token = jwt(&state, &user);
+    let token = jwt(&state, &user, tenant.id).await;
     let response = request(&state, "GET", "/api/v1/usage/stats", &token, Value::Null).await;
     assert_eq!(response.status(), StatusCode::OK);
     let entries = state.display_cache.metrics()["entries"].as_u64().unwrap();

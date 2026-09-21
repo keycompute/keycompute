@@ -349,7 +349,7 @@ fn requires_protected_settings_permission(key: &str) -> bool {
 }
 
 fn ensure_admin_permission(auth: &AuthExtractor) -> Result<()> {
-    if !auth.has_permission(&Permission::SystemAdmin) {
+    if !auth.has_permission(&Permission::ManageSystemSettings) {
         return Err(ApiError::Forbidden("Admin permission required".to_string()));
     }
     Ok(())
@@ -598,6 +598,7 @@ pub async fn get_public_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keycompute_types::CredentialKind;
     use uuid::Uuid;
 
     #[test]
@@ -759,8 +760,13 @@ mod tests {
 
     #[test]
     fn test_distribution_toggle_requires_protected_settings_permission() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system")
-            .with_permissions(vec![Permission::SystemAdmin]);
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::System,
+        )
+        .with_permissions(Vec::new());
 
         let err =
             ensure_setting_update_allowed(&auth, setting_keys::DISTRIBUTION_ENABLED).unwrap_err();
@@ -769,21 +775,34 @@ mod tests {
 
     #[test]
     fn test_distribution_toggle_allows_protected_settings_permission() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
-            .with_permissions(vec![Permission::ManageSystemSettings]);
+        let auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        )
+        .with_permissions(vec![Permission::ManageSystemSettings]);
 
         assert!(ensure_setting_update_allowed(&auth, setting_keys::DISTRIBUTION_ENABLED).is_ok());
     }
 
     #[test]
     fn admin_settings_access_uses_permissions_instead_of_role() {
-        let role_only =
-            AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system");
+        let role_only = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::System,
+        );
         assert!(ensure_admin_permission(&role_only).is_err());
 
-        let permission_only =
-            AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user")
-                .with_permissions(vec![Permission::SystemAdmin]);
+        let permission_only = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::Jwt,
+        )
+        .with_permissions(vec![Permission::ManageSystemSettings]);
         assert!(ensure_admin_permission(&permission_only).is_ok());
     }
 

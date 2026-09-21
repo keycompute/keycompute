@@ -6,10 +6,10 @@
 
 use integration_tests::common::generate_test_id;
 use integration_tests::db::{
-    TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
+    TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_auth::{AuthContext, ProduceAiKeyValidator};
-use keycompute_db::{CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, User};
+use keycompute_db::{CreateProduceAiKeyRequest, DbRouter, ProduceAiKey};
 use keycompute_types::{KeyComputeError, Result};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, Statement,
@@ -25,7 +25,7 @@ struct Fixture {
     pool: DatabaseConnection,
     guard: TestDataGuard,
     test_id: String,
-    user: User,
+    user: TenantActor,
     key: ProduceAiKey,
     token: String,
     validator: ProduceAiKeyValidator,
@@ -52,7 +52,7 @@ impl Fixture {
     }
 }
 
-async fn create_key(pool: &DatabaseConnection, user: &User) -> (ProduceAiKey, String) {
+async fn create_key(pool: &DatabaseConnection, user: &TenantActor) -> (ProduceAiKey, String) {
     let token = ProduceAiKeyValidator::generate_key();
     let key = ProduceAiKey::create(
         pool,
@@ -112,7 +112,7 @@ async fn wait_for_blocked_validator(pool: &DatabaseConnection, gate_pid: i32) {
             let row = pool
                 .query_one(Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE 'SELECT * FROM % FOR SHARE%') AS waiting",
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND $1 = ANY(pg_blocking_pids(pid)) AND query LIKE '%FOR SHARE%') AS waiting",
                     [gate_pid.into()],
                 ))
                 .await

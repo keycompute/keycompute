@@ -889,13 +889,16 @@ fn LoginModal(
             match auth_service::login(&email_val, &password_val).await {
                 Ok(resp) => {
                     get_client().set_token(&resp.access_token);
-                    auth_store.login_with_persist(resp.access_token.clone(), should_remember);
+                    auth_store.login_with_session(&resp, should_remember);
                     *user_store.info.write() = Some(UserInfo {
                         id: resp.user_id.clone(),
                         email: resp.email.clone(),
                         name: None,
-                        role: resp.role.clone(),
-                        tenant_id: resp.tenant_id.clone(),
+                        platform_role: resp.platform_role,
+                        status: None,
+                        memberships: resp.memberships.clone(),
+                        selected_tenant: resp.selected_tenant.clone(),
+                        capabilities: resp.capabilities.clone(),
                     });
                     onclose.call(());
                     nav.replace(Route::Dashboard {});
@@ -1209,13 +1212,16 @@ fn RegisterModal(
                                     match auth_service::login(&email_val, &password_val).await {
                                         Ok(resp) => {
                                             get_client().set_token(&resp.access_token);
-                                            auth_store.login_with_persist(resp.access_token.clone(), false);
+                                            auth_store.login_with_session(&resp, false);
                                             *user_store.info.write() = Some(UserInfo {
                                                 id: resp.user_id.clone(),
                                                 email: resp.email.clone(),
                                                 name: None,
-                                                role: resp.role.clone(),
-                                                tenant_id: resp.tenant_id.clone(),
+                                                platform_role: resp.platform_role,
+                                                status: None,
+                                                memberships: resp.memberships.clone(),
+                                                selected_tenant: resp.selected_tenant.clone(),
+                                                capabilities: resp.capabilities.clone(),
                                             });
                                             onclose.call(());
                                             nav.replace(Route::Dashboard {});

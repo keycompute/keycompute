@@ -14,6 +14,7 @@ use integration_tests::common::VerificationChain;
 use integration_tests::common::resolve_redis_url;
 use keycompute_db::DbRouter;
 use keycompute_db::models::{
+    AuditContext,
     node::*,
     node_session::*,
     node_task::*,
@@ -28,9 +29,9 @@ use keycompute_types::node::{
     NodeTaskResult,
 };
 use keycompute_types::{
-    AttemptStatus, AttemptTraceFinish, BillingStatus, ErrorOrigin, RequestLifecycleRecorder,
-    RequestStatus, RequestTraceFinish, StreamEndReason, TestRequestLifecycleRecorder,
-    TraceErrorCategory, TraceErrorInfo,
+    AttemptStatus, AttemptTraceFinish, BillingStatus, CredentialKind, ErrorOrigin, PlatformRole,
+    RequestLifecycleRecorder, RequestStatus, RequestTraceFinish, StreamEndReason,
+    TestRequestLifecycleRecorder, TraceErrorCategory, TraceErrorInfo,
 };
 use node_gateway::NodeGatewaySweeper;
 use node_gateway::config::NodeGatewayAppConfig;
@@ -59,9 +60,19 @@ struct NodeTestEnv {
 ///
 /// 需要创建真实用户以满足 user_node_gateway_tokens 表的 FK 约束
 /// (`user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE`)。
-async fn create_test_user(pool: &DatabaseConnection, suffix: &str) -> Uuid {
-    let tenant = Tenant::create(
+async fn create_test_user(pool: &DatabaseConnection, suffix: &str) -> (Uuid, Uuid) {
+    let user = User::create(
         pool,
+        &CreateUserRequest {
+            email: format!("ng-e2e-{}@test.local", suffix),
+            name: Some(format!("NG E2E User {}", suffix)),
+        },
+    )
+    .await
+    .expect("Failed to create test user");
+    let tx = pool.begin().await.expect("tenant transaction");
+    let tenant = Tenant::create_owned(
+        &tx,
         &CreateTenantRequest {
             name: format!("ng-e2e-tenant-{}", suffix),
             slug: format!("ng-e2e-{}-{}", suffix, Uuid::new_v4()),
@@ -69,35 +80,43 @@ async fn create_test_user(pool: &DatabaseConnection, suffix: &str) -> Uuid {
             default_rpm_limit: Some(100),
             default_tpm_limit: Some(50000),
         },
-    )
-    .await
-    .expect("Failed to create test tenant");
-
-    let user = User::create(
-        pool,
-        &CreateUserRequest {
-            tenant_id: tenant.id,
-            email: format!("ng-e2e-{}@test.local", suffix),
-            name: Some(format!("NG E2E User {}", suffix)),
-            role: None, // defaults to 'user'
+        user.id,
+        &AuditContext {
+            actor_user_id: user.id,
+            credential_kind: CredentialKind::Jwt,
+            actor_platform_role: PlatformRole::None,
+            actor_tenant_role: None,
+            request_id: None,
         },
     )
     .await
-    .expect("Failed to create test user");
+    .expect("Failed to create test tenant");
+    tx.commit().await.expect("tenant transaction commit");
 
-    user.id
+    (tenant.id, user.id)
 }
 
 /// 用于生成测试用的 HMAC 签名 token
-async fn create_test_hmac_token(pool: &DatabaseConnection, user_id: Uuid, secret: &str) -> String {
+async fn create_test_hmac_token(
+    pool: &DatabaseConnection,
+    tenant_id: Uuid,
+    user_id: Uuid,
+    secret: &str,
+) -> String {
     let (token_id, token_plaintext, token_hash, token_preview) =
         UserNodeGatewayToken::generate_hmac_token(secret.as_bytes());
 
     // 插入 DB 并设置为 approved
-    let token =
-        UserNodeGatewayToken::create_with_id(pool, token_id, user_id, &token_hash, &token_preview)
-            .await
-            .expect("Failed to create test token");
+    let token = UserNodeGatewayToken::create_with_id(
+        pool,
+        token_id,
+        tenant_id,
+        user_id,
+        &token_hash,
+        &token_preview,
+    )
+    .await
+    .expect("Failed to create test token");
 
     // 审批通过（自己审批自己用于测试）
     token
@@ -195,16 +214,17 @@ impl NodeTestEnv {
         // 此处显式清理以处理 CASCADE 未覆盖的孤立记录
         pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tip_withdrawals WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'ng-e2e-%')", [])).await?;
         pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tips WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'ng-e2e-%')", [])).await?;
-        // 清理 E2E 测试创建的租户和用户
+        // Tenants own their creator identity, so remove the tenant namespace
+        // before deleting the global fixture users.
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "DELETE FROM users WHERE email LIKE 'ng-e2e-%'",
+            "DELETE FROM tenants WHERE slug LIKE 'ng-e2e-%'",
             [],
         ))
         .await?;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "DELETE FROM tenants WHERE slug LIKE 'ng-e2e-%'",
+            "DELETE FROM users WHERE email LIKE 'ng-e2e-%'",
             [],
         ))
         .await?;
@@ -223,6 +243,7 @@ impl NodeTestEnv {
 
         let config = NodeGatewayAppConfig {
             registration_token_secret,
+            task_deadline_secs: 3,
             ..Default::default()
         };
         let store = NodeGatewayStore::new(DbRouter::single(pool.clone()), config.clone());
@@ -282,9 +303,10 @@ impl NodeTestEnv {
 #[serial(node_gateway)]
 async fn test_sweeper_runs_with_single_db_connection() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
-    let test_user_id = create_test_user(&env.pool, "sweeper-single-conn").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "sweeper-single-conn").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -336,12 +358,14 @@ async fn test_sweeper_converges_redis_queue_entries() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let model = format!("sweeper-convergence-{}", Uuid::new_v4());
     let queue_key = format!("queue:node:model:{model}");
+    let (queue_tenant_id, queue_user_id) = create_test_user(&env.pool, "sweeper-convergence").await;
 
     let queued_task = NodeTask::create(
         &env.pool,
         &CreateNodeTaskRequest {
+            tenant_id: queue_tenant_id,
             request_id: Uuid::new_v4(),
-            user_id: Uuid::new_v4(),
+            user_id: queue_user_id,
             model: model.clone(),
             payload_json: serde_json::json!({}),
             deadline_at: chrono::Utc::now() + chrono::Duration::minutes(5),
@@ -385,8 +409,9 @@ async fn test_sweeper_converges_redis_queue_entries() -> anyhow::Result<()> {
     let expired_task = NodeTask::create(
         &env.pool,
         &CreateNodeTaskRequest {
+            tenant_id: queue_tenant_id,
             request_id: Uuid::new_v4(),
-            user_id: Uuid::new_v4(),
+            user_id: queue_user_id,
             model: model.clone(),
             payload_json: serde_json::json!({}),
             deadline_at: chrono::Utc::now() - chrono::Duration::seconds(1),
@@ -440,9 +465,14 @@ async fn test_sweeper_converges_redis_queue_entries() -> anyhow::Result<()> {
 #[serial(node_gateway)]
 async fn test_sweeper_preserves_trace_quality_after_wait_timeout() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
-    let user_id = create_test_user(&env.pool, "wait-timeout-trace").await;
-    let token =
-        create_test_hmac_token(&env.pool, user_id, &env.config.registration_token_secret).await;
+    let (tenant_id, user_id) = create_test_user(&env.pool, "wait-timeout-trace").await;
+    let token = create_test_hmac_token(
+        &env.pool,
+        tenant_id,
+        user_id,
+        &env.config.registration_token_secret,
+    )
+    .await;
     let registered = env
         .service
         .register_node(&env.create_register_request("wait-timeout-trace", &token))
@@ -466,11 +496,11 @@ async fn test_sweeper_preserves_trace_quality_after_wait_timeout() -> anyhow::Re
     };
     let task = NodeTask::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        r#"INSERT INTO node_tasks (
-                request_id,user_id,model,payload_json,status,assigned_node_id,
+            r#"INSERT INTO node_tasks (
+                request_id,tenant_id,user_id,model,payload_json,status,assigned_node_id,
                 assigned_session_id,lease_id,claimed_at,deadline_at,
                 complete_grace_until,failure_threshold
-            ) VALUES ($1,$2,'stable-diffusion',$3,'leased',$4,$5,$6,$7,
+            ) VALUES ($1,(SELECT tenant_id FROM nodes WHERE id=$4),$2,'stable-diffusion',$3,'leased',$4,$5,$6,$7,
                       NOW()-INTERVAL '10 seconds',NOW()+INTERVAL '120 seconds',3)
             RETURNING *"#,
         [
@@ -497,7 +527,7 @@ async fn test_sweeper_preserves_trace_quality_after_wait_timeout() -> anyhow::Re
                           'node','running',$5,'pending','actual')"#,
             [
                 request_id.into(),
-                Uuid::new_v4().into(),
+                tenant_id.into(),
                 user_id.into(),
                 Uuid::new_v4().into(),
                 received_at.into(),
@@ -622,9 +652,10 @@ async fn test_node_registration() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     // 创建测试用户 + 一个已审批的 token
-    let test_user_id = create_test_user(&env.pool, "reg").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "reg").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -671,9 +702,14 @@ async fn test_node_registration() -> anyhow::Result<()> {
 #[serial(node_gateway)]
 async fn test_expired_session_cannot_authenticate_or_renew() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
-    let user_id = create_test_user(&env.pool, "expired-session").await;
-    let registration_token =
-        create_test_hmac_token(&env.pool, user_id, &env.config.registration_token_secret).await;
+    let (tenant_id, user_id) = create_test_user(&env.pool, "expired-session").await;
+    let registration_token = create_test_hmac_token(
+        &env.pool,
+        tenant_id,
+        user_id,
+        &env.config.registration_token_secret,
+    )
+    .await;
     let registration = env
         .service
         .register_node(
@@ -725,9 +761,10 @@ async fn test_expired_session_cannot_authenticate_or_renew() -> anyhow::Result<(
 async fn test_token_one_time_use() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
 
-    let test_user_id = create_test_user(&env.pool, "ot1").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "ot1").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -801,9 +838,10 @@ async fn test_node_reregistration() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     let client_id = "test-client-reregister";
-    let test_user_id = create_test_user(&env.pool, "rereg").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "rereg").await;
     let token1 = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -817,6 +855,7 @@ async fn test_node_reregistration() -> anyhow::Result<()> {
     // 再创建第二个 token 用于重复注册测试
     let token2 = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -853,9 +892,10 @@ async fn test_excluded_node_reject_registration() -> anyhow::Result<()> {
     let mut chain = VerificationChain::new();
 
     let client_id = "test-client-excluded";
-    let test_user_id = create_test_user(&env.pool, "excl").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "excl").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -875,6 +915,7 @@ async fn test_excluded_node_reject_registration() -> anyhow::Result<()> {
     // 需要新 token 因为旧 token 已被消费
     let token2 = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -901,9 +942,10 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "task").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "task").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -933,7 +975,12 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
 
     let _task = env
         .service
-        .enqueue_and_wait(Uuid::new_v4(), "deepseek-chat".to_string(), payload.clone())
+        .enqueue_and_wait(
+            test_tenant_id,
+            test_user_id,
+            "deepseek-chat".to_string(),
+            payload.clone(),
+        )
         .await;
 
     chain.add_step(
@@ -969,7 +1016,7 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
 async fn completion_committed_after_client_deadline_returns_timeout_for_handler()
 -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
-    let user_id = create_test_user(&env.pool, "deadline-race").await;
+    let (tenant_id, user_id) = create_test_user(&env.pool, "deadline-race").await;
     let request_id = Uuid::new_v4();
     let mut config = env.config.clone();
     config.task_deadline_secs = 1;
@@ -1002,7 +1049,7 @@ async fn completion_committed_after_client_deadline_returns_timeout_for_handler(
 
     let waiting = tokio::spawn(async move {
         service
-            .enqueue_and_wait(user_id, "deepseek-chat".to_string(), payload)
+            .enqueue_and_wait(tenant_id, user_id, "deepseek-chat".to_string(), payload)
             .await
     });
     let task = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1080,9 +1127,10 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "idem").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "idem").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -1100,13 +1148,13 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, claimed_at, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW(), NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, claimed_at, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW(), NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
                 request_id.into(),
-                Uuid::new_v4().into(),
+                test_user_id.into(),
                 "deepseek-chat".into(),
                 serde_json::to_value(&payload)?.into(),
                 register_resp.node_id.into(),
@@ -1231,9 +1279,10 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
 async fn test_client_error_does_not_exclude_node() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
 
-    let test_user_id = create_test_user(&env.pool, "cerr").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "cerr").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -1250,13 +1299,13 @@ async fn test_client_error_does_not_exclude_node() -> anyhow::Result<()> {
             Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 r#"
-                INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-                VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+                INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+                VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
                 RETURNING *
                 "#,
                 [
                     request_id.into(),
-                    Uuid::new_v4().into(),
+                    test_user_id.into(),
                     "deepseek-chat".into(),
                     serde_json::to_value(&payload)?.into(),
                     register_resp.node_id.into(),
@@ -1313,9 +1362,10 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "conc").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "conc").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -1333,13 +1383,13 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
                 request_id.into(),
-                Uuid::new_v4().into(),
+                test_user_id.into(),
                 "deepseek-chat".into(),
                 serde_json::to_value(&payload)?.into(),
                 register_resp.node_id.into(),
@@ -1446,9 +1496,10 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "imgsuc").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "imgsuc").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -1466,13 +1517,13 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
                 request_id.into(),
-                Uuid::new_v4().into(),
+                test_user_id.into(),
                 "stable-diffusion".into(),
                 serde_json::to_value(&payload)?.into(),
                 register_resp.node_id.into(),
@@ -1621,16 +1672,20 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "imggen").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "imggen").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
     .await;
 
     // 1. 注册节点
-    let register_req = env.create_register_request("test-client-image-gen", &token);
+    let mut register_req = env.create_register_request("test-client-image-gen", &token);
+    register_req.capabilities.models.push(NodeModelCapability {
+        model: "stable-diffusion".into(),
+    });
     let register_resp = env.service.register_node(&register_req).await?;
 
     // 2. 创建图片生成任务 payload
@@ -1659,63 +1714,26 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
         true,
     );
 
-    // 3. 任务入队（模拟等待超时，因为无节点主动 poll）
-    let task_result = env
+    let queued = env
         .service
-        .enqueue_and_wait(
-            Uuid::new_v4(),
-            "stable-diffusion".to_string(),
+        .store
+        .create_and_enqueue_task(
+            test_tenant_id,
+            test_user_id,
+            "stable-diffusion".into(),
             payload.clone(),
         )
-        .await;
-
-    // enqueue_and_wait 在无节点领取时会返回 Timeout 错误，这是预期的
-    chain.add_step(
-        "node-gateway",
-        "image_gen::task_enqueued",
-        "Task enqueued (timeout expected without poller)",
-        task_result.is_err() || task_result.is_ok(),
-    );
-
-    // 4. 验证任务已创建到 DB
-    let tasks = NodeTask::find_by_statement(Statement::from_string(
-        DbBackend::Postgres,
-        "SELECT * FROM node_tasks ORDER BY created_at DESC LIMIT 1".to_owned(),
-    ))
-    .all(&env.pool)
-    .await?;
-
-    chain.add_step(
-        "node-gateway",
-        "image_gen::task_in_db",
-        format!("Task count in DB: {}", tasks.len()),
-        !tasks.is_empty() && tasks[0].status == "queued",
-    );
-
-    // 5. 手动构造 leased 任务并模拟节点提交结果
-    let lease_id = Uuid::new_v4();
-    let task = NodeTask::find_by_statement(
-        Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
-            RETURNING *
-            "#,
-            [
-                Uuid::new_v4().into(),
-                test_user_id.into(),
-                "stable-diffusion".into(),
-                serde_json::to_value(&payload)?.into(),
-                register_resp.node_id.into(),
-                register_resp.session_id.into(),
-                lease_id.into(),
-            ],
-        )
-    )
-    .one(&env.pool)
-    .await?
-    .unwrap();
+        .await?;
+    assert_eq!(queued.request_id, payload.request_id);
+    assert_eq!(queued.tenant_id, test_tenant_id);
+    assert_eq!(queued.status, "queued");
+    let (task, envelope) = env
+        .service
+        .store
+        .claim_task(queued.id, register_resp.node_id, register_resp.session_id)
+        .await?
+        .expect("registered image node should lease queued task");
+    let lease_id = envelope.lease_id;
 
     // 6. 节点提交图片生成结果
     let image_response = ImageGenerationResponse {
@@ -1799,9 +1817,10 @@ async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "imgedit").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "imgedit").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -1845,12 +1864,12 @@ async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
-                Uuid::new_v4().into(),
+                payload.request_id.into(),
                 test_user_id.into(),
                 "stable-diffusion".into(),
                 serde_json::to_value(&payload)?.into(),
@@ -1940,9 +1959,10 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "invprompt").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "invprompt").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -2004,12 +2024,12 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
-                Uuid::new_v4().into(),
+                payload_empty.request_id.into(),
                 test_user_id.into(),
                 "stable-diffusion".into(),
                 serde_json::to_value(&payload_empty)?.into(),
@@ -2077,9 +2097,10 @@ async fn test_image_url_inaccessible() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "urlinv").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "urlinv").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -2108,12 +2129,12 @@ async fn test_image_url_inaccessible() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
-                Uuid::new_v4().into(),
+                payload.request_id.into(),
                 test_user_id.into(),
                 "stable-diffusion".into(),
                 serde_json::to_value(&payload)?.into(),
@@ -2189,9 +2210,10 @@ async fn test_node_task_timeout() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "timeout").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "timeout").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -2220,12 +2242,12 @@ async fn test_node_task_timeout() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, claimed_at, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() - INTERVAL '20 seconds', NOW() - INTERVAL '10 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, claimed_at, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() - INTERVAL '20 seconds', NOW() - INTERVAL '10 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
-                Uuid::new_v4().into(),
+                payload.request_id.into(),
                 test_user_id.into(),
                 "stable-diffusion".into(),
                 serde_json::to_value(&payload)?.into(),
@@ -2366,9 +2388,10 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "imgfmt").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "imgfmt").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -2397,12 +2420,12 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [
-                Uuid::new_v4().into(),
+                payload.request_id.into(),
                 test_user_id.into(),
                 "stable-diffusion".into(),
                 serde_json::to_value(&payload)?.into(),
@@ -2487,9 +2510,10 @@ async fn test_image_generation_idempotency() -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
     let mut chain = VerificationChain::new();
 
-    let test_user_id = create_test_user(&env.pool, "imgidem").await;
+    let (test_tenant_id, test_user_id) = create_test_user(&env.pool, "imgidem").await;
     let token = create_test_hmac_token(
         &env.pool,
+        test_tenant_id,
         test_user_id,
         &env.config.registration_token_secret,
     )
@@ -2507,8 +2531,8 @@ async fn test_image_generation_idempotency() -> anyhow::Result<()> {
         Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
-            VALUES ($1, $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
+            INSERT INTO node_tasks (request_id, tenant_id, user_id, model, payload_json, status, assigned_node_id, assigned_session_id, lease_id, deadline_at, complete_grace_until, failure_threshold)
+            VALUES ($1, (SELECT tenant_id FROM nodes WHERE id=$5), $2, $3, $4, 'leased', $5, $6, $7, NOW() + INTERVAL '60 seconds', NOW() + INTERVAL '120 seconds', 3)
             RETURNING *
             "#,
             [

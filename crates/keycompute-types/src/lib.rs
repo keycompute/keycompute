@@ -17,6 +17,7 @@ pub mod node_stream;
 pub mod pricing;
 pub mod request;
 pub mod response;
+pub mod tenant;
 pub mod usage;
 pub mod user;
 
@@ -50,8 +51,12 @@ pub use response::{
     ChatCompletionChunk, ChatCompletionResponse, Choice, ErrorResponse, MessageDelta, ModelInfo,
     ModelListResponse, Usage,
 };
+pub use tenant::{
+    AuditResult, AuditScopeType, AuthorizationSubject, CredentialKind, MembershipStatus,
+    PlatformRole, PlatformScope, TenantInvitationStatus, TenantRole, TenantScope, TenantStatus,
+    UserStatus,
+};
 pub use usage::{UsageAccumulator, UsageRecord};
-pub use user::{AssignableUserRole, UserRole};
 
 /// 为 `#[serde(untagged)]` 枚举生成自定义 `Deserialize` 实现
 ///

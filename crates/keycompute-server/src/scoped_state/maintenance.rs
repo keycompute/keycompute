@@ -243,7 +243,12 @@ async fn recover(state: &AppState, record: &ResponseRecord) -> Result<()> {
     } else {
         if let (Some(balance), Some(owner)) = (state.billing.balance_service(), owner) {
             balance
-                .release_request_reservation(record.request_id, owner)
+                .release_request_reservation(
+                    record.tenant_id,
+                    record.user_id,
+                    record.request_id,
+                    owner,
+                )
                 .await
                 .map_err(ApiError::from)?;
         }

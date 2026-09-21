@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use keycompute_db::DbError;
 use keycompute_db::DbRouter;
 use keycompute_db::models::{
-    node::*, node_session::*, node_task::*, node_task_submission::*, tenant::Tenant, user::User,
-    user_node_gateway_token::*,
+    node::*, node_session::*, node_task::*, node_task_submission::*, tenant::Tenant,
+    tenant_membership::TenantMembership, user::User, user_node_gateway_token::*,
 };
 use keycompute_types::node::*;
 use sea_orm::{
@@ -26,8 +26,7 @@ const ACTIVE_NODE_SESSION_FOR_UPDATE_SQL: &str = "SELECT * FROM node_sessions WH
 // updates use the same row lock, so a heartbeat or task claim serializes with
 // deactivation instead of relying on a stale pre-handler authentication read.
 const NODE_TENANT_FOR_UPDATE_SQL: &str = "SELECT t.* FROM nodes n \
-     INNER JOIN users u ON u.id = n.owner_user_id \
-     INNER JOIN tenants t ON t.id = u.tenant_id \
+     INNER JOIN tenants t ON t.id = n.tenant_id \
      WHERE n.id = $1 FOR UPDATE OF t";
 
 /// Node Gateway Store
@@ -306,6 +305,10 @@ impl NodeGatewayStore {
 
         // 1. 开始事务（通过 FOR UPDATE 行级锁防止 TOCTOU，使用默认 READ COMMITTED 隔离级别）
         let tx = self.pool.begin().await?;
+        // Low-frequency identity mutation: serialize with member revocation
+        // before locking token/tenant rows, preventing an inverse lock cycle.
+        tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+            .await?;
 
         // 2. 在事务内查询 token 并检查是否可消费（消除 TOCTOU 窗口）
         //    使用 FOR UPDATE 锁定行，防止并发修改
@@ -338,14 +341,27 @@ impl NodeGatewayStore {
         }
 
         let owner_user_id = token.user_id;
+        let tenant_id = token.tenant_id;
 
         // A registration token may have been approved before the owner's
         // tenant was closed. Lock and re-check the tenant on the writer so a
         // closed tenant cannot create or revive a node session.
-        let owner = User::find_by_id(&tx, owner_user_id)
+        User::find_by_id(&tx, owner_user_id)
             .await?
             .ok_or_else(|| DbError::Other("Registration token owner not found".to_string()))?;
-        let tenant = Tenant::find_by_id_for_update(&tx, owner.tenant_id)
+        let membership = TenantMembership::find(&tx, tenant_id, owner_user_id)
+            .await?
+            .ok_or_else(|| {
+                DbError::Other(
+                    "Registration token owner is not a member of the token tenant".into(),
+                )
+            })?;
+        if membership.status != "active" {
+            return Err(DbError::Other(
+                "Registration token owner membership is inactive".into(),
+            ));
+        }
+        let tenant = Tenant::find_by_id_for_update(&tx, tenant_id)
             .await?
             .ok_or_else(|| DbError::Other("Registration token tenant not found".to_string()))?;
         if !tenant.is_active() {
@@ -359,9 +375,13 @@ impl NodeGatewayStore {
             DbBackend::Postgres,
             r#"
             SELECT * FROM nodes
-            WHERE owner_user_id = $1 AND client_instance_id = $2
+            WHERE tenant_id = $1 AND owner_user_id = $2 AND client_instance_id = $3
             "#,
-            [owner_user_id.into(), req.client_instance_id.as_str().into()],
+            [
+                tenant_id.into(),
+                owner_user_id.into(),
+                req.client_instance_id.as_str().into(),
+            ],
         ))
         .one(&tx)
         .await?;
@@ -384,11 +404,12 @@ impl NodeGatewayStore {
                 Node::find_by_statement(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     r#"
-                    INSERT INTO nodes (owner_user_id, client_instance_id, display_name, status, capabilities_json)
-                    VALUES ($1, $2, $3, $4, $5)
+                    INSERT INTO nodes (tenant_id, owner_user_id, client_instance_id, display_name, status, capabilities_json)
+                    VALUES ($1, $2, $3, $4, $5, $6)
                     RETURNING *
                     "#,
                     [
+                        tenant_id.into(),
                         owner_user_id.into(),
                         req.client_instance_id.as_str().into(),
                         req.display_name.as_str().into(),
@@ -699,6 +720,7 @@ impl NodeGatewayStore {
     /// 创建任务并推入队列
     pub async fn create_and_enqueue_task(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         model: String,
         payload: NodeTaskPayload,
@@ -717,6 +739,7 @@ impl NodeGatewayStore {
 
         let create_req = CreateNodeTaskRequest {
             request_id: payload.request_id,
+            tenant_id,
             user_id,
             model: model.clone(),
             payload_json: serde_json::to_value(&payload)
@@ -1972,6 +1995,7 @@ impl NodeGatewayStore {
     /// Create a task whose immutable profile includes cancellation support.
     pub async fn create_cancellable_native_task(
         &self,
+        tenant_id: Uuid,
         user_id: Uuid,
         model: String,
         payload: NodeTaskPayload,
@@ -2001,6 +2025,7 @@ impl NodeGatewayStore {
         let deadline_at = Utc::now() + self.config.task_deadline();
         let request = CreateNodeTaskRequest {
             request_id: payload.request_id,
+            tenant_id,
             user_id,
             model,
             payload_json: serde_json::to_value(payload)
@@ -2054,8 +2079,10 @@ mod tests {
 
     #[test]
     fn node_mutations_lock_the_owning_tenant_before_state_changes() {
-        assert!(NODE_TENANT_FOR_UPDATE_SQL.contains("INNER JOIN users"));
-        assert!(NODE_TENANT_FOR_UPDATE_SQL.contains("INNER JOIN tenants"));
+        // Global users no longer own a tenant column: lock the node's stable
+        // resource tenant, never a selected or first user membership.
+        assert!(NODE_TENANT_FOR_UPDATE_SQL.contains("INNER JOIN tenants t ON t.id = n.tenant_id"));
+        assert!(!NODE_TENANT_FOR_UPDATE_SQL.contains("JOIN users"));
         assert!(NODE_TENANT_FOR_UPDATE_SQL.contains("n.id = $1"));
         assert!(NODE_TENANT_FOR_UPDATE_SQL.ends_with("FOR UPDATE OF t"));
     }

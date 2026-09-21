@@ -10,28 +10,24 @@ use axum::{
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use integration_tests::db::{
-    TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
+    TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::models::{
     node::{CreateNodeRequest, Node},
     node_session::{CreateNodeSessionRequest, NodeSession},
     passthrough_binding::{CreatePassthroughBindingRequest, PassthroughBinding},
-    pricing_model::{BillingDimension, CreatePricingRequest, PricingModel},
+    pricing_model::{BillingDimension, CreatePricingRequest, PricingModel, PricingScopeType},
 };
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, CreateUserRequest, DbRouter,
-    ProduceAiKey, User, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey, UserBalance,
 };
 use keycompute_ratelimit::RateLimitKey;
 use keycompute_server::{
     AppState, create_router,
     state::{AppStateConfig, RateLimitBackendConfig},
 };
-use keycompute_types::{
-    UserRole,
-    node::{NodeTaskEnvelope, NodeTaskResult},
-};
+use keycompute_types::node::{NodeTaskEnvelope, NodeTaskResult};
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde_json::{Value, json};
@@ -131,18 +127,42 @@ fn expect(r: HttpResult, status: StatusCode) -> Value {
     assert_eq!(r.status, status, "{}", r.body);
     r.body
 }
+
+async fn scoped_jwt(state: &AppState, user: &TenantActor) -> String {
+    let global = state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(
+            user.id,
+            Some(user.tenant_id),
+            user.token_version,
+            Some(1),
+            Some(1),
+            3600,
+        )
+        .unwrap();
+    let context = state.auth.verify_token(&global).await.unwrap();
+    state
+        .auth
+        .select_tenant(&context, Some(user.tenant_id))
+        .await
+        .unwrap()
+        .access_token
+}
+
 struct Fixture {
     db: DatabaseConnection,
     cleanup: TestDataGuard,
     state: AppState,
     app: Router,
-    user: User,
+    user: TenantActor,
     key: String,
     key_id: Uuid,
     admin: String,
     node: Node,
     session: NodeSession,
-    owner: User,
+    owner: TenantActor,
     shared: String,
     node_only: String,
     pool_only: String,
@@ -163,28 +183,29 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "nt-consumer", &run).await;
-        let user = User::create(
-            &db,
-            &CreateUserRequest {
-                tenant_id: tenant.id,
-                email: format!("nt-{run}@example.invalid"),
-                name: Some("NT fixture".into()),
-                role: Some(UserRole::Admin),
-            },
-        )
+        let mut user = create_test_user(&db, tenant.id, "nt-consumer", &run).await;
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='root' WHERE id=$1",
+            [user.id.into()],
+        ))
         .await
         .unwrap();
+        user.user = keycompute_db::User::find_by_id(&db, user.id)
+            .await
+            .unwrap()
+            .unwrap();
         UserBalance::recharge(
             &db,
-            user.id,
             user.tenant_id,
+            user.id,
             Decimal::from(1000),
             None,
             Some("isolated node test credit"),
         )
         .await
         .unwrap();
-        let owner_tenant = create_test_tenant(&db, "nt-owner", &run).await;
+        let owner_tenant = tenant.clone(); // Private nodes serve their own tenant only.
         let owner = create_test_user(&db, owner_tenant.id, "nt-worker", &run).await;
         keycompute_runtime::set_global_crypto("LXmXUgcaoZePsWayXJN2E5Wa9/zpkl/vOTwnLNy/oLc=")
             .unwrap();
@@ -249,6 +270,7 @@ impl Fixture {
             PricingModel::create(
                 &db,
                 &CreatePricingRequest {
+                    scope_type: PricingScopeType::Tenant,
                     tenant_id: Some(user.tenant_id),
                     model_name: shared.clone(),
                     billing_dimension,
@@ -263,7 +285,7 @@ impl Fixture {
             .await
             .unwrap();
         }
-        let node=Node::create(&db,&CreateNodeRequest{owner_user_id:owner.id,client_instance_id:format!("nt-{run}"),
+        let node=Node::create(&db,&CreateNodeRequest{tenant_id:owner.tenant_id,owner_user_id:owner.id,client_instance_id:format!("nt-{run}"),
             display_name:"isolated NT worker".into(),capabilities_json:json!({"runtime":"ollama","models":[{"model":shared},{"model":node_only}]})}).await.unwrap();
         let session = NodeSession::create(
             &db,
@@ -315,12 +337,7 @@ impl Fixture {
             state.node_gateway.is_some(),
             "this fixture requires the redis node backend"
         );
-        let admin = state
-            .auth
-            .get_jwt_validator()
-            .unwrap()
-            .generate_token_with_version(user.id, user.tenant_id, &user.role, user.token_version)
-            .unwrap();
+        let admin = scoped_jwt(&state, &user).await;
         let key = ProduceAiKeyValidator::generate_key();
         let key_id = ProduceAiKey::create(
             &db,
@@ -414,22 +431,15 @@ impl Fixture {
         })
     }
     async fn finish(&mut self) {
-        self.db
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "DELETE FROM node_tasks WHERE user_id=$1",
-                [self.user.id.into()],
-            ))
-            .await
-            .unwrap();
-        self.db
-            .execute(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "DELETE FROM nodes WHERE id=$1",
-                [self.node.id.into()],
-            ))
-            .await
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.state.generation_admission.requests.status().active > 0
+                || self.state.generation_admission.accounts.status().active > 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("request settlement must finish before fixture cleanup");
         self.cleanup.cleanup().await.unwrap();
     }
     async fn node_models(&self) -> Vec<String> {
@@ -769,15 +779,16 @@ async fn node_readiness_revocation_changes_discovery_and_dispatch_not_pool() {
         .unwrap();
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE tenants SET status=$2 WHERE id=$1",
+            "UPDATE tenant_memberships SET status=$2 WHERE user_id=$1 AND tenant_id=$3",
             [
-                f.owner.tenant_id.into(),
+                f.owner.id.into(),
                 if action == "owner_inactive" {
-                    "inactive"
+                    "suspended"
                 } else {
                     "active"
                 }
                 .into(),
+                f.owner.tenant_id.into(),
             ],
         ))
         .await
@@ -1120,7 +1131,7 @@ async fn native_claim_uses_immutable_session_permission_not_node_metadata() {
     };
     let task = service
         .store
-        .create_and_enqueue_task(f.user.id, f.shared.clone(), payload)
+        .create_and_enqueue_task(f.user.tenant_id, f.user.id, f.shared.clone(), payload)
         .await
         .unwrap();
     assert!(
@@ -1169,6 +1180,7 @@ async fn uncertain_native_execution_failure_is_terminal_and_cannot_be_requeued()
     let task = service
         .store
         .create_and_enqueue_task(
+            f.user.tenant_id,
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
@@ -1238,10 +1250,12 @@ async fn native_capable_worker_can_claim_legacy_work_without_native_queue_starva
     let service = f.state.node_gateway.as_ref().unwrap().clone();
     let model = f.shared.clone();
     let user = f.user.id;
+    let tenant = f.user.tenant_id;
     let producer = service.clone();
     let pending = tokio::spawn(async move {
         producer
             .enqueue_and_wait(
+                tenant,
                 user,
                 model.clone(),
                 keycompute_types::node::NodeTaskPayload {
@@ -1322,6 +1336,7 @@ async fn native_tool_requirements_are_checked_before_route_and_again_at_claim() 
     let task = service
         .store
         .create_and_enqueue_task(
+            f.user.tenant_id,
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
@@ -1409,6 +1424,7 @@ async fn capability_renewal_is_retry_safe_and_old_session_only_finishes_existing
     let task = service
         .store
         .create_and_enqueue_task(
+            f.user.tenant_id,
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
@@ -1520,6 +1536,7 @@ async fn native_byte_and_output_limits_are_enforced_by_sql_claim() {
     let task = service
         .store
         .create_and_enqueue_task(
+            f.user.tenant_id,
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
@@ -1667,7 +1684,7 @@ async fn a_native_backlog_does_not_starve_queued_legacy_work() {
         };
         let task = service
             .store
-            .create_and_enqueue_task(f.user.id, f.shared.clone(), payload)
+            .create_and_enqueue_task(f.user.tenant_id, f.user.id, f.shared.clone(), payload)
             .await
             .unwrap();
         if !native {

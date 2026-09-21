@@ -287,6 +287,7 @@ name_sql = sql_literal(admin_name)
 sql = f"""
 BEGIN;
 SELECT pg_advisory_xact_lock(5421647644090913945);
+UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE;
 
 DO $bootstrap$
 DECLARE
@@ -305,53 +306,33 @@ DECLARE
     v_level2_ratio NUMERIC;
     v_effective_from TIMESTAMPTZ;
 BEGIN
-    INSERT INTO tenants (name, slug, description, status)
-    VALUES ('System', 'system', 'System default tenant', 'active')
-    ON CONFLICT (slug) DO NOTHING;
-
-    SELECT id INTO v_system_tenant_id
-    FROM tenants
-    WHERE slug = 'system';
-
-    IF v_system_tenant_id IS NULL THEN
-        RAISE EXCEPTION 'system tenant is missing';
-    END IF;
-
-    SELECT id, tenant_id INTO v_admin_id, v_admin_tenant_id
-    FROM users
-    WHERE role = 'system'
-    ORDER BY created_at ASC, id ASC
-    LIMIT 1
-    FOR UPDATE;
-
-    IF v_admin_id IS NULL THEN
-        SELECT id, role INTO v_existing_id, v_existing_role
-        FROM users
-        WHERE email = {email_sql}
-        FOR UPDATE;
-
-        IF v_existing_id IS NOT NULL THEN
-            IF v_existing_role <> 'system' THEN
-                RAISE EXCEPTION 'configured admin email is already used by a non-system account';
-            END IF;
-            v_admin_id := v_existing_id;
-            SELECT tenant_id INTO v_admin_tenant_id
-            FROM users
-            WHERE id = v_admin_id
-            FOR UPDATE;
-            v_existing_admin := TRUE;
-        ELSE
-            INSERT INTO users (tenant_id, email, name, role)
-            VALUES (v_system_tenant_id, {email_sql}, {name_sql}, 'system')
-            RETURNING id, tenant_id INTO v_admin_id, v_admin_tenant_id;
+    SELECT id, platform_role INTO v_admin_id, v_existing_role
+    FROM users WHERE lower(email)=lower({email_sql}) FOR UPDATE;
+    IF v_admin_id IS NOT NULL THEN
+        IF v_existing_role <> 'root' THEN
+            RAISE EXCEPTION 'configured recovery email is not a platform root';
         END IF;
-    ELSE
         v_existing_admin := TRUE;
+    ELSE
+        IF EXISTS(SELECT 1 FROM users) THEN
+            RAISE EXCEPTION 'configured root email not found; refuse to create a privileged identity in a populated system';
+        END IF;
+        INSERT INTO users(email,name,platform_role,status)
+        VALUES(lower({email_sql}),{name_sql},'root','active') RETURNING id INTO v_admin_id;
     END IF;
+    UPDATE users SET status='active' WHERE id=v_admin_id;
 
-    IF v_admin_tenant_id IS DISTINCT FROM v_system_tenant_id THEN
-        RAISE EXCEPTION 'system admin is not attached to the system tenant';
+    INSERT INTO tenants(owner_user_id,name,slug,description,status)
+    VALUES(v_admin_id,'System','system','System administrative workspace','active')
+    ON CONFLICT(slug) DO NOTHING;
+    SELECT id INTO v_system_tenant_id FROM tenants
+    WHERE slug='system' AND owner_user_id=v_admin_id FOR UPDATE;
+    IF v_system_tenant_id IS NULL THEN
+        RAISE EXCEPTION 'system workspace belongs to another root; refuse to change its wallet';
     END IF;
+    INSERT INTO tenant_memberships(tenant_id,user_id,role,status)
+    VALUES(v_system_tenant_id,v_admin_id,'admin','active')
+    ON CONFLICT(tenant_id,user_id) DO NOTHING;
 
     IF v_existing_admin THEN
         UPDATE users
@@ -375,14 +356,14 @@ BEGIN
 
     SELECT * INTO v_balance
     FROM user_balances
-    WHERE user_id = v_admin_id
+    WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
     FOR UPDATE;
 
     IF NOT FOUND THEN
         SELECT COUNT(*)
         INTO v_active_count
         FROM balance_reservations
-        WHERE user_id = v_admin_id
+        WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
           AND status = 'active';
 
         IF v_active_count > 0 THEN
@@ -411,18 +392,8 @@ BEGIN
         SELECT COALESCE(SUM(amount), 0), COUNT(*)
         INTO v_active_reserved, v_active_count
         FROM balance_reservations
-        WHERE user_id = v_admin_id
+        WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
           AND status = 'active';
-
-        IF EXISTS (
-            SELECT 1
-            FROM balance_reservations
-            WHERE user_id = v_admin_id
-              AND status = 'active'
-              AND tenant_id IS DISTINCT FROM v_system_tenant_id
-        ) THEN
-            RAISE EXCEPTION 'system admin has a reservation attached to another tenant';
-        END IF;
 
         IF v_active_reserved > v_balance.frozen_balance THEN
             RAISE EXCEPTION 'active balance reservations exceed frozen balance';
@@ -432,7 +403,7 @@ BEGIN
             UPDATE balance_reservations
             SET status = 'expired',
                 updated_at = NOW()
-            WHERE user_id = v_admin_id
+            WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
               AND status = 'active'
               AND expires_at <= NOW()
             RETURNING amount
@@ -457,7 +428,7 @@ BEGIN
         SELECT COUNT(*)
         INTO v_active_count
         FROM balance_reservations
-        WHERE user_id = v_admin_id
+        WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
           AND status = 'active';
 
         IF v_active_count > 0 THEN
@@ -530,12 +501,12 @@ BEGIN
         v_effective_from := clock_timestamp();
 
         INSERT INTO tenant_distribution_rules (
-            tenant_id, beneficiary_id, name, description, commission_rate,
+            tenant_id, beneficiary_scope, beneficiary_id, name, description, commission_rate,
             priority, effective_from
         )
         VALUES (
             v_system_tenant_id,
-            '00000000-0000-0000-0000-000000000000',
+            'everyone', NULL,
             '一级分销规则',
             '默认一级分销规则，推荐人可获得指定比例的分销佣金',
             v_level1_ratio,
@@ -544,12 +515,12 @@ BEGIN
         );
 
         INSERT INTO tenant_distribution_rules (
-            tenant_id, beneficiary_id, name, description, commission_rate,
+            tenant_id, beneficiary_scope, beneficiary_id, name, description, commission_rate,
             priority, effective_from
         )
         VALUES (
             v_system_tenant_id,
-            '00000000-0000-0000-0000-000000000000',
+            'everyone', NULL,
             '二级分销规则',
             '默认二级分销规则，间接推荐人可获得指定比例的分销佣金',
             v_level2_ratio,
@@ -557,11 +528,15 @@ BEGIN
             v_effective_from + interval '1 microsecond'
         );
     END IF;
+    INSERT INTO tenant_audit_events(scope_type,tenant_id,actor_user_id,credential_kind,actor_platform_role,
+        action,resource_type,resource_id,details,result)
+    VALUES('platform',NULL,v_admin_id,'system','root','user.recovery','user',v_admin_id::text,
+        jsonb_build_object('reason','authorized local account recovery'),'success');
 END $bootstrap$;
 
 SELECT id || '|' || email
 FROM users
-WHERE role = 'system'
+WHERE platform_role='root' AND lower(email)=lower({email_sql})
 ORDER BY created_at ASC, id ASC
 LIMIT 1;
 
@@ -587,7 +562,7 @@ if result.returncode != 0:
 
 lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
 if not lines:
-    print("[ERROR] 事务已提交但未找到 system 账号", file=sys.stderr)
+    print("[ERROR] 事务已提交但未找到配置的 root 账号", file=sys.stderr)
     sys.exit(1)
 print(lines[-1])
 PYEOF

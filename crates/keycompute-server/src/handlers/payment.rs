@@ -476,7 +476,7 @@ pub async fn get_payment_order(
         .ok_or(ApiError::NotFound("订单不存在".to_string()))?;
 
     // 验证权限
-    if !auth.has_permission(&Permission::SystemAdmin)
+    if !auth.has_permission(&Permission::ManageBilling)
         && (order.user_id != auth.user_id || order.tenant_id != auth.tenant_id)
     {
         return Err(ApiError::Forbidden("无权访问此订单".to_string()));
@@ -1011,7 +1011,7 @@ pub async fn admin_verify_payment_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keycompute_auth::{AuthType, build_permissions};
+    use keycompute_types::CredentialKind;
 
     #[test]
     fn test_create_payment_order_request() {
@@ -1026,42 +1026,65 @@ mod tests {
 
     #[test]
     fn test_self_service_billing_rejects_api_keys_and_allows_user_jwt_permissions() {
-        let api_key_auth =
-            AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user")
-                .with_permissions(build_permissions(AuthType::ApiKey, "user"));
+        let api_key_auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::ApiKey,
+        )
+        .with_permissions(vec![Permission::UseApi]);
         assert!(matches!(
             require_own_billing_permission(&api_key_auth),
             Err(ApiError::Forbidden(_))
         ));
 
-        let jwt_auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::nil(), "user")
-            .with_permissions(build_permissions(AuthType::Jwt, "user"));
+        let jwt_auth = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::nil(),
+            CredentialKind::Jwt,
+        )
+        .with_permissions(vec![Permission::ManageOwnBilling]);
         assert!(require_own_billing_permission(&jwt_auth).is_ok());
     }
 
     #[test]
     fn test_billing_admin_permission_gates_admin_payment_handlers() {
         // 普通用户 JWT 没有 ManageBilling，必须被拒绝
-        let user_jwt = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::nil(), "user")
-            .with_permissions(build_permissions(AuthType::Jwt, "user"));
+        let user_jwt = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::nil(),
+            CredentialKind::Jwt,
+        )
+        .with_permissions(vec![Permission::ManageOwnBilling]);
         assert!(matches!(
             require_billing_admin_permission(&user_jwt),
             Err(ApiError::Forbidden(_))
         ));
 
         // API Key 即使角色是 admin 也只有 UseApi，必须被拒绝
-        let admin_api_key =
-            AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
-                .with_permissions(build_permissions(AuthType::ApiKey, "admin"));
+        let admin_api_key = AuthExtractor::new(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            CredentialKind::ApiKey,
+        )
+        .with_permissions(vec![Permission::UseApi]);
         assert!(matches!(
             require_billing_admin_permission(&admin_api_key),
             Err(ApiError::Forbidden(_))
         ));
 
-        // admin / system 角色的 JWT 均持有 ManageBilling
-        for role in ["admin", "system"] {
-            let jwt = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::nil(), role)
-                .with_permissions(build_permissions(AuthType::Jwt, role));
+        // An explicitly granted typed billing permission is sufficient.
+        for _ in 0..2 {
+            let jwt = AuthExtractor::new(
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::nil(),
+                CredentialKind::Jwt,
+            )
+            .with_permissions(vec![Permission::ManageBilling]);
             assert!(require_billing_admin_permission(&jwt).is_ok());
         }
     }

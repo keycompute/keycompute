@@ -17,10 +17,13 @@ pub fn Settings() -> Element {
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
     let current_user = user_store.info.read().clone();
-    let is_admin = current_user.as_ref().map(|u| u.is_admin()).unwrap_or(false);
+    let can_manage_console = current_user
+        .as_ref()
+        .map(|u| u.can_manage_console())
+        .unwrap_or(false);
     let is_system = current_user
         .as_ref()
-        .map(|u| u.role == "system")
+        .map(|u| u.has_platform_permission("protected_users:manage"))
         .unwrap_or(false);
 
     let settings = use_resource(move || async move {
@@ -49,7 +52,7 @@ pub fn Settings() -> Element {
     let default_user_quota = get_val("default_user_quota");
     let jwt_expire = get_val("jwt_expire_hours");
     let distribution_enabled = get_val("distribution_enabled");
-    let page_description = if is_admin {
+    let page_description = if can_manage_console {
         i18n.t("settings.admin_desc")
     } else {
         i18n.t("settings.user_desc")
@@ -62,7 +65,7 @@ pub fn Settings() -> Element {
                 description: page_description.to_string(),
             }
 
-            if !is_admin {
+            if !can_manage_console {
                 div { class: "alert alert-info",
                     span { class: "alert-icon", "ℹ" }
                     div { class: "alert-content",
@@ -104,7 +107,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.site_name_desc").to_string(),
                                     setting_key: "site_name",
                                     value: platform_name.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error
@@ -114,7 +117,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.default_user_quota_desc").to_string(),
                                     setting_key: "default_user_quota",
                                     value: default_user_quota.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -125,7 +128,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.default_currency_desc").to_string(),
                                     setting_key: "default_currency",
                                     value: currency.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -139,7 +142,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.min_recharge_desc").to_string(),
                                     setting_key: "min_recharge_amount",
                                     value: min_recharge.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -150,7 +153,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.max_recharge_desc").to_string(),
                                     setting_key: "max_recharge_amount",
                                     value: max_recharge.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -172,7 +175,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.alipay_enabled_desc").to_string(),
                                     setting_key: "alipay_enabled",
                                     value: alipay_enabled.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error
@@ -182,7 +185,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.wechatpay_enabled_desc").to_string(),
                                     setting_key: "wechatpay_enabled",
                                     value: wechatpay_enabled.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error
@@ -205,7 +208,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.jwt_expire_desc").to_string(),
                                     setting_key: "jwt_expire_hours",
                                     value: jwt_expire.clone(),
-                                    editable: is_admin,
+                                    editable: can_manage_console,
                                     auth_store,
                                     save_ok,
                                     save_error,

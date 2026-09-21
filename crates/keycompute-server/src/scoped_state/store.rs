@@ -159,7 +159,7 @@ pub async fn transaction(pool: &DbRouter, scope: Scope) -> Result<DatabaseTransa
 }
 pub async fn check_scope(db: &impl ConnectionTrait, scope: Scope) -> Result<()> {
     let row=timed(db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT 1 FROM users u JOIN tenants t ON t.id=u.tenant_id WHERE u.id=$1 AND t.id=$2 AND t.status='active'",
+        "SELECT 1 FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.tenant_id=$2 AND m.status='active' AND t.status='active'",
         [scope.user.into(),scope.tenant.into()]))).await?;
     if row.is_none() {
         return Err(missing());

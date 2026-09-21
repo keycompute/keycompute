@@ -737,7 +737,7 @@ fn test_equal_priority_global_rules_deterministic_match() {
 mod db_tests {
     use super::*;
     use integration_tests::db::{create_test_pool, create_test_tenant};
-    use keycompute_db::{TenantDistributionRule, UpdateDistributionRuleRequest};
+    use keycompute_db::{BeneficiaryScope, TenantDistributionRule, UpdateDistributionRuleRequest};
     use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
     use std::str::FromStr;
 
@@ -798,7 +798,7 @@ mod db_tests {
             .await
             .expect("find_all_by_tenant should succeed")
             .into_iter()
-            .filter(|r| r.beneficiary_id == Uuid::nil() && r.priority == 100)
+            .filter(|r| r.beneficiary_id.is_none() && r.priority == 100)
             .collect();
 
         assert_eq!(
@@ -850,7 +850,7 @@ mod db_tests {
             .await
             .expect("find_all_by_tenant should succeed")
             .into_iter()
-            .filter(|r| r.beneficiary_id == Uuid::nil() && r.priority == 100)
+            .filter(|r| r.beneficiary_id.is_none() && r.priority == 100)
             .count();
         assert_eq!(
             global_p100_count, 1,
@@ -905,7 +905,7 @@ mod db_tests {
             .expect("find_all_by_tenant should succeed")
             .into_iter()
             .filter(|r| {
-                r.beneficiary_id == Uuid::nil()
+                r.beneficiary_id.is_none()
                     && r.priority == TenantDistributionRule::GLOBAL_OVERRIDE_PRIORITY
             })
             .count();
@@ -940,7 +940,8 @@ mod db_tests {
                 &pool,
                 &CreateDistributionRuleRequest {
                     tenant_id: tenant.id,
-                    beneficiary_id: Uuid::nil(),
+                    beneficiary_scope: BeneficiaryScope::Everyone,
+                    beneficiary_id: None,
                     name: format!("Legacy Dup {}", i),
                     description: None,
                     commission_rate: BigDecimal::from_str(rate).unwrap(),
@@ -970,7 +971,7 @@ mod db_tests {
             .expect("find_all_by_tenant should succeed")
             .into_iter()
             .filter(|r| {
-                r.beneficiary_id == Uuid::nil()
+                r.beneficiary_id.is_none()
                     && r.priority == TenantDistributionRule::GLOBAL_OVERRIDE_PRIORITY
             })
             .collect();
@@ -1016,12 +1017,12 @@ mod db_tests {
             DbBackend::Postgres,
             r#"
             INSERT INTO tenant_distribution_rules
-                (id, tenant_id, beneficiary_id, name, commission_rate, priority, effective_from, created_at)
+                (id, tenant_id, beneficiary_scope, beneficiary_id, name, commission_rate, priority, effective_from, created_at)
             VALUES
-                ($1, $3, $4, 'Tie Dup A', 0.05, 100, NOW() - INTERVAL '1 second', NOW()),
-                ($2, $3, $4, 'Tie Dup B', 0.06, 100, NOW(), NOW())
+                ($1, $3, 'everyone', NULL, 'Tie Dup A', 0.05, 100, NOW() - INTERVAL '1 second', NOW()),
+                ($2, $3, 'everyone', NULL, 'Tie Dup B', 0.06, 100, NOW(), NOW())
             "#,
-            [id_a.into(), id_b.into(), tenant.id.into(), Uuid::nil().into()],
+            [id_a.into(), id_b.into(), tenant.id.into()],
         ))
         .await
         .expect("seeding identical created_at duplicates should succeed");
@@ -1034,7 +1035,7 @@ mod db_tests {
             .expect("find_by_tenant should succeed")
             .into_iter()
             .find(|r| {
-                r.beneficiary_id == Uuid::nil()
+                r.beneficiary_id.is_none()
                     && r.priority == TenantDistributionRule::GLOBAL_OVERRIDE_PRIORITY
             })
             .expect("a global rule should match");
@@ -1055,7 +1056,7 @@ mod db_tests {
             .expect("find_all_by_tenant should succeed")
             .into_iter()
             .filter(|r| {
-                r.beneficiary_id == Uuid::nil()
+                r.beneficiary_id.is_none()
                     && r.priority == TenantDistributionRule::GLOBAL_OVERRIDE_PRIORITY
                     && r.is_active
             })

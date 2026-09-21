@@ -1,4 +1,4 @@
-use crate::{DbError, Tenant, User};
+use crate::{DbError, Tenant, TenantMembership, User};
 use chrono::{DateTime, Utc};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
@@ -79,16 +79,14 @@ impl ProduceAiKey {
         Tenant::find_by_id_for_key_share(&tx, req.tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("tenant", req.tenant_id))?;
-        let user = User::find_by_id_for_update(&tx, req.user_id)
+        User::find_by_id_for_update(&tx, req.user_id)
             .await?
             .ok_or_else(|| DbError::not_found("user", req.user_id))?;
-        if user.tenant_id != req.tenant_id {
-            return Err(DbError::UserTenantMismatch {
-                user_id: req.user_id,
-                requested_tenant_id: req.tenant_id,
-                actual_tenant_id: user.tenant_id,
-            });
-        }
+        TenantMembership::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT m.* FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id JOIN users u ON u.id=m.user_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.status='active' AND t.status='active' AND u.status='active' FOR SHARE OF m",
+            [req.tenant_id.into(),req.user_id.into()],
+        )).one(&tx).await?
+            .ok_or_else(||DbError::not_found("active membership",format!("{}/{}",req.tenant_id,req.user_id)))?;
 
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -114,6 +112,44 @@ impl ProduceAiKey {
         tx.commit().await?;
 
         Ok(key)
+    }
+
+    /// Personal lists never widen for a tenant administrator.
+    pub async fn list_owned(
+        db: &impl ConnectionTrait,
+        scope: keycompute_types::TenantScope,
+        include_revoked: bool,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT * FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND ($3 OR NOT revoked) ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5",
+            [scope.tenant_id().into(),scope.user_id().into(),include_revoked.into(),limit.clamp(1,1000).into(),offset.max(0).into()],
+        )).all(db).await?)
+    }
+    pub async fn count_owned(
+        db: &impl ConnectionTrait,
+        scope: keycompute_types::TenantScope,
+        include_revoked: bool,
+    ) -> Result<i64, DbError> {
+        let row=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT COUNT(*) FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND ($3 OR NOT revoked)",
+            [scope.tenant_id().into(),scope.user_id().into(),include_revoked.into()],
+        )).await?.ok_or_else(||DbError::Other("key count returned no row".into()))?;
+        Ok(row.try_get_by_index(0)?)
+    }
+    pub async fn find_owned(
+        db: &impl ConnectionTrait,
+        scope: keycompute_types::TenantScope,
+        id: Uuid,
+    ) -> Result<Option<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+            [scope.tenant_id().into(), scope.user_id().into(), id.into()],
+        ))
+        .one(db)
+        .await?)
     }
 
     /// 根据 ID 查找 Produce AI Key

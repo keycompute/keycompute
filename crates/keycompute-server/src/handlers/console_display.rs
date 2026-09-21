@@ -167,8 +167,8 @@ mod tests {
     async fn role_names_without_console_permissions_do_not_reach_the_database() {
         let state = AppState::new();
         let id = uuid::Uuid::new_v4();
-        let auth =
-            AuthExtractor::new(id, id, id, "system").with_permissions(vec![Permission::UseApi]);
+        let auth = AuthExtractor::new(id, id, id, keycompute_types::CredentialKind::Jwt)
+            .with_permissions(vec![Permission::UseApi]);
         assert!(matches!(
             dashboard(auth.clone(), State(state.clone())).await,
             Err(ApiError::Forbidden(_))

@@ -233,7 +233,12 @@ pub(crate) async fn await_initial_stream_status(
 /// dispatched. If the client omitted an output limit, this step applies an
 /// internal bounded risk budget without changing the upstream request body.
 pub(crate) struct GenerationBalanceReservation {
-    owner: Option<(keycompute_billing::BalanceService, uuid::Uuid)>,
+    owner: Option<(
+        keycompute_billing::BalanceService,
+        uuid::Uuid,
+        uuid::Uuid,
+        uuid::Uuid,
+    )>,
     billing_request_id: uuid::Uuid,
 }
 
@@ -244,11 +249,11 @@ impl GenerationBalanceReservation {
         // while the database operation is in flight, Drop can still schedule
         // a best-effort retry instead of leaving the reservation frozen until
         // its expiry sweep.
-        let Some((balance, owner_token)) = self.owner.clone() else {
+        let Some((balance, tenant_id, user_id, owner_token)) = self.owner.clone() else {
             return;
         };
         match balance
-            .release_request_reservation(self.billing_request_id, owner_token)
+            .release_request_reservation(tenant_id, user_id, self.billing_request_id, owner_token)
             .await
         {
             Ok(_) => self.owner = None,
@@ -269,7 +274,7 @@ impl GenerationBalanceReservation {
 
 impl Drop for GenerationBalanceReservation {
     fn drop(&mut self) {
-        let Some((balance, owner_token)) = self.owner.take() else {
+        let Some((balance, tenant_id, user_id, owner_token)) = self.owner.take() else {
             return;
         };
         let billing_request_id = self.billing_request_id;
@@ -279,7 +284,7 @@ impl Drop for GenerationBalanceReservation {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
                 if let Err(error) = balance
-                    .release_request_reservation(billing_request_id, owner_token)
+                    .release_request_reservation(tenant_id, user_id, billing_request_id, owner_token)
                     .await
                 {
                     tracing::error!(%billing_request_id, %error, "failed to release cancelled request balance reservation");
@@ -751,13 +756,13 @@ pub(crate) async fn reserve_generation_balance(
     // gap at any point in the handoff.
     tokio::spawn(async move {
         let reservation_guard = GenerationBalanceReservation {
-            owner: Some((balance.clone(), owner_token)),
+            owner: Some((balance.clone(), tenant_id, user_id, owner_token)),
             billing_request_id,
         };
         let result = balance
             .reserve_request_with_owner_token(
-                user_id,
                 tenant_id,
+                user_id,
                 billing_request_id,
                 owner_token,
                 amount,

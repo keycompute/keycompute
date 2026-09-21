@@ -92,8 +92,8 @@ async fn fund_rate_limit_test_user(
     // pass the billing gate and reach the limiter under test.
     keycompute_db::UserBalance::recharge(
         pool,
-        user_id,
         tenant_id,
+        user_id,
         Decimal::from(100),
         None,
         Some("rate-limit integration test credit"),

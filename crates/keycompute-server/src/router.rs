@@ -364,11 +364,23 @@ pub fn create_router(state: AppState) -> Router {
 
     // ==================== 4. 用户自服务 API（需要认证 + 限流） ====================
     // 用户管理自己的资源，Admin 也可以访问（根据业务逻辑返回不同范围的数据）
-    let user_routes = Router::new()
-        // 当前用户信息
+    let global_self_routes = Router::new()
         .route("/api/v1/me", get(get_current_user))
         .route("/api/v1/me/profile", put(update_profile))
         .route("/api/v1/me/password", put(change_password))
+        .route(
+            "/api/v1/me/tenant",
+            post(crate::handlers::user::select_my_tenant),
+        )
+        .route(
+            "/api/v1/me/memberships",
+            get(crate::handlers::user::list_my_memberships),
+        )
+        .layer(from_fn_with_state(
+            state.clone(),
+            crate::console::global_mutation_middleware,
+        ));
+    let user_routes = Router::new()
         // API Keys 管理
         .route("/api/v1/keys", get(list_my_api_keys).post(create_api_key))
         .route("/api/v1/keys/{id}", delete(delete_api_key))
@@ -747,6 +759,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(responses_routes)
         .merge(anthropic_routes)
         .merge(user_routes)
+        .merge(global_self_routes)
         .merge(admin_routes)
         .merge(billing_routes)
         .merge(debug_routes)
@@ -962,8 +975,8 @@ mod tests {
             serde_json::json!({
                 "error": {
                     "message": "Authentication required",
-                    "type": "auth_required",
-                    "code": "unauthorized",
+                    "type": "authentication_error",
+                    "code": 401,
                 }
             })
         );

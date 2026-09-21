@@ -100,8 +100,11 @@ pub fn App() -> Element {
                     id: user.id.to_string(),
                     email: user.email,
                     name: user.name,
-                    role: user.role,
-                    tenant_id: user.tenant_id.to_string(),
+                    platform_role: user.platform_role,
+                    status: user.status,
+                    memberships: user.memberships,
+                    selected_tenant: user.selected_tenant,
+                    capabilities: user.capabilities,
                 },
             ))
         })
@@ -284,7 +287,7 @@ pub fn AppLayout() -> Element {
         };
     }
 
-    let is_admin = user_store.is_admin();
+    let can_manage_console = user_store.can_manage_console();
     let user_name = user_store
         .info
         .read()
@@ -378,7 +381,7 @@ pub fn AppLayout() -> Element {
     ];
 
     // Admin 专属导航分组（仅 admin 角色可见）
-    if is_admin {
+    if can_manage_console {
         nav_sections.push(NavSection {
             title: Some(i18n.t("nav.group.admin").to_string()),
             items: vec![
@@ -476,13 +479,13 @@ pub fn AdminLayout() -> Element {
     let i18n = I18n::new(Lang::from_str(&lang_signal()));
     let nav = use_navigator();
 
-    let is_admin = user_store.is_admin();
+    let can_manage_console = user_store.can_manage_console();
     // 用户信息已加载（info 不为 None）时才做判断，避免初始化闪屏
     let info_loaded = user_store.info.read().is_some();
     let info_load_failed = (user_store.load_failed)();
 
     use_effect(move || {
-        if info_loaded && !user_store.is_admin() {
+        if info_loaded && !user_store.can_manage_console() {
             ui_store.show_error(i18n.t("common.admin_only_page"));
             nav.replace(Route::Dashboard {});
         }
@@ -514,7 +517,7 @@ pub fn AdminLayout() -> Element {
     }
 
     // 已加载但不是 admin，显示空内容（effect 会立即跳转）
-    if !is_admin {
+    if !can_manage_console {
         return rsx! {};
     }
 

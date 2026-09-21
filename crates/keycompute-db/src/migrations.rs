@@ -227,6 +227,33 @@ mod tests {
     }
 
     #[test]
+    fn identity_schema_has_global_users_scoped_memberships_and_immutable_audit() {
+        let sql = include_str!("../migrations/001_init.sql");
+        for expected in [
+            "status VARCHAR(20) NOT NULL DEFAULT 'active'",
+            "scope_type VARCHAR(20)",
+            "resource_id TEXT",
+            "CREATE TABLE IF NOT EXISTS identity_admin_fence",
+            "CREATE TRIGGER membership_authority_version",
+            "CREATE TRIGGER tenant_audit_immutable",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_user_balances_tenant_user",
+            "CONSTRAINT uk_usage_logs_tenant_id_id UNIQUE (tenant_id, id)",
+            "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT",
+            "CONSTRAINT fk_distribution_records_usage_tenant",
+            "token_hash VARCHAR(64)",
+            "revoked_at TIMESTAMPTZ",
+        ] {
+            assert!(
+                sql.contains(expected),
+                "missing identity schema fragment {expected}"
+            );
+        }
+        assert!(!sql.contains("tenant_id UUID NOT NULL REFERENCES users"));
+        assert!(!sql.contains("ALTER TABLE"));
+        assert!(!sql.contains("00000000-0000-0000-0000-000000000000' AS tenant_id"));
+    }
+
+    #[test]
     fn initial_schema_contains_the_complete_fresh_deployment_schema() {
         for expected in [
             "CREATE TABLE IF NOT EXISTS gateway_requests",
@@ -355,7 +382,11 @@ mod tests {
             "WHERE consumed_node_id IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS idx_node_tasks_status_created_at_desc",
             "ON node_tasks(status, created_at DESC, id DESC)",
-            "tenant_id UUID NOT NULL,\n    model_name VARCHAR(100) NOT NULL",
+            "scope_type VARCHAR(20) NOT NULL DEFAULT 'tenant'",
+            "CONSTRAINT ck_pricing_models_scope CHECK",
+            "scope_type = 'platform' AND tenant_id IS NULL",
+            "scope_type = 'tenant' AND tenant_id IS NOT NULL",
+            "UNIQUE NULLS NOT DISTINCT (tenant_id, model_name, billing_dimension)",
             "version BIGINT NOT NULL DEFAULT 1",
             "CONSTRAINT ck_pricing_models_billing_dimension",
             "CONSTRAINT ck_pricing_models_model_name_nonempty",
@@ -418,6 +449,10 @@ mod tests {
         let schema = include_str!("../migrations/001_init.sql");
         for fragment in [
             "CREATE TABLE IF NOT EXISTS scoped_responses",
+            "CREATE OR REPLACE FUNCTION guard_resource_identity()",
+            "CREATE OR REPLACE FUNCTION guard_node_identity()",
+            "CREATE OR REPLACE FUNCTION revoke_suspended_user_credentials()",
+            "ON user_node_gateway_tokens(tenant_id,user_id)",
             "CREATE TABLE IF NOT EXISTS scoped_conversations",
             "CREATE TABLE IF NOT EXISTS scoped_response_events",
             "uk_scoped_responses_idempotency",
@@ -436,5 +471,31 @@ mod tests {
                 "missing schema contract {fragment}"
             );
         }
+    }
+    #[test]
+    fn tenant_identity_baseline_has_only_the_final_authority_model() {
+        let users = V0001
+            .split("CREATE TABLE IF NOT EXISTS users (")
+            .nth(1)
+            .unwrap()
+            .split("\n);")
+            .next()
+            .unwrap();
+        assert!(users.contains("platform_role"));
+        assert!(!users.contains("tenant_id"));
+        assert!(!users.contains("\n    role "));
+        for required in [
+            "PRIMARY KEY (tenant_id, user_id)",
+            "CREATE CONSTRAINT TRIGGER identity_users_guard",
+            "CREATE CONSTRAINT TRIGGER identity_tenants_guard",
+            "CREATE CONSTRAINT TRIGGER identity_memberships_guard",
+            "CREATE TRIGGER membership_credentials_revoked",
+            "fk_node_registration_membership",
+            "CREATE TRIGGER tenant_audit_immutable",
+            "CREATE TRIGGER tenant_audit_no_truncate",
+        ] {
+            assert!(V0001.contains(required), "missing {required}");
+        }
+        assert!(!V0001.contains("root@keycompute.invalid"));
     }
 }

@@ -4,7 +4,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::GlobalConsoleAuth,
     handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
@@ -14,204 +14,54 @@ use axum::{
     http::HeaderMap,
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use keycompute_auth::Permission;
+use keycompute_auth::AuthorizationAction;
 use keycompute_billing::balance::{
     BalanceReservationPageCursor, MAX_BALANCE_RESERVATION_PAGE_SIZE,
 };
 use keycompute_db::models::account::Account;
 use keycompute_db::models::api_key::ProduceAiKey;
-use keycompute_db::models::payment_order::PaymentOrder;
 use keycompute_db::models::tenant::{
     CreateTenantRequest as DbCreateTenantRequest, Tenant,
     UpdateTenantRequest as DbUpdateTenantRequest,
 };
 use keycompute_db::models::user::User;
-use keycompute_db::models::user_balance::UserBalance;
 use keycompute_db::models::user_credential::UserCredential;
-use keycompute_types::{AssignableUserRole, UserRole};
+use keycompute_types::PlatformRole;
 use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-use sea_orm::{ConnectionTrait, TransactionTrait};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ==================== 用户管理 ====================
 
-/// 用户信息（Admin 视图）
+/// Platform identity responses never project a user's arbitrary membership.
 #[derive(Debug, Serialize)]
 pub struct AdminUserInfo {
     pub id: Uuid,
     pub email: String,
     pub name: Option<String>,
-    pub role: String,
-    pub tenant_id: Uuid,
-    pub tenant_name: String,
-    /// 可用余额
-    pub balance: f64,
-    /// 冻结余额
-    pub frozen_balance: f64,
-    /// Display-only snapshot metadata; never a spending authorization.
-    pub balance_initialized: bool,
-    pub balance_as_of: String,
+    pub platform_role: String,
+    pub status: String,
     pub created_at: String,
     pub updated_at: String,
     pub last_login_at: Option<String>,
 }
-
-/// 用户列表查询参数
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UserListQueryParams {
-    /// 租户 ID 过滤（可选）
-    pub tenant_id: Option<Uuid>,
-    /// 角色过滤（可选）
-    pub role: Option<String>,
-    /// 搜索关键词（邮箱或名称）
+    pub platform_role: Option<PlatformRole>,
     pub search: Option<String>,
-    /// 页码（从 1 开始）
     #[serde(default = "default_page")]
     pub page: i64,
-    /// 每页数量
     #[serde(default = "default_page_size")]
     pub page_size: i64,
 }
-
 fn default_page() -> i64 {
     1
 }
-
 fn default_page_size() -> i64 {
     20
 }
-
-/// 一阶保护：禁止缺少受保护用户管理权限的调用方修改 system 用户。
-///
-/// 无论是改名称、改角色还是余额操作，未授权 caller 一律拒绝。
-/// 此校验与 `validate_role_change_request` 互补：
-/// - 本函数覆盖"是否能触碰 system 用户"的全局边界
-/// - `validate_role_change_request` 覆盖"角色变更"的精细规则
-fn validate_not_admin_modifying_system(auth: &AuthExtractor, target_user: &User) -> Result<()> {
-    if !auth.has_permission(&Permission::ManageProtectedUsers)
-        && target_user.role == UserRole::System.as_str()
-    {
-        return Err(ApiError::Forbidden(
-            "Protected user management permission required".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// 二阶保护：校验角色变更请求的合法性。
-///
-/// 规则（按检查顺序）：
-/// 1. 未请求变更角色 → 直接通过
-/// 2. 仅有受保护用户管理权限的调用方可变更他人角色
-/// 3. system 角色不能变更自己的角色
-/// 4. system 角色的 role 字段不可被修改（即使 caller 是 system）
-///
-/// 调用约定：必须和 `validate_not_admin_modifying_system` 搭配使用，
-/// 后者负责拦截未授权 caller 对 system 用户的任何修改。
-fn validate_role_change_request(
-    auth: &AuthExtractor,
-    target_user_id: Uuid,
-    target_user: &User,
-    requested_role: &Option<AssignableUserRole>,
-) -> Result<()> {
-    if requested_role.is_none() {
-        return Ok(());
-    }
-
-    if !auth.has_permission(&Permission::ManageProtectedUsers) {
-        return Err(ApiError::Forbidden(
-            "Protected user management permission required".to_string(),
-        ));
-    }
-
-    if auth.user_id == target_user_id {
-        return Err(ApiError::BadRequest(
-            "System cannot modify its own role".to_string(),
-        ));
-    }
-
-    if target_user.role == UserRole::System.as_str() {
-        return Err(ApiError::BadRequest(
-            "System role cannot be modified".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-/// 校验租户变更请求的租户管理权限及受保护用户边界。
-///
-/// `None` 表示保持原租户；请求原租户 ID 也视为 no-op，不应要求额外权限。
-fn validate_tenant_change_request(
-    auth: &AuthExtractor,
-    target_user_id: Uuid,
-    target_user: &User,
-    requested_tenant_id: Option<Uuid>,
-) -> Result<bool> {
-    let Some(new_tenant_id) = requested_tenant_id else {
-        return Ok(false);
-    };
-    if new_tenant_id == target_user.tenant_id {
-        return Ok(false);
-    }
-    if !auth.has_permission(&Permission::ManageTenant) {
-        return Err(ApiError::Forbidden(
-            "Tenant management permission required to change user tenant".to_string(),
-        ));
-    }
-    // Admin users are a protected management boundary, just like role edits
-    // and deletes.  Keep tenant reassignment from becoming a privilege
-    // escalation path for callers that only have ordinary tenant-management
-    // permission.
-    if target_user.role == UserRole::Admin.as_str()
-        && !auth.has_permission(&Permission::ManageProtectedUsers)
-    {
-        return Err(ApiError::Forbidden(
-            "Protected user management permission required".to_string(),
-        ));
-    }
-    if target_user_id == auth.user_id {
-        return Err(ApiError::BadRequest(
-            "Cannot change your own tenant".to_string(),
-        ));
-    }
-    if target_user.role == UserRole::System.as_str() {
-        return Err(ApiError::BadRequest(
-            "System user tenant cannot be changed".to_string(),
-        ));
-    }
-    Ok(true)
-}
-
-fn validate_user_delete_request(
-    auth: &AuthExtractor,
-    target_user_id: Uuid,
-    target_user: &User,
-) -> Result<()> {
-    if target_user_id == auth.user_id {
-        return Err(ApiError::BadRequest("Cannot delete yourself".to_string()));
-    }
-
-    if target_user.role == UserRole::System.as_str() {
-        return Err(ApiError::BadRequest(
-            "System user cannot be deleted".to_string(),
-        ));
-    }
-
-    if target_user.role == UserRole::Admin.as_str()
-        && !auth.has_permission(&Permission::ManageProtectedUsers)
-    {
-        return Err(ApiError::Forbidden(
-            "Protected user management permission required".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-/// 用户列表响应（带分页信息）
 #[derive(Debug, Serialize)]
 pub struct UserListResponse {
     pub users: Vec<AdminUserInfo>,
@@ -220,474 +70,242 @@ pub struct UserListResponse {
     pub page_size: i64,
     pub total_pages: i64,
 }
-
-/// 列出所有用户
-///
-/// GET /api/v1/users
-///
-/// 支持查询参数：
-/// - tenant_id: 租户 ID 过滤
-/// - role: 角色过滤
-/// - search: 搜索关键词
-/// - page: 页码（默认 1）
-/// - page_size: 每页数量（默认 20）
-///
-/// Admin 可以查询所有租户的用户。
-///
-/// 过滤条件下推到 SQL 层以保证分页准确性。
-pub async fn list_all_users(
-    auth: AuthExtractor,
-    State(state): State<AppState>,
-    Query(params): Query<UserListQueryParams>,
-) -> Result<Json<UserListResponse>> {
-    // 检查权限
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    let (page, page_size, offset) = super::pagination::normalize_list_pagination(
-        Some(params.page),
-        Some(params.page_size),
-        None,
-        None,
-    );
-    let params = UserListQueryParams {
-        page,
-        page_size,
-        ..params
-    };
-
-    // 过滤条件下推到 SQL 层，保证分页准确性
-    let tenant_id_filter = params.tenant_id;
-    let role_filter = params.role.as_deref();
-    let search_filter = params.search.as_deref();
-
-    // This is a management read immediately adjacent to reassignment writes.
-    // Keep it on the writer so a successful move is visible when the UI
-    // refreshes instead of briefly rendering a replica's old tenant.
-    let writer = pool.write_conn();
-    let users = User::find_all_filtered(
-        writer,
-        tenant_id_filter,
-        role_filter,
-        search_filter,
-        params.page_size,
-        offset,
-    )
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to query users: {}", e)))?;
-
-    // 统计过滤后的用户总数（同样下推到 SQL）
-    let total = User::count_all_filtered(writer, tenant_id_filter, role_filter, search_filter)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
-
-    // 预加载所有租户到 HashMap（避免 N+1 查询）
-    let tenants = Tenant::find_all(writer)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query tenants: {}", e)))?;
-    let tenant_map: std::collections::HashMap<Uuid, String> =
-        tenants.into_iter().map(|t| (t.id, t.name)).collect();
-
-    // 批量预加载余额（避免 N+1 查询）
-    let user_ids: Vec<Uuid> = users.iter().map(|u| u.id).collect();
-    let balance_map = state
-        .billing
-        .balance_service()
-        .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?
-        .find_display_snapshots(&user_ids)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query balance snapshots: {e}")))?;
-
-    // Ordinary statements can straddle a committed reassignment. Do not
-    // combine an old user's tenant label with another snapshot's owner.
-    for user in &users {
-        if balance_map
-            .get(&user.id)
-            .is_none_or(|snapshot| snapshot.tenant_id != user.tenant_id)
-        {
-            return Err(ApiError::Conflict(
-                "User changed while loading balances; please retry".into(),
-            ));
-        }
-    }
-
-    // 批量预加载用户的最后登录时间（避免 N+1 查询）
-    let credential_map: std::collections::HashMap<Uuid, UserCredential> =
-        UserCredential::find_by_user_ids(writer, &user_ids)
-            .await
-            .unwrap_or_default();
-
-    // 构建用户信息列表
-    let result: Vec<AdminUserInfo> = users
-        .into_iter()
-        .map(|user| {
-            let balance = balance_map
-                .get(&user.id)
-                .expect("snapshot exists for every listed user");
-            let tenant_name = tenant_map
-                .get(&user.tenant_id)
-                .cloned()
-                .unwrap_or_else(|| "Unknown".to_string());
-
-            AdminUserInfo {
-                id: user.id,
-                email: user.email.clone(),
-                name: user.name.clone(),
-                role: user.role.clone(),
-                tenant_id: user.tenant_id,
-                tenant_name,
-                balance: balance.available_balance.to_f64().unwrap_or(0.0),
-                frozen_balance: balance.frozen_balance.to_f64().unwrap_or(0.0),
-                balance_initialized: balance.initialized,
-                balance_as_of: balance.as_of.to_rfc3339(),
-                created_at: user.created_at.to_rfc3339(),
-                updated_at: user.updated_at.to_rfc3339(),
-                last_login_at: credential_map
-                    .get(&user.id)
-                    .and_then(|c| c.last_login_at.map(|t| t.to_rfc3339())),
-            }
-        })
-        .collect();
-
-    // 基于过滤后的 total 计算总页数
-    let total_pages = super::pagination::total_pages(total, params.page_size);
-
-    Ok(Json(UserListResponse {
-        users: result,
-        total,
-        page: params.page,
-        page_size: params.page_size,
-        total_pages,
-    }))
-}
-
-/// 获取指定用户信息
-///
-/// GET /api/v1/users/{id}
-pub async fn get_user_by_id(
-    auth: AuthExtractor,
-    Path(user_id): Path<Uuid>,
-    State(state): State<AppState>,
-) -> Result<Json<AdminUserInfo>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    // Admin detail views are commonly used immediately after an edit; read
-    // the authoritative row from the writer rather than a lagging replica.
-    let writer = pool.write_conn();
-    let user = User::find_by_id(writer, user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query user: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
-
-    // 获取租户名称
-    let tenant = Tenant::find_by_id(writer, user.tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query tenant: {}", e)))?;
-    let tenant_name = tenant
-        .map(|t| t.name)
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    // 获取用户余额
-    let balance = state
-        .billing
-        .balance_service()
-        .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?
-        .find_display_snapshot(user.tenant_id, user.id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query balance snapshot: {e}")))?;
-
-    // 获取用户最后登录时间
-    let last_login = UserCredential::find_by_user_id(writer, user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query credentials: {}", e)))?
-        .and_then(|c| c.last_login_at.map(|t| t.to_rfc3339()));
-
-    Ok(Json(AdminUserInfo {
+fn global_user_info(user: User, last_login_at: Option<String>) -> AdminUserInfo {
+    AdminUserInfo {
         id: user.id,
         email: user.email,
         name: user.name,
-        role: user.role,
-        tenant_id: user.tenant_id,
-        tenant_name,
-        balance: balance.available_balance.to_f64().unwrap_or(0.0),
-        frozen_balance: balance.frozen_balance.to_f64().unwrap_or(0.0),
-        balance_initialized: balance.initialized,
-        balance_as_of: balance.as_of.to_rfc3339(),
+        platform_role: user.platform_role,
+        status: user.status,
         created_at: user.created_at.to_rfc3339(),
         updated_at: user.updated_at.to_rfc3339(),
-        last_login_at: last_login,
+        last_login_at,
+    }
+}
+fn audit_actor(auth: &GlobalConsoleAuth) -> keycompute_db::AuditContext {
+    keycompute_db::AuditContext {
+        actor_user_id: auth.user_id,
+        credential_kind: auth.credential_kind,
+        actor_platform_role: auth.platform_role,
+        actor_tenant_role: auth.tenant_role,
+        request_id: None,
+    }
+}
+fn platform_manage(auth: &GlobalConsoleAuth) -> Result<()> {
+    auth.require_platform(AuthorizationAction::ManagePlatform)
+        .map_err(ApiError::from)?;
+    Ok(())
+}
+async fn platform_audit(
+    tx: &sea_orm::DatabaseTransaction,
+    auth: &GlobalConsoleAuth,
+    action: &str,
+    resource: &str,
+    id: Uuid,
+    details: serde_json::Value,
+) -> Result<()> {
+    keycompute_db::TenantAuditEvent::append(
+        tx,
+        keycompute_types::AuditScopeType::Platform,
+        None,
+        &audit_actor(auth),
+        action,
+        resource,
+        Some(&id.to_string()),
+        keycompute_types::AuditResult::Success,
+        details,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(())
+}
+pub async fn list_all_users(
+    auth: GlobalConsoleAuth,
+    State(state): State<AppState>,
+    Query(query): Query<UserListQueryParams>,
+) -> Result<Json<UserListResponse>> {
+    platform_manage(&auth)?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let (page, page_size, offset) =
+        normalize_list_pagination(Some(query.page), Some(query.page_size), None, None);
+    let users = User::find_all_filtered(
+        pool.write_conn(),
+        query.platform_role,
+        query.search.as_deref(),
+        page_size,
+        offset,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let total = User::count_all_filtered(
+        pool.write_conn(),
+        query.platform_role,
+        query.search.as_deref(),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let ids = users.iter().map(|u| u.id).collect::<Vec<_>>();
+    let credentials = UserCredential::find_by_user_ids(pool.write_conn(), &ids)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let users = users
+        .into_iter()
+        .map(|user| {
+            let last = credentials
+                .get(&user.id)
+                .and_then(|c| c.last_login_at)
+                .map(|time| time.to_rfc3339());
+            global_user_info(user, last)
+        })
+        .collect();
+    Ok(Json(UserListResponse {
+        users,
+        total,
+        page,
+        page_size,
+        total_pages: total_pages(total, page_size),
     }))
 }
-
-/// 更新用户请求
+pub async fn get_user_by_id(
+    auth: GlobalConsoleAuth,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<AdminUserInfo>> {
+    platform_manage(&auth)?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let user = User::find_by_id(pool.write_conn(), id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+    let credential = UserCredential::find_by_user_id(pool.write_conn(), id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(Json(global_user_info(
+        user,
+        credential
+            .and_then(|c| c.last_login_at)
+            .map(|t| t.to_rfc3339()),
+    )))
+}
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateUserRequest {
     pub name: Option<String>,
-    pub role: Option<AssignableUserRole>,
-    /// 目标租户 ID；省略时保持原租户。
-    pub tenant_id: Option<Uuid>,
+    pub platform_role: Option<PlatformRole>,
+    pub status: Option<keycompute_types::UserStatus>,
+    pub reason: Option<String>,
 }
-
-/// 更新用户信息
-///
-/// PUT /api/v1/users/{id}
 pub async fn update_user(
-    auth: AuthExtractor,
-    Path(user_id): Path<Uuid>,
+    auth: GlobalConsoleAuth,
+    Path(id): Path<Uuid>,
     State(state): State<AppState>,
     Json(req): Json<UpdateUserRequest>,
-) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    // Read the current source tenant from the writer before opening the
-    // mutation transaction.  A tenant reassignment needs both this source
-    // identity and the requested target to establish a deterministic parent
-    // lock order; the locked user is re-read below before any child rows are
-    // changed.
-    let initial_user = User::find_by_id(pool.write_conn(), user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find user: {e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {user_id}")))?;
-    let initial_source_tenant_id = initial_user.tenant_id;
-    let requested_tenant_id = req.tenant_id;
-
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin user update: {e}")))?;
-
-    // Tenant deletion and all tenant-scoped child inserts take a parent lock
-    // before touching users.  Acquire the source and requested target locks
-    // in UUID order so two concurrent moves in opposite directions cannot
-    // deadlock while each holds one tenant.  The source uses KEY SHARE (it is
-    // only read during the move); the target uses FOR UPDATE so its active
-    // status cannot change between validation and the user update.
-    let mut locked_target_tenant: Option<Tenant> = None;
-    if let Some(target_tenant_id) = requested_tenant_id {
-        let mut tenant_ids = vec![initial_source_tenant_id, target_tenant_id];
-        tenant_ids.sort_unstable();
-        tenant_ids.dedup();
-
-        for tenant_id in tenant_ids {
-            let is_target =
-                tenant_id == target_tenant_id && target_tenant_id != initial_source_tenant_id;
-            let tenant = if is_target {
-                Tenant::find_by_id_for_update(&txn, tenant_id).await
-            } else {
-                Tenant::find_by_id_for_key_share(&txn, tenant_id).await
-            }
-            .map_err(|e| ApiError::Internal(format!("Failed to lock tenant: {e}")))?;
-
-            let Some(tenant) = tenant else {
-                let _ = txn.rollback().await;
-                if is_target {
-                    return Err(ApiError::NotFound(format!(
-                        "Tenant not found: {target_tenant_id}"
-                    )));
-                }
-                return Err(ApiError::Conflict(
-                    "User tenant changed; refresh and retry".to_string(),
-                ));
-            };
-
-            if is_target {
-                locked_target_tenant = Some(tenant);
-            }
-        }
-    }
-
-    // Keep the user lock compatible with the KEY SHARE lock that PostgreSQL
-    // takes for child-table foreign-key checks. The move subsequently locks
-    // pending orders/balance, so a stronger FOR UPDATE here would create a
-    // U -> child lock order that can deadlock with payment/reservation paths
-    // (child -> KEY SHARE(U)). NO KEY UPDATE still serializes all user-row
-    // updates and deletes.
-    let user = User::find_by_id_for_no_key_update(&txn, user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find user: {e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {user_id}")))?;
-
-    // If the source changed after the pre-read, do not apply the request to a
-    // different tenant using locks chosen for the stale source.  Releasing
-    // the transaction before returning also avoids retaining parent locks
-    // while the caller refreshes its view.
-    if requested_tenant_id.is_some() && user.tenant_id != initial_source_tenant_id {
-        let _ = txn.rollback().await;
-        return Err(ApiError::Conflict(
-            "User tenant changed; refresh and retry".to_string(),
+) -> Result<Json<AdminUserInfo>> {
+    platform_manage(&auth)?;
+    let reason =
+        normalize_admin_balance_reason(req.reason.as_deref().unwrap_or("platform profile update"))?;
+    if (req.platform_role.is_some() || req.status.is_some()) && req.reason.is_none() {
+        return Err(ApiError::BadRequest(
+            "a reason is required for security changes".into(),
         ));
     }
-
-    // 禁止非 system 角色修改 system 用户（包括仅修改名称）。这些是
-    // 预期的客户端错误，但事务已经持有租户/用户锁，必须显式回滚后再
-    // 返回，避免连接池暂时保留锁。
-    if let Err(error) = validate_not_admin_modifying_system(&auth, &user) {
-        let _ = txn.rollback().await;
-        return Err(error);
-    }
-    if let Err(error) = validate_role_change_request(&auth, user_id, &user, &req.role) {
-        let _ = txn.rollback().await;
-        return Err(error);
-    }
-    let tenant_changed =
-        match validate_tenant_change_request(&auth, user_id, &user, requested_tenant_id) {
-            Ok(changed) => changed,
-            Err(error) => {
-                let _ = txn.rollback().await;
-                return Err(error);
-            }
-        };
-
-    if tenant_changed {
-        let target_tenant_id = requested_tenant_id.expect("tenant change was validated");
-        let target_tenant = locked_target_tenant
-            .take()
-            .expect("target tenant must be locked before a tenant move");
-        if target_tenant.slug == "system" {
-            let _ = txn.rollback().await;
-            return Err(ApiError::BadRequest(
-                "The system tenant is reserved for the system user".to_string(),
-            ));
-        }
-        if !target_tenant.is_active() {
-            let _ = txn.rollback().await;
-            return Err(ApiError::Conflict(
-                "Cannot move a user to an inactive tenant".to_string(),
-            ));
-        }
-
-        // Payment callbacks lock the order before the balance. Move pending
-        // orders before taking the balance lock to preserve that lock order
-        // and ensure a later source-tenant deletion cannot cascade-delete an
-        // order that the user may already have paid at the provider.
-        if let Err(error) =
-            PaymentOrder::reassign_pending_for_user(&txn, user_id, user.tenant_id, target_tenant_id)
-                .await
-        {
-            let _ = txn.rollback().await;
-            return Err(ApiError::Internal(format!(
-                "Failed to move pending payment orders: {error}"
-            )));
-        }
-
-        if let Err(error) = UserBalance::reassign_tenant(&txn, user_id, target_tenant_id).await {
-            let api_error = match error {
-                keycompute_db::DbError::UserHasActiveBalanceReservations { count } => {
-                    ApiError::Conflict(format!(
-                        "User has {count} active balance reservation(s); wait for them to settle before changing tenant"
-                    ))
-                }
-                other => ApiError::Internal(format!("Failed to move user balance: {other}")),
-            };
-            let _ = txn.rollback().await;
-            return Err(api_error);
-        }
-
-        // A tenant-scoped API key must never remain usable after a move. JWTs
-        // are invalidated by User::update's token_version bump below.
-        if let Err(error) = ProduceAiKey::revoke_all_for_user(&txn, user_id).await {
-            let _ = txn.rollback().await;
-            return Err(ApiError::Internal(format!(
-                "Failed to revoke user API keys: {error}"
-            )));
-        }
-    }
-
-    let update_req = keycompute_db::models::user::UpdateUserRequest {
-        name: req.name,
-        role: req.role,
-        tenant_id: req.tenant_id,
-    };
-
-    let updated = user
-        .update_in_tx(&txn, &update_req)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to update user: {}", e)))?;
-
-    // Resolve the response projection before committing. A post-commit read
-    // failure must not turn an already-applied mutation into a misleading
-    // HTTP 500 that encourages a client retry.
-    let tenant_name = Tenant::find_by_id(&txn, updated.tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query updated tenant: {e}")))?
-        .map(|tenant| tenant.name)
-        .unwrap_or_else(|| "Unknown".to_string());
-
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit user update: {e}")))?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "User updated",
-        "user_id": updated.id,
-        "email": updated.email,
-        "name": updated.name,
-        "role": updated.role,
-        "tenant_id": updated.tenant_id,
-        "tenant_name": tenant_name,
-    })))
-}
-
-/// 删除用户
-///
-/// DELETE /api/v1/users/{id}
-pub async fn delete_user(
-    auth: AuthExtractor,
-    Path(user_id): Path<Uuid>,
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    let user = User::find_by_id(pool, user_id)
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool
+        .begin()
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
-
-    validate_user_delete_request(&auth, user_id, &user)?;
-
-    user.delete(pool)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to delete user: {}", e)))?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "User deleted",
-        "user_id": user_id,
-        "deleted_by": auth.user_id,
-    })))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let user = User::find_by_id(&tx, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+    let role = req.platform_role.unwrap_or(
+        user.platform_role()
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    );
+    let status = req.status.unwrap_or(
+        user.user_status()
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+    );
+    let user = User::set_security(&tx, id, role, status, &audit_actor(&auth))
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    let user = user
+        .update_in_tx(&tx, &keycompute_db::UpdateUserRequest { name: req.name })
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    platform_audit(
+        &tx,
+        &auth,
+        "user.update",
+        "user",
+        id,
+        serde_json::json!({"reason":reason}),
+    )
+    .await?;
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    Ok(Json(global_user_info(user, None)))
+}
+pub async fn delete_user(
+    auth: GlobalConsoleAuth,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>> {
+    platform_manage(&auth)?;
+    if auth.user_id == id {
+        return Err(ApiError::BadRequest("cannot delete yourself".into()));
+    }
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let user = User::find_by_id(&tx, id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
+    let user = User::set_security(
+        &tx,
+        id,
+        user.platform_role()
+            .map_err(|e| ApiError::Internal(e.to_string()))?,
+        keycompute_types::UserStatus::Suspended,
+        &audit_actor(&auth),
+    )
+    .await
+    .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    user.delete(&tx)
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    platform_audit(&tx, &auth, "user.delete", "user", id, serde_json::json!({})).await?;
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    Ok(Json(serde_json::json!({"success":true,"user_id":id})))
 }
 
-/// 更新用户余额请求
 #[derive(Debug, Deserialize)]
 pub struct UpdateBalanceRequest {
+    pub tenant_id: Uuid,
     pub amount: String, // 使用字符串避免浮点精度问题
     pub reason: String,
 }
@@ -707,8 +325,9 @@ pub struct AdminBalanceReservationInfo {
     pub updated_at: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub struct AdminBalanceReservationsQuery {
+    pub tenant_id: Uuid,
     /// Opaque keyset cursor returned by the previous page.
     pub cursor: Option<String>,
     /// Defaults to 50 and is clamped to the data-layer maximum of 100.
@@ -743,6 +362,7 @@ fn decode_balance_reservation_cursor(value: &str) -> Result<BalanceReservationPa
 
 #[derive(Debug, Deserialize)]
 pub struct ReleaseBalanceReservationRequest {
+    pub tenant_id: Uuid,
     /// Version returned by the latest reservations listing. Requiring it
     /// prevents a stale UI selection from releasing a newer retry that reused
     /// the same stable request ID.
@@ -792,28 +412,23 @@ fn validate_reservation_release_reason(reason: &str) -> Result<&str> {
 
 /// 校验管理员是否可以管理目标用户的余额。
 async fn validate_balance_target(
-    auth: &AuthExtractor,
+    auth: &GlobalConsoleAuth,
     state: &AppState,
+    tenant_id: Uuid,
     user_id: Uuid,
 ) -> Result<User> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
+    platform_manage(auth)?;
+    if tenant_id.is_nil() {
+        return Err(ApiError::BadRequest("target tenant is required".into()));
     }
-
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    // Balance mutations use the user's tenant as part of their transactional
-    // identity. Read it from the writer so a just-committed tenant move does
-    // not produce a transient stale-tenant failure while replicas catch up.
-    let target_user = User::find_by_id(pool.write_conn(), user_id)
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    User::find_by_id_in_tenant(pool.write_conn(), user_id, tenant_id)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find user: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", user_id)))?;
-    validate_not_admin_modifying_system(auth, &target_user)?;
-    Ok(target_user)
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::NotFound("tenant member not found".into()))
 }
 
 /// 余额操作的公共上下文
@@ -827,13 +442,13 @@ struct BalanceOpContext {
 ///
 /// 统一处理：权限检查、用户查询、system 保护、金额解析、原因校验
 async fn validate_balance_request(
-    auth: &AuthExtractor,
+    auth: &GlobalConsoleAuth,
     state: &AppState,
     user_id: Uuid,
     req: &UpdateBalanceRequest,
     require_positive: bool,
 ) -> Result<BalanceOpContext> {
-    let target_user = validate_balance_target(auth, state, user_id).await?;
+    validate_balance_target(auth, state, req.tenant_id, user_id).await?;
 
     // 解析金额
     let amount: Decimal = req
@@ -861,7 +476,7 @@ async fn validate_balance_request(
     Ok(BalanceOpContext {
         amount,
         reason,
-        tenant_id: target_user.tenant_id,
+        tenant_id: req.tenant_id,
     })
 }
 
@@ -906,12 +521,12 @@ fn require_admin_balance_idempotency_key(headers: &HeaderMap) -> Result<&str> {
 ///
 /// GET /api/v1/users/{id}/balance/reservations
 pub async fn list_user_balance_reservations(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(user_id): Path<Uuid>,
     Query(query): Query<AdminBalanceReservationsQuery>,
     State(state): State<AppState>,
 ) -> Result<Json<AdminBalanceReservationsResponse>> {
-    let _ = validate_balance_target(&auth, &state, user_id).await?;
+    let _ = validate_balance_target(&auth, &state, query.tenant_id, user_id).await?;
 
     let cursor = query
         .cursor
@@ -928,7 +543,7 @@ pub async fn list_user_balance_reservations(
         .balance_service()
         .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?;
     let page = balance_service
-        .find_breakdown_page_by_user(user_id, cursor, limit)
+        .find_breakdown_page_by_user(query.tenant_id, user_id, cursor, limit)
         .await
         .map_err(ApiError::from)?;
 
@@ -993,12 +608,12 @@ pub async fn list_user_balance_reservations(
 /// must reuse the same version and reason; an exact retry returns success,
 /// while changing the version, actor, or normalized reason returns 409.
 pub async fn release_user_balance_reservation(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path((user_id, request_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(req): Json<ReleaseBalanceReservationRequest>,
 ) -> Result<Json<ReleaseBalanceReservationResponse>> {
-    let _ = validate_balance_target(&auth, &state, user_id).await?;
+    let _ = validate_balance_target(&auth, &state, req.tenant_id, user_id).await?;
     let reason = validate_reservation_release_reason(&req.reason)?;
 
     let balance_service = state
@@ -1007,6 +622,7 @@ pub async fn release_user_balance_reservation(
         .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?;
     let Some(release) = balance_service
         .admin_release_request_reservation(
+            req.tenant_id,
             user_id,
             request_id,
             req.expected_version,
@@ -1047,7 +663,7 @@ pub async fn release_user_balance_reservation(
 /// reuse the same key; changing the operation, target, actor, amount, or reason
 /// while reusing it returns HTTP 409.
 pub async fn update_user_balance(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(user_id): Path<Uuid>,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1120,7 +736,7 @@ pub async fn update_user_balance(
 /// reuse the same key; changing the operation, target, actor, amount, or reason
 /// while reusing it returns HTTP 409.
 pub async fn freeze_user_balance(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(user_id): Path<Uuid>,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1175,7 +791,7 @@ pub async fn freeze_user_balance(
 /// reuse the same key; changing the operation, target, actor, amount, or reason
 /// while reusing it returns HTTP 409.
 pub async fn unfreeze_user_balance(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(user_id): Path<Uuid>,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1230,22 +846,29 @@ pub async fn unfreeze_user_balance(
 /// 列出用户的所有 API Keys（Admin 视图）
 ///
 /// GET /api/v1/users/{id}/api-keys
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TenantTarget {
+    pub tenant_id: Uuid,
+}
+
 pub async fn list_all_api_keys(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(user_id): Path<Uuid>,
     State(state): State<AppState>,
+    Query(target): Query<TenantTarget>,
 ) -> Result<Json<Vec<serde_json::Value>>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    platform_manage(&auth)?;
 
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let keys = ProduceAiKey::find_by_user(pool, user_id)
-        .await
+    let keys = ProduceAiKey::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT * FROM produce_ai_keys WHERE tenant_id=$1 AND user_id=$2 ORDER BY created_at DESC,id DESC",
+        [target.tenant_id.into(),user_id.into()],
+    )).all(pool.write_conn()).await
         .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?;
 
     let result: Vec<serde_json::Value> = keys
@@ -1289,6 +912,7 @@ pub struct TenantInfo {
 /// 未提供时由服务端根据名称生成。
 #[derive(Debug, Deserialize)]
 pub struct CreateTenantRequest {
+    pub owner_user_id: Uuid,
     pub name: String,
     #[serde(default)]
     pub slug: Option<String>,
@@ -1423,13 +1047,11 @@ async fn build_tenant_info(db: &impl ConnectionTrait, tenant: Tenant) -> Result<
 ///
 /// POST /api/v1/tenants
 pub async fn create_tenant(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Json(req): Json<CreateTenantRequest>,
 ) -> Result<Json<TenantInfo>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    platform_manage(&auth)?;
     let name = req.name.trim();
     if name.is_empty() {
         return Err(ApiError::BadRequest(
@@ -1439,10 +1061,6 @@ pub async fn create_tenant(
     if name.chars().count() > 255 {
         return Err(ApiError::BadRequest("Tenant name is too long".to_string()));
     }
-    let slug_was_generated = req
-        .slug
-        .as_deref()
-        .is_none_or(|value| value.trim().is_empty());
     let slug = req
         .slug
         .as_deref()
@@ -1465,50 +1083,41 @@ pub async fn create_tenant(
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-    let writer = pool.write_conn();
-    let slug_base = slug;
-    let mut slug = slug_base.clone();
-    let mut generated_attempts = 0;
-    let tenant = loop {
-        let result = Tenant::create(
-            writer,
-            &DbCreateTenantRequest {
-                name: name.to_string(),
-                slug: slug.clone(),
-                description: None,
-                default_rpm_limit: None,
-                default_tpm_limit: None,
-            },
-        )
-        .await;
-        match result {
-            Ok(tenant) => break tenant,
-            Err(error) if slug_was_generated && is_tenant_unique_error(&error.to_string()) => {
-                generated_attempts += 1;
-                if generated_attempts >= 4 {
-                    return Err(map_tenant_db_error(error, "create"));
-                }
-                let suffix = Uuid::new_v4().simple().to_string();
-                slug = format!("{slug_base}-{}", &suffix[..8]);
-            }
-            Err(error) => return Err(map_tenant_db_error(error, "create")),
-        }
-    };
-    Ok(Json(build_tenant_info(writer, tenant).await?))
+    let tx = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let tenant = Tenant::create_owned(
+        &tx,
+        &DbCreateTenantRequest {
+            name: name.to_string(),
+            slug,
+            description: None,
+            default_rpm_limit: None,
+            default_tpm_limit: None,
+        },
+        req.owner_user_id,
+        &audit_actor(&auth),
+    )
+    .await
+    .map_err(|e| map_tenant_db_error(e, "create"))?;
+    let info = build_tenant_info(&tx, tenant).await?;
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    Ok(Json(info))
 }
 
 /// 更新租户名称或状态。
 ///
 /// PUT /api/v1/tenants/{id}
 pub async fn update_tenant(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(tenant_id): Path<Uuid>,
     State(state): State<AppState>,
     Json(req): Json<UpdateTenantRequest>,
 ) -> Result<Json<TenantInfo>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    platform_manage(&auth)?;
     if let Some(name) = req.name.as_deref()
         && (name.trim().is_empty() || name.chars().count() > 255)
     {
@@ -1527,11 +1136,14 @@ pub async fn update_tenant(
         .begin()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to begin tenant update: {e}")))?;
+    txn.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tenant = Tenant::find_by_id_for_update(&txn, tenant_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find tenant: {e}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
-    if tenant.slug == "system" && status == Some("inactive") {
+    if tenant.slug == "default" && status == Some("inactive") {
         return Err(ApiError::Forbidden(
             "The system tenant cannot be deactivated".to_string(),
         ));
@@ -1542,13 +1154,26 @@ pub async fn update_tenant(
             &DbUpdateTenantRequest {
                 name: req.name.map(|value| value.trim().to_string()),
                 description: None,
-                status: status.map(str::to_string),
+                status: status.map(|value| {
+                    value
+                        .parse::<keycompute_types::TenantStatus>()
+                        .expect("normalized tenant status")
+                }),
                 default_rpm_limit: None,
                 default_tpm_limit: None,
             },
         )
         .await
         .map_err(|e| map_tenant_db_error(e, "update"))?;
+    platform_audit(
+        &txn,
+        &auth,
+        "tenant.update",
+        "tenant",
+        tenant_id,
+        serde_json::json!({"status":tenant.status}),
+    )
+    .await?;
     let info = build_tenant_info(&txn, tenant).await?;
     txn.commit()
         .await
@@ -1560,13 +1185,11 @@ pub async fn update_tenant(
 ///
 /// DELETE /api/v1/tenants/{id}
 pub async fn delete_tenant(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(tenant_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    platform_manage(&auth)?;
     let pool = state
         .pool
         .as_deref()
@@ -1575,11 +1198,14 @@ pub async fn delete_tenant(
         .begin()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to begin tenant deletion: {e}")))?;
+    txn.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
     let tenant = Tenant::find_by_id_for_update(&txn, tenant_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find tenant: {e}")))?
         .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
-    if tenant.slug == "system" {
+    if tenant.slug == "default" {
         let _ = txn.rollback().await;
         return Err(ApiError::Forbidden(
             "The system tenant cannot be deleted".to_string(),
@@ -1591,7 +1217,7 @@ pub async fn delete_tenant(
     let account_count = Tenant::count_accounts(&txn, tenant_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to count tenant accounts: {e}")))?;
-    if user_count > 0 || account_count > 0 {
+    if user_count > 1 || account_count > 0 {
         let _ = txn.rollback().await;
         return Err(ApiError::Conflict(format!(
             "Tenant cannot be deleted while it has {user_count} user(s) and {account_count} channel account(s)"
@@ -1601,6 +1227,15 @@ pub async fn delete_tenant(
         .delete_in_tx(&txn)
         .await
         .map_err(|e| map_tenant_db_error(e, "delete"))?;
+    platform_audit(
+        &txn,
+        &auth,
+        "tenant.delete",
+        "tenant",
+        tenant_id,
+        serde_json::json!({}),
+    )
+    .await?;
     txn.commit()
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to commit tenant deletion: {e}")))?;
@@ -1614,13 +1249,11 @@ pub async fn delete_tenant(
 ///
 /// GET /api/v1/tenants
 pub async fn list_tenants(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Query(params): Query<TenantListQueryParams>,
 ) -> Result<Json<TenantListResponse>> {
-    if !auth.is_admin() {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    platform_manage(&auth)?;
 
     let pool = state
         .pool
@@ -1689,13 +1322,8 @@ mod tests {
             id: Uuid::new_v4(),
             email: "admin@example.com".to_string(),
             name: Some("Admin".to_string()),
-            role: "admin".to_string(),
-            tenant_id: Uuid::new_v4(),
-            tenant_name: "Test".to_string(),
-            balance: 1000.0,
-            frozen_balance: 0.0,
-            balance_initialized: true,
-            balance_as_of: "2024-01-01T00:00:00Z".to_string(),
+            platform_role: "operator".to_string(),
+            status: "active".to_string(),
             created_at: "2024-01-01T00:00:00Z".to_string(),
             updated_at: "2024-01-01T00:00:00Z".to_string(),
             last_login_at: None,
@@ -1858,6 +1486,7 @@ mod tests {
     fn release_balance_reservation_request_requires_a_reason_field() {
         let version = Uuid::new_v4();
         let request: ReleaseBalanceReservationRequest = serde_json::from_value(serde_json::json!({
+            "tenant_id": Uuid::new_v4(),
             "expected_version": version,
             "reason": "confirmed upstream failure"
         }))
@@ -1957,173 +1586,55 @@ mod tests {
         ));
     }
 
-    fn make_test_user(id: Uuid, role: &str) -> User {
-        use chrono::Utc;
-
-        User {
-            id,
-            tenant_id: Uuid::new_v4(),
-            email: "target@example.com".to_string(),
-            name: Some("Target".to_string()),
-            role: role.to_string(),
-            token_version: 0,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+    #[test]
+    fn global_identity_update_rejects_removed_role_and_tenant_fields() {
+        for payload in [
+            serde_json::json!({"role":"admin"}),
+            serde_json::json!({"tenant_id":Uuid::new_v4()}),
+            serde_json::json!({"platform_role":"system"}),
+            serde_json::json!({"platform_role":"admin"}),
+        ] {
+            assert!(serde_json::from_value::<UpdateUserRequest>(payload).is_err());
         }
-    }
-
-    #[test]
-    fn test_validate_role_change_request_requires_protected_user_permission() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
-        let target = make_test_user(Uuid::new_v4(), "user");
-        let err = validate_role_change_request(
-            &auth,
-            target.id,
-            &target,
-            &Some(AssignableUserRole::Admin),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ApiError::Forbidden(msg) if msg.contains("permission required")));
-    }
-
-    #[test]
-    fn test_validate_role_change_request_rejects_self_role_change() {
-        let user_id = Uuid::new_v4();
-        let auth = AuthExtractor::new(user_id, Uuid::new_v4(), Uuid::new_v4(), "system")
-            .with_permissions(vec![Permission::ManageProtectedUsers]);
-        let target = make_test_user(user_id, "system");
-        let err = validate_role_change_request(
-            &auth,
-            target.id,
-            &target,
-            &Some(AssignableUserRole::Admin),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("own role")));
-    }
-
-    #[test]
-    fn test_validate_role_change_request_rejects_modifying_system_role() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system")
-            .with_permissions(vec![Permission::ManageProtectedUsers]);
-        let target = make_test_user(Uuid::new_v4(), "system");
-        let err = validate_role_change_request(
-            &auth,
-            target.id,
-            &target,
-            &Some(AssignableUserRole::Admin),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be modified")));
-    }
-
-    #[test]
-    fn test_validate_tenant_change_request_allows_omitted_or_same_tenant() {
-        let user_id = Uuid::new_v4();
-        let target = make_test_user(user_id, "user");
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system")
-            .with_permissions(vec![Permission::ManageTenant]);
-
-        assert!(!validate_tenant_change_request(&auth, user_id, &target, None).unwrap());
         assert!(
-            !validate_tenant_change_request(&auth, user_id, &target, Some(target.tenant_id))
-                .unwrap()
+            serde_json::from_value::<UpdateBalanceRequest>(
+                serde_json::json!({"amount":"1","reason":"test"})
+            )
+            .is_err()
         );
     }
-
     #[test]
-    fn test_validate_tenant_change_request_requires_tenant_permission() {
-        let target = make_test_user(Uuid::new_v4(), "user");
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
-        let err = validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
-            .unwrap_err();
-        assert!(
-            matches!(err, ApiError::Forbidden(message) if message.contains("Tenant management"))
-        );
-    }
-
-    #[test]
-    fn test_validate_tenant_change_request_rejects_self_and_system_user() {
-        let user_id = Uuid::new_v4();
-        let auth = AuthExtractor::new(user_id, Uuid::new_v4(), Uuid::new_v4(), "system")
-            .with_permissions(vec![Permission::ManageTenant]);
-        let target = make_test_user(user_id, "user");
-        let err = validate_tenant_change_request(&auth, user_id, &target, Some(Uuid::new_v4()))
-            .unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(message) if message.contains("own tenant")));
-
-        let protected = make_test_user(Uuid::new_v4(), "system");
-        let err =
-            validate_tenant_change_request(&auth, protected.id, &protected, Some(Uuid::new_v4()))
-                .unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(message) if message.contains("System user")));
-    }
-
-    #[test]
-    fn test_validate_tenant_change_request_accepts_authorized_user_move() {
-        let target = make_test_user(Uuid::new_v4(), "user");
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
-            .with_permissions(vec![Permission::ManageTenant]);
-        assert!(
-            validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn test_validate_tenant_change_request_requires_protected_permission_for_admin_target() {
-        let target = make_test_user(Uuid::new_v4(), UserRole::Admin.as_str());
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin")
-            .with_permissions(vec![Permission::ManageTenant]);
-        let err = validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
-            .unwrap_err();
-        assert!(matches!(err, ApiError::Forbidden(message) if message.contains("Protected user")));
-    }
-
-    #[test]
-    fn test_validate_tenant_change_request_allows_protected_admin_target() {
-        let target = make_test_user(Uuid::new_v4(), UserRole::Admin.as_str());
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "system")
-            .with_permissions(vec![
-                Permission::ManageTenant,
-                Permission::ManageProtectedUsers,
-            ]);
-        assert!(
-            validate_tenant_change_request(&auth, target.id, &target, Some(Uuid::new_v4()))
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn test_validate_user_delete_request_rejects_self_delete() {
-        let user_id = Uuid::new_v4();
-        let auth = AuthExtractor::new(user_id, Uuid::new_v4(), Uuid::new_v4(), "admin");
-        let target = make_test_user(user_id, "admin");
-        let err = validate_user_delete_request(&auth, target.id, &target).unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("yourself")));
-    }
-
-    #[test]
-    fn test_validate_user_delete_request_rejects_system_user() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
-        let target = make_test_user(Uuid::new_v4(), "system");
-        let err = validate_user_delete_request(&auth, target.id, &target).unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be deleted")));
-    }
-
-    #[test]
-    fn test_validate_user_delete_request_requires_protected_user_permission_for_admin_target() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "admin");
-        let target = make_test_user(Uuid::new_v4(), "admin");
-        let err = validate_user_delete_request(&auth, target.id, &target).unwrap_err();
-        assert!(matches!(err, ApiError::Forbidden(msg) if msg.contains("permission required")));
-    }
-
-    #[test]
-    fn test_validate_user_delete_request_allows_system_to_delete_admin_target() {
-        let auth = AuthExtractor::new(Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), "user")
-            .with_permissions(vec![Permission::ManageProtectedUsers]);
-        let target = make_test_user(Uuid::new_v4(), "admin");
-        assert!(validate_user_delete_request(&auth, target.id, &target).is_ok());
+    fn platform_gate_is_independent_of_tenant_role_and_rejects_inference_credentials() {
+        use keycompute_types::{AuthorizationSubject, CredentialKind, TenantRole};
+        for platform in [
+            PlatformRole::Root,
+            PlatformRole::Operator,
+            PlatformRole::None,
+        ] {
+            for tenant in [None, Some(TenantRole::Admin), Some(TenantRole::Member)] {
+                let id = Uuid::new_v4();
+                let ctx = keycompute_auth::AuthContext::new(id, CredentialKind::Jwt)
+                    .with_authorization_subject(AuthorizationSubject {
+                        user_id: id,
+                        platform_role: platform,
+                        tenant_id: tenant.map(|_| Uuid::new_v4()),
+                        tenant_role: tenant,
+                    });
+                let auth = GlobalConsoleAuth::try_from(ctx).unwrap();
+                assert_eq!(
+                    platform_manage(&auth).is_ok(),
+                    platform == PlatformRole::Root
+                );
+            }
+            let id = Uuid::new_v4();
+            let ctx = keycompute_auth::AuthContext::new(id, CredentialKind::ApiKey)
+                .with_authorization_subject(AuthorizationSubject::tenant(
+                    id,
+                    Uuid::new_v4(),
+                    TenantRole::Admin,
+                    platform,
+                ));
+            assert!(GlobalConsoleAuth::try_from(ctx).is_err());
+        }
     }
 }

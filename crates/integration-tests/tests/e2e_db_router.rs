@@ -26,8 +26,8 @@ use keycompute_db::db_router::{
     DatabaseConfig as RouterDbConfig, DatabaseReadConfig as RouterReadConfig,
     DatabaseRoutingConfig as RouterRoutingConfig,
 };
-use keycompute_db::{CreateTenantRequest, CreateUserRequest, DbRouter, Tenant, User};
-use keycompute_types::UserRole;
+use keycompute_db::{AuditContext, CreateTenantRequest, CreateUserRequest, DbRouter, Tenant, User};
+use keycompute_types::{CredentialKind, PlatformRole};
 use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,6 +53,16 @@ fn get_write_url() -> String {
     })
 }
 
+fn tenant_owner_audit(owner_user_id: uuid::Uuid) -> AuditContext {
+    AuditContext {
+        actor_user_id: owner_user_id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::None,
+        actor_tenant_role: None,
+        request_id: None,
+    }
+}
+
 // ============================================================================
 // 测试 1: 单库模式 — 基本读写操作
 // ============================================================================
@@ -69,19 +79,33 @@ async fn test_single_db_mode() {
         .await
         .expect("cleanup should succeed");
 
-    // 1. 写操作：通过 DbRouter::single 创建租户
-    let tenant = Tenant::create(
+    // 1. 写操作：通过 DbRouter::single 创建全局身份和租户
+    let owner = User::create(
         router.as_ref(),
-        &CreateTenantRequest {
-            name: format!("Single-{}", test_id),
-            slug: format!("test-single-{}", test_id),
-            description: None,
-            default_rpm_limit: Some(100),
-            default_tpm_limit: Some(50000),
+        &CreateUserRequest {
+            email: format!("single-owner-{}@example.com", test_id),
+            name: Some(format!("Single Owner {}", test_id)),
         },
     )
     .await
-    .expect("Tenant creation via DbRouter::single should succeed");
+    .expect("global tenant owner creation should succeed");
+    let tenant = router
+        .as_ref()
+        .transaction::<_, Tenant, DbError>(|tx| {
+            let request = CreateTenantRequest {
+                name: format!("Single-{}", test_id),
+                slug: format!("test-single-{}", test_id),
+                description: None,
+                default_rpm_limit: Some(100),
+                default_tpm_limit: Some(50000),
+            };
+            let owner_id = owner.id;
+            Box::pin(async move {
+                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+            })
+        })
+        .await
+        .expect("Tenant creation via DbRouter::single should succeed");
     chain.add_step(
         "keycompute-db",
         "single_create_tenant",
@@ -252,18 +276,32 @@ async fn test_replica_read_write_routing() {
     // =========================================================
     // 测试 A: 写操作通过 DbRouter（应路由到主库）
     // =========================================================
-    let tenant = Tenant::create(
+    let owner = User::create(
         router.as_ref(),
-        &CreateTenantRequest {
-            name: format!("Replica-{}", test_id),
-            slug: format!("test-replica-{}", test_id),
-            description: None,
-            default_rpm_limit: Some(100),
-            default_tpm_limit: Some(50000),
+        &CreateUserRequest {
+            email: format!("replica-owner-{}@example.com", test_id),
+            name: Some(format!("Replica Owner {}", test_id)),
         },
     )
     .await
-    .expect("Tenant creation through DbRouter should succeed");
+    .expect("global tenant owner creation should succeed");
+    let tenant = router
+        .as_ref()
+        .transaction::<_, Tenant, DbError>(|tx| {
+            let request = CreateTenantRequest {
+                name: format!("Replica-{}", test_id),
+                slug: format!("test-replica-{}", test_id),
+                description: None,
+                default_rpm_limit: Some(100),
+                default_tpm_limit: Some(50000),
+            };
+            let owner_id = owner.id;
+            Box::pin(async move {
+                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+            })
+        })
+        .await
+        .expect("Tenant creation through DbRouter should succeed");
     chain.add_step(
         "keycompute-db",
         "replica_write_tenant",
@@ -305,12 +343,10 @@ async fn test_replica_read_write_routing() {
         .as_ref()
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO users (tenant_id, email, name, role) VALUES ($1, $2, $3, $4) RETURNING id, email",
+            "INSERT INTO users (email, name) VALUES ($1, $2) RETURNING id, email",
             [
-                tenant.id.into(),
                 format!("returning-{}@test.com", test_id).into(),
                 format!("Returning User {}", test_id).into(),
-                "user".into(),
             ],
         ))
         .await
@@ -444,6 +480,16 @@ async fn test_replica_transaction_routing() {
         .await
         .expect("cleanup_test_data should succeed");
 
+    let owner = User::create(
+        router.as_ref(),
+        &CreateUserRequest {
+            email: format!("tx-owner-{}@example.com", test_id),
+            name: Some(format!("Transaction Owner {}", test_id)),
+        },
+    )
+    .await
+    .expect("global tenant owner creation should succeed");
+
     // 在事务中同时执行写操作和查询
     let tx_result = router
         .as_ref()
@@ -451,7 +497,8 @@ async fn test_replica_transaction_routing() {
             let test_id = test_id.clone();
             Box::pin(async move {
                 // 在事务内创建租户
-                let tenant = Tenant::create(
+                let owner_id = owner.id;
+                let tenant = Tenant::create_owned(
                     txn,
                     &CreateTenantRequest {
                         name: format!("Tx-{}", test_id),
@@ -460,24 +507,31 @@ async fn test_replica_transaction_routing() {
                         default_rpm_limit: Some(100),
                         default_tpm_limit: Some(50000),
                     },
+                    owner_id,
+                    &tenant_owner_audit(owner_id),
                 )
                 .await?;
 
                 // 在同一事务内创建用户
-                User::create(
+                let member = User::create(
                     txn,
                     &CreateUserRequest {
-                        tenant_id: tenant.id,
-                        email: format!("tx-{}@test.com", test_id),
+                        email: format!("tx-{}@example.com", test_id),
                         name: Some(format!("TX User {}", test_id)),
-                        role: Some(UserRole::User),
                     },
                 )
                 .await?;
 
+                txn.execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "INSERT INTO tenant_memberships (tenant_id,user_id,role,status) VALUES ($1,$2,'member','active')",
+                    [tenant.id.into(), member.id.into()],
+                ))
+                .await?;
+
                 // 在同一事务内查询验证
                 let users = User::find_by_tenant(txn, tenant.id).await?;
-                assert_eq!(users.len(), 1, "Transaction should see its own writes");
+                assert_eq!(users.len(), 2, "Transaction should see its own writes");
 
                 Ok(())
             })
@@ -574,18 +628,32 @@ async fn test_degenerate_single_db_mode() {
     initialize_test_schema(router_single.write_conn())
         .await
         .expect("Schema initialization should succeed");
-    let tenant2 = Tenant::create(
+    let owner = User::create(
         router_single.as_ref(),
-        &CreateTenantRequest {
-            name: format!("Degenerate-{}", test_id),
-            slug: format!("test-degenerate-{}", test_id),
-            description: None,
-            default_rpm_limit: Some(100),
-            default_tpm_limit: Some(50000),
+        &CreateUserRequest {
+            email: format!("degenerate-owner-{}@example.com", test_id),
+            name: Some(format!("Degenerate Owner {}", test_id)),
         },
     )
     .await
-    .expect("Tenant creation should succeed through degenerate DbRouter");
+    .expect("global tenant owner creation should succeed");
+    let tenant2 = router_single
+        .as_ref()
+        .transaction::<_, Tenant, DbError>(|tx| {
+            let request = CreateTenantRequest {
+                name: format!("Degenerate-{}", test_id),
+                slug: format!("test-degenerate-{}", test_id),
+                description: None,
+                default_rpm_limit: Some(100),
+                default_tpm_limit: Some(50000),
+            };
+            let owner_id = owner.id;
+            Box::pin(async move {
+                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+            })
+        })
+        .await
+        .expect("Tenant creation should succeed through degenerate DbRouter");
     let found2 = Tenant::find_by_id(router_single.as_ref(), tenant2.id)
         .await
         .expect("Tenant read should succeed through degenerate DbRouter")
@@ -621,18 +689,32 @@ async fn test_concurrent_through_router() {
         .expect("cleanup should succeed");
 
     // 创建基础租户
-    let tenant = Tenant::create(
+    let owner = User::create(
         router.as_ref(),
-        &CreateTenantRequest {
-            name: format!("Concur-{}", test_id),
-            slug: format!("test-concur-{}", test_id),
-            description: None,
-            default_rpm_limit: Some(100),
-            default_tpm_limit: Some(50000),
+        &CreateUserRequest {
+            email: format!("concurrent-owner-{}@example.com", test_id),
+            name: Some(format!("Concurrent Owner {}", test_id)),
         },
     )
     .await
-    .expect("Tenant creation should succeed");
+    .expect("global tenant owner creation should succeed");
+    let tenant = router
+        .as_ref()
+        .transaction::<_, Tenant, DbError>(|tx| {
+            let request = CreateTenantRequest {
+                name: format!("Concur-{}", test_id),
+                slug: format!("test-concur-{}", test_id),
+                description: None,
+                default_rpm_limit: Some(100),
+                default_tpm_limit: Some(50000),
+            };
+            let owner_id = owner.id;
+            Box::pin(async move {
+                Tenant::create_owned(tx, &request, owner_id, &tenant_owner_audit(owner_id)).await
+            })
+        })
+        .await
+        .expect("Tenant creation should succeed");
 
     // 并发写入
     let mut handles = Vec::new();
@@ -642,10 +724,8 @@ async fn test_concurrent_through_router() {
             User::create(
                 router.as_ref(),
                 &CreateUserRequest {
-                    tenant_id: tenant.id,
                     email: format!("concur-{}-{}@test.com", i, generate_test_id()),
                     name: Some(format!("Concurrent User {}", i)),
-                    role: Some(UserRole::User),
                 },
             )
             .await
@@ -653,10 +733,21 @@ async fn test_concurrent_through_router() {
     }
 
     let results = futures::future::join_all(handles).await;
-    let success_count = results
-        .iter()
-        .filter(|r| r.is_ok() && r.as_ref().unwrap().is_ok())
-        .count();
+    let created_users: Vec<User> = results
+        .into_iter()
+        .filter_map(|result| result.ok().and_then(|user| user.ok()))
+        .collect();
+    let success_count = created_users.len();
+    for user in &created_users {
+        router
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO tenant_memberships (tenant_id,user_id,role,status) VALUES ($1,$2,'member','active')",
+                [tenant.id.into(), user.id.into()],
+            ))
+            .await
+            .expect("concurrent user membership insert should succeed");
+    }
     chain.add_step(
         "keycompute-db",
         "concurrent_through_router",
@@ -674,8 +765,18 @@ async fn test_concurrent_through_router() {
     chain.add_step(
         "keycompute-db",
         "concurrent_verify",
-        format!("{} users found after concurrent writes", users.len()),
-        users.len() == 5,
+        format!(
+            "{} concurrent users found after concurrent writes",
+            users
+                .iter()
+                .filter(|user| user.email.starts_with("concur-"))
+                .count()
+        ),
+        users
+            .iter()
+            .filter(|user| user.email.starts_with("concur-"))
+            .count()
+            == 5,
     );
 
     chain.print_report();

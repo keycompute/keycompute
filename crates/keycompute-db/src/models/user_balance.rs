@@ -1,6 +1,6 @@
 //! 用户余额模型
 
-use crate::{DbError, Tenant, User};
+use crate::{DbError, Tenant, TenantMembership, User};
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use sea_orm::{
@@ -444,6 +444,7 @@ struct ActiveReservationTotal {
 
 #[derive(Debug, FromQueryResult)]
 struct ReservationReclaimCandidate {
+    tenant_id: Uuid,
     user_id: Uuid,
     active_reserved: Decimal,
     expired_amount: Decimal,
@@ -452,6 +453,7 @@ struct ReservationReclaimCandidate {
 
 #[derive(Debug, FromQueryResult)]
 struct ReservationReclaimSummary {
+    tenant_id: Uuid,
     user_id: Uuid,
     expired_amount: Decimal,
     expired_count: i64,
@@ -459,7 +461,7 @@ struct ReservationReclaimSummary {
 
 struct ReclaimedBalanceState {
     balances: Vec<UserBalance>,
-    active_totals: std::collections::HashMap<Uuid, Decimal>,
+    active_totals: std::collections::HashMap<(Uuid, Uuid), Decimal>,
     reclaimed: u64,
 }
 
@@ -539,12 +541,13 @@ impl BalanceReservation {
 
     async fn active_total_by_user(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Decimal, DbError> {
         let reserved_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT COALESCE(SUM(amount), 0) AS amount FROM balance_reservations WHERE user_id = $1 AND status = 'active'",
-            [user_id.into()],
+            "SELECT COALESCE(SUM(amount), 0) AS amount FROM balance_reservations WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'",
+            [tenant_id.into(), user_id.into()],
         );
         Ok(ActiveReservationTotal::find_by_statement(reserved_stmt)
             .one(db)
@@ -555,15 +558,16 @@ impl BalanceReservation {
 
     async fn active_page_by_user(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
         cursor: Option<BalanceReservationPageCursor>,
         limit: u64,
     ) -> Result<(Vec<Self>, Option<BalanceReservationPageCursor>), DbError> {
-        let mut values = vec![user_id.into()];
+        let mut values = vec![tenant_id.into(), user_id.into()];
         let cursor_clause = if let Some(cursor) = cursor {
             values.push(cursor.created_at.into());
             values.push(cursor.id.into());
-            " AND (created_at, id) < ($2, $3)"
+            " AND (created_at, id) < ($3, $4)"
         } else {
             ""
         };
@@ -572,7 +576,7 @@ impl BalanceReservation {
         let active_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             format!(
-                "SELECT * FROM balance_reservations WHERE user_id = $1 AND status = 'active'{cursor_clause} ORDER BY created_at DESC, id DESC LIMIT ${limit_parameter}"
+                "SELECT * FROM balance_reservations WHERE tenant_id = $1 AND user_id = $2 AND status = 'active'{cursor_clause} ORDER BY created_at DESC, id DESC LIMIT ${limit_parameter}"
             ),
             values,
         );
@@ -614,7 +618,8 @@ impl BalanceReservation {
         tx: &DatabaseTransaction,
         balance: UserBalance,
     ) -> Result<UserBalanceBreakdown, DbError> {
-        let active_reserved = Self::active_total_by_user(tx, balance.user_id).await?;
+        let active_reserved =
+            Self::active_total_by_user(tx, balance.tenant_id, balance.user_id).await?;
         Self::breakdown_with_active_total(balance, active_reserved)
     }
 
@@ -656,6 +661,10 @@ impl BalanceReservation {
             .iter()
             .map(|balance| balance.user_id)
             .collect::<Vec<_>>();
+        let tenant_ids = balances
+            .iter()
+            .map(|balance| balance.tenant_id)
+            .collect::<Vec<_>>();
         // Balance rows are already locked before this query. Every supported
         // writer takes that lock before changing a reservation, and NOW() is
         // transaction-stable in PostgreSQL. Aggregate both the full active
@@ -663,21 +672,21 @@ impl BalanceReservation {
         // rows in the application.
         let candidates_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"SELECT user_id,
+            r#"SELECT tenant_id, user_id,
                       COALESCE(SUM(amount), 0) AS active_reserved,
                       COALESCE(SUM(amount) FILTER (WHERE expires_at <= NOW()), 0) AS expired_amount,
                       (COUNT(*) FILTER (WHERE expires_at <= NOW()))::BIGINT AS expired_count
                FROM balance_reservations
-               WHERE user_id = ANY($1) AND status = 'active'
-               GROUP BY user_id"#,
-            [user_ids.clone().into()],
+               WHERE user_id = ANY($1) AND tenant_id = ANY($2) AND status = 'active'
+               GROUP BY tenant_id, user_id"#,
+            [user_ids.clone().into(), tenant_ids.clone().into()],
         );
         let candidates = ReservationReclaimCandidate::find_by_statement(candidates_stmt)
             .all(tx)
             .await?;
         let mut active_totals = balances
             .iter()
-            .map(|balance| (balance.user_id, Decimal::ZERO))
+            .map(|balance| ((balance.tenant_id, balance.user_id), Decimal::ZERO))
             .collect::<std::collections::HashMap<_, _>>();
         let mut expired_by_user = std::collections::HashMap::new();
         for candidate in candidates {
@@ -696,16 +705,21 @@ impl BalanceReservation {
                     candidate.user_id
                 )));
             }
-            active_totals.insert(candidate.user_id, candidate.active_reserved);
+            active_totals.insert(
+                (candidate.tenant_id, candidate.user_id),
+                candidate.active_reserved,
+            );
             if expired_count > 0 {
-                expired_by_user
-                    .insert(candidate.user_id, (candidate.expired_amount, expired_count));
+                expired_by_user.insert(
+                    (candidate.tenant_id, candidate.user_id),
+                    (candidate.expired_amount, expired_count),
+                );
             }
         }
         let mut invalid_user_ids = std::collections::HashSet::new();
         for balance in &balances {
             let active_reserved = active_totals
-                .get(&balance.user_id)
+                .get(&(balance.tenant_id, balance.user_id))
                 .copied()
                 .unwrap_or(Decimal::ZERO);
             if balance.frozen_balance < active_reserved {
@@ -716,7 +730,7 @@ impl BalanceReservation {
                         active_reserved = %active_reserved,
                         "余额预留聚合不变量异常，跳过该用户的过期预留回收"
                     );
-                    invalid_user_ids.insert(balance.user_id);
+                    invalid_user_ids.insert((balance.tenant_id, balance.user_id));
                     continue;
                 }
                 return Err(DbError::Other(format!(
@@ -734,9 +748,10 @@ impl BalanceReservation {
             });
         }
 
-        let valid_user_ids = user_ids
-            .into_iter()
-            .filter(|user_id| !invalid_user_ids.contains(user_id))
+        let valid_user_ids = balances
+            .iter()
+            .map(|balance| (balance.tenant_id, balance.user_id))
+            .filter(|principal| !invalid_user_ids.contains(principal))
             .collect::<Vec<_>>();
         if valid_user_ids.is_empty() {
             return Ok(ReclaimedBalanceState {
@@ -755,28 +770,39 @@ impl BalanceReservation {
             r#"WITH expired AS (
                    UPDATE balance_reservations
                    SET status = 'expired', updated_at = NOW()
-                   WHERE user_id = ANY($1)
+                   WHERE (tenant_id, user_id) IN (SELECT * FROM UNNEST($1::uuid[], $2::uuid[]))
                      AND status = 'active'
                      AND expires_at <= NOW()
-                   RETURNING user_id, amount
+                   RETURNING tenant_id, user_id, amount
                )
-               SELECT user_id,
+               SELECT tenant_id, user_id,
                       COALESCE(SUM(amount), 0) AS expired_amount,
                       COUNT(*)::BIGINT AS expired_count
                FROM expired
-               GROUP BY user_id"#,
-            [valid_user_ids.into()],
+               GROUP BY tenant_id, user_id"#,
+            [
+                valid_user_ids
+                    .iter()
+                    .map(|(tenant, _)| *tenant)
+                    .collect::<Vec<_>>()
+                    .into(),
+                valid_user_ids
+                    .iter()
+                    .map(|(_, user)| *user)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ],
         );
         let reclaimed_by_user = ReservationReclaimSummary::find_by_statement(reclaim_stmt)
             .all(tx)
             .await?
             .into_iter()
-            .map(|summary| (summary.user_id, summary))
+            .map(|summary| ((summary.tenant_id, summary.user_id), summary))
             .collect::<std::collections::HashMap<_, _>>();
 
         let expected_valid_count = expired_by_user
             .iter()
-            .filter(|(user_id, _)| !invalid_user_ids.contains(user_id))
+            .filter(|(principal, _)| !invalid_user_ids.contains(principal))
             .count();
         if reclaimed_by_user.len() != expected_valid_count {
             return Err(DbError::Other(format!(
@@ -787,39 +813,42 @@ impl BalanceReservation {
         }
 
         let mut reclaimed = 0_u64;
-        for (user_id, (expected_amount, expected_count)) in expired_by_user
+        for (principal, (expected_amount, expected_count)) in expired_by_user
             .iter()
-            .filter(|(user_id, _)| !invalid_user_ids.contains(user_id))
+            .filter(|(principal, _)| !invalid_user_ids.contains(principal))
         {
-            let actual = reclaimed_by_user.get(user_id).ok_or_else(|| {
+            let actual = reclaimed_by_user.get(principal).ok_or_else(|| {
                 DbError::Other(format!(
-                    "expired reservation reclamation omitted user {user_id}"
+                    "expired reservation reclamation omitted principal {:?}",
+                    principal
                 ))
             })?;
             let actual_count = u64::try_from(actual.expired_count).map_err(|_| {
                 DbError::Other(format!(
-                    "expired reservation count overflow for user {user_id}"
+                    "expired reservation count overflow for principal {:?}",
+                    principal
                 ))
             })?;
             if actual.expired_amount != *expected_amount || actual_count != *expected_count {
                 return Err(DbError::Other(format!(
-                    "expired reservation reclamation for user {user_id} changed {actual_count} rows totaling {}, expected {expected_count} rows totaling {expected_amount}",
-                    actual.expired_amount
+                    "expired reservation reclamation for principal {:?} changed {actual_count} rows totaling {}, expected {expected_count} rows totaling {expected_amount}",
+                    principal, actual.expired_amount
                 )));
             }
             reclaimed = reclaimed
                 .checked_add(actual_count)
                 .ok_or_else(|| DbError::Other("expired reservation count overflow".to_string()))?;
-            let active_reserved = active_totals.get_mut(user_id).ok_or_else(|| {
+            let active_reserved = active_totals.get_mut(principal).ok_or_else(|| {
                 DbError::Other(format!(
-                    "active reservation aggregate omitted user {user_id}"
+                    "active reservation aggregate omitted principal {:?}",
+                    principal
                 ))
             })?;
             *active_reserved -= actual.expired_amount;
         }
 
         for balance in &mut balances {
-            let Some(summary) = reclaimed_by_user.get(&balance.user_id) else {
+            let Some(summary) = reclaimed_by_user.get(&(balance.tenant_id, balance.user_id)) else {
                 continue;
             };
             if summary.expired_amount == Decimal::ZERO {
@@ -827,8 +856,12 @@ impl BalanceReservation {
             }
             let update_balance = Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2 RETURNING *",
-                [summary.expired_amount.into(), balance.user_id.into()],
+                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2 RETURNING *",
+                [
+                    summary.expired_amount.into(),
+                    balance.user_id.into(),
+                    balance.tenant_id.into(),
+                ],
             );
             *balance = UserBalance::find_by_statement(update_balance)
                 .one(tx)
@@ -930,8 +963,8 @@ impl BalanceReservation {
             .ok_or_else(|| DbError::not_found("tenant", tenant_id))?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let mut balance = keycompute_observability::capacity::measure(
             keycompute_observability::capacity::Stage::BalanceRowLock,
@@ -1004,19 +1037,19 @@ impl BalanceReservation {
                     UPDATE user_balances
                     SET available_balance = available_balance - $1,
                         frozen_balance = frozen_balance + $1, updated_at = NOW()
-                    WHERE user_id = $2
+                    WHERE tenant_id = $3 AND user_id = $2
                     RETURNING user_id
                 )
                 INSERT INTO balance_reservations
                     (request_id, owner_token, tenant_id, user_id, amount, expires_at)
-                SELECT $3, $4, $5, moved.user_id, $6, $7 FROM moved
+                SELECT $4, $5, $3, moved.user_id, $6, $7 FROM moved
                 RETURNING *"#,
                 [
                     balance_delta.into(),
                     user_id.into(),
+                    tenant_id.into(),
                     request_id.into(),
                     owner_token.into(),
-                    tenant_id.into(),
                     amount.into(),
                     expires_at.into(),
                 ],
@@ -1031,8 +1064,8 @@ impl BalanceReservation {
         if balance_delta != Decimal::ZERO {
             let update_stmt = Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "UPDATE user_balances SET available_balance = available_balance - $1, frozen_balance = frozen_balance + $1, updated_at = NOW() WHERE user_id = $2",
-                [balance_delta.into(), user_id.into()],
+                "UPDATE user_balances SET available_balance = available_balance - $1, frozen_balance = frozen_balance + $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2",
+                [balance_delta.into(), user_id.into(), tenant_id.into()],
             );
             tx.execute(update_stmt).await?;
         }
@@ -1073,8 +1106,12 @@ impl BalanceReservation {
     /// update releases unused funds and consumes the actual amount atomically.
     /// `Ok(None)` means no active reservation exists and the caller should use
     /// the legacy idempotent consumption path.
+    // Keep tenant, owner and settlement capability explicit at the ledger boundary.
+    #[allow(clippy::too_many_arguments)]
     pub async fn settle(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
+        user_id: Uuid,
         request_id: Uuid,
         expected_owner_token: Option<Uuid>,
         amount: Decimal,
@@ -1092,6 +1129,13 @@ impl BalanceReservation {
         let Some(snapshot) = Self::find_by_request(db, request_id, true).await? else {
             return Ok(None);
         };
+        if snapshot.tenant_id != tenant_id || snapshot.user_id != user_id {
+            return Err(DbError::UserTenantMismatch {
+                user_id,
+                requested_tenant_id: tenant_id,
+                actual_tenant_id: snapshot.tenant_id,
+            });
+        }
         let tx = db.begin().await?;
         // Settlement creates a balance transaction with the reservation's
         // tenant foreign key. Lock that parent before the balance row, which
@@ -1101,8 +1145,8 @@ impl BalanceReservation {
             .ok_or_else(|| DbError::not_found("tenant", snapshot.tenant_id))?;
         let lock_balance = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [snapshot.user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [snapshot.tenant_id.into(), snapshot.user_id.into()],
         );
         let balance = keycompute_observability::capacity::measure(
             keycompute_observability::capacity::Stage::BalanceRowLock,
@@ -1171,8 +1215,12 @@ impl BalanceReservation {
             }
             let release_balance = Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2 RETURNING *",
-                [reservation.amount.into(), reservation.user_id.into()],
+                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2 RETURNING *",
+                [
+                    reservation.amount.into(),
+                    reservation.user_id.into(),
+                    reservation.tenant_id.into(),
+                ],
             );
             let updated_balance = UserBalance::find_by_statement(release_balance)
                 .one(&tx)
@@ -1201,11 +1249,12 @@ impl BalanceReservation {
         );
         let update_balance = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE user_balances SET available_balance = available_balance + $1 - $2, frozen_balance = frozen_balance - $1, total_consumed = total_consumed + $2, updated_at = NOW() WHERE user_id = $3 RETURNING *",
+            "UPDATE user_balances SET available_balance = available_balance + $1 - $2, frozen_balance = frozen_balance - $1, total_consumed = total_consumed + $2, updated_at = NOW() WHERE tenant_id = $4 AND user_id = $3 RETURNING *",
             [
                 reservation.amount.into(),
                 amount.into(),
                 reservation.user_id.into(),
+                reservation.tenant_id.into(),
             ],
         );
         let updated_balance = UserBalance::find_by_statement(update_balance)
@@ -1239,6 +1288,8 @@ impl BalanceReservation {
     /// ownership. Repeated releases are harmless.
     pub async fn release(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
+        user_id: Uuid,
         request_id: Uuid,
         owner_token: Uuid,
     ) -> Result<bool, DbError> {
@@ -1248,6 +1299,9 @@ impl BalanceReservation {
         let Some(snapshot) = Self::find_by_request(db, request_id, true).await? else {
             return Ok(false);
         };
+        if snapshot.tenant_id != tenant_id || snapshot.user_id != user_id {
+            return Ok(false);
+        }
         if snapshot.owner_token != owner_token {
             return Ok(false);
         }
@@ -1257,8 +1311,8 @@ impl BalanceReservation {
             .ok_or_else(|| DbError::not_found("tenant", snapshot.tenant_id))?;
         let lock_balance = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [snapshot.user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [snapshot.tenant_id.into(), snapshot.user_id.into()],
         );
         let balance = UserBalance::find_by_statement(lock_balance)
             .one(&tx)
@@ -1281,8 +1335,12 @@ impl BalanceReservation {
         if reservation.amount > Decimal::ZERO {
             let update_balance = Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2",
-                [reservation.amount.into(), reservation.user_id.into()],
+                "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2",
+                [
+                    reservation.amount.into(),
+                    reservation.user_id.into(),
+                    reservation.tenant_id.into(),
+                ],
             );
             tx.execute(update_balance).await?;
         }
@@ -1305,6 +1363,7 @@ impl BalanceReservation {
     /// the ordinary available-balance/debt consumption path.
     pub async fn admin_release(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_id: Uuid,
         request_id: Uuid,
         expected_owner_token: Uuid,
@@ -1331,6 +1390,9 @@ impl BalanceReservation {
         if snapshot.user_id != user_id {
             return Ok(None);
         }
+        if snapshot.tenant_id != tenant_id {
+            return Ok(None);
+        }
 
         let tx = db.begin().await?;
         Tenant::find_by_id_for_key_share(&tx, snapshot.tenant_id)
@@ -1338,8 +1400,8 @@ impl BalanceReservation {
             .ok_or_else(|| DbError::not_found("tenant", snapshot.tenant_id))?;
         let lock_balance = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [snapshot.tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(lock_balance)
             .one(&tx)
@@ -1379,8 +1441,12 @@ impl BalanceReservation {
 
         let update_balance = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2 RETURNING *",
-            [reservation.amount.into(), user_id.into()],
+            "UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2 RETURNING *",
+            [
+                reservation.amount.into(),
+                user_id.into(),
+                reservation.tenant_id.into(),
+            ],
         );
         let updated_balance = UserBalance::find_by_statement(update_balance)
             .one(&tx)
@@ -1425,67 +1491,6 @@ impl UserBalance {
 }
 
 impl UserBalance {
-    /// 将用户余额归属切换到新租户。
-    ///
-    /// 调用方必须传入事务；余额行必须先锁定；活跃请求预留在原租户
-    /// 结算完成前不能迁移，否则预留的历史租户和当前余额租户会不一致。
-    pub async fn reassign_tenant(
-        db: &DatabaseTransaction,
-        user_id: Uuid,
-        tenant_id: Uuid,
-    ) -> Result<bool, DbError> {
-        // Keep this helper safe for direct model callers as well as the admin
-        // handler: tenant deletion takes the parent lock before cascading its
-        // balance children, so the target parent must be acquired first.
-        Tenant::find_by_id_for_key_share(db, tenant_id)
-            .await?
-            .ok_or_else(|| DbError::not_found("tenant", tenant_id))?;
-        // Materialize the balance row before locking it. Users created with a
-        // zero/negative default quota do not have a row yet, and a later
-        // payment callback may otherwise recreate that row with the payment
-        // order's old tenant after the user move commits.
-        db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "INSERT INTO user_balances (user_id, tenant_id) VALUES ($1, $2) ON CONFLICT (user_id) DO NOTHING",
-            [user_id.into(), tenant_id.into()],
-        ))
-        .await?;
-
-        let lock_stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
-        );
-        let Some(_balance) = UserBalance::find_by_statement(lock_stmt).one(db).await? else {
-            return Ok(false);
-        };
-
-        #[derive(Debug, FromQueryResult)]
-        struct ActiveReservationCount {
-            count: i64,
-        }
-        let active = ActiveReservationCount::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT COUNT(*)::BIGINT AS count FROM balance_reservations WHERE user_id = $1 AND status = 'active'",
-            [user_id.into()],
-        ))
-        .one(db)
-        .await?
-        .map(|row| row.count)
-        .unwrap_or(0);
-        if active > 0 {
-            return Err(DbError::UserHasActiveBalanceReservations { count: active });
-        }
-
-        db.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE user_balances SET tenant_id = $1, updated_at = NOW() WHERE user_id = $2",
-            [tenant_id.into(), user_id.into()],
-        ))
-        .await?;
-        Ok(true)
-    }
-
     /// 获取或创建用户余额记录
     pub async fn get_or_create(
         db: &(impl ConnectionTrait + TransactionTrait),
@@ -1493,25 +1498,25 @@ impl UserBalance {
         user_id: Uuid,
     ) -> Result<UserBalance, DbError> {
         // Balance materialization is tenant-scoped. Keep the same parent ->
-        // user -> balance order as reassignment and payment writers so a
-        // stale caller cannot recreate a source-tenant row after a move.
+        // user -> balance order as payment writers. Membership is verified
+        // for this exact tenant; no wallet is moved between organizations.
         let tx = db.begin().await?;
         Tenant::find_by_id_for_key_share(&tx, tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("tenant", tenant_id))?;
-        let user = User::find_by_id_for_no_key_update(&tx, user_id)
+        User::find_by_id_for_no_key_update(&tx, user_id)
             .await?
             .ok_or_else(|| DbError::not_found("user", user_id))?;
-        if user.tenant_id != tenant_id {
-            return Err(DbError::UserTenantMismatch {
+        TenantMembership::find(&tx, tenant_id, user_id)
+            .await?
+            .ok_or_else(|| DbError::UserTenantMismatch {
                 user_id,
                 requested_tenant_id: tenant_id,
-                actual_tenant_id: user.tenant_id,
-            });
-        }
+                actual_tenant_id: tenant_id,
+            })?;
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO user_balances (tenant_id, user_id) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET updated_at = NOW() RETURNING *"#,
+            r#"INSERT INTO user_balances (tenant_id, user_id) VALUES ($1, $2) ON CONFLICT (tenant_id, user_id) DO UPDATE SET updated_at = NOW() RETURNING *"#,
             [tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(stmt)
@@ -1534,12 +1539,13 @@ impl UserBalance {
     /// 根据用户ID查找余额
     pub async fn find_by_user(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<UserBalance>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2",
+            [tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(stmt).one(db).await?;
         Ok(balance)
@@ -1562,7 +1568,7 @@ impl UserBalance {
             r#"
                 SELECT
                     u.id AS user_id,
-                    u.tenant_id AS owner_tenant_id,
+                    m.tenant_id AS owner_tenant_id,
                     ub.id AS balance_id,
                     ub.tenant_id AS balance_tenant_id,
                     ub.available_balance,
@@ -1571,11 +1577,12 @@ impl UserBalance {
                     ub.total_consumed,
                     statement_timestamp() AS as_of
                 FROM users u
-                JOIN tenants t ON t.id = u.tenant_id
-                LEFT JOIN user_balances ub ON ub.user_id = u.id
+                JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=$2 AND m.status='active'
+                JOIN tenants t ON t.id = m.tenant_id AND t.status='active'
+                LEFT JOIN user_balances ub ON ub.user_id = u.id AND ub.tenant_id=m.tenant_id
                 WHERE u.id = $1
             "#,
-            [user_id.into()],
+            [user_id.into(), tenant_id.into()],
         );
         let row = DisplayBalanceRow::find_by_statement(stmt)
             .one(db)
@@ -1590,6 +1597,7 @@ impl UserBalance {
     /// mismatches remain errors instead of being rendered as zero.
     pub async fn find_display_snapshots(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_ids: &[Uuid],
     ) -> Result<HashMap<Uuid, UserBalanceDisplaySnapshot>, DbError> {
         // Bound allocations even for direct model callers, before deduplication.
@@ -1612,7 +1620,7 @@ impl UserBalance {
             r#"
                 SELECT
                     u.id AS user_id,
-                    u.tenant_id AS owner_tenant_id,
+                    m.tenant_id AS owner_tenant_id,
                     ub.id AS balance_id,
                     ub.tenant_id AS balance_tenant_id,
                     ub.available_balance,
@@ -1621,11 +1629,12 @@ impl UserBalance {
                     ub.total_consumed,
                     statement_timestamp() AS as_of
                 FROM users u
-                JOIN tenants t ON t.id = u.tenant_id
-                LEFT JOIN user_balances ub ON ub.user_id = u.id
+                JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=$2 AND m.status='active'
+                JOIN tenants t ON t.id = m.tenant_id AND t.status='active'
+                LEFT JOIN user_balances ub ON ub.user_id = u.id AND ub.tenant_id=m.tenant_id
                 WHERE u.id = ANY($1)
             "#,
-            [requested.clone().into()],
+            [requested.clone().into(), tenant_id.into()],
         );
         let rows = DisplayBalanceRow::find_by_statement(stmt).all(db).await?;
         let mut snapshots = HashMap::with_capacity(rows.len());
@@ -1648,13 +1657,14 @@ impl UserBalance {
     /// `find_by_user` remains available inside existing transactions.
     pub async fn find_by_user_reclaiming_expired(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<UserBalance>, DbError> {
         let tx = db.begin().await?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let Some(balance) = UserBalance::find_by_statement(lock_stmt).one(&tx).await? else {
             tx.commit().await?;
@@ -1674,13 +1684,14 @@ impl UserBalance {
     /// frozen funds after atomically reclaiming expired reservations.
     pub async fn find_breakdown_by_user(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_id: Uuid,
     ) -> Result<Option<UserBalanceBreakdown>, DbError> {
         let tx = db.begin().await?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let Some(balance) = UserBalance::find_by_statement(lock_stmt).one(&tx).await? else {
             tx.commit().await?;
@@ -1694,7 +1705,7 @@ impl UserBalance {
             .expect("the locked balance must be preserved during reclamation");
         let active_reserved = reclaimed
             .active_totals
-            .remove(&user_id)
+            .remove(&(tenant_id, user_id))
             .expect("the locked balance must have an active reservation aggregate");
         let breakdown = BalanceReservation::breakdown_with_active_total(balance, active_reserved)?;
         tx.commit().await?;
@@ -1707,6 +1718,7 @@ impl UserBalance {
     /// detail rows are materialized while that lock is held.
     pub async fn find_breakdown_page_by_user(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_id: Uuid,
         cursor: Option<BalanceReservationPageCursor>,
         limit: u64,
@@ -1716,8 +1728,8 @@ impl UserBalance {
         let tx = db.begin().await?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let Some(balance) = UserBalance::find_by_statement(lock_stmt).one(&tx).await? else {
             tx.commit().await?;
@@ -1731,11 +1743,11 @@ impl UserBalance {
             .expect("the locked balance must be preserved during reclamation");
         let active_reserved = reclaimed
             .active_totals
-            .remove(&user_id)
+            .remove(&(tenant_id, user_id))
             .expect("the locked balance must have an active reservation aggregate");
         let breakdown = BalanceReservation::breakdown_with_active_total(balance, active_reserved)?;
         let (reservations, next_cursor) =
-            BalanceReservation::active_page_by_user(&tx, user_id, cursor, limit).await?;
+            BalanceReservation::active_page_by_user(&tx, tenant_id, user_id, cursor, limit).await?;
         tx.commit().await?;
         Ok(Some(UserBalanceBreakdownPage {
             breakdown,
@@ -1747,6 +1759,7 @@ impl UserBalance {
     /// 批量根据用户ID查找余额
     pub async fn find_by_users(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalance>, DbError> {
         if user_ids.is_empty() {
@@ -1754,8 +1767,8 @@ impl UserBalance {
         }
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = ANY($1)",
-            [user_ids.to_vec().into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = ANY($2)",
+            [tenant_id.into(), user_ids.to_vec().into()],
         );
         let balances = UserBalance::find_by_statement(stmt).all(db).await?;
         Ok(balances.into_iter().map(|b| (b.user_id, b)).collect())
@@ -1766,6 +1779,7 @@ impl UserBalance {
     /// order to preserve the lock order used by reservation settlement.
     pub async fn find_by_users_reclaiming_expired(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, UserBalance>, DbError> {
         if user_ids.is_empty() {
@@ -1778,8 +1792,8 @@ impl UserBalance {
         let tx = db.begin().await?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = ANY($1) ORDER BY user_id FOR UPDATE",
-            [user_ids.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = ANY($2) ORDER BY user_id FOR UPDATE",
+            [tenant_id.into(), user_ids.into()],
         );
         let balances = UserBalance::find_by_statement(lock_stmt).all(&tx).await?;
         let balances = BalanceReservation::reclaim_expired_for_locked_balances(&tx, balances)
@@ -1795,8 +1809,8 @@ impl UserBalance {
     /// 充值（自身创建事务执行）
     pub async fn recharge(
         db: &(impl ConnectionTrait + TransactionTrait),
-        user_id: Uuid,
         tenant_id: Uuid,
+        user_id: Uuid,
         amount: Decimal,
         order_id: Option<Uuid>,
         description: Option<&str>,
@@ -1809,7 +1823,7 @@ impl UserBalance {
         let tx = db.begin().await?;
 
         let result =
-            Self::recharge_in_tx(&tx, user_id, tenant_id, amount, order_id, description).await?;
+            Self::recharge_in_tx(&tx, tenant_id, user_id, amount, order_id, description).await?;
 
         tx.commit().await?;
         Ok(result)
@@ -1821,8 +1835,8 @@ impl UserBalance {
     /// 用于需要将充值操作与其它 DB 操作（如订单更新）放在同一事务中的场景。
     pub async fn recharge_in_tx(
         tx: &DatabaseTransaction,
-        user_id: Uuid,
         tenant_id: Uuid,
+        user_id: Uuid,
         amount: Decimal,
         order_id: Option<Uuid>,
         description: Option<&str>,
@@ -1847,7 +1861,7 @@ impl UserBalance {
             r#"INSERT INTO user_balances
                (user_id, tenant_id, available_balance, frozen_balance, total_recharged, total_consumed)
                VALUES ($1, $2, 0, 0, 0, 0)
-               ON CONFLICT (user_id) DO NOTHING"#,
+               ON CONFLICT (tenant_id, user_id) DO NOTHING"#,
             [user_id.into(), tenant_id.into()],
         ))
         .await?;
@@ -1855,8 +1869,8 @@ impl UserBalance {
         // 获取当前余额（加锁）
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(lock_stmt)
             .one(tx)
@@ -1879,9 +1893,9 @@ impl UserBalance {
                SET available_balance = available_balance + $1,
                    total_recharged = total_recharged + $1,
                    updated_at = NOW()
-               WHERE user_id = $2
+               WHERE tenant_id = $3 AND user_id = $2
                RETURNING *"#,
-            [amount.into(), user_id.into()],
+            [amount.into(), user_id.into(), tenant_id.into()],
         );
         let updated_balance = UserBalance::find_by_statement(update_stmt)
             .one(tx)
@@ -1909,6 +1923,7 @@ impl UserBalance {
     /// 消费（事务内执行）
     pub async fn consume(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         usage_log_id: Option<Uuid>,
@@ -1926,13 +1941,15 @@ impl UserBalance {
         }
         let tx = db.begin().await?;
 
-        let result = Self::consume_in_tx(&tx, user_id, amount, usage_log_id, description).await?;
+        let result =
+            Self::consume_in_tx(&tx, tenant_id, user_id, amount, usage_log_id, description).await?;
         tx.commit().await?;
         Ok(result)
     }
 
     async fn consume_in_tx(
         tx: &DatabaseTransaction,
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         usage_log_id: Option<Uuid>,
@@ -1941,17 +1958,13 @@ impl UserBalance {
         // Consumption writes a tenant-scoped balance transaction. Discover
         // the current parent first, lock it, then lock the balance row; this
         // matches tenant deletion and avoids balance -> tenant cycles.
-        let tenant_id = UserBalance::find_by_user(tx, user_id)
-            .await?
-            .map(|balance| balance.tenant_id)
-            .ok_or_else(|| DbError::not_found("UserBalance", user_id.to_string()))?;
         Tenant::find_by_id_for_key_share(tx, tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("tenant", tenant_id))?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(lock_stmt).one(tx).await?;
 
@@ -2006,8 +2019,8 @@ impl UserBalance {
 
         let update_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"UPDATE user_balances SET available_balance = available_balance - $1, total_consumed = total_consumed + $1, updated_at = NOW() WHERE user_id = $2 RETURNING *"#,
-            [amount.into(), user_id.into()],
+            r#"UPDATE user_balances SET available_balance = available_balance - $1, total_consumed = total_consumed + $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2 RETURNING *"#,
+            [amount.into(), user_id.into(), tenant_id.into()],
         );
         let updated_balance = UserBalance::find_by_statement(update_stmt)
             .one(tx)
@@ -2034,6 +2047,7 @@ impl UserBalance {
     /// 冻结余额
     pub async fn freeze(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
@@ -2045,13 +2059,14 @@ impl UserBalance {
         }
         let tx = db.begin().await?;
 
-        let result = Self::freeze_in_tx(&tx, user_id, amount, description).await?;
+        let result = Self::freeze_in_tx(&tx, tenant_id, user_id, amount, description).await?;
         tx.commit().await?;
         Ok(result)
     }
 
     async fn freeze_in_tx(
         tx: &DatabaseTransaction,
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
@@ -2059,17 +2074,13 @@ impl UserBalance {
         // Balance transactions carry the balance tenant as a foreign key.
         // Lock the parent before the balance row so this path cannot deadlock
         // with tenant deletion (which takes the same parent-first order).
-        let tenant_id = UserBalance::find_by_user(tx, user_id)
-            .await?
-            .map(|balance| balance.tenant_id)
-            .ok_or_else(|| DbError::not_found("UserBalance", user_id.to_string()))?;
         Tenant::find_by_id_for_key_share(tx, tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("tenant", tenant_id))?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(lock_stmt).one(tx).await?;
 
@@ -2102,8 +2113,8 @@ impl UserBalance {
 
         let update_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"UPDATE user_balances SET available_balance = available_balance - $1, frozen_balance = frozen_balance + $1, updated_at = NOW() WHERE user_id = $2 RETURNING *"#,
-            [amount.into(), user_id.into()],
+            r#"UPDATE user_balances SET available_balance = available_balance - $1, frozen_balance = frozen_balance + $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2 RETURNING *"#,
+            [amount.into(), user_id.into(), tenant_id.into()],
         );
         let updated_balance = UserBalance::find_by_statement(update_stmt)
             .one(tx)
@@ -2149,30 +2160,27 @@ impl UserBalance {
         }
         // Determine and lock the parent before taking the balance row lock;
         // the resulting balance transaction references this tenant.
-        let existing_tenant_id = UserBalance::find_by_user(db, user_id)
-            .await?
-            .map(|balance| balance.tenant_id);
-        let effective_tenant_id = existing_tenant_id.unwrap_or(tenant_id);
+        let effective_tenant_id = tenant_id;
         Tenant::find_by_id_for_key_share(db, effective_tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("tenant", effective_tenant_id))?;
         // The balance row may not exist yet. Lock the authoritative user
         // before materializing it so a stale tenant from an old JWT cannot
         // create a new balance after an administrator moves the user.
-        let user = User::find_by_id_for_no_key_update(db, user_id)
+        User::find_by_id_for_no_key_update(db, user_id)
             .await?
             .ok_or_else(|| DbError::not_found("user", user_id))?;
-        if user.tenant_id != effective_tenant_id {
-            return Err(DbError::UserTenantMismatch {
+        TenantMembership::find(db, effective_tenant_id, user_id)
+            .await?
+            .ok_or_else(|| DbError::UserTenantMismatch {
                 user_id,
                 requested_tenant_id: effective_tenant_id,
-                actual_tenant_id: user.tenant_id,
-            });
-        }
+                actual_tenant_id: effective_tenant_id,
+            })?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [effective_tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(lock_stmt).one(db).await?;
         if let Some(balance) = balance.as_ref()
@@ -2186,7 +2194,7 @@ impl UserBalance {
 
         let upsert_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO user_balances (user_id, tenant_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW() RETURNING *"#,
+            r#"INSERT INTO user_balances (user_id, tenant_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (tenant_id, user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW() RETURNING *"#,
             [user_id.into(), effective_tenant_id.into(), amount.into()],
         );
         let updated_balance = UserBalance::find_by_statement(upsert_stmt)
@@ -2217,6 +2225,7 @@ impl UserBalance {
     /// 解冻余额
     pub async fn unfreeze(
         db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
@@ -2229,7 +2238,7 @@ impl UserBalance {
 
         let tx = db.begin().await?;
 
-        match Self::unfreeze_in_tx(&tx, user_id, amount, description).await {
+        match Self::unfreeze_in_tx(&tx, tenant_id, user_id, amount, description).await {
             Ok(result) => {
                 tx.commit().await?;
                 Ok(result)
@@ -2246,23 +2255,20 @@ impl UserBalance {
 
     async fn unfreeze_in_tx(
         tx: &DatabaseTransaction,
+        tenant_id: Uuid,
         user_id: Uuid,
         amount: Decimal,
         description: Option<&str>,
     ) -> Result<(UserBalance, BalanceTransaction), DbError> {
         // Keep the parent-first lock order used by tenant deletion and other
         // tenant-scoped balance writes.
-        let tenant_id = UserBalance::find_by_user(tx, user_id)
-            .await?
-            .map(|balance| balance.tenant_id)
-            .ok_or_else(|| DbError::not_found("UserBalance", user_id.to_string()))?;
         Tenant::find_by_id_for_key_share(tx, tenant_id)
             .await?
             .ok_or_else(|| DbError::not_found("tenant", tenant_id))?;
         let lock_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM user_balances WHERE user_id = $1 FOR UPDATE",
-            [user_id.into()],
+            "SELECT * FROM user_balances WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE",
+            [tenant_id.into(), user_id.into()],
         );
         let balance = UserBalance::find_by_statement(lock_stmt).one(tx).await?;
 
@@ -2288,7 +2294,7 @@ impl UserBalance {
         // funds. Keep those request-owned funds separate from manual freezes.
         let active_reserved = reclaimed
             .active_totals
-            .remove(&user_id)
+            .remove(&(tenant_id, user_id))
             .expect("the locked balance must have an active reservation aggregate");
         if balance.frozen_balance < active_reserved {
             return Err(DbError::Other(format!(
@@ -2308,8 +2314,8 @@ impl UserBalance {
 
         let update_stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE user_id = $2 RETURNING *"#,
-            [amount.into(), user_id.into()],
+            r#"UPDATE user_balances SET available_balance = available_balance + $1, frozen_balance = frozen_balance - $1, updated_at = NOW() WHERE tenant_id = $3 AND user_id = $2 RETURNING *"#,
+            [amount.into(), user_id.into(), tenant_id.into()],
         );
         let updated_balance = UserBalance::find_by_statement(update_stmt)
             .one(tx)
@@ -2448,16 +2454,16 @@ impl UserBalance {
 
         let operation = match kind {
             ManualBalanceOperationKind::Recharge => {
-                Self::recharge_in_tx(&tx, user_id, tenant_id, amount, None, Some(reason)).await
+                Self::recharge_in_tx(&tx, tenant_id, user_id, amount, None, Some(reason)).await
             }
             ManualBalanceOperationKind::Consume => {
-                Self::consume_in_tx(&tx, user_id, amount, None, Some(reason)).await
+                Self::consume_in_tx(&tx, tenant_id, user_id, amount, None, Some(reason)).await
             }
             ManualBalanceOperationKind::Freeze => {
-                Self::freeze_in_tx(&tx, user_id, amount, Some(reason)).await
+                Self::freeze_in_tx(&tx, tenant_id, user_id, amount, Some(reason)).await
             }
             ManualBalanceOperationKind::Unfreeze => {
-                Self::unfreeze_in_tx(&tx, user_id, amount, Some(reason)).await
+                Self::unfreeze_in_tx(&tx, tenant_id, user_id, amount, Some(reason)).await
             }
         };
         let (updated_balance, balance_transaction) = match operation {
@@ -2593,14 +2599,20 @@ impl BalanceTransaction {
     /// 查找用户的交易记录
     pub async fn find_by_user(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<BalanceTransaction>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM balance_transactions WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            [user_id.into(), limit.into(), offset.into()],
+            "SELECT * FROM balance_transactions WHERE tenant_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+            [
+                tenant_id.into(),
+                user_id.into(),
+                limit.into(),
+                offset.into(),
+            ],
         );
         let transactions = BalanceTransaction::find_by_statement(stmt).all(db).await?;
         Ok(transactions)

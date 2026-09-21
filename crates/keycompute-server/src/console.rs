@@ -5,7 +5,11 @@
 //! database work. Identity/tenant/aggregate counters are then recorded in a
 //! namespaced memory or Redis limiter after one authoritative token lookup.
 
-use crate::{ApiError, extractors::AuthExtractor, state::AppState};
+use crate::{
+    ApiError,
+    extractors::{AuthExtractor, GlobalConsoleAuth},
+    state::AppState,
+};
 use axum::{
     extract::{Request, State},
     http::{HeaderValue, StatusCode, header},
@@ -242,11 +246,15 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
         .console_admission
         .cleanup_expired_counters(&state.console_limiter);
 
-    // A successful lookup is inserted once and reused by admin middleware and
-    // the handler extractor. Invalid credentials continue downstream so the
-    // canonical 401/403 response remains authoritative.
-    let auth = if let Some(auth) = req.extensions().get::<AuthExtractor>().cloned() {
-        Some(auth)
+    // A global session is an authenticated identity even without a tenant.
+    let context = if let Some(context) = req
+        .extensions()
+        .get::<keycompute_auth::AuthContext>()
+        .cloned()
+    {
+        Some(context)
+    } else if let Some(auth) = req.extensions().get::<AuthExtractor>() {
+        Some(auth.authorization_context())
     } else {
         let token = req
             .headers()
@@ -255,14 +263,10 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
             .and_then(|value| value.strip_prefix("Bearer "));
         match token {
             Some(token) => match state.auth.verify_token(token).await {
-                Ok(context) => Some(AuthExtractor::from_auth_context(context)),
-                Err(keycompute_types::KeyComputeError::AuthError(_)) => None,
+                Ok(context) => Some(context),
                 Err(error) => {
-                    tracing::warn!(%error, "console authentication dependency failed");
-                    let mut response = ApiError::ServiceUnavailable(
-                        "Authentication service is temporarily unavailable. Please try again later.".into(),
-                    )
-                    .into_response();
+                    let mut response =
+                        crate::extractors::authentication_error(error).into_response();
                     response
                         .headers_mut()
                         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -272,12 +276,10 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
             None => None,
         }
     };
-
-    if let Some(auth) = auth {
-        // Authentication does not imply console authorization. Inference keys
-        // retain UseApi only, regardless of their owner's role. Reject before
-        // quotas, display cache reads or mutation fences can have side effects.
-        if !auth.has_permission(&keycompute_auth::Permission::AccessConsole) {
+    if let Some(context) = context {
+        if context.credential_kind != keycompute_types::CredentialKind::Jwt
+            || !context.has_permission(&keycompute_auth::Permission::AccessConsole)
+        {
             let mut response =
                 ApiError::Forbidden("Console session required".into()).into_response();
             response
@@ -285,36 +287,40 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
             return response;
         }
-        let user_config =
-            RateLimitConfig::new(config_user(&state.console_admission.config), u32::MAX);
-        let tenant_config =
-            RateLimitConfig::new(state.console_admission.config.tenant_rpm, u32::MAX);
-        let aggregate_config =
-            RateLimitConfig::new(state.console_admission.config.aggregate_rpm, u32::MAX);
-        let checks = [
-            // Check aggregate first: even rejected class walks consume the finite
-            // aggregate budget before creating additional identity counter keys.
+        let mut checks = vec![
             (
                 scope_key(Uuid::nil(), Uuid::nil(), Uuid::nil()),
-                aggregate_config,
+                RateLimitConfig::new(state.console_admission.config.aggregate_rpm, u32::MAX),
+                "console_all",
             ),
             (
-                scope_key(auth.tenant_id, Uuid::nil(), Uuid::nil()),
-                tenant_config,
-            ),
-            (
-                scope_key(Uuid::nil(), auth.user_id, Uuid::nil()),
-                user_config,
-            ),
-            (
-                quota_key(class, auth.tenant_id, auth.user_id, Uuid::nil()),
-                RateLimitConfig::new(
-                    class_limit(&state.console_admission.config, class),
-                    u32::MAX,
-                ),
+                scope_key(Uuid::nil(), context.user_id, Uuid::nil()),
+                RateLimitConfig::new(config_user(&state.console_admission.config), u32::MAX),
+                "console_all",
             ),
         ];
-        for (scope_index, (key, config)) in checks.into_iter().enumerate() {
+        if let Some(tenant) = context.selected_tenant_id {
+            checks.push((
+                scope_key(tenant, Uuid::nil(), Uuid::nil()),
+                RateLimitConfig::new(state.console_admission.config.tenant_rpm, u32::MAX),
+                "console_all",
+            ));
+        }
+        // Nil is an absent quota dimension, never a resource's tenant identity.
+        checks.push((
+            quota_key(
+                class,
+                context.selected_tenant_id.unwrap_or_default(),
+                context.user_id,
+                Uuid::nil(),
+            ),
+            RateLimitConfig::new(
+                class_limit(&state.console_admission.config, class),
+                u32::MAX,
+            ),
+            class.as_str(),
+        ));
+        for (key, config, label) in checks {
             match state
                 .console_limiter
                 .check_and_record_with_config(&key, &config)
@@ -324,23 +330,12 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
                 Err(keycompute_types::KeyComputeError::RateLimitExceeded(_)) => {
                     state.console_admission.quota_rejected[class.index()]
                         .fetch_add(1, Ordering::Relaxed);
-                    return quota_response(
-                        &state,
-                        &key,
-                        &config,
-                        if scope_index == 3 {
-                            class.as_str()
-                        } else {
-                            "console_all"
-                        },
-                    )
-                    .await;
+                    return quota_response(&state, &key, &config, label).await;
                 }
                 Err(error) => {
-                    tracing::warn!(%error, class = class.as_str(), "console quota backend failed");
+                    tracing::warn!(%error, class=class.as_str(), "console quota backend failed");
                     let mut response = ApiError::ServiceUnavailable(
-                        "Console quota service is temporarily unavailable. Please try again later."
-                            .into(),
+                        "Console quota service is temporarily unavailable".into(),
                     )
                     .into_response();
                     response
@@ -350,7 +345,18 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
                 }
             }
         }
-        req.extensions_mut().insert(auth);
+        req.extensions_mut().insert(context.clone());
+        if let Ok(global) = GlobalConsoleAuth::try_from(context.clone()) {
+            req.extensions_mut().insert(global);
+        }
+        if context.selected_tenant_id.is_some() {
+            match AuthExtractor::from_auth_context(context) {
+                Ok(auth) => {
+                    req.extensions_mut().insert(auth);
+                }
+                Err(error) => return error.into_response(),
+            }
+        }
     }
 
     // Legacy heavy reads also respect the finite origin budget. The explicit
@@ -363,8 +369,9 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
             | "/api/v1/me/distribution/overview"
     );
     let _origin = if class == ConsoleClass::HeavyRead && !cache_owned {
-        if let Some(auth) = req.extensions().get::<AuthExtractor>() {
-            match state.console_admission.origin.acquire(auth.tenant_id).await {
+        if let Some(context) = req.extensions().get::<keycompute_auth::AuthContext>() {
+            let budget_key = context.selected_tenant_id.unwrap_or(context.user_id);
+            match state.console_admission.origin.acquire(budget_key).await {
                 Ok(permit) => Some(permit),
                 Err(error) => {
                     state.console_admission.resource_rejected[class.index()]
@@ -395,7 +402,17 @@ pub async fn middleware(State(state): State<AppState>, mut req: Request, next: N
 /// stronger authorization check. The outer console layer still bounds ingress
 /// and counts abuse attempts, including denied authenticated requests.
 pub(crate) async fn mutation_middleware(
-    _auth: crate::extractors::ConsoleAuth,
+    _auth: crate::extractors::GlobalConsoleAuth,
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    run_with_mutation_fence(&state, req, next).await
+}
+
+/// Global self-service commands do not require a selected tenant.
+pub(crate) async fn global_mutation_middleware(
+    _auth: crate::extractors::GlobalConsoleAuth,
     State(state): State<AppState>,
     req: Request,
     next: Next,

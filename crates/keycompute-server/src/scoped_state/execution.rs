@@ -89,7 +89,9 @@ impl ManagedExecution {
             };
             let ready = tokio::time::timeout(
                 Duration::from_secs(3),
-                gateway.store.cancellable_native_ready(&native),
+                gateway
+                    .store
+                    .cancellable_native_ready(ctx.tenant_id, &native),
             )
             .await
             .map_err(|_| ApiError::ServiceUnavailable("Node capability lookup timed out".into()))?

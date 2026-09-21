@@ -24,8 +24,7 @@ use keycompute_db::{Account, CreateUserRequest, DbRouter, User};
 use keycompute_runtime::{ApiKeyCrypto, encrypt_api_key, set_global_crypto};
 use keycompute_server::create_router;
 use keycompute_server::state::AppState;
-use keycompute_types::UserRole;
-use sea_orm::{Database, DatabaseConnection};
+use sea_orm::{ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement};
 use serde_json::Value;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -113,14 +112,28 @@ async fn build_admin_app(
     let admin = User::create(
         pool,
         &CreateUserRequest {
-            tenant_id,
             email: format!("proto-admin-{}@example.com", test_id),
             name: Some("Protocol Isolation Admin".to_string()),
-            role: Some(UserRole::Admin),
         },
     )
     .await
     .expect("create admin user");
+    pool.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET platform_role='root' WHERE id=$1",
+        [admin.id.into()],
+    ))
+    .await
+    .expect("promote protocol test admin");
+    let admin = User::find_by_id(pool, admin.id)
+        .await
+        .expect("reload protocol test admin")
+        .expect("protocol test admin");
+    pool.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'admin','active')",
+        [tenant_id.into(), admin.id.into()],
+    )).await.expect("admin membership");
 
     // AppState 使用默认 JWT 配置；从 state 的验证器直接签发 token，
     // secret/issuer 天然一致（避免硬编码与配置漂移）
@@ -132,8 +145,23 @@ async fn build_admin_app(
         .get_jwt_validator()
         .expect("jwt validator configured")
         .clone();
+    let membership = keycompute_db::TenantMembership::find(pool, tenant_id, admin.id)
+        .await
+        .expect("admin membership lookup")
+        .expect("admin membership");
+    let tenant = keycompute_db::Tenant::find_by_id(pool, tenant_id)
+        .await
+        .expect("tenant lookup")
+        .expect("tenant");
     let token = jwt
-        .generate_token_with_version(admin.id, admin.tenant_id, &admin.role, admin.token_version)
+        .generate_identity_token(
+            admin.id,
+            Some(tenant_id),
+            admin.token_version,
+            Some(tenant.authz_version),
+            Some(membership.version),
+            3600,
+        )
         .expect("admin token");
 
     (app, token)

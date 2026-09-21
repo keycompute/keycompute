@@ -22,7 +22,10 @@ pub mod response_affinity;
 pub mod responses_idempotency_claim;
 pub mod system_setting;
 pub mod tenant;
+pub mod tenant_audit_event;
 pub mod tenant_distribution_rule;
+pub mod tenant_invitation;
+pub mod tenant_membership;
 pub mod upstream_access;
 pub mod usage_log;
 pub mod user;
@@ -66,7 +69,9 @@ pub use payment_order::{
     PaymentOrderStats, PaymentOrderStatus,
 };
 pub use pending_registration::{PendingRegistration, UpsertPendingRegistrationRequest};
-pub use pricing_model::{CreatePricingRequest, PricingModel, UpdatePricingRequest};
+pub use pricing_model::{
+    CreatePricingRequest, PricingModel, PricingScopeType, UpdatePricingRequest,
+};
 pub use response_affinity::{
     ResponseAffinity, SettlementClaimCursor, SettlementRecoveryCursor, SettlementRecoveryRow,
 };
@@ -79,9 +84,15 @@ pub use tenant::{
     CreateTenantRequest, Tenant, TenantDeletionBlockers, TenantFinancialDeletionBlockers,
     UpdateTenantRequest,
 };
+pub use tenant_audit_event::{AuditContext, TenantAuditEvent};
 pub use tenant_distribution_rule::{
-    CreateDistributionRuleRequest, TenantDistributionRule, UpdateDistributionRuleRequest,
+    BeneficiaryScope, CreateDistributionRuleRequest, TenantDistributionRule,
+    UpdateDistributionRuleRequest,
 };
+pub use tenant_invitation::{
+    CreateTenantInvitationRequest, CreatedTenantInvitation, TenantInvitation,
+};
+pub use tenant_membership::{CreateTenantMembershipRequest, TenantMembership};
 pub use usage_log::{CreateUsageLogRequest, UsageLog, UsageStats, UserUsageStats};
 pub use user::{CreateUserRequest, UpdateUserRequest, User};
 pub use user_balance::{

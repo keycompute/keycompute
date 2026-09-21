@@ -12,9 +12,11 @@ use crate::stores::user_store::{UserInfo, UserStore};
 #[component]
 pub fn UserProfile() -> Element {
     let i18n = use_i18n();
-    let auth_store = use_context::<AuthStore>();
+    let mut auth_store = use_context::<AuthStore>();
     let mut user_store = use_context::<UserStore>();
 
+    let mut tenant_saving = use_signal(|| false);
+    let mut tenant_error = use_signal(|| Option::<String>::None);
     let mut edit_mode = use_signal(|| false);
     let mut edit_name = use_signal(String::new);
     let mut saving = use_signal(|| false);
@@ -42,8 +44,11 @@ pub fn UserProfile() -> Element {
                 id: user.id.to_string(),
                 email: user.email,
                 name: user.name,
-                role: user.role,
-                tenant_id: user.tenant_id.to_string(),
+                platform_role: user.platform_role,
+                status: user.status,
+                memberships: user.memberships,
+                selected_tenant: user.selected_tenant,
+                capabilities: user.capabilities,
             });
             user_store.loaded_session_id.set(observed.session_id);
             Ok(())
@@ -60,14 +65,18 @@ pub fn UserProfile() -> Element {
         .as_ref()
         .map(|u| u.email.clone())
         .unwrap_or_default();
-    let role = user_info
+    let platform_role = user_info
         .as_ref()
-        .map(|u| u.role.clone())
+        .and_then(|u| u.platform_role.map(|role| role.to_string()))
         .unwrap_or_default();
     let user_id = user_info.as_ref().map(|u| u.id.clone()).unwrap_or_default();
     let tenant_id = user_info
         .as_ref()
-        .map(|u| u.tenant_id.clone())
+        .and_then(|u| u.active_tenant_id().map(str::to_owned))
+        .unwrap_or_default();
+    let memberships = user_info
+        .as_ref()
+        .map(|u| u.memberships.clone())
         .unwrap_or_default();
     let avatar = user_info.as_ref().map(|u| u.avatar_char()).unwrap_or('U');
     let has_user = user_info.is_some();
@@ -109,8 +118,11 @@ pub fn UserProfile() -> Element {
                         id: updated.id.to_string(),
                         email: updated.email,
                         name: updated.name,
-                        role: updated.role,
-                        tenant_id: updated.tenant_id.to_string(),
+                        platform_role: updated.platform_role,
+                        status: updated.status,
+                        memberships: updated.memberships,
+                        selected_tenant: updated.selected_tenant,
+                        capabilities: updated.capabilities,
                     });
                     save_msg.set(Some(i18n.t("profile.saved").to_string()));
                     edit_mode.set(false);
@@ -124,6 +136,65 @@ pub fn UserProfile() -> Element {
         });
     };
 
+    let on_tenant_change = move |event: Event<FormData>| {
+        if tenant_saving() {
+            return;
+        }
+        let target = event.value();
+        let observed = (auth_store.state)();
+        let known = target.is_empty()
+            || user_store.info.read().as_ref().is_some_and(|u| {
+                u.memberships
+                    .iter()
+                    .any(|m| m.tenant_id == target && m.status.as_deref() == Some("active"))
+            });
+        if !known {
+            tenant_error.set(Some("Select an active membership".into()));
+            return;
+        }
+        tenant_saving.set(true);
+        tenant_error.set(None);
+        spawn(async move {
+            let request = if target.is_empty() {
+                client_api::api::auth::SelectTenantRequest::global()
+            } else {
+                client_api::api::auth::SelectTenantRequest::new(&target)
+            };
+            let result = client_api::AuthApi::new(&crate::services::api_client::get_client())
+                .select_tenant(
+                    &request,
+                    observed.access_token.as_deref().unwrap_or_default(),
+                )
+                .await;
+            if !auth_store.matches(&observed) {
+                return;
+            }
+            match result {
+                Ok(session) => {
+                    let returned = session
+                        .selected_tenant
+                        .as_ref()
+                        .map(|t| t.id.as_str())
+                        .unwrap_or_default();
+                    if returned != target {
+                        tenant_error.set(Some(
+                            "The server returned a different tenant selection".into(),
+                        ));
+                        tenant_saving.set(false);
+                        return;
+                    }
+                    // A new UI session invalidates cached reads and remounts tenant views.
+                    user_store.clear();
+                    auth_store.login_with_session(&session, observed.persistent);
+                }
+                Err(error) => tenant_error.set(Some(
+                    crate::services::api_client::user_error_message(&error),
+                )),
+            }
+            tenant_saving.set(false);
+        });
+    };
+
     rsx! {
         div {
             class: "page-container",
@@ -134,6 +205,23 @@ pub fn UserProfile() -> Element {
 
             if let Some(msg) = save_msg() {
                 div { class: "alert alert-success", "{msg}" }
+            }
+
+            div { class: "card",
+                label { class: "form-label", "Selected tenant" }
+                select {
+                    class: "input-field",
+                    value: "{tenant_id}",
+                    disabled: tenant_saving(),
+                    onchange: on_tenant_change,
+                    option { value: "", "Global session (no tenant selected)" }
+                    for membership in memberships.iter().filter(|m| m.status.as_deref() == Some("active")) {
+                        option { value: "{membership.tenant_id}",
+                            "{membership.tenant_name.as_deref().unwrap_or(&membership.tenant_id)} ({membership.role})"
+                        }
+                    }
+                }
+                if let Some(error) = tenant_error() { p { class: "text-error", "{error}" } }
             }
 
             div {
@@ -151,7 +239,7 @@ pub fn UserProfile() -> Element {
                             p { class: "profile-email", "{email}" }
                             div {
                                 class: "profile-badges",
-                                span { class: "profile-badge", "{role}" }
+                                span { class: "profile-badge", "{platform_role}" }
                                 span { class: "profile-badge profile-badge-muted", "{i18n.t(\"profile.tenant\")} {tenant_id}" }
                             }
                         }
@@ -182,7 +270,7 @@ pub fn UserProfile() -> Element {
                                 div {
                                     class: "profile-field",
                                     label { class: "form-label", {i18n.t("table.role")} }
-                                    p { class: "form-value", "{role}" }
+                            p { class: "form-value", "{platform_role}" }
                                 }
                                 div {
                                     class: "profile-field",
@@ -228,7 +316,7 @@ pub fn UserProfile() -> Element {
                                 div {
                                     class: "profile-field",
                                     label { class: "form-label", {i18n.t("table.role")} }
-                                    p { class: "form-value", "{role}" }
+                            p { class: "form-value", "{platform_role}" }
                                 }
                                 div {
                                     class: "profile-field",

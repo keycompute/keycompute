@@ -9,11 +9,13 @@ use axum::{
     routing::post,
 };
 use chrono::{Duration as ChronoDuration, Utc};
-use integration_tests::db::{TestDataGuard, create_test_pool, create_test_tenant};
+use integration_tests::db::{
+    TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user,
+};
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, CreateUserRequest, DbRouter,
-    ProduceAiKey, UpdateAccountRequest, User, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey,
+    UpdateAccountRequest, User, UserBalance,
     models::passthrough_binding::{
         AccountModelHealth, AccountModelHealthProbe, CreatePassthroughBindingRequest,
         PassthroughBinding,
@@ -21,7 +23,6 @@ use keycompute_db::{
 };
 use keycompute_ratelimit::RateLimitKey;
 use keycompute_server::{AppState, create_router, state::AppStateConfig};
-use keycompute_types::UserRole;
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde_json::{Value, json};
@@ -36,6 +37,22 @@ use uuid::Uuid;
 
 const PT: &str = "/pt/v1/chat/completions";
 const ADMIN: &str = "/api/v1/admin/passthrough-bindings";
+
+async fn scoped_jwt(state: &AppState, user: &TenantActor) -> String {
+    let global = state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(user.id, None, user.token_version, None, None, 3600)
+        .unwrap();
+    let context = state.auth.verify_token(&global).await.unwrap();
+    state
+        .auth
+        .select_tenant(&context, Some(user.tenant_id))
+        .await
+        .unwrap()
+        .access_token
+}
 
 #[derive(Clone, Debug)]
 struct Call {
@@ -216,7 +233,7 @@ struct Fixture {
     admin: String,
     key: String,
     key_id: Uuid,
-    user: User,
+    user: TenantActor,
     run: String,
     models: [String; 2],
     accounts: Vec<Account>,
@@ -234,21 +251,21 @@ impl Fixture {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "binding", &run).await;
-        let user = User::create(
-            &db,
-            &CreateUserRequest {
-                tenant_id: tenant.id,
-                email: format!("binding-{run}@example.test"),
-                name: Some("Binding fixture admin".into()),
-                role: Some(UserRole::Admin),
-            },
-        )
+        let mut user = create_test_user(&db, tenant.id, "binding", &run).await;
+        // These endpoints are platform APIs. Tenant membership alone must not
+        // be treated as the old unrestricted admin role.
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='root' WHERE id=$1",
+            [user.id.into()],
+        ))
         .await
         .unwrap();
+        user.user = User::find_by_id(&db, user.id).await.unwrap().unwrap();
         UserBalance::recharge(
             &db,
-            user.id,
             tenant.id,
+            user.id,
             Decimal::from(1000),
             None,
             Some("isolated binding regression credit"),
@@ -308,12 +325,7 @@ impl Fixture {
         let state = AppState::try_with_pool_and_config(DbRouter::single(db.clone()), config)
             .await
             .unwrap();
-        let admin = state
-            .auth
-            .get_jwt_validator()
-            .unwrap()
-            .generate_token_with_version(user.id, tenant.id, &user.role, user.token_version)
-            .unwrap();
+        let admin = scoped_jwt(&state, &user).await;
         let key = ProduceAiKeyValidator::generate_key();
         let key_id = ProduceAiKey::create(
             &db,
@@ -1105,13 +1117,7 @@ async fn passthrough_private_model_is_not_visible_to_a_different_authenticated_t
     let user =
         integration_tests::db::create_test_user(&f.db, other.id, "passthrough-private", &f.run)
             .await;
-    let token = f
-        .state
-        .auth
-        .get_jwt_validator()
-        .unwrap()
-        .generate_token_with_version(user.id, user.tenant_id, &user.role, user.token_version)
-        .unwrap();
+    let token = scoped_jwt(&f.state, &user).await;
     let body = f.body(0);
     expect(
         api(
@@ -1344,8 +1350,8 @@ async fn private_account_grants_apply_scope_and_pool_matrix_to_discovery_and_exe
         let user = integration_tests::db::create_test_user(&f.db, tenant.id, name, &f.run).await;
         UserBalance::recharge(
             &f.db,
-            user.id,
             tenant.id,
+            user.id,
             Decimal::from(1000),
             None,
             Some("isolated account grant matrix"),

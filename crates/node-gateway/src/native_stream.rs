@@ -73,11 +73,9 @@ async fn lock_active_stream_tenants(
     let scope = tx
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT owner.tenant_id AS owner_tenant_id, caller.tenant_id AS caller_tenant_id \
+            "SELECT node.tenant_id AS owner_tenant_id, task.tenant_id AS caller_tenant_id \
              FROM node_tasks task \
              JOIN nodes node ON node.id=task.assigned_node_id \
-             JOIN users owner ON owner.id=node.owner_user_id \
-             JOIN users caller ON caller.id=task.user_id \
              WHERE task.id=$1",
             [task_id.into()],
         ))
@@ -150,10 +148,10 @@ impl NodeGatewayStore {
             return Err(error("native_stream_lease_mismatch"));
         }
         let current_scope=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT owner.tenant_id AS owner_tenant_id,ot.status AS owner_status,caller.tenant_id AS caller_tenant_id,ct.status AS caller_status \
+            "SELECT node.tenant_id AS owner_tenant_id,ot.status AS owner_status,task.tenant_id AS caller_tenant_id,ct.status AS caller_status \
              FROM node_tasks task JOIN nodes node ON node.id=task.assigned_node_id \
-             JOIN users owner ON owner.id=node.owner_user_id JOIN tenants ot ON ot.id=owner.tenant_id \
-             JOIN users caller ON caller.id=task.user_id JOIN tenants ct ON ct.id=caller.tenant_id WHERE task.id=$1",
+             JOIN tenants ot ON ot.id=node.tenant_id \
+             JOIN tenants ct ON ct.id=task.tenant_id WHERE task.id=$1",
             [r.task_id.into()])).await?.ok_or_else(||error("native_stream_tenant_inactive"))?;
         let owner_tenant: Uuid = current_scope.try_get("", "owner_tenant_id")?;
         let caller_tenant: Uuid = current_scope.try_get("", "caller_tenant_id")?;

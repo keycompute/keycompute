@@ -34,8 +34,8 @@ async fn test_get_current_user_success() {
     assert_eq!(user.id, fixtures::TEST_USER_ID);
     assert_eq!(user.email, fixtures::TEST_EMAIL);
     assert_eq!(user.name, Some("Test User".to_string()));
-    assert_eq!(user.role, "user");
-    assert_eq!(user.tenant_id, "tenant_001");
+    assert_eq!(user.platform_role, None);
+    assert_eq!(user.selected_tenant, None);
 }
 
 #[tokio::test]

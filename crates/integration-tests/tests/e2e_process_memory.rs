@@ -12,7 +12,7 @@ use axum::{
 use futures::StreamExt;
 use http_body_util::BodyExt;
 use keycompute_server::{AppState, AppStateConfig, extractors::AuthExtractor};
-use keycompute_types::memory::process_memory_budget;
+use keycompute_types::{CredentialKind, memory::process_memory_budget};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tower::ServiceExt;
@@ -41,7 +41,7 @@ async fn websocket_http_and_native_streams_share_bytes_and_release_after_cancell
                     Uuid::new_v4(),
                     Uuid::new_v4(),
                     Uuid::new_v4(),
-                    "user",
+                    CredentialKind::Jwt,
                 ));
                 next.run(request).await
             },

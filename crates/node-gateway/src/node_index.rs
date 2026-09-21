@@ -6,6 +6,7 @@ use keycompute_types::node_capability::NativeRequirements;
 use keycompute_types::{KeyComputeError, Result};
 use sea_orm::{ConnectionTrait, DbBackend, Statement};
 use std::sync::Arc;
+use uuid::Uuid;
 pub const READY_NODE_CONDITION: &str = "n.status = 'online' AND t.status = 'active' AND ns.expires_at > NOW() AND ns.revoked_at IS NULL AND ns.accepting_tasks=TRUE AND n.capabilities_json->>'runtime' = 'ollama'";
 pub fn ready_profile_condition(model: &str, operation: &str) -> String {
     format!(
@@ -19,12 +20,12 @@ impl PostgresNodeIndex {
     pub fn new(pool: Arc<DbRouter>) -> Self {
         Self { pool }
     }
-    async fn query(&self, required: serde_json::Value) -> Result<bool> {
+    async fn query(&self, tenant_id: Uuid, required: serde_json::Value) -> Result<bool> {
         let sql = format!(
             r#"WITH required AS (SELECT $1::jsonb r)
             SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id
-            JOIN users u ON u.id=n.owner_user_id JOIN tenants t ON t.id=u.tenant_id CROSS JOIN required
-            WHERE {READY_NODE_CONDITION} AND ns.accepted_models_json @> jsonb_build_array(r->>'model')
+            JOIN tenants t ON t.id=n.tenant_id CROSS JOIN required
+            WHERE n.tenant_id=$2 AND EXISTS(SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id AND u.status='active' WHERE m.tenant_id=n.tenant_id AND m.user_id=n.owner_user_id AND m.status='active') AND {READY_NODE_CONDITION} AND ns.accepted_models_json @> jsonb_build_array(r->>'model')
               AND ns.native_operations_json @> jsonb_build_array(r->>'operation')
               AND EXISTS(SELECT 1 FROM jsonb_array_elements(ns.native_profiles_json) p WHERE {profile}))"#,
             profile = keycompute_db::models::native_capability::profile_matches("p", "r")
@@ -36,7 +37,7 @@ impl PostgresNodeIndex {
                 .query_one(Statement::from_sql_and_values(
                     DbBackend::Postgres,
                     sql,
-                    [required.into()],
+                    [required.into(), tenant_id.into()],
                 )),
         )
         .await
@@ -55,13 +56,13 @@ impl PostgresNodeIndex {
 }
 #[async_trait]
 impl NodeCapabilityIndex for PostgresNodeIndex {
-    async fn has_ready_node(&self, model: &str) -> Result<bool> {
-        self.query(serde_json::json!({"version":1,"model":model,"operation":"chat","features":[],"enforce_limits":false})).await
+    async fn has_ready_node(&self, tenant_id: Uuid, model: &str) -> Result<bool> {
+        self.query(tenant_id, serde_json::json!({"version":1,"model":model,"operation":"chat","features":[],"enforce_limits":false})).await
     }
-    async fn has_ready_native(&self, needed: &NativeRequirements) -> Result<bool> {
+    async fn has_ready_native(&self, tenant_id: Uuid, needed: &NativeRequirements) -> Result<bool> {
         let value = serde_json::to_value(needed)
             .map_err(|_| KeyComputeError::InvalidRequest("invalid native requirements".into()))?;
-        self.query(value).await
+        self.query(tenant_id, value).await
     }
 }
 #[cfg(test)]

@@ -1,415 +1,334 @@
+//! Global identities. Tenant authority exists only in tenant_memberships.
 use super::query::escape_like_pattern;
+use super::tenant_audit_event::{AuditContext, TenantAuditEvent, lock_identity_admin};
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use keycompute_types::{AssignableUserRole, UserRole};
+use keycompute_types::{AuditResult, AuditScopeType, CredentialKind, PlatformRole, UserStatus};
 use sea_orm::{ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 用户模型
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,
-    pub tenant_id: Uuid,
     pub email: String,
     pub name: Option<String>,
-    pub role: String,
-    /// Token 版本号，用于使已签发的 JWT 失效（密码重置/登出时递增）
-    #[serde(default)]
+    pub platform_role: String,
+    pub status: String,
     pub token_version: i32,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
 
-/// 创建用户请求
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateUserRequest {
-    pub tenant_id: Uuid,
     pub email: String,
     pub name: Option<String>,
-    pub role: Option<UserRole>,
 }
-
-/// 更新用户请求
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateUserRequest {
     pub name: Option<String>,
-    pub role: Option<AssignableUserRole>,
-    pub tenant_id: Option<Uuid>,
 }
 
-/// 用户过滤参数
-struct UserFilter {
-    tenant_id: Option<Uuid>,
-    role: Option<String>,
-    search_escaped: Option<String>,
+pub(crate) fn normalized_email(email: &str) -> Result<String, DbError> {
+    let email = email.trim().to_ascii_lowercase();
+    if email.len() > 255 || email.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return Err(DbError::Other("invalid email".into()));
+    }
+    let Some((local, domain)) = email.split_once('@') else {
+        return Err(DbError::Other("invalid email".into()));
+    };
+    if local.is_empty() || domain.is_empty() || domain.contains('@') {
+        return Err(DbError::Other("invalid email".into()));
+    }
+    Ok(email)
 }
 
-impl UserFilter {
-    fn new(tenant_id: Option<Uuid>, role: Option<&str>, search: Option<&str>) -> Self {
-        let search_escaped = search
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(escape_like_pattern);
-        Self {
-            tenant_id,
-            role: role.map(String::from),
-            search_escaped,
-        }
+fn filtered_query(
+    select: &str,
+    role: Option<PlatformRole>,
+    search: Option<&str>,
+    page: Option<(i64, i64)>,
+) -> Statement {
+    let search = search
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(escape_like_pattern);
+    let mut sql = format!(
+        "SELECT {select} FROM users WHERE ($1::text IS NULL OR platform_role=$1) AND ($2::text IS NULL OR email ILIKE '%'||$2||'%' ESCAPE '\\' OR COALESCE(name,'') ILIKE '%'||$2||'%' ESCAPE '\\')"
+    );
+    let mut values = vec![role.map(|role| role.as_str()).into(), search.into()];
+    if let Some((limit, offset)) = page {
+        sql.push_str(" ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4");
+        values.extend([limit.clamp(1, 1000).into(), offset.max(0).into()]);
     }
-
-    /// 构建 WHERE 子句和参数
-    fn build_where_clause(&self) -> (String, Vec<sea_orm::Value>) {
-        let mut conditions = Vec::new();
-        let mut params: Vec<sea_orm::Value> = Vec::new();
-
-        conditions.push("( $1::uuid IS NULL OR tenant_id = $1 )".to_string());
-        params.push(self.tenant_id.into());
-
-        conditions.push("( $2::text IS NULL OR role = $2 )".to_string());
-        params.push(self.role.as_deref().into());
-
-        if self.search_escaped.is_some() {
-            conditions.push(
-                "( $3::text IS NULL OR LOWER(email) LIKE '%' || LOWER($3) || '%' ESCAPE '\\' \
-                 OR LOWER(COALESCE(name, '')) LIKE '%' || LOWER($3) || '%' ESCAPE '\\' )"
-                    .to_string(),
-            );
-            params.push(self.search_escaped.as_deref().into());
-        } else {
-            conditions.push("( $3::text IS NULL )".to_string());
-            params.push(sea_orm::Value::String(None));
-        }
-
-        let where_clause = format!(" WHERE ({})", conditions.join(") AND ("));
-        (where_clause, params)
-    }
+    Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
 }
 
 impl User {
-    /// 创建新用户
+    pub fn platform_role(&self) -> Result<PlatformRole, DbError> {
+        self.platform_role.parse().map_err(DbError::Other)
+    }
+    pub fn user_status(&self) -> Result<UserStatus, DbError> {
+        self.status.parse().map_err(DbError::Other)
+    }
+
+    /// Registration cannot select a platform role or create membership implicitly.
     pub async fn create(
         db: &impl ConnectionTrait,
         req: &CreateUserRequest,
-    ) -> Result<User, DbError> {
-        let stmt = Statement::from_sql_and_values(
+    ) -> Result<Self, DbError> {
+        if req.name.as_ref().is_some_and(|name| name.len() > 255) {
+            return Err(DbError::Other("name exceeds limit".into()));
+        }
+        Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO users(email,name,platform_role,status) VALUES($1,$2,'none','active') RETURNING *",
+            [normalized_email(&req.email)?.into(), req.name.clone().into()],
+        )).one(db).await?.ok_or_else(|| DbError::Other("user insert returned no row".into()))
+    }
+
+    /// Deployment-only bootstrap. No seeded/fictitious identity and no ability to
+    /// acquire root after the first real user has been committed.
+    pub async fn bootstrap_root(
+        tx: &DatabaseTransaction,
+        email: &str,
+        name: Option<&str>,
+    ) -> Result<Self, DbError> {
+        lock_identity_admin(tx).await?;
+        if name.is_some_and(|name| name.len() > 255) {
+            return Err(DbError::Other("name exceeds limit".into()));
+        }
+        let root = Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO users(email,name,platform_role,status) SELECT $1,$2,'root','active' WHERE NOT EXISTS(SELECT 1 FROM users) RETURNING *",
+            [normalized_email(email)?.into(), name.into()],
+        )).one(tx).await?.ok_or_else(|| DbError::Other("identity bootstrap has already completed".into()))?;
+        let audit = AuditContext {
+            actor_user_id: root.id,
+            credential_kind: CredentialKind::System,
+            actor_platform_role: PlatformRole::Root,
+            actor_tenant_role: None,
+            request_id: None,
+        };
+        TenantAuditEvent::append(
+            tx,
+            AuditScopeType::Platform,
+            None,
+            &audit,
+            "identity.bootstrap",
+            "user",
+            Some(&root.id.to_string()),
+            AuditResult::Success,
+            serde_json::json!({"platform_role":"root"}),
+        )
+        .await?;
+        Ok(root)
+    }
+
+    /// Security changes are separate from profile edits and require a current
+    /// root session. Invariants are checked on final transaction state.
+    pub async fn set_security(
+        tx: &DatabaseTransaction,
+        id: Uuid,
+        role: PlatformRole,
+        status: UserStatus,
+        actor: &AuditContext,
+    ) -> Result<Self, DbError> {
+        lock_identity_admin(tx).await?;
+        let actor = actor.require_root(tx).await?;
+        tx.query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            r#"INSERT INTO users (tenant_id, email, name, role) VALUES ($1, $2, $3, COALESCE($4, 'user')) RETURNING *"#,
-            [
-                req.tenant_id.into(),
-                req.email.as_str().into(),
-                req.name.clone().into(),
-                req.role.as_ref().map(|role| role.as_str()).into(),
-            ],
-        );
-        let user = User::find_by_statement(stmt)
-            .one(db)
+            "SELECT id FROM tenants WHERE owner_user_id=$1 ORDER BY id FOR UPDATE",
+            [id.into()],
+        ))
+        .await?;
+        let before = Self::find_by_id_for_update(tx, id)
             .await?
-            .ok_or_else(|| DbError::Other("create failed to return row".to_string()))?;
-
+            .ok_or_else(|| DbError::not_found("User", id))?;
+        let user = Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role=$2,status=$3 WHERE id=$1 RETURNING *",
+            [id.into(), role.as_str().into(), status.as_str().into()],
+        ))
+        .one(tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("User", id))?;
+        TenantAuditEvent::append(tx, AuditScopeType::Platform, None, &actor, "user.security", "user",
+            Some(&id.to_string()), AuditResult::Success,
+            serde_json::json!({"before":{"platform_role":before.platform_role,"status":before.status},"after":{"platform_role":user.platform_role,"status":user.status}})).await?;
         Ok(user)
     }
 
-    /// 根据 ID 查找用户
-    pub async fn find_by_id(db: &impl ConnectionTrait, id: Uuid) -> Result<Option<User>, DbError> {
-        let stmt = Statement::from_sql_and_values(
+    pub async fn find_by_id(db: &impl ConnectionTrait, id: Uuid) -> Result<Option<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM users WHERE id = $1",
+            "SELECT * FROM users WHERE id=$1",
             [id.into()],
-        );
-        let user = User::find_by_statement(stmt).one(db).await?;
-
-        Ok(user)
+        ))
+        .one(db)
+        .await?)
     }
-
-    /// 根据 ID 查找并以最强行锁锁定用户。
-    ///
-    /// 用于不需要与子表外键写入并行的路径；租户迁移等会继续锁定余额
-    /// 或订单的事务应使用 [`Self::find_by_id_for_no_key_update`]，避免与
-    /// PostgreSQL 的外键 `KEY SHARE` 锁形成反向等待。
-    pub async fn find_by_id_for_update(
-        db: &impl ConnectionTrait,
-        id: Uuid,
-    ) -> Result<Option<User>, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM users WHERE id = $1 FOR UPDATE",
-            [id.into()],
-        );
-        Ok(User::find_by_statement(stmt).one(db).await?)
-    }
-
-    /// 根据 ID 查找并锁定用户，同时允许子表外键校验取得 `KEY SHARE` 锁。
-    ///
-    /// 管理用户租户归属的事务会在持有用户锁后继续锁定订单和余额。余额
-    /// 预留、支付回调等路径则会先锁定这些子表行，再通过 `user_id` 外键
-    /// 取得用户的 `KEY SHARE` 锁。`FOR NO KEY UPDATE` 与 `KEY SHARE`
-    /// 兼容，可以避免这两类路径形成反向锁等待环；它仍会阻止任何会修改
-    /// 用户行或删除用户的事务。
-    pub async fn find_by_id_for_no_key_update(
-        db: &impl ConnectionTrait,
-        id: Uuid,
-    ) -> Result<Option<User>, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM users WHERE id = $1 FOR NO KEY UPDATE",
-            [id.into()],
-        );
-        Ok(User::find_by_statement(stmt).one(db).await?)
-    }
-
-    /// 根据邮箱查找用户
     pub async fn find_by_email(
         db: &impl ConnectionTrait,
         email: &str,
-    ) -> Result<Option<User>, DbError> {
-        let stmt = Statement::from_sql_and_values(
+    ) -> Result<Option<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM users WHERE email = $1",
-            [email.into()],
-        );
-        let user = User::find_by_statement(stmt).one(db).await?;
-
-        Ok(user)
+            "SELECT * FROM users WHERE lower(btrim(email))=$1",
+            [normalized_email(email)?.into()],
+        ))
+        .one(db)
+        .await?)
     }
-
-    /// 查找租户下的所有用户
+    pub async fn find_by_id_for_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM users WHERE id=$1 FOR UPDATE",
+            [id.into()],
+        ))
+        .one(db)
+        .await?)
+    }
+    pub async fn find_by_id_for_no_key_update(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM users WHERE id=$1 FOR NO KEY UPDATE",
+            [id.into()],
+        ))
+        .one(db)
+        .await?)
+    }
+    pub async fn find_by_id_in_tenant(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        tenant_id: Uuid,
+    ) -> Result<Option<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT u.* FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE u.id=$1 AND m.tenant_id=$2 AND m.status='active'", [id.into(),tenant_id.into()])).one(db).await?)
+    }
     pub async fn find_by_tenant(
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
-    ) -> Result<Vec<User>, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM users WHERE tenant_id = $1",
-            [tenant_id.into()],
-        );
-        let users = User::find_by_statement(stmt).all(db).await?;
-
-        Ok(users)
+    ) -> Result<Vec<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT u.* FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE m.tenant_id=$1 AND m.status='active' ORDER BY u.created_at DESC,u.id", [tenant_id.into()])).all(db).await?)
     }
-
-    /// 查找所有用户（Admin 全局查询）
     pub async fn find_all(
         db: &impl ConnectionTrait,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<User>, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM users ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-            [limit.into(), offset.into()],
-        );
-        let users = User::find_by_statement(stmt).all(db).await?;
-
-        Ok(users)
+    ) -> Result<Vec<Self>, DbError> {
+        Self::find_all_filtered(db, None, None, limit, offset).await
     }
-
-    /// 查找所有用户（Admin 带过滤 + 分页）
     pub async fn find_all_filtered(
         db: &impl ConnectionTrait,
-        tenant_id: Option<Uuid>,
-        role: Option<&str>,
+        role: Option<PlatformRole>,
         search: Option<&str>,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<User>, DbError> {
-        let filter = UserFilter::new(tenant_id, role, search);
-        let (where_clause, mut params) = filter.build_where_clause();
-        let limit_idx = params.len() + 1;
-        let offset_idx = limit_idx + 1;
-        let sql = format!(
-            "SELECT * FROM users{} ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
-            where_clause, limit_idx, offset_idx
-        );
-        params.push(limit.into());
-        params.push(offset.into());
-
-        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, &sql, params);
-        let users = User::find_by_statement(stmt).all(db).await?;
-        Ok(users)
+    ) -> Result<Vec<Self>, DbError> {
+        Ok(
+            Self::find_by_statement(filtered_query("*", role, search, Some((limit, offset))))
+                .all(db)
+                .await?,
+        )
     }
-
-    /// 统计过滤后的用户总数
     pub async fn count_all_filtered(
         db: &impl ConnectionTrait,
-        tenant_id: Option<Uuid>,
-        role: Option<&str>,
+        role: Option<PlatformRole>,
         search: Option<&str>,
     ) -> Result<i64, DbError> {
-        let filter = UserFilter::new(tenant_id, role, search);
-        let (where_clause, params) = filter.build_where_clause();
-        let sql = format!("SELECT COUNT(*) FROM users{}", where_clause);
-
-        let stmt = Statement::from_sql_and_values(DbBackend::Postgres, &sql, params);
-        let result = db
-            .query_one(stmt)
+        let row = db
+            .query_one(filtered_query("COUNT(*)", role, search, None))
             .await?
-            .ok_or_else(|| DbError::Other("count query failed".to_string()))?;
-        let count: i64 = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
-        Ok(count)
+            .ok_or_else(|| DbError::Other("count query returned no row".into()))?;
+        Ok(row.try_get_by_index(0)?)
     }
-
-    /// 统计用户总数
     pub async fn count_all(db: &impl ConnectionTrait) -> Result<i64, DbError> {
-        let stmt = Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT COUNT(*) FROM users".to_string(),
-        );
-        let result = db
-            .query_one(stmt)
-            .await?
-            .ok_or_else(|| DbError::Other("count query failed".to_string()))?;
-        let count: i64 = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
-
-        Ok(count)
+        Self::count_all_filtered(db, None, None).await
     }
-
-    /// 批量统计租户用户数量
     pub async fn count_by_tenants(
         db: &impl ConnectionTrait,
-        tenant_ids: &[Uuid],
+        ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, i64>, DbError> {
         #[derive(FromQueryResult)]
-        struct TenantCount {
+        struct Count {
             tenant_id: Uuid,
             count: i64,
         }
-
-        if tenant_ids.is_empty() {
-            return Ok(std::collections::HashMap::new());
+        if ids.is_empty() {
+            return Ok(Default::default());
         }
-
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"SELECT tenant_id, COUNT(*) as count FROM users WHERE tenant_id = ANY($1) GROUP BY tenant_id"#,
-            [tenant_ids.to_vec().into()],
-        );
-        let rows: Vec<TenantCount> = TenantCount::find_by_statement(stmt).all(db).await?;
-
-        Ok(rows.into_iter().map(|r| (r.tenant_id, r.count)).collect())
+        let rows = Count::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT tenant_id,COUNT(*) AS count FROM tenant_memberships WHERE tenant_id=ANY($1) AND status='active' GROUP BY tenant_id", [ids.to_vec().into()])).all(db).await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| (row.tenant_id, row.count))
+            .collect())
     }
-
-    /// 更新用户的资料或角色。
-    ///
-    /// 租户归属变更必须通过 [`Self::update_in_tx`] 执行，以便调用方在
-    /// 同一协调事务中迁移余额、订单和租户级密钥。拒绝在普通连接上
-    /// 直接更新 `tenant_id`，避免留下跨租户的孤儿财务记录。
     pub async fn update(
         &self,
         db: &impl ConnectionTrait,
         req: &UpdateUserRequest,
-    ) -> Result<User, DbError> {
-        ensure_direct_update_is_scoped(req)?;
-        self.update_inner(db, req).await
+    ) -> Result<Self, DbError> {
+        if let Some(name) = &req.name {
+            if name.len() > 255 {
+                return Err(DbError::Other("name exceeds limit".into()));
+            }
+            db.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE users SET name=$1 WHERE id=$2",
+                [name.clone().into(), self.id.into()],
+            ))
+            .await?;
+        }
+        Self::find_by_id(db, self.id)
+            .await?
+            .ok_or_else(|| DbError::not_found("User", self.id))
     }
-
-    /// 在调用方持有的协调事务中更新用户。
-    ///
-    /// 当 `req.tenant_id` 非空时，调用方必须先锁定源/目标租户并迁移
-    /// 所有租户级子记录，再调用本方法。Admin 用户更新流程提供了完整
-    /// 的协调实现；此低层接口仅供同一事务中的基础设施和测试使用。
     pub async fn update_in_tx(
         &self,
-        db: &DatabaseTransaction,
+        tx: &DatabaseTransaction,
         req: &UpdateUserRequest,
-    ) -> Result<User, DbError> {
-        self.update_inner(db, req).await
+    ) -> Result<Self, DbError> {
+        self.update(tx, req).await
     }
-
-    async fn update_inner(
-        &self,
-        db: &impl ConnectionTrait,
-        req: &UpdateUserRequest,
-    ) -> Result<User, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"UPDATE users
-               SET name = COALESCE($1, name),
-                   role = COALESCE($2, role),
-                   tenant_id = COALESCE($3, tenant_id),
-                   token_version = CASE
-                       WHEN ($2::text IS NOT NULL AND role IS DISTINCT FROM $2::text)
-                         OR ($3::uuid IS NOT NULL AND tenant_id IS DISTINCT FROM $3::uuid)
-                           THEN token_version + 1
-                       ELSE token_version
-                   END,
-                   updated_at = NOW()
-               WHERE id = $4
-               RETURNING *"#,
-            [
-                req.name.clone().into(),
-                req.role.as_ref().map(|role| role.as_str()).into(),
-                req.tenant_id.into(),
-                self.id.into(),
-            ],
-        );
-        let user = User::find_by_statement(stmt)
-            .one(db)
-            .await?
-            .ok_or_else(|| DbError::not_found("User", self.id.to_string()))?;
-
-        Ok(user)
-    }
-
-    /// 递增用户的 token_version，使该用户已签发的所有 JWT 失效
-    ///
-    /// 用于密码重置、强制登出等安全场景。返回递增后的新版本号。
     pub async fn increment_token_version(
         db: &impl ConnectionTrait,
-        user_id: Uuid,
+        id: Uuid,
     ) -> Result<i32, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"UPDATE users SET token_version = token_version + 1, updated_at = NOW() WHERE id = $1 RETURNING token_version"#,
-            [user_id.into()],
-        );
-        let result = db
-            .query_one(stmt)
-            .await?
-            .ok_or_else(|| DbError::not_found("User", user_id.to_string()))?;
-        let version: i32 = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
-        Ok(version)
+        let row=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1 RETURNING token_version",[id.into()])).await?.ok_or_else(||DbError::not_found("User",id))?;
+        Ok(row.try_get_by_index(0)?)
     }
-
-    /// 轻量查询用户当前的 token_version（仅 SELECT 单列）
-    ///
-    /// 用于 JWT 失效校验的热路径，避免拉取整行用户数据。
-    /// 用户不存在时返回 `None`。
     pub async fn find_token_version(
         db: &impl ConnectionTrait,
-        user_id: Uuid,
+        id: Uuid,
     ) -> Result<Option<i32>, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT token_version FROM users WHERE id = $1",
-            [user_id.into()],
-        );
-        match db.query_one(stmt).await? {
-            Some(row) => {
-                let version: i32 = row.try_get_by_index(0).map_err(DbError::DatabaseError)?;
-                Ok(Some(version))
-            }
-            None => Ok(None),
-        }
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT token_version FROM users WHERE id=$1",
+                [id.into()],
+            ))
+            .await?;
+        row.map(|row| row.try_get_by_index(0).map_err(DbError::from))
+            .transpose()
     }
-
-    /// 删除用户
     pub async fn delete(&self, db: &impl ConnectionTrait) -> Result<(), DbError> {
-        let stmt = Statement::from_sql_and_values(
+        db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "DELETE FROM users WHERE id = $1",
+            "DELETE FROM users WHERE id=$1",
             [self.id.into()],
-        );
-        db.execute(stmt).await?;
-
-        Ok(())
-    }
-}
-
-fn ensure_direct_update_is_scoped(req: &UpdateUserRequest) -> Result<(), DbError> {
-    if req.tenant_id.is_some() {
-        Err(DbError::TenantReassignmentRequiresCoordinator)
-    } else {
+        ))
+        .await?;
         Ok(())
     }
 }
@@ -417,65 +336,27 @@ fn ensure_direct_update_is_scoped(req: &UpdateUserRequest) -> Result<(), DbError
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn test_escape_like_pattern_no_special_chars() {
-        let result = escape_like_pattern("hello");
-        assert_eq!(result, "hello");
+    fn global_identity_requests_reject_legacy_privilege_fields() {
+        assert!(
+            serde_json::from_value::<CreateUserRequest>(
+                serde_json::json!({"email":"a@b.invalid","role":"root"})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UpdateUserRequest>(
+                serde_json::json!({"tenant_id":Uuid::new_v4()})
+            )
+            .is_err()
+        );
     }
-
     #[test]
-    fn test_escape_like_pattern_percent() {
-        let result = escape_like_pattern("50%");
-        assert_eq!(result, r"50\%");
-    }
-
-    #[test]
-    fn test_escape_like_pattern_underscore() {
-        let result = escape_like_pattern("user_name");
-        assert_eq!(result, r"user\_name");
-    }
-
-    #[test]
-    fn test_escape_like_pattern_backslash() {
-        let result = escape_like_pattern(r"a\b");
-        assert_eq!(result, r"a\\b");
-    }
-
-    #[test]
-    fn test_escape_like_pattern_mixed() {
-        let result = escape_like_pattern("100%_test\\case");
-        assert_eq!(result, r"100\%\_test\\case");
-    }
-
-    #[test]
-    fn test_escape_like_pattern_empty() {
-        let result = escape_like_pattern("");
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn direct_update_rejects_tenant_reassignment() {
-        let request = UpdateUserRequest {
-            name: None,
-            role: None,
-            tenant_id: Some(Uuid::new_v4()),
-        };
-
-        assert!(matches!(
-            ensure_direct_update_is_scoped(&request),
-            Err(DbError::TenantReassignmentRequiresCoordinator)
-        ));
-    }
-
-    #[test]
-    fn direct_update_allows_profile_changes_without_tenant() {
-        let request = UpdateUserRequest {
-            name: Some("updated".to_string()),
-            role: Some(AssignableUserRole::Admin),
-            tenant_id: None,
-        };
-
-        assert!(ensure_direct_update_is_scoped(&request).is_ok());
+    fn email_is_canonical_bounded_and_has_no_controls() {
+        assert_eq!(normalized_email(" A@B.invalid ").unwrap(), "a@b.invalid");
+        for invalid in ["@x", "x@", "x@@y", "x\n@y", "x y@z"] {
+            assert!(normalized_email(invalid).is_err());
+        }
+        assert!(normalized_email(&format!("{}@x", "a".repeat(256))).is_err());
     }
 }

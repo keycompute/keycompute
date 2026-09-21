@@ -12,13 +12,11 @@ use futures::{StreamExt, stream};
 use keycompute_auth::PasswordHasher;
 use keycompute_config::{AppConfig, DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD};
 use keycompute_db::{
-    CreateDistributionRuleRequest, CreateTenantRequest, CreateUserCredentialRequest,
-    CreateUserRequest, Database, DatabaseConfig as DbConfig, DbRouter, SystemSetting, Tenant,
-    TenantDistributionRule, User,
+    CreateDistributionRuleRequest, CreateTenantRequest, CreateUserCredentialRequest, Database,
+    DatabaseConfig as DbConfig, DbRouter, SystemSetting, Tenant, TenantDistributionRule, User,
 };
 use keycompute_observability::{init_dev_observability, init_observability};
 use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run_with_shutdown};
-use keycompute_types::UserRole;
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
     sqlx::{Connection as SqlxConnection, PgConnection},
@@ -611,120 +609,49 @@ async fn initialize_default_admin(
     ))
     .await?;
 
-    info!(email = %admin_email, "检查默认管理员账户");
-
-    // 已存在 system 用户时仍会校验租户归属和登录凭证，拒绝历史半初始化状态。
-    let stmt = Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT * FROM users WHERE role = 'system' ORDER BY created_at ASC LIMIT 1",
-        [],
-    );
-    let existing_system_user = User::find_by_statement(stmt).one(&tx).await?;
-
-    // The bootstrap password is needed only when this startup will actually
-    // create the first system administrator. Initialized deployments should be
-    // able to remove this one-time secret and continue restarting safely.
+    // Bootstrap does not derive global privilege from tenant membership.
+    let existing = User::find_by_statement(Statement::from_string(DbBackend::Postgres,
+        "SELECT * FROM users WHERE platform_role='root' AND status='active' ORDER BY created_at,id LIMIT 1".to_string()))
+        .one(&tx).await?;
     validate_default_admin_bootstrap_password(
-        existing_system_user.is_some(),
+        existing.is_some(),
         is_production,
         configured_password.clone(),
     )?;
-
-    if let Some(user) = existing_system_user {
-        if user.email == admin_email {
-            info!(email = %admin_email, user_id = %user.id, "默认系统管理员已存在，跳过初始化");
-        } else {
-            warn!(
-                configured_email = %admin_email,
-                existing_email = %user.email,
-                user_id = %user.id,
-                "已存在 system 用户，跳过默认管理员初始化"
-            );
-        }
-        // 获取 system 租户（复用已有租户）
-        let tenant = Tenant::find_by_slug(&tx, "system")
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to find system tenant: {}", e))?
-            .ok_or_else(|| anyhow::anyhow!("system 租户不存在但 system 用户已存在，数据不一致"))?;
-
-        if tenant.id != user.tenant_id {
-            anyhow::bail!("system 用户 {} 不属于 system 租户，数据不一致", user.id);
-        }
-
-        let credential = keycompute_db::UserCredential::find_by_user_id(&tx, user.id)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "system 用户 {} 缺少登录凭证，拒绝以不完整引导状态启动",
-                    user.id
-                )
-            })?;
-        if credential.password_hash.trim().is_empty() {
-            anyhow::bail!("system 用户 {} 的密码哈希为空，数据不一致", user.id);
-        }
-
+    if existing.is_some() {
+        let tenant=Tenant::find_by_slug(&tx,"default").await?
+            .ok_or_else(||anyhow::anyhow!("initialized identity store has no default tenant; restore a verified complete snapshot"))?;
         tx.commit().await?;
         return Ok(tenant);
     }
-
-    // 没有 system 用户时，配置邮箱也不能被普通账号占用。
-    if let Some(existing_user) = User::find_by_email(&tx, admin_email).await? {
+    if User::count_all(&tx).await? != 0 {
         anyhow::bail!(
-            "cannot initialize system admin: email {} is already used by non-system user {}",
-            admin_email,
-            existing_user.id
+            "identity store is nonempty without an active root; refusing automatic promotion"
         );
     }
-
-    info!(email = %admin_email, "创建默认系统管理员");
-
     let admin_password = resolve_default_admin_password(configured_password);
-    if !is_production
-        && (admin_password.trim().is_empty()
-            || admin_password == DEFAULT_ADMIN_PASSWORD
-            || admin_password.chars().count() < 12)
-    {
-        warn!("默认管理员正在使用示例或较弱密码");
-    }
-
-    // 在写入任何引导数据前完成密码哈希；之后所有写入均属于同一事务。
-    let hasher = PasswordHasher::new();
-    let password_hash = hasher.hash(&admin_password)?;
-
-    // 复用或创建默认 system 租户
-    let tenant = if let Some(existing_tenant) = Tenant::find_by_slug(&tx, "system").await? {
-        info!(tenant_id = %existing_tenant.id, "复用已有 system 租户");
-        existing_tenant
-    } else {
-        let tenant = Tenant::create(
-            &tx,
-            &CreateTenantRequest {
-                name: "System".to_string(),
-                slug: "system".to_string(),
-                description: Some("System default tenant".to_string()),
-                default_rpm_limit: None,
-                default_tpm_limit: None,
-            },
-        )
-        .await?;
-
-        info!(tenant_id = %tenant.id, "默认租户创建成功");
-        tenant
+    let password_hash = PasswordHasher::new().hash(&admin_password)?;
+    let user = User::bootstrap_root(&tx, admin_email, Some("Platform Administrator")).await?;
+    let actor = keycompute_db::AuditContext {
+        actor_user_id: user.id,
+        credential_kind: keycompute_types::CredentialKind::System,
+        actor_platform_role: keycompute_types::PlatformRole::Root,
+        actor_tenant_role: None,
+        request_id: None,
     };
-
-    // 创建管理员用户（role="system" 表示系统管理员）
-    let user = User::create(
+    let tenant = Tenant::create_owned(
         &tx,
-        &CreateUserRequest {
-            tenant_id: tenant.id,
-            email: admin_email.to_string(),
-            name: Some("System Administrator".to_string()),
-            role: Some(UserRole::System),
+        &CreateTenantRequest {
+            name: "Default".into(),
+            slug: "default".into(),
+            description: Some("Default membership workspace".into()),
+            default_rpm_limit: None,
+            default_tpm_limit: None,
         },
+        user.id,
+        &actor,
     )
     .await?;
-
-    info!(user_id = %user.id, "管理员用户创建成功");
 
     // 创建用户凭证
     let credential = keycompute_db::UserCredential::create(
@@ -807,7 +734,9 @@ async fn initialize_default_distribution_rules(
     // 创建一级分销规则（全局规则，对所有用户生效）
     let level1_rule = CreateDistributionRuleRequest {
         tenant_id,
-        beneficiary_id: uuid::Uuid::nil(), // 全局规则，对所有用户生效
+        beneficiary_scope:
+            keycompute_db::models::tenant_distribution_rule::BeneficiaryScope::Everyone,
+        beneficiary_id: None,
         name: "一级分销规则".to_string(),
         description: Some("默认一级分销规则，推荐人可获得指定比例的分销佣金".to_string()),
         commission_rate: level1_ratio,
@@ -822,7 +751,9 @@ async fn initialize_default_distribution_rules(
     // 创建二级分销规则（全局规则，对所有用户生效）
     let level2_rule = CreateDistributionRuleRequest {
         tenant_id,
-        beneficiary_id: uuid::Uuid::nil(), // 全局规则，对所有用户生效
+        beneficiary_scope:
+            keycompute_db::models::tenant_distribution_rule::BeneficiaryScope::Everyone,
+        beneficiary_id: None,
         name: "二级分销规则".to_string(),
         description: Some("默认二级分销规则，间接推荐人可获得指定比例的分销佣金".to_string()),
         commission_rate: level2_ratio,
@@ -841,7 +772,7 @@ async fn initialize_default_distribution_rules(
 /// 初始化管理员余额
 ///
 /// 为默认系统管理员充值 100 元初始余额
-/// 系统管理员不需要审计，直接设置余额
+/// Bootstrap credit uses the normal immutable balance ledger.
 async fn initialize_admin_balance(
     tx: &DatabaseTransaction,
     tenant_id: uuid::Uuid,
@@ -851,7 +782,7 @@ async fn initialize_admin_balance(
     use rust_decimal::Decimal;
 
     // 检查是否已存在余额记录
-    if let Some(existing_balance) = UserBalance::find_by_user(tx, user_id).await? {
+    if let Some(existing_balance) = UserBalance::find_by_user(tx, tenant_id, user_id).await? {
         // 如果已有余额且不为 0，说明已经初始化过，跳过
         if existing_balance.available_balance > Decimal::ZERO {
             info!(
@@ -866,8 +797,8 @@ async fn initialize_admin_balance(
     let initial_amount = Decimal::new(100, 0); // 100 元
     let (updated_balance, transaction) = UserBalance::recharge_in_tx(
         tx,
-        user_id,
         tenant_id,
+        user_id,
         initial_amount,
         None, // 无订单 ID
         Some("系统管理员初始余额"),
@@ -1066,15 +997,14 @@ mod tests {
             .await
             .unwrap()
             .expect("system user should exist");
-        assert_eq!(user.role, "system");
-        assert_eq!(user.tenant_id, first.id);
+        assert_eq!(user.platform_role, "root");
         let credential = UserCredential::find_by_user_id(&isolated, user.id)
             .await
             .unwrap()
             .expect("credential should exist");
         assert!(credential.email_verified);
         assert!(!credential.password_hash.trim().is_empty());
-        let balance = UserBalance::find_by_user(&isolated, user.id)
+        let balance = UserBalance::find_by_user(&isolated, first.id, user.id)
             .await
             .unwrap()
             .expect("balance should exist");
@@ -1138,7 +1068,7 @@ mod tests {
                 .is_none()
         );
         assert!(
-            Tenant::find_by_slug(&isolated, "system")
+            Tenant::find_by_slug(&isolated, "default")
                 .await
                 .unwrap()
                 .is_none()

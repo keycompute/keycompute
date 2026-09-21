@@ -2039,7 +2039,6 @@ impl SseJsonDecoder {
 mod tests {
     use super::*;
     use axum::{Router, routing::get};
-    use keycompute_auth::Permission;
     use tokio_tungstenite::{connect_async, tungstenite::Message as ClientMessage};
 
     #[derive(Debug, Deserialize)]
@@ -2502,13 +2501,9 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_warmup_is_rejected_when_tenant_rpm_is_exhausted() {
-        let state = AppState::new();
-        let auth = AuthExtractor::new(
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            "user",
-        );
+        let fixture = crate::test_support::TestIdentity::member().await;
+        let state = fixture.state.clone();
+        let auth = fixture.auth.clone();
         // JWT-authenticated WebSocket events have no Produce AI key, so the
         // revalidated event identity uses the nil API-key component.
         let rate_key = keycompute_ratelimit::RateLimitKey::new(
@@ -2525,9 +2520,7 @@ mod tests {
                 .unwrap();
         }
 
-        let jwt = keycompute_auth::JwtValidator::new("change-me-in-production", "keycompute")
-            .generate_token(auth.user_id, auth.tenant_id, "user")
-            .unwrap();
+        let jwt = fixture.token.clone();
         let mut headers = HeaderMap::new();
         headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -2575,6 +2568,7 @@ mod tests {
             state.rate_limiter.get_rpm_count(&rate_key).await.unwrap(),
             u64::from(config.rpm_limit)
         );
+        fixture.finish().await;
     }
 
     #[test]
@@ -3167,17 +3161,10 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_connection_rejects_controls_then_handles_response_create() {
-        let state = AppState::new();
-        let auth = AuthExtractor::new(
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            uuid::Uuid::new_v4(),
-            "user",
-        )
-        .with_permissions(vec![Permission::UseApi]);
-        let jwt = keycompute_auth::JwtValidator::new("change-me-in-production", "keycompute")
-            .generate_token(auth.user_id, auth.tenant_id, "user")
-            .unwrap();
+        let fixture = crate::test_support::TestIdentity::member().await;
+        let state = fixture.state.clone();
+        let auth = fixture.auth.clone();
+        let jwt = fixture.token.clone();
         let mut connection_headers = HeaderMap::new();
         connection_headers.insert(
             axum::http::header::AUTHORIZATION,
@@ -3349,6 +3336,7 @@ mod tests {
 
         client.close(None).await.unwrap();
         server.abort();
+        fixture.finish().await;
     }
 }
 
@@ -3357,7 +3345,8 @@ mod drain_tests {
     use super::*;
     #[tokio::test]
     async fn drain_flushes_accepted_response_events_before_close() {
-        let state = AppState::new();
+        let fixture = crate::test_support::TestIdentity::member().await;
+        let state = fixture.state.clone();
         let copy = state.clone();
         let (sink, mut messages) = futures::channel::mpsc::channel::<Message>(8);
         let entered = Arc::new(tokio::sync::Notify::new());
@@ -3380,9 +3369,7 @@ mod drain_tests {
             }
         });
         let sink = Box::pin(sink);
-        let jwt = keycompute_auth::JwtValidator::new("change-me-in-production", "keycompute")
-            .generate_token(uuid::Uuid::new_v4(), uuid::Uuid::new_v4(), "user")
-            .unwrap();
+        let jwt = fixture.token.clone();
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {jwt}").parse().unwrap());
         let source=futures::stream::once(async {Ok::<_,std::io::Error>(Message::Text(json!({"type":"response.create","model":"gpt-test","generate":false,"store":false,"input":"hello"}).to_string().into()))}).chain(futures::stream::pending());
@@ -3424,6 +3411,7 @@ mod drain_tests {
             .unwrap();
         assert_eq!(types.last().map(String::as_str), Some("response.completed"));
         assert_eq!(state.shutdown.snapshot().websockets, 0);
+        fixture.finish().await;
     }
     #[tokio::test]
     async fn idle_response_socket_closes_on_drain_without_waiting_an_hour() {

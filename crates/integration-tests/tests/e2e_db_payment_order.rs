@@ -6,10 +6,11 @@ use integration_tests::db::{
     cleanup_test_data, create_test_pool, create_test_tenant, create_test_user,
 };
 use keycompute_db::{
-    CreatePaymentOrderRequest, CreditPaidOrderError, DbError, PaymentMethod, PaymentOrder, Tenant,
-    UpdateUserRequest, User, UserBalance, purge_expired_payment_security_events,
+    CreatePaymentOrderRequest, CreateTenantMembershipRequest, CreditPaidOrderError, DbError,
+    PaymentMethod, PaymentOrder, Tenant, TenantMembership, UserBalance,
+    purge_expired_payment_security_events,
 };
-use keycompute_types::AssignableUserRole;
+use keycompute_types::{CredentialKind, PlatformRole, TenantRole};
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use std::time::Duration as TokioDuration;
@@ -211,19 +212,19 @@ async fn payment_order_credit_does_not_deadlock_with_tenant_delete() {
     )
     .await
     .expect("tenant delete should not deadlock with payment credit")
-    .expect("tenant delete cascade should succeed");
+    .expect_err("retained financial order must reject tenant deletion");
     delete_tx
-        .commit()
+        .rollback()
         .await
-        .expect("tenant delete transaction should commit");
+        .expect("failed tenant delete transaction should roll back");
 
     let callback_result = tokio::time::timeout(TokioDuration::from_secs(10), callback)
         .await
         .expect("payment callback should finish after tenant deletion")
         .expect("payment callback task should not panic");
     assert!(
-        matches!(callback_result, Err(CreditPaidOrderError::OrderNotFound)),
-        "callback for a cascaded order should fail as not found, got {callback_result:?}"
+        matches!(callback_result, Ok(true)),
+        "retained payment must credit after deletion is rejected, got {callback_result:?}"
     );
 
     cleanup_test_data(&pool, &test_id).await.ok();
@@ -370,7 +371,7 @@ async fn paid_order_credit_is_atomic_audited_and_idempotent() {
     let second = second.expect("second concurrent provider event should be idempotent");
     assert_ne!(first, second, "exactly one concurrent call should credit");
 
-    let balance = UserBalance::find_by_user(&pool, user.id)
+    let balance = UserBalance::find_by_user(&pool, tenant.id, user.id)
         .await
         .expect("balance query should succeed")
         .expect("credited balance should exist");
@@ -426,7 +427,7 @@ async fn paid_order_credit_is_atomic_audited_and_idempotent() {
 }
 
 #[tokio::test]
-async fn paid_order_after_tenant_move_credits_the_new_tenant_balance() {
+async fn pending_payment_keeps_original_tenant_after_membership_changes() {
     let pool = create_test_pool().await;
     let test_id = generate_test_id();
     cleanup_test_data(&pool, &test_id)
@@ -453,38 +454,72 @@ async fn paid_order_after_tenant_move_credits_the_new_tenant_balance() {
     .await
     .expect("payment order should be created");
 
-    let tx = pool.begin().await.expect("transaction should begin");
-    let locked = User::find_by_id_for_no_key_update(&tx, user.id)
+    let source_membership = TenantMembership::find_any(&pool, source.id, user.id)
         .await
         .expect("user lookup should succeed")
-        .expect("user should exist");
-    PaymentOrder::reassign_pending_for_user(&tx, user.id, source.id, target.id)
+        .expect("source membership should exist");
+    let membership_tx = pool
+        .begin()
         .await
-        .expect("pending payment order should move with the user");
-    UserBalance::reassign_tenant(&tx, user.id, target.id)
+        .expect("membership transaction should begin");
+    TenantMembership::create(
+        &membership_tx,
+        &CreateTenantMembershipRequest {
+            tenant_id: target.id,
+            user_id: user.id,
+            role: TenantRole::Member,
+        },
+        &keycompute_db::AuditContext {
+            actor_user_id: target.owner_user_id,
+            credential_kind: CredentialKind::Jwt,
+            actor_platform_role: PlatformRole::None,
+            actor_tenant_role: Some(TenantRole::Admin),
+            request_id: None,
+        },
+    )
+    .await
+    .expect("target membership should be added");
+    TenantMembership::revoke(
+        &membership_tx,
+        source.id,
+        user.id,
+        source_membership.version,
+        &keycompute_db::AuditContext {
+            actor_user_id: source.owner_user_id,
+            credential_kind: CredentialKind::Jwt,
+            actor_platform_role: PlatformRole::None,
+            actor_tenant_role: Some(TenantRole::Admin),
+            request_id: None,
+        },
+    )
+    .await
+    .expect("source membership should be revoked");
+    membership_tx
+        .commit()
         .await
-        .expect("balance row should be materialized during the move");
-    locked
-        .update_in_tx(
-            &tx,
-            &UpdateUserRequest {
-                name: None,
-                role: Some(AssignableUserRole::User),
-                tenant_id: Some(target.id),
-            },
-        )
-        .await
-        .expect("user should move");
-    tx.commit().await.expect("transaction should commit");
+        .expect("membership transaction should commit");
 
     assert_eq!(
         PaymentOrder::find_by_id(&pool, order.id)
             .await
-            .expect("moved order query should succeed")
-            .expect("moved order should exist")
+            .unwrap()
+            .unwrap()
             .tenant_id,
-        target.id
+        source.id
     );
+    assert!(
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE payment_orders SET tenant_id=$2 WHERE id=$1",
+            [order.id.into(), target.id.into()],
+        ))
+        .await
+        .is_err(),
+        "accepted payment identity remains immutable across memberships"
+    );
+    UserBalance::get_or_create(&pool, target.id, user.id)
+        .await
+        .unwrap();
 
     // A request authenticated before the move must re-check ownership at
     // insertion time instead of leaving a new pending order under the source
@@ -506,22 +541,18 @@ async fn paid_order_after_tenant_move_credits_the_new_tenant_balance() {
     )
     .await
     .expect_err("an order for the user's former tenant must be rejected");
-    assert!(
-        matches!(stale_create, DbError::UserTenantMismatch { requested_tenant_id, actual_tenant_id, .. }
-            if requested_tenant_id == source.id && actual_tenant_id == target.id),
-        "stale order creation should report the tenant ownership mismatch"
-    );
+    assert!(matches!(stale_create, DbError::UserTenantMismatch { .. }));
 
-    // The source tenant is now empty and may be removed. The pending order
-    // must survive that deletion so an eventual provider callback can credit
-    // the user's new-tenant balance.
-    pool.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "DELETE FROM tenants WHERE id = $1",
-        [source.id.into()],
-    ))
-    .await
-    .expect("empty source tenant should be deletable");
+    assert!(
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM tenants WHERE id=$1",
+            [source.id.into()],
+        ))
+        .await
+        .is_err(),
+        "retained orders protect their original tenant"
+    );
 
     let provider_trade_no = format!("PAYMENT-MOVE-TRADE-{test_id}");
     let provider_event_id = format!("PAYMENT-MOVE-EVENT-{test_id}");
@@ -536,11 +567,19 @@ async fn paid_order_after_tenant_move_credits_the_new_tenant_balance() {
     .await
     .expect("payment callback should credit the order");
 
-    let balance = UserBalance::find_by_user(&pool, user.id)
+    let balance = UserBalance::find_by_user(&pool, source.id, user.id)
         .await
         .expect("balance query should succeed")
         .expect("balance should exist");
-    assert_eq!(balance.tenant_id, target.id);
+    assert_eq!(balance.tenant_id, source.id);
+    assert_eq!(
+        UserBalance::find_by_user(&pool, target.id, user.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .available_balance,
+        Decimal::ZERO
+    );
     assert_eq!(balance.available_balance, Decimal::new(2500, 2));
     cleanup_test_data(&pool, &test_id)
         .await
@@ -620,7 +659,7 @@ async fn paid_order_replay_paths_distinguish_provider_identity() {
         CreditPaidOrderError::ProviderIdentityMismatch
     ));
 
-    let balance = UserBalance::find_by_user(&pool, user.id)
+    let balance = UserBalance::find_by_user(&pool, tenant.id, user.id)
         .await
         .expect("balance query should succeed")
         .expect("credited balance should exist");

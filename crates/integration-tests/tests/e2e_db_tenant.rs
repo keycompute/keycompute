@@ -16,14 +16,15 @@ mod tests {
         extract::{Path, State},
     };
     use bigdecimal::BigDecimal;
-    use keycompute_auth::Permission;
-    use keycompute_db::models::pricing_model::BillingDimension;
+    use keycompute_db::models::pricing_model::{BillingDimension, PricingScopeType};
     use keycompute_db::{
         Account, CreateAccountRequest, CreateDistributionRuleRequest, CreatePaymentOrderRequest,
-        CreatePricingRequest, PaymentMethod, PaymentOrder, PricingModel, ResponseAffinity,
-        ResponsesIdempotencyClaim, TenantDistributionRule, UpdateUserRequest, User, UserBalance,
+        CreatePricingRequest, CreateTenantMembershipRequest, PaymentMethod, PaymentOrder,
+        PricingModel, ResponseAffinity, ResponsesIdempotencyClaim, TenantDistributionRule,
+        TenantMembership, UserBalance,
     };
     use keycompute_server::{AppState, AuthExtractor};
+    use keycompute_types::{CredentialKind, PlatformRole, TenantRole};
     use rust_decimal::Decimal;
     use std::{str::FromStr, sync::Arc};
 
@@ -146,6 +147,7 @@ mod tests {
         let pricing = PricingModel::create(
             &pool,
             &CreatePricingRequest {
+                scope_type: PricingScopeType::Tenant,
                 tenant_id: Some(tenant.id),
                 model_name: format!("pricing-delete-guard-{test_id}"),
                 billing_dimension: BillingDimension::ProviderAccount,
@@ -189,7 +191,8 @@ mod tests {
             &pool,
             &CreateDistributionRuleRequest {
                 tenant_id: tenant.id,
-                beneficiary_id: uuid::Uuid::nil(),
+                beneficiary_scope: keycompute_db::BeneficiaryScope::Everyone,
+                beneficiary_id: None,
                 name: format!("distribution-delete-cascade-{test_id}"),
                 description: None,
                 commission_rate: BigDecimal::from_str("0.03").unwrap(),
@@ -269,26 +272,59 @@ mod tests {
         .await
         .expect("historical balance transaction should be created");
 
-        let current = User::find_by_id(&pool, user.id)
+        let source_membership = TenantMembership::find_any(&pool, source.id, user.id)
             .await
-            .expect("user lookup should succeed")
-            .expect("user should exist");
+            .expect("source membership lookup should succeed")
+            .expect("source membership should exist");
         let move_tx = pool.begin().await.expect("transaction should begin");
-        current
-            .update_in_tx(
-                &move_tx,
-                &UpdateUserRequest {
-                    name: None,
-                    role: None,
-                    tenant_id: Some(target.id),
-                },
-            )
-            .await
-            .expect("user should move to the target tenant");
+        TenantMembership::create(
+            &move_tx,
+            &CreateTenantMembershipRequest {
+                tenant_id: target.id,
+                user_id: user.id,
+                role: TenantRole::Member,
+            },
+            &keycompute_db::AuditContext {
+                actor_user_id: target.owner_user_id,
+                credential_kind: CredentialKind::Jwt,
+                actor_platform_role: PlatformRole::None,
+                actor_tenant_role: Some(TenantRole::Admin),
+                request_id: None,
+            },
+        )
+        .await
+        .expect("target membership should be added");
+        TenantMembership::revoke(
+            &move_tx,
+            source.id,
+            user.id,
+            source_membership.version,
+            &keycompute_db::AuditContext {
+                actor_user_id: source.owner_user_id,
+                credential_kind: CredentialKind::Jwt,
+                actor_platform_role: PlatformRole::None,
+                actor_tenant_role: Some(TenantRole::Admin),
+                request_id: None,
+            },
+        )
+        .await
+        .expect("source membership should be revoked");
         move_tx
             .commit()
             .await
-            .expect("user move transaction should commit");
+            .expect("membership move transaction should commit");
+        assert!(
+            TenantMembership::find(&pool, target.id, user.id)
+                .await
+                .expect("target membership lookup should succeed")
+                .is_some()
+        );
+        assert!(
+            TenantMembership::find(&pool, source.id, user.id)
+                .await
+                .expect("source membership lookup should succeed")
+                .is_none()
+        );
 
         let delete_result = source.delete(&pool).await;
         assert!(matches!(
@@ -389,7 +425,7 @@ mod tests {
             &binding_id,
             "delete-guard-fingerprint",
             Uuid::new_v4(),
-            Uuid::new_v4(),
+            tenant.owner_user_id,
             Uuid::new_v4(),
             "openai",
             Some("gpt-test"),
@@ -715,8 +751,19 @@ mod tests {
 
         let router = keycompute_db::DbRouter::single(pool.clone());
         let state = AppState::with_pool(Arc::clone(&router));
-        let auth = AuthExtractor::new(Uuid::new_v4(), tenant.id, Uuid::new_v4(), "system")
-            .with_permissions(vec![Permission::SystemAdmin]);
+        // This isolated handler test supplies the already verified platform
+        // capabilities that the outer platform guard would normally attach.
+        let auth = AuthExtractor::new(
+            tenant.owner_user_id,
+            tenant.id,
+            Uuid::nil(),
+            CredentialKind::Jwt,
+        )
+        .with_permissions(keycompute_auth::permissions_for(
+            CredentialKind::Jwt,
+            PlatformRole::Root,
+            Some(TenantRole::Admin),
+        ));
         let request = keycompute_server::handlers::admin_account::UpdateAccountRequest {
             tenant_id: Some(tenant.id),
             name: Some("updated-lock-order".to_string()),
@@ -821,7 +868,7 @@ mod tests {
     /// on the child. This test keeps the delete's child lock wait open while
     /// the complete reassignment transaction runs.
     #[tokio::test]
-    async fn test_tenant_delete_does_not_deadlock_with_user_reassignment() {
+    async fn joining_another_tenant_never_locks_or_moves_existing_payment() {
         let pool = create_test_pool().await;
         let test_id = generate_test_id();
         cleanup_test_data(&pool, &test_id)
@@ -854,108 +901,69 @@ mod tests {
         .await
         .expect("pending order should be created");
 
-        // The move owns the user, target tenant, and pending order first.
-        // Keeping the order lock while the delete takes the source parent
-        // reproduces the only lock ordering that could form a cycle.
-        let move_tx = pool.begin().await.expect("move transaction should begin");
-        let locked_user = User::find_by_id_for_no_key_update(&move_tx, user.id)
-            .await
-            .expect("move should lock the user")
-            .expect("user should exist");
-        Tenant::find_by_id_for_update(&move_tx, target.id)
-            .await
-            .expect("move should lock the target tenant")
-            .expect("target tenant should exist");
-        move_tx
+        let order_reader = pool.begin().await.unwrap();
+        order_reader
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT id FROM payment_orders WHERE id = $1 FOR UPDATE",
+                "SELECT id FROM payment_orders WHERE id=$1 FOR UPDATE",
                 [order.id.into()],
             ))
             .await
-            .expect("move should lock the pending order");
-
-        let delete_tx = pool.begin().await.expect("delete transaction should begin");
-        Tenant::find_by_id_for_update(&delete_tx, source.id)
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let tx = pool.begin().await.unwrap();
+            TenantMembership::create(
+                &tx,
+                &keycompute_db::CreateTenantMembershipRequest {
+                    tenant_id: target.id,
+                    user_id: user.id,
+                    role: TenantRole::Member,
+                },
+                &keycompute_db::AuditContext {
+                    actor_user_id: target.owner_user_id,
+                    credential_kind: CredentialKind::Jwt,
+                    actor_platform_role: PlatformRole::None,
+                    actor_tenant_role: Some(TenantRole::Admin),
+                    request_id: None,
+                },
+            )
             .await
-            .expect("delete should lock the source tenant")
-            .expect("source tenant should exist");
-        let (delete_started_tx, delete_started_rx) = tokio::sync::oneshot::channel();
-        let delete_task = tokio::spawn(async move {
-            let _ = delete_started_tx.send(());
-            // A cascading tenant delete eventually takes this child lock. Use
-            // the same lock explicitly so the test remains independent of
-            // PostgreSQL's internal cascade plan and exposes a deterministic
-            // parent -> child wait.
-            let result = delete_tx
-                .query_all(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "SELECT id FROM payment_orders WHERE tenant_id = $1 FOR UPDATE",
-                    [source.id.into()],
-                ))
-                .await;
-            let _ = delete_tx.rollback().await;
-            result
-        });
-        delete_started_rx
-            .await
-            .expect("delete child-lock task should start");
-
-        // Let the child-lock query reach PostgreSQL before the move attempts
-        // its tenant-FK updates. The assertion below is bounded by timeout, so
-        // a scheduling delay cannot leave a leaked transaction.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let move_result = tokio::time::timeout(Duration::from_secs(3), async {
-            PaymentOrder::reassign_pending_for_user(&move_tx, user.id, source.id, target.id)
-                .await
-                .expect("pending order should move");
-            UserBalance::reassign_tenant(&move_tx, user.id, target.id)
-                .await
-                .expect("balance should move");
-            locked_user
-                .update_in_tx(
-                    &move_tx,
-                    &UpdateUserRequest {
-                        name: None,
-                        role: None,
-                        tenant_id: Some(target.id),
-                    },
-                )
-                .await
-                .expect("user should move");
-            move_tx.commit().await.expect("move should commit");
+            .unwrap();
+            tx.commit().await.unwrap();
         })
-        .await;
-        assert!(
-            move_result.is_ok(),
-            "user reassignment must not wait on the source tenant while delete waits on its order"
-        );
-
-        delete_task
-            .await
-            .expect("delete child-lock task should not panic")
-            .expect("delete child-lock query should finish after reassignment");
-
-        let moved = User::find_by_id(&pool, user.id)
-            .await
-            .expect("moved user lookup should succeed")
-            .expect("moved user should remain");
-        assert_eq!(moved.tenant_id, target.id);
+        .await
+        .expect("joining another tenant must not wait on or move an existing payment order");
+        order_reader.rollback().await.unwrap();
         assert_eq!(
             PaymentOrder::find_by_id(&pool, order.id)
                 .await
-                .expect("moved order lookup should succeed")
-                .expect("moved order should remain")
+                .unwrap()
+                .unwrap()
                 .tenant_id,
-            target.id
+            source.id
         );
-
-        cleanup_test_data(&pool, &test_id)
-            .await
-            .expect("cleanup should succeed");
+        assert!(
+            TenantMembership::find(&pool, source.id, user.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            TenantMembership::find(&pool, target.id, user.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            UserBalance::find_by_user(&pool, target.id, user.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            source.delete(&pool).await.is_err(),
+            "pending financial work must protect its original tenant"
+        );
+        cleanup_test_data(&pool, &test_id).await.unwrap();
     }
-
-    // ============================================================================
-    // 用户 CRUD 测试
-    // ============================================================================
 }

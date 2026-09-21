@@ -143,6 +143,7 @@ mod tests {
 
     async fn post_admin_balance_operation(
         app: &axum::Router,
+        tenant_id: uuid::Uuid,
         token: &str,
         uri: &str,
         idempotency_key: Option<&str>,
@@ -166,7 +167,7 @@ mod tests {
             .oneshot(
                 request
                     .body(Body::from(
-                        serde_json::json!({"amount": amount, "reason": reason}).to_string(),
+                        serde_json::json!({"tenant_id":tenant_id,"amount": amount, "reason": reason}).to_string(),
                     ))
                     .expect("administrator balance request should build"),
             )
@@ -219,10 +220,11 @@ mod tests {
 
     async fn assert_no_request_balance_reservation(
         pool: &DatabaseConnection,
+        tenant_id: uuid::Uuid,
         user_id: uuid::Uuid,
         expected_available: Decimal,
     ) {
-        let balance = keycompute_db::UserBalance::find_by_user(pool, user_id)
+        let balance = keycompute_db::UserBalance::find_by_user(pool, tenant_id, user_id)
             .await
             .expect("balance query after local TPM rejection should succeed")
             .expect("balance should exist");
@@ -264,8 +266,8 @@ mod tests {
 
         let (initial, _) = balance_service
             .recharge(
-                user.id,
                 tenant.id,
+                user.id,
                 Decimal::from(100),
                 None,
                 Some("initial recharge for freeze test"),
@@ -277,7 +279,12 @@ mod tests {
 
         // 冻结 30 元
         let (after_freeze, tx) = balance_service
-            .freeze(user.id, Decimal::from(30), Some("test freeze half"))
+            .freeze(
+                tenant.id,
+                user.id,
+                Decimal::from(30),
+                Some("test freeze half"),
+            )
             .await
             .expect("freeze should succeed");
 
@@ -317,8 +324,8 @@ mod tests {
 
         let _ = balance_service
             .recharge(
-                user.id,
                 tenant.id,
+                user.id,
                 Decimal::from(100),
                 None,
                 Some("recharge for cumulative test"),
@@ -328,7 +335,7 @@ mod tests {
 
         // 第一次冻结 20
         let (b1, _) = balance_service
-            .freeze(user.id, Decimal::from(20), None)
+            .freeze(tenant.id, user.id, Decimal::from(20), None)
             .await
             .expect("first freeze should succeed");
         assert_eq!(b1.available_balance, Decimal::from(80));
@@ -336,7 +343,7 @@ mod tests {
 
         // 第二次冻结 40（累计冻结 60）
         let (b2, _) = balance_service
-            .freeze(user.id, Decimal::from(40), None)
+            .freeze(tenant.id, user.id, Decimal::from(40), None)
             .await
             .expect("second freeze should succeed");
         assert_eq!(b2.available_balance, Decimal::from(40));
@@ -363,12 +370,12 @@ mod tests {
 
         // 只充 10 元，尝试冻结 100 元应失败
         let _ = balance_service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("recharge should succeed");
 
         let err = balance_service
-            .freeze(user.id, Decimal::from(100), None)
+            .freeze(tenant.id, user.id, Decimal::from(100), None)
             .await
             .expect_err("freeze with insufficient balance should fail");
 
@@ -404,7 +411,7 @@ mod tests {
 
         for amount in [Decimal::ZERO, Decimal::from(-1)] {
             let recharge_error = balance_service
-                .recharge(user.id, tenant.id, amount, None, Some("invalid recharge"))
+                .recharge(tenant.id, user.id, amount, None, Some("invalid recharge"))
                 .await
                 .expect_err("non-positive recharge must fail");
             assert!(
@@ -413,7 +420,13 @@ mod tests {
             );
 
             let consumption_error = balance_service
-                .consume(user.id, amount, None, Some("invalid consumption"))
+                .consume(
+                    tenant.id,
+                    user.id,
+                    amount,
+                    None,
+                    Some("invalid consumption"),
+                )
                 .await
                 .expect_err("non-positive administrative consumption must fail");
             assert!(
@@ -422,7 +435,7 @@ mod tests {
             );
 
             let freeze_error = balance_service
-                .freeze(user.id, amount, Some("invalid freeze"))
+                .freeze(tenant.id, user.id, amount, Some("invalid freeze"))
                 .await
                 .expect_err("non-positive freeze must fail");
             assert!(
@@ -431,7 +444,7 @@ mod tests {
             );
 
             let unfreeze_error = balance_service
-                .unfreeze(user.id, amount, Some("invalid unfreeze"))
+                .unfreeze(tenant.id, user.id, amount, Some("invalid unfreeze"))
                 .await
                 .expect_err("non-positive unfreeze must fail");
             assert!(
@@ -439,39 +452,39 @@ mod tests {
                 "unexpected unfreeze error: {unfreeze_error}"
             );
 
-            keycompute_db::UserBalance::recharge(&pool, user.id, tenant.id, amount, None, None)
+            keycompute_db::UserBalance::recharge(&pool, tenant.id, user.id, amount, None, None)
                 .await
                 .expect_err("DB recharge guard must reject non-positive amounts");
             let tx = pool
                 .begin()
                 .await
                 .expect("validation transaction should begin");
-            keycompute_db::UserBalance::recharge_in_tx(&tx, user.id, tenant.id, amount, None, None)
+            keycompute_db::UserBalance::recharge_in_tx(&tx, tenant.id, user.id, amount, None, None)
                 .await
                 .expect_err("DB in-transaction recharge guard must reject non-positive amounts");
-            keycompute_db::UserBalance::credit_tips(&tx, user.id, tenant.id, amount, None)
+            keycompute_db::UserBalance::credit_tips(&tx, tenant.id, user.id, amount, None)
                 .await
                 .expect_err("DB tip-credit guard must reject non-positive amounts");
             tx.rollback()
                 .await
                 .expect("validation transaction should roll back");
-            keycompute_db::UserBalance::consume(&pool, user.id, amount, None, None)
+            keycompute_db::UserBalance::consume(&pool, tenant.id, user.id, amount, None, None)
                 .await
                 .expect_err("DB consumption guard must reject non-positive manual amounts");
-            keycompute_db::UserBalance::freeze(&pool, user.id, amount, None)
+            keycompute_db::UserBalance::freeze(&pool, tenant.id, user.id, amount, None)
                 .await
                 .expect_err("DB freeze guard must reject non-positive amounts");
-            keycompute_db::UserBalance::unfreeze(&pool, user.id, amount, None)
+            keycompute_db::UserBalance::unfreeze(&pool, tenant.id, user.id, amount, None)
                 .await
                 .expect_err("DB unfreeze guard must reject non-positive amounts");
         }
 
         balance_service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("valid recharge should succeed");
 
-        let after = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let after = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -498,13 +511,13 @@ mod tests {
             .expect("get_or_create should succeed");
 
         let _ = balance_service
-            .recharge(user.id, tenant.id, Decimal::from(100), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(100), None, None)
             .await
             .expect("recharge should succeed");
 
         // 冻结 50
         let (frozen, _) = balance_service
-            .freeze(user.id, Decimal::from(50), None)
+            .freeze(tenant.id, user.id, Decimal::from(50), None)
             .await
             .expect("freeze should succeed");
         assert_eq!(frozen.available_balance, Decimal::from(50));
@@ -512,7 +525,12 @@ mod tests {
 
         // 解冻 20
         let (unfrozen, tx) = balance_service
-            .unfreeze(user.id, Decimal::from(20), Some("partial unfreeze"))
+            .unfreeze(
+                tenant.id,
+                user.id,
+                Decimal::from(20),
+                Some("partial unfreeze"),
+            )
             .await
             .expect("unfreeze should succeed");
 
@@ -551,19 +569,19 @@ mod tests {
             .expect("get_or_create should succeed");
 
         let _ = balance_service
-            .recharge(user.id, tenant.id, Decimal::from(50), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(50), None, None)
             .await
             .expect("recharge should succeed");
 
         // 冻结 10
         let _ = balance_service
-            .freeze(user.id, Decimal::from(10), None)
+            .freeze(tenant.id, user.id, Decimal::from(10), None)
             .await
             .expect("freeze should succeed");
 
         // 尝试解冻 100（超过已冻结的 10）
         let err = balance_service
-            .unfreeze(user.id, Decimal::from(100), None)
+            .unfreeze(tenant.id, user.id, Decimal::from(100), None)
             .await
             .expect_err("unfreeze with insufficient frozen balance should fail");
 
@@ -598,13 +616,13 @@ mod tests {
             .expect("get_or_create should succeed");
 
         let (initial, _) = balance_service
-            .recharge(user.id, tenant.id, Decimal::from(100), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(100), None, None)
             .await
             .expect("recharge should succeed");
 
         // 冻结 100
         let (frozen, _) = balance_service
-            .freeze(user.id, Decimal::from(100), None)
+            .freeze(tenant.id, user.id, Decimal::from(100), None)
             .await
             .expect("freeze all should succeed");
         assert_eq!(frozen.available_balance, Decimal::ZERO);
@@ -612,7 +630,7 @@ mod tests {
 
         // 解冻 100
         let (unfrozen, _) = balance_service
-            .unfreeze(user.id, Decimal::from(100), None)
+            .unfreeze(tenant.id, user.id, Decimal::from(100), None)
             .await
             .expect("unfreeze all should succeed");
 
@@ -640,6 +658,8 @@ mod tests {
             .expect("concurrent recharge cleanup should succeed");
         let tenant = create_test_tenant(&pool, "recharge-race", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "recharge-race", &test_id).await;
+        let tenant_id = tenant.id;
+        let user_id = user.id;
         let barrier = Arc::new(Barrier::new(RECHARGE_COUNT));
         let mut tasks = JoinSet::new();
 
@@ -650,8 +670,8 @@ mod tests {
                 barrier.wait().await;
                 service
                     .recharge(
-                        user.id,
-                        tenant.id,
+                        tenant_id,
+                        user_id,
                         Decimal::ONE,
                         None,
                         Some("concurrent first recharge"),
@@ -673,7 +693,7 @@ mod tests {
             assert_eq!(transaction.balance_before, expected_before);
             assert_eq!(transaction.balance_after, expected_before + Decimal::ONE);
         }
-        let final_balance = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let final_balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("final balance query should succeed")
             .expect("final balance should exist");
@@ -692,13 +712,15 @@ mod tests {
             .expect("reservation race cleanup should succeed");
         let tenant = create_test_tenant(&pool, "reserve-race", &test_id).await;
         let user = create_test_user(&pool, tenant.id, "reserve-race", &test_id).await;
+        let tenant_id = tenant.id;
+        let user_id = user.id;
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         service
             .get_or_create(tenant.id, user.id)
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::ONE, None, None)
+            .recharge(tenant.id, user.id, Decimal::ONE, None, None)
             .await
             .expect("reservation test recharge should succeed");
 
@@ -711,8 +733,8 @@ mod tests {
                 barrier.wait().await;
                 service
                     .reserve_request(
-                        user.id,
-                        tenant.id,
+                        tenant_id,
+                        user_id,
                         uuid::Uuid::new_v4(),
                         Decimal::ONE,
                         std::time::Duration::from_secs(26 * 60 * 60),
@@ -736,7 +758,7 @@ mod tests {
         assert_eq!(failures, 1);
         assert_eq!(successes[0].amount, Decimal::ONE);
 
-        let balance = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -759,7 +781,7 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::ONE, None, None)
+            .recharge(tenant.id, user.id, Decimal::ONE, None, None)
             .await
             .expect("reservation ownership recharge should succeed");
 
@@ -767,8 +789,8 @@ mod tests {
         let first_owner_token = uuid::Uuid::new_v4();
         let first = service
             .reserve_request_with_owner_token(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 first_owner_token,
                 Decimal::ONE,
@@ -779,8 +801,8 @@ mod tests {
         let replacement_owner_token = uuid::Uuid::new_v4();
         let replacement = service
             .reserve_request_with_owner_token(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 replacement_owner_token,
                 Decimal::ONE,
@@ -793,11 +815,16 @@ mod tests {
         assert_eq!(replacement.owner_token, replacement_owner_token);
         assert!(
             !service
-                .release_request_reservation(billing_request_id, first.owner_token)
+                .release_request_reservation(
+                    tenant.id,
+                    user.id,
+                    billing_request_id,
+                    first.owner_token,
+                )
                 .await
                 .expect("stale release should be a successful no-op")
         );
-        let still_reserved = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let still_reserved = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -806,11 +833,16 @@ mod tests {
 
         assert!(
             service
-                .release_request_reservation(billing_request_id, replacement.owner_token)
+                .release_request_reservation(
+                    tenant.id,
+                    user.id,
+                    billing_request_id,
+                    replacement.owner_token,
+                )
                 .await
                 .expect("current owner should release the reservation")
         );
-        let released = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let released = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -833,15 +865,15 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("reservation resize recharge should succeed");
 
         let billing_request_id = uuid::Uuid::new_v4();
         let first = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(3),
                 std::time::Duration::from_secs(60),
@@ -851,8 +883,8 @@ mod tests {
         let competing_request_id = uuid::Uuid::new_v4();
         let competing = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 competing_request_id,
                 Decimal::from(5),
                 std::time::Duration::from_secs(60),
@@ -861,8 +893,8 @@ mod tests {
             .expect("competing reservation should succeed");
         let failed_growth = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(6),
                 std::time::Duration::from_secs(60),
@@ -870,22 +902,28 @@ mod tests {
             .await
             .expect_err("growth beyond this request's reservable capacity should fail");
         assert!(failed_growth.to_string().contains("Insufficient balance"));
-        let after_failed_growth = keycompute_db::UserBalance::find_by_user(&pool, user.id)
-            .await
-            .expect("balance query should succeed")
-            .expect("balance should exist");
+        let after_failed_growth =
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
+                .await
+                .expect("balance query should succeed")
+                .expect("balance should exist");
         assert_eq!(after_failed_growth.available_balance, Decimal::from(2));
         assert_eq!(after_failed_growth.frozen_balance, Decimal::from(8));
         assert!(
             service
-                .release_request_reservation(billing_request_id, first.owner_token)
+                .release_request_reservation(
+                    tenant.id,
+                    user.id,
+                    billing_request_id,
+                    first.owner_token,
+                )
                 .await
                 .expect("failed growth must preserve the current owner")
         );
         let first = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(3),
                 std::time::Duration::from_secs(60),
@@ -894,15 +932,20 @@ mod tests {
             .expect("released logical request should be reservable again");
         assert!(
             service
-                .release_request_reservation(competing_request_id, competing.owner_token)
+                .release_request_reservation(
+                    tenant.id,
+                    user.id,
+                    competing_request_id,
+                    competing.owner_token,
+                )
                 .await
                 .expect("competing reservation should release")
         );
 
         let grown = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(6),
                 std::time::Duration::from_secs(60),
@@ -911,7 +954,7 @@ mod tests {
             .expect("reservation growth should succeed");
         assert_eq!(grown.amount, Decimal::from(6));
         assert_ne!(first.owner_token, grown.owner_token);
-        let after_growth = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let after_growth = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -919,15 +962,20 @@ mod tests {
         assert_eq!(after_growth.frozen_balance, Decimal::from(6));
         assert!(
             !service
-                .release_request_reservation(billing_request_id, first.owner_token)
+                .release_request_reservation(
+                    tenant.id,
+                    user.id,
+                    billing_request_id,
+                    first.owner_token,
+                )
                 .await
                 .expect("stale release should be a successful no-op")
         );
 
         let shrunk = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(2),
                 std::time::Duration::from_secs(60),
@@ -935,7 +983,7 @@ mod tests {
             .await
             .expect("reservation shrink should succeed");
         assert_eq!(shrunk.amount, Decimal::from(2));
-        let after_shrink = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let after_shrink = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -944,8 +992,8 @@ mod tests {
 
         let full_balance = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(10),
                 std::time::Duration::from_secs(60),
@@ -953,7 +1001,7 @@ mod tests {
             .await
             .expect("explicit full-balance replacement should own all reservable funds");
         assert_eq!(full_balance.amount, Decimal::from(10));
-        let fully_reserved = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let fully_reserved = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -962,11 +1010,16 @@ mod tests {
 
         assert!(
             service
-                .release_request_reservation(billing_request_id, full_balance.owner_token)
+                .release_request_reservation(
+                    tenant.id,
+                    user.id,
+                    billing_request_id,
+                    full_balance.owner_token,
+                )
                 .await
                 .expect("latest owner should release the resized reservation")
         );
-        let released = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let released = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -990,14 +1043,14 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::ONE, None, None)
+            .recharge(tenant.id, user.id, Decimal::ONE, None, None)
             .await
             .expect("reservation test recharge should succeed");
 
         let stale = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::ONE,
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -1008,8 +1061,8 @@ mod tests {
 
         let replacement = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::ONE,
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -1018,7 +1071,7 @@ mod tests {
             .expect("expired funds should be reclaimed before admission");
         assert_eq!(replacement.amount, Decimal::ONE);
 
-        let balance = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("balance query should succeed")
             .expect("balance should exist");
@@ -1045,14 +1098,14 @@ mod tests {
                 .await
                 .expect("balance creation should succeed");
             service
-                .recharge(user_id, tenant.id, Decimal::ONE, None, None)
+                .recharge(tenant.id, user_id, Decimal::ONE, None, None)
                 .await
                 .expect("balance read expiry recharge should succeed");
         }
         let single_reservation = service
             .reserve_request(
-                single_user.id,
                 tenant.id,
+                single_user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::ONE,
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -1061,8 +1114,8 @@ mod tests {
             .expect("single-read reservation should succeed");
         let batch_reservation = service
             .reserve_request(
-                batch_user.id,
                 tenant.id,
+                batch_user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::ONE,
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -1073,7 +1126,7 @@ mod tests {
         force_reservation_expired(&pool, batch_reservation.id).await;
 
         let single_balance = service
-            .find_by_user(single_user.id)
+            .find_by_user(tenant.id, single_user.id)
             .await
             .expect("single balance query should succeed")
             .expect("single balance should exist");
@@ -1081,7 +1134,7 @@ mod tests {
         assert_eq!(single_balance.frozen_balance, Decimal::ZERO);
 
         let batch_balances = service
-            .find_by_users(&[batch_user.id])
+            .find_by_users(tenant.id, &[batch_user.id])
             .await
             .expect("batch balance query should succeed");
         let batch_balance = batch_balances
@@ -1107,17 +1160,17 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("unfreeze expiry recharge should succeed");
         service
-            .freeze(user.id, Decimal::from(3), Some("manual freeze"))
+            .freeze(tenant.id, user.id, Decimal::from(3), Some("manual freeze"))
             .await
             .expect("manual freeze should succeed");
         let stale = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::from(4),
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -1127,7 +1180,12 @@ mod tests {
         force_reservation_expired(&pool, stale.id).await;
 
         let (balance, transaction) = service
-            .unfreeze(user.id, Decimal::from(3), Some("release manual freeze"))
+            .unfreeze(
+                tenant.id,
+                user.id,
+                Decimal::from(3),
+                Some("release manual freeze"),
+            )
             .await
             .expect("manual funds should be unfrozen after expiry reclamation");
         assert_eq!(balance.available_balance, Decimal::from(10));
@@ -1152,13 +1210,13 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(4), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(4), None, None)
             .await
             .expect("recharge should succeed");
         let stale = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::from(4),
                 std::time::Duration::from_secs(60),
@@ -1168,7 +1226,12 @@ mod tests {
         force_reservation_expired(&pool, stale.id).await;
 
         let error = service
-            .unfreeze(user.id, Decimal::ONE, Some("invalid manual release"))
+            .unfreeze(
+                tenant.id,
+                user.id,
+                Decimal::ONE,
+                Some("invalid manual release"),
+            )
             .await
             .expect_err("request-owned funds are not manually frozen funds");
         assert!(
@@ -1178,7 +1241,7 @@ mod tests {
 
         // Use the raw read so this assertion cannot itself trigger lazy
         // reclamation and hide a transaction rollback regression.
-        let balance = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("raw balance query should succeed")
             .expect("balance should exist");
@@ -1202,13 +1265,13 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("recharge should succeed");
         let first = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::from(3),
                 std::time::Duration::from_secs(60),
@@ -1217,8 +1280,8 @@ mod tests {
             .expect("first reservation should succeed");
         let second = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::from(2),
                 std::time::Duration::from_secs(60),
@@ -1243,7 +1306,7 @@ mod tests {
                 .expect("repeated reclamation should succeed"),
             0
         );
-        let balance = keycompute_db::UserBalance::find_by_user(&pool, user.id)
+        let balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
             .await
             .expect("raw balance query should succeed")
             .expect("balance should exist");
@@ -1279,15 +1342,15 @@ mod tests {
                 .await
                 .expect("balance creation should succeed");
             service
-                .recharge(user_id, tenant.id, Decimal::from(5), None, None)
+                .recharge(tenant.id, user_id, Decimal::from(5), None, None)
                 .await
                 .expect("recharge should succeed");
         }
 
         let inconsistent_reservation = service
             .reserve_request(
-                inconsistent_user.id,
                 tenant.id,
+                inconsistent_user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::ONE,
                 std::time::Duration::from_secs(60),
@@ -1296,8 +1359,8 @@ mod tests {
             .expect("inconsistent user's reservation should initially succeed");
         let inconsistent_unexpired_reservation = service
             .reserve_request(
-                inconsistent_user.id,
                 tenant.id,
+                inconsistent_user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::from(4),
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -1306,8 +1369,8 @@ mod tests {
             .expect("inconsistent user's unexpired reservation should initially succeed");
         let healthy_reservation = service
             .reserve_request(
-                healthy_user.id,
                 tenant.id,
+                healthy_user.id,
                 uuid::Uuid::new_v4(),
                 Decimal::from(3),
                 std::time::Duration::from_secs(60),
@@ -1362,15 +1425,16 @@ mod tests {
             "the healthy reservation must be reclaimed"
         );
 
-        let healthy_balance = keycompute_db::UserBalance::find_by_user(&pool, healthy_user.id)
-            .await
-            .expect("healthy balance query should succeed")
-            .expect("healthy balance should exist");
+        let healthy_balance =
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, healthy_user.id)
+                .await
+                .expect("healthy balance query should succeed")
+                .expect("healthy balance should exist");
         assert_eq!(healthy_balance.available_balance, Decimal::from(5));
         assert_eq!(healthy_balance.frozen_balance, Decimal::ZERO);
 
         let inconsistent_balance =
-            keycompute_db::UserBalance::find_by_user(&pool, inconsistent_user.id)
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, inconsistent_user.id)
                 .await
                 .expect("inconsistent balance query should succeed")
                 .expect("inconsistent balance should exist");
@@ -1396,7 +1460,7 @@ mod tests {
         }
 
         let strict_error = service
-            .find_breakdown_by_user(inconsistent_user.id)
+            .find_breakdown_by_user(tenant.id, inconsistent_user.id)
             .await
             .expect_err("foreground balance reads must remain fail-closed on the invariant breach");
         assert!(
@@ -1429,20 +1493,23 @@ mod tests {
             create_test_user(&pool, tenant.id, "admin-release-replay-other", &test_id).await;
         let other_user =
             create_test_user(&pool, tenant.id, "admin-release-replay-user", &test_id).await;
+        let tenant_id = tenant.id;
+        let user_id = user.id;
+        let administrator_id = administrator.id;
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         service
             .get_or_create(tenant.id, user.id)
             .await
             .expect("target balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("recharge should succeed");
         let request_id = uuid::Uuid::new_v4();
         let reservation = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 request_id,
                 Decimal::from(6),
                 std::time::Duration::from_secs(60),
@@ -1460,10 +1527,11 @@ mod tests {
                 barrier.wait().await;
                 service
                     .admin_release_request_reservation(
-                        user.id,
+                        tenant_id,
+                        user_id,
                         request_id,
                         owner_token,
-                        administrator.id,
+                        administrator_id,
                         "  confirmed orphan  ",
                     )
                     .await
@@ -1493,6 +1561,7 @@ mod tests {
 
         let sequential_replay = service
             .admin_release_request_reservation(
+                tenant.id,
                 user.id,
                 request_id,
                 reservation.owner_token,
@@ -1541,6 +1610,7 @@ mod tests {
             assert!(
                 service
                     .admin_release_request_reservation(
+                        tenant.id,
                         conflict_user,
                         request_id,
                         conflict_owner,
@@ -1582,7 +1652,7 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("recharge should succeed");
 
@@ -1618,7 +1688,7 @@ mod tests {
             .expect("fixture transaction should commit");
 
         let first = service
-            .find_breakdown_page_by_user(user.id, None, 100)
+            .find_breakdown_page_by_user(tenant.id, user.id, None, 100)
             .await
             .expect("first reservation page should succeed")
             .expect("balance should exist");
@@ -1631,7 +1701,7 @@ mod tests {
             .expect("the 101st reservation must produce a next cursor");
 
         let second = service
-            .find_breakdown_page_by_user(user.id, Some(next_cursor), 100)
+            .find_breakdown_page_by_user(tenant.id, user.id, Some(next_cursor), 100)
             .await
             .expect("second reservation page should succeed")
             .expect("balance should exist");
@@ -1686,7 +1756,7 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("recharge should succeed");
 
@@ -1722,7 +1792,7 @@ mod tests {
             .expect("fixture transaction should commit");
 
         let page = service
-            .find_breakdown_page_by_user(user.id, None, 100)
+            .find_breakdown_page_by_user(tenant.id, user.id, None, 100)
             .await
             .expect("balance page should reclaim the expired backlog")
             .expect("balance should exist");
@@ -1776,18 +1846,18 @@ mod tests {
             .await
             .expect("target balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("recharge should succeed");
         service
-            .freeze(user.id, Decimal::from(3), Some("manual hold"))
+            .freeze(tenant.id, user.id, Decimal::from(3), Some("manual hold"))
             .await
             .expect("manual freeze should succeed");
         let request_id = uuid::Uuid::new_v4();
         let first_owner = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 request_id,
                 Decimal::from(4),
                 std::time::Duration::from_secs(60),
@@ -1796,8 +1866,8 @@ mod tests {
             .expect("request reservation should succeed");
         let reservation = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 request_id,
                 Decimal::from(4),
                 std::time::Duration::from_secs(60),
@@ -1807,7 +1877,7 @@ mod tests {
         assert_ne!(first_owner.owner_token, reservation.owner_token);
 
         let page = service
-            .find_breakdown_page_by_user(user.id, None, 1)
+            .find_breakdown_page_by_user(tenant.id, user.id, None, 1)
             .await
             .expect("balance reservation page should succeed")
             .expect("balance should exist");
@@ -1828,6 +1898,7 @@ mod tests {
         assert!(
             service
                 .admin_release_request_reservation(
+                    tenant.id,
                     other_user.id,
                     request_id,
                     reservation.owner_token,
@@ -1842,6 +1913,7 @@ mod tests {
             .repeat(keycompute_billing::balance::MAX_BALANCE_RESERVATION_RELEASE_REASON_CHARS + 1);
         let oversized_error = service
             .admin_release_request_reservation(
+                tenant.id,
                 user.id,
                 request_id,
                 reservation.owner_token,
@@ -1854,6 +1926,7 @@ mod tests {
         assert!(
             service
                 .admin_release_request_reservation(
+                    tenant.id,
                     user.id,
                     request_id,
                     first_owner.owner_token,
@@ -1865,14 +1938,16 @@ mod tests {
                 .is_none(),
             "an administrator must not release a newer owner's reservation"
         );
-        let after_stale_release = keycompute_db::UserBalance::find_by_user(&pool, user.id)
-            .await
-            .expect("balance query after stale release should succeed")
-            .expect("balance should exist");
+        let after_stale_release =
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
+                .await
+                .expect("balance query after stale release should succeed")
+                .expect("balance should exist");
         assert_eq!(after_stale_release.available_balance, Decimal::from(3));
         assert_eq!(after_stale_release.frozen_balance, Decimal::from(7));
         let released_result = service
             .admin_release_request_reservation(
+                tenant.id,
                 user.id,
                 request_id,
                 reservation.owner_token,
@@ -1903,6 +1978,7 @@ mod tests {
         );
         let exact_replay = service
             .admin_release_request_reservation(
+                tenant.id,
                 user.id,
                 request_id,
                 reservation.owner_token,
@@ -1974,6 +2050,7 @@ mod tests {
         assert!(
             service
                 .admin_release_request_reservation(
+                    tenant.id,
                     user.id,
                     request_id,
                     reservation.owner_token,
@@ -1986,8 +2063,8 @@ mod tests {
         );
         let reactivation_error = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 request_id,
                 Decimal::ONE,
                 std::time::Duration::from_secs(60),
@@ -2000,10 +2077,11 @@ mod tests {
                 .contains("administratively released"),
             "unexpected reactivation error: {reactivation_error}"
         );
-        let after_fenced_reactivation = keycompute_db::UserBalance::find_by_user(&pool, user.id)
-            .await
-            .expect("balance query after fenced reactivation should succeed")
-            .expect("balance should exist");
+        let after_fenced_reactivation =
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
+                .await
+                .expect("balance query after fenced reactivation should succeed")
+                .expect("balance should exist");
         assert_eq!(
             after_fenced_reactivation.available_balance,
             Decimal::from(7)
@@ -2038,6 +2116,8 @@ mod tests {
         assert!(
             service
                 .settle_request_reservation(
+                    tenant.id,
+                    user.id,
                     request_id,
                     Some(reservation.owner_token),
                     Decimal::from(12),
@@ -2051,6 +2131,7 @@ mod tests {
         );
         let (late_balance, _) = service
             .consume(
+                tenant.id,
                 user.id,
                 Decimal::from(12),
                 Some(usage_log.id),
@@ -2118,7 +2199,7 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("recharge should succeed");
 
@@ -2150,6 +2231,7 @@ mod tests {
 
         let (first_balance, first_transaction) = service
             .consume(
+                tenant.id,
                 user.id,
                 Decimal::ZERO,
                 Some(usage_log.id),
@@ -2159,6 +2241,7 @@ mod tests {
             .expect("zero-cost ledger side effect should be recorded");
         let (replayed_balance, replayed_transaction) = service
             .consume(
+                tenant.id,
                 user.id,
                 Decimal::ZERO,
                 Some(usage_log.id),
@@ -2188,15 +2271,15 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("settlement test recharge should succeed");
 
         let billing_request_id = uuid::Uuid::new_v4();
         let first_owner = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(8),
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -2205,8 +2288,8 @@ mod tests {
             .expect("bounded reservation should succeed");
         let reservation = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(8),
                 std::time::Duration::from_secs(26 * 60 * 60),
@@ -2245,6 +2328,8 @@ mod tests {
         assert!(
             service
                 .settle_request_reservation(
+                    tenant.id,
+                    user.id,
                     billing_request_id,
                     Some(first_owner.owner_token),
                     Decimal::from(3),
@@ -2256,10 +2341,11 @@ mod tests {
                 .is_none(),
             "O1 must not consume funds after O2 takes ownership"
         );
-        let after_stale_settlement = keycompute_db::UserBalance::find_by_user(&pool, user.id)
-            .await
-            .expect("balance query after stale settlement should succeed")
-            .expect("balance should exist");
+        let after_stale_settlement =
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
+                .await
+                .expect("balance query after stale settlement should succeed")
+                .expect("balance should exist");
         assert_eq!(after_stale_settlement.available_balance, Decimal::from(2));
         assert_eq!(after_stale_settlement.frozen_balance, Decimal::from(8));
 
@@ -2267,6 +2353,7 @@ mod tests {
         // debit against available balance while O2 still owns the reservation.
         let (fallback_balance, fallback_transaction) = service
             .consume(
+                tenant.id,
                 user.id,
                 Decimal::from(3),
                 Some(usage_log.id),
@@ -2280,6 +2367,8 @@ mod tests {
 
         let (balance, transaction) = service
             .settle_request_reservation(
+                tenant.id,
+                user.id,
                 billing_request_id,
                 Some(reservation.owner_token),
                 Decimal::from(3),
@@ -2325,6 +2414,8 @@ mod tests {
 
         let (replayed_balance, replayed_transaction) = service
             .settle_request_reservation(
+                tenant.id,
+                user.id,
                 billing_request_id,
                 Some(first_owner.owner_token),
                 Decimal::from(3),
@@ -2340,6 +2431,8 @@ mod tests {
 
         let mismatched_replay_error = service
             .settle_request_reservation(
+                tenant.id,
+                user.id,
                 billing_request_id,
                 Some(reservation.owner_token),
                 Decimal::from(4),
@@ -2354,7 +2447,7 @@ mod tests {
                 .contains("already bound to a different balance consumption")
         );
         let balance_after_mismatched_replay =
-            keycompute_db::UserBalance::find_by_user(&pool, user.id)
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user.id)
                 .await
                 .expect("balance query after mismatched replay should succeed")
                 .expect("balance should exist");
@@ -2437,7 +2530,7 @@ mod tests {
             .expect("balance creation should succeed");
         let starting_balance = Decimal::from(100);
         balance_service
-            .recharge(user.id, tenant.id, starting_balance, None, None)
+            .recharge(tenant.id, user.id, starting_balance, None, None)
             .await
             .expect("test balance recharge should succeed");
 
@@ -2446,7 +2539,20 @@ mod tests {
             .auth
             .get_jwt_validator()
             .expect("JWT validator should be configured")
-            .generate_token_with_version(user.id, user.tenant_id, &user.role, user.token_version)
+            .generate_identity_token(
+                user.id,
+                Some(tenant.id),
+                user.token_version,
+                Some(
+                    keycompute_db::Tenant::find_by_id(&pool, tenant.id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .authz_version,
+                ),
+                Some(1),
+                3600,
+            )
             .expect("user token should be generated");
         let rate_key = RateLimitKey::new(tenant.id, user.id, uuid::Uuid::nil());
         state
@@ -2499,7 +2605,8 @@ mod tests {
                     .is_some_and(|message| message.to_ascii_lowercase().contains("rate limit")),
                 "{uri} should expose a rate-limit error: {body}"
             );
-            assert_no_request_balance_reservation(&pool, user.id, starting_balance).await;
+            assert_no_request_balance_reservation(&pool, tenant.id, user.id, starting_balance)
+                .await;
         }
     }
 
@@ -2520,7 +2627,7 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         balance_service
-            .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(10), None, None)
             .await
             .expect("upstream rate-limit settlement recharge should succeed");
 
@@ -2528,8 +2635,8 @@ mod tests {
         let reservation_owner_token = uuid::Uuid::new_v4();
         let reservation = balance_service
             .reserve_request_with_owner_token(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 reservation_owner_token,
                 Decimal::from(4),
@@ -2711,12 +2818,13 @@ mod tests {
         }
         for user in [&consume_user, &freeze_user, &unfreeze_user] {
             service
-                .recharge(user.id, tenant.id, Decimal::from(10), None, None)
+                .recharge(tenant.id, user.id, Decimal::from(10), None, None)
                 .await
                 .expect("test setup recharge should succeed");
         }
         service
             .freeze(
+                tenant.id,
                 unfreeze_user.id,
                 Decimal::from(5),
                 Some("test setup manual hold"),
@@ -2775,7 +2883,7 @@ mod tests {
             assert_eq!(outcome.balance_after, expected_available);
             assert_eq!(outcome.frozen_balance_after, expected_frozen);
 
-            let balance = keycompute_db::UserBalance::find_by_user(&pool, user_id)
+            let balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, user_id)
                 .await
                 .expect("balance query should succeed")
                 .expect("balance should exist");
@@ -2930,16 +3038,17 @@ mod tests {
             );
         }
 
-        let target_balance = keycompute_db::UserBalance::find_by_user(&pool, target.id)
+        let target_balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, target.id)
             .await
             .expect("target balance query should succeed")
             .expect("target balance should exist");
         assert_eq!(target_balance.available_balance, Decimal::from(2));
         assert_eq!(target_balance.frozen_balance, Decimal::ZERO);
-        let other_balance = keycompute_db::UserBalance::find_by_user(&pool, other_target.id)
-            .await
-            .expect("other target balance query should succeed")
-            .expect("other target balance should exist");
+        let other_balance =
+            keycompute_db::UserBalance::find_by_user(&pool, tenant.id, other_target.id)
+                .await
+                .expect("other target balance query should succeed")
+                .expect("other target balance should exist");
         assert_eq!(other_balance.available_balance, Decimal::ZERO);
         assert_eq!(other_balance.frozen_balance, Decimal::ZERO);
         let claim_row = pool
@@ -2966,7 +3075,6 @@ mod tests {
     async fn admin_balance_http_api_requires_keys_replays_results_and_returns_conflict() {
         use axum::http::StatusCode;
         use keycompute_server::{create_router, state::AppState};
-        use keycompute_types::UserRole;
 
         let pool = create_test_pool().await;
         let test_id = generate_test_id();
@@ -2974,17 +3082,33 @@ mod tests {
             .await
             .expect("administrator balance API cleanup should succeed");
         let tenant = create_test_tenant(&pool, "admin-balance-api", &test_id).await;
-        let admin = keycompute_db::User::create(
+        let mut admin = keycompute_db::User::create(
             &pool,
             &keycompute_db::CreateUserRequest {
-                tenant_id: tenant.id,
                 email: format!("test-admin-balance-api-{test_id}@example.com"),
                 name: Some("Balance API administrator".to_string()),
-                role: Some(UserRole::Admin),
             },
         )
         .await
         .expect("administrator should be created");
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenant_memberships (tenant_id, user_id, role, status) VALUES ($1, $2, 'admin', 'active')",
+            [tenant.id.into(), admin.id.into()],
+        ))
+        .await
+        .expect("administrator membership should be created");
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='root' WHERE id=$1",
+            [admin.id.into()],
+        ))
+        .await
+        .unwrap();
+        admin = keycompute_db::User::find_by_id(&pool, admin.id)
+            .await
+            .unwrap()
+            .unwrap();
         let target = create_test_user(&pool, tenant.id, "admin-balance-api-target", &test_id).await;
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         service
@@ -2992,7 +3116,7 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(target.id, tenant.id, Decimal::from(10), None, None)
+            .recharge(tenant.id, target.id, Decimal::from(10), None, None)
             .await
             .expect("test setup recharge should succeed");
 
@@ -3001,11 +3125,13 @@ mod tests {
             .auth
             .get_jwt_validator()
             .expect("JWT validator should be configured")
-            .generate_token_with_version(
+            .generate_identity_token(
                 admin.id,
-                admin.tenant_id,
-                &admin.role,
+                Some(tenant.id),
                 admin.token_version,
+                Some(1),
+                Some(1),
+                3600,
             )
             .expect("administrator token should be generated");
         let app = create_router(state);
@@ -3013,6 +3139,7 @@ mod tests {
         let freeze_key = format!("http-freeze-{}", uuid::Uuid::new_v4());
         let (first_status, first_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &freeze_uri,
             Some(&freeze_key),
@@ -3024,6 +3151,7 @@ mod tests {
         assert_eq!(first_body["reason"], "incident hold");
         let (replay_status, replay_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &freeze_uri,
             Some(&freeze_key),
@@ -3036,6 +3164,7 @@ mod tests {
 
         let (conflict_status, conflict_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &freeze_uri,
             Some(&freeze_key),
@@ -3049,6 +3178,7 @@ mod tests {
         let unfreeze_uri = format!("/api/v1/users/{}/balance/unfreeze", target.id);
         let (missing_status, missing_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &unfreeze_uri,
             None,
@@ -3066,6 +3196,7 @@ mod tests {
         let unfreeze_key = format!("http-unfreeze-{}", uuid::Uuid::new_v4());
         let (unfreeze_status, unfreeze_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &unfreeze_uri,
             Some(&unfreeze_key),
@@ -3076,6 +3207,7 @@ mod tests {
         assert_eq!(unfreeze_status, StatusCode::OK, "{unfreeze_body}");
         let (unfreeze_replay_status, unfreeze_replay_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &unfreeze_uri,
             Some(&unfreeze_key),
@@ -3090,6 +3222,7 @@ mod tests {
         let update_key = format!("http-update-{}", uuid::Uuid::new_v4());
         let (update_status, update_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &update_uri,
             Some(&update_key),
@@ -3100,6 +3233,7 @@ mod tests {
         assert_eq!(update_status, StatusCode::OK, "{update_body}");
         let (update_replay_status, update_replay_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &update_uri,
             Some(&update_key),
@@ -3111,6 +3245,7 @@ mod tests {
         assert_eq!(update_replay_body, update_body);
         let (signed_conflict_status, signed_conflict_body) = post_admin_balance_operation(
             &app,
+            tenant.id,
             &token,
             &update_uri,
             Some(&update_key),
@@ -3124,7 +3259,7 @@ mod tests {
             "{signed_conflict_body}"
         );
 
-        let final_balance = keycompute_db::UserBalance::find_by_user(&pool, target.id)
+        let final_balance = keycompute_db::UserBalance::find_by_user(&pool, tenant.id, target.id)
             .await
             .expect("final balance query should succeed")
             .expect("final balance should exist");
@@ -3210,12 +3345,13 @@ mod tests {
 
         for user in [&freeze_user, &consume_user, &unfreeze_user] {
             service
-                .recharge(user.id, tenant.id, Decimal::from(2), None, None)
+                .recharge(tenant.id, user.id, Decimal::from(2), None, None)
                 .await
                 .expect("funding should succeed");
         }
         service
             .freeze(
+                tenant.id,
                 unfreeze_user.id,
                 Decimal::from(2),
                 Some("manual hold before idempotent unfreeze"),
@@ -3305,13 +3441,13 @@ mod tests {
                 .await
                 .expect("balance creation should succeed");
             service
-                .recharge(user.id, tenant.id, Decimal::from(4), None, None)
+                .recharge(tenant.id, user.id, Decimal::from(4), None, None)
                 .await
                 .expect("recharge should succeed");
             let reservation = service
                 .reserve_request(
-                    user.id,
                     tenant.id,
+                    user.id,
                     uuid::Uuid::new_v4(),
                     Decimal::from(4),
                     std::time::Duration::from_secs(60),
@@ -3324,6 +3460,7 @@ mod tests {
 
         let (consumed_balance, consume_transaction) = service
             .consume(
+                tenant.id,
                 consume_user.id,
                 Decimal::from(2),
                 None,
@@ -3339,6 +3476,7 @@ mod tests {
 
         let (frozen_balance, freeze_transaction) = service
             .freeze(
+                tenant.id,
                 freeze_user.id,
                 Decimal::from(2),
                 Some("manual freeze after reservation expiry"),
@@ -3379,15 +3517,15 @@ mod tests {
             .await
             .expect("balance creation should succeed");
         service
-            .recharge(user.id, tenant.id, Decimal::from(5), None, None)
+            .recharge(tenant.id, user.id, Decimal::from(5), None, None)
             .await
             .expect("recharge should succeed");
 
         let billing_request_id = uuid::Uuid::new_v4();
         let reservation = service
             .reserve_request(
-                user.id,
                 tenant.id,
+                user.id,
                 billing_request_id,
                 Decimal::from(2),
                 std::time::Duration::from_secs(60),
@@ -3422,6 +3560,8 @@ mod tests {
 
         let (settled_balance, transaction) = service
             .settle_request_reservation(
+                tenant.id,
+                user.id,
                 billing_request_id,
                 Some(reservation.owner_token),
                 Decimal::from(8),
@@ -3440,6 +3580,8 @@ mod tests {
 
         let (replayed_balance, replayed_transaction) = service
             .settle_request_reservation(
+                tenant.id,
+                user.id,
                 billing_request_id,
                 Some(reservation.owner_token),
                 Decimal::from(8),

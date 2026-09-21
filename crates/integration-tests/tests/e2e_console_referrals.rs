@@ -5,9 +5,11 @@ use axum::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
-use keycompute_db::{DbRouter, User, models::referral_display::find_referral_display_page};
+use keycompute_db::{
+    CreateUserRequest, DbRouter, User, models::referral_display::find_referral_display_page,
+};
 use keycompute_server::{AppState, create_router};
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbBackend, DbErr, ExecResult, QueryResult, Statement,
@@ -48,7 +50,7 @@ impl ConnectionTrait for Counted<'_> {
 struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
-    beneficiary: User,
+    beneficiary: TenantActor,
     tenant: Uuid,
     users: Vec<Uuid>,
 }
@@ -60,19 +62,35 @@ impl Fixture {
         let owner = create_test_tenant(&db, "ref-owner", &seed).await;
         let tenant = create_test_tenant(&db, "referred", &seed).await.id;
         let beneficiary = create_test_user(&db, owner.id, "referrer", &seed).await;
-        db.execute(Statement::from_sql_and_values(DbBackend::Postgres, r#"
-            INSERT INTO users(id, tenant_id, email, name, role)
-            SELECT md5($1 || ':' || g::text)::uuid, $2,
-                   'ref-' || g::text || '-' || $1 || '@example.invalid', 'Referred ' || g::text, 'user'
-            FROM generate_series(1, $3::bigint) g
-        "#, [seed.clone().into(), tenant.into(), count.into()])).await.unwrap();
+        db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+            [tenant.into(),beneficiary.id.into()],
+        )).await.unwrap();
+        let mut referred_ids = Vec::new();
+        for n in 1..=count {
+            let user = User::create(
+                &db,
+                &CreateUserRequest {
+                    email: format!("ref-{n}-{seed}@example.invalid"),
+                    name: Some(format!("Referred {n}")),
+                },
+            )
+            .await
+            .unwrap();
+            db.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+                [tenant.into(), user.id.into()],
+            )).await.unwrap();
+            referred_ids.push(user.id);
+        }
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
             INSERT INTO user_referrals(user_id, level1_referrer_id, level2_referrer_id, created_at)
-            SELECT id, $1, $1, '2026-01-01T00:00:00Z'::timestamptz FROM users WHERE tenant_id=$2
+            SELECT u.id, $1, $1, '2026-01-01T00:00:00Z'::timestamptz FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE m.tenant_id=$2 AND u.id=ANY($3)
         "#,
-            [beneficiary.id.into(), tenant.into()],
+            [beneficiary.id.into(), tenant.into(), referred_ids.into()],
         ))
         .await
         .unwrap();
@@ -257,11 +275,13 @@ async fn http_referral_pages_preserve_auth_feature_guards_and_bounded_legacy_sha
         .auth
         .get_jwt_validator()
         .unwrap()
-        .generate_token_with_version(
+        .generate_identity_token(
             f.beneficiary.id,
-            f.beneficiary.tenant_id,
-            &f.beneficiary.role,
+            Some(f.beneficiary.tenant_id),
             f.beneficiary.token_version,
+            Some(1),
+            Some(1),
+            3600,
         )
         .unwrap();
     let app = create_router(state.clone());

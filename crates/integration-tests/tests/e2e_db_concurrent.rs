@@ -4,10 +4,9 @@ use integration_tests::common::VerificationChain;
 use integration_tests::common::generate_test_id;
 use integration_tests::db::{cleanup_test_data, create_test_pool, create_test_tenant};
 use keycompute_db::{CreateUserRequest, DbRouter, User};
-use keycompute_types::UserRole;
+use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
 use std::sync::Arc;
 use tokio::sync::Barrier;
-use uuid::Uuid;
 
 #[cfg(test)]
 mod tests {
@@ -35,21 +34,26 @@ mod tests {
         for i in 0..10 {
             let pool_clone = Arc::clone(&pool);
             let barrier_clone = Arc::clone(&barrier);
+            let run = test_id.clone();
 
             handles.push(tokio::spawn(async move {
                 barrier_clone.wait().await;
 
-                let email = format!("concurrent-{}-{}@example.com", i, Uuid::new_v4().simple());
-                User::create(
-                    pool_clone.as_ref(),
+                let email = format!("concurrent-{}-{}@example.com", i, run);
+                let tx = pool_clone.begin().await?;
+                let user = User::create(
+                    &tx,
                     &CreateUserRequest {
-                        tenant_id,
                         email,
                         name: Some(format!("Concurrent User {}", i)),
-                        role: Some(UserRole::User),
                     },
-                )
-                .await
+                ).await?;
+                tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                    "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+                    [tenant_id.into(),user.id.into()],
+                )).await?;
+                tx.commit().await?;
+                Ok::<_,keycompute_db::DbError>(user)
             }));
         }
 
@@ -92,10 +96,25 @@ mod tests {
                 "Found {} users in tenant",
                 all_users.as_ref().map(|v| v.len()).unwrap_or(0)
             ),
-            all_users.map(|v| v.len() == 10).unwrap_or(false),
+            all_users
+                .map(|v| {
+                    let mut expected = results
+                        .iter()
+                        .filter_map(|r| r.as_ref().ok().and_then(|r| r.as_ref().ok()).map(|u| u.id))
+                        .collect::<std::collections::HashSet<_>>();
+                    expected.insert(tenant.owner_user_id);
+                    v.iter()
+                        .map(|u| u.id)
+                        .collect::<std::collections::HashSet<_>>()
+                        == expected
+                })
+                .unwrap_or(false),
         );
 
         chain.print_report();
         assert!(chain.all_passed(), "Concurrent operations tests failed");
+        cleanup_test_data(pool.write_conn(), &test_id)
+            .await
+            .unwrap();
     }
 }

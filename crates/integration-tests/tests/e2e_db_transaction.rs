@@ -10,7 +10,7 @@ use integration_tests::db::{
 use keycompute_db::{
     CreateProduceAiKeyRequest, CreateUsageLogRequest, ProduceAiKey, Tenant, UsageLog, User,
 };
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use sea_orm::TransactionTrait;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -20,77 +20,72 @@ mod tests {
     /// 测试数据库事务
     #[tokio::test]
     async fn test_database_transaction() {
-        let mut chain = VerificationChain::new();
-
         let pool = create_test_pool().await;
-        let test_id = generate_test_id();
-        cleanup_test_data(&pool, &test_id)
-            .await
-            .expect("test_cascade_delete cleanup should succeed");
-
-        // 1. 测试事务提交
-        let tx_slug = format!("test-tx-tenant-{}", test_id);
-        let tenant_id = {
-            let tx = pool.begin().await.expect("Failed to begin transaction");
-
-            let tenant: Option<Tenant> = Tenant::find_by_statement(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "INSERT INTO tenants (name, slug) VALUES ($1, $2) RETURNING *",
-                ["Transaction Test Tenant".into(), tx_slug.as_str().into()],
-            ))
-            .one(&tx)
-            .await
-            .expect("Tenant insert should succeed");
-
-            chain.add_step(
-                "keycompute-db",
-                "transaction_insert",
-                "Insert in transaction",
-                tenant.is_some(),
-            );
-
-            // 提交事务
-            tx.commit().await.expect("Failed to commit transaction");
-
-            tenant.expect("Tenant should exist").id
+        let run = generate_test_id();
+        let owner = User::create(
+            &pool,
+            &keycompute_db::CreateUserRequest {
+                email: format!("transaction-owner-{run}@example.com"),
+                name: None,
+            },
+        )
+        .await
+        .unwrap();
+        let audit = keycompute_db::AuditContext {
+            actor_user_id: owner.id,
+            credential_kind: keycompute_types::CredentialKind::Jwt,
+            actor_platform_role: keycompute_types::PlatformRole::None,
+            actor_tenant_role: None,
+            request_id: None,
         };
-
-        // 验证提交后数据存在
-        let found = Tenant::find_by_id(&pool, tenant_id).await;
-        chain.add_step(
-            "keycompute-db",
-            "verify_committed",
-            "Data exists after commit",
-            found.map(|t| t.is_some()).unwrap_or(false),
+        let request = |kind: &str| keycompute_db::CreateTenantRequest {
+            name: kind.into(),
+            slug: format!("test-{kind}-{run}"),
+            description: None,
+            default_rpm_limit: None,
+            default_tpm_limit: None,
+        };
+        let committed = pool.begin().await.unwrap();
+        let tenant = Tenant::create_owned(&committed, &request("commit"), owner.id, &audit)
+            .await
+            .unwrap();
+        committed.commit().await.unwrap();
+        assert!(
+            Tenant::find_by_id(&pool, tenant.id)
+                .await
+                .unwrap()
+                .is_some()
         );
-
-        // 2. 测试事务回滚
-        let rollback_slug = format!("test-rollback-tenant-{}", test_id);
-        {
-            let tx = pool.begin().await.expect("Failed to begin transaction");
-
-            let _ = tx
-                .execute(Statement::from_sql_and_values(
-                    DbBackend::Postgres,
-                    "INSERT INTO tenants (name, slug) VALUES ($1, $2)",
-                    ["Rollback Test Tenant".into(), rollback_slug.as_str().into()],
-                ))
-                .await; // intentionally ignoring error in test
-
-            tx.rollback().await.expect("Failed to rollback transaction");
-        }
-
-        // 验证回滚后数据不存在
-        let found = Tenant::find_by_slug(&pool, &rollback_slug).await;
-        chain.add_step(
-            "keycompute-db",
-            "verify_rolled_back",
-            "Data does not exist after rollback",
-            found.map(|t| t.is_none()).unwrap_or(false),
+        assert!(
+            keycompute_db::TenantMembership::find(&pool, tenant.id, owner.id)
+                .await
+                .unwrap()
+                .is_some()
         );
-
-        chain.print_report();
-        assert!(chain.all_passed(), "Transaction tests failed");
+        let rolled_back = pool.begin().await.unwrap();
+        let aborted = Tenant::create_owned(&rolled_back, &request("rollback"), owner.id, &audit)
+            .await
+            .unwrap();
+        assert!(
+            Tenant::find_by_id(&rolled_back, aborted.id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        rolled_back.rollback().await.unwrap();
+        assert!(
+            Tenant::find_by_id(&pool, aborted.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            keycompute_db::TenantMembership::find_any(&pool, aborted.id, owner.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        cleanup_test_data(&pool, &run).await.unwrap();
     }
 
     // ============================================================================
@@ -199,7 +194,7 @@ mod tests {
             .expect("Failed to find user")
             .expect("User not found");
 
-        let found_tenant = Tenant::find_by_id(&pool, found_user.tenant_id)
+        let found_tenant = Tenant::find_by_id(&pool, tenant.id)
             .await
             .expect("Failed to find tenant")
             .expect("Tenant not found");

@@ -3690,6 +3690,7 @@ dependencies = [
  "rust_decimal",
  "sea-orm",
  "serde",
+ "serde_json",
  "sha2",
  "tokio",
  "tracing",

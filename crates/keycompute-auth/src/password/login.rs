@@ -4,7 +4,7 @@
 
 use crate::jwt::JwtValidator;
 use crate::password::{EmailValidator, PasswordHasher};
-use keycompute_db::{DbRouter, Tenant, User, UserCredential};
+use keycompute_db::{DbRouter, User, UserCredential};
 use keycompute_types::{KeyComputeError, Result};
 use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
@@ -28,11 +28,9 @@ pub struct LoginResponse {
     /// 用户 ID
     pub user_id: Uuid,
     /// 租户 ID
-    pub tenant_id: Uuid,
+    pub tenant_id: Option<Uuid>,
     /// 邮箱
     pub email: String,
-    /// 角色
-    pub role: String,
     /// JWT Token
     pub jwt_token: String,
     /// Token 有效期（秒）
@@ -117,18 +115,6 @@ impl LoginService {
                 KeyComputeError::AuthError("Email or password is incorrect".to_string())
             })?;
 
-        // Closed tenants must not issue new credentials. This check uses the
-        // writer so lifecycle changes are effective immediately.
-        let tenant = Tenant::find_by_id(self.pool.write_conn(), user.tenant_id)
-            .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find tenant: {}", e)))?
-            .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
-        if !tenant.is_active() {
-            return Err(KeyComputeError::AuthError(
-                "Email or password is incorrect".to_string(),
-            ));
-        }
-
         // 3. 获取凭证
         let credential = UserCredential::find_by_user_id(self.pool.write_conn(), user.id)
             .await
@@ -196,22 +182,14 @@ impl LoginService {
             .await
             .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to refresh user: {e}")))?
             .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
-        let current_tenant = Tenant::find_by_id(&tx, current_user.tenant_id)
-            .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to refresh tenant: {e}")))?
-            .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
-        if !current_tenant.is_active() {
-            return Err(KeyComputeError::AuthError(
-                "Email or password is incorrect".to_string(),
-            ));
-        }
         let current_credential = UserCredential::find_by_user_id_for_update(&tx, current_user.id)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to refresh credential: {e}"))
             })?
             .ok_or_else(|| KeyComputeError::AuthError("Email or password is incorrect".into()))?;
-        if current_credential.password_hash != credential.password_hash
+        if current_user.status != "active"
+            || current_credential.password_hash != credential.password_hash
             || current_credential.is_locked()
             || !current_credential.email_verified
         {
@@ -230,11 +208,13 @@ impl LoginService {
             })?;
 
         // 生成 JWT Token（写入用户当前 token_version，以支持失效校验）
-        let token = self.jwt_validator.generate_token_with_version(
+        let token = self.jwt_validator.generate_identity_token(
             current_user.id,
-            current_user.tenant_id,
-            &current_user.role,
+            None,
             current_user.token_version,
+            None,
+            None,
+            self.jwt_validator.default_expiration(),
         )?;
 
         tx.commit().await.map_err(|e| {
@@ -243,16 +223,14 @@ impl LoginService {
 
         tracing::info!(
             user_id = %current_user.id,
-            tenant_id = %current_user.tenant_id,
             email = %email,
             "User logged in successfully"
         );
 
         Ok(LoginResponse {
             user_id: current_user.id,
-            tenant_id: current_user.tenant_id,
+            tenant_id: None,
             email: current_user.email.clone(),
-            role: current_user.role.clone(),
             jwt_token: token,
             expires_in: self.jwt_validator.default_expiration(),
         })
@@ -297,41 +275,15 @@ impl LoginService {
     /// 验证当前 Token 并生成新 Token
     pub async fn refresh_token(&self, token: &str) -> Result<LoginResponse> {
         // 验证当前 Token
-        let claims = self.jwt_validator.validate(token)?;
+        let claims = self.jwt_validator.validate_claims(token)?;
 
-        // 获取用户信息。
-        // 强制走主库（write_conn）：下方的 token_version 失效校验与账户锁定/邮箱校验
-        // 均为安全敏感判定。若走读副本，复制延迟会形成一个窗口，使密码重置/登出/锁定后
-        // 本应失效的旧 token 仍能刷新出新的有效 token——与 verify_token 的主库策略保持一致。
-        let user = User::find_by_id(self.pool.write_conn(), claims.user_id)
-            .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find user: {}", e)))?
-            .ok_or_else(|| KeyComputeError::AuthError("User does not exist".to_string()))?;
-
-        let tenant = Tenant::find_by_id(self.pool.write_conn(), user.tenant_id)
-            .await
-            .map_err(|e| KeyComputeError::DatabaseError(format!("Failed to find tenant: {}", e)))?
-            .ok_or_else(|| KeyComputeError::AuthError("User tenant does not exist".to_string()))?;
-        if !tenant.is_active() {
-            return Err(KeyComputeError::AuthError(
-                "Tenant is not active".to_string(),
-            ));
-        }
-
-        // token_version 失效校验：拒绝刷新已失效的 token（如密码重置后签发的旧 token）。
-        // refresh-token 为公开路由、不经过 AuthService::verify_token，故必须在此显式比对，
-        // 否则攻击者可用未过期的旧 token 刷新出新的有效 token，绕过失效机制。
-        if claims.token_version != user.token_version {
-            tracing::warn!(
-                user_id = %user.id,
-                token_version = claims.token_version,
-                current_version = user.token_version,
-                "Refresh rejected: token has been invalidated"
-            );
-            return Err(KeyComputeError::AuthError(
-                "Token has been invalidated".to_string(),
-            ));
-        }
+        let service = crate::AuthService::with_pool(Arc::clone(&self.pool))
+            .with_jwt(self.jwt_validator.clone());
+        let current = service.verify_token(token).await?;
+        let user = current
+            .user_info
+            .as_ref()
+            .ok_or_else(|| KeyComputeError::AuthError("current identity unavailable".into()))?;
 
         // 检查凭证状态（同样强制走主库，避免读副本延迟放行已锁定/未验证的账户）
         let credential = UserCredential::find_by_user_id(self.pool.write_conn(), user.id)
@@ -354,18 +306,19 @@ impl LoginService {
         }
 
         // 生成新 Token（写入用户当前 token_version）
-        let new_token = self.jwt_validator.generate_token_with_version(
+        let new_token = self.jwt_validator.generate_identity_token(
             user.id,
-            user.tenant_id,
-            &user.role,
+            claims.tenant_id()?,
             user.token_version,
+            current.authz_version,
+            current.membership_version,
+            self.jwt_validator.default_expiration(),
         )?;
 
         Ok(LoginResponse {
             user_id: user.id,
-            tenant_id: user.tenant_id,
+            tenant_id: claims.tenant_id()?,
             email: user.email.clone(),
-            role: user.role.clone(),
             jwt_token: new_token,
             expires_in: self.jwt_validator.default_expiration(),
         })
@@ -406,15 +359,13 @@ mod tests {
         // 测试响应结构
         let response = LoginResponse {
             user_id: Uuid::nil(),
-            tenant_id: Uuid::nil(),
+            tenant_id: None,
             email: "test@example.com".to_string(),
-            role: "user".to_string(),
             jwt_token: "token123".to_string(),
             expires_in: 3600,
         };
 
         assert_eq!(response.email, "test@example.com");
-        assert_eq!(response.role, "user");
         assert_eq!(response.expires_in, 3600);
     }
 }

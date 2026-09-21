@@ -10,6 +10,7 @@ use chrono::Utc;
 use integration_tests::common::{VerificationChain, resolve_database_url};
 use keycompute_db::models::system_setting::setting_keys::NODE_TIP_RATIO;
 use keycompute_db::models::{
+    AuditContext,
     api_key::{CreateProduceAiKeyRequest, ProduceAiKey},
     node::*,
     node_tip::*,
@@ -20,7 +21,6 @@ use keycompute_db::models::{
     user::*,
     user_node_gateway_token::*,
 };
-use keycompute_types::UserRole;
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, FromQueryResult, Statement,
     TransactionTrait,
@@ -59,9 +59,18 @@ impl TipWithdrawalTestEnv {
         // 清理历史测试数据
         Self::cleanup_test_data(&pool).await?;
 
-        // 创建测试租户
-        let tenant = Tenant::create(
+        // 创建测试租户及其真实 owner membership
+        let owner = User::create(
             &pool,
+            &CreateUserRequest {
+                email: format!("tip-test-owner-{}@test.local", suffix),
+                name: Some(format!("Tip Test Owner {}", suffix)),
+            },
+        )
+        .await?;
+        let tx = pool.begin().await?;
+        let tenant = Tenant::create_owned(
+            &tx,
             &CreateTenantRequest {
                 name: format!("tip-test-tenant-{}", suffix),
                 slug: format!("tip-test-{}-{}", suffix, Uuid::new_v4()),
@@ -69,17 +78,24 @@ impl TipWithdrawalTestEnv {
                 default_rpm_limit: Some(100),
                 default_tpm_limit: Some(50000),
             },
+            owner.id,
+            &AuditContext {
+                actor_user_id: owner.id,
+                credential_kind: keycompute_types::CredentialKind::Jwt,
+                actor_platform_role: keycompute_types::PlatformRole::None,
+                actor_tenant_role: None,
+                request_id: None,
+            },
         )
         .await?;
+        tx.commit().await?;
 
         // 创建测试用户（普通用户）
         let test_user = User::create(
             &pool,
             &CreateUserRequest {
-                tenant_id: tenant.id,
                 email: format!("tip-test-user-{}@test.local", suffix),
                 name: Some(format!("Tip Test User {}", suffix)),
-                role: None, // 默认为 user
             },
         )
         .await?;
@@ -88,12 +104,16 @@ impl TipWithdrawalTestEnv {
         let admin_user = User::create(
             &pool,
             &CreateUserRequest {
-                tenant_id: tenant.id,
                 email: format!("tip-test-admin-{}@test.local", suffix),
                 name: Some(format!("Tip Test Admin {}", suffix)),
-                role: Some(UserRole::Admin),
             },
         )
+        .await?;
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES ($1,$2,'member','active'),($1,$3,'admin','active')",
+            [tenant.id.into(), test_user.id.into(), admin_user.id.into()],
+        ))
         .await?;
 
         // 为测试用户创建 API Key（用于创建 usage_log）
@@ -114,6 +134,7 @@ impl TipWithdrawalTestEnv {
         let node = Node::create(
             &pool,
             &CreateNodeRequest {
+                tenant_id: tenant.id,
                 owner_user_id: test_user.id,
                 client_instance_id: format!("test-client-{}", suffix),
                 display_name: format!("test-node-{}", suffix),
@@ -246,6 +267,7 @@ async fn test_token_approval_workflow() -> anyhow::Result<()> {
     let token = UserNodeGatewayToken::create_with_id(
         &env.pool,
         token_id,
+        env.tenant_id,
         env.test_user_id,
         &token_hash,
         &token_preview,
@@ -288,6 +310,7 @@ async fn test_token_approval_workflow() -> anyhow::Result<()> {
     let token2 = UserNodeGatewayToken::create_with_id(
         &env.pool,
         token_id2,
+        env.tenant_id,
         env.test_user_id,
         &token_hash2,
         &token_preview2,

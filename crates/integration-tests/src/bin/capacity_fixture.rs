@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
                     let user =
                         create_test_user(&db, tenant.id, &format!("lab-{t}-{u}"), &run).await;
                     balance
-                        .recharge(user.id, tenant.id, 100000.into(), None, None)
+                        .recharge(tenant.id, user.id, 100000.into(), None, None)
                         .await?;
                     let key = format!(
                         "sk-{}{}",
@@ -121,10 +121,8 @@ async fn main() -> anyhow::Result<()> {
             let admin = User::create(
                 &db,
                 &CreateUserRequest {
-                    tenant_id: tids[0],
                     email: format!("lab-admin-{}@example.invalid", id.simple()),
                     name: Some("Lab diagnostics".into()),
-                    role: Some(keycompute_types::UserRole::Admin),
                 },
             )
             .await?;
@@ -132,12 +130,20 @@ async fn main() -> anyhow::Result<()> {
                 env::var("KC__AUTH__JWT_SECRET")?,
                 "capacity-lab",
             );
-            let token = jwt.generate_token(admin.id, tids[0], "admin")?;
+            let token = jwt.generate_identity_token(
+                admin.id,
+                Some(tids[0]),
+                admin.token_version,
+                Some(1),
+                Some(1),
+                3600,
+            )?;
             let node_fixture = if protocol == "node" {
                 let owner = create_test_user(&db, tids[0], "node-owner", &run).await;
                 let node = keycompute_db::models::node::Node::create(
                     &db,
                     &keycompute_db::models::node::CreateNodeRequest {
+                        tenant_id: owner.tenant_id,
                         owner_user_id: owner.id,
                         client_instance_id: format!("lab-{id}"),
                         display_name: "Disposable capacity node".into(),

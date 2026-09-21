@@ -181,6 +181,7 @@ impl Owner {
         };
         let task = match gateway
             .enqueue_native_stream(
+                self.input.ctx.tenant_id,
                 self.input.ctx.user_id,
                 self.input.model.clone(),
                 NodeTaskPayload {

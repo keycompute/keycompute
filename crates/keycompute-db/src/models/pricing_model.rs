@@ -6,8 +6,48 @@ use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 全局默认定价的租户 ID（nil UUID）
-pub const GLOBAL_DEFAULT_TENANT_ID: Uuid = Uuid::nil();
+/// Explicit pricing scope. Platform rows have no tenant identifier; tenant
+/// rows always identify their owning tenant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PricingScopeType {
+    Platform,
+    Tenant,
+}
+impl PricingScopeType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::Tenant => "tenant",
+        }
+    }
+}
+impl std::str::FromStr for PricingScopeType {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "platform" => Ok(Self::Platform),
+            "tenant" => Ok(Self::Tenant),
+            other => Err(format!("unknown pricing scope: {other}")),
+        }
+    }
+}
+impl std::fmt::Display for PricingScopeType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+impl sea_orm::TryGetable for PricingScopeType {
+    fn try_get_by<I: sea_orm::ColIdx>(
+        res: &sea_orm::QueryResult,
+        idx: I,
+    ) -> Result<Self, sea_orm::TryGetError> {
+        let value: String = res.try_get_by(idx)?;
+        value
+            .parse()
+            .map_err(|_| sea_orm::TryGetError::Null("invalid pricing scope".into()))
+    }
+}
 
 /// 计费维度解析错误
 #[derive(Debug, thiserror::Error)]
@@ -68,7 +108,8 @@ impl sea_orm::TryGetable for BillingDimension {
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct PricingModel {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub scope_type: PricingScopeType,
+    pub tenant_id: Option<Uuid>,
     pub model_name: String,
     pub billing_dimension: BillingDimension,
     pub currency: String,
@@ -90,6 +131,7 @@ struct PricingCount {
 /// 创建定价请求
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreatePricingRequest {
+    pub scope_type: PricingScopeType,
     pub tenant_id: Option<Uuid>,
     pub model_name: String,
     pub billing_dimension: BillingDimension,
@@ -111,13 +153,29 @@ pub struct UpdatePricingRequest {
 }
 
 impl PricingModel {
+    fn validate_scope(
+        scope_type: PricingScopeType,
+        tenant_id: Option<Uuid>,
+    ) -> Result<(), DbError> {
+        match (scope_type, tenant_id) {
+            (PricingScopeType::Platform, None) => Ok(()),
+            (PricingScopeType::Tenant, Some(id)) if !id.is_nil() => Ok(()),
+            _ => Err(DbError::Other(
+                "pricing scope and tenant_id do not match".into(),
+            )),
+        }
+    }
+
     /// 管理端按条件分页查询定价。
     pub async fn find_all_filtered(
         db: &impl ConnectionTrait,
+        scope_type: PricingScopeType,
+        tenant_id: Option<Uuid>,
         search: Option<&str>,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<PricingModel>, DbError> {
+        Self::validate_scope(scope_type, tenant_id)?;
         let search_pattern = search
             .filter(|value| !value.trim().is_empty())
             .map(|value| format!("%{}%", escape_like_pattern(&value.trim().to_lowercase())));
@@ -125,15 +183,23 @@ impl PricingModel {
             DbBackend::Postgres,
             r#"
             SELECT * FROM pricing_models
-            WHERE $1::TEXT IS NULL
-               OR LOWER(model_name) LIKE $1 ESCAPE '\'
-               OR LOWER(billing_dimension) LIKE $1 ESCAPE '\'
-               OR LOWER(id::TEXT) LIKE $1 ESCAPE '\'
-               OR LOWER(tenant_id::TEXT) LIKE $1 ESCAPE '\'
+            WHERE scope_type = $1
+              AND (($2::UUID IS NULL AND tenant_id IS NULL) OR ($2::UUID IS NOT NULL AND tenant_id = $2))
+              AND ($3::TEXT IS NULL
+               OR LOWER(model_name) LIKE $3 ESCAPE '\'
+               OR LOWER(billing_dimension) LIKE $3 ESCAPE '\'
+               OR LOWER(id::TEXT) LIKE $3 ESCAPE '\'
+               OR LOWER(COALESCE(tenant_id::TEXT, 'platform')) LIKE $3 ESCAPE '\')
             ORDER BY model_name, tenant_id, created_at DESC, id
-            LIMIT $2 OFFSET $3
+            LIMIT $4 OFFSET $5
             "#,
-            [search_pattern.clone().into(), limit.into(), offset.into()],
+            [
+                scope_type.as_str().into(),
+                tenant_id.into(),
+                search_pattern.clone().into(),
+                limit.into(),
+                offset.into(),
+            ],
         );
         Ok(PricingModel::find_by_statement(stmt).all(db).await?)
     }
@@ -141,8 +207,11 @@ impl PricingModel {
     /// 统计管理端筛选后的定价数量。
     pub async fn count_all_filtered(
         db: &impl ConnectionTrait,
+        scope_type: PricingScopeType,
+        tenant_id: Option<Uuid>,
         search: Option<&str>,
     ) -> Result<i64, DbError> {
+        Self::validate_scope(scope_type, tenant_id)?;
         let search_pattern = search
             .filter(|value| !value.trim().is_empty())
             .map(|value| format!("%{}%", escape_like_pattern(&value.trim().to_lowercase())));
@@ -151,13 +220,19 @@ impl PricingModel {
             r#"
             SELECT COUNT(*)::BIGINT AS total
             FROM pricing_models
-            WHERE $1::TEXT IS NULL
-               OR LOWER(model_name) LIKE $1 ESCAPE '\'
-               OR LOWER(billing_dimension) LIKE $1 ESCAPE '\'
-               OR LOWER(id::TEXT) LIKE $1 ESCAPE '\'
-               OR LOWER(tenant_id::TEXT) LIKE $1 ESCAPE '\'
+            WHERE scope_type = $1
+              AND (($2::UUID IS NULL AND tenant_id IS NULL) OR ($2::UUID IS NOT NULL AND tenant_id = $2))
+              AND ($3::TEXT IS NULL
+               OR LOWER(model_name) LIKE $3 ESCAPE '\'
+               OR LOWER(billing_dimension) LIKE $3 ESCAPE '\'
+               OR LOWER(id::TEXT) LIKE $3 ESCAPE '\'
+               OR LOWER(COALESCE(tenant_id::TEXT, 'platform')) LIKE $3 ESCAPE '\')
             "#,
-            [search_pattern.into()],
+            [
+                scope_type.as_str().into(),
+                tenant_id.into(),
+                search_pattern.into(),
+            ],
         );
         let count = PricingCount::find_by_statement(stmt)
             .one(db)
@@ -171,21 +246,28 @@ impl PricingModel {
         db: &impl ConnectionTrait,
         req: &CreatePricingRequest,
     ) -> Result<PricingModel, DbError> {
-        // A missing tenant in the write DTO means the global scope. Persist it
-        // using the same nil UUID representation used by all lookup paths.
-        let tenant_id = req.tenant_id.unwrap_or(GLOBAL_DEFAULT_TENANT_ID);
+        let tenant_id = match (req.scope_type, req.tenant_id) {
+            (PricingScopeType::Platform, None) => None,
+            (PricingScopeType::Tenant, Some(id)) if !id.is_nil() => Some(id),
+            _ => {
+                return Err(DbError::Other(
+                    "pricing scope and tenant_id do not match".into(),
+                ));
+            }
+        };
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
             INSERT INTO pricing_models (
-                tenant_id, model_name, billing_dimension, currency,
+                scope_type, tenant_id, model_name, billing_dimension, currency,
                 input_price_per_1k, output_price_per_1k,
                 is_default, effective_from, effective_until
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             RETURNING *
             "#,
             [
+                req.scope_type.as_str().into(),
                 tenant_id.into(),
                 req.model_name.as_str().into(),
                 req.billing_dimension.as_str().into(),
@@ -242,11 +324,11 @@ impl PricingModel {
             DbBackend::Postgres,
             r#"
             SELECT * FROM pricing_models
-            WHERE (tenant_id = $1 AND $1 <> $2)
-               OR (tenant_id = $2 AND is_default = TRUE)
-            ORDER BY model_name, tenant_id
+            WHERE (scope_type = 'tenant' AND tenant_id = $1)
+               OR (scope_type = 'platform' AND tenant_id IS NULL AND is_default = TRUE)
+            ORDER BY model_name, scope_type, tenant_id
             "#,
-            [tenant_id.into(), GLOBAL_DEFAULT_TENANT_ID.into()],
+            [tenant_id.into()],
         );
         let pricing = PricingModel::find_by_statement(stmt).all(db).await?;
 
@@ -269,11 +351,11 @@ impl PricingModel {
               AND effective_from <= NOW()
               AND (effective_until IS NULL OR effective_until > NOW())
               AND (
-                  (tenant_id = $3 AND $3 <> $4)
-                  OR (tenant_id = $4 AND is_default = TRUE)
+                  (scope_type = 'tenant' AND tenant_id = $3)
+                  OR (scope_type = 'platform' AND tenant_id IS NULL AND is_default = TRUE)
               )
             ORDER BY 
-                CASE WHEN tenant_id = $4 THEN 1 ELSE 0 END,
+                CASE WHEN scope_type = 'platform' THEN 1 ELSE 0 END,
                 CASE WHEN is_default = TRUE THEN 0 ELSE 1 END
             LIMIT 1
             "#,
@@ -281,7 +363,6 @@ impl PricingModel {
                 model_name.into(),
                 billing_dimension.into(),
                 tenant_id.into(),
-                GLOBAL_DEFAULT_TENANT_ID.into(),
             ],
         );
         let pricing = PricingModel::find_by_statement(stmt).one(db).await?;
@@ -289,44 +370,29 @@ impl PricingModel {
         Ok(pricing)
     }
 
-    /// 查找所有默认定价
-    pub async fn find_defaults(db: &impl ConnectionTrait) -> Result<Vec<PricingModel>, DbError> {
-        let stmt = Statement::from_string(
-            DbBackend::Postgres,
-            r#"
-            SELECT * FROM pricing_models
-            WHERE is_default = TRUE
-              AND effective_from <= NOW()
-              AND (effective_until IS NULL OR effective_until > NOW())
-            ORDER BY model_name
-            "#
-            .to_string(),
-        );
-        let pricing = PricingModel::find_by_statement(stmt).all(db).await?;
-
-        Ok(pricing)
-    }
-
-    /// 查找所有全局默认定价。
-    ///
-    /// 租户级记录也可以被标记为默认，但它们不得参与其它租户的兜底或
-    /// 全局缓存预热；这些场景必须显式限定为 nil UUID 全局作用域。
-    pub async fn find_global_defaults(
+    /// Find default rows in an explicitly selected scope.
+    pub async fn find_defaults(
         db: &impl ConnectionTrait,
+        scope_type: PricingScopeType,
+        tenant_id: Option<Uuid>,
     ) -> Result<Vec<PricingModel>, DbError> {
+        Self::validate_scope(scope_type, tenant_id)?;
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
             SELECT * FROM pricing_models
-            WHERE tenant_id = $1
+            WHERE scope_type = $1
+              AND (($2::UUID IS NULL AND tenant_id IS NULL) OR ($2::UUID IS NOT NULL AND tenant_id = $2))
               AND is_default = TRUE
               AND effective_from <= NOW()
               AND (effective_until IS NULL OR effective_until > NOW())
             ORDER BY model_name
             "#,
-            [GLOBAL_DEFAULT_TENANT_ID.into()],
+            [scope_type.as_str().into(), tenant_id.into()],
         );
-        Ok(PricingModel::find_by_statement(stmt).all(db).await?)
+        let pricing = PricingModel::find_by_statement(stmt).all(db).await?;
+
+        Ok(pricing)
     }
 
     /// 更新定价
@@ -398,7 +464,7 @@ impl PricingModel {
     /// 初始化系统默认定价
     ///
     /// 系统启动时调用，如果 model-empty 模型的全局默认定价不存在则创建。
-    /// 全局默认定价使用 tenant_id = nil UUID，表示全局级别。
+    /// 平台默认定价使用 scope_type=platform 且 tenant_id=NULL。
     pub async fn init_default_pricing(db: &impl ConnectionTrait) -> Result<(), DbError> {
         // 使用字符串解析 BigDecimal
         let input_price_per_1k: BigDecimal = "0.1".parse().unwrap_or_default();
@@ -410,15 +476,14 @@ impl PricingModel {
             DbBackend::Postgres,
             r#"
             INSERT INTO pricing_models (
-                tenant_id, model_name, billing_dimension, currency,
+                scope_type, tenant_id, model_name, billing_dimension, currency,
                 input_price_per_1k, output_price_per_1k, is_default
             )
-            VALUES ($1, $2, $3, $4, $5, $6, TRUE)
+            VALUES ('platform', NULL, $1, $2, $3, $4, $5, $6, TRUE)
             ON CONFLICT (tenant_id, model_name, billing_dimension) DO NOTHING
             RETURNING *
             "#,
             [
-                GLOBAL_DEFAULT_TENANT_ID.into(),
                 "model-empty".into(),
                 BillingDimension::ProviderAccount.as_str().into(),
                 "CNY".into(),

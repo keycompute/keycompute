@@ -4,6 +4,7 @@
 
 use crate::client::ApiClient;
 use crate::error::Result;
+use keycompute_types::{PlatformRole, TenantRole};
 use serde::{Deserialize, Serialize};
 
 pub use super::common::MessageResponse;
@@ -72,6 +73,20 @@ impl AuthApi {
     pub async fn refresh_token(&self, req: &RefreshTokenRequest) -> Result<AuthResponse> {
         self.client
             .post_json("/api/v1/auth/refresh-token", req, None)
+            .await
+    }
+
+    /// Selects the active tenant for a console session.
+    ///
+    /// The request contains only the tenant selector. Authority is refreshed
+    /// by the server and returned in the session response.
+    pub async fn select_tenant(
+        &self,
+        req: &SelectTenantRequest,
+        token: &str,
+    ) -> Result<AuthResponse> {
+        self.client
+            .post_json(&super::routes::me("tenant"), req, Some(token))
             .await
     }
 }
@@ -161,16 +176,82 @@ impl LoginRequest {
     }
 }
 
+/// Explicit tenant selector used when switching a console session.
+#[derive(Debug, Clone, Serialize)]
+pub struct SelectTenantRequest {
+    pub tenant_id: Option<String>,
+}
+
+impl SelectTenantRequest {
+    pub fn new(tenant_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: Some(tenant_id.into()),
+        }
+    }
+
+    pub fn global() -> Self {
+        Self { tenant_id: None }
+    }
+}
+
 /// 认证响应
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthResponse {
     pub user_id: String,
-    pub tenant_id: String,
+    pub name: Option<String>,
+    pub status: Option<keycompute_types::UserStatus>,
     pub email: String,
-    pub role: String,
+    /// The server may omit this for a global session or before membership
+    /// lookup. The client never invents a role when it is absent.
+    #[serde(default)]
+    pub platform_role: Option<PlatformRole>,
+    #[serde(default)]
+    pub selected_tenant: Option<SelectedTenant>,
+    #[serde(default)]
+    pub memberships: Vec<TenantMembership>,
+    #[serde(default)]
+    pub capabilities: SessionCapabilities,
     pub access_token: String,
     pub token_type: String,
     pub expires_in: i64,
+}
+
+/// The tenant selected for this session, if any.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct SelectedTenant {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub role: Option<TenantRole>,
+    #[serde(default)]
+    pub authz_version: Option<i64>,
+    #[serde(default)]
+    pub membership_version: Option<i64>,
+}
+
+/// A membership is an identity relationship, not a global user role.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct TenantMembership {
+    pub tenant_id: String,
+    #[serde(default)]
+    pub tenant_name: Option<String>,
+    pub role: TenantRole,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub version: Option<i64>,
+}
+
+/// Returned permissions are authoritative presentation data for the console.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+pub struct SessionCapabilities {
+    #[serde(default)]
+    pub platform: Vec<String>,
+    #[serde(default)]
+    pub tenant: Vec<String>,
 }
 
 /// 忘记密码请求

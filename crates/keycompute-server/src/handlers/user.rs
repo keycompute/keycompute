@@ -8,7 +8,7 @@ use crate::handlers::pagination::{
 };
 use crate::{
     error::{ApiError, Result},
-    extractors::ConsoleAuth,
+    extractors::{ConsoleAuth, GlobalConsoleAuth},
     state::AppState,
 };
 use axum::{
@@ -24,94 +24,119 @@ use keycompute_db::models::{
     user_credential::UserCredential,
 };
 use rust_decimal::prelude::ToPrimitive;
+use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// 当前用户信息响应
-#[derive(Debug, Serialize)]
-pub struct CurrentUserResponse {
-    pub id: Uuid,
-    pub email: String,
-    pub name: Option<String>,
-    pub role: String,
-    pub tenant_id: Uuid,
-    pub created_at: String,
-}
-
-/// 获取当前用户信息
-///
-/// GET /api/v1/me
+/// Global profile and current membership presentation. A global session needs
+/// no tenant selection to read its own identity or select a workspace.
 pub async fn get_current_user(
-    auth: ConsoleAuth,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
-) -> Result<Json<CurrentUserResponse>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    // This response is also used to refresh the client after an administrator
-    // moves the account. Read the authoritative row so the client does not
-    // immediately overwrite its tenant context with a lagging replica value.
-    let user = User::find_by_id(pool.write_conn(), auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch user: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", auth.user_id)))?;
-
-    Ok(Json(CurrentUserResponse {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        tenant_id: user.tenant_id,
-        created_at: user.created_at.to_rfc3339(),
-    }))
+) -> Result<Json<keycompute_auth::ConsoleSession>> {
+    Ok(Json(
+        state
+            .auth
+            .console_session(&auth.0)
+            .await
+            .map_err(ApiError::from)?,
+    ))
 }
 
-/// 更新个人资料请求
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateProfileRequest {
     pub name: Option<String>,
-    pub email: Option<String>,
 }
 
-/// 更新个人资料
-///
-/// PUT /api/v1/me/profile
 pub async fn update_profile(
-    auth: ConsoleAuth,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Json(req): Json<UpdateProfileRequest>,
-) -> Result<Json<CurrentUserResponse>> {
+) -> Result<Json<keycompute_auth::ConsoleSession>> {
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    let user = User::find_by_id(pool.write_conn(), auth.user_id)
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool
+        .begin()
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch user: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("User not found: {}", auth.user_id)))?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let user = User::find_by_id_for_no_key_update(&tx, auth.user_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .filter(|user| user.status == "active" && user.token_version == auth.token_version)
+        .ok_or_else(|| ApiError::Auth("identity has changed".into()))?;
+    user.update_in_tx(&tx, &keycompute_db::UpdateUserRequest { name: req.name })
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    append_personal_audit(&tx, &auth, "user.profile").await?;
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    get_current_user(auth, State(state)).await
+}
 
-    let update_req = keycompute_db::models::user::UpdateUserRequest {
-        name: req.name,
-        role: None,      // 不允许用户自己修改角色
-        tenant_id: None, // 不允许用户自己修改租户
+async fn append_personal_audit(
+    tx: &sea_orm::DatabaseTransaction,
+    auth: &GlobalConsoleAuth,
+    action: &str,
+) -> Result<()> {
+    let actor = keycompute_db::AuditContext {
+        actor_user_id: auth.user_id,
+        credential_kind: auth.credential_kind,
+        actor_platform_role: auth.platform_role,
+        actor_tenant_role: auth.tenant_role,
+        request_id: None,
     };
+    keycompute_db::TenantAuditEvent::append(
+        tx,
+        keycompute_types::AuditScopeType::Platform,
+        None,
+        &actor,
+        action,
+        "user",
+        Some(&auth.user_id.to_string()),
+        keycompute_types::AuditResult::Success,
+        serde_json::json!({}),
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
+    Ok(())
+}
 
-    let updated = user
-        .update(pool, &update_req)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to update profile: {}", e)))?;
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelectTenantRequest {
+    pub tenant_id: Option<Uuid>,
+}
 
-    Ok(Json(CurrentUserResponse {
-        id: updated.id,
-        email: updated.email,
-        name: updated.name,
-        role: updated.role,
-        tenant_id: updated.tenant_id,
-        created_at: updated.created_at.to_rfc3339(),
-    }))
+pub async fn select_my_tenant(
+    auth: GlobalConsoleAuth,
+    State(state): State<AppState>,
+    Json(req): Json<SelectTenantRequest>,
+) -> Result<Json<keycompute_auth::SessionTokenResponse>> {
+    Ok(Json(
+        state
+            .auth
+            .select_tenant(&auth.0, req.tenant_id)
+            .await
+            .map_err(ApiError::from)?,
+    ))
+}
+
+pub async fn list_my_memberships(
+    auth: GlobalConsoleAuth,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<keycompute_auth::session::SessionMembership>>> {
+    Ok(Json(
+        state
+            .auth
+            .console_session(&auth.0)
+            .await
+            .map_err(ApiError::from)?
+            .memberships,
+    ))
 }
 
 /// 修改密码请求
@@ -125,7 +150,7 @@ pub struct ChangePasswordRequest {
 ///
 /// PUT /api/v1/me/password
 pub async fn change_password(
-    auth: ConsoleAuth,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<serde_json::Value>> {
@@ -171,16 +196,44 @@ pub async fn change_password(
         .hash(&req.new_password)
         .map_err(|e| ApiError::Internal(format!("Failed to hash new password: {}", e)))?;
 
-    // 5. 更新数据库
-    let update_req = keycompute_db::models::user_credential::UpdateUserCredentialRequest {
-        password_hash: Some(new_password_hash),
-        ..Default::default()
-    };
-
-    credential
-        .update(pool, &update_req)
+    // Retain the verified hash through the parent-first transaction so a
+    // concurrent reset cannot let an old password replace a newer one.
+    let tx = pool
+        .begin()
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to update password: {}", e)))?;
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let user = User::find_by_id_for_update(&tx, auth.user_id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .filter(|user| user.status == "active" && user.token_version == auth.token_version)
+        .ok_or_else(|| ApiError::Auth("identity has changed".into()))?;
+    let current = UserCredential::find_by_user_id_for_update(&tx, user.id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .ok_or_else(|| ApiError::Auth("credential unavailable".into()))?;
+    if current.password_hash != credential.password_hash
+        || current.is_locked()
+        || !current.email_verified
+    {
+        return Err(ApiError::Auth("credential has changed".into()));
+    }
+    current
+        .update(
+            &tx,
+            &keycompute_db::models::user_credential::UpdateUserCredentialRequest {
+                password_hash: Some(new_password_hash),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    User::increment_token_version(&tx, user.id)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    append_personal_audit(&tx, &auth, "user.password").await?;
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     tracing::info!(
         user_id = %auth.user_id,
@@ -251,25 +304,19 @@ pub async fn list_my_api_keys(
     let modern_pagination = params.page.is_some() || params.page_size.is_some();
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
-    let keys = if has_pagination {
-        ProduceAiKey::find_by_user_page(
-            pool,
-            auth.user_id,
-            params.include_revoked,
-            page_size,
-            offset,
-        )
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?
-    } else if params.include_revoked {
-        ProduceAiKey::find_by_user(pool, auth.user_id)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?
-    } else {
-        ProduceAiKey::find_active_by_user(pool, auth.user_id)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to fetch API keys: {}", e)))?
-    };
+    let scope = auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?;
+    let keys = ProduceAiKey::list_owned(
+        pool.write_conn(),
+        scope,
+        params.include_revoked,
+        if has_pagination { page_size } else { 1000 },
+        if has_pagination { offset } else { 0 },
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let api_keys: Vec<ApiKeyInfo> = keys
         .into_iter()
@@ -289,7 +336,7 @@ pub async fn list_my_api_keys(
         .collect();
 
     if modern_pagination {
-        let total = ProduceAiKey::count_by_user(pool, auth.user_id, params.include_revoked)
+        let total = ProduceAiKey::count_owned(pool.write_conn(), scope, params.include_revoked)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to count API keys: {}", e)))?;
         Ok(Json(
@@ -311,6 +358,7 @@ pub async fn list_my_api_keys(
 
 /// 创建 API Key 请求
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateApiKeyRequest {
     /// API Key 名称
     pub name: String,
@@ -333,6 +381,16 @@ pub async fn create_api_key(
     State(state): State<AppState>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<serde_json::Value>> {
+    auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ManagePersonalResource,
+    )?;
+    if req.name.trim().is_empty()
+        || req.name.chars().count() > 255
+        || req.name.chars().any(char::is_control)
+    {
+        return Err(ApiError::BadRequest("invalid key name".into()));
+    }
     let pool = state
         .pool
         .as_deref()
@@ -394,7 +452,11 @@ pub async fn delete_api_key(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找 API Key 并验证所有权
-    let key = ProduceAiKey::find_by_id(pool, key_id)
+    let scope = auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ManagePersonalResource,
+    )?;
+    let key = ProduceAiKey::find_owned(pool.write_conn(), scope, key_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to find API key: {}", e)))?
         .ok_or_else(|| ApiError::NotFound(format!("API Key not found: {}", key_id)))?;
@@ -581,17 +643,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_current_user_response_serialization() {
-        let user = CurrentUserResponse {
-            id: Uuid::new_v4(),
-            email: "test@example.com".to_string(),
-            name: Some("Test User".to_string()),
-            role: "user".to_string(),
-            tenant_id: Uuid::new_v4(),
-            created_at: "2024-01-01T00:00:00Z".to_string(),
-        };
-
-        let json = serde_json::to_string(&user).unwrap();
-        assert!(json.contains("test@example.com"));
+    fn profile_requests_cannot_modify_global_or_membership_privileges() {
+        for payload in [
+            serde_json::json!({"name":"ok","platform_role":"root"}),
+            serde_json::json!({"role":"admin"}),
+            serde_json::json!({"tenant_id":Uuid::new_v4()}),
+            serde_json::json!({"email":"new@fixture.invalid"}),
+        ] {
+            assert!(serde_json::from_value::<UpdateProfileRequest>(payload).is_err());
+        }
+        assert!(
+            serde_json::from_value::<UpdateProfileRequest>(serde_json::json!({"name":"ok"}))
+                .is_ok()
+        );
     }
 }

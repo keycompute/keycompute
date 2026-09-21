@@ -12,15 +12,14 @@ use chrono::{Duration as ChronoDuration, Utc};
 use futures::{SinkExt, StreamExt};
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_auth::ProduceAiKeyValidator;
 use keycompute_db::{
-    Account, CreateAccountRequest, CreateProduceAiKeyRequest, CreateUserRequest, DbRouter,
-    ProduceAiKey, ResponseAffinity, User, UserBalance,
+    Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, ProduceAiKey,
+    ResponseAffinity, UserBalance,
 };
 use keycompute_server::{AppState, create_router};
-use keycompute_types::UserRole;
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde_json::{Value, json};
@@ -107,7 +106,7 @@ async fn unexpected_upstream(
     )
         .into_response()
 }
-async fn key(db: &DatabaseConnection, user: &User) -> String {
+async fn key(db: &DatabaseConnection, user: &TenantActor) -> String {
     let raw = ProduceAiKeyValidator::generate_key();
     ProduceAiKey::create(
         db,
@@ -124,21 +123,28 @@ async fn key(db: &DatabaseConnection, user: &User) -> String {
     .unwrap();
     raw
 }
-fn jwt(state: &AppState, user: &User) -> String {
-    state
+async fn jwt(state: &AppState, user: &TenantActor) -> String {
+    let global = state
         .auth
         .get_jwt_validator()
         .unwrap()
-        .generate_token_with_version(user.id, user.tenant_id, &user.role, user.token_version)
+        .generate_identity_token(user.id, None, user.token_version, None, None, 3600)
+        .unwrap();
+    let context = state.auth.verify_token(&global).await.unwrap();
+    state
+        .auth
+        .select_tenant(&context, Some(user.tenant_id))
+        .await
         .unwrap()
+        .access_token
 }
 struct Fixture {
+    run_id: String,
     db: DatabaseConnection,
     cleanup: TestDataGuard,
     state: AppState,
-    owner: User,
-    peer: User,
-    foreign: User,
+    owner: TenantActor,
+    peer: TenantActor,
     key: String,
     rotated: String,
     peer_key: String,
@@ -180,23 +186,13 @@ impl Fixture {
         .await
         .unwrap();
         let owner = create_test_user(&db, tenant.id, "response-owner", &run).await;
-        let peer = User::create(
-            &db,
-            &CreateUserRequest {
-                tenant_id: tenant.id,
-                email: format!("response-admin-{run}@example.invalid"),
-                name: None,
-                role: Some(UserRole::Admin),
-            },
-        )
-        .await
-        .unwrap();
+        let peer = create_test_user(&db, tenant.id, "response-peer", &run).await;
         let foreign = create_test_user(&db, foreign_tenant.id, "response-foreign", &run).await;
         for user in [&owner, &peer] {
             UserBalance::recharge(
                 &db,
-                user.id,
                 user.tenant_id,
+                user.id,
                 Decimal::from(1000),
                 None,
                 Some("isolated ownership test credit"),
@@ -249,12 +245,12 @@ impl Fixture {
         let foreign_key = crate::key(&db, &foreign).await;
         let state = AppState::with_pool(DbRouter::single(db.clone()));
         Self {
+            run_id: run,
             db,
             cleanup,
             state,
             owner,
             peer,
-            foreign,
             key,
             rotated,
             peer_key,
@@ -401,7 +397,7 @@ async fn pool_http_resources_and_idempotency_are_private_to_the_stable_user() {
         .unwrap()
         .unwrap();
     assert_eq!(owned.user_id, Some(f.owner.id));
-    let admin = jwt(&f.state, &f.peer);
+    let admin = jwt(&f.state, &f.peer).await;
     for token in [&f.peer_key, &f.foreign_key, &admin] {
         let before = f.calls();
         for (method, path) in [
@@ -686,17 +682,26 @@ async fn immutable_ownership_prevents_takeover_and_preserves_internal_settlement
     // A user moving does not move previously accepted resources or billing work.
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE users SET tenant_id=$2,token_version=token_version+1 WHERE id=$1",
-        [f.owner.id.into(), f.foreign.tenant_id.into()],
+        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$2 AND user_id=$1",
+        [f.owner.id.into(), f.owner.tenant_id.into()],
     ))
     .await
     .unwrap();
-    let moved = User::find_by_id(&f.db, f.owner.id).await.unwrap().unwrap();
+    assert!(f.state.auth.verify_token(&f.key).await.is_err());
+    let destination = create_test_tenant(&f.db, "response-moved", &f.run_id).await;
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        [destination.id.into(), f.owner.id.into()],
+    )).await.unwrap();
+    let mut moved = f.owner.clone();
+    moved.tenant_id = destination.id;
+    let moved_token = jwt(&f.state, &moved).await;
     expect(
         f.request(
             Method::GET,
             &format!("/v1/responses/{id}"),
-            &jwt(&f.state, &moved),
+            &moved_token,
             None,
             None,
         )
@@ -705,8 +710,8 @@ async fn immutable_ownership_prevents_takeover_and_preserves_internal_settlement
     );
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "DELETE FROM users WHERE id=$1",
-        [f.owner.id.into()],
+        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2",
+        [f.owner.tenant_id.into(), f.owner.id.into()],
     ))
     .await
     .unwrap();

@@ -5,9 +5,9 @@ use axum::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
-use keycompute_db::{DbRouter, User};
+use keycompute_db::{DbRouter, TenantMembership};
 use keycompute_ratelimit::{RateLimitConfig, RateLimitKey};
 use keycompute_server::{AppState, create_router};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
@@ -18,7 +18,7 @@ struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
     state: AppState,
-    user: User,
+    user: TenantActor,
     token: String,
     run: String,
 }
@@ -29,12 +29,23 @@ impl Fixture {
         let guard = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "console-auth", &run).await;
         let user = create_test_user(&db, tenant.id, "console-auth", &run).await;
+        let membership = TenantMembership::find(&db, tenant.id, user.id)
+            .await
+            .unwrap()
+            .unwrap();
         let state = AppState::with_pool(DbRouter::single(db.clone()));
         let token = state
             .auth
             .get_jwt_validator()
             .unwrap()
-            .generate_token_with_version(user.id, user.tenant_id, &user.role, user.token_version)
+            .generate_identity_token(
+                user.id,
+                Some(user.tenant_id),
+                user.token_version,
+                Some(tenant.authz_version),
+                Some(membership.version),
+                3600,
+            )
             .unwrap();
         Self {
             db,
@@ -79,6 +90,30 @@ impl Fixture {
         .unwrap()
         .is_ok()
     }
+    async fn refresh_selected_token(&mut self) {
+        let global = self
+            .state
+            .auth
+            .get_jwt_validator()
+            .unwrap()
+            .generate_identity_token(
+                self.user.id,
+                None,
+                self.user.token_version,
+                None,
+                None,
+                3600,
+            )
+            .unwrap();
+        let context = self.state.auth.verify_token(&global).await.unwrap();
+        self.token = self
+            .state
+            .auth
+            .select_tenant(&context, Some(self.user.tenant_id))
+            .await
+            .unwrap()
+            .access_token;
+    }
 }
 #[tokio::test]
 async fn jwt_revocation_is_observed_on_the_next_request() {
@@ -97,7 +132,13 @@ async fn jwt_revocation_is_observed_on_the_next_request() {
 async fn role_change_does_not_keep_old_jwt_permissions() {
     let mut f = Fixture::new().await;
     assert!(f.verify().await);
-    f.change("UPDATE users SET role='admin' WHERE id=$1").await;
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE tenant_memberships SET role='admin' WHERE tenant_id=$2 AND user_id=$1",
+        [f.user.id.into(), f.user.tenant_id.into()],
+    ))
+    .await
+    .unwrap();
     assert!(!f.verify().await);
     assert_eq!(f.dashboard_status().await, StatusCode::UNAUTHORIZED);
     f.guard.cleanup().await.unwrap();
@@ -109,11 +150,16 @@ async fn tenant_reassignment_rejects_the_old_jwt_even_without_a_version_change()
     assert!(f.verify().await);
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE users SET tenant_id=$2 WHERE id=$1",
-        [f.user.id.into(), other.id.into()],
+        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$2 AND user_id=$1",
+        [f.user.id.into(), f.user.tenant_id.into()],
     ))
     .await
     .unwrap();
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($2,$1,'member','active')",
+        [f.user.id.into(), other.id.into()],
+    )).await.unwrap();
     assert!(!f.verify().await);
     assert_eq!(f.dashboard_status().await, StatusCode::UNAUTHORIZED);
     f.guard.cleanup().await.unwrap();
@@ -155,6 +201,7 @@ async fn real_console_http_reads_do_not_spend_generation_rpm() {
     ))
     .await
     .unwrap();
+    f.refresh_selected_token().await;
     let app = create_router(f.state.clone());
     for _ in 0..4 {
         let response = app

@@ -118,9 +118,9 @@ async fn build_token_response(
                         END AS status,
                         last_heartbeat_at
                     FROM nodes
-                    WHERE id = $1
+                    WHERE id = $1 AND tenant_id=$2 AND owner_user_id=$3
                     "#,
-                [node_id.into()],
+                [node_id.into(), t.tenant_id.into(), t.user_id.into()],
             );
             RegisteredNodeInfo::find_by_statement(stmt)
                 .one(pool)
@@ -158,7 +158,7 @@ pub async fn get_my_node_gateway_token(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let token = UserNodeGatewayToken::find_latest_by_user(pool, auth.user_id)
+    let token = UserNodeGatewayToken::find_latest_by_user(pool, auth.tenant_id, auth.user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query token: {}", e)))?;
 
@@ -184,7 +184,7 @@ pub async fn list_my_node_gateway_tokens(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let tokens = UserNodeGatewayToken::find_all_by_user(pool, auth.user_id)
+    let tokens = UserNodeGatewayToken::find_all_by_user(pool, auth.tenant_id, auth.user_id)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to query tokens: {}", e)))?;
 
@@ -219,9 +219,10 @@ pub async fn create_my_node_gateway_token(
 
     // 1. 检查是否已有阻止新申请的令牌
     //    阻止状态: pending(待审批) / approved(已通过) / consumed(已使用) / rejected+revoke_reason(已吊销)
-    if let Some(existing) = UserNodeGatewayToken::find_blocking_token(pool, auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query existing token: {}", e)))?
+    if let Some(existing) =
+        UserNodeGatewayToken::find_blocking_token(pool, auth.tenant_id, auth.user_id)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to query existing token: {}", e)))?
     {
         let message = match existing.status.as_str() {
             "pending" => "You already have a pending token. Please wait for admin approval.",
@@ -256,6 +257,7 @@ pub async fn create_my_node_gateway_token(
     let token = match UserNodeGatewayToken::create_with_id(
         pool,
         token_id,
+        auth.tenant_id,
         auth.user_id,
         &token_hash,
         &token_preview,

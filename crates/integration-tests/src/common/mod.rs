@@ -43,30 +43,18 @@ impl Default for TestContext {
     }
 }
 
-/// 解析数据库连接 URL。
-///
-/// 优先从 DATABASE_URL 读取；若未设置则回退到 KC__DATABASE__URL，
-/// 最后使用本地默认 URL 兜底。该顺序兼容 CI 与本地运行环境。
+/// Explicit test database; never silently use a developer's local database.
 pub fn resolve_database_url() -> String {
     std::env::var("DATABASE_URL")
         .or_else(|_| std::env::var("KC__DATABASE__URL"))
-        .unwrap_or_else(|_| {
-            "postgres://keycompute:change-me-strong-password@localhost:5432/keycompute".to_string()
-        })
+        .expect("set DATABASE_URL to an isolated integration database")
 }
 
-/// 解析 Redis 连接 URL。
-///
-/// 优先从 REDIS_URL 读取；若未设置则回退到 KC__REDIS__URL，
-/// 最后使用 CI workflow 的无密码 redis 默认值进行兜底。
+/// Explicit test Redis endpoint; do not load machine-specific environment files.
 pub fn resolve_redis_url() -> String {
     std::env::var("REDIS_URL")
         .or_else(|_| std::env::var("KC__REDIS__URL"))
-        .or_else(|_| {
-            std::env::var("REDIS_PASSWORD")
-                .map(|password| format!("redis://:{password}@127.0.0.1:6379"))
-        })
-        .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+        .expect("set REDIS_URL to an isolated integration Redis")
 }
 
 /// 带超时的测试运行器

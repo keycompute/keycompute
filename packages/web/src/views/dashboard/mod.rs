@@ -26,9 +26,12 @@ pub fn Dashboard() -> Element {
     let public_settings_store = use_context::<PublicSettingsStore>();
 
     let user_info = user_store.info.read().clone();
-    let is_admin = user_info.as_ref().map(|u| u.is_admin()).unwrap_or(false);
+    let can_manage_console = user_info
+        .as_ref()
+        .map(|u| u.can_manage_console())
+        .unwrap_or(false);
     let distribution_settings_loaded = public_settings_store.loaded();
-    let show_distribution_metrics = !is_admin
+    let show_distribution_metrics = !can_manage_console
         && distribution_settings_loaded
         && public_settings_store.distribution_is_enabled();
 
@@ -54,7 +57,7 @@ pub fn Dashboard() -> Element {
         let auth = auth_store.clone();
         let public_settings_store = public_settings_store;
         async move {
-            if is_admin {
+            if can_manage_console {
                 return Some(Ok(None));
             }
             if !public_settings_store.loaded() {
@@ -76,7 +79,7 @@ pub fn Dashboard() -> Element {
     let gateway_status = use_resource(move || {
         let auth = auth_store.clone();
         async move {
-            if !is_admin {
+            if !can_manage_console {
                 return Ok(None);
             }
             with_auto_refresh(auth, |token| async move {
@@ -89,7 +92,7 @@ pub fn Dashboard() -> Element {
     let gateway_stats = use_resource(move || {
         let auth = auth_store.clone();
         async move {
-            if !is_admin {
+            if !can_manage_console {
                 return Ok(None);
             }
             with_auto_refresh(auth, |token| async move {
@@ -102,7 +105,7 @@ pub fn Dashboard() -> Element {
     let provider_health = use_resource(move || {
         let auth = auth_store.clone();
         async move {
-            if !is_admin {
+            if !can_manage_console {
                 return Ok(None);
             }
             with_auto_refresh(auth, |token| async move {
@@ -475,17 +478,17 @@ pub fn Dashboard() -> Element {
                     div { class: "dashboard-panel-head",
                         div {
                             h2 { class: "dashboard-panel-title",
-                                if is_admin { {i18n.t("dashboard.system_status")} } else { {i18n.t("dashboard.account_status")} }
+                                if can_manage_console { {i18n.t("dashboard.system_status")} } else { {i18n.t("dashboard.account_status")} }
                             }
                             p { class: "dashboard-panel-copy",
-                                if is_admin {
+                                if can_manage_console {
                                     {i18n.t("dashboard.system_status_desc")}
                                 } else {
                                     {i18n.t("dashboard.account_status_desc")}
                                 }
                             }
                         }
-                        if is_admin {
+                        if can_manage_console {
                             span {
                                 class: if admin_gateway.as_ref().map(|g| g.available).unwrap_or(false) {
                                     "dashboard-status-pill dashboard-status-pill-ok"
@@ -497,7 +500,7 @@ pub fn Dashboard() -> Element {
                         }
                     }
                     div { class: "dashboard-panel-body",
-                        if is_admin {
+                        if can_manage_console {
                             DashboardStatusMetric {
                                 label: i18n.t("dashboard.gateway_providers").to_string(),
                                 value: admin_gateway.as_ref()

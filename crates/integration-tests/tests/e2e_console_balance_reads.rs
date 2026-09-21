@@ -7,10 +7,10 @@ use axum::{
 };
 use integration_tests::{
     common::generate_test_id,
-    db::{TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
+    db::{TenantActor, TestDataGuard, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_billing::balance::BalanceService;
-use keycompute_db::{DbError, DbRouter, Tenant, User, UserBalance};
+use keycompute_db::{DbError, DbRouter, Tenant, UserBalance};
 use keycompute_server::{AppState, create_router};
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
@@ -26,7 +26,7 @@ struct Fixture {
     pool: DatabaseConnection,
     guard: TestDataGuard,
     tenant: Tenant,
-    user: User,
+    user: TenantActor,
     service: BalanceService,
     app: Router,
     token: String,
@@ -41,12 +41,15 @@ impl Fixture {
         if admin {
             pool.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "UPDATE users SET role = 'admin' WHERE id = $1",
+                "UPDATE users SET platform_role='root' WHERE id=$1",
                 [user.id.into()],
             ))
             .await
             .unwrap();
-            user = User::find_by_id(&pool, user.id).await.unwrap().unwrap();
+            user.user = keycompute_db::User::find_by_id(&pool, user.id)
+                .await
+                .unwrap()
+                .unwrap();
         }
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         let state = AppState::with_pool(DbRouter::single(pool.clone()));
@@ -54,7 +57,14 @@ impl Fixture {
             .auth
             .get_jwt_validator()
             .unwrap()
-            .generate_token_with_version(user.id, tenant.id, &user.role, user.token_version)
+            .generate_identity_token(
+                user.id,
+                Some(tenant.id),
+                user.token_version,
+                Some(1),
+                Some(1),
+                3600,
+            )
             .unwrap();
         Self {
             pool,
@@ -69,8 +79,8 @@ impl Fixture {
     async fn fund(&self) {
         self.service
             .recharge(
-                self.user.id,
                 self.tenant.id,
+                self.user.id,
                 Decimal::new(12345678, 4),
                 None,
                 None,
@@ -145,7 +155,7 @@ async fn valid_uninitialized_user_stays_uninitialized_after_http_reads() {
         assert_eq!(value["initialized"], false);
         assert_eq!(value["available_balance"], "0");
         assert!(
-            UserBalance::find_by_user(&f.pool, f.user.id)
+            UserBalance::find_by_user(&f.pool, f.tenant.id, f.user.id)
                 .await
                 .unwrap()
                 .is_none()
@@ -193,8 +203,8 @@ async fn display_does_not_reclaim_expired_reservations_but_money_helper_still_do
     let reservation = f
         .service
         .reserve_request(
-            f.user.id,
             f.tenant.id,
+            f.user.id,
             Uuid::new_v4(),
             Decimal::from(5),
             Duration::from_secs(60),
@@ -225,7 +235,12 @@ async fn display_does_not_reclaim_expired_reservations_but_money_helper_still_do
         .unwrap();
     assert_eq!(row.try_get_by_index::<String>(0).unwrap(), "active");
     assert_eq!(before, f.tuple().await);
-    let reclaimed = f.service.find_by_user(f.user.id).await.unwrap().unwrap();
+    let reclaimed = f
+        .service
+        .find_by_user(f.tenant.id, f.user.id)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(reclaimed.frozen_balance, Decimal::ZERO);
     assert_eq!(reclaimed.available_balance, Decimal::new(12345678, 4));
     f.guard.cleanup().await.unwrap();
@@ -235,7 +250,7 @@ async fn snapshot_rejects_wrong_owner_missing_user_and_bounded_batch_without_zer
     let mut f = Fixture::new(false).await;
     assert!(matches!(
         UserBalance::find_display_snapshot(&f.pool, Uuid::new_v4(), f.user.id).await,
-        Err(DbError::UserTenantMismatch { .. })
+        Err(DbError::NotFound { .. })
     ));
     assert!(
         UserBalance::find_display_snapshot(&f.pool, f.tenant.id, Uuid::new_v4())
@@ -245,21 +260,22 @@ async fn snapshot_rejects_wrong_owner_missing_user_and_bounded_batch_without_zer
     );
     let snapshots = f
         .service
-        .find_display_snapshots(&[f.user.id, f.user.id])
+        .find_display_snapshots(f.tenant.id, &[f.user.id, f.user.id])
         .await
         .unwrap();
     assert_eq!(snapshots.len(), 1);
     assert!(!snapshots[&f.user.id].initialized);
     assert!(
         f.service
-            .find_display_snapshots(&[f.user.id, Uuid::new_v4()])
+            .find_display_snapshots(f.tenant.id, &[f.user.id, Uuid::new_v4()])
             .await
             .is_err()
     );
     let unavailable = DatabaseConnection::Disconnected;
-    let error = UserBalance::find_display_snapshots(&unavailable, &vec![f.user.id; 1001])
-        .await
-        .unwrap_err();
+    let error =
+        UserBalance::find_display_snapshots(&unavailable, f.tenant.id, &vec![f.user.id; 1001])
+            .await
+            .unwrap_err();
     assert!(
         error.to_string().contains("1000"),
         "batch cap must apply before a DB query"
@@ -285,17 +301,21 @@ async fn admin_user_list_and_detail_use_read_only_snapshots_and_bounded_paginati
     .await
     .unwrap();
     let (status, page) = f
-        .get(&format!(
-            "/api/v1/users?tenant_id={}&page_size=9223372036854775807&page=1",
-            f.tenant.id
-        ))
+        .get("/api/v1/users?page_size=9223372036854775807&page=1")
         .await;
     assert_eq!(status, StatusCode::OK, "{page}");
     assert_eq!(page["page_size"], 100);
-    assert_eq!(page["users"][0]["balance_initialized"], true);
+    assert!(
+        page["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|u| u.get("balance_initialized").is_none() && u.get("tenant_id").is_none())
+    );
     let (status, detail) = f.get(&format!("/api/v1/users/{}", f.user.id)).await;
     assert_eq!(status, StatusCode::OK, "{detail}");
-    assert_eq!(detail["balance_initialized"], true);
+    assert_eq!(detail["id"], f.user.id.to_string());
+    assert!(detail.get("balance_initialized").is_none());
     tx.rollback().await.unwrap();
     assert_eq!(before, f.tuple().await);
     f.guard.cleanup().await.unwrap();

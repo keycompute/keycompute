@@ -3448,7 +3448,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             tenant_id,
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         );
         let body = json!({"conversation": "conv_unknown", "input": "continue"});
         let routing = ResponsesRoutingFields::parse_input_tokens(&body).unwrap();
@@ -3476,7 +3476,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             tenant_id,
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         )
         .with_permissions(vec![Permission::UseApi]);
 
@@ -3540,7 +3540,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         )
         .with_permissions(vec![Permission::UseApi]);
 
@@ -3572,7 +3572,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         )
         .with_permissions(vec![Permission::UseApi]);
         let mut headers = HeaderMap::new();
@@ -3812,7 +3812,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         );
         let body = json!({
             "input": "prepare local context",
@@ -3841,7 +3841,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         );
         let previous_response_id = "resp_upstream_parent";
         state.responses_affinity.write().await.insert(
@@ -3967,7 +3967,7 @@ mod tests {
             uuid::Uuid::new_v4(),
             tenant_id,
             uuid::Uuid::new_v4(),
-            "user",
+            keycompute_types::CredentialKind::Jwt,
         )
         .with_permissions(vec![Permission::UseApi]);
 

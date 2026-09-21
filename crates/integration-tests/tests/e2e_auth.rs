@@ -3,10 +3,8 @@
 //! 验证认证流程：Produce AI Key 验证、JWT 解析、权限检查
 
 use integration_tests::common::VerificationChain;
-use keycompute_auth::user::TenantInfo;
-use keycompute_auth::{
-    JwtValidator, Permission, PermissionChecker, ProduceAiKeyValidator, UserInfo,
-};
+use keycompute_auth::user::{TenantInfo, UserInfo};
+use keycompute_auth::{JwtValidator, Permission, PermissionChecker, ProduceAiKeyValidator};
 use uuid::Uuid;
 
 /// 测试 Produce AI Key 验证流程
@@ -80,7 +78,7 @@ fn test_auth_jwt_flow() {
     // 2. 创建 Claims（需要 role 和 issuer 参数）
     let user_id = Uuid::new_v4();
     let tenant_id = Uuid::new_v4();
-    let claims = keycompute_auth::JwtClaims::new(user_id, tenant_id, "user", 3600, "keycompute", 0);
+    let claims = keycompute_auth::JwtClaims::new(user_id, Some(tenant_id), 0, 3600, "keycompute");
 
     chain.add_step(
         "keycompute-auth",
@@ -100,7 +98,7 @@ fn test_auth_jwt_flow() {
 
     // 4. 生成 token（使用新的 API）
     let token = validator
-        .generate_token(user_id, tenant_id, "user")
+        .generate_identity_token(user_id, Some(tenant_id), 0, Some(1), Some(1), 3600)
         .unwrap();
     chain.add_step(
         "keycompute-auth",
@@ -145,8 +143,8 @@ fn test_auth_permission_flow() {
     );
 
     // 2. 从字符串解析
-    let parsed_api = Permission::from_str("api:use");
-    let parsed_manage = Permission::from_str("users:manage");
+    let parsed_api = Permission::parse("api:use");
+    let parsed_manage = Permission::parse("users:manage");
 
     chain.add_step(
         "keycompute-auth",
@@ -163,8 +161,16 @@ fn test_auth_permission_flow() {
 
     // 3. 使用 PermissionChecker 静态方法检查权限
     let user_perms = vec![Permission::UseApi, Permission::ViewUsage];
-    let has_api = PermissionChecker::check("user", &user_perms, &Permission::UseApi);
-    let has_manage = PermissionChecker::check("user", &user_perms, &Permission::ManageUsers);
+    let has_api = PermissionChecker::check(
+        keycompute_types::CredentialKind::Jwt,
+        &user_perms,
+        &Permission::UseApi,
+    );
+    let has_manage = PermissionChecker::check(
+        keycompute_types::CredentialKind::Jwt,
+        &user_perms,
+        &Permission::ManageUsers,
+    );
 
     chain.add_step(
         "keycompute-auth",
@@ -179,12 +185,17 @@ fn test_auth_permission_flow() {
         !has_manage,
     );
 
-    // 4. 权限检查完全基于权限列表，不基于角色
-    // admin 角色需要通过 build_permissions 获取完整权限
-    use keycompute_auth::{AuthType, build_permissions};
-    let admin_perms = build_permissions(AuthType::Jwt, "admin");
-    let admin_has_manage =
-        PermissionChecker::check("admin", &admin_perms, &Permission::ManageUsers);
+    // 4. 权限检查完全基于已验证的 typed identity
+    let admin_perms = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::Jwt,
+        keycompute_types::PlatformRole::Root,
+        None,
+    );
+    let admin_has_manage = PermissionChecker::check(
+        keycompute_types::CredentialKind::Jwt,
+        &admin_perms,
+        &Permission::ManageUsers,
+    );
     chain.add_step(
         "keycompute-auth",
         "PermissionChecker::admin_has_manage",
@@ -195,10 +206,17 @@ fn test_auth_permission_flow() {
         admin_has_manage,
     );
 
-    // 5. 验证 API Key 认证的 admin 没有管理权限
-    let api_key_perms = build_permissions(AuthType::ApiKey, "admin");
-    let api_key_has_manage =
-        PermissionChecker::check("admin", &api_key_perms, &Permission::ManageUsers);
+    // 5. API keys remain inference-only even when the user is a root user.
+    let api_key_perms = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::ApiKey,
+        keycompute_types::PlatformRole::Root,
+        None,
+    );
+    let api_key_has_manage = PermissionChecker::check(
+        keycompute_types::CredentialKind::ApiKey,
+        &api_key_perms,
+        &Permission::ManageUsers,
+    );
     chain.add_step(
         "keycompute-auth",
         "PermissionChecker::api_key_no_manage",
@@ -210,34 +228,38 @@ fn test_auth_permission_flow() {
     assert!(chain.all_passed());
 }
 
-/// 测试管理路由的权限判定（对应 admin_auth_middleware 的 has_permission(SystemAdmin) 门禁）
-///
-/// 关键安全不变量：即使某用户角色为 admin，其 **API Key** 认证也只能获得 UseApi 权限，
-/// 不得拥有 SystemAdmin，从而无法访问管理路由；只有 JWT 登录的 admin/system 才具备 SystemAdmin。
+/// Platform and tenant authority are separate.  JWT metadata cannot grant a
+/// platform role, while an API key remains inference-only even for a root user.
 #[test]
 fn test_admin_route_permission_gate() {
-    use keycompute_auth::{AuthType, build_permissions};
-
-    // JWT admin / system → 必须拥有 SystemAdmin
-    for role in ["admin", "system"] {
-        let perms = build_permissions(AuthType::Jwt, role);
-        assert!(
-            perms.contains(&Permission::SystemAdmin),
-            "JWT {role} 应拥有 SystemAdmin 权限"
-        );
-    }
-
-    // API Key（即便角色为 admin）→ 不得拥有 SystemAdmin，仅有 UseApi
-    let api_admin = build_permissions(AuthType::ApiKey, "admin");
-    assert!(
-        !api_admin.contains(&Permission::SystemAdmin),
-        "API Key 认证不得拥有 SystemAdmin 权限（防止越权访问管理路由）"
+    let root = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::Jwt,
+        keycompute_types::PlatformRole::Root,
+        None,
     );
-    assert_eq!(api_admin, vec![Permission::UseApi]);
-
-    // 普通 JWT 用户 → 无 SystemAdmin
-    let jwt_user = build_permissions(AuthType::Jwt, "user");
-    assert!(!jwt_user.contains(&Permission::SystemAdmin));
+    assert!(root.contains(&Permission::ManageUsers));
+    let operator = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::Jwt,
+        keycompute_types::PlatformRole::Operator,
+        None,
+    );
+    assert!(!operator.contains(&Permission::ManageUsers));
+    let api_admin = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::ApiKey,
+        keycompute_types::PlatformRole::Root,
+        None,
+    );
+    assert!(!api_admin.contains(&Permission::ManageUsers));
+    assert!(
+        api_admin.is_empty(),
+        "global API-key identity has no capability"
+    );
+    let tenant_api_key = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::ApiKey,
+        keycompute_types::PlatformRole::Root,
+        Some(keycompute_types::TenantRole::Member),
+    );
+    assert_eq!(tenant_api_key, vec![Permission::UseApi]);
 }
 
 /// 测试用户信息
@@ -247,8 +269,14 @@ fn test_auth_user_info() {
 
     // 1. 创建用户信息（需要 5 个参数）
     let user_id = Uuid::new_v4();
-    let tenant_id = Uuid::new_v4();
-    let user = UserInfo::new(user_id, tenant_id, "test@example.com", "test-user", "user");
+    let user = UserInfo::new(
+        user_id,
+        "test@example.com",
+        "test-user",
+        keycompute_types::PlatformRole::None,
+        keycompute_types::UserStatus::Active,
+        0,
+    );
 
     chain.add_step(
         "keycompute-auth",
@@ -260,9 +288,9 @@ fn test_auth_user_info() {
     // 2. 检查租户
     chain.add_step(
         "keycompute-auth",
-        "UserInfo::tenant_id",
-        format!("Tenant ID: {:?}", user.tenant_id),
-        user.tenant_id == tenant_id,
+        "UserInfo::platform_role",
+        format!("Platform role: {:?}", user.platform_role),
+        user.platform_role == keycompute_types::PlatformRole::None,
     );
 
     // 3. 检查名称
@@ -285,8 +313,11 @@ fn test_auth_user_info() {
     chain.add_step(
         "keycompute-auth",
         "UserInfo::has_admin_role",
-        format!("Is admin: {}", user.has_admin_role()),
-        !user.has_admin_role(),
+        format!(
+            "Is root: {}",
+            user.platform_role == keycompute_types::PlatformRole::Root
+        ),
+        user.platform_role != keycompute_types::PlatformRole::Root,
     );
 
     chain.print_report();

@@ -7,6 +7,7 @@ use client_api::{
         AuthResponse, CompleteRegistrationRequest, CompleteRegistrationResponse,
         ForgotPasswordRequest, LoginRequest, MessageResponse, RefreshTokenRequest,
         RequestRegistrationCodeRequest, RequestRegistrationCodeResponse, ResetPasswordRequest,
+        SelectTenantRequest,
     },
 };
 
@@ -52,6 +53,14 @@ pub async fn refresh_token(refresh_token: &str) -> Result<AuthResponse> {
     let client = get_client();
     AuthApi::new(&client)
         .refresh_token(&RefreshTokenRequest::new(refresh_token))
+        .await
+}
+
+/// Switches the server-selected tenant and refreshes session capabilities.
+pub async fn select_tenant(tenant_id: &str, token: &str) -> Result<AuthResponse> {
+    let client = get_client();
+    AuthApi::new(&client)
+        .select_tenant(&SelectTenantRequest::new(tenant_id), token)
         .await
 }
 

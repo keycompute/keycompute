@@ -388,7 +388,7 @@ pub async fn list_distribution_records(
     let (page, page_size, offset) =
         normalize_list_pagination(query.page, query.page_size, query.limit, query.offset);
 
-    let records = if auth.is_admin() {
+    let records = if auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
         // Admin 可以查看所有记录，或按受益人筛选
         if let Some(beneficiary_id) = query.beneficiary_id {
             keycompute_db::DistributionRecord::find_by_beneficiary_filtered(
@@ -438,7 +438,7 @@ pub async fn list_distribution_records(
         })?));
     }
 
-    let total = if auth.is_admin() {
+    let total = if auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
         if let Some(beneficiary_id) = query.beneficiary_id {
             keycompute_db::DistributionRecord::count_by_beneficiary_filtered(
                 pool,
@@ -496,7 +496,7 @@ pub async fn get_distribution_stats(
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用（普通用户）
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
         check_distribution_enabled(pool).await?;
     }
 
@@ -535,7 +535,7 @@ pub async fn list_distribution_rules(
     auth: AuthExtractor,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DistributionRuleResponse>>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -574,7 +574,7 @@ pub async fn create_distribution_rule(
     State(state): State<AppState>,
     Json(req): Json<CreateDistributionRuleRequest>,
 ) -> Result<Json<DistributionRuleResponse>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -590,7 +590,7 @@ pub async fn create_distribution_rule(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
-    // 全局规则使用 Uuid::nil() 表示对系统所有用户生效（租户级全局规则）
+    // 全局规则使用显式 everyone beneficiary scope，对租户所有用户生效
     // 采用 upsert 语义：如已存在同租户的 priority=100 全局规则则更新（并重新激活），否则创建。
     //
     // 并发安全：upsert 在写库事务 + 租户级 advisory lock 内原子执行
@@ -632,7 +632,7 @@ pub async fn update_distribution_rule(
     State(state): State<AppState>,
     Json(req): Json<UpdateDistributionRuleRequest>,
 ) -> Result<Json<DistributionRuleResponse>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -697,7 +697,7 @@ pub async fn delete_distribution_rule(
     Path(rule_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 

@@ -235,7 +235,7 @@ pub async fn list_accounts(
     State(state): State<AppState>,
     Query(params): Query<AccountListQueryParams>,
 ) -> Result<Json<AccountListResponse>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -415,7 +415,7 @@ pub async fn create_account(
     State(state): State<AppState>,
     Json(req): Json<CreateAccountRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
     validate_account_priority(req.priority)?;
@@ -572,7 +572,7 @@ pub async fn update_account(
     State(state): State<AppState>,
     Json(req): Json<UpdateAccountRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
     validate_account_priority(req.priority)?;
@@ -787,7 +787,7 @@ pub async fn delete_account(
     Path(account_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -946,7 +946,7 @@ pub async fn test_account(
     Path(account_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
@@ -1426,7 +1426,7 @@ pub async fn refresh_account(
     Path(account_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.is_admin() {
+    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
         return Err(ApiError::Auth("Admin permission required".to_string()));
     }
 
