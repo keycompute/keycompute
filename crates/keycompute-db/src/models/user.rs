@@ -46,27 +46,6 @@ pub(crate) fn normalized_email(email: &str) -> Result<String, DbError> {
     Ok(email)
 }
 
-fn filtered_query(
-    select: &str,
-    role: Option<PlatformRole>,
-    search: Option<&str>,
-    page: Option<(i64, i64)>,
-) -> Statement {
-    let search = search
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(escape_like_pattern);
-    let mut sql = format!(
-        "SELECT {select} FROM users WHERE ($1::text IS NULL OR platform_role=$1) AND ($2::text IS NULL OR email ILIKE '%'||$2||'%' ESCAPE '\\' OR COALESCE(name,'') ILIKE '%'||$2||'%' ESCAPE '\\')"
-    );
-    let mut values = vec![role.map(|role| role.as_str()).into(), search.into()];
-    if let Some((limit, offset)) = page {
-        sql.push_str(" ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4");
-        values.extend([limit.clamp(1, 1000).into(), offset.max(0).into()]);
-    }
-    Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
-}
-
 impl User {
     pub fn platform_role(&self) -> Result<PlatformRole, DbError> {
         self.platform_role.parse().map_err(DbError::Other)
@@ -205,73 +184,16 @@ impl User {
         .one(db)
         .await?)
     }
-    pub async fn find_by_id_in_tenant(
-        db: &impl ConnectionTrait,
-        id: Uuid,
-        tenant_id: Uuid,
-    ) -> Result<Option<Self>, DbError> {
-        Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT u.* FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE u.id=$1 AND m.tenant_id=$2 AND m.status='active'", [id.into(),tenant_id.into()])).one(db).await?)
-    }
-    pub async fn find_by_tenant(
-        db: &impl ConnectionTrait,
-        tenant_id: Uuid,
-    ) -> Result<Vec<Self>, DbError> {
-        Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT u.* FROM users u JOIN tenant_memberships m ON m.user_id=u.id WHERE m.tenant_id=$1 AND m.status='active' ORDER BY u.created_at DESC,u.id", [tenant_id.into()])).all(db).await?)
-    }
-    pub async fn find_all(
-        db: &impl ConnectionTrait,
-        limit: i64,
-        offset: i64,
-    ) -> Result<Vec<Self>, DbError> {
-        Self::find_all_filtered(db, None, None, limit, offset).await
-    }
-    pub async fn find_all_filtered(
-        db: &impl ConnectionTrait,
-        role: Option<PlatformRole>,
-        search: Option<&str>,
-        limit: i64,
-        offset: i64,
-    ) -> Result<Vec<Self>, DbError> {
-        Ok(
-            Self::find_by_statement(filtered_query("*", role, search, Some((limit, offset))))
-                .all(db)
-                .await?,
-        )
-    }
-    pub async fn count_all_filtered(
-        db: &impl ConnectionTrait,
-        role: Option<PlatformRole>,
-        search: Option<&str>,
-    ) -> Result<i64, DbError> {
-        let row = db
-            .query_one(filtered_query("COUNT(*)", role, search, None))
-            .await?
-            .ok_or_else(|| DbError::Other("count query returned no row".into()))?;
-        Ok(row.try_get_by_index(0)?)
-    }
+    /// Identity initialization only; management lists use checked platform scopes.
     pub async fn count_all(db: &impl ConnectionTrait) -> Result<i64, DbError> {
-        Self::count_all_filtered(db, None, None).await
-    }
-    pub async fn count_by_tenants(
-        db: &impl ConnectionTrait,
-        ids: &[Uuid],
-    ) -> Result<std::collections::HashMap<Uuid, i64>, DbError> {
-        #[derive(FromQueryResult)]
-        struct Count {
-            tenant_id: Uuid,
-            count: i64,
-        }
-        if ids.is_empty() {
-            return Ok(Default::default());
-        }
-        let rows = Count::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT tenant_id,COUNT(*) AS count FROM tenant_memberships WHERE tenant_id=ANY($1) AND status='active' GROUP BY tenant_id", [ids.to_vec().into()])).all(db).await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| (row.tenant_id, row.count))
-            .collect())
+        let row = db
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT COUNT(*) FROM users".to_string(),
+            ))
+            .await?
+            .ok_or_else(|| DbError::Other("identity count returned no row".into()))?;
+        Ok(row.try_get_by_index(0)?)
     }
     pub async fn update(
         &self,
@@ -360,3 +282,7 @@ mod tests {
         assert!(normalized_email(&format!("{}@x", "a".repeat(256))).is_err());
     }
 }
+
+#[path = "user_scope.rs"]
+mod scope;
+pub use scope::TenantMemberRecord;

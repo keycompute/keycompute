@@ -91,10 +91,9 @@ fn audit_actor(auth: &GlobalConsoleAuth) -> keycompute_db::AuditContext {
         request_id: None,
     }
 }
-fn platform_manage(auth: &GlobalConsoleAuth) -> Result<()> {
+fn platform_manage(auth: &GlobalConsoleAuth) -> Result<keycompute_types::PlatformScope> {
     auth.require_platform(AuthorizationAction::ManagePlatform)
-        .map_err(ApiError::from)?;
-    Ok(())
+        .map_err(ApiError::from)
 }
 async fn platform_audit(
     tx: &sea_orm::DatabaseTransaction,
@@ -131,8 +130,9 @@ pub async fn list_all_users(
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
     let (page, page_size, offset) =
         normalize_list_pagination(Some(query.page), Some(query.page_size), None, None);
-    let users = User::find_all_filtered(
+    let users = User::find_platform_filtered(
         pool.write_conn(),
+        platform_manage(&auth)?,
         query.platform_role,
         query.search.as_deref(),
         page_size,
@@ -140,8 +140,9 @@ pub async fn list_all_users(
     )
     .await
     .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let total = User::count_all_filtered(
+    let total = User::count_platform_filtered(
         pool.write_conn(),
+        platform_manage(&auth)?,
         query.platform_role,
         query.search.as_deref(),
     )
@@ -179,7 +180,7 @@ pub async fn get_user_by_id(
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let user = User::find_by_id(pool.write_conn(), id)
+    let user = User::find_platform(pool.write_conn(), platform_manage(&auth)?, id)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
@@ -425,10 +426,15 @@ async fn validate_balance_target(
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    User::find_by_id_in_tenant(pool.write_conn(), user_id, tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::NotFound("tenant member not found".into()))
+    User::find_platform_member(
+        pool.write_conn(),
+        platform_manage(auth)?,
+        tenant_id,
+        user_id,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(e.to_string()))?
+    .ok_or_else(|| ApiError::NotFound("tenant member not found".into()))
 }
 
 /// 余额操作的公共上下文
@@ -1275,9 +1281,10 @@ pub async fn list_tenants(
 
     // 批量统计各租户用户数量（避免 N+1 查询）
     let tenant_ids: Vec<Uuid> = tenants.iter().map(|t| t.id).collect();
-    let user_counts = User::count_by_tenants(writer, &tenant_ids)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
+    let user_counts =
+        User::count_memberships_platform(writer, platform_manage(&auth)?, &tenant_ids)
+            .await
+            .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
     let account_counts = Account::count_by_tenants(writer, &tenant_ids)
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to count channel accounts: {}", e)))?;

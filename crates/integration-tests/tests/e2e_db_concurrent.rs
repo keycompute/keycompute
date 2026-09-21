@@ -88,7 +88,7 @@ mod tests {
         );
 
         // 4. 验证所有用户存在
-        let all_users = User::find_by_tenant(pool.as_ref(), tenant_id).await;
+        let all_users = integration_tests::db::list_test_members(pool.as_ref(), tenant_id).await;
         chain.add_step(
             "keycompute-db",
             "verify_concurrent_users",
@@ -104,7 +104,7 @@ mod tests {
                         .collect::<std::collections::HashSet<_>>();
                     expected.insert(tenant.owner_user_id);
                     v.iter()
-                        .map(|u| u.id)
+                        .map(|u| u.user_id)
                         .collect::<std::collections::HashSet<_>>()
                         == expected
                 })

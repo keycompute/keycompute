@@ -377,3 +377,25 @@ pub async fn delete_user_by_email(
     .await?;
     tx.commit().await
 }
+
+/// Inspect fixture members through the same scoped projection as tenant administration.
+pub async fn list_test_members(
+    db: &impl ConnectionTrait,
+    tenant_id: Uuid,
+) -> Result<Vec<keycompute_db::models::user::TenantMemberRecord>, keycompute_db::DbError> {
+    let tenant = Tenant::find_by_id(db, tenant_id)
+        .await?
+        .ok_or_else(|| keycompute_db::DbError::not_found("tenant", tenant_id))?;
+    let scope =
+        keycompute_types::TenantScope::checked(tenant.id, tenant.owner_user_id, TenantRole::Admin)
+            .map_err(keycompute_db::DbError::Other)?;
+    keycompute_db::models::user::TenantMemberRecord::list_in_tenant(
+        db,
+        scope,
+        Some(keycompute_types::MembershipStatus::Active),
+        None,
+        1000,
+        0,
+    )
+    .await
+}

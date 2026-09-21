@@ -530,7 +530,7 @@ async fn test_replica_transaction_routing() {
                 .await?;
 
                 // 在同一事务内查询验证
-                let users = User::find_by_tenant(txn, tenant.id).await?;
+                let users = integration_tests::db::list_test_members(txn, tenant.id).await?;
                 assert_eq!(users.len(), 2, "Transaction should see its own writes");
 
                 Ok(())
@@ -759,7 +759,7 @@ async fn test_concurrent_through_router() {
     );
 
     // 验证所有用户都写入成功
-    let users = User::find_by_tenant(router.as_ref(), tenant.id)
+    let users = integration_tests::db::list_test_members(router.as_ref(), tenant.id)
         .await
         .expect("User lookup should succeed");
     chain.add_step(

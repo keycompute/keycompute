@@ -29,12 +29,14 @@ async fn test_user_crud() {
         "membership does not become platform authority",
         found.platform_role().unwrap() == PlatformRole::None,
     );
-    let members = User::find_by_tenant(&pool, tenant.id).await.unwrap();
+    let members = integration_tests::db::list_test_members(&pool, tenant.id)
+        .await
+        .unwrap();
     chain.add_step(
         "keycompute-db",
         "User::find_by_tenant",
         "explicit tenant membership filter",
-        members.iter().any(|u| u.id == actor.id),
+        members.iter().any(|u| u.user_id == actor.id),
     );
     let updated = found
         .update(

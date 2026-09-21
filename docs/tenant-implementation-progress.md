@@ -90,6 +90,41 @@ ownership/transaction/lock-coordination issues. They are not part of this
 checkpoint. No schema, callback/accounting, production service, credentials,
 branch or deployment changes are included. Phases 4–9 remain pending.
 
+## Phase 3 — user/member query subgate (partial delivery)
+
+Global user administration now carries a checked `PlatformScope` into its
+list/detail/count queries, including explicit member targets for platform
+billing and tenant-list member counts. Queries also check the acting root's
+current database status instead of relying only on a supplied scope value.
+
+Tenant member reads use `TenantMemberRecord` and a mandatory `TenantScope`.
+Detail, list and count share one tenant/actor predicate, including current
+active admin membership, active global actor and active tenant. The projection
+contains membership role/status/version and basic profile information, not
+platform roles or global token versions. Optional status/search/user filters
+only narrow that scope. Pagination has a stable member-ID tie-breaker and
+literal search escapes wildcard characters.
+
+The old unscoped user management list/count and tenant-member methods were
+removed. Authentication/global identity lookup, startup identity counting and
+existing security mutations remain separate; no tenant-facing global-profile
+or platform-role mutation API was introduced.
+
+Review corrected test call sites that still expected a global User record and
+retained all prior assertions. Three new real-PostgreSQL/HTTP regressions and
+two query-boundary unit tests cover A/member versus B/admin, foreign and
+fabricated scopes, projection fields, platform root access without tenant
+selection, member/operator denial, counts, pagination and literal search.
+Final full workspace: **2,404 passed, 0 failed, 30 default ignored**
+(excluding desktop/mobile). Strict workspace Clippy, formatting, whitespace
+and reviewed-source hash checks passed. The five new tests are included in
+that total. Final review found no further actionable issue in this change set.
+
+This is not the phase-three completion gate: key mutations, other resource
+DAO families, runtime/settlement queries and route/audit/job adoption remain.
+No schema, production identity, service, deployment or Go-service change was
+made. In particular, the separate API-key core proposal was not applied.
+
 ## Remaining phase gates
 
 Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security and client acceptance. Phase 9: verified offline cutover and release.

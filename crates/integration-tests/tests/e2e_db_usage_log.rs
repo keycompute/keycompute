@@ -7,9 +7,7 @@ use integration_tests::common::generate_test_id;
 use integration_tests::db::{
     cleanup_test_data, create_test_pool, create_test_tenant, create_test_user,
 };
-use keycompute_db::{
-    CreateProduceAiKeyRequest, CreateUsageLogRequest, ProduceAiKey, UsageLog, User,
-};
+use keycompute_db::{CreateProduceAiKeyRequest, CreateUsageLogRequest, ProduceAiKey, UsageLog};
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -193,8 +191,8 @@ mod tests {
         );
 
         // 3. 验证租户用户隔离
-        let tenant1_users = User::find_by_tenant(&pool, tenant1.id).await;
-        let tenant2_users = User::find_by_tenant(&pool, tenant2.id).await;
+        let tenant1_users = integration_tests::db::list_test_members(&pool, tenant1.id).await;
+        let tenant2_users = integration_tests::db::list_test_members(&pool, tenant2.id).await;
 
         chain.add_step(
             "keycompute-db",
@@ -221,7 +219,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .map(|u| u.id)
+                .map(|u| u.user_id)
                 .collect::<std::collections::HashSet<_>>(),
             expected1
         );
@@ -230,7 +228,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .map(|u| u.id)
+                .map(|u| u.user_id)
                 .collect::<std::collections::HashSet<_>>(),
             expected2
         );
@@ -238,7 +236,7 @@ mod tests {
         // 4. 验证跨租户访问被阻止
         // 用户1不应该出现在租户2的用户列表中
         let tenant2_has_user1 = tenant2_users
-            .map(|users| users.iter().any(|u| u.id == user1.id))
+            .map(|users| users.iter().any(|u| u.user_id == user1.id))
             .unwrap_or(false);
 
         chain.add_step(
