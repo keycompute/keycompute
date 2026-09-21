@@ -18,7 +18,7 @@ use tower::ServiceExt;
 
 /// 测试完整的 API 请求流程
 ///
-/// 注意：无数据库连接时，认证会失败（返回 401）
+/// 注意：无数据库连接时，认证后端不可用（返回 503），不能误报凭证无效。
 /// 这是预期的安全行为
 #[tokio::test]
 async fn test_api_request_flow_requires_database() {
@@ -42,7 +42,7 @@ async fn test_api_request_flow_requires_database() {
         true,
     );
 
-    // 2. 发送 chat/completions 请求（无数据库连接，应该返回 401）
+    // 2. 有效格式凭证遇到认证存储缺失，应该返回 503。
     let test_api_key = keycompute_auth::ProduceAiKeyValidator::generate_key();
     let request_body = json!({
         "model": "gpt-4o",
@@ -60,16 +60,31 @@ async fn test_api_request_flow_requires_database() {
 
     let response = app.clone().oneshot(request).await.unwrap();
 
-    // 无数据库连接时，认证应该失败（返回 401）
-    let status_unauthorized = response.status() == StatusCode::UNAUTHORIZED;
+    // 后端不可用仍然拒绝请求，但与 401 凭证错误保持区分。
+    let backend_unavailable = response.status() == StatusCode::SERVICE_UNAVAILABLE;
     chain.add_step(
         "keycompute-server",
         "chat_completions_handler",
         format!(
-            "Response status: {:?} (expected 401 without database)",
+            "Response status: {:?} (expected 503 without authentication database)",
             response.status()
         ),
-        status_unauthorized,
+        backend_unavailable,
+    );
+
+    let malformed = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("Content-Type", "application/json")
+        .header("Authorization", "Bearer invalid-key")
+        .body(Body::from(request_body.to_string()))
+        .unwrap();
+    let denied = app.clone().oneshot(malformed).await.unwrap();
+    chain.add_step(
+        "keycompute-server",
+        "reject_malformed_credential",
+        "Malformed credentials remain 401, not 503",
+        denied.status() == StatusCode::UNAUTHORIZED,
     );
 
     // 3. 模型发现按调用租户隔离，匿名访问必须拒绝。
@@ -124,8 +139,11 @@ async fn test_auth_flow_requires_database() {
     chain.add_step(
         "keycompute-server::extractors",
         "AuthExtractor::from_header_with_auth",
-        "Valid API key rejected (no database connection)",
-        result.is_err(),
+        "Authentication storage missing: service unavailable",
+        matches!(
+            result,
+            Err(keycompute_server::error::ApiError::ServiceUnavailable(_))
+        ),
     );
 
     // 2. 测试无效格式的 API Key
@@ -137,7 +155,7 @@ async fn test_auth_flow_requires_database() {
         "keycompute-server::extractors",
         "AuthExtractor::reject_invalid",
         "Invalid API key rejected",
-        bad_result.is_err(),
+        matches!(bad_result, Err(keycompute_server::error::ApiError::Auth(_))),
     );
 
     // 3. 测试缺失 Authorization 头
@@ -147,7 +165,10 @@ async fn test_auth_flow_requires_database() {
         "keycompute-server::extractors",
         "AuthExtractor::reject_missing",
         "Missing auth header rejected",
-        missing_result.is_err(),
+        matches!(
+            missing_result,
+            Err(keycompute_server::error::ApiError::Auth(_))
+        ),
     );
 
     // 4. 验证 API Key 格式检查
@@ -155,7 +176,7 @@ async fn test_auth_flow_requires_database() {
     chain.add_step(
         "keycompute-server::extractors",
         "API Key format validation",
-        format!("Generated key format valid: {}", generated_key),
+        "Generated key format valid (credential omitted)",
         ProduceAiKeyValidator::is_valid_format(&generated_key),
     );
 

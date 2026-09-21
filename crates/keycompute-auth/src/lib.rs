@@ -106,7 +106,7 @@ impl AuthContext {
         self
     }
     pub fn has_permission(&self, p: &Permission) -> bool {
-        self.permissions.contains(p)
+        PermissionChecker::check(self.credential_kind, &self.permissions, p)
     }
     pub fn user_info(&self) -> Option<&UserInfo> {
         self.user_info.as_ref()

@@ -560,8 +560,9 @@ mod tests {
         // 无数据库连接时应该返回配置错误
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(matches!(err, ApiError::Auth(_)));
-        assert!(err.to_string().contains("not properly configured"));
+        assert!(matches!(err, ApiError::ServiceUnavailable(_)));
+        assert!(err.to_string().contains("temporarily unavailable"));
+        assert!(!err.to_string().contains("not properly configured"));
     }
 
     #[test]

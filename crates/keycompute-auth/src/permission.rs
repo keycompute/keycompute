@@ -120,10 +120,12 @@ impl PermissionChecker {
         permissions: &[Permission],
         required: &Permission,
     ) -> bool {
-        if credential == CredentialKind::ApiKey && *required != Permission::UseApi {
-            return false;
-        }
-        permissions.contains(required)
+        let permitted_credential = match credential {
+            CredentialKind::Jwt => true,
+            CredentialKind::ApiKey => *required == Permission::UseApi,
+            CredentialKind::Node | CredentialKind::System => false,
+        };
+        permitted_credential && permissions.contains(required)
     }
     pub fn requires_tenant_isolation(permission: &Permission) -> bool {
         matches!(
@@ -227,8 +229,22 @@ pub fn authorize(
     action: AuthorizationAction,
     resource: ResourceScope,
 ) -> AuthorizationDecision {
-    if subject.user_id.is_nil() {
+    if subject.user_id.is_nil() || subject.tenant_id.is_some_and(|id| id.is_nil()) {
         return AuthorizationDecision::Deny;
+    }
+    // A malformed identifier is never a platform/global scope or an anonymous
+    // resource owner. Check it before either credential or role can allow it.
+    match resource {
+        ResourceScope::Tenant { tenant_id } if tenant_id.is_nil() => {
+            return AuthorizationDecision::Deny;
+        }
+        ResourceScope::UserOwned {
+            tenant_id,
+            owner_user_id,
+        } if tenant_id.is_nil() || owner_user_id.is_nil() => {
+            return AuthorizationDecision::Deny;
+        }
+        _ => {}
     }
     if credential != CredentialKind::Jwt {
         if credential != CredentialKind::ApiKey || !matches!(action, AuthorizationAction::Use) {
@@ -316,6 +332,10 @@ pub fn authorize(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "permission_boundary_tests.rs"]
+mod boundary_tests;
 
 #[cfg(test)]
 mod tests {

@@ -90,7 +90,7 @@ impl ProduceAiKeyValidator {
                     "API key validation attempted without database connection. \
                      This indicates a misconfiguration. Use ProduceAiKeyValidator::with_pool() for production."
                 );
-                Err(KeyComputeError::AuthError(
+                Err(KeyComputeError::ServiceUnavailable(
                     "Authentication service not properly configured".into(),
                 ))
             }
@@ -499,6 +499,7 @@ mod tests {
             "Validation should fail without database connection"
         );
         let err = result.unwrap_err();
+        assert!(matches!(err, KeyComputeError::ServiceUnavailable(_)));
         assert!(
             err.to_string().contains("not properly configured"),
             "Error should indicate misconfiguration"
