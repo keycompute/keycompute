@@ -61,6 +61,35 @@ production service, credential, deployment or Go-service changes were made.
 Resource DAO enforcement, full route-level adoption, mutation audit coverage
 and asynchronous authorization remain the following stages.
 
+## Phase 3 — payment query subgate (partial delivery)
+
+The payment read/control-plane boundary is now implemented independently of the
+remaining resource DAO work. Personal order detail and synchronization lookups
+apply `tenant_id + user_id` in SQL, including for tenant administrators. Personal
+lists, counts and statistics share the same scope predicate; tenant-admin and
+platform query families are explicit, and raw platform payment management
+requires a checked root platform scope rather than a tenant billing capability.
+Unknown or foreign personal order IDs return the same 404 before provider work.
+
+Review reproduced a real-router disclosure of another member's payment body and
+URL before the fix. The new real-PostgreSQL tests cover same-tenant foreign
+owners, cross-tenant orders, one global user's separate tenant orders, merchant
+references, pagination/counts and member/operator rejection. Two pure DAO tests
+verify the predicate and capability boundaries. Final repeated review found no
+additional actionable issue in this retained payment-query change set.
+
+Verification: full workspace tests excluding desktop/mobile **2,399 passed,
+0 failed, 30 default ignored**; strict workspace Clippy with all targets/features
+and `-D warnings`, formatting, whitespace checks and reviewed-source hash checks
+passed. The four new tests are included in the full-workspace total.
+
+This does **not** close phase 3. Legacy/runtime payment settlement queries and
+other resource DAO families still require follow-up. Broader user/provider and
+Responses prototypes were excluded after integration review found unresolved
+ownership/transaction/lock-coordination issues. They are not part of this
+checkpoint. No schema, callback/accounting, production service, credentials,
+branch or deployment changes are included. Phases 4–9 remain pending.
+
 ## Remaining phase gates
 
 Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security and client acceptance. Phase 9: verified offline cutover and release.

@@ -575,3 +575,6 @@ impl PaymentOrder {
         Ok(stats)
     }
 }
+
+#[path = "payment_order_scope.rs"]
+mod scope;

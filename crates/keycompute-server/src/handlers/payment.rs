@@ -15,7 +15,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use keycompute_auth::Permission;
+use keycompute_auth::AuthorizationAction;
 use rust_decimal::Decimal;
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
@@ -27,24 +27,15 @@ fn payment_internal_error(context: &'static str, error: impl std::fmt::Display) 
     ApiError::Internal("支付服务内部错误".to_string())
 }
 
-fn require_own_billing_permission(auth: &AuthExtractor) -> Result<()> {
-    if auth.has_permission(&Permission::ManageOwnBilling) {
-        Ok(())
-    } else {
-        Err(ApiError::Forbidden(
-            "无权访问用户支付与账单功能".to_string(),
-        ))
-    }
+fn require_own_billing_permission(auth: &AuthExtractor) -> Result<keycompute_types::TenantScope> {
+    auth.require_owner(auth.user_id, AuthorizationAction::ManagePersonalResource)
 }
 
-/// 纵深防御：除路由层的 admin_auth_middleware 外，handler 内再次校验
-/// 账单管理权限，防止未来路由重排时静默丢失防护。
-fn require_billing_admin_permission(auth: &AuthExtractor) -> Result<()> {
-    if auth.has_permission(&Permission::ManageBilling) {
-        Ok(())
-    } else {
-        Err(ApiError::Forbidden("无权访问支付管理功能".to_string()))
-    }
+/// Platform payment operations never derive authority from a tenant role.
+fn require_billing_admin_permission(
+    auth: &AuthExtractor,
+) -> Result<keycompute_types::PlatformScope> {
+    auth.require_platform(AuthorizationAction::ManagePlatform)
 }
 
 async fn load_payment_amount_limits(pool: &keycompute_db::DbRouter) -> Result<(Decimal, Decimal)> {
@@ -394,7 +385,7 @@ pub async fn list_my_payment_orders(
     State(state): State<AppState>,
     Query(params): Query<PaymentOrderQueryParams>,
 ) -> Result<Json<PaymentOrderListResponse>> {
-    require_own_billing_permission(&auth)?;
+    let scope = require_own_billing_permission(&auth)?;
 
     let pool = state
         .pool
@@ -402,39 +393,22 @@ pub async fn list_my_payment_orders(
         .ok_or_else(|| payment_internal_error("list_orders", "database unavailable"))?;
 
     let (_page, page_size, offset) = normalize_pagination(&params);
-    let status_value = params
-        .status
-        .as_deref()
-        .map(|status| status.into())
-        .unwrap_or(sea_orm::Value::String(None));
-    let orders = keycompute_db::PaymentOrder::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT * FROM payment_orders WHERE user_id=$1 AND tenant_id=$2 AND ($3::text IS NULL OR status=$3) ORDER BY created_at DESC LIMIT $4 OFFSET $5",
-        [
-            auth.user_id.into(),
-            auth.tenant_id.into(),
-            status_value.clone(),
-            page_size.into(),
-            offset.into(),
-        ],
-    ))
-    .all(pool)
+    let orders = keycompute_db::PaymentOrder::list_owned(
+        pool.write_conn(),
+        scope,
+        params.status.as_deref(),
+        page_size,
+        offset,
+    )
     .await
     .map_err(|e| payment_internal_error("list_orders", e))?;
-    #[derive(FromQueryResult)]
-    struct CountRow {
-        total: i64,
-    }
-    let total = CountRow::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT COUNT(*)::bigint AS total FROM payment_orders WHERE user_id=$1 AND tenant_id=$2 AND ($3::text IS NULL OR status=$3)",
-        [auth.user_id.into(), auth.tenant_id.into(), status_value],
-    ))
-    .one(pool)
+    let total = keycompute_db::PaymentOrder::count_owned(
+        pool.write_conn(),
+        scope,
+        params.status.as_deref(),
+    )
     .await
-    .map_err(|e| payment_internal_error("count_orders", e))?
-    .map(|row| row.total)
-    .unwrap_or(0);
+    .map_err(|e| payment_internal_error("count_orders", e))?;
 
     let items: Vec<PaymentOrderItem> = orders
         .into_iter()
@@ -463,24 +437,17 @@ pub async fn get_payment_order(
     State(state): State<AppState>,
     Path(order_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>> {
-    require_own_billing_permission(&auth)?;
+    let scope = require_own_billing_permission(&auth)?;
 
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| payment_internal_error("get_order", "database unavailable"))?;
 
-    let order = keycompute_db::PaymentOrder::find_by_id(pool, order_id)
+    let order = keycompute_db::PaymentOrder::find_owned(pool.write_conn(), scope, order_id)
         .await
         .map_err(|e| payment_internal_error("get_order", e))?
-        .ok_or(ApiError::NotFound("订单不存在".to_string()))?;
-
-    // 验证权限
-    if !auth.has_permission(&Permission::ManageBilling)
-        && (order.user_id != auth.user_id || order.tenant_id != auth.tenant_id)
-    {
-        return Err(ApiError::Forbidden("无权访问此订单".to_string()));
-    }
+        .ok_or_else(|| ApiError::NotFound("订单不存在".to_string()))?;
 
     Ok(Json(serde_json::json!({
         "id": order.id,
@@ -537,23 +504,24 @@ pub async fn sync_payment_order(
     State(state): State<AppState>,
     Path(order_ref): Path<String>,
 ) -> Result<Json<SyncOrderResponse>> {
-    require_own_billing_permission(&auth)?;
+    let scope = require_own_billing_permission(&auth)?;
 
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| payment_internal_error("sync_order", "database unavailable"))?;
     let order = if let Ok(order_id) = Uuid::parse_str(&order_ref) {
-        keycompute_db::PaymentOrder::find_by_id(pool.write_conn(), order_id).await
+        keycompute_db::PaymentOrder::find_owned(pool.write_conn(), scope, order_id).await
     } else {
-        // 兼容一个发布周期的旧商户订单号路由。
-        keycompute_db::PaymentOrder::find_by_out_trade_no(pool.write_conn(), &order_ref).await
+        keycompute_db::PaymentOrder::find_owned_by_out_trade_no(
+            pool.write_conn(),
+            scope,
+            &order_ref,
+        )
+        .await
     }
     .map_err(|e| payment_internal_error("find_order_for_sync", e))?
-    .ok_or(ApiError::NotFound("订单不存在".to_string()))?;
-    if order.user_id != auth.user_id || order.tenant_id != auth.tenant_id {
-        return Err(ApiError::NotFound("订单不存在".to_string()));
-    }
+    .ok_or_else(|| ApiError::NotFound("订单不存在".to_string()))?;
 
     let registry = state
         .payment
@@ -812,7 +780,7 @@ pub async fn admin_list_payment_orders(
     State(state): State<AppState>,
     Query(params): Query<PaymentOrderQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
-    require_billing_admin_permission(&auth)?;
+    let scope = require_billing_admin_permission(&auth)?;
     let pool = state
         .pool
         .as_deref()
@@ -821,57 +789,24 @@ pub async fn admin_list_payment_orders(
     // 管理员可以查看所有订单
     let (page, page_size, offset) = normalize_pagination(&params);
 
-    let stmt = Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r#"
-        SELECT * FROM payment_orders
-        WHERE ($1::text IS NULL OR status = $1)
-          AND ($2::uuid IS NULL OR user_id = $2)
-        ORDER BY created_at DESC
-        LIMIT $3 OFFSET $4
-        "#,
-        [
-            params
-                .status
-                .as_deref()
-                .map(|s| s.into())
-                .unwrap_or(sea_orm::Value::String(None)),
-            params
-                .user_id
-                .map(Into::into)
-                .unwrap_or(sea_orm::Value::Uuid(None)),
-            page_size.into(),
-            offset.into(),
-        ],
-    );
-    let orders = keycompute_db::PaymentOrder::find_by_statement(stmt)
-        .all(pool)
-        .await
-        .map_err(|e| payment_internal_error("admin_list_orders", e))?;
-    #[derive(FromQueryResult)]
-    struct CountRow {
-        total: i64,
-    }
-    let count = CountRow::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT COUNT(*)::bigint AS total FROM payment_orders WHERE ($1::text IS NULL OR status=$1) AND ($2::uuid IS NULL OR user_id=$2)",
-        [
-            params
-                .status
-                .as_deref()
-                .map(|status| status.into())
-                .unwrap_or(sea_orm::Value::String(None)),
-            params
-                .user_id
-                .map(Into::into)
-                .unwrap_or(sea_orm::Value::Uuid(None)),
-        ],
-    ))
-    .one(pool)
+    let orders = keycompute_db::PaymentOrder::list_platform(
+        pool.write_conn(),
+        scope,
+        params.status.as_deref(),
+        params.user_id,
+        page_size,
+        offset,
+    )
     .await
-    .map_err(|e| payment_internal_error("admin_count_orders", e))?
-    .map(|row| row.total)
-    .unwrap_or(0);
+    .map_err(|e| payment_internal_error("admin_list_orders", e))?;
+    let count = keycompute_db::PaymentOrder::count_platform(
+        pool.write_conn(),
+        scope,
+        params.status.as_deref(),
+        params.user_id,
+    )
+    .await
+    .map_err(|e| payment_internal_error("admin_count_orders", e))?;
 
     Ok(Json(serde_json::json!({
         "orders": orders.iter().map(|o| serde_json::json!({
@@ -1011,7 +946,8 @@ pub async fn admin_verify_payment_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keycompute_types::CredentialKind;
+    use keycompute_auth::Permission;
+    use keycompute_types::{CredentialKind, PlatformRole, TenantRole};
 
     #[test]
     fn test_create_payment_order_request() {
@@ -1038,13 +974,14 @@ mod tests {
             Err(ApiError::Forbidden(_))
         ));
 
-        let jwt_auth = AuthExtractor::new(
+        let mut jwt_auth = AuthExtractor::new(
             Uuid::new_v4(),
             Uuid::new_v4(),
             Uuid::nil(),
             CredentialKind::Jwt,
         )
         .with_permissions(vec![Permission::ManageOwnBilling]);
+        jwt_auth.tenant_role = Some(TenantRole::Member);
         assert!(require_own_billing_permission(&jwt_auth).is_ok());
     }
 
@@ -1076,16 +1013,27 @@ mod tests {
             Err(ApiError::Forbidden(_))
         ));
 
-        // An explicitly granted typed billing permission is sufficient.
-        for _ in 0..2 {
-            let jwt = AuthExtractor::new(
+        // A tenant billing capability is not platform payment administration.
+        for platform_role in [
+            PlatformRole::None,
+            PlatformRole::Operator,
+            PlatformRole::Root,
+        ] {
+            let mut jwt = AuthExtractor::new(
                 Uuid::new_v4(),
                 Uuid::new_v4(),
                 Uuid::nil(),
                 CredentialKind::Jwt,
             )
             .with_permissions(vec![Permission::ManageBilling]);
-            assert!(require_billing_admin_permission(&jwt).is_ok());
+            jwt.tenant_role = Some(TenantRole::Admin);
+            jwt.platform_role = platform_role;
+            assert_eq!(
+                require_billing_admin_permission(&jwt).is_ok(),
+                platform_role == PlatformRole::Root
+            );
+            jwt.credential_kind = CredentialKind::ApiKey;
+            assert!(require_billing_admin_permission(&jwt).is_err());
         }
     }
 
