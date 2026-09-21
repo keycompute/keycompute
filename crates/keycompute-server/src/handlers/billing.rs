@@ -93,7 +93,7 @@ pub async fn list_billing_records(
 
     // 获取总数
     let total = scope
-        .count(pool, query.start_time, query.end_time)
+        .count(pool.write_conn(), query.start_time, query.end_time)
         .await
         .map_err(|e| {
             crate::error::ApiError::Internal(format!("Failed to count billing records: {}", e))
@@ -101,7 +101,13 @@ pub async fn list_billing_records(
 
     // 从数据库查询计费记录
     let logs = scope
-        .list(pool, query.start_time, query.end_time, limit, offset)
+        .list(
+            pool.write_conn(),
+            query.start_time,
+            query.end_time,
+            limit,
+            offset,
+        )
         .await
         .map_err(|e| {
             crate::error::ApiError::Internal(format!("Failed to query billing records: {}", e))
@@ -200,14 +206,17 @@ pub async fn get_billing_stats(
     validate_time_range(Some(start_time), Some(end_time))?;
 
     // 获取总体统计
-    let stats = scope.stats(pool, start_time, end_time).await.map_err(|e| {
-        crate::error::ApiError::Internal(format!("Failed to query billing stats: {}", e))
-    })?;
+    let stats = scope
+        .stats(pool.write_conn(), start_time, end_time)
+        .await
+        .map_err(|e| {
+            crate::error::ApiError::Internal(format!("Failed to query billing stats: {}", e))
+        })?;
 
     // 获取按模型分组的统计
     let model_stats = if query.group_by_model.unwrap_or(true) {
         scope
-            .by_model(pool, start_time, end_time)
+            .by_model(pool.write_conn(), start_time, end_time)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to query model stats: {e}")))?
     } else {
@@ -242,7 +251,10 @@ fn own_billing_scope(auth: &AuthExtractor) -> Result<UserUsageScope> {
     if !auth.has_permission(&Permission::ManageOwnBilling) {
         return Err(ApiError::Forbidden("Own billing access required".into()));
     }
-    Ok(UserUsageScope::new(auth.tenant_id, auth.user_id))
+    Ok(UserUsageScope::new(auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?))
 }
 
 fn validate_time_range(from: Option<DateTime<Utc>>, to: Option<DateTime<Utc>>) -> Result<()> {

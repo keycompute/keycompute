@@ -76,10 +76,7 @@ mod tests {
             usage_log.is_ok(),
         );
 
-        let Ok(usage_log) = usage_log else {
-            chain.print_report();
-            return;
-        };
+        let usage_log = usage_log.expect("usage ledger fixture must be created before assertions");
 
         // 3. 验证字段
         chain.add_step(
@@ -104,7 +101,17 @@ mod tests {
         );
 
         // 5. 查找租户的 UsageLog
-        let tenant_logs = UsageLog::find_by_tenant(&pool, tenant.id, 100, 0).await;
+        let tenant_logs = keycompute_db::models::usage_log::TenantUsageScope::new(
+            keycompute_types::TenantScope::checked(
+                tenant.id,
+                tenant.owner_user_id,
+                keycompute_types::TenantRole::Admin,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .list(&pool, None, None, 100, 0)
+        .await;
         chain.add_step(
             "keycompute-db",
             "UsageLog::find_by_tenant",
@@ -116,9 +123,17 @@ mod tests {
         );
 
         // 6. 获取租户统计
-        let stats = UsageLog::get_stats_by_tenant(
+        let stats = keycompute_db::models::usage_log::TenantUsageScope::new(
+            keycompute_types::TenantScope::checked(
+                tenant.id,
+                tenant.owner_user_id,
+                keycompute_types::TenantRole::Admin,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .stats(
             &pool,
-            tenant.id,
             now - chrono::Duration::hours(1),
             now + chrono::Duration::hours(1),
         )
@@ -134,7 +149,9 @@ mod tests {
         );
 
         // 7. 获取用户统计
-        let user_stats = UsageLog::get_user_stats(&pool, user.id).await;
+        let user_stats = keycompute_db::models::usage_log::UserUsageScope::new(user.scope())
+            .all_time_stats(&pool)
+            .await;
         chain.add_step(
             "keycompute-db",
             "UsageLog::get_user_stats",

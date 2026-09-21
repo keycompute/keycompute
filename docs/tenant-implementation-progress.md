@@ -125,6 +125,34 @@ DAO families, runtime/settlement queries and route/audit/job adoption remain.
 No schema, production identity, service, deployment or Go-service change was
 made. In particular, the separate API-key core proposal was not applied.
 
+## Phase 3 — scoped usage reads (partial delivery)
+
+Personal usage, counts, model groups and totals now accept a validated
+`TenantScope` and bind tenant plus owner in SQL, including for tenant admins.
+Tenant-wide reads require the current active administrator membership and
+active user/tenant rows. Platform reporting is aggregate-only, grouped by
+currency, and checks the current active root/operator identity in SQL.
+The unscoped user/tenant list and statistic methods were removed; existing
+settlement identity lookups are not reinterpreted as public read authorization.
+All changed personal HTTP paths use writer-authoritative queries. Cache-hit
+regressions confirm revoked membership credentials are denied before cached
+statistics are returned, while another active membership remains usable.
+
+Two query unit tests and six PostgreSQL/HTTP tests cover resource IDs,
+independent memberships, paging, half-open time ranges, role and status
+changes, currency groups, forged scopes, and actual cache hits followed by
+revocation. Fixed one pre-existing test path that could silently return after
+fixture insertion failed, and corrected a strict-Clippy comparison warning.
+Repeated review found no further actionable defect in this change set.
+Final workspace: **2,412 passed, 0 failed, 30 default ignored**,
+excluding desktop/mobile. Strict all-target/all-feature workspace Clippy,
+formatting, whitespace and source-hash checks passed. The eight new tests are
+included in that total. No production database, credential or service changed.
+
+This completes the Usage read subgate, not phase 3 or the release gate.
+API-key management, provider resources, accepted-work lookups and later
+route/audit/job stages remain open.
+
 ## Remaining phase gates
 
 Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security and client acceptance. Phase 9: verified offline cutover and release.

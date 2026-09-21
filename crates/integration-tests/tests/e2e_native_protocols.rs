@@ -880,10 +880,10 @@ async fn passthrough_disconnect_settlement() {
     drop(body);
     let rows = tokio::time::timeout(Duration::from_secs(8), async {
         loop {
-            let rows =
-                keycompute_db::models::usage_log::UsageLog::find_by_user(&f.db, f.user.id, 2, 0)
-                    .await
-                    .unwrap();
+            let rows = keycompute_db::models::usage_log::UserUsageScope::new(f.user.scope())
+                .list(&f.db, None, None, 2, 0)
+                .await
+                .unwrap();
             if !rows.is_empty() {
                 break rows;
             }
@@ -1029,7 +1029,8 @@ async fn node_stream_generic_failure_after_head_closes_before_deadline() {
     assert_eq!(f.tasks().await, 1);
     assert!(f.upstream.calls.lock().unwrap().is_empty());
     f.wait_for_settlement().await;
-    let ledger = keycompute_db::models::usage_log::UsageLog::find_by_user(&f.db, f.user.id, 2, 0)
+    let ledger = keycompute_db::models::usage_log::UserUsageScope::new(f.user.scope())
+        .list(&f.db, None, None, 2, 0)
         .await
         .unwrap();
     assert_eq!(

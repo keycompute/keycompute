@@ -315,6 +315,14 @@ pub struct TenantActor {
     pub tenant_role: TenantRole,
 }
 
+impl TenantActor {
+    /// Use the tenant and member role recorded by this test fixture.
+    pub fn scope(&self) -> keycompute_types::TenantScope {
+        keycompute_types::TenantScope::checked(self.tenant_id, self.id, self.tenant_role)
+            .expect("fixture has valid tenant and user IDs")
+    }
+}
+
 impl Deref for TenantActor {
     type Target = User;
 

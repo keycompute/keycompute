@@ -899,7 +899,8 @@ async fn background_returns_early_and_idempotency_never_repeats_inference() {
     assert_eq!(calls.len(), 1);
     assert_ne!(calls[0].body["background"], true);
     assert_eq!(calls[0].body["store"], false);
-    let rows = keycompute_db::models::usage_log::UsageLog::find_by_user(&f.db, f.user.id, 10, 0)
+    let rows = keycompute_db::models::usage_log::UserUsageScope::new(f.user.scope())
+        .list(&f.db, None, None, 10, 0)
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);

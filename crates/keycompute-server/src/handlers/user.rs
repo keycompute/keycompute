@@ -549,10 +549,13 @@ pub async fn get_my_usage(
     let modern_pagination = params.page.is_some() || params.page_size.is_some();
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
-    let scope = UserUsageScope::new(auth.tenant_id, auth.user_id);
+    let scope = UserUsageScope::new(auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?);
     let logs = scope
         .list(
-            pool,
+            pool.write_conn(),
             None,
             None,
             if has_pagination { page_size } else { 100 },
@@ -578,7 +581,7 @@ pub async fn get_my_usage(
 
     if modern_pagination {
         let total = scope
-            .count(pool, None, None)
+            .count(pool.write_conn(), None, None)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to count usage logs: {}", e)))?;
         Ok(Json(
@@ -624,7 +627,10 @@ pub async fn get_my_usage_stats(
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
     let db = state.pool.clone().expect("database checked above");
     let key = crate::display_cache::DisplayCache::key(&auth, "usage-stats", "all-time");
-    let scope = UserUsageScope::new(auth.tenant_id, auth.user_id);
+    let scope = UserUsageScope::new(auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?);
     let value = state.display_cache.read(state.cache.clone(), state.console_admission.origin.clone(), auth.tenant_id, key, async move {
         let as_of = chrono::Utc::now().to_rfc3339();
         let stats = scope.all_time_stats(db.write_conn()).await

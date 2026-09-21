@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use keycompute_db::{DistributionRecord, ProduceAiKey, UsageLog};
+use keycompute_db::{DistributionRecord, ProduceAiKey};
 use sea_orm::{
     Database, DatabaseConnection, DbBackend, DbErr, ProxyDatabaseTrait, ProxyExecResult, ProxyRow,
     Statement, Value,
@@ -51,9 +51,17 @@ async fn paginated_queries_use_unique_created_at_tie_breakers() {
     ProduceAiKey::find_by_user_page(&db, Uuid::new_v4(), true, 20, 20)
         .await
         .unwrap();
-    UsageLog::find_by_user(&db, Uuid::new_v4(), 20, 20)
-        .await
-        .unwrap();
+    keycompute_db::models::usage_log::UserUsageScope::new(
+        keycompute_types::TenantScope::checked(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            keycompute_types::TenantRole::Member,
+        )
+        .unwrap(),
+    )
+    .list(&db, None, None, 20, 20)
+    .await
+    .unwrap();
     DistributionRecord::find_by_tenant_filtered(
         &db,
         Uuid::new_v4(),
@@ -94,7 +102,7 @@ async fn paginated_queries_use_unique_created_at_tie_breakers() {
     let statements = statements.lock().unwrap();
     assert_eq!(statements.len(), 6);
     assert!(statements[0].contains("ORDER BY created_at DESC, id DESC"));
-    assert!(statements[1].contains("ORDER BY created_at DESC, id DESC"));
+    assert!(statements[1].contains("ORDER BY l.created_at DESC, l.id DESC"));
     assert!(statements[2].contains("ORDER BY created_at DESC, id DESC"));
     assert!(statements[3].contains("ORDER BY created_at DESC, id DESC"));
     for statement in &statements[4..] {
