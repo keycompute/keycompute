@@ -1,0 +1,281 @@
+path	line_at_phase0	symbol
+crates/integration-tests/src/bin/capacity_fixture.rs	127	UserRole
+crates/integration-tests/src/db.rs	9	UserRole
+crates/integration-tests/src/db.rs	249	UserRole
+crates/integration-tests/tests/e2e_auth.rs	213	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	216	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	221	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	225	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	226	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	230	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	233	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	234	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	238	SystemAdmin
+crates/integration-tests/tests/e2e_auth.rs	240	SystemAdmin
+crates/integration-tests/tests/e2e_auth_token_version.rs	20	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	49	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	131	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	185	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	221	AssignableUserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	234	AssignableUserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	240	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	269	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	382	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	499	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	616	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	735	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	861	UserRole
+crates/integration-tests/tests/e2e_auth_token_version.rs	1056	UserRole
+crates/integration-tests/tests/e2e_console_permission_boundary.rs	21	UserRole
+crates/integration-tests/tests/e2e_console_permission_boundary.rs	84	UserRole
+crates/integration-tests/tests/e2e_console_permission_boundary.rs	99	is_admin(
+crates/integration-tests/tests/e2e_db_balance.rs	2969	UserRole
+crates/integration-tests/tests/e2e_db_balance.rs	2983	UserRole
+crates/integration-tests/tests/e2e_db_concurrent.rs	7	UserRole
+crates/integration-tests/tests/e2e_db_concurrent.rs	49	UserRole
+crates/integration-tests/tests/e2e_db_payment_order.rs	12	AssignableUserRole
+crates/integration-tests/tests/e2e_db_payment_order.rs	472	AssignableUserRole
+crates/integration-tests/tests/e2e_db_router.rs	30	UserRole
+crates/integration-tests/tests/e2e_db_router.rs	473	UserRole
+crates/integration-tests/tests/e2e_db_router.rs	648	UserRole
+crates/integration-tests/tests/e2e_db_tenant.rs	719	SystemAdmin
+crates/integration-tests/tests/e2e_db_user.rs	11	AssignableUserRole
+crates/integration-tests/tests/e2e_db_user.rs	100	AssignableUserRole
+crates/integration-tests/tests/e2e_db_user.rs	359	SystemAdmin
+crates/integration-tests/tests/e2e_db_user.rs	478	users.role
+crates/integration-tests/tests/e2e_native_protocols.rs	30	UserRole
+crates/integration-tests/tests/e2e_native_protocols.rs	202	UserRole
+crates/integration-tests/tests/e2e_node_ingress.rs	32	UserRole
+crates/integration-tests/tests/e2e_node_ingress.rs	172	UserRole
+crates/integration-tests/tests/e2e_passthrough_binding.rs	24	UserRole
+crates/integration-tests/tests/e2e_passthrough_binding.rs	243	UserRole
+crates/integration-tests/tests/e2e_protocol_isolation.rs	27	UserRole
+crates/integration-tests/tests/e2e_protocol_isolation.rs	119	UserRole
+crates/integration-tests/tests/e2e_response_ownership.rs	23	UserRole
+crates/integration-tests/tests/e2e_response_ownership.rs	189	UserRole
+crates/integration-tests/tests/e2e_scoped_response_resources.rs	30	UserRole
+crates/integration-tests/tests/e2e_scoped_response_resources.rs	205	UserRole
+crates/integration-tests/tests/e2e_tips_withdrawals.rs	23	UserRole
+crates/integration-tests/tests/e2e_tips_withdrawals.rs	94	UserRole
+crates/integration-tests/tests/e2e_user_tenant.rs	337	SystemAdmin
+crates/integration-tests/tests/e2e_user_tenant.rs	338	SystemAdmin
+crates/integration-tests/tests/e2e_user_tenant.rs	340	SystemAdmin
+crates/keycompute-auth/src/jwt.rs	488	SystemAdmin
+crates/keycompute-auth/src/jwt.rs	493	SystemAdmin
+crates/keycompute-auth/src/lib.rs	134	is_admin(
+crates/keycompute-auth/src/lib.rs	135	SystemAdmin
+crates/keycompute-auth/src/lib.rs	401	is_admin(
+crates/keycompute-auth/src/lib.rs	414	is_admin(
+crates/keycompute-auth/src/lib.rs	418	SystemAdmin
+crates/keycompute-auth/src/lib.rs	430	is_admin(
+crates/keycompute-auth/src/lib.rs	432	SystemAdmin
+crates/keycompute-auth/src/password/register.rs	17	UserRole
+crates/keycompute-auth/src/password/register.rs	504	UserRole
+crates/keycompute-auth/src/permission.rs	52	SystemAdmin
+crates/keycompute-auth/src/permission.rs	72	SystemAdmin
+crates/keycompute-auth/src/permission.rs	92	SystemAdmin
+crates/keycompute-auth/src/permission.rs	155	SystemAdmin
+crates/keycompute-auth/src/permission.rs	211	SystemAdmin
+crates/keycompute-auth/src/permission.rs	249	SystemAdmin
+crates/keycompute-auth/src/permission.rs	324	SystemAdmin
+crates/keycompute-auth/src/permission.rs	344	SystemAdmin
+crates/keycompute-auth/src/permission.rs	353	SystemAdmin
+crates/keycompute-billing/src/usage_log.rs	806	tenant_id: Option<
+crates/keycompute-db/src/models/account.rs	110	tenant_id: Option<
+crates/keycompute-db/src/models/passthrough_binding.rs	39	tenant_id: Option<
+crates/keycompute-db/src/models/pricing_model.rs	93	tenant_id: Option<
+crates/keycompute-db/src/models/tenant_audit_event.rs	12	tenant_id: Option<
+crates/keycompute-db/src/models/tenant_audit_event.rs	28	tenant_id: Option<
+crates/keycompute-db/src/models/user.rs	4	AssignableUserRole;UserRole
+crates/keycompute-db/src/models/user.rs	32	UserRole
+crates/keycompute-db/src/models/user.rs	38	AssignableUserRole
+crates/keycompute-db/src/models/user.rs	39	tenant_id: Option<
+crates/keycompute-db/src/models/user.rs	43	tenant_id: Option<
+crates/keycompute-db/src/models/user.rs	49	tenant_id: Option<
+crates/keycompute-db/src/models/user.rs	90	UserRole
+crates/keycompute-db/src/models/user.rs	107	UserRole
+crates/keycompute-db/src/models/user.rs	208	tenant_id: Option<
+crates/keycompute-db/src/models/user.rs	234	tenant_id: Option<
+crates/keycompute-db/src/models/user_balance.rs	101	tenant_id: Option<
+crates/keycompute-distribution/src/records.rs	215	tenant_id: Option<
+crates/keycompute-distribution/src/rule.rs	126	tenant_id: Option<
+crates/keycompute-server/src/display_cache_tests.rs	186	SystemAdmin
+crates/keycompute-server/src/extractors.rs	170	is_admin(
+crates/keycompute-server/src/extractors.rs	171	SystemAdmin
+crates/keycompute-server/src/extractors.rs	573	SystemAdmin
+crates/keycompute-server/src/extractors.rs	574	is_admin(
+crates/keycompute-server/src/extractors.rs	576	SystemAdmin
+crates/keycompute-server/src/extractors.rs	577	SystemAdmin
+crates/keycompute-server/src/extractors.rs	578	is_admin(
+crates/keycompute-server/src/extractors.rs	596	is_admin(
+crates/keycompute-server/src/extractors.rs	599	is_admin(
+crates/keycompute-server/src/extractors.rs	613	is_admin(
+crates/keycompute-server/src/extractors.rs	616	is_admin(
+crates/keycompute-server/src/handlers/admin_account.rs	238	is_admin(
+crates/keycompute-server/src/handlers/admin_account.rs	418	is_admin(
+crates/keycompute-server/src/handlers/admin_account.rs	550	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_account.rs	575	is_admin(
+crates/keycompute-server/src/handlers/admin_account.rs	790	is_admin(
+crates/keycompute-server/src/handlers/admin_account.rs	949	is_admin(
+crates/keycompute-server/src/handlers/admin_account.rs	1429	is_admin(
+crates/keycompute-server/src/handlers/admin_capacity.rs	51	is_admin(
+crates/keycompute-server/src/handlers/admin_model_catalog.rs	30	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_model_catalog.rs	46	SystemAdmin
+crates/keycompute-server/src/handlers/admin_model_catalog.rs	56	is_admin(
+crates/keycompute-server/src/handlers/admin_monitoring.rs	197	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_passthrough_binding.rs	32	is_admin(
+crates/keycompute-server/src/handlers/admin_passthrough_binding.rs	62	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_passthrough_binding.rs	82	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_pricing.rs	101	is_admin(
+crates/keycompute-server/src/handlers/admin_pricing.rs	174	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_pricing.rs	342	is_admin(
+crates/keycompute-server/src/handlers/admin_pricing.rs	401	is_admin(
+crates/keycompute-server/src/handlers/admin_pricing.rs	521	is_admin(
+crates/keycompute-server/src/handlers/admin_pricing.rs	620	is_admin(
+crates/keycompute-server/src/handlers/admin_pricing.rs	682	is_admin(
+crates/keycompute-server/src/handlers/admin_settings.rs	352	SystemAdmin
+crates/keycompute-server/src/handlers/admin_settings.rs	763	SystemAdmin
+crates/keycompute-server/src/handlers/admin_settings.rs	786	SystemAdmin
+crates/keycompute-server/src/handlers/admin_user.rs	31	AssignableUserRole;UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	65	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_user.rs	94	UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	117	AssignableUserRole
+crates/keycompute-server/src/handlers/admin_user.rs	135	UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	151	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_user.rs	168	UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	180	UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	197	UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	203	UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	244	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	378	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	439	AssignableUserRole
+crates/keycompute-server/src/handlers/admin_user.rs	441	tenant_id: Option<
+crates/keycompute-server/src/handlers/admin_user.rs	453	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	660	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	799	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	1238	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	1430	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	1509	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	1567	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	1621	is_admin(
+crates/keycompute-server/src/handlers/admin_user.rs	1983	AssignableUserRole
+crates/keycompute-server/src/handlers/admin_user.rs	1999	AssignableUserRole
+crates/keycompute-server/src/handlers/admin_user.rs	2014	AssignableUserRole
+crates/keycompute-server/src/handlers/admin_user.rs	2075	UserRole
+crates/keycompute-server/src/handlers/admin_user.rs	2085	UserRole
+crates/keycompute-server/src/handlers/billing.rs	272	tenant_id: Option<
+crates/keycompute-server/src/handlers/billing.rs	296	is_admin(
+crates/keycompute-server/src/handlers/billing.rs	381	SystemAdmin
+crates/keycompute-server/src/handlers/distribution.rs	391	is_admin(
+crates/keycompute-server/src/handlers/distribution.rs	441	is_admin(
+crates/keycompute-server/src/handlers/distribution.rs	499	is_admin(
+crates/keycompute-server/src/handlers/distribution.rs	538	is_admin(
+crates/keycompute-server/src/handlers/distribution.rs	577	is_admin(
+crates/keycompute-server/src/handlers/distribution.rs	635	is_admin(
+crates/keycompute-server/src/handlers/distribution.rs	700	is_admin(
+crates/keycompute-server/src/handlers/payment.rs	479	SystemAdmin
+crates/keycompute-server/src/main.rs	21	UserRole
+crates/keycompute-server/src/main.rs	704	UserRole
+crates/keycompute-server/src/middleware.rs	1683	SystemAdmin
+crates/keycompute-server/src/middleware.rs	1684	SystemAdmin
+crates/keycompute-server/src/middleware.rs	1685	SystemAdmin
+crates/keycompute-server/src/middleware.rs	1776	SystemAdmin
+crates/keycompute-server/src/middleware.rs	1833	SystemAdmin
+crates/keycompute-server/src/middleware.rs	1840	SystemAdmin
+crates/keycompute-server/src/middleware.rs	1851	SystemAdmin
+crates/keycompute-server/src/middleware.rs	3434	SystemAdmin
+crates/keycompute-server/src/middleware.rs	3450	SystemAdmin
+crates/keycompute-server/src/middleware.rs	3456	is_admin(
+crates/keycompute-server/src/middleware.rs	3760	SystemAdmin
+crates/keycompute-server/src/middleware.rs	3781	SystemAdmin
+crates/keycompute-types/src/lib.rs	59	AssignableUserRole;UserRole
+crates/keycompute-types/src/tenant.rs	68	tenant_id: Option<
+crates/keycompute-types/src/user.rs	61	UserRole
+crates/keycompute-types/src/user.rs	67	UserRole
+crates/keycompute-types/src/user.rs	69	UserRole
+crates/keycompute-types/src/user.rs	71	is_admin(
+crates/keycompute-types/src/user.rs	72	UserRole
+crates/keycompute-types/src/user.rs	79	AssignableUserRole
+crates/keycompute-types/src/user.rs	84	AssignableUserRole
+crates/keycompute-types/src/user.rs	86	AssignableUserRole;UserRole
+crates/keycompute-types/src/user.rs	87	AssignableUserRole
+crates/keycompute-types/src/user.rs	89	AssignableUserRole;UserRole
+crates/keycompute-types/src/user.rs	90	AssignableUserRole;UserRole
+crates/keycompute-types/src/user.rs	97	AssignableUserRole;UserRole
+crates/keycompute-types/src/user.rs	101	UserRole
+crates/keycompute-types/src/user.rs	102	UserRole
+crates/keycompute-types/src/user.rs	103	UserRole
+crates/keycompute-types/src/user.rs	108	UserRole
+crates/keycompute-types/src/user.rs	117	UserRole
+crates/keycompute-types/src/user.rs	120	UserRole
+crates/keycompute-types/src/user.rs	121	UserRole
+crates/keycompute-types/src/user.rs	127	AssignableUserRole
+crates/keycompute-types/src/user.rs	128	AssignableUserRole
+crates/keycompute-types/src/user.rs	131	AssignableUserRole
+crates/keycompute-types/src/user.rs	132	AssignableUserRole
+crates/keycompute-types/src/user.rs	138	AssignableUserRole
+crates/keycompute-types/src/user.rs	146	AssignableUserRole
+crates/keycompute-types/src/user.rs	149	AssignableUserRole
+crates/keycompute-types/src/user.rs	150	AssignableUserRole
+crates/keycompute-types/src/user.rs	155	AssignableUserRole;UserRole
+crates/keycompute-types/src/user.rs	156	UserRole
+packages/client-api/src/api/admin/account.rs	250	tenant_id: Option<
+packages/client-api/src/api/admin/model_catalog.rs	21	tenant_id: Option<
+packages/client-api/src/api/admin/model_catalog.rs	88	tenant_id: Option<
+packages/client-api/src/api/admin/monitoring.rs	182	tenant_id: Option<
+packages/client-api/src/api/admin/passthrough_binding.rs	123	tenant_id: Option<
+packages/client-api/src/api/admin/payment.rs	83	tenant_id: Option<
+packages/client-api/src/api/admin/pricing.rs	39	tenant_id: Option<
+packages/client-api/src/api/admin/pricing.rs	119	tenant_id: Option<
+packages/client-api/src/api/admin/pricing.rs	238	tenant_id: Option<
+packages/client-api/src/api/admin/user.rs	3	AssignableUserRole;UserRole
+packages/client-api/src/api/admin/user.rs	12	tenant_id: Option<
+packages/client-api/src/api/admin/user.rs	14	UserRole
+packages/client-api/src/api/admin/user.rs	35	UserRole
+packages/client-api/src/api/admin/user.rs	121	AssignableUserRole
+packages/client-api/src/api/admin/user.rs	124	tenant_id: Option<
+packages/client-api/src/api/admin/user.rs	137	AssignableUserRole
+packages/client-api/src/api/admin/user.rs	157	tenant_id: Option<
+packages/client-api/src/lib.rs	52	AssignableUserRole;UserRole
+packages/client-api/tests/admin_test.rs	3	AssignableUserRole
+packages/client-api/tests/admin_test.rs	178	AssignableUserRole
+packages/web/src/app.rs	287	is_admin(
+packages/web/src/app.rs	479	is_admin(
+packages/web/src/app.rs	485	is_admin(
+packages/web/src/i18n/en.rs	1637	users.role
+packages/web/src/i18n/en.rs	1638	users.role
+packages/web/src/i18n/en.rs	1639	users.role
+packages/web/src/i18n/zh.rs	1420	users.role
+packages/web/src/i18n/zh.rs	1421	users.role
+packages/web/src/i18n/zh.rs	1422	users.role
+packages/web/src/stores/user_store.rs	19	is_admin(
+packages/web/src/stores/user_store.rs	74	is_admin(
+packages/web/src/stores/user_store.rs	77	is_admin(
+packages/web/src/utils/display.rs	67	users.role
+packages/web/src/utils/display.rs	68	users.role
+packages/web/src/utils/display.rs	69	users.role
+packages/web/src/views/dashboard/mod.rs	29	is_admin(
+packages/web/src/views/shared/accounts.rs	280	is_admin(
+packages/web/src/views/shared/distribution_records.rs	31	is_admin(
+packages/web/src/views/shared/monitoring.rs	102	is_admin(
+packages/web/src/views/shared/monitoring.rs	134	is_admin(
+packages/web/src/views/shared/node_gateway.rs	53	is_admin(
+packages/web/src/views/shared/payment_orders.rs	34	is_admin(
+packages/web/src/views/shared/pricing.rs	88	is_admin(
+packages/web/src/views/shared/settings.rs	20	is_admin(
+packages/web/src/views/shared/system.rs	276	is_admin(
+packages/web/src/views/shared/tenants.rs	67	is_admin(
+packages/web/src/views/shared/users.rs	2	AssignableUserRole;UserRole
+packages/web/src/views/shared/users.rs	1174	is_admin(
+packages/web/src/views/shared/users.rs	1201	UserRole
+packages/web/src/views/shared/users.rs	1380	AssignableUserRole
+packages/web/src/views/shared/users.rs	1436	UserRole
+packages/web/src/views/shared/users.rs	1437	UserRole
+packages/web/src/views/shared/users.rs	1442	UserRole
+packages/web/src/views/shared/users.rs	1815	UserRole
+packages/web/src/views/shared/users.rs	1924	UserRole
+packages/web/src/views/shared/users.rs	1941	UserRole
+packages/web/src/views/shared/users.rs	1970	UserRole
+packages/web/src/views/shared/users.rs	1971	UserRole
+packages/web/src/views/shared/users.rs	2058	users.role
+packages/web/src/views/shared/users.rs	2059	users.role

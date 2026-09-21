@@ -6,20 +6,20 @@ The matrix is the source of truth for the hard-cutover authorization implementat
 |---|---|---|---|---|
 | users | platform identity | manage members in own tenant | self only | root; operator allowlist |
 | tenants | tenant control plane | settings in own tenant | read active context | root/operator lifecycle |
-| tenant_memberships | tenant | full member CRUD except platform role | none | root/operator support |
-| tenant_invitations | tenant | create/revoke/consume own tenant | none | root/operator support |
+| tenant_memberships | tenant | full member CRUD except platform role | none | root explicit support; operator diagnostics only |
+| tenant_invitations | tenant | create/revoke/consume own tenant | none | root explicit support; operator diagnostics only |
 | produce_ai_keys | tenant + user owner | manage all own-tenant keys; secrets never read | own keys | root audited |
-| accounts | tenant-owned | full CRUD in own tenant | use only | root/operator global |
-| passthrough_bindings | tenant-owned | full CRUD in own tenant | use only | root/operator global |
-| pricing_models | tenant or platform | tenant records only | read effective price | root/operator global |
+| accounts | tenant-owned | full CRUD in own tenant | use only | root global management; operator diagnostics |
+| passthrough_bindings | tenant-owned | full CRUD in own tenant | use only | root global management; operator diagnostics |
+| pricing_models | tenant or platform | tenant records only | read effective price | root global management; operator diagnostics |
 | usage_logs | tenant + user owner | read own tenant | own records | operator aggregate only |
-| user_balances | user-owned | view tenant records; mutation requires explicit billing action | own balance | root/operator payment policy |
-| payment_orders | user/tenant billing | own tenant records | own orders | root/operator payment policy |
-| balance_reservations | user/tenant request | inspect/release own tenant request | own request | root/operator recovery |
+| user_balances | user-owned | view tenant records; mutation requires explicit billing action | own balance | root audited billing; operator aggregate read |
+| payment_orders | user/tenant billing | own tenant records | own orders | root audited billing; operator aggregate read |
+| balance_reservations | user/tenant request | inspect/release own tenant request | own request | root audited recovery; operator diagnostics |
 | responses/scoped_responses | tenant + owner | all own-tenant Responses | own or shared | root audited |
 | response_affinities | tenant + owner | tenant lookup without changing owner | own resources | root audited |
 | conversations | tenant + owner | own-tenant management | own/shared | root audited |
-| distribution_rules | tenant | full CRUD in own tenant | none | root/operator global |
+| distribution_rules | tenant | full CRUD in own tenant | none | root global management; operator diagnostics |
 | nodes/node_tasks | tenant + owner | own-tenant management | assigned use | root/operator operations |
 | system_settings | platform | none | none | root only |
 | global shared accounts | global shared | consume only | consume only | owner/root write |
@@ -54,3 +54,16 @@ The following are not tenant invitations and must not be reused for membership:
 - distribution referral links.
 
 Membership invitation records must include tenant, target email, requested tenant role, hashed one-time token, expiry, status, and audit actor.
+
+## Source inventory
+
+`tenant-schema-inventory.tsv` classifies every table observed at phase 0.
+`tenant-route-inventory.tsv` records all current route declarations and their
+new trust domains; final routes are implemented in the route phase.
+`tenant-cache-job-inventory.tsv` records cache and spawned-work reference sites.
+`tenant-legacy-paths.tsv` is the removal inventory, not a permitted legacy API.
+The line numbers are phase-0 navigation aids, not final source positions.
+
+`tenant-implementation-decisions.md` resolves earlier draft differences in favor
+of the latest request, including main-only delivery, membership status names,
+explicit tenant selection and the independently deployed Go-service boundary.

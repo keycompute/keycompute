@@ -82,7 +82,7 @@ The `new/` Go service must consume this model if it shares identity or authoriza
 
 ## Delivery gates
 
-Each implementation phase is reviewed and tested on a feature branch before its commit is pushed. The phases are development gates, not deployable mixed-mode states.
+Each implementation phase is implemented, repeatedly reviewed, tested, committed and pushed directly on main. No new branch or worktree is created. The phases are development gates, not deployable mixed-mode states.
 
 The final cutover requires schema assertions, authorization matrix tests, invitation concurrency tests, cross-tenant negative tests, cache and async isolation tests, Responses admin/member tests, formatting, workspace checks, Clippy, and a clean working tree.
 
