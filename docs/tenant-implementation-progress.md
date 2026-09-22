@@ -6,6 +6,8 @@ phase-1 field/provenance alignment, tenant control/member/invitation APIs and
 scoped tenant/platform pricing and provider/binding administration have passed
 local acceptance gates recorded below. Tenant usage/billing/payment/wallet
 reporting and owner-only tenant key-pool backend APIs are also accepted.
+Distribution read/reporting isolation is accepted as recorded below; policy
+writes and the other remaining resource families are not included.
 Remaining resource mutations, complete platform
 routing/operator allowlists, client UI and final deployment remain unaccepted.
 
@@ -241,6 +243,45 @@ all-target/all-feature strict Clippy, formatting, whitespace and exact source
 hashes passed. Counts above are subsets/repeats, not additional workspace tests.
 Remote CI is checked after this follow-up push. No frontend, distribution,
 production database, credential or deployment changes are included.
+
+## Current phases 3/5 — distribution reporting accepted
+
+This is a read/reporting subgate, not distribution-rule CRUD or overall phase closure.
+Canonical tenant read routes expose distribution records/detail/stats and policy
+metadata list/detail. Explicit platform paths carry a mandatory target tenant;
+canonical personal paths retain beneficiary self, including for administrators.
+One SQL builder binds the same actor, tenant, owner and status/level/time/currency
+filters before pagination for every record query and per-currency aggregate.
+Historical everyone records keep a nullable beneficiary rather than a fake UUID.
+
+Legacy root read adapters use the current selected tenant with explicit platform
+authority; they no longer filter by a beneficiary across all tenants. Their CNY
+presentation remains explicitly CNY. Large legacy rule collections fail explicitly
+and direct callers to bounded canonical pagination instead of silently truncating.
+The canonical routes expose individual currencies without relabeling USD as CNY.
+
+Personal earnings, cached overview origin and referral financial sums now require
+verified tenant-plus-beneficiary scope and current primary membership/user/tenant
+checks. Global self-referral relationships remain global metadata, not tenant
+invitations; their financial columns are selected-tenant CNY. A new cache namespace
+prevents replay of older all-tenant financial snapshots. Operator and inference
+credentials cannot access tenant/platform individual reports.
+
+Real PostgreSQL/HTTP regressions cover multi-tenant roles, actual cache hits and
+revocation, fabricated authority, foreign IDs, nullable identities, CNY/USD totals,
+identical filters/counts, literal Unicode search and a read-only transaction.
+Existing fixed-query-count referral tests retain their large-page assertions.
+Final default-parallel native workspace: **2,508 passed, 0 failed, 30 default
+ignored**, including desktop/mobile. Strict all-target/all-feature workspace
+Clippy, formatting, whitespace and all13 frozen-source hashes passed. The
+12-test reporting/referral/display suite also passed with eight threads; it
+is a subset of the workspace count, not an additional test total. Legacy
+feature-enable checks now use the primary too, and the existing disable test
+also verifies the personal earnings endpoint is denied.
+
+No production database, credential, service or deployment changes. Policy writes,
+node/tasks, Responses, remaining financial operations, operator routes, full UI and
+final release remain unaccepted. Unfinished mutation drafts are not in this commit.
 
 # Tenant subsystem implementation status
 

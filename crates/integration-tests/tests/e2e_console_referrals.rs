@@ -47,6 +47,10 @@ impl ConnectionTrait for Counted<'_> {
         self.db.query_all(s).await
     }
 }
+fn display_scope(tenant: Uuid, user: Uuid) -> keycompute_types::TenantScope {
+    keycompute_types::TenantScope::checked(tenant, user, keycompute_types::TenantRole::Member)
+        .unwrap()
+}
 struct Fixture {
     db: DatabaseConnection,
     guard: TestDataGuard,
@@ -136,10 +140,10 @@ async fn same_query_count_for_twenty_and_thousand_referrals_with_stable_nonoverl
     for count in [20, 1000] {
         let mut f = Fixture::new(count).await;
         let db = f.counted();
-        let p1 = find_referral_display_page(&db, f.beneficiary.id, 10, 0)
+        let p1 = find_referral_display_page(&db, display_scope(f.tenant, f.beneficiary.id), 10, 0)
             .await
             .unwrap();
-        let p2 = find_referral_display_page(&db, f.beneficiary.id, 10, 10)
+        let p2 = find_referral_display_page(&db, display_scope(f.tenant, f.beneficiary.id), 10, 10)
             .await
             .unwrap();
         assert_eq!(p1.total, count);
@@ -172,9 +176,14 @@ async fn same_query_count_for_twenty_and_thousand_referrals_with_stable_nonoverl
             plan[0]["Planning Time"], plan[0]["Execution Time"], plan[0]["Plan"]["Actual Rows"]
         );
 
-        let empty = find_referral_display_page(&db, f.beneficiary.id, 20, count + 10)
-            .await
-            .unwrap();
+        let empty = find_referral_display_page(
+            &db,
+            display_scope(f.tenant, f.beneficiary.id),
+            20,
+            count + 10,
+        )
+        .await
+        .unwrap();
         assert!(empty.referrals.is_empty());
         assert_eq!(empty.total, count);
         f.guard.cleanup().await.unwrap();
@@ -193,7 +202,7 @@ async fn independent_aggregates_preserve_precise_money_and_do_not_multiply_rows_
     f.commission(second, f.beneficiary.id, "level1", "0.3000000003")
         .await;
     f.commission(first, f.users[1], "level1", "999").await;
-    let page = find_referral_display_page(&f.db, f.beneficiary.id, 20, 0)
+    let page = find_referral_display_page(&f.db, display_scope(f.tenant, f.beneficiary.id), 20, 0)
         .await
         .unwrap();
     assert_eq!(
@@ -219,7 +228,7 @@ async fn independent_aggregates_preserve_precise_money_and_do_not_multiply_rows_
         f.beneficiary.tenant_id, f.tenant,
         "legitimate cross-tenant referral must remain visible"
     );
-    let unrelated = find_referral_display_page(&f.db, f.users[2], 20, 0)
+    let unrelated = find_referral_display_page(&f.db, display_scope(f.tenant, f.users[2]), 20, 0)
         .await
         .unwrap();
     assert_eq!(unrelated.total, 0);
@@ -230,16 +239,21 @@ async fn independent_aggregates_preserve_precise_money_and_do_not_multiply_rows_
 async fn empty_referral_count_and_invalid_pagination_are_not_ambiguous() {
     let mut f = Fixture::new(0).await;
     let db = f.counted();
-    let page = find_referral_display_page(&db, f.beneficiary.id, 20, 0)
+    let page = find_referral_display_page(&db, display_scope(f.tenant, f.beneficiary.id), 20, 0)
         .await
         .unwrap();
     assert_eq!(page.total, 0);
     assert!(page.referrals.is_empty());
     for (limit, offset) in [(0, 0), (101, 0), (20, -1), (20, i64::MAX)] {
         assert!(
-            find_referral_display_page(&db, f.beneficiary.id, limit, offset)
-                .await
-                .is_err()
+            find_referral_display_page(
+                &db,
+                display_scope(f.tenant, f.beneficiary.id),
+                limit,
+                offset
+            )
+            .await
+            .is_err()
         );
     }
     assert_eq!(
@@ -334,6 +348,9 @@ async fn http_referral_pages_preserve_auth_feature_guards_and_bounded_legacy_sha
     .unwrap();
     let status = get_page(&app, Some(&token), root).await.0;
     let overview_disabled = get_page(&app, Some(&token), overview_path).await.0;
+    let earnings_disabled = get_page(&app, Some(&token), "/api/v1/me/distribution/earnings")
+        .await
+        .0;
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE system_settings SET value=$1 WHERE key='distribution_enabled'",
@@ -343,6 +360,7 @@ async fn http_referral_pages_preserve_auth_feature_guards_and_bounded_legacy_sha
     .unwrap();
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(overview_disabled, StatusCode::FORBIDDEN);
+    assert_eq!(earnings_disabled, StatusCode::FORBIDDEN);
     assert_eq!(
         state.display_cache.metrics()["hit"],
         1,

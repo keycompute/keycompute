@@ -97,18 +97,23 @@ SELECT jsonb_build_object('as_of',statement_timestamp(),
 "#;
 
 /// Independent aggregate subqueries prevent fanout multiplication of money.
-pub async fn distribution(db: &impl ConnectionTrait, user: Uuid) -> Result<Value, DbError> {
+pub async fn distribution(
+    db: &impl ConnectionTrait,
+    scope: keycompute_types::TenantScope,
+) -> Result<Value, DbError> {
     json_query(db, r#"
     SELECT jsonb_build_object('as_of',statement_timestamp(),'earnings',
       jsonb_build_object('user_id',$1::uuid,'currency','CNY',
         'total_earnings',d.total::text,'pending_amount',d.pending::text,'settled_amount',d.settled::text,
         'level1_referrals',r.level1,'level2_referrals',r.level2))
-    FROM (SELECT COALESCE(SUM(share_amount),0) AS total,
-      COALESCE(SUM(share_amount) FILTER (WHERE status='pending'),0) AS pending,
-      COALESCE(SUM(share_amount) FILTER (WHERE status='settled'),0) AS settled
-      FROM distribution_records WHERE beneficiary_id=$1) d
+    FROM (SELECT COALESCE(SUM(dr.share_amount),0) AS total,
+      COALESCE(SUM(dr.share_amount) FILTER (WHERE dr.status='pending'),0) AS pending,
+      COALESCE(SUM(dr.share_amount) FILTER (WHERE dr.status='settled'),0) AS settled
+      FROM distribution_records dr JOIN usage_logs ul ON ul.tenant_id=dr.tenant_id AND ul.id=dr.usage_log_id
+      WHERE dr.beneficiary_id=$1 AND dr.tenant_id=$2 AND ul.currency='CNY') d
     CROSS JOIN (SELECT COUNT(*) FILTER (WHERE level1_referrer_id=$1) AS level1,
       COUNT(*) FILTER (WHERE level2_referrer_id=$1) AS level2
       FROM user_referrals WHERE level1_referrer_id=$1 OR level2_referrer_id=$1) r
-    "#, vec![user.into()]).await
+    WHERE EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$2 AND m.user_id=$1 AND m.status='active' AND u.status='active' AND t.status='active')
+    "#, vec![scope.user_id().into(),scope.tenant_id().into()]).await
 }

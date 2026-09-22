@@ -5,6 +5,7 @@
 pub mod account;
 pub mod api_key;
 pub mod distribution_record;
+pub mod distribution_scope;
 pub mod native_capability;
 pub mod node;
 pub mod node_session;
@@ -42,6 +43,7 @@ pub use api_key::{CreateProduceAiKeyRequest, ProduceAiKey, ProduceAiKeyResponse}
 pub use distribution_record::{
     CreateDistributionRecordRequest, DistributionLevelStats, DistributionRecord, DistributionStats,
 };
+pub use distribution_scope::{DistributionCurrencyStats, DistributionRecordReport};
 pub use node::{
     CreateNodeRequest, NODE_STATUS_EXCLUDED, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE, Node,
 };

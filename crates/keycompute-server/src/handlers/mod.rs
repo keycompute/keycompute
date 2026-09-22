@@ -30,6 +30,7 @@ pub mod requirement;
 pub mod responses;
 pub mod responses_websocket;
 pub mod routing;
+pub mod tenant_distribution;
 pub mod user;
 
 // 认证相关

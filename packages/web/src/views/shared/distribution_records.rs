@@ -257,9 +257,9 @@ pub fn DistributionRecords() -> Element {
                                                 td { {format_time(&rec.created_at)} }
                                                 td {
                                                     span {
-                                                        title: "{rec.referrer_id}",
+                                                        title: rec.referrer_id.as_deref().unwrap_or("—"),
                                                         style: "cursor: help; font-family: monospace; font-size: 13px;",
-                                                        {short_id(&rec.referrer_id)}
+                                                        {short_id(rec.referrer_id.as_deref().unwrap_or("—"))}
                                                     }
                                                 }
                                             }

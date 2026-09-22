@@ -306,7 +306,7 @@ pub struct DistributionRecordPage {
 pub struct DistributionRecord {
     pub id: String,
     #[serde(alias = "beneficiary_id")]
-    pub referrer_id: String,
+    pub referrer_id: Option<String>,
     #[serde(alias = "usage_log_id")]
     pub referred_id: String,
     #[serde(default, deserialize_with = "deserialize_string_from_number_or_string")]

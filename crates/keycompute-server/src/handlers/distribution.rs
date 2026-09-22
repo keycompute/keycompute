@@ -9,7 +9,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::{AuthExtractor, ConsoleAuth},
     handlers::configured_public_base_url,
     handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
@@ -60,7 +60,7 @@ pub struct DistributionRecordResponse {
     /// 记录 ID
     pub id: String,
     /// 推荐人（受益人）ID
-    pub referrer_id: String,
+    pub referrer_id: Option<String>,
     /// 被推荐用户 ID
     pub referred_id: String,
     /// 被推荐用户消费金额
@@ -228,7 +228,7 @@ fn build_invite_link(base_url: &str, referral_code: &str, source: Option<&str>) 
 ///
 /// GET /api/v1/me/referral/code
 pub async fn get_my_referral_code(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
 ) -> Result<Json<ReferralCodeResponse>> {
     let pool = state
@@ -237,7 +237,7 @@ pub async fn get_my_referral_code(
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用
-    check_distribution_enabled(pool).await?;
+    check_distribution_enabled(pool.write_conn()).await?;
 
     // 获取推荐统计
     let referral_stats = keycompute_db::UserReferral::get_stats_by_referrer(pool, auth.user_id)
@@ -262,7 +262,7 @@ pub async fn get_my_referral_code(
 ///
 /// POST /api/v1/me/referral/invite-link
 pub async fn generate_invite_link(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
     Json(req): Json<GenerateInviteLinkRequest>,
 ) -> Result<Json<InviteLinkResponse>> {
@@ -272,7 +272,7 @@ pub async fn generate_invite_link(
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用
-    check_distribution_enabled(pool).await?;
+    check_distribution_enabled(pool.write_conn()).await?;
 
     let base_url = configured_public_base_url(state.app_base_url.as_deref()).ok_or_else(|| {
         ApiError::Config("APP_BASE_URL is required to generate public invite links".to_string())
@@ -320,7 +320,7 @@ fn string_to_bigdecimal(value: &str) -> Result<BigDecimal> {
 }
 
 /// 检查分销系统是否启用
-async fn check_distribution_enabled(pool: &impl ConnectionTrait) -> Result<()> {
+pub(crate) async fn check_distribution_enabled(pool: &impl ConnectionTrait) -> Result<()> {
     let enabled =
         keycompute_db::SystemSetting::find_by_key(pool, setting_keys::DISTRIBUTION_ENABLED)
             .await
@@ -339,32 +339,18 @@ async fn check_distribution_enabled(pool: &impl ConnectionTrait) -> Result<()> {
     }
 }
 
-async fn build_distribution_record_response(
-    pool: &impl ConnectionTrait,
-    record: keycompute_db::DistributionRecord,
-) -> Result<DistributionRecordResponse> {
-    let usage_log = keycompute_db::UsageLog::find_by_id(pool, record.usage_log_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    let (referred_id, amount) = usage_log
-        .map(|usage_log| {
-            (
-                usage_log.user_id.to_string(),
-                bigdecimal_to_string(&usage_log.user_amount),
-            )
-        })
-        .unwrap_or_else(|| (record.usage_log_id.to_string(), "0".to_string()));
-
-    Ok(DistributionRecordResponse {
+fn build_distribution_record_response(
+    record: keycompute_db::models::distribution_scope::DistributionRecordReport,
+) -> DistributionRecordResponse {
+    DistributionRecordResponse {
         id: record.id.to_string(),
-        referrer_id: record.beneficiary_id.to_string(),
-        referred_id,
-        amount,
-        commission: bigdecimal_to_string(&record.share_amount),
+        referrer_id: record.beneficiary_id.map(|id| id.to_string()),
+        referred_id: record.referred_id.to_string(),
+        amount: record.amount.to_string(),
+        commission: record.commission.to_string(),
         status: record.status,
         created_at: record.created_at.to_rfc3339(),
-    })
+    }
 }
 
 // ==================== API Handlers ====================
@@ -372,114 +358,53 @@ async fn build_distribution_record_response(
 /// 查看分销记录
 ///
 /// GET /api/v1/distribution/records
-/// - Admin: 查看所有记录
-/// - 普通用户: 查看自己的记录
+/// Root-only legacy view of the explicitly selected tenant.
+/// This single-currency UI remains CNY; canonical report routes expose currencies.
 pub async fn list_distribution_records(
     auth: AuthExtractor,
     State(state): State<AppState>,
     Query(query): Query<DistributionQuery>,
 ) -> Result<Json<serde_json::Value>> {
+    use keycompute_db::models::distribution_scope::{
+        self as scoped, DistributionScope, RecordFilter,
+    };
+    let root = auth.require_platform(keycompute_auth::AuthorizationAction::ManagePlatform)?;
+    let scope = DistributionScope::Platform(root, auth.tenant_id);
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
-
+        .ok_or_else(|| ApiError::ServiceUnavailable("Distribution storage unavailable".into()))?;
     let modern_pagination = query.page.is_some() || query.page_size.is_some();
-    let (page, page_size, offset) =
-        normalize_list_pagination(query.page, query.page_size, query.limit, query.offset);
-
-    let records = if auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
-        // Admin 可以查看所有记录，或按受益人筛选
-        if let Some(beneficiary_id) = query.beneficiary_id {
-            keycompute_db::DistributionRecord::find_by_beneficiary_filtered(
-                pool,
-                beneficiary_id,
-                query.status.as_deref(),
-                query.level.as_deref(),
-                page_size,
-                offset,
-            )
-            .await
-            .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
-        } else {
-            keycompute_db::DistributionRecord::find_by_tenant_filtered(
-                pool,
-                auth.tenant_id,
-                query.status.as_deref(),
-                query.level.as_deref(),
-                page_size,
-                offset,
-            )
-            .await
-            .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
-        }
-    } else {
-        // 普通用户只能查看自己的记录
-        keycompute_db::DistributionRecord::find_by_beneficiary_filtered(
-            pool,
-            auth.user_id,
-            query.status.as_deref(),
-            query.level.as_deref(),
-            page_size,
-            offset,
-        )
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
+    let (page, page_size, offset) = normalize_list_pagination(
+        query.page,
+        query.page_size.map(|v| v.clamp(1, 100)),
+        query.limit.map(|v| v.clamp(1, 100)),
+        query.offset,
+    );
+    let filter = RecordFilter {
+        beneficiary_id: query.beneficiary_id,
+        status: query.status,
+        level: query.level,
+        currency: Some("CNY".into()),
+        ..Default::default()
     };
-
-    let mut responses = Vec::with_capacity(records.len());
-    for record in records {
-        responses.push(build_distribution_record_response(pool, record).await?);
-    }
-
+    let records = scoped::records(pool.write_conn(), scope, &filter, page_size, offset)
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable("Distribution records unavailable".into()))?;
+    let responses: Vec<_> = records
+        .into_iter()
+        .map(build_distribution_record_response)
+        .collect();
     if !modern_pagination {
-        return Ok(Json(serde_json::to_value(responses).map_err(|error| {
-            ApiError::Internal(format!("Failed to serialize distribution records: {error}"))
+        return Ok(Json(serde_json::to_value(responses).map_err(|_| {
+            ApiError::Internal("Distribution serialization failed".into())
         })?));
     }
-
-    let total = if auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
-        if let Some(beneficiary_id) = query.beneficiary_id {
-            keycompute_db::DistributionRecord::count_by_beneficiary_filtered(
-                pool,
-                beneficiary_id,
-                query.status.as_deref(),
-                query.level.as_deref(),
-            )
-            .await
-        } else {
-            keycompute_db::DistributionRecord::count_by_tenant_filtered(
-                pool,
-                auth.tenant_id,
-                query.status.as_deref(),
-                query.level.as_deref(),
-            )
-            .await
-        }
-    } else {
-        keycompute_db::DistributionRecord::count_by_beneficiary_filtered(
-            pool,
-            auth.user_id,
-            query.status.as_deref(),
-            query.level.as_deref(),
-        )
+    let total = scoped::record_count(pool.write_conn(), scope, &filter)
         .await
-    }
-    .map_err(|e| ApiError::Internal(format!("Database error: {e}")))?;
-
+        .map_err(|_| ApiError::ServiceUnavailable("Distribution count unavailable".into()))?;
     Ok(Json(
-        serde_json::to_value(DistributionRecordPageResponse {
-            records: responses,
-            total,
-            page,
-            page_size,
-            total_pages: total_pages(total, page_size),
-        })
-        .map_err(|error| {
-            ApiError::Internal(format!(
-                "Failed to serialize distribution record page: {error}"
-            ))
-        })?,
+        serde_json::json!({"records": responses,"total": total,"page": page,"page_size":page_size,"total_pages":total_pages(total,page_size)}),
     ))
 }
 
@@ -490,40 +415,53 @@ pub async fn get_distribution_stats(
     auth: AuthExtractor,
     State(state): State<AppState>,
 ) -> Result<Json<DistributionStatsResponse>> {
+    auth.require_platform(keycompute_auth::AuthorizationAction::ManagePlatform)?;
+    let own = auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?;
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
-
-    // 检查分销系统是否启用（普通用户）
-    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
-        check_distribution_enabled(pool).await?;
-    }
-
-    // 获取当前用户的分销统计
-    let stats = keycompute_db::DistributionRecord::get_stats_by_beneficiary(pool, auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    // 获取按层级的统计
-    let level_stats =
-        keycompute_db::DistributionRecord::get_level_stats_by_beneficiary(pool, auth.user_id)
+        .ok_or_else(|| ApiError::ServiceUnavailable("Distribution storage unavailable".into()))?;
+    let values = keycompute_db::models::distribution_scope::record_stats(
+        pool.write_conn(),
+        keycompute_db::models::distribution_scope::DistributionScope::Owned(own),
+        &keycompute_db::models::distribution_scope::RecordFilter {
+            currency: Some("CNY".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("Distribution statistics unavailable".into()))?;
+    let stats = values.into_iter().next();
+    let referrals =
+        keycompute_db::UserReferral::get_stats_by_referrer(pool.write_conn(), auth.user_id)
             .await
-            .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
-    // 获取推荐统计
-    let referral_stats = keycompute_db::UserReferral::get_stats_by_referrer(pool, auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
-
+            .map_err(|_| ApiError::ServiceUnavailable("Referral statistics unavailable".into()))?;
     Ok(Json(DistributionStatsResponse {
-        total_earnings: bigdecimal_to_string(&stats.total_amount),
-        pending_amount: bigdecimal_to_string(&stats.pending_amount),
-        settled_amount: bigdecimal_to_string(&stats.settled_amount),
-        currency: "CNY".to_string(),
-        level1_earnings: bigdecimal_to_string(&level_stats.level1_amount),
-        level2_earnings: bigdecimal_to_string(&level_stats.level2_amount),
-        referral_count: referral_stats.total_referrals,
+        total_earnings: stats
+            .as_ref()
+            .map(|v| v.total_earnings.to_string())
+            .unwrap_or_else(|| "0".into()),
+        pending_amount: stats
+            .as_ref()
+            .map(|v| v.pending_amount.to_string())
+            .unwrap_or_else(|| "0".into()),
+        settled_amount: stats
+            .as_ref()
+            .map(|v| v.settled_amount.to_string())
+            .unwrap_or_else(|| "0".into()),
+        currency: "CNY".into(),
+        level1_earnings: stats
+            .as_ref()
+            .map(|v| v.level1_earnings.to_string())
+            .unwrap_or_else(|| "0".into()),
+        level2_earnings: stats
+            .as_ref()
+            .map(|v| v.level2_earnings.to_string())
+            .unwrap_or_else(|| "0".into()),
+        referral_count: referrals.total_referrals,
     }))
 }
 
@@ -535,19 +473,30 @@ pub async fn list_distribution_rules(
     auth: AuthExtractor,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<DistributionRuleResponse>>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let root = auth.require_platform(keycompute_auth::AuthorizationAction::ManagePlatform)?;
+    let scope = keycompute_db::models::distribution_scope::DistributionScope::Platform(
+        root,
+        auth.tenant_id,
+    );
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
-    // 查询租户的所有规则
-    let rules = keycompute_db::TenantDistributionRule::find_all_by_tenant(pool, auth.tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
+    let filter = keycompute_db::models::distribution_scope::RuleFilter::default();
+    let total =
+        keycompute_db::models::distribution_scope::rule_count(pool.write_conn(), scope, &filter)
+            .await
+            .map_err(|_| ApiError::ServiceUnavailable("Distribution rules unavailable".into()))?;
+    if total > 100 {
+        return Err(ApiError::BadRequest(
+            "Use the canonical paginated distribution rule endpoint for more than 100 rules".into(),
+        ));
+    }
+    let rules =
+        keycompute_db::models::distribution_scope::rules(pool.write_conn(), scope, &filter, 100, 0)
+            .await
+            .map_err(|_| ApiError::ServiceUnavailable("Distribution rules unavailable".into()))?;
 
     let responses: Vec<DistributionRuleResponse> = rules
         .into_iter()
@@ -728,7 +677,7 @@ pub async fn delete_distribution_rule(
 ///
 /// GET /api/v1/me/distribution/earnings
 pub async fn get_my_distribution_earnings(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
 ) -> Result<Json<UserDistributionEarningsResponse>> {
     let pool = state
@@ -737,12 +686,24 @@ pub async fn get_my_distribution_earnings(
         .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
 
     // 检查分销系统是否启用
-    check_distribution_enabled(pool).await?;
+    check_distribution_enabled(pool.write_conn()).await?;
 
-    // 获取分销统计
-    let stats = keycompute_db::DistributionRecord::get_stats_by_beneficiary(pool, auth.user_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?;
+    let scope = auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?;
+    let stats = keycompute_db::models::distribution_scope::record_stats(
+        pool.write_conn(),
+        keycompute_db::models::distribution_scope::DistributionScope::Owned(scope),
+        &keycompute_db::models::distribution_scope::RecordFilter {
+            currency: Some("CNY".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("Distribution earnings unavailable".into()))?
+    .into_iter()
+    .next();
 
     // 获取推荐统计
     let referral_stats = keycompute_db::UserReferral::get_stats_by_referrer(pool, auth.user_id)
@@ -751,9 +712,18 @@ pub async fn get_my_distribution_earnings(
 
     Ok(Json(UserDistributionEarningsResponse {
         user_id: auth.user_id.to_string(),
-        total_earnings: bigdecimal_to_string(&stats.total_amount),
-        pending_amount: bigdecimal_to_string(&stats.pending_amount),
-        settled_amount: bigdecimal_to_string(&stats.settled_amount),
+        total_earnings: stats
+            .as_ref()
+            .map(|v| v.total_earnings.to_string())
+            .unwrap_or_else(|| "0".into()),
+        pending_amount: stats
+            .as_ref()
+            .map(|v| v.pending_amount.to_string())
+            .unwrap_or_else(|| "0".into()),
+        settled_amount: stats
+            .as_ref()
+            .map(|v| v.settled_amount.to_string())
+            .unwrap_or_else(|| "0".into()),
         currency: "CNY".to_string(),
         level1_referrals: referral_stats.level1_count,
         level2_referrals: referral_stats.level2_count,
@@ -780,7 +750,7 @@ pub struct ReferralPageResponse {
 /// Read one bounded page. Authentication and distribution visibility checks
 /// remain mandatory; the query only sees this beneficiary's relationships.
 pub async fn get_my_referrals(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
     Query(params): Query<ReferralQuery>,
 ) -> Result<Json<serde_json::Value>> {
@@ -794,7 +764,10 @@ pub async fn get_my_referrals(
         normalize_list_pagination(params.page, params.page_size, None, None);
     let result = keycompute_db::models::referral_display::find_referral_display_page(
         pool,
-        auth.user_id,
+        auth.require_owner(
+            auth.user_id,
+            keycompute_auth::AuthorizationAction::ReadPersonalResource,
+        )?,
         page_size,
         offset,
     )
@@ -831,7 +804,7 @@ pub async fn get_my_referrals(
 
 /// One overview replaces duplicated earnings/count/link requests in the Web UI.
 pub async fn get_my_distribution_overview(
-    auth: AuthExtractor,
+    auth: ConsoleAuth,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
     use crate::display_cache::DisplayCache;
@@ -851,8 +824,11 @@ pub async fn get_my_distribution_overview(
     })?;
     let referral_code = auth.user_id.to_string();
     let invite_link = build_invite_link(&base, &referral_code, None)?;
-    let key = DisplayCache::key(&auth, "distribution-overview", &invite_link);
-    let user = auth.user_id;
+    let key = DisplayCache::key(&auth, "distribution-overview-tenant-v2", &invite_link);
+    let scope = auth.require_owner(
+        auth.user_id,
+        keycompute_auth::AuthorizationAction::ReadPersonalResource,
+    )?;
     let value = state
         .display_cache
         .read(
@@ -862,7 +838,7 @@ pub async fn get_my_distribution_overview(
             key,
             async move {
                 let mut value =
-                    keycompute_db::models::console_display::distribution(pool.write_conn(), user)
+                    keycompute_db::models::console_display::distribution(pool.write_conn(), scope)
                         .await
                         .map_err(|error| {
                             tracing::warn!(%error,"distribution overview query failed");

@@ -163,7 +163,13 @@ async fn distribution_summary_aggregates_once_without_count_money_fanout() {
         INSERT INTO distribution_records(usage_log_id,tenant_id,beneficiary_id,share_amount,share_ratio,level,status)
         SELECT id,$1,$2,0.1000000001,0.1,'level1','settled' FROM usage_logs WHERE user_id=$2
     "#,[tenant.into(),user.into()])).await.unwrap();
-    let value = console_display::distribution(&db, user).await.unwrap();
+    let value = console_display::distribution(
+        &db,
+        keycompute_types::TenantScope::checked(tenant, user, keycompute_types::TenantRole::Member)
+            .unwrap(),
+    )
+    .await
+    .unwrap();
     let e = &value["earnings"];
     assert_eq!(e["level1_referrals"], 1);
     assert_eq!(e["level2_referrals"], 1);
@@ -176,9 +182,21 @@ async fn distribution_summary_aggregates_once_without_count_money_fanout() {
         "0.2000000002".parse::<bigdecimal::BigDecimal>().unwrap()
     );
     assert_eq!(e["settled_amount"], e["total_earnings"]);
-    let empty = console_display::distribution(&db, Uuid::new_v4())
+    let empty = console_display::distribution(&db, referred.scope())
         .await
         .unwrap();
     assert_eq!(empty["earnings"]["level1_referrals"], 0);
+    let fabricated = keycompute_types::TenantScope::checked(
+        tenant,
+        Uuid::new_v4(),
+        keycompute_types::TenantRole::Member,
+    )
+    .unwrap();
+    assert!(
+        console_display::distribution(&db, fabricated)
+            .await
+            .is_err(),
+        "unknown identity is not an authorized empty report"
+    );
     guard.cleanup().await.unwrap();
 }
