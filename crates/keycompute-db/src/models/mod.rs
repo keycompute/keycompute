@@ -4,6 +4,7 @@
 
 pub mod account;
 pub mod api_key;
+pub mod distribution_policy;
 pub mod distribution_record;
 pub mod distribution_scope;
 pub mod native_capability;

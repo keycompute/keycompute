@@ -536,3 +536,18 @@ pub async fn delete_test_tenant_pricing(
     keycompute_db::PricingModel::delete_in_tenant(&tx, scope, price.id, &actor).await?;
     tx.commit().await.map_err(keycompute_db::DbError::from)
 }
+
+/// Test-only SQL fixture insertion. This is not a production policy write API.
+/// Duplicate-default tests intentionally seed conflicting rows before invoking
+/// the real scoped/audited repair operation.
+pub async fn seed_distribution_rule(
+    db: &impl sea_orm::ConnectionTrait,
+    req: &keycompute_db::CreateDistributionRuleRequest,
+) -> Result<keycompute_db::TenantDistributionRule, keycompute_db::DbError> {
+    use sea_orm::FromQueryResult;
+    keycompute_db::TenantDistributionRule::find_by_statement(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DbBackend::Postgres,
+        "INSERT INTO tenant_distribution_rules(tenant_id,beneficiary_scope,beneficiary_id,name,description,commission_rate,priority,effective_from,effective_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
+        [req.tenant_id.into(),req.beneficiary_scope.as_str().into(),req.beneficiary_id.into(),req.name.clone().into(),req.description.clone().into(),req.commission_rate.clone().into(),req.priority.unwrap_or(0).into(),req.effective_from.unwrap_or_else(chrono::Utc::now).into(),req.effective_until.into()]
+    )).one(db).await?.ok_or_else(||keycompute_db::DbError::Other("rule fixture insert returned no row".into()))
+}

@@ -189,7 +189,7 @@ mod tests {
             .expect("distribution rule cleanup should succeed");
 
         let tenant = create_test_tenant(&pool, "distribution-delete-cascade", &test_id).await;
-        let rule = TenantDistributionRule::create(
+        let rule = integration_tests::db::seed_distribution_rule(
             &pool,
             &CreateDistributionRuleRequest {
                 tenant_id: tenant.id,
@@ -211,10 +211,18 @@ mod tests {
             .await
             .expect("tenant deletion should cascade tenant distribution rules");
         assert!(
-            TenantDistributionRule::find_by_id(&pool, rule.id)
-                .await
-                .unwrap()
-                .is_none()
+            {
+                use sea_orm::FromQueryResult;
+                TenantDistributionRule::find_by_statement(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT * FROM tenant_distribution_rules WHERE tenant_id=$1 AND id=$2",
+                    [tenant.id.into(), rule.id.into()],
+                ))
+                .one(&pool)
+            }
+            .await
+            .unwrap()
+            .is_none()
         );
 
         cleanup_test_data(&pool, &test_id)

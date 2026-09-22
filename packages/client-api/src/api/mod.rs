@@ -10,6 +10,7 @@ pub mod common;
 pub mod console;
 pub mod debug;
 pub mod distribution;
+pub mod distribution_policy;
 pub mod health;
 pub mod node_gateway_token;
 pub mod node_tips;

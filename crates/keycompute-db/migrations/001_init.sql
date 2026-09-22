@@ -861,13 +861,16 @@ CREATE TABLE IF NOT EXISTS tenant_distribution_rules (
     beneficiary_id UUID,
     name VARCHAR(255) NOT NULL DEFAULT '默认分销规则',
     description TEXT,
-    commission_rate DECIMAL(5, 4) NOT NULL,
-    priority INTEGER NOT NULL DEFAULT 0,
+    commission_rate DECIMAL(5, 4) NOT NULL CHECK (commission_rate >= 0 AND commission_rate <= 1),
+    priority INTEGER NOT NULL DEFAULT 0 CHECK (priority BETWEEN -1000 AND 1000),
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     effective_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     effective_until TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT ck_distribution_policy_name CHECK (name = BTRIM(name) AND name <> '' AND name !~ '[[:cntrl:]]'),
+    CONSTRAINT ck_distribution_policy_window CHECK (effective_until IS NULL OR effective_until > effective_from),
+    CONSTRAINT ck_distribution_policy_description CHECK (description IS NULL OR char_length(description) <= 4096),
     UNIQUE NULLS NOT DISTINCT (tenant_id, beneficiary_scope, beneficiary_id, effective_from),
     CONSTRAINT ck_tenant_distribution_rules_beneficiary CHECK (
         (beneficiary_scope = 'everyone' AND beneficiary_id IS NULL)
@@ -881,6 +884,19 @@ CREATE TABLE IF NOT EXISTS tenant_distribution_rules (
 
 CREATE INDEX IF NOT EXISTS idx_tenant_distribution_rules_tenant ON tenant_distribution_rules(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_tenant_distribution_rules_active ON tenant_distribution_rules(is_active) WHERE is_active = TRUE;
+-- A policy changes future allocation only, never its tenant or beneficiary identity.
+CREATE OR REPLACE FUNCTION guard_distribution_policy_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.id,NEW.tenant_id,NEW.beneficiary_scope,NEW.beneficiary_id)
+       IS DISTINCT FROM ROW(OLD.id,OLD.tenant_id,OLD.beneficiary_scope,OLD.beneficiary_id) THEN
+        RAISE EXCEPTION 'distribution policy ownership is immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS distribution_policy_identity ON tenant_distribution_rules;
+CREATE TRIGGER distribution_policy_identity BEFORE UPDATE OF id,tenant_id,beneficiary_scope,beneficiary_id
+    ON tenant_distribution_rules FOR EACH ROW EXECUTE FUNCTION guard_distribution_policy_identity();
+
 -- pending_registrations: 待完成注册表
 -- 用于邮箱验证码注册流程，在验证码验证成功前暂存注册占位状态
 

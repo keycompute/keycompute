@@ -6,8 +6,8 @@ phase-1 field/provenance alignment, tenant control/member/invitation APIs and
 scoped tenant/platform pricing and provider/binding administration have passed
 local acceptance gates recorded below. Tenant usage/billing/payment/wallet
 reporting and owner-only tenant key-pool backend APIs are also accepted.
-Distribution read/reporting isolation is accepted as recorded below; policy
-writes and the other remaining resource families are not included.
+Distribution reporting and scoped/audited policy writes are accepted as recorded
+below. Other remaining resource families and full client UI are not included.
 Remaining resource mutations, complete platform
 routing/operator allowlists, client UI and final deployment remain unaccepted.
 
@@ -282,6 +282,48 @@ also verifies the personal earnings endpoint is denied.
 No production database, credential, service or deployment changes. Policy writes,
 node/tasks, Responses, remaining financial operations, operator routes, full UI and
 final release remain unaccepted. Unfinished mutation drafts are not in this commit.
+
+## Current phases 3/5 — distribution policy mutations accepted
+
+Tenant policy creation, optimistic PATCH/DELETE and deterministic default override
+now share one transaction-bound DAO with explicit root-targeted platform routes.
+Tenant URLs require path-matching active admin membership; root without membership
+uses a platform path and explicit target, while operator has no business-write grant.
+Every write revalidates current signed identity/tenant/member versions under the
+established parent-first locks, then locks the policy group before resource rows.
+All row predicates retain tenant and ID; update/delete additionally require an exact
+revision. Reasons and server Request IDs are audited with numeric/state before/after
+snapshots; arbitrary names/descriptions and credential material are not audit data.
+
+The owned transaction/savepoint explicitly rolls back errors, including injected
+audit failure when an outer caller catches the error and commits. Duplicate default
+repair retains deterministic created-at/ID ordering, audits every deactivation, and
+no-op defaults preserve revisions. Precise 0..1 rates have at most four decimal places;
+active beneficiary policies require active target membership. Disabling/deleting an
+unavailable beneficiary remains possible without reactivating it. Policy ownership
+is immutable in final greenfield SQL. Policy edits never rewrite historic commissions
+or credit/debit balances. No incremental migration or production schema change.
+
+The old unscoped production rule CRUD methods are removed. Bootstrap creates initial
+rules through explicit current-root policy authority; accepted settlement has a
+separately named read-only effective-policy resolver. Legacy mutation URLs now require
+root plus an explicit tenant selector and a revision for update/delete. Unsupported
+min/max monetary limits are rejected rather than reported as saved. A new typed client
+API supports canonical tenant/platform policy CRUD, decimal strings and omitted/null
+patch semantics; full frontend page migration remains phase 7, not this acceptance.
+
+Eight new PostgreSQL/HTTP regressions cover bare handlers, foreign IDs, API keys,
+forged actors, regrant/token invalidation, exact-PID queued demotion, revision races,
+root/admin concurrent defaults, audit rollback and unchanged historic money. Existing
+16 rule tests (including ten-way upsert and duplicate repair) were retained. Two new
+client wire tests and four unit/schema/handler tests add exact contract checks.
+Final default-parallel native workspace: **2,522 passed, 0 failed, 30 default ignored**,
+including desktop/mobile. The 37-test DB scope/policy suite and 19-test client suite
+are included subsets. All-target check, all-target/all-feature strict Clippy, Web and
+client WASM compilation, formatting, whitespace and all 20 frozen-source hashes pass.
+CI is verified separately after pushing. No deployment, production data or credentials
+changed. Node/task, Responses administration/live authority, remaining financial
+operations, operator routes, full UI and release gates remain open.
 
 # Tenant subsystem implementation status
 

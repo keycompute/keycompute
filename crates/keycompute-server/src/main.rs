@@ -13,7 +13,7 @@ use keycompute_auth::PasswordHasher;
 use keycompute_config::{AppConfig, DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD};
 use keycompute_db::{
     CreateDistributionRuleRequest, CreateTenantRequest, CreateUserCredentialRequest, Database,
-    DatabaseConfig as DbConfig, DbRouter, SystemSetting, Tenant, TenantDistributionRule, User,
+    DatabaseConfig as DbConfig, DbRouter, SystemSetting, Tenant, User,
 };
 use keycompute_observability::{init_dev_observability, init_observability};
 use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run_with_shutdown};
@@ -698,15 +698,35 @@ async fn initialize_default_admin(
 ///
 /// 基于 system_settings 中的配置创建一级和二级分销规则
 async fn initialize_default_distribution_rules(
-    pool: &impl ConnectionTrait,
+    pool: &(impl ConnectionTrait + TransactionTrait),
     tenant_id: uuid::Uuid,
-    _admin_user_id: uuid::Uuid,
+    admin_user_id: uuid::Uuid,
 ) -> anyhow::Result<()> {
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
 
-    // 检查是否已存在分销规则
-    let existing_rules = TenantDistributionRule::find_all_by_tenant(pool, tenant_id).await?;
+    use keycompute_db::models::{distribution_policy as policy, distribution_scope};
+    let user = User::find_by_id(pool, admin_user_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("bootstrap root is missing"))?;
+    let root = keycompute_types::PlatformScope::checked(user.id, user.platform_role()?)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let who = policy::PolicyActor::platform(root, tenant_id, user.token_version)?;
+    let audit = keycompute_db::AuditContext {
+        actor_user_id: user.id,
+        credential_kind: keycompute_types::CredentialKind::Jwt,
+        actor_platform_role: user.platform_role()?,
+        actor_tenant_role: None,
+        request_id: Some(uuid::Uuid::new_v4()),
+    };
+    let existing_rules = distribution_scope::rules(
+        pool,
+        distribution_scope::DistributionScope::Platform(root, tenant_id),
+        &distribution_scope::RuleFilter::default(),
+        1,
+        0,
+    )
+    .await?;
     if !existing_rules.is_empty() {
         info!(tenant_id = %tenant_id, "分销规则已存在，跳过初始化");
         return Ok(());
@@ -745,7 +765,14 @@ async fn initialize_default_distribution_rules(
         effective_until: None,
     };
 
-    let rule = TenantDistributionRule::create(pool, &level1_rule).await?;
+    let rule = policy::create(
+        pool,
+        who,
+        &audit,
+        &level1_rule,
+        "bootstrap level one policy",
+    )
+    .await?;
     info!(rule_id = %rule.id, "一级分销规则创建成功");
 
     // 创建二级分销规则（全局规则，对所有用户生效）
@@ -762,7 +789,14 @@ async fn initialize_default_distribution_rules(
         effective_until: None,
     };
 
-    let rule = TenantDistributionRule::create(pool, &level2_rule).await?;
+    let rule = policy::create(
+        pool,
+        who,
+        &audit,
+        &level2_rule,
+        "bootstrap level two policy",
+    )
+    .await?;
     info!(rule_id = %rule.id, "二级分销规则创建成功");
 
     info!(tenant_id = %tenant_id, "默认分销规则初始化完成");
@@ -1010,7 +1044,7 @@ mod tests {
             .expect("balance should exist");
         assert_eq!(balance.available_balance, Decimal::new(100, 0));
         assert_eq!(
-            TenantDistributionRule::find_all_by_tenant(&isolated, first.id)
+            TenantDistributionRule::find_effective_for_settlement(&isolated, first.id)
                 .await
                 .unwrap()
                 .len(),

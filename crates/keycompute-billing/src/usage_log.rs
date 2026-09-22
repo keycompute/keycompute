@@ -571,7 +571,7 @@ impl BillingService {
         };
 
         // 查询租户的分销规则
-        let rules = match keycompute_db::TenantDistributionRule::find_by_tenant(
+        let rules = match keycompute_db::TenantDistributionRule::find_effective_for_settlement(
             pool.as_ref(),
             ctx.tenant_id,
         )

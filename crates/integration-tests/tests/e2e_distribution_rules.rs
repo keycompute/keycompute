@@ -740,6 +740,113 @@ mod db_tests {
     use keycompute_db::{BeneficiaryScope, TenantDistributionRule, UpdateDistributionRuleRequest};
     use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
     use std::str::FromStr;
+    async fn authority(
+        db: &DatabaseConnection,
+        tenant_id: Uuid,
+    ) -> (
+        keycompute_db::models::distribution_policy::PolicyActor,
+        keycompute_db::AuditContext,
+    ) {
+        let tenant = keycompute_db::Tenant::find_by_id(db, tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let user = keycompute_db::User::find_by_id(db, tenant.owner_user_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let member = keycompute_db::TenantMembership::find(db, tenant_id, user.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let scope = keycompute_types::TenantScope::checked(
+            tenant_id,
+            user.id,
+            keycompute_types::TenantRole::Admin,
+        )
+        .unwrap();
+        let who = keycompute_db::models::distribution_policy::PolicyActor::tenant(
+            scope,
+            keycompute_db::models::tenant_control::TenantAuthzSnapshot {
+                token_version: user.token_version,
+                tenant_authz_version: tenant.authz_version,
+                membership_authz_version: member.authz_version,
+            },
+        )
+        .unwrap();
+        let audit = keycompute_db::AuditContext {
+            actor_user_id: user.id,
+            credential_kind: keycompute_types::CredentialKind::Jwt,
+            actor_platform_role: user.platform_role().unwrap(),
+            actor_tenant_role: Some(keycompute_types::TenantRole::Admin),
+            request_id: Some(Uuid::new_v4()),
+        };
+        (who, audit)
+    }
+    async fn upsert_scoped(
+        db: &DatabaseConnection,
+        tenant: Uuid,
+        name: &str,
+        rate: BigDecimal,
+    ) -> Result<TenantDistributionRule, keycompute_db::DbError> {
+        let (who, audit) = authority(db, tenant).await;
+        keycompute_db::models::distribution_policy::upsert_default(
+            db,
+            who,
+            &audit,
+            name,
+            rate,
+            "default policy regression",
+        )
+        .await
+    }
+    async fn all_scoped_rules(
+        db: &DatabaseConnection,
+        tenant: Uuid,
+    ) -> Result<Vec<TenantDistributionRule>, keycompute_db::DbError> {
+        let t = keycompute_db::Tenant::find_by_id(db, tenant)
+            .await?
+            .unwrap();
+        let scope = keycompute_types::TenantScope::checked(
+            tenant,
+            t.owner_user_id,
+            keycompute_types::TenantRole::Admin,
+        )
+        .unwrap();
+        keycompute_db::models::distribution_scope::rules(
+            db,
+            keycompute_db::models::distribution_scope::DistributionScope::Tenant(scope),
+            &keycompute_db::models::distribution_scope::RuleFilter::default(),
+            100,
+            0,
+        )
+        .await
+    }
+    async fn update_scoped(
+        db: &DatabaseConnection,
+        row: &TenantDistributionRule,
+        req: &UpdateDistributionRuleRequest,
+    ) -> Result<TenantDistributionRule, keycompute_db::DbError> {
+        let (who, audit) = authority(db, row.tenant_id).await;
+        let patch = keycompute_db::models::distribution_policy::PolicyPatch {
+            expected_updated_at: row.updated_at,
+            name: req.name.clone(),
+            description: req.description.clone().map(Some),
+            commission_rate: req.commission_rate.clone(),
+            priority: req.priority,
+            is_active: req.is_active,
+            effective_until: req.effective_until.map(Some),
+        };
+        keycompute_db::models::distribution_policy::update(
+            db,
+            who,
+            &audit,
+            row.id,
+            &patch,
+            "rule state regression",
+        )
+        .await
+    }
 
     /// 直接调用生产代码的原子 upsert（写库事务 + advisory lock + 唯一性校验），
     /// 与 handler create_distribution_rule 的调用路径完全一致
@@ -749,14 +856,9 @@ mod db_tests {
         rate: &str,
         name: &str,
     ) -> TenantDistributionRule {
-        TenantDistributionRule::upsert_global_override(
-            pool,
-            tenant_id,
-            name,
-            BigDecimal::from_str(rate).unwrap(),
-        )
-        .await
-        .expect("upsert_global_override should succeed")
+        upsert_scoped(pool, tenant_id, name, BigDecimal::from_str(rate).unwrap())
+            .await
+            .expect("upsert_global_override should succeed")
     }
 
     /// 清理测试租户及其分销规则
@@ -794,7 +896,7 @@ mod db_tests {
 
         assert_eq!(first.id, second.id, "upsert should update the same rule");
 
-        let global_p100: Vec<_> = TenantDistributionRule::find_all_by_tenant(&pool, tenant.id)
+        let global_p100: Vec<_> = all_scoped_rules(&pool, tenant.id)
             .await
             .expect("find_all_by_tenant should succeed")
             .into_iter()
@@ -826,8 +928,9 @@ mod db_tests {
         let rule = upsert_global_rule(&pool, tenant.id, "0.08", "Rule Active").await;
 
         // 管理员禁用该规则
-        rule.update(
+        update_scoped(
             &pool,
+            &rule,
             &UpdateDistributionRuleRequest {
                 name: None,
                 description: None,
@@ -846,7 +949,7 @@ mod db_tests {
         assert_eq!(rule.id, reactivated.id, "disabled rule should be reused");
         assert!(reactivated.is_active, "rule should be reactivated");
 
-        let global_p100_count = TenantDistributionRule::find_all_by_tenant(&pool, tenant.id)
+        let global_p100_count = all_scoped_rules(&pool, tenant.id)
             .await
             .expect("find_all_by_tenant should succeed")
             .into_iter()
@@ -875,7 +978,7 @@ mod db_tests {
             let pool = pool.clone();
             let tenant_id = tenant.id;
             handles.push(tokio::spawn(async move {
-                TenantDistributionRule::upsert_global_override(
+                upsert_scoped(
                     &pool,
                     tenant_id,
                     &format!("Concurrent Rule {}", i),
@@ -900,7 +1003,7 @@ mod db_tests {
             "all concurrent upserts should converge to the same rule"
         );
 
-        let global_p100_count = TenantDistributionRule::find_all_by_tenant(&pool, tenant.id)
+        let global_p100_count = all_scoped_rules(&pool, tenant.id)
             .await
             .expect("find_all_by_tenant should succeed")
             .into_iter()
@@ -936,7 +1039,7 @@ mod db_tests {
         // id 决胜路径由测试 16 显式覆盖
         let mut legacy_ids = Vec::new();
         for (i, rate) in ["0.05", "0.06"].iter().enumerate() {
-            let rule = TenantDistributionRule::create(
+            let rule = integration_tests::db::seed_distribution_rule(
                 &pool,
                 &CreateDistributionRuleRequest {
                     tenant_id: tenant.id,
@@ -966,7 +1069,7 @@ mod db_tests {
         assert_eq!(healed.name, "Healed Rule");
         assert!(healed.is_active);
 
-        let all_p100: Vec<_> = TenantDistributionRule::find_all_by_tenant(&pool, tenant.id)
+        let all_p100: Vec<_> = all_scoped_rules(&pool, tenant.id)
             .await
             .expect("find_all_by_tenant should succeed")
             .into_iter()
@@ -1030,7 +1133,7 @@ mod db_tests {
         let expected_kept = if id_a < id_b { id_a } else { id_b };
 
         // 自愈前：计费侧 find_by_tenant 的 id ASC 决胜应使首条 p100 全局规则确定
-        let first_match = TenantDistributionRule::find_by_tenant(&pool, tenant.id)
+        let first_match = TenantDistributionRule::find_effective_for_settlement(&pool, tenant.id)
             .await
             .expect("find_by_tenant should succeed")
             .into_iter()
@@ -1051,7 +1154,7 @@ mod db_tests {
             "self-heal must keep the same rule billing-side matching hits"
         );
 
-        let active: Vec<_> = TenantDistributionRule::find_all_by_tenant(&pool, tenant.id)
+        let active: Vec<_> = all_scoped_rules(&pool, tenant.id)
             .await
             .expect("find_all_by_tenant should succeed")
             .into_iter()

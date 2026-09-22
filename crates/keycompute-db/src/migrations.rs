@@ -174,6 +174,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn distribution_policy_schema_enforces_domain_and_immutable_ownership() {
+        let sql = include_str!("../migrations/001_init.sql");
+        for expected in [
+            "commission_rate >= 0 AND commission_rate <= 1",
+            "ck_distribution_policy_window",
+            "ck_distribution_policy_name",
+            "ck_distribution_policy_description",
+            "guard_distribution_policy_identity",
+            "NEW.id,NEW.tenant_id,NEW.beneficiary_scope,NEW.beneficiary_id",
+        ] {
+            assert!(
+                sql.contains(expected),
+                "missing policy invariant: {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn key_issuance_schema_retains_scoped_identity_without_storing_secrets() {
         let sql = include_str!("../migrations/001_init.sql");
         let body = sql

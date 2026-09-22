@@ -320,6 +320,14 @@ pub async fn my_stats(
 pub fn router() -> Router<AppState> {
     Router::new()
         .route(
+            "/api/v1/tenants/{tenant_id}/distribution/rules/default",
+            axum::routing::post(super::distribution_policy::tenant_default),
+        )
+        .route(
+            "/api/v1/platform/distribution/tenants/{tenant_id}/rules/default",
+            axum::routing::post(super::distribution_policy::platform_default),
+        )
+        .route(
             "/api/v1/tenants/{tenant_id}/distribution/records",
             get(tenant_records),
         )
@@ -333,11 +341,13 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/tenants/{tenant_id}/distribution/rules",
-            get(tenant_rules),
+            get(tenant_rules).post(super::distribution_policy::tenant_create),
         )
         .route(
             "/api/v1/tenants/{tenant_id}/distribution/rules/{id}",
-            get(tenant_rule),
+            get(tenant_rule)
+                .patch(super::distribution_policy::tenant_patch)
+                .delete(super::distribution_policy::tenant_delete),
         )
         .route(
             "/api/v1/platform/distribution/tenants/{tenant_id}/records",
@@ -353,11 +363,13 @@ pub fn router() -> Router<AppState> {
         )
         .route(
             "/api/v1/platform/distribution/tenants/{tenant_id}/rules",
-            get(platform_rules),
+            get(platform_rules).post(super::distribution_policy::platform_create),
         )
         .route(
             "/api/v1/platform/distribution/tenants/{tenant_id}/rules/{id}",
-            get(platform_rule),
+            get(platform_rule)
+                .patch(super::distribution_policy::platform_patch)
+                .delete(super::distribution_policy::platform_delete),
         )
         .route("/api/v1/me/distribution/records", get(my_records))
         .route("/api/v1/me/distribution/records/{id}", get(my_record))

@@ -459,7 +459,7 @@ async fn rule_reports_keep_literal_search_stable_pages_and_current_admin_checks(
         (f.a.id, format!("研发AA{}", f.run)),
         (f.b.id, format!("研发_%_{}", f.run)),
     ] {
-        keycompute_db::TenantDistributionRule::create(
+        integration_tests::db::seed_distribution_rule(
             &f.db,
             &keycompute_db::CreateDistributionRuleRequest {
                 tenant_id: tenant,

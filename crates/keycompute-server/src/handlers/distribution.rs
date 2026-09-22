@@ -7,6 +7,7 @@
 //! - 用户分销收益查询（从数据库）
 //! - 推荐关系查询（从数据库）
 
+use crate::extractors::{GlobalConsoleAuth, RequestId};
 use crate::{
     error::{ApiError, Result},
     extractors::{AuthExtractor, ConsoleAuth},
@@ -124,6 +125,7 @@ pub struct DistributionRuleResponse {
 
 /// 创建分销规则请求
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateDistributionRuleRequest {
     /// 规则名称
     pub name: String,
@@ -137,6 +139,7 @@ pub struct CreateDistributionRuleRequest {
 
 /// 更新分销规则请求
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateDistributionRuleRequest {
     /// 规则名称
     pub name: Option<String>,
@@ -514,163 +517,136 @@ pub async fn list_distribution_rules(
     Ok(Json(responses))
 }
 
-/// 创建分销规则
-///
-/// POST /api/v1/distribution/rules
-/// 仅 Admin 可访问
+/// Legacy platform selectors are mandatory; absent tenant never means all.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyTargetQuery {
+    pub tenant_id: Uuid,
+    pub expected_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+fn legacy_policy_result(
+    row: keycompute_db::TenantDistributionRule,
+) -> Result<Json<DistributionRuleResponse>> {
+    let rate = row
+        .commission_rate
+        .to_string()
+        .parse::<f64>()
+        .map_err(|_| ApiError::Internal("Invalid stored distribution rate".into()))?;
+    Ok(Json(DistributionRuleResponse {
+        id: row.id.to_string(),
+        name: row.name,
+        commission_rate: rate,
+        min_purchase_amount: None,
+        max_commission_amount: None,
+        is_active: row.is_active,
+        created_at: row.created_at.to_rfc3339(),
+    }))
+}
+/// Existing URL, final explicit root/target authority; no tenant-admin fallback.
 pub async fn create_distribution_rule(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    id: RequestId,
     State(state): State<AppState>,
+    Query(target): Query<PolicyTargetQuery>,
     Json(req): Json<CreateDistributionRuleRequest>,
 ) -> Result<Json<DistributionRuleResponse>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
-    // 验证参数
-    if req.commission_rate < 0.0 || req.commission_rate > 1.0 {
-        return Err(ApiError::BadRequest(
-            "commission_rate must be between 0.0 and 1.0".to_string(),
-        ));
-    }
-
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
-
-    // 全局规则使用显式 everyone beneficiary scope，对租户所有用户生效
-    // 采用 upsert 语义：如已存在同租户的 priority=100 全局规则则更新（并重新激活），否则创建。
-    //
-    // 并发安全：upsert 在写库事务 + 租户级 advisory lock 内原子执行
-    //（见 TenantDistributionRule::upsert_global_override），消除并发请求下
-    // check-then-create/update 的 TOCTOU 重复创建问题，并在提交前校验
-    // priority=100 全局规则的唯一性；事务由 DbRouter 路由到写库，
-    // 不受读副本复制延迟影响。
-    let new_rate = string_to_bigdecimal(&req.commission_rate.to_string())?;
-    let rule = keycompute_db::TenantDistributionRule::upsert_global_override(
-        pool,
-        auth.tenant_id,
-        &req.name,
-        new_rate,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, tenant_id = %auth.tenant_id, "Failed to upsert distribution rule");
-        ApiError::Internal("Distribution rule operation failed".to_string())
-    })?;
-
-    Ok(Json(DistributionRuleResponse {
-        id: rule.id.to_string(),
-        name: rule.name,
-        commission_rate: req.commission_rate,
-        min_purchase_amount: req.min_purchase_amount,
-        max_commission_amount: req.max_commission_amount,
-        is_active: rule.is_active,
-        created_at: rule.created_at.to_rfc3339(),
-    }))
-}
-
-/// 更新分销规则
-///
-/// PUT /api/v1/distribution/rules/{id}
-/// 仅 Admin 可访问
-pub async fn update_distribution_rule(
-    auth: AuthExtractor,
-    Path(rule_id): Path<Uuid>,
-    State(state): State<AppState>,
-    Json(req): Json<UpdateDistributionRuleRequest>,
-) -> Result<Json<DistributionRuleResponse>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
-    // 验证参数
-    if let Some(rate) = req.commission_rate
-        && !(0.0..=1.0).contains(&rate)
+    let who = super::distribution_policy::platform(&auth, target.tenant_id)?;
+    if req.min_purchase_amount.is_some()
+        || req.max_commission_amount.is_some()
+        || !req.commission_rate.is_finite()
     {
         return Err(ApiError::BadRequest(
-            "commission_rate must be between 0.0 and 1.0".to_string(),
+            "unsupported amount limits or invalid commission rate".into(),
         ));
     }
-
-    let pool = state
+    let rate = string_to_bigdecimal(&req.commission_rate.to_string())?;
+    let db = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
-
-    // 查找规则
-    let rule = keycompute_db::TenantDistributionRule::find_by_id(pool, rule_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound("Distribution rule not found".to_string()))?;
-
-    // 更新规则
-    let update_req = keycompute_db::UpdateDistributionRuleRequest {
-        name: req.name,
-        description: None,
-        commission_rate: req.commission_rate.and_then(|r| r.to_string().parse().ok()),
-        priority: None,
-        is_active: req.is_active,
-        effective_until: None,
-    };
-
-    let updated_rule = rule
-        .update(pool, &update_req)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to update rule: {}", e)))?;
-
-    Ok(Json(DistributionRuleResponse {
-        id: updated_rule.id.to_string(),
-        name: updated_rule.name,
-        commission_rate: req.commission_rate.unwrap_or_else(|| {
-            updated_rule
-                .commission_rate
-                .to_string()
-                .parse()
-                .unwrap_or(0.0)
-        }),
-        min_purchase_amount: req.min_purchase_amount,
-        max_commission_amount: req.max_commission_amount,
-        is_active: updated_rule.is_active,
-        created_at: updated_rule.created_at.to_rfc3339(),
-    }))
+        .ok_or_else(|| ApiError::ServiceUnavailable("Distribution storage unavailable".into()))?;
+    let row = keycompute_db::models::distribution_policy::upsert_default(
+        db.write_conn(),
+        who,
+        &super::distribution_policy::platform_audit(&auth, id),
+        &req.name,
+        rate,
+        "platform default policy update",
+    )
+    .await
+    .map_err(super::distribution_policy::map)?;
+    legacy_policy_result(row)
 }
-
-/// 删除分销规则
-///
-/// DELETE /api/v1/distribution/rules/{id}
-/// 仅 Admin 可访问
-pub async fn delete_distribution_rule(
-    auth: AuthExtractor,
+pub async fn update_distribution_rule(
+    auth: GlobalConsoleAuth,
+    id: RequestId,
     Path(rule_id): Path<Uuid>,
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageBilling) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
+    Query(target): Query<PolicyTargetQuery>,
+    Json(req): Json<UpdateDistributionRuleRequest>,
+) -> Result<Json<DistributionRuleResponse>> {
+    let who = super::distribution_policy::platform(&auth, target.tenant_id)?;
+    if req.min_purchase_amount.is_some()
+        || req.max_commission_amount.is_some()
+        || req.commission_rate.is_some_and(|v| !v.is_finite())
+    {
+        return Err(ApiError::BadRequest(
+            "unsupported amount limits or invalid commission rate".into(),
+        ));
     }
-
-    let pool = state
+    let revision = target
+        .expected_updated_at
+        .ok_or_else(|| ApiError::BadRequest("expected_updated_at is required".into()))?;
+    let mut patch = keycompute_db::models::distribution_policy::PolicyPatch::empty(revision);
+    patch.name = req.name;
+    patch.is_active = req.is_active;
+    patch.commission_rate = req
+        .commission_rate
+        .map(|v| string_to_bigdecimal(&v.to_string()))
+        .transpose()?;
+    let db = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not available".to_string()))?;
-
-    // 查找并删除规则
-    let rule = keycompute_db::TenantDistributionRule::find_by_id(pool, rule_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Database error: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound("Distribution rule not found".to_string()))?;
-
-    rule.delete(pool)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to delete rule: {}", e)))?;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "Distribution rule deleted",
-        "rule_id": rule_id.to_string(),
-        "deleted_by": auth.user_id.to_string(),
-    })))
+        .ok_or_else(|| ApiError::ServiceUnavailable("Distribution storage unavailable".into()))?;
+    let row = keycompute_db::models::distribution_policy::update(
+        db.write_conn(),
+        who,
+        &super::distribution_policy::platform_audit(&auth, id),
+        rule_id,
+        &patch,
+        "platform policy update",
+    )
+    .await
+    .map_err(super::distribution_policy::map)?;
+    legacy_policy_result(row)
+}
+pub async fn delete_distribution_rule(
+    auth: GlobalConsoleAuth,
+    id: RequestId,
+    Path(rule_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Query(target): Query<PolicyTargetQuery>,
+) -> Result<Json<serde_json::Value>> {
+    let who = super::distribution_policy::platform(&auth, target.tenant_id)?;
+    let revision = target
+        .expected_updated_at
+        .ok_or_else(|| ApiError::BadRequest("expected_updated_at is required".into()))?;
+    let db = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Distribution storage unavailable".into()))?;
+    keycompute_db::models::distribution_policy::delete(
+        db.write_conn(),
+        who,
+        &super::distribution_policy::platform_audit(&auth, id),
+        rule_id,
+        revision,
+        "platform policy deletion",
+    )
+    .await
+    .map_err(super::distribution_policy::map)?;
+    Ok(Json(
+        serde_json::json!({"success":true,"message":"Distribution rule deleted","id":rule_id}),
+    ))
 }
 
 /// 获取当前用户的分销收益
