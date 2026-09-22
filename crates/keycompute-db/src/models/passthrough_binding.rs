@@ -10,6 +10,13 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[path = "passthrough_binding_scope.rs"]
+mod scope;
+pub use scope::{
+    PassthroughAccountOption, PassthroughBindingListFilter, PassthroughBindingManagementView,
+    PreparedPassthroughProbe,
+};
+
 pub const PASSTHROUGH_BINDING_MAX_PAGE_SIZE: i64 = 200;
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct PassthroughBinding {

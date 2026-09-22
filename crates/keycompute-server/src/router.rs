@@ -464,6 +464,22 @@ pub fn create_router(state: AppState) -> Router {
 
     // 账号/渠道管理（仅 Admin）
     let admin_account_routes = Router::new()
+        .route(
+            "/api/v1/platform/accounts",
+            get(list_accounts).post(create_account),
+        )
+        .route(
+            "/api/v1/platform/accounts/{id}",
+            get(crate::handlers::admin_account::get_account)
+                .put(update_account)
+                .patch(update_account)
+                .delete(delete_account),
+        )
+        .route("/api/v1/platform/accounts/{id}/test", post(test_account))
+        .route(
+            "/api/v1/platform/accounts/{id}/refresh",
+            post(refresh_account),
+        )
         .route("/api/v1/accounts", get(list_accounts).post(create_account))
         .route(
             "/api/v1/accounts/{id}",
@@ -476,6 +492,21 @@ pub fn create_router(state: AppState) -> Router {
     // JWT admin middleware as account management, while handlers additionally
     // check ManageProviders so API keys can never acquire console access.
     let admin_passthrough_binding_routes = Router::new()
+        .route(
+            "/api/v1/platform/passthrough-bindings",
+            get(list_passthrough_bindings).post(create_passthrough_binding),
+        )
+        .route(
+            "/api/v1/platform/passthrough-bindings/{id}",
+            get(get_passthrough_binding)
+                .put(update_passthrough_binding)
+                .patch(update_passthrough_binding)
+                .delete(delete_passthrough_binding),
+        )
+        .route(
+            "/api/v1/platform/passthrough-bindings/{id}/probe",
+            post(probe_passthrough_binding),
+        )
         .route(
             "/api/v1/admin/passthrough-bindings",
             get(list_passthrough_bindings).post(create_passthrough_binding),
@@ -491,6 +522,11 @@ pub fn create_router(state: AppState) -> Router {
             post(probe_passthrough_binding),
         );
     let admin_model_catalog_routes = Router::new()
+        .route("/api/v1/platform/model-catalog", get(model_catalog))
+        .route(
+            "/api/v1/platform/passthrough-bindings/options",
+            get(passthrough_binding_options),
+        )
         .route("/api/v1/admin/model-catalog", get(model_catalog))
         .route(
             "/api/v1/admin/passthrough-bindings/options",
@@ -782,6 +818,8 @@ pub fn create_router(state: AppState) -> Router {
         .merge(global_self_routes)
         .merge(crate::handlers::tenant_control::router())
         .merge(crate::handlers::tenant_pricing::router())
+        .merge(crate::handlers::tenant_providers::router())
+        .merge(crate::handlers::tenant_bindings::router())
         .merge(admin_routes)
         .merge(billing_routes)
         .merge(debug_routes)

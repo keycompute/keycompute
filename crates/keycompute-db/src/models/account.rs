@@ -5,6 +5,12 @@ use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[path = "account_scope.rs"]
+mod scope;
+pub use scope::{
+    AccountListFilter, AccountManagementScope, AccountManagementView, ProviderAuthzSnapshot,
+};
+
 pub const ACCOUNT_PRIORITY_MIN: i32 = 0;
 pub const ACCOUNT_PRIORITY_MAX: i32 = 10;
 pub const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;

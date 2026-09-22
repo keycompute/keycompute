@@ -3,9 +3,10 @@
 The current acceptance contract is the latest phase **0–8** plan. Older
 phase-numbered entries below are historical delivery records. The current
 phase-1 field/provenance alignment, tenant control/member/invitation APIs and
-scoped tenant/platform pricing have passed the acceptance gates recorded below.
-Provider/binding scopes, complete platform/resource route separation, remaining
-resource management, client UI and final deployment remain unaccepted.
+scoped tenant/platform pricing and provider/binding administration have passed
+local acceptance gates recorded below. Remaining resource administration,
+complete platform routing/operator allowlists, client UI and final deployment
+remain unaccepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
@@ -107,6 +108,42 @@ This is pricing acceptance within phases 3/5, not closure of either whole phase.
 Account/binding, other tenant-resource administration, full operator routing,
 client UI and final release remain open. Prepared provider drafts are not
 included in this pricing delivery. CI is checked separately after the push.
+
+## Current phases 3/5 — provider and binding administration accepted
+
+Tenant provider/account and passthrough-binding CRUD, options and probes now
+use path-bound active-admin membership and scoped DAO queries. Platform routes
+use current root authority independently of tenant selection; legacy URLs map
+to those same guards. Consumers of foreign/global grants do not acquire the
+account or binding's management authority. Tenant payloads cannot publish global
+grants or transfer ownership. Root transfers remain explicit and transactional.
+
+Mutations retain current user/member/tenant-version checks under ordered locks,
+resource tenant predicates, configuration/revision checks, pending Responses
+blockers and atomic secret-free audit. Account binding counts are projected in
+the authorized account SELECT for all lists/details, not filled with zero or
+retrieved afterward using a naked ID. Probe connection material and current
+actor authorization are read together from the primary. Refresh preserves that
+configuration snapshot and refuses stale changes; runtime monitoring remains
+separate from user management authority.
+
+Repeated review corrected binding counts, safe audit metadata, a stale model
+parser error assertion and a concurrent test's ambiguous identity-fence waiter.
+The test now identifies its own single physical request connection; no suite
+serialization, skipped test or deadlock retry was introduced. Invalid model
+payloads still fail with a safe stable error code, never reflected secrets.
+
+Final native default-parallel workspace: **2,479 passed, 0 failed, 30 default
+ignored**, including desktop/mobile. Strict all-target/all-feature workspace
+Clippy with `-D warnings`, formatting and whitespace passed. Provider/binding
+regressions also passed with eight threads (42 tests, included in the workspace
+total). No production database, service, credentials or deployment changed.
+
+This closes provider/binding administration, not the entire phase 3/5 or release
+contract. Tenant key-pool owner-only issuance, reporting and financial operations,
+node/distribution/Responses administration, full operator routing, UI and final
+release gates remain. Scratch preparation is not accepted runtime code. CI
+is verified separately after this commit.
 
 # Tenant subsystem implementation status
 

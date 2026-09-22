@@ -357,17 +357,36 @@ async fn queued_tenant_price_mutation_rechecks_membership_before_any_write() {
     .await
     .unwrap();
     let dt = f.token(Some(&f.a), delegate.id).await;
+    // Give the tested request a dedicated physical connection. An arbitrary
+    // identity-fence waiter may belong to another concurrently running test.
+    let mut options =
+        sea_orm::ConnectOptions::new(std::env::var("DATABASE_URL").expect("isolated database URL"));
+    options
+        .max_connections(1)
+        .min_connections(1)
+        .sqlx_logging(false);
+    let request_db = sea_orm::Database::connect(options).await.unwrap();
+    let request_pid: i32 = request_db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_backend_pid()",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap();
     let tx = f.db.begin().await.unwrap();
     tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
         .await
         .unwrap();
     let path = f.base(&f.a);
-    let state = f.state.clone();
+    let state = AppState::with_pool(DbRouter::single(request_db.clone()));
     let payload = f.payload("blocked");
     let task = tokio::spawn(async move { request(state, "POST", &path, &dt, payload).await });
     tokio::time::timeout(std::time::Duration::from_secs(8),async{
         loop {let r=f.db.query_one(Statement::from_string(DbBackend::Postgres,
-            "SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND wait_event_type='Lock' AND query LIKE '%identity_admin_fence%'".to_string())).await.unwrap().unwrap();
+            format!("SELECT count(*) AS n FROM pg_stat_activity WHERE datname=current_database() AND pid={request_pid} AND wait_event_type='Lock' AND query LIKE '%identity_admin_fence%'"))).await.unwrap().unwrap();
             if r.try_get::<i64>("","n").unwrap()>0{break;}
             tokio::time::sleep(std::time::Duration::from_millis(15)).await;
         }
@@ -395,5 +414,6 @@ async fn queued_tenant_price_mutation_rechecks_membership_before_any_write() {
         .unwrap()
         .unwrap();
     assert_eq!(r.try_get::<i64>("", "n").unwrap(), 0);
+    request_db.close().await.unwrap();
     f.guard.cleanup().await.unwrap();
 }

@@ -1,23 +1,24 @@
 //! System-admin account-to-tenant grants. Writes do not call upstreams.
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::{GlobalConsoleAuth, RequestId},
     state::AppState,
 };
 use axum::{
     Json,
     extract::{Path, Query, State},
 };
-use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use keycompute_auth::Permission;
+use chrono::Duration as ChronoDuration;
+use keycompute_auth::AuthorizationAction;
 use keycompute_db::{
-    DbError,
+    AuditContext, DbError,
+    models::account::{AccountManagementScope, ProviderAuthzSnapshot},
     models::passthrough_binding::{
         AccountModelHealth, AccountModelHealthProbe, CreatePassthroughBindingRequest as DbCreate,
-        PassthroughBinding, UpdatePassthroughBindingRequest as DbUpdate,
+        PassthroughBinding, PassthroughBindingListFilter, PassthroughBindingManagementView,
+        UpdatePassthroughBindingRequest as DbUpdate,
     },
 };
-use sea_orm::{DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, LazyLock},
@@ -28,23 +29,72 @@ use uuid::Uuid;
 const TIMEOUT: Duration = Duration::from_secs(3);
 static PROBES: LazyLock<Arc<tokio::sync::Semaphore>> =
     LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(8)));
-fn admin(a: &AuthExtractor) -> Result<()> {
-    if !a.has_permission(&Permission::ManageProviders) {
-        return Err(ApiError::Forbidden(
-            "System administrator permission required".into(),
-        ));
+fn management_scope(auth: &GlobalConsoleAuth) -> Result<AccountManagementScope> {
+    // These are platform handlers, including when mounted without middleware.
+    // Tenant administration has its own path-bound TenantAdmin entry points.
+    Ok(AccountManagementScope::Platform(
+        auth.require_platform(AuthorizationAction::ManagePlatform)?,
+    ))
+}
+
+fn audit_context(auth: &GlobalConsoleAuth, request_id: RequestId) -> AuditContext {
+    AuditContext {
+        actor_user_id: auth.user_id,
+        credential_kind: auth.credential_kind,
+        actor_platform_role: auth.platform_role,
+        actor_tenant_role: auth.tenant_role,
+        request_id: Some(request_id.0),
     }
-    Ok(())
 }
 fn map(error: DbError) -> ApiError {
-    match error{
-    DbError::OptimisticConflict{..}=>ApiError::Conflict("Passthrough binding changed; reload and retry".into()),
-    DbError::Other(s) if s=="passthrough_binding_ambiguous"=>ApiError::Conflict("Another account exposes an overlapping model to these tenants; resolve the conflict first".into()),
-    DbError::Other(s) if s.contains("must")||s.contains("invalid")=>ApiError::BadRequest(s),
-    DbError::DatabaseError(e) if e.to_string().to_ascii_lowercase().contains("unique")=>ApiError::Conflict("This account and tenant already have a passthrough binding".into()),
-    DbError::NotFound{..}=>ApiError::NotFound("Account, tenant or binding not found".into()),
-    _=>ApiError::ServiceUnavailable("Passthrough binding state is unavailable".into()),
+    match error {
+        DbError::OptimisticConflict { .. } => {
+            ApiError::Conflict("Passthrough binding changed; reload and retry".into())
+        }
+        DbError::Other(s) if s == "passthrough_binding_ambiguous" => ApiError::Conflict(
+            "Another account exposes an overlapping model to these tenants; resolve the conflict first"
+                .into(),
+        ),
+        DbError::Other(s)
+            if s.contains("authorization")
+                || s.contains("administrator")
+                || s.contains("root platform") =>
+        {
+            ApiError::Forbidden("Passthrough binding management authorization denied".into())
+        }
+        DbError::Other(s) if s.contains("must") || s.contains("invalid") => {
+            ApiError::BadRequest(s)
+        }
+        DbError::Other(s) if s.contains("active") || s.contains("referenced") => {
+            ApiError::Conflict(s)
+        }
+        DbError::DatabaseError(e) if e.to_string().to_ascii_lowercase().contains("unique") => {
+            ApiError::Conflict("This account and tenant already have a passthrough binding".into())
+        }
+        DbError::NotFound { .. } => ApiError::NotFound("Account, tenant or binding not found".into()),
+        _ => ApiError::ServiceUnavailable("Passthrough binding state is unavailable".into()),
+    }
 }
+fn binding_info(mut row: PassthroughBindingManagementView) -> PassthroughBindingInfo {
+    row.validate_connection(|endpoint, secret| {
+        crate::passthrough_binding::connection_metadata(endpoint, secret).is_ok()
+    });
+    PassthroughBindingInfo {
+        id: row.id,
+        account_id: row.account_id,
+        account_name: row.account_name,
+        tenant_id: row.tenant_id,
+        tenant_name: row.tenant_name,
+        provider: row.provider,
+        is_global: row.is_global,
+        pool_enabled: row.pool_enabled,
+        revision: row.revision,
+        models_supported: row.models_supported,
+        health_status: Some(row.health_status),
+        health_reason_code: row.health_reason_code,
+        created_at: row.created_at.to_rfc3339(),
+        updated_at: row.updated_at.to_rfc3339(),
+    }
 }
 fn pool(state: &AppState) -> Result<&keycompute_db::DbRouter> {
     state
@@ -54,7 +104,7 @@ fn pool(state: &AppState) -> Result<&keycompute_db::DbRouter> {
 }
 fn pagination(page: Option<i64>, size: Option<i64>) -> (i64, i64, i64) {
     let p = page.unwrap_or(1).clamp(1, 1_000_000);
-    let s = size.unwrap_or(20).clamp(1, 200);
+    let s = size.unwrap_or(20).clamp(1, 100);
     (p, s, (p - 1) * s)
 }
 #[derive(Debug, Deserialize, Default)]
@@ -137,283 +187,290 @@ pub struct PassthroughAccountOptions {
     pub page_size: i64,
     pub total_pages: i64,
 }
-#[derive(FromQueryResult)]
-struct InfoRow {
-    // Internal metadata is never copied into the serialized public DTO.
-    endpoint: String,
-    upstream_api_key_encrypted: String,
-    pub id: Uuid,
-    pub account_id: Uuid,
-    pub account_name: String,
-    pub tenant_id: Uuid,
-    pub tenant_name: String,
-    pub provider: String,
-    pub is_global: bool,
-    pub pool_enabled: bool,
-    pub revision: i64,
-    pub models_supported: Vec<String>,
-    pub health_status: Option<String>,
-    pub health_reason_code: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-impl From<InfoRow> for PassthroughBindingInfo {
-    fn from(r: InfoRow) -> Self {
-        let usable = crate::passthrough_binding::connection_metadata(
-            &r.endpoint,
-            &r.upstream_api_key_encrypted,
-        )
-        .is_ok();
-        Self {
-            id: r.id,
-            account_id: r.account_id,
-            account_name: r.account_name,
-            tenant_id: r.tenant_id,
-            tenant_name: r.tenant_name,
-            provider: r.provider,
-            is_global: r.is_global,
-            pool_enabled: r.pool_enabled,
-            revision: r.revision,
-            models_supported: r.models_supported,
-            health_status: if usable {
-                r.health_status
-            } else {
-                Some("unavailable".into())
-            },
-            health_reason_code: if usable {
-                r.health_reason_code
-            } else {
-                Some("invalid_connection_metadata".into())
-            },
-            created_at: r.created_at.to_rfc3339(),
-            updated_at: r.updated_at.to_rfc3339(),
+async fn info(
+    state: &AppState,
+    scope: AccountManagementScope,
+    id: Uuid,
+) -> Result<PassthroughBindingInfo> {
+    let db = pool(state)?.write_conn();
+    let row = tokio::time::timeout(TIMEOUT, async {
+        match scope {
+            AccountManagementScope::Tenant(scope) => {
+                PassthroughBinding::find_in_tenant(db, scope, id).await
+            }
+            AccountManagementScope::Platform(scope) => {
+                PassthroughBinding::find_platform(db, scope, id).await
+            }
         }
-    }
-}
-const INFO_SELECT: &str = "SELECT pb.*,a.endpoint,a.upstream_api_key_encrypted,a.name AS account_name,t.name AS tenant_name,a.provider,a.models_supported,CASE WHEN NOT ((a.provider='openai' AND a.api_capabilities && ARRAY['chat_completions','responses']::TEXT[]) OR (a.provider='anthropic' AND 'messages'=ANY(a.api_capabilities))) OR NOT a.enabled OR t.status<>'active' OR owner.status<>'active' THEN 'unavailable' ELSE a.health_status END AS health_status,a.health_reason AS health_reason_code FROM passthrough_bindings pb JOIN accounts a ON a.id=pb.account_id JOIN tenants t ON t.id=pb.tenant_id JOIN tenants owner ON owner.id=a.tenant_id";
-async fn info(state: &AppState, id: Uuid) -> Result<PassthroughBindingInfo> {
-    let row = tokio::time::timeout(
-        TIMEOUT,
-        InfoRow::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!("{INFO_SELECT} WHERE pb.id=$1"),
-            [id.into()],
-        ))
-        .one(pool(state)?.write_conn()),
-    )
+    })
     .await
     .map_err(|_| ApiError::ServiceUnavailable("Binding lookup timed out".into()))?
-    .map_err(|_| ApiError::ServiceUnavailable("Binding lookup failed".into()))?
+    .map_err(map)?
     .ok_or_else(|| ApiError::NotFound("Passthrough binding not found".into()))?;
-    Ok(row.into())
-}
-#[derive(FromQueryResult)]
-struct Total {
-    total: i64,
+    Ok(binding_info(row))
 }
 pub async fn list_passthrough_bindings(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Query(q): Query<PassthroughBindingListQuery>,
 ) -> Result<Json<PassthroughBindingPage>> {
-    admin(&auth)?;
+    let scope = management_scope(&auth)?;
     let (p, s, offset) = pagination(q.page, q.page_size);
-    let search = PassthroughBinding::escaped_search(q.search.as_deref());
-    let filter = "WHERE ($1::UUID IS NULL OR pb.tenant_id=$1) AND ($2::TEXT IS NULL OR a.name ILIKE '%'||$2||'%' ESCAPE '\\' OR t.name ILIKE '%'||$2||'%' ESCAPE '\\')";
-    let read = async {
-        let total=Total::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,format!("SELECT count(*)::BIGINT AS total FROM passthrough_bindings pb JOIN accounts a ON a.id=pb.account_id JOIN tenants t ON t.id=pb.tenant_id {filter}"),[q.tenant_id.into(),search.clone().into()])).one(pool(&state)?.write_conn()).await.map_err(|_|ApiError::ServiceUnavailable("Binding listing failed".into()))?.map_or(0,|r|r.total);
-        let rows = InfoRow::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!("{INFO_SELECT} {filter} ORDER BY a.name,t.name,pb.id LIMIT $3 OFFSET $4"),
-            [q.tenant_id.into(), search.into(), s.into(), offset.into()],
-        ))
-        .all(pool(&state)?.write_conn())
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable("Binding listing failed".into()))?;
-        Ok::<_, ApiError>(PassthroughBindingPage {
-            bindings: rows.into_iter().map(Into::into).collect(),
-            total,
-            page: p,
-            page_size: s,
-            total_pages: (total + s - 1) / s,
-        })
+    if let AccountManagementScope::Tenant(scope) = scope
+        && q.tenant_id.is_some_and(|id| id != scope.tenant_id())
+    {
+        return Err(ApiError::Forbidden(
+            "Cross-tenant binding access is not permitted".into(),
+        ));
+    }
+    let filter = PassthroughBindingListFilter {
+        tenant_id: match scope {
+            AccountManagementScope::Tenant(scope) => Some(scope.tenant_id()),
+            AccountManagementScope::Platform(_) => q.tenant_id,
+        },
+        search: q.search.clone(),
     };
-    Ok(Json(tokio::time::timeout(TIMEOUT, read).await.map_err(
-        |_| ApiError::ServiceUnavailable("Binding listing timed out".into()),
-    )??))
+    let db = pool(&state)?.write_conn();
+    let (rows, total) = match scope {
+        AccountManagementScope::Tenant(scope) => (
+            PassthroughBinding::list_in_tenant(db, scope, &filter, s, offset)
+                .await
+                .map_err(map)?,
+            PassthroughBinding::count_in_tenant(db, scope, &filter)
+                .await
+                .map_err(map)?,
+        ),
+        AccountManagementScope::Platform(scope) => (
+            PassthroughBinding::list_platform(db, scope, &filter, s, offset)
+                .await
+                .map_err(map)?,
+            PassthroughBinding::count_platform(db, scope, &filter)
+                .await
+                .map_err(map)?,
+        ),
+    };
+    Ok(Json(PassthroughBindingPage {
+        bindings: rows.into_iter().map(binding_info).collect(),
+        total,
+        page: p,
+        page_size: s,
+        total_pages: (total + s - 1) / s,
+    }))
 }
 pub async fn get_passthrough_binding(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PassthroughBindingInfo>> {
-    admin(&auth)?;
-    Ok(Json(info(&state, id).await?))
+    let scope = management_scope(&auth)?;
+    Ok(Json(info(&state, scope, id).await?))
 }
 pub async fn create_passthrough_binding(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Json(req): Json<CreatePassthroughBindingRequest>,
 ) -> Result<Json<PassthroughBindingInfo>> {
-    admin(&auth)?;
-    let b = tokio::time::timeout(
-        TIMEOUT,
-        PassthroughBinding::create(
-            pool(&state)?.write_conn(),
-            &DbCreate {
-                account_id: req.account_id,
-                tenant_id: req.tenant_id,
-                is_global: req.is_global,
-                pool_enabled: req.pool_enabled,
-            },
-        ),
-    )
-    .await
-    .map_err(|_| {
-        ApiError::ServiceUnavailable("Binding creation timed out; reload before retrying".into())
-    })?
+    let scope = management_scope(&auth)?;
+    let audit = audit_context(&auth, request_id);
+    let db_req = DbCreate {
+        account_id: req.account_id,
+        tenant_id: req.tenant_id,
+        is_global: req.is_global,
+        pool_enabled: req.pool_enabled,
+    };
+    let b = match scope {
+        AccountManagementScope::Tenant(scope) => {
+            PassthroughBinding::create_in_tenant(
+                pool(&state)?,
+                scope,
+                &db_req,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+        AccountManagementScope::Platform(scope) => {
+            PassthroughBinding::create_platform(
+                pool(&state)?,
+                scope,
+                &db_req,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+    }
     .map_err(map)?;
-    Ok(Json(info(&state, b.id).await?))
+    Ok(Json(info(&state, scope, b.id).await?))
 }
 pub async fn update_passthrough_binding(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(id): Path<Uuid>,
+    request_id: RequestId,
     Json(req): Json<UpdatePassthroughBindingRequest>,
 ) -> Result<Json<PassthroughBindingInfo>> {
-    admin(&auth)?;
-    let write = async {
-        let b = PassthroughBinding::find_by_id(pool(&state)?.write_conn(), id)
-            .await
-            .map_err(map)?
-            .ok_or_else(|| ApiError::NotFound("Passthrough binding not found".into()))?;
-        b.update(
-            pool(&state)?.write_conn(),
-            &DbUpdate {
-                account_id: req.account_id,
-                tenant_id: req.tenant_id,
-                is_global: req.is_global,
-                pool_enabled: req.pool_enabled,
-                expected_revision: req.expected_revision,
-            },
-        )
-        .await
-        .map_err(map)
+    let scope = management_scope(&auth)?;
+    let audit = audit_context(&auth, request_id);
+    let db_req = DbUpdate {
+        account_id: req.account_id,
+        tenant_id: req.tenant_id,
+        is_global: req.is_global,
+        pool_enabled: req.pool_enabled,
+        expected_revision: req.expected_revision,
     };
-    let b = tokio::time::timeout(TIMEOUT, write).await.map_err(|_| {
-        ApiError::ServiceUnavailable("Binding update timed out; reload before retrying".into())
-    })??;
-    Ok(Json(info(&state, b.id).await?))
+    let b = match scope {
+        AccountManagementScope::Tenant(scope) => {
+            PassthroughBinding::update_in_tenant(
+                pool(&state)?,
+                scope,
+                id,
+                &db_req,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+        AccountManagementScope::Platform(scope) => {
+            PassthroughBinding::update_platform(
+                pool(&state)?,
+                scope,
+                id,
+                &db_req,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+    }
+    .map_err(map)?;
+    Ok(Json(info(&state, scope, b.id).await?))
 }
 pub async fn delete_passthrough_binding(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(id): Path<Uuid>,
+    request_id: RequestId,
     Query(q): Query<RevisionQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    admin(&auth)?;
-    let write = async {
-        let b = PassthroughBinding::find_by_id(pool(&state)?.write_conn(), id)
+    let scope = management_scope(&auth)?;
+    let audit = audit_context(&auth, request_id);
+    match scope {
+        AccountManagementScope::Tenant(scope) => {
+            PassthroughBinding::delete_in_tenant(
+                pool(&state)?,
+                scope,
+                id,
+                q.expected_revision,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
             .await
-            .map_err(map)?
-            .ok_or_else(|| ApiError::NotFound("Passthrough binding not found".into()))?;
-        b.delete_if_revision(pool(&state)?.write_conn(), q.expected_revision)
+        }
+        AccountManagementScope::Platform(scope) => {
+            PassthroughBinding::delete_platform(
+                pool(&state)?,
+                scope,
+                id,
+                q.expected_revision,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
             .await
-            .map_err(map)
-    };
-    tokio::time::timeout(TIMEOUT, write).await.map_err(|_| {
-        ApiError::ServiceUnavailable("Binding deletion timed out; reload before retrying".into())
-    })??;
+        }
+    }
+    .map_err(map)?;
     Ok(Json(
         serde_json::json!({"deleted":true,"message":"Passthrough grant removed; the account does not automatically rejoin the pool"}),
     ))
 }
 pub async fn passthrough_binding_options(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Query(q): Query<PassthroughBindingListQuery>,
 ) -> Result<Json<PassthroughAccountOptions>> {
-    admin(&auth)?;
+    let scope = management_scope(&auth)?;
     let (p, s, offset) = pagination(q.page, q.page_size);
-    let search = PassthroughBinding::escaped_search(q.search.as_deref());
-    #[derive(FromQueryResult)]
-    struct Row {
-        id: Uuid,
-        name: String,
-        provider: String,
-        pool_enabled: bool,
-        models: Vec<String>,
-    }
-    let filter = "FROM accounts a JOIN tenants t ON t.id=a.tenant_id WHERE a.enabled AND t.status='active' AND ((a.provider='openai' AND a.api_capabilities && ARRAY['chat_completions','responses']::TEXT[]) OR (a.provider='anthropic' AND 'messages'=ANY(a.api_capabilities))) AND ($1::TEXT IS NULL OR a.name ILIKE '%'||$1||'%' ESCAPE '\\')";
-    let read = async {
-        let total = Total::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            format!("SELECT count(*)::BIGINT AS total {filter}"),
-            [search.clone().into()],
-        ))
-        .one(pool(&state)?.write_conn())
+    let (rows, total) = match scope {
+        AccountManagementScope::Tenant(scope) => PassthroughBinding::options_in_tenant(
+            pool(&state)?.write_conn(),
+            scope,
+            q.search.as_deref(),
+            s,
+            offset,
+        )
         .await
-        .map_err(|_| ApiError::ServiceUnavailable("Account options unavailable".into()))?
-        .map_or(0, |r| r.total);
-        let rows=Row::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,format!("SELECT a.id,a.name,a.provider,a.pool_enabled,a.models_supported AS models {filter} ORDER BY a.name,a.id LIMIT $2 OFFSET $3"),[search.into(),s.into(),offset.into()])).all(pool(&state)?.write_conn()).await.map_err(|_|ApiError::ServiceUnavailable("Account options unavailable".into()))?;
-        Ok::<_, ApiError>(PassthroughAccountOptions {
-            accounts: rows
-                .into_iter()
-                .map(|r| PassthroughAccountOption {
-                    id: r.id,
-                    name: r.name,
-                    provider: r.provider,
-                    pool_enabled: r.pool_enabled,
-                    models: r.models,
-                })
-                .collect(),
-            total,
-            page: p,
-            page_size: s,
-            total_pages: (total + s - 1) / s,
-        })
+        .map_err(map)?,
+        AccountManagementScope::Platform(scope) => PassthroughBinding::options_platform(
+            pool(&state)?.write_conn(),
+            scope,
+            q.search.as_deref(),
+            s,
+            offset,
+        )
+        .await
+        .map_err(map)?,
     };
-    Ok(Json(tokio::time::timeout(TIMEOUT, read).await.map_err(
-        |_| ApiError::ServiceUnavailable("Account options timed out".into()),
-    )??))
+    Ok(Json(PassthroughAccountOptions {
+        accounts: rows
+            .into_iter()
+            .map(|row| PassthroughAccountOption {
+                id: row.id,
+                name: row.name,
+                provider: row.provider,
+                pool_enabled: row.pool_enabled,
+                models: row.models,
+            })
+            .collect(),
+        total,
+        page: p,
+        page_size: s,
+        total_pages: (total + s - 1) / s,
+    }))
 }
-pub async fn probe_passthrough_binding(
-    State(state): State<AppState>,
-    auth: AuthExtractor,
-    Path(id): Path<Uuid>,
-    Json(req): Json<PassthroughBindingProbeRequest>,
+pub(crate) async fn probe_with_scope(
+    state: &AppState,
+    scope: AccountManagementScope,
+    id: Uuid,
+    audit: &AuditContext,
+    snapshot: keycompute_db::models::account::ProviderAuthzSnapshot,
+    req: PassthroughBindingProbeRequest,
 ) -> Result<Json<serde_json::Value>> {
     use llm_protocol_provider::{
         ProtocolType, UpstreamMessage, UpstreamRequest, normalize_base_url,
     };
-    admin(&auth)?;
     let timeout = Duration::from_millis(req.timeout_ms.unwrap_or(2000).clamp(100, 10000));
+    let db = pool(state)?.write_conn();
+    let _ = tokio::time::timeout(
+        TIMEOUT,
+        PassthroughBinding::prepare_probe(pool(state)?, scope, id, audit, snapshot),
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("Probe lookup timed out".into()))?
+    .map_err(map)?
+    .ok_or_else(|| ApiError::NotFound("Passthrough binding not found".into()))?;
     let _permit = tokio::time::timeout(timeout, Arc::clone(&PROBES).acquire_owned())
         .await
         .map_err(|_| ApiError::ServiceUnavailable("Diagnostic probes are busy".into()))?
         .map_err(|_| ApiError::ServiceUnavailable("Diagnostic probes are unavailable".into()))?;
-    let db = pool(&state)?.write_conn();
-    let load = async {
-        let binding = PassthroughBinding::find_by_id(db, id)
-            .await
-            .map_err(map)?
-            .ok_or_else(|| ApiError::NotFound("Passthrough binding not found".into()))?;
-        let account = keycompute_db::Account::find_by_id(db, binding.account_id)
-            .await
-            .map_err(map)?
-            .ok_or_else(|| ApiError::NotFound("Account not found".into()))?;
-        Ok::<_, ApiError>((binding, account))
-    };
-    let (binding, account) = tokio::time::timeout(TIMEOUT, load)
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable("Probe lookup timed out".into()))??;
+    let prepared = tokio::time::timeout(
+        TIMEOUT,
+        PassthroughBinding::prepare_probe(pool(state)?, scope, id, audit, snapshot),
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("Probe lookup timed out".into()))?
+    .map_err(map)?
+    .ok_or_else(|| ApiError::NotFound("Passthrough binding not found".into()))?;
+    let binding = prepared.binding;
+    let account = prepared.account;
     let capability = req.api_capability.as_deref().unwrap_or_else(|| {
         if account.provider == "anthropic" {
             "messages"
         } else if account
             .api_capabilities
             .iter()
-            .any(|c| c == "chat_completions")
+            .any(|value| value == "chat_completions")
         {
             "chat_completions"
         } else {
@@ -471,11 +528,22 @@ pub async fn probe_passthrough_binding(
         temperature: None,
         top_p: None,
         native_openai_chat_request: None,
-        native_anthropic_request: (capability=="messages").then(|| Arc::new(serde_json::json!({"model":model,"messages":[{"role":"user","content":"ping"}],"max_tokens":1,"stream":false}))),
-        native_anthropic_headers: if capability=="messages" {[("anthropic-version".into(),"2023-06-01".into())].into()} else {Default::default()},
+        native_anthropic_request: (capability == "messages").then(|| {
+            Arc::new(serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": false
+            }))
+        }),
+        native_anthropic_headers: if capability == "messages" {
+            [("anthropic-version".into(), "2023-06-01".into())].into()
+        } else {
+            Default::default()
+        },
     };
     let adapter = crate::providers::get_provider_definition(&account.provider)
-        .map(|p| (p.create_adapter)())
+        .map(|provider| (provider.create_adapter)())
         .ok_or_else(|| ApiError::ServiceUnavailable("Protocol adapter unavailable".into()))?;
     let client = state
         .http_proxy
@@ -483,11 +551,32 @@ pub async fn probe_passthrough_binding(
     let operation = async {
         if capability == "responses" {
             use futures::StreamExt;
-            let mut stream=adapter.stream_responses_with_meta(client.as_ref(),request,llm_protocol_provider::NativeResponsesRequest {
-                body:Arc::new(serde_json::json!({"model":model,"input":"ping","max_output_tokens":16,"stream":false,"store":false})),path:"/responses".into(),headers:Default::default(),
-            }).await.map_err(|failure|keycompute_types::KeyComputeError::UpstreamFailure {
-                status:failure.status,stable_code:failure.stable_error_code,retryable:false,summary:String::new(),
-            })?.body;
+            let mut stream = adapter
+                .stream_responses_with_meta(
+                    client.as_ref(),
+                    request,
+                    llm_protocol_provider::NativeResponsesRequest {
+                        body: Arc::new(serde_json::json!({
+                            "model": model,
+                            "input": "ping",
+                            "max_output_tokens": 16,
+                            "stream": false,
+                            "store": false
+                        })),
+                        path: "/responses".into(),
+                        headers: Default::default(),
+                    },
+                )
+                .await
+                .map_err(
+                    |failure| keycompute_types::KeyComputeError::UpstreamFailure {
+                        status: failure.status,
+                        stable_code: failure.stable_error_code,
+                        retryable: false,
+                        summary: String::new(),
+                    },
+                )?
+                .body;
             while let Some(event) = stream.next().await {
                 match event? {
                     llm_protocol_provider::StreamEvent::Done => return Ok(()),
@@ -513,31 +602,29 @@ pub async fn probe_passthrough_binding(
         Ok(Err(error)) => {
             let code = match error {
                 keycompute_types::KeyComputeError::UpstreamFailure {
-                    status: Some(s), ..
-                } => format!("upstream_http_{s}"),
+                    status: Some(status),
+                    ..
+                } => format!("upstream_http_{status}"),
                 _ => "upstream_probe_failed".into(),
             };
             ("unhealthy", Some(code))
         }
     };
     let expires = checked + ChronoDuration::seconds(crate::passthrough_binding::HEALTH_TTL_SECS);
+    let probe = AccountModelHealthProbe {
+        account_id: account.id,
+        api_capability: capability.into(),
+        model: model.clone(),
+        status: status.into(),
+        reason_code: reason.clone(),
+        checked_at: checked,
+        expires_at: expires,
+        account_config_version: version,
+        expected_generation: prior.generation,
+    };
     let saved = tokio::time::timeout(
         TIMEOUT,
-        AccountModelHealth::upsert_binding_probe_if_current(
-            db,
-            &AccountModelHealthProbe {
-                account_id: account.id,
-                api_capability: capability.into(),
-                model: model.clone(),
-                status: status.into(),
-                reason_code: reason.clone(),
-                checked_at: checked,
-                expires_at: expires,
-                account_config_version: version,
-                expected_generation: prior.generation,
-            },
-            &binding,
-        ),
+        PassthroughBinding::record_probe(pool(state)?, scope, &binding, &probe, audit, snapshot),
     )
     .await
     .map_err(|_| ApiError::ServiceUnavailable("Diagnostic persistence timed out".into()))?
@@ -547,7 +634,36 @@ pub async fn probe_passthrough_binding(
             "Binding, account or model health changed while probing; reload and retry".into(),
         )
     })?;
-    Ok(Json(
-        serde_json::json!({"binding_id":binding.id,"account_id":account.id,"model":model,"status":status,"reason_code":reason,"checked_at":checked.to_rfc3339(),"expires_at":expires.to_rfc3339(),"generation":saved.generation,"scope":"single_model_diagnostic","api_capability":capability}),
-    ))
+    Ok(Json(serde_json::json!({
+        "binding_id": binding.id,
+        "account_id": account.id,
+        "model": model,
+        "status": status,
+        "reason_code": reason,
+        "checked_at": checked.to_rfc3339(),
+        "expires_at": expires.to_rfc3339(),
+        "generation": saved.generation,
+        "scope": "single_model_diagnostic",
+        "api_capability": capability
+    })))
+}
+
+pub async fn probe_passthrough_binding(
+    State(state): State<AppState>,
+    auth: GlobalConsoleAuth,
+    Path(id): Path<Uuid>,
+    request_id: RequestId,
+    Json(req): Json<PassthroughBindingProbeRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let scope = management_scope(&auth)?;
+    let snapshot = ProviderAuthzSnapshot::platform(auth.token_version);
+    probe_with_scope(
+        &state,
+        scope,
+        id,
+        &audit_context(&auth, request_id),
+        snapshot,
+        req,
+    )
+    .await
 }

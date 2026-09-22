@@ -141,6 +141,14 @@ fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
                             | "user_id"
                             | "tenant_id"
                             | "account_id"
+                            | "previous_tenant_id"
+                            | "visibility"
+                            | "is_global"
+                            | "pool_enabled"
+                            | "revision"
+                            | "connection_changed"
+                            | "models_changed"
+                            | "capabilities_changed"
                             | "invitation_id"
                             | "key_id"
                             | "reason"
@@ -274,6 +282,15 @@ mod tests {
     fn audit_redacts_nested_secrets_and_rejects_unbounded_input() {
         let value = audit_metadata(serde_json::json!({"role":"member","before":{"password":"secret","token":"secret"},"authorization":"Bearer secret"})).unwrap();
         assert_eq!(value["role"], "member");
+        let provider = audit_metadata(serde_json::json!({
+            "visibility":"tenant", "is_global":false, "revision":2,
+            "connection_changed":true, "upstream_api_key_encrypted":"must-not-leak"
+        }))
+        .unwrap();
+        assert_eq!(provider["visibility"], "tenant");
+        assert_eq!(provider["revision"], 2);
+        assert_eq!(provider["connection_changed"], true);
+        assert!(!provider.to_string().contains("must-not-leak"));
         let pricing = audit_metadata(serde_json::json!({
             "before":{"input_price_per_1k":"0.1","is_default":false,"api_key":"secret"},
             "after":{"input_price_per_1k":"0.2","is_default":true,"password":"secret"},

@@ -4,7 +4,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::{GlobalConsoleAuth, RequestId},
     handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
@@ -13,29 +13,21 @@ use axum::{
     extract::{Path, Query, State},
 };
 use futures::StreamExt;
-use keycompute_db::models::{
-    account::{
-        Account, CreateAccountRequest as DbCreateAccountRequest,
-        UpdateAccountRequest as DbUpdateAccountRequest,
-    },
-    response_affinity::ResponseAffinity,
-    tenant::Tenant,
+use keycompute_auth::AuthorizationAction;
+use keycompute_db::models::account::{
+    Account, AccountListFilter, AccountManagementScope, AccountManagementView,
+    CreateAccountRequest as DbCreateAccountRequest, ProviderAuthzSnapshot,
+    UpdateAccountRequest as DbUpdateAccountRequest,
 };
-use keycompute_db::{ACCOUNT_PRIORITY_MAX, ACCOUNT_PRIORITY_MIN};
+use keycompute_db::{ACCOUNT_PRIORITY_MAX, ACCOUNT_PRIORITY_MIN, AuditContext};
 use keycompute_types::{AccountApiCapability, SensitiveString};
 use llm_protocol_provider::{
     HttpTransport, NativeResponsesRequest, ProtocolType, UpstreamMessage, UpstreamRequest,
     normalize_base_url,
 };
-use sea_orm::{
-    ConnectionTrait, DatabaseConnection, DbBackend, FromQueryResult, Statement, TransactionTrait,
-};
+use sea_orm::{ConnectionTrait, DatabaseConnection};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::Arc,
-    time::Instant,
-};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 use subtle::ConstantTimeEq;
 use tracing;
 use uuid::Uuid;
@@ -43,7 +35,10 @@ use uuid::Uuid;
 const RESPONSES_PROBE_MAX_OUTPUT_TOKENS: u32 = 16;
 const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
 
-fn validate_account_rate_limits(rpm_limit: Option<i32>, tpm_limit: Option<i32>) -> Result<()> {
+pub(crate) fn validate_account_rate_limits(
+    rpm_limit: Option<i32>,
+    tpm_limit: Option<i32>,
+) -> Result<()> {
     if let Some(rpm_limit) = rpm_limit
         && rpm_limit < ACCOUNT_RATE_LIMIT_MIN
     {
@@ -61,7 +56,7 @@ fn validate_account_rate_limits(rpm_limit: Option<i32>, tpm_limit: Option<i32>) 
     Ok(())
 }
 
-fn normalize_model_list(models: Vec<String>) -> Vec<String> {
+pub(crate) fn normalize_model_list(models: Vec<String>) -> Vec<String> {
     let mut normalized = Vec::with_capacity(models.len());
     for model in models {
         let model = model.trim();
@@ -72,7 +67,7 @@ fn normalize_model_list(models: Vec<String>) -> Vec<String> {
     normalized
 }
 
-fn validate_account_priority(priority: Option<i32>) -> Result<()> {
+pub(crate) fn validate_account_priority(priority: Option<i32>) -> Result<()> {
     if let Some(priority) = priority
         && !(ACCOUNT_PRIORITY_MIN..=ACCOUNT_PRIORITY_MAX).contains(&priority)
     {
@@ -81,83 +76,6 @@ fn validate_account_priority(priority: Option<i32>) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-async fn ensure_active_tenant(db: &impl ConnectionTrait, tenant_id: Uuid) -> Result<()> {
-    let tenant = Tenant::find_by_id_for_update(db, tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query tenant: {e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
-    if !tenant.is_active() {
-        return Err(ApiError::Conflict(
-            "The target tenant is inactive and cannot receive channel accounts".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-#[derive(Debug, FromQueryResult)]
-struct ActiveTenantId {
-    id: Uuid,
-}
-
-async fn load_active_tenant_ids(
-    db: &impl ConnectionTrait,
-    tenant_ids: &[Uuid],
-) -> Result<HashSet<Uuid>> {
-    if tenant_ids.is_empty() {
-        return Ok(HashSet::new());
-    }
-
-    let rows = ActiveTenantId::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT id FROM tenants WHERE id = ANY($1) AND status = 'active'",
-        [tenant_ids.to_vec().into()],
-    ))
-    .all(db)
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to query tenant statuses: {e}")))?;
-    Ok(rows.into_iter().map(|row| row.id).collect())
-}
-
-#[derive(FromQueryResult)]
-struct AccountBindingCount {
-    account_id: Uuid,
-    count: i64,
-}
-async fn account_binding_counts(
-    db: &impl ConnectionTrait,
-    ids: &[Uuid],
-) -> Result<BTreeMap<Uuid, u64>> {
-    if ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let rows=tokio::time::timeout(std::time::Duration::from_secs(3),AccountBindingCount::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT account_id,COUNT(*)::BIGINT AS count FROM passthrough_bindings WHERE account_id=ANY($1::UUID[]) GROUP BY account_id",[ids.to_vec().into()])).all(db))
-        .await.map_err(|_|ApiError::ServiceUnavailable("Account binding metadata timed out".into()))?
-        .map_err(|_|ApiError::ServiceUnavailable("Account binding metadata is unavailable".into()))?;
-    Ok(rows
-        .into_iter()
-        .map(|r| (r.account_id, r.count.max(0) as u64))
-        .collect())
-}
-fn account_update_error(error: keycompute_db::DbError) -> ApiError {
-    match error {
-        keycompute_db::DbError::Other(message)
-            if message.contains("managed by passthrough bindings") =>
-        {
-            ApiError::Conflict(
-                "This account's pool access is managed by its passthrough bindings".into(),
-            )
-        }
-        keycompute_db::DbError::Other(message) if message == "passthrough_binding_ambiguous" => {
-            ApiError::Conflict(
-                "This model change overlaps another passthrough account in the same tenant scope"
-                    .into(),
-            )
-        }
-        error => ApiError::Internal(format!("Account update failed: {error}")),
-    }
 }
 
 /// Provider 账号信息
@@ -201,6 +119,7 @@ pub struct AccountListQueryParams {
     pub search: Option<String>,
     pub provider: Option<String>,
     pub status: Option<String>,
+    pub tenant_id: Option<Uuid>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub limit: Option<i64>,
@@ -227,18 +146,139 @@ fn parse_account_status(status: Option<&str>) -> Result<Option<bool>> {
     }
 }
 
+fn management_scope(auth: &GlobalConsoleAuth) -> Result<AccountManagementScope> {
+    // These are platform handlers, including when mounted without middleware.
+    // Tenant administration has its own path-bound TenantAdmin entry points.
+    Ok(AccountManagementScope::Platform(
+        auth.require_platform(AuthorizationAction::ManagePlatform)?,
+    ))
+}
+
+fn audit_context(auth: &GlobalConsoleAuth, request_id: RequestId) -> AuditContext {
+    AuditContext {
+        actor_user_id: auth.user_id,
+        credential_kind: auth.credential_kind,
+        actor_platform_role: auth.platform_role,
+        actor_tenant_role: auth.tenant_role,
+        request_id: Some(request_id.0),
+    }
+}
+
+pub(crate) fn account_info(state: &AppState, acc: AccountManagementView) -> AccountInfo {
+    let is_cooling = state.account_states.is_cooling_down(&acc.id);
+    let is_healthy = acc.health_status == keycompute_routing::ACCOUNT_HEALTHY;
+    AccountInfo {
+        id: acc.id,
+        tenant_id: acc.tenant_id,
+        tenant_active: acc.tenant_active,
+        name: acc.name,
+        provider: acc.provider,
+        api_key_preview: acc.upstream_api_key_preview,
+        api_base: if acc.endpoint.is_empty() {
+            None
+        } else {
+            normalize_base_url(&acc.endpoint).ok()
+        },
+        models: acc.models_supported,
+        api_capabilities: acc.api_capabilities,
+        rpm_limit: acc.rpm_limit,
+        tpm_limit: acc.tpm_limit,
+        current_rpm: if is_cooling { -1 } else { 0 },
+        is_active: acc.enabled,
+        is_healthy,
+        health_status: acc.health_status.clone(),
+        health_penalty: acc.health_penalty,
+        health_reason: acc.health_reason,
+        routing_eligible: acc.tenant_active
+            && acc.enabled
+            && acc.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
+            && !is_cooling,
+        pool_enabled: acc.pool_enabled,
+        passthrough_binding_count: acc.passthrough_binding_count.max(0) as u64,
+        last_probe_at: acc.last_probe_at.map(|value| value.to_rfc3339()),
+        last_probe_status: acc.last_probe_status,
+        last_probe_error_code: acc.last_probe_error_code,
+        priority: acc.priority,
+        visibility: acc.visibility,
+        created_at: acc.created_at.to_rfc3339(),
+        last_used_at: Some(acc.updated_at.to_rfc3339()),
+    }
+}
+
+async fn account_view(
+    state: &AppState,
+    db: &impl ConnectionTrait,
+    scope: AccountManagementScope,
+    id: Uuid,
+) -> Result<AccountInfo> {
+    let row = match scope {
+        AccountManagementScope::Tenant(scope) => Account::find_in_tenant(db, scope, id).await,
+        AccountManagementScope::Platform(scope) => Account::find_platform(db, scope, id).await,
+    }
+    .map_err(account_scope_error)?
+    .ok_or_else(|| ApiError::NotFound(format!("Account not found: {id}")))?;
+    Ok(account_info(state, row))
+}
+
+pub(crate) fn account_scope_error(error: keycompute_db::DbError) -> ApiError {
+    match error {
+        keycompute_db::DbError::NotFound { .. } => ApiError::NotFound("Account not found".into()),
+        keycompute_db::DbError::OptimisticConflict { .. } => {
+            ApiError::Conflict("Account changed; reload and retry".into())
+        }
+        keycompute_db::DbError::Other(message)
+            if message.contains("authorization")
+                || message.contains("administrator")
+                || message.contains("root platform")
+                || message.contains("active tenant") =>
+        {
+            ApiError::Forbidden("Account management authorization denied".into())
+        }
+        keycompute_db::DbError::Other(message)
+            if message.contains("pending")
+                || message.contains("referenced")
+                || message.contains("ownership")
+                || message.contains("managed by") =>
+        {
+            ApiError::Conflict(message)
+        }
+        keycompute_db::DbError::Other(message) if message == "passthrough_binding_ambiguous" => {
+            ApiError::Conflict(
+                "This model change overlaps another passthrough account in the same tenant scope"
+                    .into(),
+            )
+        }
+        error => {
+            tracing::error!(error = %error, "account management database operation failed");
+            ApiError::ServiceUnavailable("Account management is temporarily unavailable".into())
+        }
+    }
+}
+
 /// 列出所有账号（Admin 全局视图，不限租户）
 ///
 /// GET /api/v1/accounts
+pub async fn get_account(
+    auth: GlobalConsoleAuth,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<AccountInfo>> {
+    let scope = management_scope(&auth)?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Account storage unavailable".into()))?;
+    Ok(Json(
+        account_view(&state, pool.write_conn(), scope, id).await?,
+    ))
+}
+
 pub async fn list_accounts(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Query(params): Query<AccountListQueryParams>,
 ) -> Result<Json<AccountListResponse>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = management_scope(&auth)?;
     let pool = state
         .pool
         .as_deref()
@@ -247,79 +287,43 @@ pub async fn list_accounts(
     let enabled = parse_account_status(params.status.as_deref())?;
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
-    let db_accounts = Account::find_all_filtered(
-        pool,
-        params.provider.as_deref(),
+    let filter = AccountListFilter {
+        provider: params.provider.clone(),
         enabled,
-        params.search.as_deref(),
-        page_size,
-        offset,
-    )
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to query accounts: {}", e)))?;
-    let total = Account::count_all_filtered(
-        pool,
-        params.provider.as_deref(),
-        enabled,
-        params.search.as_deref(),
-    )
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to count accounts: {}", e)))?;
-
-    let tenant_ids: Vec<Uuid> = db_accounts
-        .iter()
-        .map(|account| account.tenant_id)
-        .collect();
-    let active_tenant_ids = load_active_tenant_ids(pool.write_conn(), &tenant_ids).await?;
-
-    let account_ids: Vec<Uuid> = db_accounts.iter().map(|account| account.id).collect();
-    let binding_counts = account_binding_counts(pool.write_conn(), &account_ids).await?;
-    let accounts: Vec<AccountInfo> = db_accounts
-        .into_iter()
-        .map(|acc| {
-            // 健康状态以具体账号为键；Provider 仅表示协议。
-            let health = state.provider_health.account_health_for(&acc);
-            let is_healthy = health.status == keycompute_routing::ACCOUNT_HEALTHY;
-            // 检查账号是否在冷却中
-            let is_cooling = state.account_states.is_cooling_down(&acc.id);
-            let tenant_active = active_tenant_ids.contains(&acc.tenant_id);
-            let routing_eligible =
-                tenant_active && acc.enabled && health.is_routable() && !is_cooling;
-
-            AccountInfo {
-                id: acc.id,
-                tenant_id: acc.tenant_id,
-                tenant_active,
-                name: acc.name,
-                provider: acc.provider,
-                api_key_preview: acc.upstream_api_key_preview,
-                api_base: if acc.endpoint.is_empty() {
-                    None
-                } else {
-                    Some(acc.endpoint)
-                },
-                models: acc.models_supported,
-                api_capabilities: acc.api_capabilities,
-                rpm_limit: acc.rpm_limit,
-                tpm_limit: acc.tpm_limit,
-                current_rpm: if is_cooling { -1 } else { 0 }, // -1 表示冷却中
-                is_active: acc.enabled,
-                is_healthy,
-                health_status: health.status,
-                health_penalty: health.penalty,
-                health_reason: health.reason,
-                routing_eligible,
-                pool_enabled: acc.pool_enabled,
-                passthrough_binding_count: binding_counts.get(&acc.id).copied().unwrap_or(0),
-                last_probe_at: acc.last_probe_at.map(|value| value.to_rfc3339()),
-                last_probe_status: acc.last_probe_status,
-                last_probe_error_code: acc.last_probe_error_code,
-                priority: acc.priority,
-                visibility: acc.visibility,
-                created_at: acc.created_at.to_rfc3339(),
-                last_used_at: acc.updated_at.to_rfc3339().into(),
+        search: params.search.clone(),
+        tenant_id: match scope {
+            AccountManagementScope::Tenant(scope) => {
+                if params.tenant_id.is_some_and(|id| id != scope.tenant_id()) {
+                    return Err(ApiError::Forbidden(
+                        "Cross-tenant account access is not permitted".into(),
+                    ));
+                }
+                Some(scope.tenant_id())
             }
-        })
+            AccountManagementScope::Platform(_) => params.tenant_id,
+        },
+    };
+    let (rows, total) = match scope {
+        AccountManagementScope::Tenant(scope) => (
+            Account::list_in_tenant(pool.write_conn(), scope, &filter, page_size, offset)
+                .await
+                .map_err(account_scope_error)?,
+            Account::count_in_tenant(pool.write_conn(), scope, &filter)
+                .await
+                .map_err(account_scope_error)?,
+        ),
+        AccountManagementScope::Platform(scope) => (
+            Account::list_platform(pool.write_conn(), scope, &filter, page_size, offset)
+                .await
+                .map_err(account_scope_error)?,
+            Account::count_platform(pool.write_conn(), scope, &filter)
+                .await
+                .map_err(account_scope_error)?,
+        ),
+    };
+    let accounts = rows
+        .into_iter()
+        .map(|row| account_info(&state, row))
         .collect();
 
     Ok(Json(AccountListResponse {
@@ -334,6 +338,9 @@ pub async fn list_accounts(
 /// 创建账号请求
 #[derive(Debug, Deserialize)]
 pub struct CreateAccountRequest {
+    /// Required for a platform-root request; tenant admins are bound to their
+    /// verified selected tenant.
+    pub tenant_id: Option<Uuid>,
     pub name: String,
     pub provider: String,
     pub api_key: String,
@@ -368,7 +375,7 @@ fn default_api_capabilities(protocol: ProtocolType) -> Vec<String> {
     }
 }
 
-fn normalize_api_capabilities(
+pub(crate) fn normalize_api_capabilities(
     protocol: ProtocolType,
     capabilities: Option<&[String]>,
 ) -> std::result::Result<Vec<String>, String> {
@@ -411,13 +418,12 @@ fn normalize_api_capabilities(
 ///
 /// POST /api/v1/accounts
 pub async fn create_account(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
+    request_id: RequestId,
     Json(req): Json<CreateAccountRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    let scope = management_scope(&auth)?;
     validate_account_priority(req.priority)?;
     validate_account_rate_limits(req.rpm_limit, req.tpm_limit)?;
 
@@ -425,14 +431,26 @@ pub async fn create_account(
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-    // Keep the tenant row locked through the insert. This closes the race
-    // where a concurrent tenant deactivation could otherwise allow an account
-    // to be attached after the tenant became inactive.
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin account creation: {e}")))?;
-    ensure_active_tenant(&txn, auth.tenant_id).await?;
+    let tenant_id = match scope {
+        AccountManagementScope::Tenant(scope) => {
+            if req.tenant_id.is_some_and(|id| id != scope.tenant_id()) {
+                return Err(ApiError::Forbidden(
+                    "Account tenant must match the selected tenant".into(),
+                ));
+            }
+            scope.tenant_id()
+        }
+        AccountManagementScope::Platform(_) => {
+            req.tenant_id.filter(|id| !id.is_nil()).ok_or_else(|| {
+                ApiError::BadRequest("tenant_id is required for platform creation".into())
+            })?
+        }
+    };
+    if !matches!(req.visibility.as_str(), "tenant" | "global") {
+        return Err(ApiError::BadRequest(
+            "visibility must be tenant or global".into(),
+        ));
+    }
 
     // 校验协议类型：系统仅支持 openai / anthropic 两种协议，
     // 任何厂商（DeepSeek、Ollama、vLLM 等）通过协议 + base_url 接入
@@ -478,12 +496,12 @@ pub async fn create_account(
             );
             (
                 req.api_key.clone(),
-                format!("{}****", &req.api_key[..req.api_key.len().min(3)]),
+                keycompute_runtime::crypto::ApiKeyCrypto::create_preview(&req.api_key),
             )
         };
 
     let db_req = DbCreateAccountRequest {
-        tenant_id: auth.tenant_id,
+        tenant_id,
         // 使用规范化后的协议名（小写），与路由/Gateway 注册键一致
         provider: protocol.as_str().to_string(),
         name: req.name.clone(),
@@ -499,49 +517,35 @@ pub async fn create_account(
         pool_enabled: req.pool_enabled,
     };
 
-    let account = Account::create(&txn, &db_req)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to create account: {}", e)))?;
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit account creation: {e}")))?;
-
-    // 返回完整的账号信息，与前端 AccountInfo 类型匹配
-    Ok(Json(serde_json::json!({
-        "id": account.id.to_string(),
-        "tenant_id": account.tenant_id.to_string(),
-        "tenant_active": true,
-        "name": account.name,
-        "provider": account.provider,
-        "api_key_preview": account.upstream_api_key_preview,
-        "api_base": if account.endpoint.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::String(account.endpoint)
-        },
-        "models": account.models_supported,
-        "api_capabilities": account.api_capabilities,
-        "rpm_limit": account.rpm_limit,
-        "tpm_limit": account.tpm_limit,
-        "current_rpm": 0,
-        "is_active": account.enabled,
-        "is_healthy": account.health_status == keycompute_routing::ACCOUNT_HEALTHY,
-        "health_status": account.health_status,
-        "health_penalty": account.health_penalty,
-        "health_reason": account.health_reason,
-        "routing_eligible": account.enabled
-            && account.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
-            && !state.account_states.is_cooling_down(&account.id),
-        "pool_enabled": account.pool_enabled,
-        "passthrough_binding_count": 0,
-        "last_probe_at": account.last_probe_at.map(|value| value.to_rfc3339()),
-        "last_probe_status": account.last_probe_status,
-        "last_probe_error_code": account.last_probe_error_code,
-        "priority": account.priority,
-        "visibility": account.visibility,
-        "created_at": account.created_at.to_rfc3339(),
-        "last_used_at": serde_json::Value::Null,
-    })))
+    let audit = audit_context(&auth, request_id);
+    let account = match scope {
+        AccountManagementScope::Tenant(scope) => {
+            Account::create_in_tenant(
+                pool,
+                scope,
+                &db_req,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+        AccountManagementScope::Platform(scope) => {
+            Account::create_platform(
+                pool,
+                scope,
+                tenant_id,
+                &db_req,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+    }
+    .map_err(account_scope_error)?;
+    let result = account_view(&state, pool.write_conn(), scope, account.id).await?;
+    Ok(Json(serde_json::to_value(result).map_err(|error| {
+        ApiError::Internal(format!("Failed to serialize account: {error}"))
+    })?))
 }
 
 /// 更新账号请求
@@ -567,14 +571,13 @@ pub struct UpdateAccountRequest {
 ///
 /// PUT /api/v1/accounts/{id}
 pub async fn update_account(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(account_id): Path<Uuid>,
     State(state): State<AppState>,
+    request_id: RequestId,
     Json(req): Json<UpdateAccountRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    let scope = management_scope(&auth)?;
     validate_account_priority(req.priority)?;
     validate_account_rate_limits(req.rpm_limit, req.tpm_limit)?;
 
@@ -583,44 +586,26 @@ pub async fn update_account(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Failed to begin account update: {error}")))?;
-    keycompute_db::models::upstream_access::lock_configuration(&txn)
-        .await
-        .map_err(account_update_error)?;
-
-    // Responses execution reservations establish the tenant -> account lock
-    // order before they insert a route reservation. An account update that
-    // also changes (or explicitly keeps) its tenant must use the same order;
-    // taking the account first and then locking the target tenant would leave
-    // a cycle when a reservation already owns the tenant key-share lock.
-    // Lock/validate the requested tenant before acquiring the account row.
-    let requested_tenant = if let Some(target_tenant_id) = req.tenant_id {
-        Some(
-            Tenant::find_by_id_for_update(&txn, target_tenant_id)
-                .await
-                .map_err(|e| ApiError::Internal(format!("Failed to query tenant: {e}")))?
-                .ok_or_else(|| {
-                    ApiError::NotFound(format!("Tenant not found: {target_tenant_id}"))
-                })?,
-        )
-    } else {
-        None
-    };
-
-    let existing = Account::find_by_id_for_update(&txn, account_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
-    if let Some(target_tenant) = requested_tenant
-        && !target_tenant.is_active()
+    if req
+        .visibility
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "tenant" | "global"))
     {
-        return Err(ApiError::Conflict(
-            "The target tenant is inactive and cannot receive channel accounts".to_string(),
+        return Err(ApiError::BadRequest(
+            "visibility must be tenant or global".into(),
         ));
     }
+    let audit = audit_context(&auth, request_id);
+    let existing = Account::prepare_update(
+        pool,
+        scope,
+        account_id,
+        &audit,
+        ProviderAuthzSnapshot::platform(auth.token_version),
+    )
+    .await
+    .map_err(account_scope_error)?
+    .ok_or_else(|| ApiError::NotFound(format!("Account not found: {account_id}")))?;
     let existing_protocol = ProtocolType::parse(&existing.provider).ok_or_else(|| {
         ApiError::Conflict(format!(
             "Account has unsupported protocol '{}'; please recreate it",
@@ -640,39 +625,14 @@ pub async fn update_account(
         requested_endpoint_changes(existing_protocol, &existing.endpoint, api_base.as_deref());
     let api_key_changed =
         requested_api_key_changes(&existing.upstream_api_key_encrypted, req.api_key.as_deref());
-    let changes_upstream_connection = endpoint_changed || api_key_changed;
-    if changes_upstream_connection {
-        // Serialize actual connection-material updates with Responses
-        // reservations and durable settlements. Merely resubmitting an
-        // unchanged endpoint/key must not invalidate stored resource routes.
-        let has_pending_responses_work =
-            ResponseAffinity::lock_account_routes_and_has_deletion_blocker(&txn, account_id)
-                .await
-                .map_err(|error| {
-                    ApiError::Internal(format!(
-                        "Failed to inspect account Responses settlements: {error}"
-                    ))
-                })?;
-        ensure_account_connection_update_has_no_pending_responses_work(has_pending_responses_work)?;
-        // A stored upstream resource is scoped to the endpoint and credential
-        // that created it. Once that connection identity changes, retaining its
-        // old affinity would send the opaque resource ID to an unrelated
-        // upstream account. Pending work is rejected above; settled routes can
-        // be invalidated atomically with the account update.
-        ResponseAffinity::delete_settled_account_routes(&txn, account_id)
-            .await
-            .map_err(|error| {
-                ApiError::Internal(format!(
-                    "Failed to invalidate stale Responses routes: {error}"
-                ))
-            })?;
-    }
     let api_capabilities = req
         .api_capabilities
         .as_deref()
         .map(|capabilities| normalize_api_capabilities(existing_protocol, Some(capabilities)))
         .transpose()
         .map_err(ApiError::BadRequest)?;
+    let models_supported = req.models.map(normalize_model_list);
+    let invalidate_local_affinity = endpoint_changed || api_key_changed;
 
     // 处理 API Key 加密
     let (encrypted_key, key_preview) = if api_key_changed {
@@ -692,14 +652,15 @@ pub async fn update_account(
         } else {
             (
                 Some(key.clone()),
-                Some(format!("{}****", &key[..key.len().min(3)])),
+                Some(keycompute_runtime::crypto::ApiKeyCrypto::create_preview(
+                    key,
+                )),
             )
         }
     } else {
         (None, None)
     };
 
-    let models_supported = req.models.map(normalize_model_list);
     let db_req = DbUpdateAccountRequest {
         tenant_id: req.tenant_id,
         name: req.name.clone(),
@@ -716,16 +677,35 @@ pub async fn update_account(
         pool_enabled: req.pool_enabled,
     };
 
-    let updated = existing
-        .update(&txn, &db_req)
-        .await
-        .map_err(account_update_error)?;
-    keycompute_db::models::passthrough_binding::PassthroughBinding::ensure_account_models_unambiguous(&txn,account_id).await.map_err(account_update_error)?;
-    txn.commit()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Failed to commit account update: {error}")))?;
+    let updated = match scope {
+        AccountManagementScope::Tenant(scope) => {
+            Account::update_in_tenant(
+                pool,
+                scope,
+                account_id,
+                &db_req,
+                existing.upstream_config_version,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+        AccountManagementScope::Platform(scope) => {
+            Account::update_platform(
+                pool,
+                scope,
+                account_id,
+                &db_req,
+                existing.upstream_config_version,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+    }
+    .map_err(account_scope_error)?;
 
-    if changes_upstream_connection {
+    if invalidate_local_affinity {
         // Database-backed affinity lookups are authoritative, so stale Redis
         // entries cannot be used after the transaction commits. Drop this
         // replica's copies eagerly to avoid retaining dead entries until TTL.
@@ -736,125 +716,50 @@ pub async fn update_account(
             .retain(|_, affinity| affinity.account_id != account_id);
     }
 
-    let tenant_active = load_active_tenant_ids(pool.write_conn(), &[updated.tenant_id])
-        .await?
-        .contains(&updated.tenant_id);
-
-    // 返回更新后的账号信息
-    Ok(Json(serde_json::json!({
-        "id": updated.id.to_string(),
-        "tenant_id": updated.tenant_id.to_string(),
-        "tenant_active": tenant_active,
-        "name": updated.name,
-        "provider": updated.provider,
-        "api_key_preview": updated.upstream_api_key_preview,
-        "api_base": if updated.endpoint.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::String(updated.endpoint)
-        },
-        "models": updated.models_supported,
-        "api_capabilities": updated.api_capabilities,
-        "rpm_limit": updated.rpm_limit,
-        "tpm_limit": updated.tpm_limit,
-        "current_rpm": 0,
-        "is_active": updated.enabled,
-        "is_healthy": updated.health_status == keycompute_routing::ACCOUNT_HEALTHY,
-        "health_status": updated.health_status,
-        "health_penalty": updated.health_penalty,
-        "health_reason": updated.health_reason,
-        "routing_eligible": tenant_active
-            && updated.enabled
-            && updated.health_status != keycompute_routing::ACCOUNT_UNHEALTHY
-            && !state.account_states.is_cooling_down(&updated.id),
-        "pool_enabled": updated.pool_enabled,
-        "passthrough_binding_count": account_binding_counts(pool.write_conn(), &[updated.id]).await?.get(&updated.id).copied().unwrap_or(0),
-        "last_probe_at": updated.last_probe_at.map(|value| value.to_rfc3339()),
-        "last_probe_status": updated.last_probe_status,
-        "last_probe_error_code": updated.last_probe_error_code,
-        "priority": updated.priority,
-        "visibility": updated.visibility,
-        "created_at": updated.created_at.to_rfc3339(),
-        "last_used_at": serde_json::Value::Null,
-    })))
+    let result = account_view(&state, pool.write_conn(), scope, updated.id).await?;
+    Ok(Json(serde_json::to_value(result).map_err(|error| {
+        ApiError::Internal(format!("Failed to serialize account: {error}"))
+    })?))
 }
 
 /// 删除账号
 ///
 /// DELETE /api/v1/accounts/{id}
 pub async fn delete_account(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(account_id): Path<Uuid>,
     State(state): State<AppState>,
+    request_id: RequestId,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = management_scope(&auth)?;
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    // Account deletion and Responses route draining share one writer
-    // transaction. Locking the account first also prevents a concurrent
-    // Responses create from adding a new foreign-key reference mid-delete.
-    let txn = pool.begin().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to begin account deletion: {error}"))
-    })?;
-    let existing = Account::find_by_id_for_update(&txn, account_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
-
-    let has_pending_responses_work =
-        ResponseAffinity::lock_account_routes_and_has_deletion_blocker(&txn, account_id)
+    let audit = audit_context(&auth, request_id);
+    match scope {
+        AccountManagementScope::Tenant(scope) => {
+            Account::delete_in_tenant(
+                pool,
+                scope,
+                account_id,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
             .await
-            .map_err(|error| {
-                ApiError::Internal(format!(
-                    "Failed to inspect account Responses settlements: {error}"
-                ))
-            })?;
-    if let Err(error) =
-        ensure_account_delete_has_no_pending_responses_work(has_pending_responses_work)
-    {
-        let _ = txn.rollback().await;
-        return Err(error);
+        }
+        AccountManagementScope::Platform(scope) => {
+            Account::delete_platform(
+                pool,
+                scope,
+                account_id,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
     }
-    ResponseAffinity::delete_settled_account_routes(&txn, account_id)
-        .await
-        .map_err(|error| {
-            ApiError::Internal(format!("Failed to drain account Responses routes: {error}"))
-        })?;
-
-    let has_passthrough_bindings = txn
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT 1 FROM passthrough_bindings WHERE account_id = $1 LIMIT 1",
-            [account_id.into()],
-        ))
-        .await
-        .map_err(|error| {
-            ApiError::Internal(format!(
-                "Failed to inspect account passthrough bindings: {error}"
-            ))
-        })?
-        .is_some();
-    if has_passthrough_bindings {
-        let _ = txn.rollback().await;
-        return Err(ApiError::Conflict(
-            "Account is referenced by passthrough bindings; delete or retarget them first"
-                .to_string(),
-        ));
-    }
-
-    existing
-        .delete(&txn)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to delete account: {}", e)))?;
-    txn.commit().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to commit account deletion: {error}"))
-    })?;
+    .map_err(account_scope_error)?;
 
     // Redis entries expire with the normal Responses TTL. Remove process-local
     // entries immediately so this replica does not retain stale account routes.
@@ -873,26 +778,6 @@ pub async fn delete_account(
         "account_id": account_id,
         "deleted_by": auth.user_id,
     })))
-}
-
-fn ensure_account_delete_has_no_pending_responses_work(has_pending: bool) -> Result<()> {
-    if has_pending {
-        return Err(ApiError::Conflict(
-            "Account has an active or background Responses request; retry deletion after it completes"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn ensure_account_connection_update_has_no_pending_responses_work(has_pending: bool) -> Result<()> {
-    if has_pending {
-        return Err(ApiError::Conflict(
-            "Account endpoint or API key cannot change while a Responses request is active or awaiting billing settlement"
-                .to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn requested_endpoint_changes(
@@ -942,16 +827,37 @@ fn requested_api_key_changes(
 ///
 /// 实际调用上游 API 进行连接测试，验证 API Key 是否有效
 pub async fn test_account(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(account_id): Path<Uuid>,
     State(state): State<AppState>,
+    request_id: RequestId,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = management_scope(&auth)?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let audit = audit_context(&auth, request_id);
+    Account::prepare_probe(
+        pool,
+        scope,
+        account_id,
+        &audit,
+        ProviderAuthzSnapshot::platform(auth.token_version),
+    )
+    .await
+    .map_err(account_scope_error)?
+    .ok_or_else(|| ApiError::NotFound(format!("Account not found: {account_id}")))?;
     Ok(Json(
-        probe_account_for_monitoring(&state, account_id).await?,
+        probe_account_for_monitoring_with_policy(
+            &state,
+            account_id,
+            AccountProbePolicy::Explicit,
+            Some(scope),
+            Some(ProviderAuthzSnapshot::platform(auth.token_version)),
+        )
+        .await?
+        .ok_or_else(|| ApiError::NotFound(format!("Account not found: {account_id}")))?,
     ))
 }
 
@@ -959,9 +865,15 @@ pub async fn probe_account_for_monitoring(
     state: &AppState,
     account_id: Uuid,
 ) -> Result<serde_json::Value> {
-    probe_account_for_monitoring_with_policy(state, account_id, AccountProbePolicy::Explicit)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))
+    probe_account_for_monitoring_with_policy(
+        state,
+        account_id,
+        AccountProbePolicy::Explicit,
+        None,
+        None,
+    )
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))
 }
 
 /// Probe an account only while its owning tenant is active and, for automatic
@@ -974,12 +886,18 @@ pub async fn probe_enabled_account_for_monitoring(
     state: &AppState,
     account_id: Uuid,
 ) -> Result<Option<serde_json::Value>> {
-    probe_account_for_monitoring_with_policy(state, account_id, AccountProbePolicy::EnabledOnly)
-        .await
+    probe_account_for_monitoring_with_policy(
+        state,
+        account_id,
+        AccountProbePolicy::EnabledOnly,
+        None,
+        None,
+    )
+    .await
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AccountProbePolicy {
+pub(crate) enum AccountProbePolicy {
     Explicit,
     EnabledOnly,
 }
@@ -988,10 +906,12 @@ fn account_matches_probe_policy(enabled: bool, policy: AccountProbePolicy) -> bo
     policy == AccountProbePolicy::Explicit || enabled
 }
 
-async fn probe_account_for_monitoring_with_policy(
+pub(crate) async fn probe_account_for_monitoring_with_policy(
     state: &AppState,
     account_id: Uuid,
     policy: AccountProbePolicy,
+    management_scope: Option<AccountManagementScope>,
+    management_token_version: Option<ProviderAuthzSnapshot>,
 ) -> Result<Option<serde_json::Value>> {
     let pool = state
         .pool
@@ -1005,12 +925,27 @@ async fn probe_account_for_monitoring_with_policy(
     // Require the owning tenant to remain active immediately before making
     // the upstream request; otherwise a stale monitoring candidate could
     // continue probing a closed tenant's channel account.
-    let account = Account::find_by_id_for_key_share(writer, account_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
-        .and_then(|account| {
-            account_matches_probe_policy(account.enabled, policy).then_some(account)
-        });
+    let account = match (management_scope, management_token_version) {
+        (Some(scope), Some(snapshot)) => Some(
+            Account::load_authorized_probe(writer, scope, account_id, snapshot)
+                .await
+                .map_err(account_scope_error)?
+                .ok_or_else(|| {
+                    ApiError::Forbidden(
+                        "Account management authorization is no longer active".into(),
+                    )
+                })?,
+        ),
+        (None, None) => Account::find_by_id_for_key_share(writer, account_id)
+            .await
+            .map_err(|error| ApiError::Internal(format!("Failed to find account: {error}")))?,
+        _ => {
+            return Err(ApiError::Forbidden(
+                "Incomplete account management authorization".into(),
+            ));
+        }
+    }
+    .and_then(|account| account_matches_probe_policy(account.enabled, policy).then_some(account));
     let Some(account) = account else {
         return match policy {
             AccountProbePolicy::Explicit => Err(ApiError::NotFound(format!(
@@ -1020,7 +955,6 @@ async fn probe_account_for_monitoring_with_policy(
             AccountProbePolicy::EnabledOnly => Ok(None),
         };
     };
-
     let start = Instant::now();
     // All probe exits, including local configuration failures, must start
     // from and persist the account's existing health snapshot.
@@ -1071,7 +1005,8 @@ async fn probe_account_for_monitoring_with_policy(
     let endpoint = if account.endpoint.is_empty() {
         protocol.default_endpoint().to_string()
     } else {
-        account.endpoint.clone()
+        normalize_base_url(&account.endpoint)
+            .map_err(|_| ApiError::Conflict("Stored account endpoint is invalid".into()))?
     };
 
     // Probe through the same provider/account proxy and timeout path as live
@@ -1286,7 +1221,7 @@ fn account_test_response(
 /// 通过 Provider 注册表取对应协议的 adapter 调用 `list_models`，
 /// 认证方式由协议实现自行处理（openai: Bearer；anthropic: x-api-key），
 /// 避免在 handler 层重复协议认证逻辑
-async fn fetch_upstream_models(
+pub(crate) async fn fetch_upstream_models(
     protocol: ProtocolType,
     transport: &dyn HttpTransport,
     endpoint: &str,
@@ -1300,7 +1235,7 @@ async fn fetch_upstream_models(
     adapter
         .list_models(transport, endpoint, &key)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|error| probe_error_code(&error))
 }
 
 async fn probe_upstream_account(
@@ -1422,13 +1357,12 @@ fn probe_error_code(error: &keycompute_types::KeyComputeError) -> String {
 ///
 /// 从上游 API 获取模型列表并更新数据库中的 models_supported 字段
 pub async fn refresh_account(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Path(account_id): Path<Uuid>,
     State(state): State<AppState>,
+    request_id: RequestId,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManageProviders) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
+    let scope = management_scope(&auth)?;
 
     let pool = state
         .pool
@@ -1436,10 +1370,28 @@ pub async fn refresh_account(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 查找账号
-    let account = Account::find_by_id(pool, account_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find account: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
+    let audit = audit_context(&auth, request_id);
+    Account::prepare_probe(
+        pool,
+        scope,
+        account_id,
+        &audit,
+        ProviderAuthzSnapshot::platform(auth.token_version),
+    )
+    .await
+    .map_err(account_scope_error)?
+    .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))?;
+    let account = Account::load_authorized_probe(
+        pool.write_conn(),
+        scope,
+        account_id,
+        ProviderAuthzSnapshot::platform(auth.token_version),
+    )
+    .await
+    .map_err(account_scope_error)?
+    .ok_or_else(|| {
+        ApiError::Forbidden("Account management authorization is no longer active".into())
+    })?;
 
     // 解密 API Key
     let api_key = decrypt_account_api_key(&account.upstream_api_key_encrypted)?;
@@ -1456,7 +1408,8 @@ pub async fn refresh_account(
     let endpoint = if account.endpoint.is_empty() {
         protocol.default_endpoint().to_string()
     } else {
-        account.endpoint.clone()
+        normalize_base_url(&account.endpoint)
+            .map_err(|_| ApiError::Conflict("Stored account endpoint is invalid".into()))?
     };
 
     let transport = state
@@ -1471,32 +1424,43 @@ pub async fn refresh_account(
     // 更新数据库
     let db_req = refresh_models_update_request(fetched_models);
 
-    // No configuration lock is held during external metadata I/O.
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin model refresh: {e}")))?;
-    keycompute_db::models::upstream_access::lock_configuration(&txn)
-        .await
-        .map_err(account_update_error)?;
-    let current = Account::find_by_id_for_update(&txn, account_id)
-        .await
-        .map_err(account_update_error)?
-        .ok_or_else(|| ApiError::NotFound("Account no longer exists".into()))?;
-    if current.upstream_config_version != account.upstream_config_version {
-        return Err(ApiError::Conflict(
-            "Account configuration changed during model refresh; retry".into(),
-        ));
+    let updated = match scope {
+        AccountManagementScope::Tenant(scope) => {
+            Account::update_in_tenant(
+                pool,
+                scope,
+                account_id,
+                &db_req,
+                account.upstream_config_version,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
+        AccountManagementScope::Platform(scope) => {
+            Account::update_platform(
+                pool,
+                scope,
+                account_id,
+                &db_req,
+                account.upstream_config_version,
+                &audit,
+                ProviderAuthzSnapshot::platform(auth.token_version),
+            )
+            .await
+        }
     }
-    let updated = current
-        .update(&txn, &db_req)
-        .await
-        .map_err(account_update_error)?;
-    keycompute_db::models::passthrough_binding::PassthroughBinding::ensure_account_models_unambiguous(&txn,account_id)
-        .await.map_err(account_update_error)?;
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit model refresh: {e}")))?;
+    .map_err(account_scope_error)?;
+
+    if updated.models_supported != account.models_supported {
+        // A successful model refresh changes the account's routing namespace.
+        // A no-op refresh must preserve active local affinity and pending work.
+        state
+            .responses_affinity
+            .write()
+            .await
+            .retain(|_, affinity| affinity.account_id != account_id);
+    }
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -1512,7 +1476,9 @@ pub async fn refresh_account(
 ///
 /// A valid empty `/models` response is persisted as an empty list so routing
 /// cannot continue selecting models that the account no longer exposes.
-fn refresh_models_update_request(models_supported: Vec<String>) -> DbUpdateAccountRequest {
+pub(crate) fn refresh_models_update_request(
+    models_supported: Vec<String>,
+) -> DbUpdateAccountRequest {
     DbUpdateAccountRequest {
         tenant_id: None,
         name: None,
@@ -1531,7 +1497,7 @@ fn refresh_models_update_request(models_supported: Vec<String>) -> DbUpdateAccou
 }
 
 /// 解密账号的 API Key
-pub fn decrypt_account_api_key(encrypted_key: &str) -> Result<String> {
+pub(crate) fn decrypt_account_api_key(encrypted_key: &str) -> Result<String> {
     // 生产环境配置了全局加密器后，存储值必须是有效密文。将解密失败的密文
     // 当作明文继续使用会掩盖密钥轮换/数据损坏，并可能把无效内容发给上游。
     if keycompute_runtime::crypto::global_crypto().is_some() {
@@ -1827,7 +1793,9 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_upstream_models_rejects_invalid_models_payload() {
-        let transport = RecordingGetTransport::new(br#"{"data": "invalid"}"#.to_vec());
+        let transport = RecordingGetTransport::new(
+            br#"{"data": "upstream-secret-echo-must-not-escape"}"#.to_vec(),
+        );
 
         let error = fetch_upstream_models(
             ProtocolType::Openai,
@@ -1838,7 +1806,10 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(error.contains("Invalid /models response"));
+        // The model-list parser reports ProviderError, mapped to the generic
+        // stable failure code rather than raw provider details or secrets.
+        assert_eq!(error, "probe_failed");
+        assert!(!error.contains("upstream-secret-echo-must-not-escape"));
         assert_eq!(
             transport.requests(),
             vec![(
@@ -1998,21 +1969,25 @@ mod tests {
 
     #[test]
     fn active_or_background_responses_work_blocks_account_deletion() {
-        assert!(ensure_account_delete_has_no_pending_responses_work(false).is_ok());
-        assert!(matches!(
-            ensure_account_delete_has_no_pending_responses_work(true),
-            Err(ApiError::Conflict(message)) if message.contains("active or background")
-        ));
+        assert!(matches!(account_scope_error(keycompute_db::DbError::Other(
+            "account has pending Responses work".into(),
+        )), ApiError::Conflict(message) if message.contains("pending Responses")));
     }
 
     #[test]
     fn active_or_background_responses_work_blocks_connection_material_updates() {
-        assert!(ensure_account_connection_update_has_no_pending_responses_work(false).is_ok());
         assert!(matches!(
-            ensure_account_connection_update_has_no_pending_responses_work(true),
-            Err(ApiError::Conflict(message))
-                if message.contains("endpoint or API key")
-                    && message.contains("billing settlement")
+            account_scope_error(keycompute_db::DbError::Other(
+                "account has pending Responses work".into(),
+            )),
+            ApiError::Conflict(_)
+        ));
+        assert!(matches!(
+            account_scope_error(keycompute_db::DbError::OptimisticConflict {
+                entity: "account".into(),
+                id: Uuid::new_v4().to_string(),
+            }),
+            ApiError::Conflict(_)
         ));
     }
 

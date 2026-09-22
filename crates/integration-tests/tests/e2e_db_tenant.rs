@@ -23,7 +23,7 @@ mod tests {
         ResponseAffinity, ResponsesIdempotencyClaim, TenantDistributionRule, TenantMembership,
         UserBalance,
     };
-    use keycompute_server::{AppState, AuthExtractor};
+    use keycompute_server::AppState;
     use keycompute_types::{CredentialKind, PlatformRole, TenantRole};
     use rust_decimal::Decimal;
     use std::{str::FromStr, sync::Arc};
@@ -754,19 +754,22 @@ mod tests {
 
         let router = keycompute_db::DbRouter::single(pool.clone());
         let state = AppState::with_pool(Arc::clone(&router));
-        // This isolated handler test supplies the already verified platform
-        // capabilities that the outer platform guard would normally attach.
-        let auth = AuthExtractor::new(
-            tenant.owner_user_id,
-            tenant.id,
-            Uuid::nil(),
-            CredentialKind::Jwt,
+        // Use a real global-root session; a tenant role or synthetic permission
+        // list must never substitute for platform authorization.
+        let root = keycompute_db::User::find_by_email(&pool, "tenant-test-root@fixture.invalid")
+            .await
+            .unwrap()
+            .unwrap();
+        let token = state
+            .auth
+            .get_jwt_validator()
+            .unwrap()
+            .generate_identity_token(root.id, None, root.token_version, None, None, 3600)
+            .unwrap();
+        let auth = keycompute_server::extractors::GlobalConsoleAuth::try_from(
+            state.auth.verify_token(&token).await.unwrap(),
         )
-        .with_permissions(keycompute_auth::permissions_for(
-            CredentialKind::Jwt,
-            PlatformRole::Root,
-            Some(TenantRole::Admin),
-        ));
+        .unwrap();
         let request = keycompute_server::handlers::admin_account::UpdateAccountRequest {
             tenant_id: Some(tenant.id),
             name: Some("updated-lock-order".to_string()),
@@ -781,11 +784,22 @@ mod tests {
             pool_enabled: None,
             visibility: Some("tenant".to_string()),
         };
+        let reservation_pid: i32 = reservation_tx
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT pg_backend_pid()",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index(0)
+            .unwrap();
         let update_task = tokio::spawn(async move {
             keycompute_server::handlers::admin_account::update_account(
                 auth,
                 Path(account.id),
                 State(state),
+                keycompute_server::extractors::RequestId::new(),
                 Json(request),
             )
             .await
@@ -801,9 +815,10 @@ mod tests {
         let mut update_reached_tenant_lock = false;
         for _ in 0..300 {
             let row = pool
-                .query_one(Statement::from_string(
+                .query_one(Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query ILIKE '%FROM tenants WHERE id = $1 FOR UPDATE%') AS waiting".to_string(),
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND $1=ANY(pg_blocking_pids(pid))) AS waiting",
+                    [reservation_pid.into()],
                 ))
                 .await
                 .expect("lock wait probe should succeed")

@@ -6,7 +6,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::GlobalConsoleAuth,
     handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
@@ -14,7 +14,8 @@ use axum::{
     Json,
     extract::{Query, State},
 };
-use keycompute_auth::Permission;
+use keycompute_auth::AuthorizationAction;
+use keycompute_db::models::account::AccountManagementScope;
 use keycompute_types::{ModelAccessMode, ModelAvailability, ModelCatalogEntry, ModelCatalogPage};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::Deserialize;
@@ -42,23 +43,25 @@ struct NodeCatalogRow {
     eligible_targets: i64,
 }
 
-fn require_admin(auth: &AuthExtractor) -> Result<()> {
-    if !auth.has_permission(&Permission::ManageProviders) {
-        return Err(ApiError::Forbidden("Admin permission required".into()));
-    }
-    Ok(())
+fn management_scope(auth: &GlobalConsoleAuth) -> Result<AccountManagementScope> {
+    Ok(AccountManagementScope::Platform(
+        auth.require_platform(AuthorizationAction::ManagePlatform)?,
+    ))
 }
 
-fn target_tenant(auth: &AuthExtractor, requested: Option<Uuid>) -> Result<Uuid> {
-    match requested {
-        None => Ok(auth.tenant_id),
-        Some(id) if id == auth.tenant_id => Ok(id),
-        Some(_) if auth.has_permission(&Permission::ManageProviders) => {
-            Ok(requested.expect("matched Some"))
+fn target_tenant(scope: AccountManagementScope, requested: Option<Uuid>) -> Result<Option<Uuid>> {
+    match scope {
+        AccountManagementScope::Tenant(scope) => match requested {
+            None => Ok(Some(scope.tenant_id())),
+            Some(id) if id == scope.tenant_id() => Ok(Some(id)),
+            Some(_) => Err(ApiError::Forbidden(
+                "Cross-tenant catalog access is not permitted".into(),
+            )),
+        },
+        AccountManagementScope::Platform(_) if requested.is_some_and(|id| id.is_nil()) => {
+            Err(ApiError::BadRequest("tenant_id must be a real UUID".into()))
         }
-        Some(_) => Err(ApiError::Forbidden(
-            "Cross-tenant catalog access is not permitted".into(),
-        )),
+        AccountManagementScope::Platform(_) => Ok(requested),
     }
 }
 
@@ -106,13 +109,13 @@ async fn query_rows<T: FromQueryResult>(
 }
 
 pub async fn model_catalog(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Query(params): Query<ModelCatalogQuery>,
 ) -> Result<Json<ModelCatalogPage>> {
-    require_admin(&auth)?;
+    let scope = management_scope(&auth)?;
     let mode = params.mode.unwrap_or_default();
-    let tenant_id = target_tenant(&auth, params.tenant_id)?;
+    let tenant_id = target_tenant(scope, params.tenant_id)?;
     let (protocol, capability) = protocol_capability(
         mode,
         params.protocol.as_deref(),
@@ -164,7 +167,9 @@ pub async fn model_catalog(
     };
     Ok(Json(ModelCatalogPage {
         mode,
-        tenant_id: tenant_id.to_string(),
+        tenant_id: tenant_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "global".into()),
         entries,
         page: page as u64,
         page_size: page_size as u64,
@@ -178,7 +183,7 @@ pub async fn model_catalog(
 
 async fn account_pool_catalog(
     state: &AppState,
-    tenant: Uuid,
+    tenant: Option<Uuid>,
     protocol: &str,
     capability: &str,
     q: Option<&str>,
@@ -201,7 +206,7 @@ async fn account_pool_catalog(
       WITH local AS (SELECT * FROM jsonb_to_recordset($7::JSONB) AS h(id UUID,status TEXT,updated_at TIMESTAMPTZ,generation BIGINT,configuration_updated_at TIMESTAMPTZ)),
       candidates AS (
         SELECT DISTINCT a.id,m.model,a.enabled,
-          (owner.status='active' AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active')) AS active,
+          (owner.status='active' AND ($1::UUID IS NULL OR EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active'))) AS active,
           (CASE WHEN h.id IS NOT NULL THEN h.status ELSE a.health_status END <> 'unhealthy') AS healthy,
           NOT(a.id=ANY($8::UUID[])) AS not_cooling
         FROM accounts a JOIN tenants owner ON owner.id=a.tenant_id
@@ -211,7 +216,7 @@ async fn account_pool_catalog(
         WHERE (a.tenant_id=$1 OR a.visibility='global') AND a.pool_enabled
           AND a.provider=$2 AND a.api_capabilities @> ARRAY[$3]::TEXT[]
           AND m.model<>''
-          AND ($4::TEXT IS NULL OR m.model ILIKE '%'||$4||'%')
+          AND ($4::TEXT IS NULL OR m.model ILIKE '%'||$4||'%' ESCAPE '\')
       ), grouped AS (
         SELECT model,COUNT(*)::BIGINT configured_targets,
           COUNT(*) FILTER(WHERE enabled AND active AND healthy AND not_cooling)::BIGINT eligible_targets,
@@ -220,9 +225,12 @@ async fn account_pool_catalog(
       ), paged AS (SELECT * FROM grouped ORDER BY model LIMIT $5 OFFSET $6)
       SELECT totals.total,paged.* FROM (SELECT count(*)::BIGINT total FROM grouped) totals LEFT JOIN paged ON TRUE ORDER BY model
     "#;
+    let account_scope = tenant
+        .map(|_| keycompute_db::models::upstream_access::non_pt_predicate("a", "$1"))
+        .unwrap_or_else(|| "a.enabled AND owner.status='active' AND a.pool_enabled".into());
     let sql = sql.replace(
         "(a.tenant_id=$1 OR a.visibility='global') AND a.pool_enabled",
-        &keycompute_db::models::upstream_access::non_pt_predicate("a", "$1"),
+        &account_scope,
     );
     let result = tokio::time::timeout(
         DB_TIMEOUT,
@@ -312,25 +320,118 @@ async fn account_pool_catalog(
 
 async fn passthrough_catalog(
     state: &AppState,
-    tenant: Uuid,
+    tenant: Option<Uuid>,
     capability: &str,
     q: Option<&str>,
     limit: i64,
     offset: i64,
 ) -> Result<(Vec<ModelCatalogEntry>, i64)> {
-    let result = crate::passthrough_binding::DbPassthroughBindingValidator::for_capability(
-        state,
-        keycompute_types::AccountApiCapability::parse(capability).expect("validated capability"),
-    )?
-    .catalog_page(tenant, q, offset / limit + 1, limit)
+    if let Some(tenant) = tenant {
+        let result = crate::passthrough_binding::DbPassthroughBindingValidator::for_capability(
+            state,
+            keycompute_types::AccountApiCapability::parse(capability)
+                .expect("validated capability"),
+        )?
+        .catalog_page(tenant, q, offset / limit + 1, limit)
+        .await?;
+        return Ok((result.entries, result.total as i64));
+    }
+
+    #[derive(Debug, FromQueryResult)]
+    struct GlobalBindingCatalogRow {
+        model: String,
+        configured_targets: i64,
+        eligible_targets: i64,
+        total: i64,
+    }
+    let db = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Model catalog unavailable".into()))?
+        .write_conn();
+    let protocol = if capability == "messages" {
+        "anthropic"
+    } else {
+        "openai"
+    };
+    let rows = query_rows::<GlobalBindingCatalogRow>(
+        db,
+        Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "WITH grouped AS (
+                 SELECT m.model,
+                        COUNT(DISTINCT pb.id)::BIGINT AS configured_targets,
+                        COUNT(DISTINCT pb.id) FILTER (
+                            WHERE pb.pool_enabled
+                              AND a.enabled
+                              AND owner.status='active'
+                              AND t.status='active'
+                        )::BIGINT AS eligible_targets
+                 FROM passthrough_bindings pb
+                 JOIN accounts a ON a.id=pb.account_id
+                 JOIN tenants owner ON owner.id=a.tenant_id
+                 JOIN tenants t ON t.id=pb.tenant_id
+                 CROSS JOIN LATERAL unnest(a.models_supported) AS m(model)
+                 WHERE a.provider=$1 AND a.api_capabilities @> ARRAY[$2]::TEXT[]
+                   AND m.model<>''
+                   AND ($3::TEXT IS NULL OR m.model ILIKE '%'||$3||'%' ESCAPE '\')
+                 GROUP BY m.model
+             )
+             SELECT model,configured_targets,eligible_targets,
+                    (SELECT COUNT(*)::BIGINT FROM grouped) AS total
+             FROM grouped ORDER BY model LIMIT $4 OFFSET $5",
+            [
+                protocol.into(),
+                capability.into(),
+                q.into(),
+                limit.into(),
+                offset.into(),
+            ],
+        ),
+    )
     .await?;
-    Ok((result.entries, result.total as i64))
+    let total = rows.first().map(|row| row.total).unwrap_or(0);
+    let entries = rows
+        .into_iter()
+        .map(|row| ModelCatalogEntry {
+            model: row.model.clone(),
+            request_model: row.model,
+            protocol: protocol.into(),
+            capability: capability.into(),
+            request_path: match capability {
+                "responses" => "/pt/v1/responses",
+                "messages" => "/pt/v1/messages",
+                _ => "/pt/v1/chat/completions",
+            }
+            .into(),
+            status: if row.eligible_targets > 0 {
+                ModelAvailability::Ready
+            } else {
+                ModelAvailability::Unavailable
+            },
+            reason_code: if row.eligible_targets > 0 {
+                "binding_ready"
+            } else {
+                "no_active_binding"
+            }
+            .into(),
+            configured_targets: row.configured_targets.max(0) as u64,
+            eligible_targets: row.eligible_targets.max(0) as u64,
+            binding_id: None,
+            binding_revision: None,
+            account_id: None,
+            account_name: None,
+            pool_enabled: None,
+            health_expires_at: None,
+        })
+        .collect();
+    Ok((entries, total))
 }
 
 fn node_supply_sql(operation: keycompute_types::node_native::NodeNativeOperation) -> String {
     format!(
         r#"
-      SELECT DISTINCT n.id,m.model,
+      SELECT DISTINCT n.id,m.model,t.status AS tenant_status,
         EXISTS(SELECT 1 FROM node_sessions ns WHERE ns.node_id=n.id
           AND {ready} AND ns.accepted_models_json @> jsonb_build_array(m.model) AND {profile}) AS ready
       FROM nodes n JOIN tenants t ON t.id=n.tenant_id
@@ -341,6 +442,7 @@ fn node_supply_sql(operation: keycompute_types::node_native::NodeNativeOperation
           WHERE ns.node_id=n.id AND ns.expires_at>NOW() AND ns.revoked_at IS NULL
       ) m
       WHERE m.model IS NOT NULL AND m.model<>'' AND n.capabilities_json->>'runtime'='ollama'
+        AND ($1::UUID IS NULL OR t.id=$1)
     "#,
         ready = node_gateway::node_index::READY_NODE_CONDITION,
         profile = node_gateway::node_index::ready_profile_condition(
@@ -351,7 +453,7 @@ fn node_supply_sql(operation: keycompute_types::node_native::NodeNativeOperation
 }
 async fn node_catalog(
     state: &AppState,
-    tenant: Uuid,
+    tenant: Option<Uuid>,
     capability: &str,
     q: Option<&str>,
     limit: i64,
@@ -366,8 +468,8 @@ async fn node_catalog(
     let sql = format!(
         r#"WITH supply AS ({}), grouped AS (
         SELECT model,COUNT(DISTINCT id)::BIGINT configured_targets,
-          COUNT(DISTINCT id) FILTER(WHERE ready AND EXISTS(SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active'))::BIGINT eligible_targets
-        FROM supply WHERE ($2::TEXT IS NULL OR model ILIKE '%'||$2||'%') GROUP BY model
+          COUNT(DISTINCT id) FILTER(WHERE ready AND tenant_status='active' AND ($1::UUID IS NULL OR EXISTS(SELECT 1 FROM tenants selected WHERE selected.id=$1 AND selected.status='active')))::BIGINT eligible_targets
+        FROM supply WHERE ($2::TEXT IS NULL OR model ILIKE '%'||$2||'%' ESCAPE '\') GROUP BY model
       ), paged AS (SELECT * FROM grouped ORDER BY model LIMIT $3 OFFSET $4)
       SELECT totals.total,paged.* FROM (SELECT count(*)::BIGINT total FROM grouped) totals LEFT JOIN paged ON TRUE ORDER BY model"#,
         node_supply_sql(operation)
