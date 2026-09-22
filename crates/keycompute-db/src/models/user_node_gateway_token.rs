@@ -412,21 +412,6 @@ impl UserNodeGatewayToken {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Admin 恢复节点时同步恢复被吊销的令牌
-    pub async fn restore_from_revoked(
-        db: &impl ConnectionTrait,
-        token_id: Uuid,
-    ) -> Result<bool, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"UPDATE user_node_gateway_tokens SET status = 'approved', revoke_reason = NULL, actioned_at = NOW(), updated_at = NOW() WHERE id = $1 AND status = 'rejected' AND revoke_reason IS NOT NULL AND revoke_reason NOT IN ('membership deactivated','user suspended') AND NOT EXISTS (SELECT 1 FROM user_node_gateway_tokens t2 WHERE (t2.tenant_id,t2.user_id) = (SELECT tenant_id,user_id FROM user_node_gateway_tokens WHERE id = $1) AND t2.status IN ('pending', 'approved') AND t2.id != $1)"#,
-            [token_id.into()],
-        );
-        let result = db.execute(stmt).await?;
-
-        Ok(result.rows_affected() > 0)
-    }
-
     /// 按 consumed_node_id 反查 token
     pub async fn find_by_consumed_node_id(
         db: &impl ConnectionTrait,

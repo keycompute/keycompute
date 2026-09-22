@@ -133,6 +133,7 @@ fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
                             | "tenant_role"
                             | "email"
                             | "count"
+                            | "failure_threshold"
                             | "version"
                             | "authz_version"
                             | "membership_authz_version"

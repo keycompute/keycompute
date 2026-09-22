@@ -1410,14 +1410,22 @@ async fn native_tool_requirements_are_checked_before_route_and_again_at_claim() 
 async fn capability_renewal_is_retry_safe_and_old_session_only_finishes_existing_work() {
     let mut f = Fixture::new().await;
     let secret = format!("isolated-session-{}", Uuid::new_v4());
-    f.db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE node_sessions SET session_token_hash=$2 WHERE id=$1",
-        [
-            f.session.id.into(),
-            hex::encode(Sha256::digest(secret.as_bytes())).into(),
-        ],
-    ))
+    // A credential hash is immutable. Give this fixture a real fresh session
+    // with a known credential before any task is leased to it.
+    keycompute_db::models::node_session::NodeSession::revoke(&f.db, f.session.id)
+        .await
+        .unwrap();
+    f.session = keycompute_db::models::node_session::NodeSession::create(
+        &f.db,
+        &keycompute_db::models::node_session::CreateNodeSessionRequest {
+            node_id: f.node.id,
+            session_token_hash: hex::encode(Sha256::digest(secret.as_bytes())),
+            expires_at: f.session.expires_at,
+            accepted_models_json: f.session.accepted_models_json.clone(),
+            native_operations_json: f.session.native_operations_json.clone(),
+            native_profiles_json: f.session.native_profiles_json.clone(),
+        },
+    )
     .await
     .unwrap();
     let service = f.state.node_gateway.as_ref().unwrap();

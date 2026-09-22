@@ -570,4 +570,24 @@ mod tests {
         }
         assert!(!V0001.contains("root@keycompute.invalid"));
     }
+    #[test]
+    fn node_control_schema_prevents_credential_transfer_and_reactivation() {
+        let sql = include_str!("../migrations/001_init.sql");
+        for guard in [
+            "guard_node_session_identity",
+            "advance_node_control_revision",
+            "node_control_revision BEFORE UPDATE ON nodes",
+            "node_control_revision BEFORE UPDATE ON user_node_gateway_tokens",
+            "GREATEST(clock_timestamp(), OLD.updated_at + INTERVAL '1 microsecond')",
+            "guard_node_registration_identity",
+            "node session identity is immutable",
+            "terminal node registrations cannot be reapproved",
+            "owner_user_id=NEW.user_id",
+        ] {
+            assert!(
+                sql.contains(guard),
+                "missing node control invariant: {guard}"
+            );
+        }
+    }
 }

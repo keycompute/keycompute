@@ -9,6 +9,7 @@ pub mod distribution_record;
 pub mod distribution_scope;
 pub mod native_capability;
 pub mod node;
+pub mod node_control;
 pub mod node_session;
 pub mod node_task;
 pub mod node_task_submission;

@@ -2917,3 +2917,5 @@ pub mod tenant_reporting;
 pub mod tenant_keys;
 
 pub mod distribution_policy;
+
+pub mod tenant_nodes;

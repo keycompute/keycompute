@@ -6,7 +6,8 @@ identity/membership foundations and tenant control/invitation APIs are accepted.
 Scoped pricing, providers/bindings, financial/distribution reports, owner-only
 key issuance and distribution policy mutations are also accepted. Live scoped
 Responses replay now revalidates credentials and authorization versions.
-Remaining node/task and Responses administration, financial mutations, complete
+Node/registration control is accepted; task mutations and Responses administration,
+financial mutations, complete
 platform/operator routing, frontend delivery and final release are not accepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
@@ -357,6 +358,44 @@ strict Clippy, formatting, whitespace and all five frozen-source hashes passed.
 The resource/stream/owner focused rerun passed at eight threads and is a subset,
 not an additional workspace count. No production schema, credentials, services
 or deployment changed. CI is checked independently after push.
+
+## Current phases 3/5/6 — node and registration control accepted
+
+Canonical tenant, explicit-platform and personal node/task/registration metadata
+queries now enforce current primary user/member/tenant and signed version scopes.
+Tenant administrators manage node configuration, exclusion, recovery, revocation
+and deletion; operator mutations are limited to exclude/recover, without raw
+task content or registration credentials. Legacy admin adapters independently
+check root and explicit targets/revisions. Task mutation delivery is still open.
+
+Node and registration writes retain exact actor, immutable tenant/owner identity,
+optimistic revisions and atomic audit/savepoint rollback. Node deletion refuses
+to unlink retained tasks, submissions, streams or financial evidence. Revocation
+drains existing sessions for their accepted lease completion only; recovery
+never reactivates a consumed/rejected token or a draining session. New approvals
+are separate pending requests. Owner secret retrieval commits authorization and
+audit before a private/no-store response; history and administrative views have
+no plaintext. Approval notifications contain no credential and report delivery
+separately. Client types use canonical targets and redact credential Debug.
+
+Independent resumption reproduced transaction-start NOW() regressing a newer
+node revision. Final greenfield triggers now enforce monotonically advancing
+node/registration revisions for real changes and retain revisions for no-ops.
+The new real PostgreSQL regression covers older runtime transactions on both
+resources; the claim test verifies stale admin revisions fail, refreshed ones
+succeed, and repeated owner reads do not unnecessarily advance the revision.
+The command API was refactored to a typed NodeMutation; all strict Clippy issues
+were corrected without suppressions or dropping tests.
+
+Final default-parallel native workspace: **2,541 passed, 0 failed, 30 original
+default ignored**, including desktop/mobile. The 54-test node/ingress/control
+rerun is a subset. All-target check, all-target/all-feature Clippy with
+-D warnings, Web/client WASM compilation, formatting, whitespace and all
+18 frozen source hashes passed. CI is checked separately after pushing.
+No production database, credential, service restart or deployment changed.
+Task cancellation/archival, full Responses administration, remaining financial
+operations, other platform/operator routes, full frontend and release gates
+remain unaccepted.
 
 # Tenant subsystem implementation status
 

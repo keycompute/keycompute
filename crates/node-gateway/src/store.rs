@@ -348,7 +348,8 @@ impl NodeGatewayStore {
         // closed tenant cannot create or revive a node session.
         User::find_by_id(&tx, owner_user_id)
             .await?
-            .ok_or_else(|| DbError::Other("Registration token owner not found".to_string()))?;
+            .filter(|user| user.status == "active")
+            .ok_or_else(|| DbError::Other("Registration token owner is inactive".to_string()))?;
         let membership = TenantMembership::find(&tx, tenant_id, owner_user_id)
             .await?
             .ok_or_else(|| {
@@ -548,26 +549,6 @@ impl NodeGatewayStore {
             }
             None => Err(DbError::not_found("Session", "token")),
         }
-    }
-
-    /// Admin 把 excluded 节点恢复为 online
-    /// 同时清零 consecutive_failure_count, 节点可重新接收任务。
-    pub async fn recover_node(&self, node_id: Uuid) -> Result<Node, DbError> {
-        Node::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            UPDATE nodes
-            SET status = 'online',
-                consecutive_failure_count = 0,
-                updated_at = NOW()
-            WHERE id = $1
-            RETURNING *
-            "#,
-            [node_id.into()],
-        ))
-        .one(self.pool.as_ref())
-        .await?
-        .ok_or_else(|| DbError::not_found("Node", node_id.to_string()))
     }
 
     pub async fn heartbeat(

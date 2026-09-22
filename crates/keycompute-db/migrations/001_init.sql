@@ -2241,3 +2241,75 @@ END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS node_identity_immutable ON nodes;
 CREATE TRIGGER node_identity_immutable BEFORE UPDATE OF tenant_id,owner_user_id ON nodes
     FOR EACH ROW EXECUTE FUNCTION guard_node_identity();
+
+
+-- Session credentials and their node identity cannot be transferred or revived.
+CREATE OR REPLACE FUNCTION guard_node_session_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.id,NEW.node_id,NEW.session_token_hash,NEW.issued_at)
+       IS DISTINCT FROM ROW(OLD.id,OLD.node_id,OLD.session_token_hash,OLD.issued_at) THEN
+        RAISE EXCEPTION 'node session identity is immutable' USING ERRCODE='23514';
+    END IF;
+    IF (OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at)
+       OR (NOT OLD.accepting_tasks AND NEW.accepting_tasks) THEN
+        RAISE EXCEPTION 'disabled node sessions require fresh registration' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS node_session_identity_guard ON node_sessions;
+CREATE TRIGGER node_session_identity_guard BEFORE UPDATE ON node_sessions
+    FOR EACH ROW EXECUTE FUNCTION guard_node_session_identity();
+
+CREATE OR REPLACE FUNCTION guard_node_registration_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        IF ROW(NEW.id,NEW.token_hash,NEW.token_preview,NEW.issued_at)
+           IS DISTINCT FROM ROW(OLD.id,OLD.token_hash,OLD.token_preview,OLD.issued_at) THEN
+            RAISE EXCEPTION 'node registration credential identity is immutable' USING ERRCODE='23514';
+        END IF;
+        IF OLD.status='rejected' AND NEW.status<>'rejected'
+           OR OLD.status='consumed' AND NEW.status NOT IN ('consumed','rejected') THEN
+            RAISE EXCEPTION 'terminal node registrations cannot be reapproved' USING ERRCODE='23514';
+        END IF;
+        IF OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS DISTINCT FROM OLD.consumed_at THEN
+            RAISE EXCEPTION 'node registration consumption is immutable' USING ERRCODE='23514';
+        END IF;
+        IF OLD.consumed_node_id IS NOT NULL AND NEW.consumed_node_id IS DISTINCT FROM OLD.consumed_node_id
+           AND EXISTS(SELECT 1 FROM nodes WHERE id=OLD.consumed_node_id) THEN
+            RAISE EXCEPTION 'node registration cannot transfer its consumed node' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    IF NEW.status NOT IN ('pending','approved','rejected','consumed') THEN
+        RAISE EXCEPTION 'invalid node registration status' USING ERRCODE='23514';
+    END IF;
+    IF NEW.consumed_node_id IS NOT NULL AND NOT EXISTS(
+        SELECT 1 FROM nodes WHERE id=NEW.consumed_node_id
+            AND tenant_id=NEW.tenant_id AND owner_user_id=NEW.user_id
+    ) THEN
+        RAISE EXCEPTION 'node registration owner and node do not match' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS node_registration_identity_guard ON user_node_gateway_tokens;
+CREATE TRIGGER node_registration_identity_guard BEFORE INSERT OR UPDATE ON user_node_gateway_tokens
+    FOR EACH ROW EXECUTE FUNCTION guard_node_registration_identity();
+
+
+-- Administrative compare-and-swap uses updated_at. All runtime writers must
+-- advance it after row-lock waits, not reuse an older transaction-start NOW().
+-- A metadata no-op retains its revision; identity/lifecycle guards still run.
+CREATE OR REPLACE FUNCTION advance_node_control_revision() RETURNS TRIGGER AS $$
+BEGIN
+    IF (to_jsonb(NEW)-'updated_at') IS DISTINCT FROM (to_jsonb(OLD)-'updated_at') THEN
+        NEW.updated_at := GREATEST(clock_timestamp(), OLD.updated_at + INTERVAL '1 microsecond');
+    ELSE
+        NEW.updated_at := OLD.updated_at;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS node_control_revision ON nodes;
+CREATE TRIGGER node_control_revision BEFORE UPDATE ON nodes
+    FOR EACH ROW EXECUTE FUNCTION advance_node_control_revision();
+DROP TRIGGER IF EXISTS node_control_revision ON user_node_gateway_tokens;
+CREATE TRIGGER node_control_revision BEFORE UPDATE ON user_node_gateway_tokens
+    FOR EACH ROW EXECUTE FUNCTION advance_node_control_revision();

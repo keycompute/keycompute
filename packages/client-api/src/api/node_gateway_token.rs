@@ -30,7 +30,7 @@ impl NodeGatewayTokenApi {
     /// 否则 → registration_token 为 null
     pub async fn get_my_token(&self, auth_token: &str) -> Result<NodeGatewayTokenDetail> {
         self.client
-            .get_json("/api/v1/me/node-gateway/token", Some(auth_token))
+            .get_json_fresh("/api/v1/me/node-gateway/token", Some(auth_token))
             .await
     }
 
@@ -39,7 +39,7 @@ impl NodeGatewayTokenApi {
     /// GET /api/v1/me/node-gateway/tokens
     pub async fn list_my_tokens(&self, auth_token: &str) -> Result<Vec<NodeGatewayTokenDetail>> {
         self.client
-            .get_json("/api/v1/me/node-gateway/tokens", Some(auth_token))
+            .get_json_fresh("/api/v1/me/node-gateway/tokens", Some(auth_token))
             .await
     }
 
@@ -83,7 +83,7 @@ pub struct RegisteredNodeInfo {
 }
 
 /// Node Gateway Token 详情响应
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Clone, PartialEq, Deserialize)]
 pub struct NodeGatewayTokenDetail {
     pub token: NodeGatewayTokenInfo,
     /// token 明文（审批通过后始终返回；is_revealed=true 时仍返回但附带安全提醒）
@@ -108,4 +108,30 @@ pub struct NodeGatewayTokenInfo {
     pub consumed_at: Option<String>,
     pub revoke_reason: Option<String>,
     pub issued_at: String,
+}
+
+impl std::fmt::Debug for NodeGatewayTokenDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeGatewayTokenDetail")
+            .field("token", &self.token)
+            .field(
+                "registration_token",
+                &self.registration_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("registered_node", &self.registered_node)
+            .finish_non_exhaustive()
+    }
+}
+#[cfg(test)]
+mod safe_debug_tests {
+    #[test]
+    fn owner_registration_secret_is_not_debug_output() {
+        let detail:super::NodeGatewayTokenDetail=serde_json::from_value(serde_json::json!({
+            "token":{"id":"fixture","user_id":"owner","token_preview":"kcng-preview","status":"approved","is_revealed":true,"actioned_at":null,"consumed_at":null,"revoke_reason":null,"issued_at":"2026-01-01"},
+            "registration_token":"never-log-registration-credential","message":"untrusted-message-never-log"
+        })).unwrap();
+        let debug = format!("{detail:?}");
+        assert!(!debug.contains("never-log"));
+        assert!(debug.contains("redacted"));
+    }
 }
