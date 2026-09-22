@@ -1711,3 +1711,170 @@ async fn account_owned_local_warmups_obey_revocation_but_root_warmups_survive() 
     );
     f.finish().await;
 }
+
+async fn verify_queued_dispatch_authority(case: &str, pool: bool) {
+    let mut f = Fixture::new().await;
+    let binding = f.bind(pool).await;
+    f.probe(&binding).await;
+    if pool {
+        for account in &f.accounts[1..] {
+            f.db.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE accounts SET enabled=FALSE WHERE tenant_id=$1 AND id=$2",
+                [f.user.tenant_id.into(), account.id.into()],
+            ))
+            .await
+            .unwrap();
+        }
+    }
+    let token = if case == "jwt_expiry" {
+        let proof =
+            integration_tests::db::fixture_dispatch_identity(&f.db, f.user.tenant_id, f.user.id)
+                .await;
+        f.state
+            .auth
+            .get_jwt_validator()
+            .unwrap()
+            .generate_identity_token(
+                f.user.id,
+                Some(f.user.tenant_id),
+                proof.token_version,
+                Some(proof.tenant_authz_version),
+                Some(proof.membership_authz_version),
+                2,
+            )
+            .unwrap()
+    } else {
+        f.key.clone()
+    };
+    let expires = if case == "jwt_expiry" {
+        Some(
+            f.state
+                .auth
+                .get_jwt_validator()
+                .unwrap()
+                .validate_claims(&token)
+                .unwrap()
+                .exp,
+        )
+    } else {
+        None
+    };
+    let permit = f
+        .state
+        .generation_admission
+        .accounts
+        .acquire(f.accounts[0].id)
+        .await
+        .unwrap();
+    let body = f.body(0);
+    let worker_body = body.clone();
+    let app = f.app.clone();
+    let path = if pool { "/v1/chat/completions" } else { PT };
+    let worker =
+        tokio::spawn(
+            async move { api(app, Method::POST, path, Some(&token), Some(worker_body)).await },
+        );
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while f.state.generation_admission.accounts.status().queued == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("request must reach the real account queue");
+    let statement = match case {
+        "key_revoked" => Some((
+            "UPDATE produce_ai_keys SET revoked=TRUE,revoked_at=NOW() WHERE id=$1",
+            f.key_id,
+        )),
+        "key_expired" => Some((
+            "UPDATE produce_ai_keys SET expires_at=NOW()-INTERVAL '1 second' WHERE id=$1",
+            f.key_id,
+        )),
+        "token_version" => Some((
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+            f.user.id,
+        )),
+        "membership_version" => Some((
+            "UPDATE tenant_memberships SET tenant_role='admin' WHERE user_id=$1",
+            f.user.id,
+        )),
+        "tenant_version" => Some((
+            "UPDATE tenants SET name=name||'-new' WHERE id=$1",
+            f.user.tenant_id,
+        )),
+        "unchanged" | "jwt_expiry" => None,
+        _ => panic!("unknown dispatch fixture case"),
+    };
+    if let Some((sql, id)) = statement {
+        f.db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [id.into()],
+        ))
+        .await
+        .unwrap();
+    }
+    if let Some(expires) = expires {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while Utc::now().timestamp() < expires {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    drop(permit);
+    let result = tokio::time::timeout(Duration::from_secs(8), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    if case == "unchanged" {
+        expect(result, StatusCode::OK);
+        assert_eq!(f.mock.calls_for(&body).len(), 1);
+    } else {
+        assert_eq!(
+            result.status,
+            StatusCode::FORBIDDEN,
+            "{case}, pool={pool}: {}",
+            result.body
+        );
+        assert_eq!(
+            result.body["error"]["code"], "execution_authority_invalid",
+            "{case}: {}",
+            result.body
+        );
+        assert!(
+            f.mock.calls_for(&body).is_empty(),
+            "revoked authority must not contact any account"
+        );
+    }
+    assert_eq!(f.state.generation_admission.accounts.status().active, 0);
+    let active=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT COUNT(*)::bigint AS n FROM balance_reservations WHERE tenant_id=$1 AND user_id=$2 AND status='active'",
+        [f.user.tenant_id.into(),f.user.id.into()])).await.unwrap().unwrap();
+    assert_eq!(
+        active.try_get::<i64>("", "n").unwrap(),
+        0,
+        "unused reservations must be released"
+    );
+    f.finish().await;
+}
+#[tokio::test]
+async fn queued_provider_requests_recheck_original_key_and_all_authorization_versions() {
+    for case in [
+        "unchanged",
+        "key_revoked",
+        "key_expired",
+        "token_version",
+        "membership_version",
+        "tenant_version",
+    ] {
+        verify_queued_dispatch_authority(case, false).await;
+    }
+}
+#[tokio::test]
+async fn queued_pool_requests_and_jwt_expiry_cannot_inherit_an_old_grant() {
+    verify_queued_dispatch_authority("key_revoked", true).await;
+    verify_queued_dispatch_authority("jwt_expiry", false).await;
+}

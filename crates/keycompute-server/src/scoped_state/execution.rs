@@ -332,8 +332,12 @@ async fn cancel_node(state: &AppState, record: &ResponseRecord) {
     if let (Some(pool), Some(gateway)) = (&state.pool, &state.node_gateway) {
         let query = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT id FROM node_tasks WHERE request_id=$1 AND user_id=$2 AND status IN ('queued','leased') LIMIT 1",
-            [record.request_id.into(), record.user_id.into()],
+            "SELECT id FROM node_tasks WHERE request_id=$1 AND user_id=$2 AND tenant_id=$3 AND status IN ('queued','leased') LIMIT 1",
+            [
+                record.request_id.into(),
+                record.user_id.into(),
+                record.tenant_id.into(),
+            ],
         );
         if let Ok(Ok(Some(row))) =
             tokio::time::timeout(Duration::from_secs(2), pool.write_conn().query_one(query)).await

@@ -2068,7 +2068,20 @@ mod tests {
 
     #[test]
     fn successful_result_type_must_match_the_task_payload() {
+        let user = uuid::Uuid::new_v4();
+        let proof = keycompute_types::DispatchIdentity {
+            tenant_id: uuid::Uuid::new_v4(),
+            actor_user_id: user,
+            resource_owner_user_id: user,
+            credential_kind: keycompute_types::CredentialKind::Jwt,
+            api_key_id: None,
+            token_version: 0,
+            tenant_authz_version: 1,
+            membership_authz_version: 1,
+            credential_expires_at: Some(chrono::Utc::now().timestamp() + 3600),
+        };
         let chat_payload = NodeTaskPayload {
+            dispatch_identity: proof,
             request_id: Uuid::new_v4(),
             chat: Some(ChatCompletionRequest::new("test-model", Vec::new())),
             image_generation: None,
@@ -2076,6 +2089,7 @@ mod tests {
             native: None,
         };
         let image_payload = NodeTaskPayload {
+            dispatch_identity: proof,
             request_id: Uuid::new_v4(),
             chat: None,
             image_generation: Some(ImageGenerationRequest {

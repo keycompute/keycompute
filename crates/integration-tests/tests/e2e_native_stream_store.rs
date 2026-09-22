@@ -113,7 +113,15 @@ impl Fixture {
                 self.node.tenant_id,
                 self.caller_id,
                 MODEL.into(),
-                payload(Uuid::new_v4()),
+                payload(
+                    Uuid::new_v4(),
+                    integration_tests::db::fixture_dispatch_identity(
+                        &self.pool,
+                        self.node.tenant_id,
+                        self.caller_id,
+                    )
+                    .await,
+                ),
             )
             .await
             .unwrap();
@@ -128,8 +136,12 @@ impl Fixture {
     }
 }
 
-fn payload(request_id: Uuid) -> NodeTaskPayload {
+fn payload(
+    request_id: Uuid,
+    dispatch_identity: keycompute_types::DispatchIdentity,
+) -> NodeTaskPayload {
     NodeTaskPayload {
+        dispatch_identity,
         request_id,
         chat: None,
         image_generation: None,
@@ -446,7 +458,15 @@ async fn stream_profile_and_preheader_native_error_variants_are_distinct() -> an
             no_sse.node.tenant_id,
             no_sse.caller_id,
             MODEL.into(),
-            payload(Uuid::new_v4()),
+            payload(
+                Uuid::new_v4(),
+                integration_tests::db::fixture_dispatch_identity(
+                    &no_sse.pool,
+                    no_sse.node.tenant_id,
+                    no_sse.caller_id,
+                )
+                .await,
+            ),
         )
         .await?;
     assert!(
@@ -619,7 +639,15 @@ async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
             a.node.tenant_id,
             a.caller_id,
             MODEL.into(),
-            payload(Uuid::new_v4()),
+            payload(
+                Uuid::new_v4(),
+                integration_tests::db::fixture_dispatch_identity(
+                    &a.pool,
+                    a.node.tenant_id,
+                    a.caller_id,
+                )
+                .await,
+            ),
         )
         .await
         .unwrap();
@@ -647,7 +675,15 @@ async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
             b.node.tenant_id,
             a.caller_id,
             MODEL.into(),
-            payload(Uuid::new_v4()),
+            payload(
+                Uuid::new_v4(),
+                integration_tests::db::fixture_dispatch_identity(
+                    &b.pool,
+                    b.node.tenant_id,
+                    a.caller_id,
+                )
+                .await,
+            ),
         )
         .await
         .unwrap();
@@ -690,4 +726,309 @@ async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
     }
     b._cleanup.cleanup().await.unwrap();
     a._cleanup.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn queued_nodes_keep_original_versions_instead_of_refreshing_their_authority() {
+    for change in ["token", "membership", "tenant", "expiry"] {
+        let f = Fixture::new(true).await;
+        let mut proof = integration_tests::db::fixture_dispatch_identity(
+            &f.pool,
+            f.node.tenant_id,
+            f.caller_id,
+        )
+        .await;
+        if change == "expiry" {
+            proof.credential_expires_at = Some(Utc::now().timestamp() + 2);
+        }
+        let work = payload(Uuid::new_v4(), proof);
+        let task = f
+            .store
+            .create_and_enqueue_task(f.node.tenant_id, f.caller_id, MODEL.into(), work.clone())
+            .await
+            .unwrap();
+        match change {
+            "token" => {
+                f.pool
+                    .execute(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+                        [f.caller_id.into()],
+                    ))
+                    .await
+                    .unwrap();
+            }
+            "membership" => {
+                f.pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,"UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",[f.node.tenant_id.into(),f.caller_id.into()])).await.unwrap();
+            }
+            "tenant" => {
+                f.pool
+                    .execute(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "UPDATE tenants SET name=name||'-updated' WHERE id=$1",
+                        [f.node.tenant_id.into()],
+                    ))
+                    .await
+                    .unwrap();
+            }
+            "expiry" => {
+                while Utc::now().timestamp() < proof.credential_expires_at.unwrap() {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            f.store
+                .claim_task(task.id, f.node.id, f.session.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{change}: legacy claim reused stale authority"
+        );
+        assert!(
+            f.store
+                .claim_next_native_task(f.node.id, f.session.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "{change}: native claim refreshed authority"
+        );
+        assert!(
+            f.store
+                .create_and_enqueue_task(f.node.tenant_id, f.caller_id, MODEL.into(), work)
+                .await
+                .is_err(),
+            "{change}: stale producer created new work"
+        );
+        let old = NodeTask::find_by_id(&f.pool, task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(old.status, "queued");
+        assert!(old.lease_id.is_none());
+        assert_eq!(
+            old.payload_json["dispatch_identity"],
+            serde_json::to_value(proof).unwrap()
+        );
+        let fresh = integration_tests::db::fixture_dispatch_identity(
+            &f.pool,
+            f.node.tenant_id,
+            f.caller_id,
+        )
+        .await;
+        let next = f
+            .store
+            .create_and_enqueue_task(
+                f.node.tenant_id,
+                f.caller_id,
+                MODEL.into(),
+                payload(Uuid::new_v4(), fresh),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            f.store
+                .claim_next_native_task(f.node.id, f.session.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .0
+                .id,
+            next.id
+        );
+        assert!(f.pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "UPDATE node_tasks SET payload_json=jsonb_set(payload_json,'{dispatch_identity}',$2) WHERE id=$1",
+            [task.id.into(),serde_json::to_value(fresh).unwrap().into()])).await.is_err(),"queued work must not be reauthorized in place");
+    }
+}
+
+#[tokio::test]
+async fn database_dispatch_proofs_fail_closed_for_malformed_or_cross_owner_metadata() {
+    let f = Fixture::new(true).await;
+    let proof =
+        integration_tests::db::fixture_dispatch_identity(&f.pool, f.node.tenant_id, f.caller_id)
+            .await;
+    let valid = serde_json::to_value(proof).unwrap();
+    async fn active(f: &Fixture, value: serde_json::Value) -> bool {
+        f.pool
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT dispatch_identity_is_active($1,$2,$3) AS allowed",
+                [value.into(), f.node.tenant_id.into(), f.caller_id.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "allowed")
+            .unwrap()
+    }
+    assert!(active(&f, valid.clone()).await);
+    for malformed in [
+        serde_json::Value::Null,
+        json!({}),
+        json!([]),
+        json!("not a proof"),
+    ] {
+        assert!(!active(&f, malformed).await);
+    }
+    for (field, replacement) in [
+        ("tenant_id", json!(Uuid::new_v4())),
+        ("actor_user_id", json!(Uuid::new_v4())),
+        ("resource_owner_user_id", json!(Uuid::new_v4())),
+        ("tenant_id", json!("not-a-uuid")),
+        ("token_version", json!(-1)),
+        ("token_version", json!("99999999999999999999999999")),
+        ("tenant_authz_version", json!(0)),
+        ("membership_authz_version", json!(0)),
+        ("credential_kind", json!("system")),
+        ("credential_kind", json!("node")),
+        ("credential_kind", json!("api_key")),
+        ("credential_expires_at", serde_json::Value::Null),
+        ("credential_expires_at", json!(Utc::now().timestamp() - 1)),
+        ("api_key_id", json!(Uuid::new_v4())),
+    ] {
+        let mut forged = valid.clone();
+        forged[field] = replacement;
+        assert!(!active(&f, forged).await, "malformed field {field}");
+    }
+    for field in valid.as_object().unwrap().keys() {
+        if field == "api_key_id" {
+            continue;
+        }
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(!active(&f, missing).await, "missing {field} was accepted");
+    }
+    let authorizer = keycompute_auth::DbDispatchAuthorizer::new(DbRouter::single(f.pool.clone()));
+    let mut ctx = keycompute_types::RequestContext::new(
+        Uuid::new_v4(),
+        f.caller_id,
+        f.node.tenant_id,
+        Uuid::nil(),
+        MODEL,
+        vec![],
+        false,
+        keycompute_types::PricingSnapshot::default(),
+    );
+    use keycompute_types::DispatchAuthorizer;
+    assert!(authorizer.authorize_dispatch(&ctx).await.is_err());
+    ctx.dispatch_identity = Some(proof);
+    authorizer.authorize_dispatch(&ctx).await.unwrap();
+    ctx.user_id = Uuid::new_v4();
+    assert!(authorizer.authorize_dispatch(&ctx).await.is_err());
+}
+
+#[tokio::test]
+async fn revoked_key_blocks_queued_work_but_keeps_original_lease_completion_rights() {
+    use keycompute_types::CredentialKind;
+    let f = Fixture::new(true).await;
+    let key = keycompute_auth::ProduceAiKeyValidator::generate_key();
+    let saved = integration_tests::db::create_test_api_key(
+        &f.pool,
+        &keycompute_db::CreateProduceAiKeyRequest {
+            tenant_id: f.node.tenant_id,
+            user_id: f.caller_id,
+            name: "dispatch-only-fixture".into(),
+            produce_ai_key_hash: keycompute_auth::ProduceAiKeyValidator::hash_key(&key),
+            produce_ai_key_preview: "fixture***".into(),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let proof = keycompute_types::DispatchIdentity {
+        credential_kind: CredentialKind::ApiKey,
+        api_key_id: Some(saved.id),
+        credential_expires_at: None,
+        ..integration_tests::db::fixture_dispatch_identity(&f.pool, f.node.tenant_id, f.caller_id)
+            .await
+    };
+    let first = f
+        .store
+        .create_and_enqueue_task(
+            f.node.tenant_id,
+            f.caller_id,
+            MODEL.into(),
+            payload(Uuid::new_v4(), proof),
+        )
+        .await
+        .unwrap();
+    let (leased, envelope) = f
+        .store
+        .claim_task(first.id, f.node.id, f.session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let second = f
+        .store
+        .create_and_enqueue_task(
+            f.node.tenant_id,
+            f.caller_id,
+            MODEL.into(),
+            payload(Uuid::new_v4(), proof),
+        )
+        .await
+        .unwrap();
+    f.pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE produce_ai_keys SET revoked=TRUE,revoked_at=NOW() WHERE tenant_id=$1 AND user_id=$2 AND id=$3",
+        [f.node.tenant_id.into(),f.caller_id.into(),saved.id.into()])).await.unwrap();
+    assert!(
+        f.store
+            .claim_task(second.id, f.node.id, f.session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        f.store
+            .claim_next_native_task(f.node.id, f.session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let result = NodeTaskResult::NativeSucceeded {
+        response: NodeNativeHttpResult {
+            status: 429,
+            headers: vec![],
+            body: json!({"error":{"type":"rate_limit_error","message":"fixture rejection"}}),
+        },
+    };
+    let ack = f
+        .store
+        .complete_task(
+            leased.id,
+            envelope.lease_id,
+            f.node.id,
+            f.session.id,
+            result.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ack.action, keycompute_types::NodeTaskCompleteAction::Failed);
+    let repeat = f
+        .store
+        .complete_task(
+            leased.id,
+            envelope.lease_id,
+            f.node.id,
+            f.session.id,
+            result,
+        )
+        .await
+        .unwrap();
+    assert_eq!(repeat.action, ack.action);
+    let terminal = NodeTask::find_by_id(&f.pool, leased.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(terminal.tenant_id, leased.tenant_id);
+    assert_eq!(terminal.user_id, leased.user_id);
+    assert_eq!(terminal.request_id, leased.request_id);
+    assert_eq!(terminal.lease_id, leased.lease_id);
+    assert_eq!(
+        terminal.payload_json["dispatch_identity"],
+        serde_json::to_value(proof).unwrap()
+    );
+    assert!(!terminal.payload_json.to_string().contains(&key));
 }

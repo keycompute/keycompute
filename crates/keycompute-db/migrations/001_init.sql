@@ -2365,3 +2365,62 @@ END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS node_task_control_guard ON node_tasks;
 CREATE TRIGGER node_task_control_guard BEFORE INSERT OR UPDATE ON node_tasks
     FOR EACH ROW EXECUTE FUNCTION guard_node_task_control();
+
+-- New-work authority only: completed/leased settlement keeps immutable owners.
+-- Malformed, expired or missing proofs are rejected, never upgraded to a role.
+CREATE OR REPLACE FUNCTION dispatch_identity_is_active(proof JSONB, expected_tenant UUID, expected_owner UUID)
+RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$
+DECLARE kind TEXT;
+DECLARE key_id UUID;
+DECLARE token_ver INTEGER;
+DECLARE tenant_ver BIGINT;
+DECLARE member_ver BIGINT;
+DECLARE expires BIGINT;
+BEGIN
+    IF proof IS NULL OR jsonb_typeof(proof) IS DISTINCT FROM 'object'
+        OR expected_tenant IS NULL OR expected_owner IS NULL
+        OR expected_tenant='00000000-0000-0000-0000-000000000000'::uuid
+        OR expected_owner='00000000-0000-0000-0000-000000000000'::uuid
+        OR (proof->>'tenant_id')::uuid IS DISTINCT FROM expected_tenant
+        OR (proof->>'actor_user_id')::uuid IS DISTINCT FROM expected_owner
+        OR (proof->>'resource_owner_user_id')::uuid IS DISTINCT FROM expected_owner THEN
+        RETURN FALSE;
+    END IF;
+    kind := proof->>'credential_kind';
+    key_id := (proof->>'api_key_id')::uuid;
+    token_ver := (proof->>'token_version')::integer;
+    tenant_ver := (proof->>'tenant_authz_version')::bigint;
+    member_ver := (proof->>'membership_authz_version')::bigint;
+    expires := (proof->>'credential_expires_at')::bigint;
+    IF kind IS NULL OR kind NOT IN ('jwt','api_key') OR token_ver IS NULL OR token_ver<0
+        OR tenant_ver IS NULL OR tenant_ver<=0 OR member_ver IS NULL OR member_ver<=0
+        OR (kind='jwt' AND (key_id IS NOT NULL OR expires IS NULL))
+        OR (kind='api_key' AND (key_id IS NULL OR key_id='00000000-0000-0000-0000-000000000000'::uuid))
+        OR (expires IS NOT NULL AND expires<=EXTRACT(EPOCH FROM statement_timestamp())) THEN
+        RETURN FALSE;
+    END IF;
+    RETURN EXISTS (
+        SELECT 1 FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id JOIN users u ON u.id=m.user_id
+        WHERE t.id=expected_tenant AND u.id=expected_owner AND t.status='active' AND m.status='active' AND u.status='active'
+          AND t.authz_version=tenant_ver AND m.authz_version=member_ver AND u.token_version=token_ver
+          AND (kind='jwt' OR EXISTS(SELECT 1 FROM produce_ai_keys k WHERE k.id=key_id
+              AND k.tenant_id=t.id AND k.user_id=u.id AND NOT k.revoked
+              AND (k.expires_at IS NULL OR k.expires_at>statement_timestamp())))
+    );
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range OR invalid_parameter_value THEN
+    RETURN FALSE;
+END; $$;
+
+CREATE OR REPLACE FUNCTION guard_node_task_dispatch_identity() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='INSERT' AND NOT dispatch_identity_is_active(NEW.payload_json->'dispatch_identity',NEW.tenant_id,NEW.user_id) THEN
+        RAISE EXCEPTION 'current original dispatch identity required' USING ERRCODE='23514';
+    END IF;
+    IF TG_OP='UPDATE' AND ROW(NEW.model,NEW.payload_json) IS DISTINCT FROM ROW(OLD.model,OLD.payload_json) THEN
+        RAISE EXCEPTION 'node task payload and original dispatch identity are immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS node_task_dispatch_identity_guard ON node_tasks;
+CREATE TRIGGER node_task_dispatch_identity_guard BEFORE INSERT OR UPDATE OF model,payload_json ON node_tasks
+    FOR EACH ROW EXECUTE FUNCTION guard_node_task_dispatch_identity();

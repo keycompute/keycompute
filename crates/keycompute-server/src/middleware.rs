@@ -654,6 +654,8 @@ pub(crate) fn sanitize_openai_responses_error_code(
     fallback: serde_json::Value,
 ) -> serde_json::Value {
     const ALLOWED: &[&str] = &[
+        "execution_authority_invalid",
+        "execution_authority_unavailable",
         "context_length_exceeded",
         "file_not_found",
         "insufficient_quota",

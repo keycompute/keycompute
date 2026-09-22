@@ -89,6 +89,18 @@ pub async fn ensure_generation(state: &AppState, auth: &mut AuthExtractor) -> Re
 }
 
 pub fn bind_context(auth: &AuthExtractor, ctx: &mut keycompute_types::RequestContext) {
+    ctx.dispatch_identity = Some(keycompute_types::DispatchIdentity {
+        tenant_id: auth.tenant_id,
+        actor_user_id: auth.user_id,
+        resource_owner_user_id: auth.user_id,
+        credential_kind: auth.credential_kind,
+        api_key_id: (auth.credential_kind == keycompute_types::CredentialKind::ApiKey)
+            .then_some(auth.produce_ai_key_id),
+        token_version: auth.token_version,
+        tenant_authz_version: auth.authz_version,
+        membership_authz_version: auth.membership_authz_version,
+        credential_expires_at: auth.credential_expires_at,
+    });
     ctx.resource_guard = auth
         .generation_permit
         .clone()

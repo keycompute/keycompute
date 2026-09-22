@@ -193,7 +193,7 @@ impl Fixture {
     }
     async fn task(&self, t: Uuid, u: Uuid, name: &str) -> NodeTask {
         let request_id = Uuid::new_v4();
-        NodeTask::create(&self.db,&CreateNodeTaskRequest{tenant_id:t,user_id:u,request_id,model:name.into(),payload_json:json!({"request_id":request_id,"chat":{"model":name,"messages":[{"role":"user","content":"never-leak-task-payload-marker"}]},"native":null}),deadline_at:Utc::now()+Duration::minutes(3),complete_grace_until:Utc::now()+Duration::minutes(5)}).await.unwrap()
+        NodeTask::create(&self.db,&CreateNodeTaskRequest{tenant_id:t,user_id:u,request_id,model:name.into(),payload_json:json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&self.db,t,u).await,"request_id":request_id,"chat":{"model":name,"messages":[{"role":"user","content":"never-leak-task-payload-marker"}]},"native":null}),deadline_at:Utc::now()+Duration::minutes(3),complete_grace_until:Utc::now()+Duration::minutes(5)}).await.unwrap()
     }
     async fn registration(&self, t: Uuid, u: Uuid) -> UserNodeGatewayToken {
         let (id, _, hash, preview) = UserNodeGatewayToken::generate_hmac_token(SECRET.as_bytes());
@@ -1341,7 +1341,7 @@ async fn task_control_lease(f: &Fixture, native: bool) -> (Node, NodeSession, No
     .unwrap();
     let store = &f.state.node_gateway.as_ref().unwrap().store;
     let task = if native {
-        store.create_cancellable_native_task(f.a.id,f.member.id,model.clone(),NodeTaskPayload{request_id:Uuid::new_v4(),chat:None,image_generation:None,image_edit:None,native:Some(NodeNativeRequest{operation:NodeNativeOperation::Chat,body:json!({"model":model,"messages":[{"role":"user","content":"private task control fixture"}]}),headers:vec![]})}).await.unwrap()
+        store.create_cancellable_native_task(f.a.id,f.member.id,model.clone(),NodeTaskPayload{dispatch_identity:integration_tests::db::fixture_dispatch_identity(&f.db,f.a.id,f.member.id).await,request_id:Uuid::new_v4(),chat:None,image_generation:None,image_edit:None,native:Some(NodeNativeRequest{operation:NodeNativeOperation::Chat,body:json!({"model":model,"messages":[{"role":"user","content":"private task control fixture"}]}),headers:vec![]})}).await.unwrap()
     } else {
         f.task(f.a.id, f.member.id, &model).await
     };

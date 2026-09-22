@@ -184,6 +184,9 @@ pub struct NodeTaskEnvelope {
 /// 三个字段至多设置一个；若全部为 `None` 则视为无效 payload。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeTaskPayload {
+    /// Original server-verified identity. This is metadata, not a bearer token;
+    /// node replies never get to replace the persisted proof.
+    pub dispatch_identity: crate::DispatchIdentity,
     /// 请求 ID
     pub request_id: Uuid,
     /// Chat 完成请求（可选，与图片生成/编辑互斥）

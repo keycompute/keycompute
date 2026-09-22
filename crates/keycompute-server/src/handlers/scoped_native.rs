@@ -260,6 +260,7 @@ pub(crate) async fn generate_with_state(
     };
     ctx.access_mode = mode;
     crate::admission::bind_context(&auth, &mut ctx);
+    let dispatch_identity = ctx.validated_dispatch_identity().map_err(ApiError::from)?;
     ctx.max_tokens = body
         .get(if op == Op::Responses {
             "max_output_tokens"
@@ -403,6 +404,7 @@ pub(crate) async fn generate_with_state(
         let _body_permit = body_permit;
         let mut result = if mode == ModelAccessMode::NodeDispatch {
             let payload = NodeTaskPayload {
+                dispatch_identity,
                 request_id: worker_ctx.request_id,
                 native,
                 chat: None,

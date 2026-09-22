@@ -576,6 +576,9 @@ mod tests {
         for guard in [
             "guard_node_session_identity",
             "guard_node_task_control",
+            "dispatch_identity_is_active",
+            "node_task_dispatch_identity_guard",
+            "node task payload and original dispatch identity are immutable",
             "task_cancel_actor_pair",
             "task_archive_actor_pair",
             "task request and ownership are immutable",

@@ -5,6 +5,7 @@
 
 pub mod account;
 pub mod console;
+pub mod dispatch;
 pub mod error;
 pub mod execution_plan;
 pub mod memory;
@@ -23,6 +24,7 @@ pub mod user;
 
 // 重新导出最常用的类型
 pub use account::AccountApiCapability;
+pub use dispatch::{DispatchAuthorizer, DispatchIdentity};
 pub use error::{ErrorCategory, KeyComputeError, PassthroughBindingError, Result};
 pub use execution_plan::{
     AccountSelection, ExecutionPlan, ExecutionTarget, PassthroughBindingSelection, SensitiveString,

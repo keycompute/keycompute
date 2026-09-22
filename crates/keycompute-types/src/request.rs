@@ -105,6 +105,9 @@ pub struct RequestContext {
     /// Shared ownership of ingress resource slots across streaming, executor and
     /// settlement clones. This is runtime-only and never part of an API payload.
     pub resource_guard: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Original verified identity for NEW dispatches. Settlement never refreshes
+    /// this proof or changes its owner, and does not require it to remain active.
+    pub dispatch_identity: Option<crate::DispatchIdentity>,
     pub request_id: Uuid,
     /// Stable identity used by the immutable billing ledger and TPM
     /// deduplication. It normally equals `request_id`; an ingress that offers
@@ -328,6 +331,16 @@ impl fmt::Debug for RequestContext {
 }
 
 impl RequestContext {
+    /// Extract the original request proof without inferring an actor/tenant or
+    /// panicking when an internal caller failed to bind authentication.
+    pub fn validated_dispatch_identity(&self) -> crate::Result<crate::DispatchIdentity> {
+        let identity = self.dispatch_identity.ok_or_else(|| {
+            crate::KeyComputeError::PermissionDenied("execution_authority_invalid".into())
+        })?;
+        identity.validate_context(self)?;
+        Ok(identity)
+    }
+
     // Keep the immutable request identity and execution inputs explicit at call sites. Grouping
     // these fields only to satisfy Clippy would obscure construction and churn every protocol,
     // routing, billing, and integration-test caller.
@@ -345,6 +358,7 @@ impl RequestContext {
         let (client_response_outcome, _) = watch::channel(None);
         Self {
             resource_guard: None,
+            dispatch_identity: None,
             request_id,
             billing_request_id: request_id,
             user_id,
@@ -395,6 +409,7 @@ impl RequestContext {
     pub fn clone_without_request_payloads(&self) -> Self {
         Self {
             resource_guard: self.resource_guard.clone(),
+            dispatch_identity: self.dispatch_identity,
             request_id: self.request_id,
             billing_request_id: self.billing_request_id,
             user_id: self.user_id,

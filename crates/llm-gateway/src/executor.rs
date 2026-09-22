@@ -124,7 +124,23 @@ fn is_payload_capacity_error(error: &KeyComputeError) -> bool {
             if matches!(stable_code.as_str(), "upstream_body_capacity_exhausted" | "upstream_json_capacity_exhausted"))
 }
 
+fn is_dispatch_authority_error(error: &KeyComputeError) -> bool {
+    matches!(error, KeyComputeError::PermissionDenied(code) if code=="execution_authority_invalid")
+        || matches!(error, KeyComputeError::ServiceUnavailable(code) if code=="execution_authority_unavailable")
+}
+
 fn classify_execution_error(error: &KeyComputeError) -> (TraceErrorCategory, String, bool) {
+    if is_dispatch_authority_error(error) {
+        return (
+            TraceErrorCategory::Authorization,
+            if matches!(error, KeyComputeError::PermissionDenied(_)) {
+                "execution_authority_invalid".into()
+            } else {
+                "execution_authority_unavailable".into()
+            },
+            false,
+        );
+    }
     match error {
         KeyComputeError::UpstreamFailure {
             status: Some(status),
@@ -265,6 +281,9 @@ enum FailureContinuation {
 /// must stop, while a forwarded idempotency key permits retries only inside the
 /// same upstream account namespace.
 fn failure_continuation(ctx: &RequestContext, error: &KeyComputeError) -> FailureContinuation {
+    if is_dispatch_authority_error(error) {
+        return FailureContinuation::Stop;
+    }
     match error {
         KeyComputeError::UpstreamFailure {
             status: Some(200..=299),
@@ -515,6 +534,7 @@ pub struct GatewayExecutor {
     default_transport: Arc<DefaultHttpTransport>,
     account_admission: Option<Arc<keycompute_runtime::admission::BoundedAdmission>>,
     account_capacity: Option<Arc<dyn keycompute_types::AccountCapacityPolicy>>,
+    dispatch_authorizer: Option<Arc<dyn keycompute_types::DispatchAuthorizer>>,
 }
 
 impl GatewayExecutor {
@@ -530,6 +550,7 @@ impl GatewayExecutor {
             default_transport: Arc::new(DefaultHttpTransport::new()),
             account_admission: None,
             account_capacity: None,
+            dispatch_authorizer: None,
         }
     }
 
@@ -546,7 +567,51 @@ impl GatewayExecutor {
             default_transport: Arc::new(DefaultHttpTransport::new()),
             account_admission: None,
             account_capacity: None,
+            dispatch_authorizer: None,
         }
+    }
+
+    pub fn with_dispatch_authorizer(
+        mut self,
+        authorizer: Arc<dyn keycompute_types::DispatchAuthorizer>,
+    ) -> Self {
+        self.dispatch_authorizer = Some(authorizer);
+        self
+    }
+    /// New dispatch only. Already accepted execution and settlement never use
+    /// this gate, and cannot acquire a replacement identity after invalidation.
+    pub async fn authorize_dispatch(&self, ctx: &RequestContext) -> Result<()> {
+        let Some(authorizer) = &self.dispatch_authorizer else {
+            return Ok(());
+        };
+        let result =
+            tokio::time::timeout(Duration::from_secs(3), authorizer.authorize_dispatch(ctx))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(KeyComputeError::ServiceUnavailable(
+                        "execution_authority_unavailable".into(),
+                    ))
+                });
+        // An injected authority source may use a different error vocabulary.
+        // Normalize at this trust boundary so every denial/outage terminates
+        // dispatch, and its private diagnostic text never reaches retry policy,
+        // account-health accounting, client payloads or execution logs.
+        let result = result.map_err(|error| match error {
+            KeyComputeError::PermissionDenied(_) | KeyComputeError::AuthError(_) => {
+                KeyComputeError::PermissionDenied("execution_authority_invalid".into())
+            }
+            _ => KeyComputeError::ServiceUnavailable("execution_authority_unavailable".into()),
+        });
+        if let Err(error) = &result {
+            let denied = matches!(error, KeyComputeError::PermissionDenied(_));
+            ctx.set_client_upstream_response(ClientUpstreamResponse {
+                status: if denied {403} else {503}, headers: vec![],
+                body: serde_json::json!({"error":{"type":if denied {"permission_error"} else {"server_error"},
+                    "code":if denied {"execution_authority_invalid"} else {"execution_authority_unavailable"},
+                    "message":if denied {"The original request authority is no longer valid"} else {"Request authority cannot be verified"}}}).to_string(),
+            });
+        }
+        result
     }
 
     pub fn with_account_capacity(
@@ -632,6 +697,7 @@ impl GatewayExecutor {
             default_transport: Arc::clone(&self.default_transport),
             account_admission: self.account_admission.clone(),
             account_capacity: self.account_capacity.clone(),
+            dispatch_authorizer: self.dispatch_authorizer.clone(),
         };
 
         // 执行超时：防止上游 Provider 无限阻塞导致资源泄漏。
@@ -1133,6 +1199,10 @@ impl GatewayExecutor {
                     input.saturating_add(output)
                 });
                 let release = result.is_ok()
+                    || result
+                        .as_ref()
+                        .err()
+                        .is_some_and(is_dispatch_authority_error)
                     || matches!(&result,
                     Err(KeyComputeError::UpstreamFailure { status:Some(status), .. }) if *status >= 400);
                 if let Err(error) = lease.finish(exact, release).await {
@@ -1281,7 +1351,7 @@ impl GatewayExecutor {
                     let error_text = e.to_string();
                     let (category, code, retryable) = classify_execution_error(&e);
                     let error = TraceErrorInfo {
-                        origin: if client_gone {
+                        origin: if client_gone || is_dispatch_authority_error(&e) {
                             ErrorOrigin::Gateway
                         } else {
                             ErrorOrigin::Upstream
@@ -1399,7 +1469,8 @@ impl GatewayExecutor {
                     // (and thereby unrelated healthy models) on an isolated
                     // model response/client error. Ordinary pool traffic keeps
                     // the historical account/provider health observations.
-                    if (!model_bound || should_record_account_health_failure(&ctx, &e))
+                    if !is_dispatch_authority_error(&e)
+                        && (!model_bound || should_record_account_health_failure(&ctx, &e))
                         && let ExecutionTarget::UpstreamAccount {
                             provider,
                             account_id,
@@ -1610,6 +1681,10 @@ impl GatewayExecutor {
             native_responses = native_responses_request.is_some(),
             "try_execute: calling provider"
         );
+
+        // All account queues, quota admission, target snapshots and trace setup
+        // have finished. Revalidate immediately before the physical dispatch.
+        self.authorize_dispatch(ctx).await?;
 
         // 执行流式请求（传入 transport）。后台结算任务会继续持有下游
         // receiver，因此客户端断开不会关闭 tx；显式监听 RequestContext 的
@@ -6620,6 +6695,115 @@ mod tests {
         async fn finish(&mut self, tokens: Option<u32>, release: bool) -> Result<()> {
             self.settlements.lock().unwrap().push((tokens, release));
             Ok(())
+        }
+    }
+    #[derive(Debug)]
+    struct RejectDispatch {
+        unavailable: bool,
+    }
+    #[async_trait]
+    impl keycompute_types::DispatchAuthorizer for RejectDispatch {
+        async fn authorize_dispatch(&self, _: &RequestContext) -> Result<()> {
+            if self.unavailable {
+                Err(KeyComputeError::ServiceUnavailable(
+                    "execution_authority_unavailable".into(),
+                ))
+            } else {
+                Err(KeyComputeError::PermissionDenied(
+                    "execution_authority_invalid".into(),
+                ))
+            }
+        }
+    }
+    #[derive(Debug)]
+    struct UnclassifiedDispatchFailure;
+    #[async_trait]
+    impl keycompute_types::DispatchAuthorizer for UnclassifiedDispatchFailure {
+        async fn authorize_dispatch(&self, _: &RequestContext) -> Result<()> {
+            Err(KeyComputeError::AuthError(
+                "do-not-leak-custom-authority-detail".into(),
+            ))
+        }
+    }
+    #[tokio::test]
+    async fn custom_authorizer_errors_cannot_enable_fallback_or_leak_details() {
+        let executor = GatewayExecutor::new(GatewayConfig::default(), HashMap::new())
+            .with_dispatch_authorizer(Arc::new(UnclassifiedDispatchFailure));
+        let ctx = create_test_context();
+        let error = executor.authorize_dispatch(&ctx).await.unwrap_err();
+        assert!(
+            matches!(&error,KeyComputeError::PermissionDenied(c) if c=="execution_authority_invalid")
+        );
+        assert_eq!(
+            failure_continuation(&ctx, &error),
+            FailureContinuation::Stop
+        );
+        assert!(!error.to_string().contains("do-not-leak"));
+        assert_eq!(ctx.client_upstream_response().unwrap().status, 403);
+    }
+    #[tokio::test]
+    async fn dispatch_denial_and_outage_release_quota_without_provider_or_fallback() {
+        for unavailable in [false, true] {
+            let primary = Uuid::new_v4();
+            let fallback = Uuid::new_v4();
+            let admissions = Arc::new(Mutex::new(Vec::new()));
+            let settlements = Arc::new(Mutex::new(Vec::new()));
+            let quota = Arc::new(TestQuotaPolicy {
+                denied: None,
+                dependency_error: false,
+                admissions: admissions.clone(),
+                settlements: settlements.clone(),
+                lost: Arc::new(Notify::new()),
+            });
+            let mut providers = HashMap::new();
+            providers.insert(
+                "many-chunks".into(),
+                Arc::new(ManyChunksProvider { chunks: 1 }) as Arc<dyn ProviderAdapter>,
+            );
+            let executor = GatewayExecutor::new(GatewayConfig::default(), providers)
+                .with_account_capacity(quota)
+                .with_dispatch_authorizer(Arc::new(RejectDispatch { unavailable }));
+            let ctx = Arc::new(create_test_context());
+            let plan = ExecutionPlan::new(ExecutionTarget::new_provider(
+                "many-chunks",
+                primary,
+                "http://mock",
+                "fixture",
+            ))
+            .with_fallback(ExecutionTarget::new_provider(
+                "many-chunks",
+                fallback,
+                "http://mock",
+                "fixture",
+            ));
+            let mut rx = executor
+                .execute(ctx.clone(), plan, Arc::new(AccountStateStore::new()), None)
+                .await
+                .unwrap();
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await
+                .unwrap()
+            {
+                assert!(
+                    matches!(event, StreamEvent::Error { .. }),
+                    "denied dispatcher must emit no provider content"
+                );
+            }
+            assert_eq!(*admissions.lock().unwrap(), vec![primary]);
+            assert_eq!(
+                *settlements.lock().unwrap(),
+                vec![(None, true)],
+                "unused quota must release"
+            );
+            assert!(ctx.executed_provider_account().is_none());
+            let failure = ctx.execution_failure().unwrap();
+            assert_eq!(failure.error.origin, ErrorOrigin::Gateway);
+            assert_eq!(failure.error.category, TraceErrorCategory::Authorization);
+            assert_eq!(failure.error.retryable, Some(false));
+            assert_eq!(
+                ctx.client_upstream_response().unwrap().status,
+                if unavailable { 503 } else { 403 }
+            );
         }
     }
     #[tokio::test]

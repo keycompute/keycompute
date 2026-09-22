@@ -986,6 +986,7 @@ async fn chat_completions_inner(
             };
 
             let payload = keycompute_types::node::NodeTaskPayload {
+                dispatch_identity: ctx.validated_dispatch_identity().map_err(ApiError::from)?,
                 request_id: ctx.request_id,
                 chat: None,
                 image_generation: None,

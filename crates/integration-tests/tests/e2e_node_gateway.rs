@@ -127,8 +127,12 @@ async fn create_test_hmac_token(
     token_plaintext
 }
 
-fn chat_task_payload(request_id: Uuid) -> NodeTaskPayload {
+fn chat_task_payload(
+    request_id: Uuid,
+    dispatch_identity: keycompute_types::DispatchIdentity,
+) -> NodeTaskPayload {
     NodeTaskPayload {
+        dispatch_identity,
         request_id,
         chat: Some(keycompute_types::ChatCompletionRequest::new(
             "deepseek-chat",
@@ -140,8 +144,12 @@ fn chat_task_payload(request_id: Uuid) -> NodeTaskPayload {
     }
 }
 
-fn image_generation_task_payload(request_id: Uuid) -> NodeTaskPayload {
+fn image_generation_task_payload(
+    request_id: Uuid,
+    dispatch_identity: keycompute_types::DispatchIdentity,
+) -> NodeTaskPayload {
     NodeTaskPayload {
+        dispatch_identity,
         request_id,
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -367,7 +375,7 @@ async fn test_sweeper_converges_redis_queue_entries() -> anyhow::Result<()> {
             request_id: Uuid::new_v4(),
             user_id: queue_user_id,
             model: model.clone(),
-            payload_json: serde_json::json!({}),
+            payload_json: serde_json::json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&env.pool,queue_tenant_id,queue_user_id).await}),
             deadline_at: chrono::Utc::now() + chrono::Duration::minutes(5),
             complete_grace_until: chrono::Utc::now() + chrono::Duration::minutes(6),
         },
@@ -413,7 +421,7 @@ async fn test_sweeper_converges_redis_queue_entries() -> anyhow::Result<()> {
             request_id: Uuid::new_v4(),
             user_id: queue_user_id,
             model: model.clone(),
-            payload_json: serde_json::json!({}),
+            payload_json: serde_json::json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&env.pool,queue_tenant_id,queue_user_id).await}),
             deadline_at: chrono::Utc::now() - chrono::Duration::seconds(1),
             complete_grace_until: chrono::Utc::now() + chrono::Duration::minutes(1),
         },
@@ -484,6 +492,10 @@ async fn test_sweeper_preserves_trace_quality_after_wait_timeout() -> anyhow::Re
     let received_at = chrono::Utc::now() - chrono::Duration::seconds(30);
     let claimed_at = chrono::Utc::now() - chrono::Duration::seconds(20);
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool, tenant_id, user_id,
+        )
+        .await,
         request_id,
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -954,6 +966,12 @@ async fn test_task_creation_and_enqueue() -> anyhow::Result<()> {
     env.service.register_node(&register_req).await?;
 
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: Some(keycompute_types::ChatCompletionRequest {
             model: "deepseek-chat".to_string(),
@@ -1028,6 +1046,10 @@ async fn completion_committed_after_client_deadline_returns_timeout_for_handler(
     )
     .with_lifecycle(Arc::clone(&recorder) as Arc<dyn RequestLifecycleRecorder>);
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool, tenant_id, user_id,
+        )
+        .await,
         request_id,
         chat: Some(keycompute_types::ChatCompletionRequest {
             model: "deepseek-chat".to_string(),
@@ -1143,7 +1165,11 @@ async fn test_complete_idempotency() -> anyhow::Result<()> {
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
     let request_id = Uuid::new_v4();
-    let payload = chat_task_payload(request_id);
+    let payload = chat_task_payload(
+        request_id,
+        integration_tests::db::fixture_dispatch_identity(&env.pool, test_tenant_id, test_user_id)
+            .await,
+    );
     let task = NodeTask::find_by_statement(
         Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -1294,7 +1320,15 @@ async fn test_client_error_does_not_exclude_node() -> anyhow::Result<()> {
     for i in 1..=3 {
         let lease_id = Uuid::new_v4();
         let request_id = Uuid::new_v4();
-        let payload = chat_task_payload(request_id);
+        let payload = chat_task_payload(
+            request_id,
+            integration_tests::db::fixture_dispatch_identity(
+                &env.pool,
+                test_tenant_id,
+                test_user_id,
+            )
+            .await,
+        );
         let task = NodeTask::find_by_statement(
             Statement::from_sql_and_values(
                 DbBackend::Postgres,
@@ -1378,7 +1412,11 @@ async fn test_concurrent_complete_safety() -> anyhow::Result<()> {
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
     let request_id = Uuid::new_v4();
-    let payload = chat_task_payload(request_id);
+    let payload = chat_task_payload(
+        request_id,
+        integration_tests::db::fixture_dispatch_identity(&env.pool, test_tenant_id, test_user_id)
+            .await,
+    );
     let task = NodeTask::find_by_statement(
         Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -1512,7 +1550,11 @@ async fn test_image_succeeded_submission() -> anyhow::Result<()> {
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
     let request_id = Uuid::new_v4();
-    let payload = image_generation_task_payload(request_id);
+    let payload = image_generation_task_payload(
+        request_id,
+        integration_tests::db::fixture_dispatch_identity(&env.pool, test_tenant_id, test_user_id)
+            .await,
+    );
     let task = NodeTask::find_by_statement(
         Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -1690,6 +1732,12 @@ async fn test_image_generation_normal_flow() -> anyhow::Result<()> {
 
     // 2. 创建图片生成任务 payload
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -1832,6 +1880,12 @@ async fn test_image_edit_normal_flow() -> anyhow::Result<()> {
 
     // 2. 创建图片编辑任务 payload
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         native: None,
         request_id: Uuid::new_v4(),
         chat: None,
@@ -1974,6 +2028,12 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
 
     // 2. 测试空 prompt
     let payload_empty = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -1998,6 +2058,12 @@ async fn test_image_generation_invalid_prompt() -> anyhow::Result<()> {
 
     // 3. 测试过短 prompt
     let payload_short = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -2112,6 +2178,12 @@ async fn test_image_url_inaccessible() -> anyhow::Result<()> {
 
     // 2. 创建图片生成任务
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -2225,6 +2297,12 @@ async fn test_node_task_timeout() -> anyhow::Result<()> {
 
     // 2. 创建图片生成任务
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -2403,6 +2481,12 @@ async fn test_unsupported_image_format() -> anyhow::Result<()> {
 
     // 2. 创建图片生成任务
     let payload = NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &env.pool,
+            test_tenant_id,
+            test_user_id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: Some(ImageGenerationRequest {
@@ -2526,7 +2610,11 @@ async fn test_image_generation_idempotency() -> anyhow::Result<()> {
     // 2. 创建 leased 任务
     let lease_id = Uuid::new_v4();
     let request_id = Uuid::new_v4();
-    let payload = image_generation_task_payload(request_id);
+    let payload = image_generation_task_payload(
+        request_id,
+        integration_tests::db::fixture_dispatch_identity(&env.pool, test_tenant_id, test_user_id)
+            .await,
+    );
     let task = NodeTask::find_by_statement(
         Statement::from_sql_and_values(
             DbBackend::Postgres,

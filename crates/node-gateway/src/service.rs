@@ -1301,7 +1301,12 @@ impl NodeGatewayService {
         payload: NodeTaskPayload,
         ctx: Arc<keycompute_types::RequestContext>,
     ) -> Result<keycompute_types::node_native::NodeNativeHttpResult, NodeExecutionError> {
-        if payload.request_id != ctx.request_id || user_id != ctx.user_id || model != ctx.model {
+        if payload.request_id != ctx.request_id
+            || tenant_id != ctx.tenant_id
+            || user_id != ctx.user_id
+            || model != ctx.model
+            || ctx.dispatch_identity.as_ref() != Some(&payload.dispatch_identity)
+        {
             return Err(NodeExecutionError::gateway_internal(
                 anyhow::anyhow!("native control identity mismatch"),
                 "native_control_identity_mismatch",

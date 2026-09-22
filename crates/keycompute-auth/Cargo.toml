@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+serde_json = "1"
 keycompute-observability = { workspace = true }
 keycompute-types = { workspace = true }
 keycompute-db = { workspace = true }
@@ -28,5 +29,4 @@ regex = "1"
 rand = "0.8"
 
 [dev-dependencies]
-serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros"] }

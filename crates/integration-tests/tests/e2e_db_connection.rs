@@ -4387,7 +4387,7 @@ mod tests {
             r#"INSERT INTO node_tasks (
                 id,request_id,tenant_id,user_id,model,payload_json,status,result_json,queued_at,
                 finished_at,deadline_at,complete_grace_until
-            ) VALUES ($1,$2,$8,$3,'test-model','{}','image_succeeded','{}',$4,$5,$6,$7)"#,
+            ) VALUES ($1,$2,$8,$3,'test-model',$9,'image_succeeded','{}',$4,$5,$6,$7)"#,
             [
                 task_id.into(),
                 request_id.into(),
@@ -4397,6 +4397,7 @@ mod tests {
                 (now + chrono::Duration::minutes(1)).into(),
                 (now + chrono::Duration::minutes(2)).into(),
                 trace_tenant.into(),
+                serde_json::json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&pool,trace_tenant,trace_user).await}).into(),
             ],
         ))
         .await

@@ -91,8 +91,8 @@ async fn tip_probe_preserves_successful_node_replay_and_skips_other_completions(
         "INSERT INTO nodes(id,tenant_id,owner_user_id,client_instance_id,display_name,status,capabilities_json) VALUES($1,$4,$2,$3,'test','online','{}')",
         [node.into(),owner.id.into(),run.clone().into(),tenant.id.into()])).await.unwrap();
     db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO node_tasks(request_id,tenant_id,user_id,model,payload_json,status,assigned_node_id,deadline_at,complete_grace_until) VALUES($1,$4,$2,'test','{}','queued',$3,NOW()+INTERVAL '1 minute',NOW()+INTERVAL '2 minutes')",
-        [log.request_id.into(),user.id.into(),node.into(),tenant.id.into()])).await.unwrap();
+        "INSERT INTO node_tasks(request_id,tenant_id,user_id,model,payload_json,status,assigned_node_id,deadline_at,complete_grace_until) VALUES($1,$4,$2,'test',$5,'queued',$3,NOW()+INTERVAL '1 minute',NOW()+INTERVAL '2 minutes')",
+        [log.request_id.into(),user.id.into(),node.into(),tenant.id.into(),serde_json::json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&db,tenant.id,user.id).await}).into()])).await.unwrap();
     assert!(
         NodeTip::create_from_usage_log(&db, log.id)
             .await

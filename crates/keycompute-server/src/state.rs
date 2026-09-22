@@ -1002,7 +1002,13 @@ impl AppState {
                 .with_capacity_snapshot_config(config.gateway.routing_capacity.clone())
                 .map_err(crate::error::ApiError::from)?,
         );
-        let gateway = Arc::new(gateway.with_account_capacity(account_capacity));
+        let gateway = Arc::new(
+            gateway
+                .with_account_capacity(account_capacity)
+                .with_dispatch_authorizer(Arc::new(keycompute_auth::DbDispatchAuthorizer::new(
+                    Arc::clone(&pool),
+                ))),
+        );
 
         // 将 PricingService 接入分布式缓存（L2 防击穿）
         let pricing_service = pricing_service.with_dist_cache(Arc::clone(&cache));

@@ -154,6 +154,7 @@ impl JwtValidator {
             produce_ai_key_id: Uuid::nil(),
             permissions: Vec::new(),
             token_version: c.token_version,
+            credential_expires_at: Some(c.exp),
             membership_authz_version: c.membership_authz_version,
             authz_version: c.authz_version,
             user_info: None,

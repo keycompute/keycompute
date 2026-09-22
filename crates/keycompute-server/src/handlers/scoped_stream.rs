@@ -175,6 +175,14 @@ impl Owner {
     }
 
     async fn run_node(&mut self) {
+        let dispatch_identity = match self.input.ctx.validated_dispatch_identity() {
+            Ok(identity) => identity,
+            Err(_) => {
+                self.prehead_failure("execution_authority_invalid", 403)
+                    .await;
+                return;
+            }
+        };
         let Some(gateway) = self.input.state.node_gateway.clone() else {
             self.prehead_failure("node_gateway_unavailable", 503).await;
             return;
@@ -185,6 +193,7 @@ impl Owner {
                 self.input.ctx.user_id,
                 self.input.model.clone(),
                 NodeTaskPayload {
+                    dispatch_identity,
                     request_id: self.input.ctx.request_id,
                     native: self.input.native.clone(),
                     chat: None,

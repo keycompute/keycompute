@@ -551,3 +551,27 @@ pub async fn seed_distribution_rule(
         [req.tenant_id.into(),req.beneficiary_scope.as_str().into(),req.beneficiary_id.into(),req.name.clone().into(),req.description.clone().into(),req.commission_rate.clone().into(),req.priority.unwrap_or(0).into(),req.effective_from.unwrap_or_else(chrono::Utc::now).into(),req.effective_until.into()]
     )).one(db).await?.ok_or_else(||keycompute_db::DbError::Other("rule fixture insert returned no row".into()))
 }
+
+/// Explicit fixture-only proof from the fixture's actual database versions.
+/// Production producers must carry the original authenticated request proof;
+/// they must never refresh a queued task using this test convenience function.
+pub async fn fixture_dispatch_identity(
+    db: &impl sea_orm::ConnectionTrait,
+    tenant: Uuid,
+    user: Uuid,
+) -> keycompute_types::DispatchIdentity {
+    let row = db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT u.token_version,t.authz_version AS tenant_version,m.authz_version AS member_version FROM users u JOIN tenant_memberships m ON m.user_id=u.id JOIN tenants t ON t.id=m.tenant_id WHERE u.id=$1 AND t.id=$2",
+        [user.into(),tenant.into()])).await.expect("fixture authority query").expect("fixture membership");
+    keycompute_types::DispatchIdentity {
+        tenant_id: tenant,
+        actor_user_id: user,
+        resource_owner_user_id: user,
+        credential_kind: keycompute_types::CredentialKind::Jwt,
+        api_key_id: None,
+        token_version: row.try_get("", "token_version").unwrap(),
+        tenant_authz_version: row.try_get("", "tenant_version").unwrap(),
+        membership_authz_version: row.try_get("", "member_version").unwrap(),
+        credential_expires_at: Some(chrono::Utc::now().timestamp() + 3600),
+    }
+}

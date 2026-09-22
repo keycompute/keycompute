@@ -74,6 +74,7 @@ pub struct AuthExtractor {
     /// 用户权限列表
     pub permissions: Vec<Permission>,
     pub token_version: i32,
+    pub credential_expires_at: Option<i64>,
     pub membership_authz_version: i64,
     pub authz_version: i64,
     /// A resource permit, not an authorization decision; never serialized.
@@ -98,6 +99,7 @@ impl AuthExtractor {
             produce_ai_key_id,
             permissions: Vec::new(),
             token_version: 0,
+            credential_expires_at: None,
             membership_authz_version: 1,
             authz_version: 1,
             generation_permit: None,
@@ -181,6 +183,7 @@ impl AuthExtractor {
             produce_ai_key_id: ctx.produce_ai_key_id,
             permissions: ctx.permissions,
             token_version: ctx.token_version,
+            credential_expires_at: ctx.credential_expires_at,
             membership_authz_version: ctx
                 .membership_authz_version
                 .ok_or_else(|| ApiError::Auth("membership version required".into()))?,
@@ -201,6 +204,7 @@ impl AuthExtractor {
             produce_ai_key_id: self.produce_ai_key_id,
             permissions: self.permissions.clone(),
             token_version: self.token_version,
+            credential_expires_at: self.credential_expires_at,
             membership_authz_version: Some(self.membership_authz_version),
             authz_version: Some(self.authz_version),
             user_info: None,

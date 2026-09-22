@@ -6,8 +6,8 @@ identity/membership foundations and tenant control/invitation APIs are accepted.
 Scoped pricing, providers/bindings, financial/distribution reports, owner-only
 key issuance and distribution policy mutations are also accepted. Live scoped
 Responses replay now revalidates credentials and authorization versions.
-Node/registration control and task cancellation/archival are accepted. Remaining
-async-new-work authorization and Responses administration, financial mutations, complete
+Node/registration control and task cancellation/archival are accepted. Original-authority physical dispatch and node-queue claim checks are also accepted.
+Remaining Responses/Conversation administration, financial mutations, complete
 platform/operator routing, frontend delivery and final release are not accepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
@@ -444,6 +444,47 @@ not every async-new-work authorization path or the complete tenant subsystem.
 Full queued-work authorization version propagation, tenant Responses/Conversation
 administration, remaining financial mutations, other platform/operator routes,
 full frontend and release/rollback gates are still open.
+
+## Current phase 5 — original-authority dispatch and queue claims accepted
+
+New physical inference attempts carry the original tenant, actor/resource owner,
+credential kind/key ID, user/member/tenant authorization versions and credential
+expiry. The proof contains no bearer secret or role override and is not refreshed
+from a user's later membership. All pool-backed server gateways install the primary
+DB dispatch authorizer; missing or invalid request proof fails closed. Standalone
+library embeddings still choose their explicit authorizer dependency.
+
+After account queueing, quota admission, target snapshots and attempt-trace setup,
+the gateway checks current primary authority immediately before each upstream
+attempt. Authorization denials and dependency failures cannot trigger retry or
+fallback, consume unused account quota, or penalize upstream account health.
+Custom authorizer diagnostics are normalized to fixed non-retryable public codes;
+the regression first reproduced the old error-vocabulary bypass, then passed after
+normalization. These checks do not retroactively reauthorize accepted settlement.
+
+Node task payloads require the same original dispatch identity. Greenfield INSERT
+validation and ordinary/native claim predicates reject missing, malformed, stale,
+revoked or expired proofs. Model/payload identity is immutable, so a regrant cannot
+refresh an old queued task in place. Queue hints do not confer authority. Previously
+leased completion keeps its original authenticated node/session/lease and billing
+owner; invalid queued tasks remain retained until ordinary cleanup without a new
+lease. Runtime proof snapshots are not alternate console-management capabilities.
+
+Real PostgreSQL/provider tests cover unchanged positive controls, revoked/expired
+keys, signed user/member/tenant version changes, JWT expiry, both node claim paths,
+malformed and cross-owner proofs, fresh-request success after invalidation, and
+preserved completion/idempotency for an existing lease. No production proof fallback
+or ignored-test changes were added; fixtures construct isolated explicit identities.
+
+The interrupted 31-file implementation was preserved and resumed on main. Final
+native default-parallel workspace: **2,559 passed, 0 failed, 30 original default
+ignored**, including desktop/mobile. All-target check, all-target/all-feature strict
+Clippy, Web/client WASM compilation, formatting and whitespace pass. A focused
+node/provider queue suite passed again at eight threads and is an included subset,
+not an extra workspace count. All 31 source hashes match the tested snapshot.
+CI is checked separately after push. No production data, schema, credentials,
+service restart or deployment changed. Responses/Conversation management and the
+remaining financial, platform/operator, frontend and release gates remain open.
 
 # Tenant subsystem implementation status
 

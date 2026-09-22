@@ -64,6 +64,20 @@ impl NodeTask {
         db: &impl ConnectionTrait,
         req: &CreateNodeTaskRequest,
     ) -> Result<NodeTask, DbError> {
+        let identity: keycompute_types::DispatchIdentity = serde_json::from_value(
+            req.payload_json
+                .get("dispatch_identity")
+                .cloned()
+                .ok_or_else(|| DbError::Other("dispatch identity required".into()))?,
+        )
+        .map_err(|_| DbError::Other("invalid dispatch identity".into()))?;
+        identity
+            .validate(
+                req.tenant_id,
+                req.user_id,
+                identity.api_key_id.unwrap_or_default(),
+            )
+            .map_err(|_| DbError::Other("invalid original dispatch identity".into()))?;
         let native = match req.payload_json.get("native").filter(|v| !v.is_null()) {
             Some(value) => {
                 let request: keycompute_types::node_native::NodeNativeRequest =
@@ -169,6 +183,7 @@ impl NodeTask {
             WHERE id = $5
               AND status = $6
               AND cancellation_requested_at IS NULL AND archived_at IS NULL
+              AND dispatch_identity_is_active(payload_json->'dispatch_identity',tenant_id,user_id)
               AND deadline_at >= NOW()
               AND EXISTS (
                 SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id
@@ -238,6 +253,7 @@ impl NodeTask {
                 JOIN tenants ct ON ct.id=nt.tenant_id
                 WHERE nt.status='queued' AND nt.deadline_at>NOW() AND ct.status='active'
                   AND nt.cancellation_requested_at IS NULL AND nt.archived_at IS NULL
+                  AND dispatch_identity_is_active(nt.payload_json->'dispatch_identity',nt.tenant_id,nt.user_id)
                   AND nt.native_requirements_json IS NOT NULL
                   AND EXISTS(SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
                     JOIN tenants ot ON ot.id=n.tenant_id

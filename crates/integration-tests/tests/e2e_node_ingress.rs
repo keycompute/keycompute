@@ -1119,6 +1119,12 @@ async fn native_claim_uses_immutable_session_permission_not_node_metadata() {
     f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE nodes SET capabilities_json=capabilities_json || '{\"native_operations\":[\"chat\"]}'::jsonb WHERE id=$1",[f.node.id.into()])).await.unwrap();
     let payload = keycompute_types::node::NodeTaskPayload {
+        dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+            &f.db,
+            f.user.tenant_id,
+            f.user.id,
+        )
+        .await,
         request_id: Uuid::new_v4(),
         chat: None,
         image_generation: None,
@@ -1184,6 +1190,12 @@ async fn uncertain_native_execution_failure_is_terminal_and_cannot_be_requeued()
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
+                dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+                    &f.db,
+                    f.user.tenant_id,
+                    f.user.id,
+                )
+                .await,
                 request_id: Uuid::new_v4(),
                 chat: None,
                 image_generation: None,
@@ -1252,6 +1264,8 @@ async fn native_capable_worker_can_claim_legacy_work_without_native_queue_starva
     let user = f.user.id;
     let tenant = f.user.tenant_id;
     let producer = service.clone();
+    let dispatch_identity =
+        integration_tests::db::fixture_dispatch_identity(&f.db, tenant, user).await;
     let pending = tokio::spawn(async move {
         producer
             .enqueue_and_wait(
@@ -1259,6 +1273,7 @@ async fn native_capable_worker_can_claim_legacy_work_without_native_queue_starva
                 user,
                 model.clone(),
                 keycompute_types::node::NodeTaskPayload {
+                    dispatch_identity,
                     request_id: Uuid::new_v4(),
                     native: None,
                     image_generation: None,
@@ -1340,6 +1355,12 @@ async fn native_tool_requirements_are_checked_before_route_and_again_at_claim() 
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
+                dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+                    &f.db,
+                    f.user.tenant_id,
+                    f.user.id,
+                )
+                .await,
                 request_id: Uuid::new_v4(),
                 chat: None,
                 image_generation: None,
@@ -1436,6 +1457,12 @@ async fn capability_renewal_is_retry_safe_and_old_session_only_finishes_existing
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
+                dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+                    &f.db,
+                    f.user.tenant_id,
+                    f.user.id,
+                )
+                .await,
                 request_id: Uuid::new_v4(),
                 chat: None,
                 image_generation: None,
@@ -1548,6 +1575,12 @@ async fn native_byte_and_output_limits_are_enforced_by_sql_claim() {
             f.user.id,
             f.shared.clone(),
             keycompute_types::node::NodeTaskPayload {
+                dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+                    &f.db,
+                    f.user.tenant_id,
+                    f.user.id,
+                )
+                .await,
                 request_id: Uuid::new_v4(),
                 chat: None,
                 image_generation: None,
@@ -1679,6 +1712,12 @@ async fn a_native_backlog_does_not_starve_queued_legacy_work() {
     .unwrap();
     for native in [true, true, false] {
         let payload = keycompute_types::node::NodeTaskPayload {
+            dispatch_identity: integration_tests::db::fixture_dispatch_identity(
+                &f.db,
+                f.user.tenant_id,
+                f.user.id,
+            )
+            .await,
             request_id: Uuid::new_v4(),
             image_generation: None,
             image_edit: None,

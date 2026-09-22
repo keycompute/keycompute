@@ -1,5 +1,7 @@
 //! Authentication, identity verification, and scope construction.
 pub mod api_key;
+pub mod dispatch;
+pub use dispatch::DbDispatchAuthorizer;
 pub mod jwt;
 pub mod password;
 pub mod permission;
@@ -36,6 +38,7 @@ pub struct AuthContext {
     pub produce_ai_key_id: Uuid,
     pub permissions: Vec<Permission>,
     pub token_version: i32,
+    pub credential_expires_at: Option<i64>,
     pub membership_authz_version: Option<i64>,
     pub authz_version: Option<i64>,
     pub user_info: Option<UserInfo>,
@@ -52,6 +55,7 @@ impl AuthContext {
             produce_ai_key_id: Uuid::nil(),
             permissions: Vec::new(),
             token_version: 0,
+            credential_expires_at: None,
             membership_authz_version: None,
             authz_version: None,
             user_info: None,
@@ -68,6 +72,7 @@ impl AuthContext {
             produce_ai_key_id: Uuid::nil(),
             permissions: Vec::new(),
             token_version: 0,
+            credential_expires_at: None,
             membership_authz_version: None,
             authz_version: None,
             user_info: None,
