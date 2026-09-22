@@ -20,8 +20,8 @@ mod tests {
     use keycompute_db::{
         Account, CreateAccountRequest, CreateDistributionRuleRequest, CreatePaymentOrderRequest,
         CreatePricingRequest, CreateTenantMembershipRequest, PaymentMethod, PaymentOrder,
-        PricingModel, ResponseAffinity, ResponsesIdempotencyClaim, TenantDistributionRule,
-        TenantMembership, UserBalance,
+        ResponseAffinity, ResponsesIdempotencyClaim, TenantDistributionRule, TenantMembership,
+        UserBalance,
     };
     use keycompute_server::{AppState, AuthExtractor};
     use keycompute_types::{CredentialKind, PlatformRole, TenantRole};
@@ -144,7 +144,7 @@ mod tests {
             .expect("pricing delete guard cleanup should succeed");
 
         let tenant = create_test_tenant(&pool, "pricing-delete-guard", &test_id).await;
-        let pricing = PricingModel::create(
+        let pricing = integration_tests::db::create_test_pricing(
             &pool,
             &CreatePricingRequest {
                 scope_type: PricingScopeType::Tenant,
@@ -171,7 +171,9 @@ mod tests {
                 .is_some()
         );
 
-        pricing.delete(&pool).await.unwrap();
+        integration_tests::db::delete_test_tenant_pricing(&pool, &pricing)
+            .await
+            .unwrap();
         tenant.delete(&pool).await.unwrap();
         cleanup_test_data(&pool, &test_id)
             .await

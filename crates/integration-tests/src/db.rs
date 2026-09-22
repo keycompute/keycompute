@@ -428,3 +428,111 @@ pub async fn create_test_api_key(
     };
     keycompute_db::ProduceAiKey::create_owned(db, scope, req, &actor).await
 }
+
+/// Build price fixtures through the same scope and audit checks as management.
+pub async fn create_test_pricing(
+    db: &(impl ConnectionTrait + TransactionTrait),
+    req: &keycompute_db::CreatePricingRequest,
+) -> Result<keycompute_db::PricingModel, keycompute_db::DbError> {
+    use keycompute_db::models::pricing_model::{
+        PlatformPricingScope, PricingScopeType, PricingTarget, TenantPricingScope,
+    };
+    use keycompute_types::{CredentialKind, PlatformRole};
+    let tx = db.begin().await?;
+    let row = match (req.scope_type, req.tenant_id) {
+        (PricingScopeType::Tenant, Some(tenant_id)) => {
+            let tenant = Tenant::find_by_id(&tx, tenant_id)
+                .await?
+                .ok_or_else(|| keycompute_db::DbError::not_found("tenant", tenant_id))?;
+            let user = User::find_by_id(&tx, tenant.owner_user_id)
+                .await?
+                .ok_or_else(|| keycompute_db::DbError::not_found("owner", tenant.owner_user_id))?;
+            let member = keycompute_db::TenantMembership::find(&tx, tenant_id, user.id)
+                .await?
+                .ok_or_else(|| keycompute_db::DbError::not_found("membership", user.id))?;
+            let scope = TenantPricingScope::checked(
+                tenant_id,
+                user.id,
+                CredentialKind::Jwt,
+                user.token_version,
+                tenant.authz_version,
+                member.authz_version,
+            )?;
+            let actor = keycompute_db::AuditContext {
+                actor_user_id: user.id,
+                credential_kind: CredentialKind::Jwt,
+                actor_platform_role: user.platform_role()?,
+                actor_tenant_role: Some(TenantRole::Admin),
+                request_id: Some(uuid::Uuid::new_v4()),
+            };
+            keycompute_db::PricingModel::create_in_tenant(&tx, scope, req, &actor).await?
+        }
+        (PricingScopeType::Platform, None) => {
+            let root = User::find_by_email(&tx, "tenant-test-root@fixture.invalid")
+                .await?
+                .ok_or_else(|| keycompute_db::DbError::Other("fixture root is missing".into()))?;
+            let scope =
+                PlatformPricingScope::checked(root.id, CredentialKind::Jwt, root.token_version)?;
+            let actor = keycompute_db::AuditContext {
+                actor_user_id: root.id,
+                credential_kind: CredentialKind::Jwt,
+                actor_platform_role: PlatformRole::Root,
+                actor_tenant_role: None,
+                request_id: Some(uuid::Uuid::new_v4()),
+            };
+            keycompute_db::PricingModel::create_platform(
+                &tx,
+                scope,
+                PricingTarget::Platform,
+                req,
+                &actor,
+            )
+            .await?
+        }
+        _ => {
+            return Err(keycompute_db::DbError::Other(
+                "invalid fixture pricing target".into(),
+            ));
+        }
+    };
+    tx.commit().await?;
+    Ok(row)
+}
+
+pub async fn delete_test_tenant_pricing(
+    db: &(impl ConnectionTrait + TransactionTrait),
+    price: &keycompute_db::PricingModel,
+) -> Result<(), keycompute_db::DbError> {
+    use keycompute_db::models::pricing_model::TenantPricingScope;
+    use keycompute_types::CredentialKind;
+    let tenant_id = price.tenant_id.ok_or_else(|| {
+        keycompute_db::DbError::Other("fixture deletion requires tenant price".into())
+    })?;
+    let tx = db.begin().await?;
+    let tenant = Tenant::find_by_id(&tx, tenant_id)
+        .await?
+        .ok_or_else(|| keycompute_db::DbError::not_found("tenant", tenant_id))?;
+    let user = User::find_by_id(&tx, tenant.owner_user_id)
+        .await?
+        .ok_or_else(|| keycompute_db::DbError::not_found("owner", tenant.owner_user_id))?;
+    let member = keycompute_db::TenantMembership::find(&tx, tenant_id, user.id)
+        .await?
+        .ok_or_else(|| keycompute_db::DbError::not_found("membership", user.id))?;
+    let scope = TenantPricingScope::checked(
+        tenant_id,
+        user.id,
+        CredentialKind::Jwt,
+        user.token_version,
+        tenant.authz_version,
+        member.authz_version,
+    )?;
+    let actor = keycompute_db::AuditContext {
+        actor_user_id: user.id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: user.platform_role()?,
+        actor_tenant_role: Some(TenantRole::Admin),
+        request_id: Some(uuid::Uuid::new_v4()),
+    };
+    keycompute_db::PricingModel::delete_in_tenant(&tx, scope, price.id, &actor).await?;
+    tx.commit().await.map_err(keycompute_db::DbError::from)
+}

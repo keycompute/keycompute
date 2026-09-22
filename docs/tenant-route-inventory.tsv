@@ -79,6 +79,10 @@ existing_path	source_file	line_at_audit	resource_category	authority_contract	can
 /api/v1/payments/orders/{id}	crates/keycompute-server/src/router.rs	684	user_owned_resource	console; current tenant and self	/api/v1/me/payments/orders/{id}
 /api/v1/payments/orders/{id}/sync	crates/keycompute-server/src/router.rs	691	user_owned_resource	console; current tenant and self	/api/v1/me/payments/orders/{id}/sync
 /api/v1/payments/sync/{out_trade_no}	crates/keycompute-server/src/router.rs	687	user_owned_resource	console; current tenant and self	/api/v1/me/payments/sync/{out_trade_no}
+/api/v1/platform/pricing	crates/keycompute-server/src/router.rs	556	platform_resource_or_explicit_tenant_target	JWT; current root platform scope; explicit pricing target	/api/v1/platform/pricing
+/api/v1/platform/pricing/batch-defaults	crates/keycompute-server/src/router.rs	560	platform_resource_or_explicit_tenant_target	JWT; current root platform scope; explicit pricing target	/api/v1/platform/pricing/batch-defaults
+/api/v1/platform/pricing/{id}	crates/keycompute-server/src/router.rs	564	platform_resource_or_explicit_tenant_target	JWT; current root platform scope; explicit pricing target	/api/v1/platform/pricing/{id}
+/api/v1/platform/pricing/{id}/make-default	crates/keycompute-server/src/router.rs	568	platform_resource_or_explicit_tenant_target	JWT; current root platform scope; explicit pricing target	/api/v1/platform/pricing/{id}/make-default
 /api/v1/pricing	crates/keycompute-server/src/router.rs	541	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/pricing
 /api/v1/pricing/batch-defaults	crates/keycompute-server/src/router.rs	542	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/pricing/batch-defaults
 /api/v1/pricing/calculate	crates/keycompute-server/src/router.rs	551	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/pricing/calculate
@@ -90,6 +94,10 @@ existing_path	source_file	line_at_audit	resource_category	authority_contract	can
 /api/v1/settings/{key}	crates/keycompute-server/src/router.rs	514	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/settings/{key}
 /api/v1/tenants	crates/keycompute-server/src/router.rs	502	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/tenants
 /api/v1/tenants/{id}	crates/keycompute-server/src/router.rs	503	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/tenants/{id}
+/api/v1/tenants/{tenant_id}/pricing	crates/keycompute-server/src/handlers/tenant_pricing.rs	220	tenant_resource	JWT; selected path membership; current signed versions; active tenant admin	/api/v1/tenants/{tenant_id}/pricing
+/api/v1/tenants/{tenant_id}/pricing/batch-defaults	crates/keycompute-server/src/handlers/tenant_pricing.rs	224	tenant_resource	JWT; selected path membership; current signed versions; active tenant admin	/api/v1/tenants/{tenant_id}/pricing/batch-defaults
+/api/v1/tenants/{tenant_id}/pricing/{id}	crates/keycompute-server/src/handlers/tenant_pricing.rs	228	tenant_resource	JWT; selected path membership; current signed versions; active tenant admin	/api/v1/tenants/{tenant_id}/pricing/{id}
+/api/v1/tenants/{tenant_id}/pricing/{id}/make-default	crates/keycompute-server/src/handlers/tenant_pricing.rs	232	tenant_resource	JWT; selected path membership; current signed versions; active tenant admin	/api/v1/tenants/{tenant_id}/pricing/{id}/make-default
 /api/v1/usage	crates/keycompute-server/src/router.rs	388	user_owned_resource	console; current tenant and self	/api/v1/me/usage
 /api/v1/usage/stats	crates/keycompute-server/src/router.rs	389	user_owned_resource	console; current tenant and self	/api/v1/me/usage/stats
 /api/v1/usage/trend	crates/keycompute-server/src/router.rs	390	user_owned_resource	console; current tenant and self	/api/v1/me/usage/trend

@@ -245,7 +245,22 @@ impl PricingService {
         provider: Option<&str>,
     ) -> Result<PricingSnapshot> {
         let provider = provider.unwrap_or(DEFAULT_PRICING_PROVIDER);
-        let key = Self::cache_key(tenant_id, model_name, provider);
+        let base_key = Self::cache_key(tenant_id, model_name, provider);
+        // Revisions are part of cache identity, not a best-effort invalidation
+        // message. A writer outage fails closed even when a stale L1 exists.
+        let key = if let Some(pool) = &self.pool {
+            let revision = PricingModel::runtime_cache_revision(
+                pool.write_conn(),
+                *tenant_id,
+                model_name,
+                provider,
+            )
+            .await
+            .map_err(|error| KeyComputeError::DatabaseError(error.to_string()))?;
+            format!("{base_key}:{revision}")
+        } else {
+            base_key
+        };
         {
             let mut cache = self.cache.write().await;
             if let Some(entry) = cache.get(&key)
@@ -261,7 +276,7 @@ impl PricingService {
         if let (Some(dist_cache), Some(pool)) = (&self.dist_cache, &self.pool) {
             // Version the namespace to discard snapshots populated by the old
             // platform-first fallback. Only tenant-resolved entries are read.
-            let dist_key = format!("pricing:v2:tenant:{key}");
+            let dist_key = format!("pricing:v3:tenant:{key}");
             let result = dist_cache
                 .get_or_insert_with_lock::<(PricingSnapshot, PricingSource), _, String>(
                     &dist_key,
@@ -396,15 +411,16 @@ impl PricingService {
         provider: &str,
     ) -> Result<SnapshotWithSource> {
         // 尝试按租户+模型名+计费维度查找
-        let pricing = PricingModel::find_by_model(pool, *tenant_id, model_name, provider)
-            .await
-            .map_err(|e| {
-                KeyComputeError::DatabaseError(format!("Failed to load pricing: {}", e))
-            })?;
+        let pricing =
+            PricingModel::find_effective_for_runtime(pool, *tenant_id, model_name, provider)
+                .await
+                .map_err(|e| {
+                    KeyComputeError::DatabaseError(format!("Failed to load pricing: {}", e))
+                })?;
 
         if let Some(p) = pricing {
             // 判断结果是租户特定定价还是全局默认定价
-            // find_by_model may return an explicit platform default.
+            // The runtime lookup may return an explicit platform default.
             let is_global_default = p.scope_type == PricingScopeType::Platform;
             let source = if is_global_default {
                 PricingSource::DatabaseDefault
@@ -424,7 +440,7 @@ impl PricingService {
         }
 
         // 尝试查找默认定价（按计费维度匹配）
-        let defaults = PricingModel::find_defaults(pool, PricingScopeType::Platform, None)
+        let defaults = PricingModel::find_runtime_defaults(pool)
             .await
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
@@ -528,12 +544,11 @@ impl PricingService {
             return Ok(());
         };
 
-        let defaults =
-            PricingModel::find_defaults(pool.write_conn(), PricingScopeType::Platform, None)
-                .await
-                .map_err(|e| {
-                    KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
-                })?;
+        let defaults = PricingModel::find_runtime_defaults(pool.write_conn())
+            .await
+            .map_err(|e| {
+                KeyComputeError::DatabaseError(format!("Failed to load default pricing: {}", e))
+            })?;
 
         let mut cache = self.cache.write().await;
         for p in defaults {

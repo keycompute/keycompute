@@ -9,10 +9,11 @@
 use integration_tests::db::initialize_test_schema;
 use keycompute_cache::CacheService;
 use keycompute_db::{
-    CreatePricingRequest, PricingModel,
+    CreatePricingRequest,
     models::pricing_model::{BillingDimension, PricingScopeType},
 };
 use keycompute_pricing::PricingService;
+use sea_orm::ConnectionTrait;
 use std::str::FromStr;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -217,7 +218,7 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
     let tenant_b = create_test_tenant(&db, "pricing-b", &run).await;
     let model = format!("pricing-scope-{run}");
     let provider = "provideraccount";
-    let default = PricingModel::create(
+    let default = integration_tests::db::create_test_pricing(
         &db,
         &CreatePricingRequest {
             scope_type: PricingScopeType::Platform,
@@ -234,7 +235,7 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
     )
     .await
     .unwrap();
-    PricingModel::create(
+    integration_tests::db::create_test_pricing(
         &db,
         &CreatePricingRequest {
             scope_type: PricingScopeType::Tenant,
@@ -276,7 +277,11 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
         rust_decimal::Decimal::from_str("0.5").unwrap()
     );
     for tenant in [tenant_a.id, tenant_b.id] {
-        let key = format!("pricing:v2:tenant:{tenant}:{model}:{provider}");
+        let revision =
+            keycompute_db::PricingModel::runtime_cache_revision(&db, tenant, &model, provider)
+                .await
+                .unwrap();
+        let key = format!("pricing:v3:tenant:{tenant}:{model}:{provider}:{revision}");
         assert!(
             cache
                 .get::<serde_json::Value>(&key)
@@ -322,6 +327,227 @@ async fn test_cross_tenant_pricing_isolation_with_db() {
             );
         }
     }
-    default.delete(pool.write_conn()).await.unwrap();
+    // Platform defaults are protected from business deletion; remove only this
+    // exact synthetic fixture directly during isolated-test teardown.
+    let removed = pool.write_conn().execute(sea_orm::Statement::from_sql_and_values(
+        sea_orm::DbBackend::Postgres,
+        "DELETE FROM pricing_models WHERE id=$1 AND scope_type='platform' AND tenant_id IS NULL AND model_name=$2",
+        [default.id.into(), model.into()],
+    )).await.unwrap();
+    assert_eq!(removed.rows_affected(), 1);
     cleanup_test_data(&db, &run).await.unwrap();
+}
+
+#[tokio::test]
+async fn committed_price_revisions_fence_other_process_caches_and_future_boundaries() {
+    use chrono::{Duration as ChronoDuration, Utc};
+    use integration_tests::db::{
+        TestDataGuard, create_test_pool, create_test_pricing, create_test_tenant,
+    };
+    use keycompute_db::{
+        AuditContext, TenantMembership, User,
+        models::pricing_model::{TenantPricingScope, UpdatePricingRequest},
+    };
+    use keycompute_types::{CredentialKind, PlatformRole, TenantRole};
+    use sea_orm::{ConnectionTrait, TransactionTrait};
+    let db = create_test_pool().await;
+    let run = generate_test_id();
+    let mut guard = TestDataGuard::new(db.clone(), run.clone());
+    let tenant = create_test_tenant(&db, "price-revision", &run).await;
+    let model = format!("pricing-revision-{run}");
+    let row = create_test_pricing(
+        &db,
+        &CreatePricingRequest {
+            scope_type: PricingScopeType::Tenant,
+            tenant_id: Some(tenant.id),
+            model_name: model.clone(),
+            billing_dimension: BillingDimension::ProviderAccount,
+            currency: Some("CNY".into()),
+            input_price_per_1k: "0.2".parse().unwrap(),
+            output_price_per_1k: "0.3".parse().unwrap(),
+            is_default: Some(false),
+            effective_from: None,
+            effective_until: None,
+        },
+    )
+    .await
+    .unwrap();
+    let dist = try_create_cache().await.expect("isolated Redis required");
+    let router = keycompute_db::DbRouter::single(db.clone());
+    let first = PricingService::with_pool(router.clone()).with_dist_cache(dist.clone());
+    let second = PricingService::with_pool(router.clone()).with_dist_cache(dist.clone());
+    for service in [&first, &second] {
+        assert_eq!(
+            service
+                .create_snapshot(&model, &tenant.id, Some("provideraccount"))
+                .await
+                .unwrap()
+                .input_price_per_1k,
+            rust_decimal::Decimal::from_str("0.2").unwrap()
+        );
+    }
+    let user = User::find_by_id(&db, tenant.owner_user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let member = TenantMembership::find(&db, tenant.id, user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let scope = TenantPricingScope::checked(
+        tenant.id,
+        user.id,
+        CredentialKind::Jwt,
+        user.token_version,
+        tenant.authz_version,
+        member.authz_version,
+    )
+    .unwrap();
+    let actor = AuditContext {
+        actor_user_id: user.id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::None,
+        actor_tenant_role: Some(TenantRole::Admin),
+        request_id: Some(Uuid::new_v4()),
+    };
+    let tx = db.begin().await.unwrap();
+    let changed = keycompute_db::PricingModel::update_in_tenant(
+        &tx,
+        scope,
+        row.id,
+        &UpdatePricingRequest {
+            input_price_per_1k: Some("0.8".parse().unwrap()),
+            output_price_per_1k: None,
+            effective_until: None,
+            expected_version: row.version,
+        },
+        &actor,
+    )
+    .await
+    .unwrap();
+    // Uncommitted prices and revisions remain invisible even to another process.
+    assert_eq!(
+        second
+            .create_snapshot(&model, &tenant.id, Some("provideraccount"))
+            .await
+            .unwrap()
+            .input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.2").unwrap()
+    );
+    tx.commit().await.unwrap();
+    for service in [&first, &second] {
+        assert_eq!(
+            service
+                .create_snapshot(&model, &tenant.id, Some("provideraccount"))
+                .await
+                .unwrap()
+                .input_price_per_1k,
+            rust_decimal::Decimal::from_str("0.8").unwrap(),
+            "other process L1 must not outlive a committed version"
+        );
+    }
+    let tx = db.begin().await.unwrap();
+    keycompute_db::PricingModel::update_in_tenant(
+        &tx,
+        scope,
+        row.id,
+        &UpdatePricingRequest {
+            input_price_per_1k: Some("0.9".parse().unwrap()),
+            output_price_per_1k: None,
+            effective_until: None,
+            expected_version: changed.version,
+        },
+        &actor,
+    )
+    .await
+    .unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        second
+            .create_snapshot(&model, &tenant.id, Some("provideraccount"))
+            .await
+            .unwrap()
+            .input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.8").unwrap()
+    );
+    // A future validity boundary also fences caches without another mutation.
+    let tx = db.begin().await.unwrap();
+    let until = Utc::now() + ChronoDuration::seconds(1);
+    keycompute_db::PricingModel::update_in_tenant(
+        &tx,
+        scope,
+        row.id,
+        &UpdatePricingRequest {
+            input_price_per_1k: None,
+            output_price_per_1k: None,
+            effective_until: Some(until),
+            expected_version: changed.version,
+        },
+        &actor,
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(
+        second
+            .create_snapshot(&model, &tenant.id, Some("provideraccount"))
+            .await
+            .unwrap()
+            .input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.8").unwrap()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let after = second
+        .create_snapshot(&model, &tenant.id, Some("provideraccount"))
+        .await
+        .unwrap();
+    assert_eq!(
+        after.input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.1").unwrap()
+    );
+    // The existing runtime policy permits a platform fallback from the other
+    // billing dimension. Its validity window must also fence this cache key.
+    let cross_model = format!("pricing-cross-dimension-{run}");
+    let cross = create_test_pricing(
+        &db,
+        &CreatePricingRequest {
+            scope_type: PricingScopeType::Platform,
+            tenant_id: None,
+            model_name: cross_model.clone(),
+            billing_dimension: BillingDimension::ProviderAccount,
+            currency: Some("CNY".into()),
+            input_price_per_1k: "0.65".parse().unwrap(),
+            output_price_per_1k: "0.7".parse().unwrap(),
+            is_default: Some(true),
+            effective_from: None,
+            effective_until: Some(Utc::now() + ChronoDuration::seconds(1)),
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        second
+            .create_snapshot(&cross_model, &tenant.id, Some("node"))
+            .await
+            .unwrap()
+            .input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.65").unwrap()
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    assert_eq!(
+        second
+            .create_snapshot(&cross_model, &tenant.id, Some("node"))
+            .await
+            .unwrap()
+            .input_price_per_1k,
+        rust_decimal::Decimal::from_str("0.1").unwrap()
+    );
+    db.execute(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+        "DELETE FROM pricing_models WHERE id=$1 AND scope_type='platform' AND tenant_id IS NULL AND model_name=$2",
+        [cross.id.into(),cross_model.into()])).await.unwrap();
+    // Revision reads are SELECT-only and never persist activity timestamps.
+    let count=db.query_one(sea_orm::Statement::from_sql_and_values(sea_orm::DbBackend::Postgres,
+        "SELECT version FROM pricing_cache_revisions WHERE scope_type='tenant' AND tenant_id=$1",[tenant.id.into()])).await.unwrap().unwrap();
+    assert_eq!(count.try_get::<i64>("", "version").unwrap(), 3);
+    guard.cleanup().await.unwrap();
 }

@@ -498,6 +498,37 @@ COMMENT ON COLUMN pricing_models.billing_dimension IS '计费维度: node 或 pr
 COMMENT ON COLUMN pricing_models.scope_type IS '定价范围：platform 或 tenant';
 COMMENT ON COLUMN pricing_models.version IS '管理端乐观并发版本号';
 
+-- Pricing cache revisions are changed only with pricing writes. Reads never
+-- lock or update these rows; committed revisions fence every process and Redis.
+CREATE TABLE IF NOT EXISTS pricing_cache_revisions (
+    scope_type VARCHAR(20) NOT NULL,
+    tenant_id UUID REFERENCES tenants(id) ON DELETE CASCADE,
+    version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+    UNIQUE NULLS NOT DISTINCT (scope_type, tenant_id),
+    CONSTRAINT ck_pricing_cache_revision_scope CHECK (
+        (scope_type='platform' AND tenant_id IS NULL)
+        OR (scope_type='tenant' AND tenant_id IS NOT NULL)
+    )
+);
+CREATE OR REPLACE FUNCTION advance_pricing_cache_revision() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP='UPDATE' AND ROW(NEW.scope_type,NEW.tenant_id,NEW.model_name,NEW.billing_dimension)
+       IS DISTINCT FROM ROW(OLD.scope_type,OLD.tenant_id,OLD.model_name,OLD.billing_dimension) THEN
+        RAISE EXCEPTION 'pricing scope and group are immutable' USING ERRCODE='23514';
+    END IF;
+    IF TG_OP='DELETE' THEN
+        INSERT INTO pricing_cache_revisions(scope_type,tenant_id) VALUES(OLD.scope_type,OLD.tenant_id)
+        ON CONFLICT (scope_type,tenant_id) DO UPDATE SET version=pricing_cache_revisions.version+1;
+        RETURN OLD;
+    END IF;
+    INSERT INTO pricing_cache_revisions(scope_type,tenant_id) VALUES(NEW.scope_type,NEW.tenant_id)
+    ON CONFLICT (scope_type,tenant_id) DO UPDATE SET version=pricing_cache_revisions.version+1;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS pricing_cache_revision ON pricing_models;
+CREATE TRIGGER pricing_cache_revision AFTER INSERT OR UPDATE OR DELETE ON pricing_models
+    FOR EACH ROW EXECUTE FUNCTION advance_pricing_cache_revision();
+
 -- 定价管理审计事件。事件表不引用业务行，避免删除定价后丢失变更证据。
 CREATE TABLE IF NOT EXISTS pricing_audit_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -1,10 +1,12 @@
-//! 定价管理处理器
+//! Platform pricing management handlers.
 //!
-//! 处理需要 Admin 权限的定价管理请求
+//! These legacy URLs remain available only as root platform-console endpoints.
+//! Tenant pricing is exposed by the tenant route phase through the scoped DAO
+//! methods; this module never treats a selected tenant as a management grant.
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::{GlobalConsoleAuth, RequestId},
     handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
@@ -14,120 +16,74 @@ use axum::{
 };
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
+use keycompute_auth::AuthorizationAction;
+use keycompute_db::AuditContext;
 use keycompute_db::models::pricing_model::{
-    CreatePricingRequest, PricingModel, PricingScopeType, UpdatePricingRequest,
+    BillingDimension, CreatePricingRequest, PlatformPricingScope, PricingModel, PricingScopeType,
+    PricingTarget, UpdatePricingRequest,
 };
-use keycompute_db::models::tenant::Tenant;
-use sea_orm::{ConnectionTrait, DbBackend, Statement, TransactionTrait};
+use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-fn validate_active_pricing_tenant_status(status: Option<&str>, tenant_id: Uuid) -> Result<()> {
-    match status {
-        Some("active") => Ok(()),
-        Some(_) => Err(ApiError::Conflict(
-            "The target tenant is inactive and cannot receive pricing models".to_string(),
-        )),
-        None => Err(ApiError::NotFound(format!("Tenant not found: {tenant_id}"))),
+fn require_platform_scope(auth: &GlobalConsoleAuth) -> Result<PlatformPricingScope> {
+    auth.require_platform(AuthorizationAction::ManagePlatform)?;
+    PlatformPricingScope::checked(auth.user_id, auth.credential_kind, auth.token_version)
+        .map_err(|error| ApiError::Forbidden(error.to_string()))
+}
+
+fn audit_context(auth: &GlobalConsoleAuth, request_id: RequestId) -> AuditContext {
+    AuditContext {
+        actor_user_id: auth.user_id,
+        credential_kind: auth.credential_kind,
+        actor_platform_role: auth.platform_role,
+        actor_tenant_role: auth.tenant_role,
+        request_id: Some(request_id.0),
     }
 }
 
-async fn ensure_active_pricing_tenant(db: &impl ConnectionTrait, tenant_id: Uuid) -> Result<()> {
-    let tenant = Tenant::find_by_id_for_update(db, tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find pricing tenant: {e}")))?
-        .map(|tenant| tenant.status);
-    validate_active_pricing_tenant_status(tenant.as_deref(), tenant_id)
-}
-
-async fn set_pricing_default_in_transaction(
-    db: &impl ConnectionTrait,
-    actor_user_id: Uuid,
-    pricing_id: Uuid,
-) -> Result<PricingModel> {
-    let target = PricingModel::find_by_id_for_update(db, pricing_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find pricing: {e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("Pricing not found: {pricing_id}")))?;
-    // Retrying an already successful command must not bump the version or add
-    // a duplicate audit event. This also keeps the endpoint safe for clients
-    // that retry after a lost response.
-    if target.is_default {
-        return Ok(target);
+pub(crate) fn map_pricing_db_error(error: keycompute_db::DbError, operation: &str) -> ApiError {
+    if error.is_duplicate() {
+        return ApiError::Conflict("Pricing already exists for this scope/model/dimension".into());
     }
-    let before = target.clone();
-    db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE pricing_models SET is_default = FALSE, version = version + 1, updated_at = NOW() WHERE model_name = $1 AND billing_dimension = $2 AND scope_type = $3 AND (($4::UUID IS NULL AND tenant_id IS NULL) OR ($4::UUID IS NOT NULL AND tenant_id = $4)) AND is_default = TRUE AND id <> $5",
-        [
-            target.model_name.as_str().into(),
-            target.billing_dimension.as_str().into(),
-            target.scope_type.as_str().into(),
-            target.tenant_id.into(),
-            pricing_id.into(),
-        ],
-    ))
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to clear previous default: {e}")))?;
-    db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "UPDATE pricing_models SET is_default = TRUE, version = version + 1, updated_at = NOW() WHERE id = $1",
-        [pricing_id.into()],
-    ))
-    .await
-    .map_err(|e| ApiError::Internal(format!("Failed to set pricing default: {e}")))?;
-    let updated = PricingModel::find_by_id(db, pricing_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to reload pricing: {e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("Pricing not found: {pricing_id}")))?;
-    record_pricing_audit(
-        db,
-        actor_user_id,
-        "make_default",
-        Some(&before),
-        Some(&updated),
-    )
-    .await?;
-    Ok(updated)
-}
-
-/// 将某个定价设为默认
-///
-/// POST /api/v1/pricing/{id}/make-default
-pub async fn make_pricing_default(
-    auth: AuthExtractor,
-    Path(pricing_id): Path<Uuid>,
-    State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
+    if error.is_optimistic_conflict() {
+        return ApiError::Conflict("Pricing or its authority changed; reload and retry".into());
     }
-
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin default pricing update: {e}")))?;
-    let updated = set_pricing_default_in_transaction(&txn, auth.user_id, pricing_id).await?;
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit default pricing update: {e}")))?;
-
-    state.pricing.clear_cache().await;
-
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "Pricing set as default",
-        "pricing_id": pricing_id,
-        "version": updated.version,
-    })))
+    if error.is_not_found() {
+        return ApiError::NotFound("Pricing target not found".into());
+    }
+    if let keycompute_db::DbError::Other(message) = &error {
+        if message.contains("current root pricing actor")
+            || message.contains("current pricing actor")
+        {
+            return ApiError::Auth("Pricing authorization has changed".into());
+        }
+        if message.contains("authority")
+            || message.contains("administrator")
+            || message.contains("membership")
+            || message.contains("JWT pricing")
+        {
+            return ApiError::Forbidden("Pricing administration is not permitted".into());
+        }
+        if message == "platform pricing rows cannot be deleted"
+            || message == "target pricing tenant is inactive"
+        {
+            return ApiError::Conflict(message.clone());
+        }
+        if message.contains("pricing")
+            || message.contains("DECIMAL")
+            || message.contains("effective_until")
+            || message.contains("non-negative")
+            || message.contains("input_price")
+            || message.contains("output_price")
+        {
+            return ApiError::BadRequest(message.clone());
+        }
+    }
+    tracing::error!(operation, error = %error, "pricing operation failed");
+    ApiError::ServiceUnavailable("Pricing storage is temporarily unavailable".into())
 }
 
-/// 定价信息
 #[derive(Debug, Serialize)]
 pub struct PricingInfo {
     pub id: Uuid,
@@ -146,6 +102,28 @@ pub struct PricingInfo {
     pub version: i64,
 }
 
+impl From<PricingModel> for PricingInfo {
+    fn from(pricing: PricingModel) -> Self {
+        let is_effective = pricing.is_effective();
+        Self {
+            id: pricing.id,
+            scope_type: pricing.scope_type.to_string(),
+            tenant_id: pricing.tenant_id,
+            model_name: pricing.model_name,
+            billing_dimension: pricing.billing_dimension.as_str().to_string(),
+            currency: pricing.currency,
+            input_price_per_1k: pricing.input_price_per_1k.to_string(),
+            output_price_per_1k: pricing.output_price_per_1k.to_string(),
+            is_default: pricing.is_default,
+            is_effective,
+            effective_from: pricing.effective_from.to_rfc3339(),
+            effective_until: pricing.effective_until.map(|value| value.to_rfc3339()),
+            created_at: pricing.created_at.to_rfc3339(),
+            version: pricing.version,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct PricingListQueryParams {
     pub search: Option<String>,
@@ -153,6 +131,12 @@ pub struct PricingListQueryParams {
     pub page_size: Option<i64>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    pub scope_type: Option<PricingScopeType>,
+    pub tenant_id: Option<Uuid>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct PricingTargetQueryParams {
     pub scope_type: Option<PricingScopeType>,
     pub tenant_id: Option<Uuid>,
 }
@@ -166,47 +150,33 @@ pub struct PricingListResponse {
     pub total_pages: i64,
 }
 
-/// 创建定价请求（管理员）
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreatePricingAdminRequest {
     pub scope_type: PricingScopeType,
-    /// 模型名称
     pub model_name: String,
-    /// 计费维度: node 或 provideraccount
-    #[serde(rename = "billing_dimension")]
     pub billing_dimension: String,
-    /// Tenant ID is required when scope_type is tenant and forbidden for platform.
     pub tenant_id: Option<Uuid>,
-    /// 货币（默认 CNY）
     #[serde(default = "default_currency")]
     pub currency: String,
-    /// 输入价格（每 1k tokens）
     pub input_price_per_1k: String,
-    /// 输出价格（每 1k tokens）
     pub output_price_per_1k: String,
-    /// 是否为默认定价
     #[serde(default)]
     pub is_default: bool,
-    /// 生效时间（可选）
     pub effective_from: Option<String>,
-    /// 失效时间（可选）
     pub effective_until: Option<String>,
 }
 
 fn default_currency() -> String {
-    "CNY".to_string()
+    "CNY".into()
 }
 
-/// 更新定价请求（管理员）
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdatePricingAdminRequest {
-    /// 输入价格（每 1k tokens）
     pub input_price_per_1k: Option<String>,
-    /// 输出价格（每 1k tokens）
     pub output_price_per_1k: Option<String>,
-    /// 失效时间
     pub effective_until: Option<String>,
-    /// 客户端读取到的版本号，用于防止覆盖并发修改。
     pub expected_version: Option<i64>,
 }
 
@@ -216,31 +186,32 @@ pub struct SetDefaultPricingAdminRequest {
     pub model_ids: Vec<Uuid>,
 }
 
-fn parse_price(raw: &str, field: &str) -> Result<BigDecimal> {
+pub(crate) fn parse_price(raw: &str, field: &str) -> Result<BigDecimal> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 256 {
+        return Err(ApiError::BadRequest(format!(
+            "{field} must be a bounded decimal number"
+        )));
+    }
+    if let Some((_, exponent)) = raw.split_once(['e', 'E']) {
+        let exponent = exponent
+            .parse::<i64>()
+            .map_err(|_| ApiError::BadRequest(format!("Invalid {field} exponent")))?;
+        if !(-4096..=4096).contains(&exponent) {
+            return Err(ApiError::BadRequest(format!(
+                "{field} exponent is out of range"
+            )));
+        }
+    }
     let value = raw
-        .trim()
         .parse::<BigDecimal>()
         .map_err(|_| ApiError::BadRequest(format!("Invalid {field}: expected a decimal number")))?;
-    if value < 0 {
-        return Err(ApiError::BadRequest(format!(
-            "{field} must be non-negative"
-        )));
-    }
-    // pricing_models stores prices as DECIMAL(20,10). PostgreSQL rounds
-    // excess fractional digits on assignment, so reject them here instead of
-    // silently charging a value different from the one the administrator sent.
-    let normalized = value.normalized();
-    let fractional_digits = normalized.fractional_digit_count();
-    let integer_digits = (normalized.digits() as i64 - fractional_digits).max(0);
-    if fractional_digits > 10 || integer_digits > 10 {
-        return Err(ApiError::BadRequest(format!(
-            "{field} must fit DECIMAL(20,10) (at most 10 integer and 10 fractional digits)"
-        )));
-    }
+    keycompute_db::models::pricing_model::validate_pricing_amount(&value)
+        .map_err(|error| ApiError::BadRequest(format!("{field}: {error}")))?;
     Ok(value)
 }
 
-fn parse_timestamp(raw: Option<&String>, field: &str) -> Result<Option<DateTime<Utc>>> {
+pub(crate) fn parse_timestamp(raw: Option<&String>, field: &str) -> Result<Option<DateTime<Utc>>> {
     raw.map(|value| {
         DateTime::parse_from_rfc3339(value.trim())
             .map(|timestamp| timestamp.with_timezone(&Utc))
@@ -249,170 +220,155 @@ fn parse_timestamp(raw: Option<&String>, field: &str) -> Result<Option<DateTime<
     .transpose()
 }
 
-fn validate_model_name(model_name: &str) -> Result<String> {
-    let model_name = model_name.trim();
-    if model_name.is_empty()
-        || model_name.chars().count() > 100
-        || model_name.chars().any(|character| character.is_control())
-    {
-        return Err(ApiError::BadRequest(
-            "model_name must contain 1-100 characters".to_string(),
-        ));
+fn request_target(scope_type: PricingScopeType, tenant_id: Option<Uuid>) -> Result<PricingTarget> {
+    match (scope_type, tenant_id) {
+        (PricingScopeType::Platform, None) => Ok(PricingTarget::Platform),
+        (PricingScopeType::Tenant, Some(tenant_id)) => {
+            PricingTarget::Tenant(tenant_id)
+                .validate()
+                .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+            Ok(PricingTarget::Tenant(tenant_id))
+        }
+        (PricingScopeType::Platform, Some(_)) => Err(ApiError::BadRequest(
+            "platform pricing cannot specify tenant_id".into(),
+        )),
+        (PricingScopeType::Tenant, None) => Err(ApiError::BadRequest(
+            "tenant pricing requires tenant_id".into(),
+        )),
     }
-    Ok(model_name.to_string())
 }
 
-fn validate_currency(currency: &str) -> Result<String> {
-    let currency = currency.trim().to_ascii_uppercase();
-    if currency.is_empty()
-        || currency.len() > 10
-        || !currency
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric())
-    {
-        return Err(ApiError::BadRequest(
-            "currency must contain 1-10 characters".to_string(),
-        ));
+fn target_from_query(
+    auth: &GlobalConsoleAuth,
+    scope_type: Option<PricingScopeType>,
+    tenant_id: Option<Uuid>,
+) -> Result<PricingTarget> {
+    match (scope_type, tenant_id, auth.selected_tenant_id) {
+        (Some(scope_type), tenant_id, _) => request_target(scope_type, tenant_id),
+        (None, Some(tenant_id), _) => request_target(PricingScopeType::Tenant, Some(tenant_id)),
+        (None, None, Some(tenant_id)) => request_target(PricingScopeType::Tenant, Some(tenant_id)),
+        (None, None, None) => Ok(PricingTarget::Platform),
     }
-    Ok(currency)
 }
 
-async fn record_pricing_audit(
-    db: &impl ConnectionTrait,
-    actor_user_id: Uuid,
-    action: &str,
-    before: Option<&PricingModel>,
-    after: Option<&PricingModel>,
-) -> Result<()> {
-    let row = after.or(before).ok_or_else(|| {
-        ApiError::Internal("Pricing audit requires a before or after state".to_string())
-    })?;
-    let before_json = before
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|e| ApiError::Internal(format!("Failed to serialize pricing audit: {e}")))?;
-    let after_json = after
-        .map(serde_json::to_string)
-        .transpose()
-        .map_err(|e| ApiError::Internal(format!("Failed to serialize pricing audit: {e}")))?;
-    let stmt = Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r#"
-        INSERT INTO pricing_audit_events
-            (actor_user_id, action, pricing_id, scope_type, tenant_id, model_name,
-             billing_dimension, before_state, after_state)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
-        "#,
-        [
-            actor_user_id.into(),
-            action.into(),
-            row.id.into(),
-            row.scope_type.as_str().into(),
-            row.tenant_id.into(),
-            row.model_name.as_str().into(),
-            row.billing_dimension.as_str().into(),
-            before_json.into(),
-            after_json.into(),
-        ],
-    );
-    db.execute(stmt)
+fn validate_model_name(value: &str) -> Result<String> {
+    keycompute_db::models::pricing_model::validate_pricing_model_name(value)
+        .map_err(|error| ApiError::BadRequest(error.to_string()))
+}
+
+pub(crate) fn create_request(
+    req: CreatePricingAdminRequest,
+) -> Result<(PricingTarget, CreatePricingRequest)> {
+    let target = request_target(req.scope_type, req.tenant_id)?;
+    let billing_dimension = req
+        .billing_dimension
+        .parse::<BillingDimension>()
+        .map_err(|error| ApiError::BadRequest(error.to_string()))?;
+    Ok((
+        target,
+        CreatePricingRequest {
+            scope_type: req.scope_type,
+            tenant_id: req.tenant_id,
+            model_name: validate_model_name(&req.model_name)?,
+            billing_dimension,
+            currency: Some(req.currency),
+            input_price_per_1k: parse_price(&req.input_price_per_1k, "input_price_per_1k")?,
+            output_price_per_1k: parse_price(&req.output_price_per_1k, "output_price_per_1k")?,
+            is_default: Some(req.is_default),
+            effective_from: parse_timestamp(req.effective_from.as_ref(), "effective_from")?,
+            effective_until: parse_timestamp(req.effective_until.as_ref(), "effective_until")?,
+        },
+    ))
+}
+
+pub(crate) fn platform_update_request(
+    req: UpdatePricingAdminRequest,
+) -> Result<UpdatePricingRequest> {
+    let input_price_per_1k = req
+        .input_price_per_1k
+        .as_deref()
+        .map(|value| parse_price(value, "input_price_per_1k"))
+        .transpose()?;
+    let output_price_per_1k = req
+        .output_price_per_1k
+        .as_deref()
+        .map(|value| parse_price(value, "output_price_per_1k"))
+        .transpose()?;
+    let effective_until = parse_timestamp(req.effective_until.as_ref(), "effective_until")?;
+    let expected_version = req
+        .expected_version
+        .ok_or_else(|| ApiError::BadRequest("expected_version is required".into()))?;
+    if expected_version <= 0 {
+        return Err(ApiError::BadRequest(
+            "expected_version must be positive".into(),
+        ));
+    }
+    if input_price_per_1k.is_none()
+        && output_price_per_1k.is_none()
+        && req.effective_until.is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "At least one pricing field must be provided".into(),
+        ));
+    }
+    Ok(UpdatePricingRequest {
+        input_price_per_1k,
+        output_price_per_1k,
+        effective_until,
+        expected_version,
+    })
+}
+
+async fn mutation_target(
+    tx: &sea_orm::DatabaseTransaction,
+    scope: PlatformPricingScope,
+    auth: &GlobalConsoleAuth,
+    params: &PricingTargetQueryParams,
+    id: Uuid,
+) -> Result<PricingTarget> {
+    if params.scope_type.is_some() || params.tenant_id.is_some() {
+        return target_from_query(auth, params.scope_type, params.tenant_id);
+    }
+    PricingModel::resolve_platform_target(tx, scope, id)
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to record pricing audit: {e}")))?;
-    Ok(())
+        .map_err(|error| map_pricing_db_error(error, "resolve pricing target"))?
+        .ok_or_else(|| ApiError::NotFound(format!("Pricing not found: {id}")))
 }
 
-fn map_pricing_db_error(error: keycompute_db::DbError, operation: &str) -> ApiError {
-    if error.is_duplicate() {
-        ApiError::Conflict("Pricing already exists for this tenant/model/dimension".to_string())
-    } else if error.is_optimistic_conflict() {
-        ApiError::Conflict("Pricing was modified by another request; reload and retry".to_string())
-    } else if error.to_string().contains("numeric field overflow")
-        || error.to_string().contains("violates check constraint")
-    {
-        ApiError::BadRequest("Pricing values exceed the supported database range".to_string())
-    } else {
-        ApiError::Internal(format!("Failed to {operation}: {error}"))
-    }
-}
-
-/// 列出所有定价
-///
-/// GET /api/v1/pricing
-///
-/// Admin 可以看到所有租户的定价，普通用户只能看到自己的
 pub async fn list_pricing(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    _request_id: RequestId,
     State(state): State<AppState>,
     Query(params): Query<PricingListQueryParams>,
 ) -> Result<Json<PricingListResponse>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = require_platform_scope(&auth)?;
+    let target = target_from_query(&auth, params.scope_type, params.tenant_id)?;
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
-    let writer = pool.write_conn();
-    let scope_type = params.scope_type.unwrap_or(PricingScopeType::Tenant);
-    let scope_tenant = match scope_type {
-        PricingScopeType::Platform => {
-            if params.tenant_id.is_some() {
-                return Err(ApiError::BadRequest(
-                    "platform pricing cannot specify tenant_id".into(),
-                ));
-            }
-            None
-        }
-        PricingScopeType::Tenant => Some(params.tenant_id.unwrap_or(auth.tenant_id)),
-    };
-    let pricing_models = PricingModel::find_all_filtered(
-        writer,
-        scope_type,
-        scope_tenant,
+    let rows = PricingModel::find_platform_filtered(
+        pool.write_conn(),
+        scope,
+        target,
         params.search.as_deref(),
         page_size,
         offset,
     )
     .await
-    .map_err(|e| ApiError::Internal(format!("Failed to query pricing: {}", e)))?;
-    let total = PricingModel::count_all_filtered(
-        writer,
-        scope_type,
-        scope_tenant,
+    .map_err(|error| map_pricing_db_error(error, "list pricing"))?;
+    let total = PricingModel::count_platform_filtered(
+        pool.write_conn(),
+        scope,
+        target,
         params.search.as_deref(),
     )
     .await
-    .map_err(|e| ApiError::Internal(format!("Failed to count pricing: {}", e)))?;
-
-    let pricing_list: Vec<PricingInfo> = pricing_models
-        .into_iter()
-        .map(|p| {
-            let is_effective = p.is_effective();
-            PricingInfo {
-                id: p.id,
-                scope_type: p.scope_type.to_string(),
-                tenant_id: p.tenant_id,
-                model_name: p.model_name,
-                billing_dimension: p.billing_dimension.as_str().to_string(),
-                currency: p.currency,
-                input_price_per_1k: p.input_price_per_1k.to_string(),
-                output_price_per_1k: p.output_price_per_1k.to_string(),
-                is_default: p.is_default,
-                is_effective,
-                effective_from: p.effective_from.to_rfc3339(),
-                effective_until: p.effective_until.map(|t| t.to_rfc3339()),
-                created_at: p.created_at.to_rfc3339(),
-                version: p.version,
-            }
-        })
-        .collect();
-
+    .map_err(|error| map_pricing_db_error(error, "count pricing"))?;
     Ok(Json(PricingListResponse {
-        pricing: pricing_list,
+        pricing: rows.into_iter().map(PricingInfo::from).collect(),
         total,
         page,
         page_size,
@@ -420,271 +376,119 @@ pub async fn list_pricing(
     }))
 }
 
-/// 创建定价
-///
-/// POST /api/v1/pricing
 pub async fn create_pricing(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
     State(state): State<AppState>,
     Json(req): Json<CreatePricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = require_platform_scope(&auth)?;
+    let (target, request) = create_request(req)?;
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    // 校验计费维度必须是合法值
-    let billing_dimension: keycompute_db::models::pricing_model::BillingDimension =
-        req.billing_dimension.parse().map_err(
-            |e: keycompute_db::models::pricing_model::BillingDimensionError| {
-                ApiError::BadRequest(format!(
-                    "Invalid billing dimension: '{}'. Must be 'node' or 'provideraccount'",
-                    e.0
-                ))
-            },
-        )?;
-
-    let input_price = parse_price(&req.input_price_per_1k, "input_price_per_1k")?;
-    let output_price = parse_price(&req.output_price_per_1k, "output_price_per_1k")?;
-    let model_name = validate_model_name(&req.model_name)?;
-    let currency = validate_currency(&req.currency)?;
-    let effective_from =
-        parse_timestamp(req.effective_from.as_ref(), "effective_from")?.unwrap_or_else(Utc::now);
-    let effective_until = parse_timestamp(req.effective_until.as_ref(), "effective_until")?;
-    if let Some(until) = effective_until
-        && until <= effective_from
-    {
-        return Err(ApiError::BadRequest(
-            "effective_until must be later than effective_from".to_string(),
-        ));
-    }
-
-    let tenant_id = match (req.scope_type, req.tenant_id) {
-        (PricingScopeType::Platform, None) => None,
-        (PricingScopeType::Tenant, Some(id)) if !id.is_nil() => Some(id),
-        _ => {
-            return Err(ApiError::BadRequest(
-                "pricing scope and tenant_id do not match".into(),
-            ));
-        }
-    };
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin pricing creation: {e}")))?;
-    if let Some(tenant_id) = tenant_id {
-        ensure_active_pricing_tenant(&txn, tenant_id).await?;
-    }
-
-    // A create request may make the new row the default. Clear only the
-    // matching tenant/model/dimension scope in this same transaction so the
-    // partial unique index is never used as a substitute for business logic.
-    if req.is_default {
-        txn.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "UPDATE pricing_models SET is_default = FALSE, version = version + 1, updated_at = NOW() WHERE model_name = $1 AND billing_dimension = $2 AND scope_type = $3 AND (($4::UUID IS NULL AND tenant_id IS NULL) OR ($4::UUID IS NOT NULL AND tenant_id = $4)) AND is_default = TRUE",
-            [
-                req.model_name.trim().into(),
-                billing_dimension.as_str().into(),
-                req.scope_type.as_str().into(),
-                tenant_id.into(),
-            ],
-        ))
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to clear previous default: {e}")))?;
-    }
-
-    let db_req = CreatePricingRequest {
-        scope_type: req.scope_type,
-        tenant_id,
-        model_name,
-        billing_dimension,
-        currency: Some(currency),
-        input_price_per_1k: input_price,
-        output_price_per_1k: output_price,
-        is_default: Some(req.is_default),
-        effective_from: Some(effective_from),
-        effective_until,
-    };
-
-    let pricing = PricingModel::create(&txn, &db_req)
-        .await
-        .map_err(|e| map_pricing_db_error(e, "create pricing"))?;
-    record_pricing_audit(&txn, auth.user_id, "create", None, Some(&pricing)).await?;
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit pricing creation: {e}")))?;
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool.begin().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to begin pricing creation: {error}"))
+    })?;
+    let row = PricingModel::create_platform(
+        &tx,
+        scope,
+        target,
+        &request,
+        &audit_context(&auth, request_id),
+    )
+    .await
+    .map_err(|error| map_pricing_db_error(error, "create pricing"))?;
+    tx.commit().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to commit pricing creation: {error}"))
+    })?;
     state.pricing.clear_cache().await;
-
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing created",
-        "pricing_id": pricing.id,
-        "model_name": pricing.model_name,
-        "billing_dimension": pricing.billing_dimension.as_str(),
-        "input_price_per_1k": pricing.input_price_per_1k.to_string(),
-        "output_price_per_1k": pricing.output_price_per_1k.to_string(),
-        "is_default": pricing.is_default,
-        "version": pricing.version,
+        "pricing_id": row.id,
+        "model_name": row.model_name,
+        "billing_dimension": row.billing_dimension.as_str(),
+        "input_price_per_1k": row.input_price_per_1k.to_string(),
+        "output_price_per_1k": row.output_price_per_1k.to_string(),
+        "is_default": row.is_default,
+        "version": row.version,
         "created_by": auth.user_id,
     })))
 }
 
-/// 更新定价
-///
-/// PUT /api/v1/pricing/{id}
 pub async fn update_pricing(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Path(pricing_id): Path<Uuid>,
     State(state): State<AppState>,
+    Query(target_query): Query<PricingTargetQueryParams>,
     Json(req): Json<UpdatePricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = require_platform_scope(&auth)?;
+    let request = platform_update_request(req)?;
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    let expected_version = req.expected_version.ok_or_else(|| {
-        ApiError::BadRequest("expected_version is required for pricing updates".to_string())
-    })?;
-    if expected_version <= 0 {
-        return Err(ApiError::BadRequest(
-            "expected_version must be positive".to_string(),
-        ));
-    }
-    let txn = pool
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool
         .begin()
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin pricing update: {e}")))?;
-    // 查找并锁定现有定价，确保审计和更新处于同一事务。
-    let existing = PricingModel::find_by_id_for_update(&txn, pricing_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find pricing: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Pricing not found: {}", pricing_id)))?;
-
-    let input_price = req
-        .input_price_per_1k
-        .as_deref()
-        .map(|value| parse_price(value, "input_price_per_1k"))
-        .transpose()?;
-    let output_price = req
-        .output_price_per_1k
-        .as_deref()
-        .map(|value| parse_price(value, "output_price_per_1k"))
-        .transpose()?;
-    let effective_until = parse_timestamp(req.effective_until.as_ref(), "effective_until")?;
-    if input_price.is_none() && output_price.is_none() && req.effective_until.is_none() {
-        return Err(ApiError::BadRequest(
-            "At least one pricing field must be provided".to_string(),
-        ));
-    }
-    if let Some(until) = effective_until
-        && until <= existing.effective_from
-    {
-        return Err(ApiError::BadRequest(
-            "effective_until must be later than effective_from".to_string(),
-        ));
-    }
-
-    let db_req = UpdatePricingRequest {
-        input_price_per_1k: input_price,
-        output_price_per_1k: output_price,
-        effective_until,
-        expected_version,
-    };
-
-    let updated = existing
-        .update(&txn, &db_req)
-        .await
-        .map_err(|e| map_pricing_db_error(e, "update pricing"))?;
-    record_pricing_audit(
-        &txn,
-        auth.user_id,
-        "update",
-        Some(&existing),
-        Some(&updated),
+        .map_err(|error| ApiError::Internal(format!("Failed to begin pricing update: {error}")))?;
+    let target = mutation_target(&tx, scope, &auth, &target_query, pricing_id).await?;
+    let row = PricingModel::update_platform(
+        &tx,
+        scope,
+        target,
+        pricing_id,
+        &request,
+        &audit_context(&auth, request_id),
     )
-    .await?;
-    txn.commit()
+    .await
+    .map_err(|error| map_pricing_db_error(error, "update pricing"))?;
+    tx.commit()
         .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit pricing update: {e}")))?;
-
-    // 清除缓存
+        .map_err(|error| ApiError::Internal(format!("Failed to commit pricing update: {error}")))?;
     state.pricing.clear_cache().await;
-
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing updated",
-        "pricing_id": updated.id,
-        "version": updated.version,
-        "updated_fields": {
-            "input_price_per_1k": req.input_price_per_1k,
-            "output_price_per_1k": req.output_price_per_1k,
-            "effective_until": req.effective_until.clone(),
-        },
+        "pricing_id": row.id,
+        "version": row.version,
         "updated_by": auth.user_id,
     })))
 }
 
-/// 删除定价
-///
-/// DELETE /api/v1/pricing/{id}
 pub async fn delete_pricing(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Path(pricing_id): Path<Uuid>,
     State(state): State<AppState>,
+    Query(target_query): Query<PricingTargetQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = require_platform_scope(&auth)?;
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin pricing deletion: {e}")))?;
-    // 查找并锁定定价，审计记录必须和删除原子提交。
-    let existing = PricingModel::find_by_id_for_update(&txn, pricing_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find pricing: {}", e)))?
-        .ok_or_else(|| ApiError::NotFound(format!("Pricing not found: {}", pricing_id)))?;
-
-    if existing.scope_type == PricingScopeType::Platform {
-        tracing::warn!(
-            pricing_id = %pricing_id,
-            model_name = %existing.model_name,
-            scope_type = %existing.scope_type,
-            "Attempted to delete global default pricing, which is not allowed"
-        );
-        return Err(ApiError::BadRequest(
-            "Cannot delete global default pricing. Only update is allowed.".to_string(),
-        ));
-    }
-
-    existing
-        .delete(&txn)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to delete pricing: {}", e)))?;
-    record_pricing_audit(&txn, auth.user_id, "delete", Some(&existing), None).await?;
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit pricing deletion: {e}")))?;
-
-    // 清除缓存
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool.begin().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to begin pricing deletion: {error}"))
+    })?;
+    let target = mutation_target(&tx, scope, &auth, &target_query, pricing_id).await?;
+    PricingModel::delete_platform(
+        &tx,
+        scope,
+        target,
+        pricing_id,
+        &audit_context(&auth, request_id),
+    )
+    .await
+    .map_err(|error| map_pricing_db_error(error, "delete pricing"))?;
+    tx.commit().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to commit pricing deletion: {error}"))
+    })?;
     state.pricing.clear_cache().await;
-
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing deleted",
@@ -693,49 +497,81 @@ pub async fn delete_pricing(
     })))
 }
 
-/// 批量设置默认定价
-///
-/// POST /api/v1/pricing/batch-defaults
-///
-/// 按定价 ID 批量设置各自作用域内的默认定价。
-pub async fn set_default_pricing(
-    auth: AuthExtractor,
+pub async fn make_pricing_default(
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
+    Path(pricing_id): Path<Uuid>,
     State(state): State<AppState>,
-    Json(req): Json<SetDefaultPricingAdminRequest>,
+    Query(target_query): Query<PricingTargetQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::ManagePricing) {
-        return Err(ApiError::Auth("Admin permission required".to_string()));
-    }
-
+    let scope = require_platform_scope(&auth)?;
     let pool = state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool.begin().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to begin default pricing update: {error}"))
+    })?;
+    let target = mutation_target(&tx, scope, &auth, &target_query, pricing_id).await?;
+    let row = PricingModel::make_default_platform(
+        &tx,
+        scope,
+        target,
+        pricing_id,
+        &audit_context(&auth, request_id),
+    )
+    .await
+    .map_err(|error| map_pricing_db_error(error, "set pricing default"))?;
+    tx.commit().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to commit default pricing update: {error}"))
+    })?;
+    state.pricing.clear_cache().await;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Pricing set as default",
+        "pricing_id": row.id,
+        "version": row.version,
+    })))
+}
+
+pub async fn set_default_pricing(
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
+    State(state): State<AppState>,
+    Query(target_query): Query<PricingTargetQueryParams>,
+    Json(req): Json<SetDefaultPricingAdminRequest>,
+) -> Result<Json<serde_json::Value>> {
+    let scope = require_platform_scope(&auth)?;
+    let target = target_from_query(&auth, target_query.scope_type, target_query.tenant_id)?;
     if req.model_ids.is_empty() {
         return Err(ApiError::BadRequest(
-            "model_ids must contain at least one pricing id".to_string(),
+            "model_ids must contain at least one pricing id".into(),
         ));
     }
-    let mut pricing_ids = req.model_ids;
-    pricing_ids.sort_unstable();
-    pricing_ids.dedup();
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin batch default update: {e}")))?;
-    let mut updated = Vec::with_capacity(pricing_ids.len());
-    for pricing_id in pricing_ids {
-        set_pricing_default_in_transaction(&txn, auth.user_id, pricing_id).await?;
-        updated.push(pricing_id);
-    }
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit batch default update: {e}")))?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let tx = pool.begin().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to begin batch default update: {error}"))
+    })?;
+    let rows = PricingModel::batch_make_defaults_platform(
+        &tx,
+        scope,
+        target,
+        &req.model_ids,
+        &audit_context(&auth, request_id),
+    )
+    .await
+    .map_err(|error| map_pricing_db_error(error, "set pricing defaults"))?;
+    tx.commit().await.map_err(|error| {
+        ApiError::Internal(format!("Failed to commit batch default update: {error}"))
+    })?;
     state.pricing.clear_cache().await;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing defaults set",
-        "pricing_ids": updated,
+        "pricing_ids": rows.into_iter().map(|row| row.id).collect::<Vec<_>>(),
         "set_by": auth.user_id,
     })))
 }
@@ -743,25 +579,11 @@ pub async fn set_default_pricing(
 #[cfg(test)]
 mod tests {
     use super::{
-        SetDefaultPricingAdminRequest, parse_price, parse_timestamp,
-        validate_active_pricing_tenant_status, validate_model_name,
+        CreatePricingAdminRequest, SetDefaultPricingAdminRequest, UpdatePricingAdminRequest,
+        create_request, map_pricing_db_error, parse_price, parse_timestamp,
+        platform_update_request, validate_model_name,
     };
-    use crate::error::ApiError;
     use uuid::Uuid;
-
-    #[test]
-    fn pricing_creation_requires_an_existing_active_tenant() {
-        let tenant_id = Uuid::new_v4();
-        assert!(validate_active_pricing_tenant_status(Some("active"), tenant_id).is_ok());
-        assert!(matches!(
-            validate_active_pricing_tenant_status(Some("inactive"), tenant_id),
-            Err(ApiError::Conflict(_))
-        ));
-        assert!(matches!(
-            validate_active_pricing_tenant_status(None, tenant_id),
-            Err(ApiError::NotFound(_))
-        ));
-    }
 
     #[test]
     fn pricing_model_names_do_not_select_an_execution_mode() {
@@ -776,26 +598,82 @@ mod tests {
     }
 
     #[test]
+    fn pricing_creation_requires_an_existing_active_tenant() {
+        assert!(matches!(
+            map_pricing_db_error(
+                keycompute_db::DbError::Other("target pricing tenant is inactive".into()),
+                "create pricing"
+            ),
+            crate::error::ApiError::Conflict(_)
+        ));
+        assert!(matches!(
+            map_pricing_db_error(
+                keycompute_db::DbError::not_found("pricing tenant", Uuid::new_v4()),
+                "create pricing"
+            ),
+            crate::error::ApiError::NotFound(_)
+        ));
+    }
+
+    #[test]
+    fn platform_request_rejects_inconsistent_target() {
+        let request = CreatePricingAdminRequest {
+            scope_type: keycompute_db::models::pricing_model::PricingScopeType::Platform,
+            model_name: "model".into(),
+            billing_dimension: "provideraccount".into(),
+            tenant_id: Some(Uuid::new_v4()),
+            currency: "USD".into(),
+            input_price_per_1k: "1".into(),
+            output_price_per_1k: "2".into(),
+            is_default: false,
+            effective_from: None,
+            effective_until: None,
+        };
+        assert!(create_request(request).is_err());
+    }
+
+    #[test]
     fn pricing_inputs_reject_negative_or_malformed_values() {
-        assert!(parse_price("0.125", "input_price").is_ok());
         assert!(parse_price("-0.1", "input_price").is_err());
+        assert!(parse_price("0.125", "input_price").is_ok());
         assert!(parse_price("not-a-number", "input_price").is_err());
-        assert!(parse_price("0.12345678901", "input_price").is_err());
         assert!(parse_price("10000000000", "input_price").is_err());
-        assert!(parse_price("9999999999.9999999999", "input_price").is_ok());
         assert!(parse_price("1.23000000000", "input_price").is_ok());
         assert!(parse_timestamp(Some(&"not-a-date".to_string()), "effective_until").is_err());
         assert!(validate_model_name(&"模".repeat(100)).is_ok());
+        for malformed in [
+            "1e9223372036854775807",
+            "1e-9223372036854775808",
+            "1e9999999999999999999999",
+        ] {
+            assert!(parse_price(malformed, "input_price").is_err());
+        }
+        assert!(parse_price(&"0".repeat(257), "input_price").is_err());
+        assert!(parse_price("0.12345678901", "input_price").is_err());
+        assert!(parse_price("9999999999.9999999999", "input_price").is_ok());
+    }
+
+    #[test]
+    fn update_requires_version_and_a_field() {
+        assert!(
+            platform_update_request(UpdatePricingAdminRequest {
+                input_price_per_1k: None,
+                output_price_per_1k: None,
+                effective_until: None,
+                expected_version: None,
+            })
+            .is_err()
+        );
     }
 
     #[test]
     fn batch_default_payload_accepts_legacy_and_explicit_id_field_names() {
         let id = Uuid::new_v4();
-        let legacy: SetDefaultPricingAdminRequest =
-            serde_json::from_value(serde_json::json!({"model_ids": [id]})).unwrap();
-        let explicit: SetDefaultPricingAdminRequest =
+        let request: SetDefaultPricingAdminRequest =
             serde_json::from_value(serde_json::json!({"pricing_ids": [id]})).unwrap();
-        assert_eq!(legacy.model_ids, vec![id]);
-        assert_eq!(explicit.model_ids, vec![id]);
+        assert_eq!(request.model_ids, vec![id]);
+        let original: SetDefaultPricingAdminRequest =
+            serde_json::from_value(serde_json::json!({"model_ids": [id]})).unwrap();
+        assert_eq!(original.model_ids, vec![id]);
     }
 }

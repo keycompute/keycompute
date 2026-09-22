@@ -17,7 +17,7 @@ use keycompute_db::models::{
     node::{CreateNodeRequest, Node},
     node_session::{CreateNodeSessionRequest, NodeSession},
     passthrough_binding::{CreatePassthroughBindingRequest, PassthroughBinding},
-    pricing_model::{BillingDimension, CreatePricingRequest, PricingModel, PricingScopeType},
+    pricing_model::{BillingDimension, CreatePricingRequest, PricingScopeType},
 };
 use keycompute_db::{
     Account, CreateAccountRequest, CreateProduceAiKeyRequest, DbRouter, UserBalance,
@@ -267,7 +267,7 @@ impl Fixture {
             (BillingDimension::Node, 1),
             (BillingDimension::ProviderAccount, 10),
         ] {
-            PricingModel::create(
+            integration_tests::db::create_test_pricing(
                 &db,
                 &CreatePricingRequest {
                     scope_type: PricingScopeType::Tenant,

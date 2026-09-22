@@ -44,3 +44,4 @@ scoped_conversations	user_tenant_resource
 scoped_responses	user_tenant_resource
 scoped_response_events	parent_scoped_child
 identity_admin_fence	platform_control
+pricing_cache_revisions	explicit_platform_or_tenant

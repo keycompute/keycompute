@@ -552,7 +552,23 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/pricing/{id}/make-default",
             post(make_pricing_default),
         )
-        .route("/api/v1/pricing/calculate", post(calculate_cost));
+        .route("/api/v1/pricing/calculate", post(calculate_cost))
+        .route(
+            "/api/v1/platform/pricing",
+            get(list_pricing).post(create_pricing),
+        )
+        .route(
+            "/api/v1/platform/pricing/batch-defaults",
+            post(set_default_pricing),
+        )
+        .route(
+            "/api/v1/platform/pricing/{id}",
+            put(update_pricing).delete(delete_pricing),
+        )
+        .route(
+            "/api/v1/platform/pricing/{id}/make-default",
+            post(make_pricing_default),
+        );
 
     // Node Gateway 管理（仅 Admin）
     let admin_node_gateway_routes = Router::new()
@@ -765,6 +781,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(user_routes)
         .merge(global_self_routes)
         .merge(crate::handlers::tenant_control::router())
+        .merge(crate::handlers::tenant_pricing::router())
         .merge(admin_routes)
         .merge(billing_routes)
         .merge(debug_routes)

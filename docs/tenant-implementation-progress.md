@@ -74,6 +74,40 @@ binding, pricing, tenant financial/node/distribution/Responses administration,
 operator allowlists, full client UI and final release gates remain. No
 production data, credentials, running service or deployment was changed.
 
+## Current phases 3/5 — scoped tenant pricing accepted
+
+Pricing reads, counts and mutations now use explicit tenant-admin or root
+platform scopes. Tenant HTTP APIs are `/api/v1/tenants/{tenant_id}/pricing/**`;
+root APIs are `/api/v1/platform/pricing/**`. Existing pricing URLs retain only
+the new root authorization. Tenant payloads cannot set tenant ownership or
+platform scope. Current signed user/tenant/membership versions are rechecked
+under retained locks, including requests queued during administrator demotion.
+
+Mutations and both audit streams share a transaction. Nested savepoints roll
+back failures even when an outer caller catches the error and commits. Group
+locking, version checks and bounded batches preserve atomicity and idempotency.
+The original unique scope/model/dimension policy and protected platform prices
+remain unchanged. Canonical server request IDs and non-secret before/after
+prices are recorded; password and key fields stay redacted.
+
+Committed pricing-cache revisions now fence all process-local and Redis caches.
+The primary read includes tenant/platform revisions and scheduled validity
+boundaries, including the existing cross-dimension platform fallback. Price
+reads add no row writes or identity locks; previously accepted request snapshots
+remain immutable. This schema addition is in greenfield `001_init.sql` only.
+
+Final native workspace validation: **2,464 passed, 0 failed, 30 default ignored**,
+including desktop/mobile. Strict all-target/all-feature Clippy, formatting,
+whitespace and exact source hashes passed. The 20-test pricing DAO/cache/HTTP
+suite also passed with eight threads; it is a subset of the workspace total.
+Repeated review closed cache staleness, scheduled validity and audit metadata
+issues before acceptance. No production data, credentials or services changed.
+
+This is pricing acceptance within phases 3/5, not closure of either whole phase.
+Account/binding, other tenant-resource administration, full operator routing,
+client UI and final release remain open. Prepared provider drafts are not
+included in this pricing delivery. CI is checked separately after the push.
+
 # Tenant subsystem implementation status
 
 ## Phase 1 — global identity and membership foundation

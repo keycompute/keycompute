@@ -152,6 +152,13 @@ fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
                             | "operation"
                             | "amount"
                             | "currency"
+                            | "model_name"
+                            | "billing_dimension"
+                            | "input_price_per_1k"
+                            | "output_price_per_1k"
+                            | "is_default"
+                            | "effective_from"
+                            | "effective_until"
                             | "before"
                             | "after"
                             | "result"
@@ -267,6 +274,15 @@ mod tests {
     fn audit_redacts_nested_secrets_and_rejects_unbounded_input() {
         let value = audit_metadata(serde_json::json!({"role":"member","before":{"password":"secret","token":"secret"},"authorization":"Bearer secret"})).unwrap();
         assert_eq!(value["role"], "member");
+        let pricing = audit_metadata(serde_json::json!({
+            "before":{"input_price_per_1k":"0.1","is_default":false,"api_key":"secret"},
+            "after":{"input_price_per_1k":"0.2","is_default":true,"password":"secret"},
+        }))
+        .unwrap();
+        assert_eq!(pricing["before"]["input_price_per_1k"], "0.1");
+        assert_eq!(pricing["after"]["is_default"], true);
+        assert!(!pricing.to_string().contains("secret"));
+
         let lifecycle = audit_metadata(serde_json::json!({
             "previous_tenant_role":"admin", "tenant_role":"member",
             "membership_authz_version":7, "before":{"password":"never-persist"},

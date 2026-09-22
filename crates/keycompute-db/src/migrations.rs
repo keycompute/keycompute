@@ -252,6 +252,9 @@ mod tests {
             "CONSTRAINT uk_usage_logs_tenant_id_id UNIQUE (tenant_id, id)",
             "tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT",
             "CONSTRAINT fk_distribution_records_usage_tenant",
+            "CREATE TABLE IF NOT EXISTS pricing_cache_revisions",
+            "CREATE TRIGGER pricing_cache_revision",
+            "pricing scope and group are immutable",
             "token_hash VARCHAR(64)",
             "revoked_at TIMESTAMPTZ",
         ] {
