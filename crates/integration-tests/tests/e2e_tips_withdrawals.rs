@@ -111,7 +111,7 @@ impl TipWithdrawalTestEnv {
         .await?;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES ($1,$2,'member','active'),($1,$3,'admin','active')",
+            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES ($1,$2,'member','active'),($1,$3,'admin','active')",
             [tenant.id.into(), test_user.id.into(), admin_user.id.into()],
         ))
         .await?;

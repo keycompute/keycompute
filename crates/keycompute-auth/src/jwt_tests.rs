@@ -55,7 +55,7 @@ fn selected_identity_and_refresh_preserve_every_signed_version() {
     let c = v.validate(&refreshed).unwrap();
     assert_eq!((c.user_id, c.selected_tenant_id), (user, Some(tenant)));
     assert_eq!(
-        (c.token_version, c.authz_version, c.membership_version),
+        (c.token_version, c.authz_version, c.membership_authz_version),
         (9, Some(12), Some(35))
     );
     assert!(c.permissions.is_empty());
@@ -145,10 +145,10 @@ fn malformed_subjects_and_partial_or_nonpositive_tenant_versions_are_rejected() 
         let mut c = claims();
         c["tenant_id"] = json!(Uuid::new_v4());
         c["authz_version"] = json!(av);
-        c["membership_version"] = json!(mv);
+        c["membership_authz_version"] = json!(mv);
         invalid.push(c);
     }
-    for field in ["authz_version", "membership_version"] {
+    for field in ["authz_version", "membership_authz_version"] {
         let mut c = claims();
         c[field] = json!(1);
         invalid.push(c);

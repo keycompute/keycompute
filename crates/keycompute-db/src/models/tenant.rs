@@ -211,7 +211,7 @@ impl Tenant {
                 req.description.clone().into(), req.default_rpm_limit.into(), req.default_tpm_limit.into()],
         )).one(tx).await?.ok_or_else(|| DbError::Other("tenant insert returned no row".into()))?;
         tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'admin','active')",
+            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
             [tenant.id.into(), owner_user_id.into()],
         )).await?;
         TenantAuditEvent::append(
@@ -248,7 +248,7 @@ impl Tenant {
         }
         super::tenant_membership::TenantMembership::find(tx, tenant_id, new_owner)
             .await?
-            .filter(|member| member.role == "admin")
+            .filter(|member| member.tenant_role == "admin")
             .ok_or_else(|| DbError::Other("new owner must be an active administrator".into()))?;
         let updated = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,

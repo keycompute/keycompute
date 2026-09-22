@@ -33,7 +33,7 @@ async fn stale_identity_token_is_rejected_after_version_bump() {
             Some(tenant.id),
             actor.token_version,
             Some(tenant.authz_version),
-            Some(membership.version),
+            Some(membership.authz_version),
             3600,
         )
         .unwrap();
@@ -57,7 +57,7 @@ async fn structural_validator_accepts_global_identity_without_tenant() {
 }
 
 #[tokio::test]
-async fn membership_version_is_part_of_selected_tenant_identity() {
+async fn membership_authz_version_is_part_of_selected_tenant_identity() {
     let db = create_test_pool().await;
     let run = generate_test_id();
     let tenant = create_test_tenant(&db, "membership-version", &run).await;
@@ -73,12 +73,15 @@ async fn membership_version_is_part_of_selected_tenant_identity() {
             Some(tenant.id),
             actor.token_version,
             Some(tenant.authz_version),
-            Some(membership.version),
+            Some(membership.authz_version),
             3600,
         )
         .unwrap();
     let claims = jwt.validate_claims(&token).unwrap();
     assert_eq!(claims.tenant_id().unwrap(), Some(tenant.id));
-    assert_eq!(claims.membership_version, Some(membership.version));
+    assert_eq!(
+        claims.membership_authz_version,
+        Some(membership.authz_version)
+    );
     cleanup_test_data(&db, &run).await.unwrap();
 }

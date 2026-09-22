@@ -231,6 +231,18 @@ mod tests {
         let sql = include_str!("../migrations/001_init.sql");
         for expected in [
             "status VARCHAR(20) NOT NULL DEFAULT 'active'",
+            "tenant_role VARCHAR(20) NOT NULL DEFAULT 'member'",
+            "invited_by UUID REFERENCES users(id) ON DELETE RESTRICT",
+            "joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+            "removed_at TIMESTAMPTZ",
+            "authz_version BIGINT NOT NULL DEFAULT 1",
+            "CONSTRAINT ck_tenant_memberships_removed_lifecycle",
+            "owner_identity.status='active'",
+            "status IN ('active', 'suspended', 'removed')",
+            "tenant_role VARCHAR(20)",
+            "accepted_by UUID REFERENCES users(id) ON DELETE RESTRICT",
+            "platform_role VARCHAR(20) NOT NULL",
+            "metadata JSONB NOT NULL DEFAULT '{}'::jsonb",
             "scope_type VARCHAR(20)",
             "resource_id TEXT",
             "CREATE TABLE IF NOT EXISTS identity_admin_fence",
@@ -248,6 +260,14 @@ mod tests {
                 "missing identity schema fragment {expected}"
             );
         }
+        assert!(!sql.contains("invited_by_user_id"));
+        assert!(!sql.contains("accepted_by_user_id"));
+        assert!(!sql.contains("actor_platform_role"));
+        assert!(!sql.contains("actor_tenant_role"));
+        assert!(!sql.contains("details JSONB"));
+        assert!(!sql.contains("m.role"));
+        assert!(!sql.contains("m.version"));
+        assert!(!sql.contains("status IN ('active', 'suspended', 'revoked')"));
         assert!(!sql.contains("tenant_id UUID NOT NULL REFERENCES users"));
         assert!(!sql.contains("ALTER TABLE"));
         assert!(!sql.contains("00000000-0000-0000-0000-000000000000' AS tenant_id"));

@@ -45,7 +45,7 @@ async fn add(db: &DatabaseConnection, t: &Tenant, user: Uuid, role: TenantRole) 
         &CreateTenantMembershipRequest {
             tenant_id: t.id,
             user_id: user,
-            role,
+            tenant_role: role,
         },
         &actor(t.owner_user_id),
     )
@@ -81,8 +81,8 @@ async fn tenant_member_projection_preserves_membership_and_hides_global_authorit
         .unwrap()
         .unwrap();
     assert_eq!(in_a.user_id, in_b.user_id);
-    assert_eq!(in_a.role, "member");
-    assert_eq!(in_b.role, "admin");
+    assert_eq!(in_a.tenant_role, "member");
+    assert_eq!(in_b.tenant_role, "admin");
     assert_eq!(in_a.tenant_id, a.id);
     assert_eq!(in_b.tenant_id, b.id);
     let json = serde_json::to_value(&in_a).unwrap();
@@ -216,7 +216,7 @@ async fn member_query_pagination_and_literal_search_do_not_expand_scope() {
         1
     );
     assert_eq!(
-        TenantMemberRecord::count_in_tenant(&db, scope(&a), Some(MembershipStatus::Revoked), None)
+        TenantMemberRecord::count_in_tenant(&db, scope(&a), Some(MembershipStatus::Removed), None)
             .await
             .unwrap(),
         0

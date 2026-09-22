@@ -671,7 +671,7 @@ async fn resource_scope_is_user_tenant_family_and_current_passthrough_grant() {
     // Raising the peer's platform role cannot grant access to private content.
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET role='admin' WHERE tenant_id=$1 AND user_id=$2",
+        "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
         [user.tenant_id.into(), user.id.into()],
     ))
     .await

@@ -72,7 +72,7 @@ async fn test_two_memberships_keep_roles_and_global_identity_independent() {
     let tx = pool.begin().await.unwrap();
     tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'admin','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
         [second.id.into(), actor.id.into()],
     )).await.unwrap();
     tx.commit().await.unwrap();
@@ -109,14 +109,14 @@ async fn test_two_memberships_keep_roles_and_global_identity_independent() {
 }
 
 #[tokio::test]
-async fn test_membership_revoke_retains_history_and_blocks_session() {
+async fn test_membership_remove_retains_history_and_blocks_session() {
     let pool = create_test_pool().await;
     let run = generate_test_id();
-    let tenant = create_test_tenant(&pool, "membership-revoke", &run).await;
-    let actor = create_test_user(&pool, tenant.id, "membership-revoke", &run).await;
+    let tenant = create_test_tenant(&pool, "membership-remove", &run).await;
+    let actor = create_test_user(&pool, tenant.id, "membership-remove", &run).await;
     pool.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2",
+        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
         [tenant.id.into(), actor.id.into()],
     ))
     .await
@@ -127,7 +127,7 @@ async fn test_membership_revoke_retains_history_and_blocks_session() {
         .unwrap();
     assert_eq!(
         historical.membership_status().unwrap(),
-        MembershipStatus::Revoked
+        MembershipStatus::Removed
     );
     assert!(
         TenantMembership::find(&pool, tenant.id, actor.id)
@@ -181,7 +181,7 @@ async fn test_invalid_membership_role_is_rejected() {
     let bad = pool
         .execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE tenant_memberships SET role='tenant_admin' WHERE tenant_id=$1 AND user_id=$2",
+            "UPDATE tenant_memberships SET tenant_role='tenant_admin' WHERE tenant_id=$1 AND user_id=$2",
             [tenant.id.into(), actor.id.into()],
         ))
         .await;

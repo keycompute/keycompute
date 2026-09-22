@@ -13,18 +13,18 @@ use uuid::Uuid;
 pub struct SessionMembership {
     pub tenant_id: Uuid,
     pub tenant_name: String,
-    pub role: TenantRole,
+    pub tenant_role: TenantRole,
     pub status: String,
-    pub version: i64,
+    pub authz_version: i64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct SelectedTenant {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
-    pub role: TenantRole,
+    pub tenant_role: TenantRole,
     pub authz_version: i64,
-    pub membership_version: i64,
+    pub membership_authz_version: i64,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionCapabilities {
@@ -81,8 +81,8 @@ struct MembershipRow {
     tenant_id: Uuid,
     tenant_name: String,
     tenant_slug: String,
-    role: String,
-    version: i64,
+    tenant_role: String,
+    membership_authz_version: i64,
     authz_version: i64,
 }
 fn db_error(error: impl std::fmt::Display) -> KeyComputeError {
@@ -111,17 +111,17 @@ impl AuthService {
             return Err(KeyComputeError::AuthError("identity has changed".into()));
         }
         let rows=MembershipRow::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT m.tenant_id,t.name AS tenant_name,t.slug AS tenant_slug,m.role,m.version,t.authz_version FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.status='active' AND t.status='active' ORDER BY t.name,m.tenant_id",
+            "SELECT m.tenant_id,t.name AS tenant_name,t.slug AS tenant_slug,m.tenant_role,m.authz_version AS membership_authz_version,t.authz_version FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.status='active' AND t.status='active' ORDER BY t.name,m.tenant_id",
             [ctx.user_id.into()],
         )).all(pool.write_conn()).await.map_err(db_error)?;
         let mut memberships = Vec::with_capacity(rows.len());
         let mut selected = None;
         for row in rows {
-            let role = row.role.parse::<TenantRole>().map_err(db_error)?;
+            let tenant_role = row.tenant_role.parse::<TenantRole>().map_err(db_error)?;
             if Some(row.tenant_id) == ctx.selected_tenant_id {
-                if Some(row.version) != ctx.membership_version
+                if Some(row.membership_authz_version) != ctx.membership_authz_version
                     || Some(row.authz_version) != ctx.authz_version
-                    || Some(role) != ctx.tenant_role
+                    || Some(tenant_role) != ctx.tenant_role
                 {
                     return Err(KeyComputeError::AuthError(
                         "selected tenant authority has changed".into(),
@@ -131,17 +131,17 @@ impl AuthService {
                     id: row.tenant_id,
                     name: row.tenant_name.clone(),
                     slug: row.tenant_slug,
-                    role,
+                    tenant_role,
                     authz_version: row.authz_version,
-                    membership_version: row.version,
+                    membership_authz_version: row.membership_authz_version,
                 });
             }
             memberships.push(SessionMembership {
                 tenant_id: row.tenant_id,
                 tenant_name: row.tenant_name,
-                role,
+                tenant_role,
                 status: "active".into(),
-                version: row.version,
+                authz_version: row.membership_authz_version,
             });
         }
         if ctx.selected_tenant_id.is_some() && selected.is_none() {
@@ -159,11 +159,15 @@ impl AuthService {
                 .collect()
         };
         let tenant = if let Some(selected) = &selected {
-            permissions_for(CredentialKind::Jwt, PlatformRole::None, Some(selected.role))
-                .into_iter()
-                .filter(|permission| *permission != Permission::AccessConsole)
-                .map(|permission| permission.as_str().to_string())
-                .collect()
+            permissions_for(
+                CredentialKind::Jwt,
+                PlatformRole::None,
+                Some(selected.tenant_role),
+            )
+            .into_iter()
+            .filter(|permission| *permission != Permission::AccessConsole)
+            .map(|permission| permission.as_str().to_string())
+            .collect()
         } else {
             Vec::new()
         };
@@ -199,7 +203,8 @@ impl AuthService {
         let service = self.user_service.as_ref().ok_or_else(|| {
             KeyComputeError::ServiceUnavailable("identity storage unavailable".into())
         })?;
-        let (token_version, authz_version, membership_version) = if let Some(tenant) = target {
+        let (token_version, authz_version, membership_authz_version) = if let Some(tenant) = target
+        {
             if tenant.is_nil() {
                 return Err(KeyComputeError::ValidationError(
                     "tenant ID must be nonzero".into(),
@@ -215,7 +220,7 @@ impl AuthService {
             (
                 identity.token_version,
                 Some(identity.authz_version),
-                Some(identity.membership_version),
+                Some(identity.membership_authz_version),
             )
         } else {
             let user = service.load_user(ctx.user_id).await?;
@@ -233,7 +238,7 @@ impl AuthService {
             target,
             token_version,
             authz_version,
-            membership_version,
+            membership_authz_version,
             expires,
         )?;
         self.session_response(token, expires).await

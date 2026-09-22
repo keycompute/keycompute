@@ -9,10 +9,13 @@ pub struct TenantMemberRecord {
     pub user_id: Uuid,
     pub email: String,
     pub name: Option<String>,
-    pub role: String,
+    pub tenant_role: String,
     pub status: String,
     pub user_status: String,
-    pub version: i64,
+    pub invited_by: Option<Uuid>,
+    pub joined_at: DateTime<Utc>,
+    pub removed_at: Option<DateTime<Utc>>,
+    pub authz_version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -61,7 +64,7 @@ fn platform_query(
     ))
 }
 
-const MEMBER_COLUMNS: &str = "m.tenant_id,m.user_id,u.email,u.name,m.role,m.status,u.status AS user_status,m.version,m.created_at,m.updated_at";
+const MEMBER_COLUMNS: &str = "m.tenant_id,m.user_id,u.email,u.name,m.tenant_role,m.status,u.status AS user_status,m.invited_by,m.joined_at,m.removed_at,m.authz_version,m.created_at,m.updated_at";
 
 fn member_query(
     scope: TenantScope,
@@ -81,7 +84,7 @@ fn member_query(
     let mut sql = format!("SELECT {select} FROM tenant_memberships m JOIN users u ON u.id=m.user_id
         WHERE m.tenant_id=$1 AND EXISTS (
             SELECT 1 FROM tenant_memberships actor JOIN users au ON au.id=actor.user_id JOIN tenants t ON t.id=actor.tenant_id
-            WHERE actor.tenant_id=m.tenant_id AND actor.user_id=$2 AND actor.role='admin'
+            WHERE actor.tenant_id=m.tenant_id AND actor.user_id=$2 AND actor.tenant_role='admin'
               AND actor.status='active' AND au.status='active' AND t.status='active')
         AND ($3::text IS NULL OR m.status=$3)
         AND ($4::text IS NULL OR u.email ILIKE '%'||$4||'%' ESCAPE '\\' OR COALESCE(u.name,'') ILIKE '%'||$4||'%' ESCAPE '\\')

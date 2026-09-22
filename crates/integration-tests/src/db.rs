@@ -290,7 +290,7 @@ pub async fn create_test_user(
         .expect("membership fixture transaction should start");
     tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships (tenant_id,user_id,role,status) VALUES ($1,$2,'member','active')",
+        "INSERT INTO tenant_memberships (tenant_id,user_id,tenant_role,status) VALUES ($1,$2,'member','active')",
         [tenant_id.into(), user.id.into()],
     ))
     .await

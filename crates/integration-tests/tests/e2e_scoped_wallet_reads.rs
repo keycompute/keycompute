@@ -51,7 +51,7 @@ impl Fixture {
             &CreateTenantMembershipRequest {
                 tenant_id: b.id,
                 user_id: user.id,
-                role: TenantRole::Member,
+                tenant_role: TenantRole::Member,
             },
             &actor(b.owner_user_id),
         )
@@ -144,8 +144,8 @@ async fn revoked_member_wallet_is_private_but_remains_inspectable_by_its_tenant_
         &tx,
         f.a.id,
         f.user.id,
-        MembershipStatus::Revoked,
-        membership.version,
+        MembershipStatus::Removed,
+        membership.authz_version,
         &actor(f.a.owner_user_id),
     )
     .await
@@ -197,7 +197,7 @@ async fn wallet_admin_and_root_projections_recheck_current_role_and_lifecycle() 
         f.a.id,
         f.other.id,
         TenantRole::Member,
-        elevated.version,
+        elevated.authz_version,
         &actor(f.a.owner_user_id),
     )
     .await

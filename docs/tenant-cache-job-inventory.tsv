@@ -1,338 +1,136 @@
-path	line_at_phase0	classification
-crates/integration-tests/src/db.rs	212	owned_task_resource
-crates/integration-tests/tests/e2e_account_capacity.rs	5	owned_task_resource
-crates/integration-tests/tests/e2e_account_capacity.rs	88	owned_task_resource
-crates/integration-tests/tests/e2e_api_key_read_concurrency.rs	78	owned_task_resource
-crates/integration-tests/tests/e2e_auth_token_version.rs	425	owned_task_resource
-crates/integration-tests/tests/e2e_auth_token_version.rs	541	owned_task_resource
-crates/integration-tests/tests/e2e_auth_token_version.rs	667	owned_task_resource
-crates/integration-tests/tests/e2e_auth_token_version.rs	780	owned_task_resource
-crates/integration-tests/tests/e2e_auth_token_version.rs	918	owned_task_resource
-crates/integration-tests/tests/e2e_auth_token_version.rs	954	owned_task_resource
-crates/integration-tests/tests/e2e_balance_capacity.rs	49	owned_task_resource
-crates/integration-tests/tests/e2e_balance_capacity.rs	71	owned_task_resource
-crates/integration-tests/tests/e2e_balance_capacity.rs	136	owned_task_resource
-crates/integration-tests/tests/e2e_cache_pricing.rs	42	display_cache
-crates/integration-tests/tests/e2e_concurrent.rs	3	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	98	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	182	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	252	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	313	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	405	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	486	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	500	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	514	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	528	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	602	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	676	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	714	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	774	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	900	owned_task_resource
-crates/integration-tests/tests/e2e_concurrent.rs	981	owned_task_resource
-crates/integration-tests/tests/e2e_db_api_key.rs	140	owned_task_resource
-crates/integration-tests/tests/e2e_db_balance.rs	108	owned_task_resource
-crates/integration-tests/tests/e2e_db_balance.rs	649	owned_task_resource
-crates/integration-tests/tests/e2e_db_balance.rs	710	owned_task_resource
-crates/integration-tests/tests/e2e_db_balance.rs	1459	owned_task_resource
-crates/integration-tests/tests/e2e_db_concurrent.rs	39	owned_task_resource
-crates/integration-tests/tests/e2e_db_connection.rs	2049	owned_task_resource
-crates/integration-tests/tests/e2e_db_payment_order.rs	62	owned_task_resource
-crates/integration-tests/tests/e2e_db_payment_order.rs	160	owned_task_resource
-crates/integration-tests/tests/e2e_db_registration.rs	335	owned_task_resource
-crates/integration-tests/tests/e2e_db_router.rs	641	owned_task_resource
-crates/integration-tests/tests/e2e_db_tenant.rs	590	owned_task_resource
-crates/integration-tests/tests/e2e_db_tenant.rs	734	owned_task_resource
-crates/integration-tests/tests/e2e_db_tenant.rs	884	owned_task_resource
-crates/integration-tests/tests/e2e_db_user.rs	258	owned_task_resource
-crates/integration-tests/tests/e2e_db_user.rs	365	owned_task_resource
-crates/integration-tests/tests/e2e_db_user.rs	421	owned_task_resource
-crates/integration-tests/tests/e2e_db_user.rs	815	owned_task_resource
-crates/integration-tests/tests/e2e_distribution_rules.rs	877	owned_task_resource
-crates/integration-tests/tests/e2e_email_service.rs	391	owned_task_resource
-crates/integration-tests/tests/e2e_error_handling.rs	782	owned_task_resource
-crates/integration-tests/tests/e2e_error_handling.rs	792	owned_task_resource
-crates/integration-tests/tests/e2e_error_handling.rs	802	owned_task_resource
-crates/integration-tests/tests/e2e_error_handling.rs	864	owned_task_resource
-crates/integration-tests/tests/e2e_full_chain_load.rs	90	owned_task_resource
-crates/integration-tests/tests/e2e_full_chain_load.rs	445	owned_task_resource
-crates/integration-tests/tests/e2e_http_transport.rs	961	owned_task_resource
-crates/integration-tests/tests/e2e_native_protocols.rs	228	owned_task_resource
-crates/integration-tests/tests/e2e_native_protocols.rs	390	owned_task_resource
-crates/integration-tests/tests/e2e_native_protocols.rs	748	owned_task_resource
-crates/integration-tests/tests/e2e_native_protocols.rs	941	owned_task_resource
-crates/integration-tests/tests/e2e_node_gateway.rs	52	owned_task_resource
-crates/integration-tests/tests/e2e_node_gateway.rs	232	owned_task_resource
-crates/integration-tests/tests/e2e_node_gateway.rs	1003	owned_task_resource
-crates/integration-tests/tests/e2e_node_gateway.rs	1370	owned_task_resource
-crates/integration-tests/tests/e2e_node_ingress.rs	200	owned_task_resource
-crates/integration-tests/tests/e2e_node_ingress.rs	383	owned_task_resource
-crates/integration-tests/tests/e2e_node_ingress.rs	840	owned_task_resource
-crates/integration-tests/tests/e2e_node_ingress.rs	1242	owned_task_resource
-crates/integration-tests/tests/e2e_node_ingress.rs	1644	owned_task_resource
-crates/integration-tests/tests/e2e_passthrough_binding.rs	273	owned_task_resource
-crates/integration-tests/tests/e2e_passthrough_binding.rs	866	owned_task_resource
-crates/integration-tests/tests/e2e_passthrough_binding.rs	954	owned_task_resource
-crates/integration-tests/tests/e2e_passthrough_binding.rs	1166	owned_task_resource
-crates/integration-tests/tests/e2e_passthrough_binding.rs	1219	owned_task_resource
-crates/integration-tests/tests/e2e_process_memory.rs	54	owned_task_resource
-crates/integration-tests/tests/e2e_redis_ratelimit.rs	405	runtime_quota
-crates/integration-tests/tests/e2e_redis_roles.rs	6	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	45	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	74	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	81	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	83	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	88	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	181	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	196	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	235	owned_task_resource
-crates/integration-tests/tests/e2e_redis_roles.rs	251	owned_task_resource
-crates/integration-tests/tests/e2e_redis_safety.rs	10	owned_task_resource
-crates/integration-tests/tests/e2e_redis_safety.rs	81	owned_task_resource
-crates/integration-tests/tests/e2e_redis_safety.rs	110	owned_task_resource
-crates/integration-tests/tests/e2e_redis_safety.rs	337	owned_task_resource
-crates/integration-tests/tests/e2e_redis_safety.rs	345	owned_task_resource
-crates/integration-tests/tests/e2e_redis_safety.rs	434	owned_task_resource
-crates/integration-tests/tests/e2e_redis_safety.rs	442	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	218	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	320	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	940	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	957	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	963	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	964	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	986	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	992	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	1011	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	1012	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	1018	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	1019	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	1034	owned_task_resource
-crates/integration-tests/tests/e2e_response_ownership.rs	1035	owned_task_resource
-crates/integration-tests/tests/e2e_scoped_response_resources.rs	231	owned_task_resource
-crates/integration-tests/tests/e2e_scoped_response_resources.rs	394	owned_task_resource
-crates/integration-tests/tests/e2e_scoped_response_resources.rs	472	owned_task_resource
-crates/integration-tests/tests/e2e_settlement_capacity.rs	185	owned_task_resource
-crates/integration-tests/tests/e2e_settlement_capacity.rs	195	owned_task_resource
-crates/keycompute-auth/src/api_key/last_used.rs	62	owned_task_resource
-crates/keycompute-billing/src/balance.rs	707	owned_task_resource
-crates/keycompute-cache/src/lib.rs	163	display_cache
-crates/keycompute-cache/src/lib.rs	1039	display_cache
-crates/keycompute-cache/src/lib.rs	1053	display_cache
-crates/keycompute-cache/src/lock.rs	312	display_cache
-crates/keycompute-db/src/db_router.rs	124	owned_task_resource
-crates/keycompute-db/src/db_router.rs	265	owned_task_resource
-crates/keycompute-db/src/lifecycle.rs	111	owned_task_resource
-crates/keycompute-db/src/lifecycle.rs	185	owned_task_resource
-crates/keycompute-observability/src/host_monitor.rs	32	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	224	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	253	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	254	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	268	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	657	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	722	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	733	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	955	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	1040	owned_task_resource
-crates/keycompute-pricing/src/lib.rs	1045	owned_task_resource
-crates/keycompute-ratelimit/src/account.rs	348	runtime_quota
-crates/keycompute-ratelimit/src/account.rs	415	runtime_quota
-crates/keycompute-ratelimit/src/lib.rs	1548	runtime_quota
-crates/keycompute-ratelimit/src/lib.rs	1692	runtime_quota
-crates/keycompute-ratelimit/src/redis.rs	10	runtime_quota
-crates/keycompute-ratelimit/src/redis.rs	1774	runtime_quota
-crates/keycompute-ratelimit/src/redis.rs	2188	runtime_quota
-crates/keycompute-routing/src/capacity_cache.rs	177	display_cache
-crates/keycompute-routing/src/capacity_cache.rs	203	display_cache
-crates/keycompute-routing/src/capacity_cache.rs	222	display_cache
-crates/keycompute-routing/src/provider_health.rs	556	owned_task_resource
-crates/keycompute-routing/src/provider_health.rs	1698	owned_task_resource
-crates/keycompute-runtime/src/admission.rs	295	runtime_quota
-crates/keycompute-runtime/src/admission.rs	318	runtime_quota
-crates/keycompute-runtime/src/admission.rs	343	runtime_quota
-crates/keycompute-runtime/src/admission.rs	380	runtime_quota
-crates/keycompute-runtime/src/lib.rs	16	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	59	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	65	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	254	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	377	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	390	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	391	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	393	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	404	runtime_quota
-crates/keycompute-runtime/src/redis_store.rs	431	runtime_quota
-crates/keycompute-server/src/display_cache_tests.rs	34	display_cache
-crates/keycompute-server/src/display_cache_tests.rs	84	display_cache
-crates/keycompute-server/src/drain_tests.rs	31	owned_task_resource
-crates/keycompute-server/src/drain_tests.rs	231	owned_task_resource
-crates/keycompute-server/src/handlers/admin_capacity.rs	43	owned_task_resource
-crates/keycompute-server/src/handlers/anthropic.rs	604	owned_task_resource
-crates/keycompute-server/src/handlers/anthropic.rs	832	owned_task_resource
-crates/keycompute-server/src/handlers/anthropic.rs	1975	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	280	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	408	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	572	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	609	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	685	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	752	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	1369	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	1439	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	1683	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	1728	owned_task_resource
-crates/keycompute-server/src/handlers/mod.rs	2006	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	1100	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	1483	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	2095	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	2314	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	2922	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	3395	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	3954	owned_task_resource
-crates/keycompute-server/src/handlers/openai.rs	4010	owned_task_resource
-crates/keycompute-server/src/handlers/responses/background.rs	661	owned_task_resource
-crates/keycompute-server/src/handlers/responses/background.rs	675	owned_task_resource
-crates/keycompute-server/src/handlers/responses/background.rs	739	owned_task_resource
-crates/keycompute-server/src/handlers/responses/background.rs	772	owned_task_resource
-crates/keycompute-server/src/handlers/responses/background.rs	905	owned_task_resource
-crates/keycompute-server/src/handlers/responses/create.rs	875	owned_task_resource
-crates/keycompute-server/src/handlers/responses/state.rs	334	owned_task_resource
-crates/keycompute-server/src/handlers/responses/state.rs	780	owned_task_resource
-crates/keycompute-server/src/handlers/responses/state.rs	1294	owned_task_resource
-crates/keycompute-server/src/handlers/responses/state.rs	1388	owned_task_resource
-crates/keycompute-server/src/handlers/responses/stream.rs	96	owned_task_resource
-crates/keycompute-server/src/handlers/responses.rs	2885	owned_task_resource
-crates/keycompute-server/src/handlers/responses.rs	5993	owned_task_resource
-crates/keycompute-server/src/handlers/responses.rs	6029	owned_task_resource
-crates/keycompute-server/src/handlers/responses_websocket.rs	557	owned_task_resource
-crates/keycompute-server/src/handlers/responses_websocket.rs	697	owned_task_resource
-crates/keycompute-server/src/handlers/responses_websocket.rs	3199	owned_task_resource
-crates/keycompute-server/src/handlers/responses_websocket.rs	3390	owned_task_resource
-crates/keycompute-server/src/handlers/responses_websocket.rs	3435	owned_task_resource
-crates/keycompute-server/src/handlers/scoped_native.rs	402	owned_task_resource
-crates/keycompute-server/src/handlers/scoped_stream.rs	81	owned_task_resource
-crates/keycompute-server/src/lib.rs	66	owned_task_resource
-crates/keycompute-server/src/main.rs	308	owned_task_resource
-crates/keycompute-server/src/main.rs	348	owned_task_resource
-crates/keycompute-server/src/main.rs	375	owned_task_resource
-crates/keycompute-server/src/main.rs	402	owned_task_resource
-crates/keycompute-server/src/main.rs	443	owned_task_resource
-crates/keycompute-server/src/main.rs	511	owned_task_resource
-crates/keycompute-server/src/middleware.rs	2098	owned_task_resource
-crates/keycompute-server/src/middleware.rs	3274	owned_task_resource
-crates/keycompute-server/src/scoped_state/execution.rs	113	owned_task_resource
-crates/keycompute-server/src/scoped_state/maintenance.rs	30	owned_task_resource
-crates/keycompute-server/src/scoped_state/maintenance.rs	31	owned_task_resource
-crates/keycompute-server/src/scoped_state/mod.rs	271	owned_task_resource
-crates/keycompute-server/src/state.rs	316	owned_task_resource
-crates/keycompute-server/src/state.rs	356	owned_task_resource
-crates/keycompute-server/src/state.rs	494	owned_task_resource
-crates/keycompute-server/src/state.rs	587	owned_task_resource
-crates/keycompute-server/src/state.rs	664	owned_task_resource
-crates/keycompute-server/src/state.rs	668	owned_task_resource
-crates/keycompute-server/src/state.rs	753	owned_task_resource
-crates/keycompute-server/src/state.rs	766	owned_task_resource
-crates/keycompute-server/src/state.rs	884	owned_task_resource
-crates/keycompute-server/src/state.rs	948	owned_task_resource
-crates/keycompute-server/src/state.rs	956	owned_task_resource
-crates/keycompute-server/src/state.rs	961	owned_task_resource
-crates/keycompute-server/src/state.rs	984	owned_task_resource
-crates/keycompute-server/src/state.rs	1038	owned_task_resource
-crates/keycompute-server/src/state.rs	1154	owned_task_resource
-crates/keycompute-types/src/memory.rs	174	owned_task_resource
-crates/llm-gateway/src/executor.rs	647	owned_task_resource
-crates/llm-gateway/src/executor.rs	3888	owned_task_resource
-crates/llm-protocol/anthropic/src/stream.rs	47	owned_task_resource
-crates/llm-protocol/openai/src/responses_stream.rs	155	owned_task_resource
-crates/llm-protocol/openai/src/stream.rs	50	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	33	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	42	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	159	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	163	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	194	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	223	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	259	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	308	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	349	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	459	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	498	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	604	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	605	owned_task_resource
-crates/node-gateway/src/redis/tests.rs	613	owned_task_resource
-crates/node-gateway/src/redis.rs	7	owned_task_resource
-crates/node-gateway/src/redis.rs	74	owned_task_resource
-crates/node-gateway/src/redis.rs	88	owned_task_resource
-crates/node-gateway/src/redis.rs	90	owned_task_resource
-packages/client-api/src/client.rs	8	owned_task_resource
-packages/client-api/src/client.rs	258	owned_task_resource
-packages/client-api/src/query_cache.rs	309	display_cache
-packages/client-api/src/query_cache.rs	378	display_cache
-packages/client-api/src/query_cache.rs	385	display_cache
-packages/client-api/src/query_cache.rs	398	display_cache
-packages/client-api/src/query_cache.rs	399	display_cache
-packages/client-api/src/query_cache.rs	401	display_cache
-packages/client-api/src/query_cache.rs	402	display_cache
-packages/client-api/src/query_cache.rs	417	display_cache
-packages/client-api/tests/query_cache_test.rs	64	display_cache
-packages/client-api/tests/query_cache_test.rs	219	display_cache
-packages/client-api/tests/query_cache_test.rs	258	display_cache
-packages/web/src/app.rs	83	owned_task_resource
-packages/web/src/stores/ui_store.rs	27	owned_task_resource
-packages/web/src/stores/ui_store.rs	40	owned_task_resource
-packages/web/src/stores/ui_store.rs	53	owned_task_resource
-packages/web/src/stores/ui_store.rs	67	owned_task_resource
-packages/web/src/utils/copy.rs	32	owned_task_resource
-packages/web/src/views/api_keys/list.rs	55	owned_task_resource
-packages/web/src/views/api_keys/list.rs	76	owned_task_resource
-packages/web/src/views/auth/forgot_password.rs	17	owned_task_resource
-packages/web/src/views/auth/forgot_password.rs	78	owned_task_resource
-packages/web/src/views/auth/reset_password.rs	45	owned_task_resource
-packages/web/src/views/home.rs	888	owned_task_resource
-packages/web/src/views/home.rs	1116	owned_task_resource
-packages/web/src/views/home.rs	1150	owned_task_resource
-packages/web/src/views/home.rs	1208	owned_task_resource
-packages/web/src/views/home.rs	1527	owned_task_resource
-packages/web/src/views/node/node_earnings.rs	535	owned_task_resource
-packages/web/src/views/node/node_token.rs	112	owned_task_resource
-packages/web/src/views/node/node_token.rs	398	owned_task_resource
-packages/web/src/views/payments/recharge.rs	163	owned_task_resource
-packages/web/src/views/payments/recharge.rs	268	owned_task_resource
-packages/web/src/views/shared/accounts.rs	357	owned_task_resource
-packages/web/src/views/shared/accounts.rs	395	owned_task_resource
-packages/web/src/views/shared/accounts.rs	441	owned_task_resource
-packages/web/src/views/shared/accounts.rs	517	owned_task_resource
-packages/web/src/views/shared/accounts.rs	917	owned_task_resource
-packages/web/src/views/shared/accounts.rs	950	owned_task_resource
-packages/web/src/views/shared/accounts.rs	1455	owned_task_resource
-packages/web/src/views/shared/monitoring.rs	243	owned_task_resource
-packages/web/src/views/shared/node_gateway.rs	160	owned_task_resource
-packages/web/src/views/shared/node_gateway.rs	195	owned_task_resource
-packages/web/src/views/shared/node_gateway.rs	220	owned_task_resource
-packages/web/src/views/shared/node_gateway.rs	244	owned_task_resource
-packages/web/src/views/shared/passthrough_bindings.rs	136	owned_task_resource
-packages/web/src/views/shared/passthrough_bindings.rs	170	owned_task_resource
-packages/web/src/views/shared/passthrough_bindings.rs	322	owned_task_resource
-packages/web/src/views/shared/payment_orders.rs	206	owned_task_resource
-packages/web/src/views/shared/pricing.rs	106	owned_task_resource
-packages/web/src/views/shared/pricing.rs	325	owned_task_resource
-packages/web/src/views/shared/pricing.rs	331	owned_task_resource
-packages/web/src/views/shared/pricing.rs	339	owned_task_resource
-packages/web/src/views/shared/pricing.rs	422	owned_task_resource
-packages/web/src/views/shared/pricing.rs	447	owned_task_resource
-packages/web/src/views/shared/pricing.rs	472	owned_task_resource
-packages/web/src/views/shared/pricing.rs	479	owned_task_resource
-packages/web/src/views/shared/pricing.rs	564	owned_task_resource
-packages/web/src/views/shared/pricing.rs	761	owned_task_resource
-packages/web/src/views/shared/settings.rs	278	owned_task_resource
-packages/web/src/views/shared/settings.rs	367	owned_task_resource
-packages/web/src/views/shared/settings.rs	454	owned_task_resource
-packages/web/src/views/shared/settings.rs	554	owned_task_resource
-packages/web/src/views/shared/tenants.rs	87	owned_task_resource
-packages/web/src/views/shared/tenants.rs	223	owned_task_resource
-packages/web/src/views/shared/tenants.rs	327	owned_task_resource
-packages/web/src/views/shared/tenants.rs	383	owned_task_resource
-packages/web/src/views/shared/users.rs	1256	owned_task_resource
-packages/web/src/views/shared/users.rs	1395	owned_task_resource
-packages/web/src/views/shared/users.rs	1453	owned_task_resource
-packages/web/src/views/shared/users.rs	1563	owned_task_resource
-packages/web/src/views/shared/users.rs	1748	owned_task_resource
-packages/web/src/views/shared/users.rs	3000	owned_task_resource
-packages/web/src/views/shared/users.rs	3068	owned_task_resource
-packages/web/src/views/user/profile.rs	99	owned_task_resource
-packages/web/src/views/user/settings.rs	71	owned_task_resource
+path	line_at_audit	symbol	kind	classification	required_scope	acceptance
+crates/keycompute-auth/src/api_key/last_used.rs	64	record	job	user-owned resource	validated tenant + user + key ID; telemetry is not authority	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-auth/src/api_key.rs	347	hash_key	cache-key	user-owned resource	validated tenant + user + key ID; telemetry is not authority	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-auth/src/api_key.rs	357	generate_key	cache-key	user-owned resource	validated tenant + user + key ID; telemetry is not authority	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-auth/src/api_key.rs	377	generate_key_with_prefix	cache-key	user-owned resource	validated tenant + user + key ID; telemetry is not authority	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-auth/src/lib.rs	245	verify_api_key	cache-key	platform identity or tenant credential resource	global identity proof or explicit tenant-bound credential; current primary authorization, one-time tokens never cached as authority	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-auth/src/lib.rs	340	verify_api_key_with_context	cache-key	platform identity or tenant credential resource	global identity proof or explicit tenant-bound credential; current primary authorization, one-time tokens never cached as authority	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-billing/src/usage_log.rs	881	produce_ai_key_id	cache-key	user-owned resource	immutable tenant + billing user + request/reservation; settlement independent of membership removal	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	30	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	87	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	96	fmt	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	154	new	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	167	with_pool	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	179	with_recovering_pool	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	193	with_prefix	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	203	disabled	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	223	build_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	224	build_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	228	build_null_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	229	build_null_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	361	delete_matching	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lib.rs	530	get_or_insert_with_lock	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-cache/src/lock.rs	312	drop	job	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-config/src/crypto.rs	24	has_key	cache-key	platform protected configuration	root-managed runtime configuration; secret definitions are not tenant cache entries	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-config/src/crypto.rs	29	secret_key	cache-key	platform protected configuration	root-managed runtime configuration; secret definitions are not tenant cache entries	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/db_router.rs	124	new	job	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/lifecycle.rs	111	spawn_intermediate_worker	job	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/lifecycle.rs	185	schedule_intermediate_cleanup	job	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/migrations.rs	10	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/account.rs	12	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/account.rs	13	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/account.rs	200	find_by_id_for_key_share	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/account.rs	218	find_by_id_for_key_share_any_tenant	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/response_affinity.rs	162	find_active_for_key_share	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/response_affinity.rs	178	find_active_for_key_share_for_user	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/responses_idempotency_claim.rs	611	find_for_key_share	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/responses_idempotency_claim.rs	626	find_metadata_for_key_share	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/system_setting.rs	212	find_by_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/tenant.rs	300	find_by_id_for_key_share	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/user.rs	175	find_by_id_for_no_key_update	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/user_balance.rs	232	find_by_request	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/models/user_node_gateway_token.rs	102	from	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	9	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	36	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	92	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	93	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	109	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	110	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	191	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-db/src/schema.rs	306	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-observability/src/host_monitor.rs	32	start_monitoring	job	platform resource	host diagnostics only, no user payload or secret	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-payment/keycompute-alipay/src/config.rs	174	parse_previous_public_keys	cache-key	user-owned payment resource	verified provider event plus immutable tenant/order/billing owner; credential rotation is platform-controlled	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-payment/keycompute-alipay/src/config.rs	244	format_private_key	cache-key	user-owned payment resource	verified provider event plus immutable tenant/order/billing owner; credential rotation is platform-controlled	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-payment/keycompute-alipay/src/config.rs	249	format_public_key	cache-key	user-owned payment resource	verified provider event plus immutable tenant/order/billing owner; credential rotation is platform-controlled	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-payment/keycompute-wechatpay/src/config.rs	152	parse_previous_callback_keys	cache-key	user-owned payment resource	verified provider event plus immutable tenant/order/billing owner; credential rotation is platform-controlled	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-payment/keycompute-wechatpay/src/config.rs	167	normalize_private_key	cache-key	user-owned payment resource	verified provider event plus immutable tenant/order/billing owner; credential rotation is platform-controlled	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-payment/keycompute-wechatpay/src/config.rs	171	normalize_public_key	cache-key	user-owned payment resource	verified provider event plus immutable tenant/order/billing owner; credential rotation is platform-controlled	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-pricing/src/lib.rs	224	cache_key	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-pricing/src/lib.rs	248	create_snapshot	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-pricing/src/lib.rs	251	create_snapshot	cache-operation	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-pricing/src/lib.rs	490	clear_cache	cache-operation	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	37	<module>	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	78	new	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	87	with_prefix	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	99	build_key	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	102	build_key	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	107	build_rpm_key	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	114	build_tpm_keys	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-ratelimit/src/redis.rs	120	build_tpm_keys	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-routing/src/lib.rs	760	decrypt_upstream_api_key	cache-key	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-routing/src/provider_health.rs	556	start_persistence_worker	job	tenant resource or explicit global shared resource	verified consumer tenant plus real account/node owner; explicit platform price/config namespace	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/crypto.rs	57	<module>	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/crypto.rs	189	generate_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/crypto.rs	311	encrypt_api_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/crypto.rs	319	decrypt_api_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	61	storage_role_hook	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	84	with_prefix	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	96	from_config	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	108	build_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	109	build_key	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	229	with_pool	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	238	with_pool_and_prefix	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	314	flush_prefix	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	339	key_prefix	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	340	key_prefix	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	356	key_prefix	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-runtime/src/redis_store.rs	366	default	cache-key	platform infrastructure / caller-scoped primitive	generic primitive is not authorization; caller key and immutable work scope are classified at call site	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/console.rs	159	quota_key	cache-key	tenant/user resource or explicit platform view	credential domain + tenant + actor/owner + authorization versions; platform caches require explicit platform scope	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/console.rs	169	scope_key	cache-key	tenant/user resource or explicit platform view	credential domain + tenant + actor/owner + authorization versions; platform caches require explicit platform scope	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/admin_account.rs	919	requested_api_key_changes	cache-key	platform resource or explicitly scoped tenant administration	platform allowlisted action or verified tenant-admin scope; resource ownership and current actor checks before cache/I/O	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/admin_account.rs	1534	decrypt_account_api_key	cache-key	platform resource or explicitly scoped tenant administration	platform allowlisted action or verified tenant-admin scope; resource ownership and current actor checks before cache/I/O	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/admin_settings.rs	506	get_system_setting_by_key	cache-key	platform resource or explicitly scoped tenant administration	platform allowlisted action or verified tenant-admin scope; resource ownership and current actor checks before cache/I/O	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/admin_settings.rs	533	update_system_setting_by_key	cache-key	platform resource or explicitly scoped tenant administration	platform allowlisted action or verified tenant-admin scope; resource ownership and current actor checks before cache/I/O	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/admin_user.rs	505	normalize_admin_balance_reason	cache-key	platform resource or explicitly scoped tenant administration	platform allowlisted action or verified tenant-admin scope; resource ownership and current actor checks before cache/I/O	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/admin_user.rs	508	require_admin_balance_idempotency_key	cache-key	platform resource or explicitly scoped tenant administration	platform allowlisted action or verified tenant-admin scope; resource ownership and current actor checks before cache/I/O	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/admin_user.rs	861	list_all_api_keys	cache-key	platform resource or explicitly scoped tenant administration	platform allowlisted action or verified tenant-admin scope; resource ownership and current actor checks before cache/I/O	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/responses/state.rs	334	drop	job	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/responses/state.rs	698	affinity_storage_key_for_user	cache-key	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/responses/state.rs	706	affinity_cache_key_for_user	cache-key	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/responses/stream.rs	96	create_responses_stream	job	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/scoped_native.rs	402	generate_with_state	job	user-owned resource	verified request tenant + actor + billing owner; immutable accepted-work context	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/scoped_stream.rs	81	serve	job	user-owned resource	verified request tenant + actor + billing owner; immutable accepted-work context	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/user.rs	292	list_my_api_keys	cache-key	tenant/user resource	verified selected tenant + actor/owner; shared access only through explicit grant	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/user.rs	379	create_api_key	cache-key	tenant/user resource	verified selected tenant + actor/owner; shared access only through explicit grant	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/handlers/user.rs	445	delete_api_key	cache-key	tenant/user resource	verified selected tenant + actor/owner; shared access only through explicit grant	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/lib.rs	66	spawn_scoped_response_maintenance	job	platform infrastructure with scoped work items	scheduler/system capability; each dispatched tenant item retains its own immutable tenant and owner	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/main.rs	306	spawn_payment_security_event_retention	job	platform infrastructure with scoped work items	scheduler/system capability; each dispatched tenant item retains its own immutable tenant and owner	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/main.rs	346	spawn_stale_trace_reconciler	job	platform infrastructure with scoped work items	scheduler/system capability; each dispatched tenant item retains its own immutable tenant and owner	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/main.rs	373	spawn_balance_reservation_sweeper	job	platform infrastructure with scoped work items	scheduler/system capability; each dispatched tenant item retains its own immutable tenant and owner	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/main.rs	400	spawn_node_gateway_sweeper	job	platform infrastructure with scoped work items	scheduler/system capability; each dispatched tenant item retains its own immutable tenant and owner	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/main.rs	441	spawn_account_probe_alerts	job	platform infrastructure with scoped work items	scheduler/system capability; each dispatched tenant item retains its own immutable tenant and owner	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/main.rs	509	setup_shutdown_handler	job	platform infrastructure with scoped work items	scheduler/system capability; each dispatched tenant item retains its own immutable tenant and owner	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/scoped_state/execution.rs	115	watch	job	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/scoped_state/maintenance.rs	30	spawn	job	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/scoped_state/maintenance.rs	31	spawn	job	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/keycompute-server/src/scoped_state/mod.rs	271	create	job	user-owned resource	tenant + original user + access mode; current authority for reads/new work; accepted-work scope for terminal settlement	source inventory; runtime adoption must pass phase 5/8
+crates/llm-gateway/src/executor.rs	647	execute_with_recorder	job	user-owned resource	verified inference request context and accepted-work ownership	source inventory; runtime adoption must pass phase 5/8
+crates/llm-protocol/anthropic/src/stream.rs	47	parse_anthropic_stream_with_raw	job	platform infrastructure / request-bound transport	no independent data authority; stream inherits caller request scope	source inventory; runtime adoption must pass phase 5/8
+crates/llm-protocol/openai/src/responses_stream.rs	155	parse_responses_stream_with_limits_and_empty_eof	job	platform infrastructure / request-bound transport	no independent data authority; stream inherits caller request scope	source inventory; runtime adoption must pass phase 5/8
+crates/llm-protocol/openai/src/stream.rs	50	parse_chat_stream	job	platform infrastructure / request-bound transport	no independent data authority; stream inherits caller request scope	source inventory; runtime adoption must pass phase 5/8
+crates/llm-protocol/provider/src/http.rs	107	into_keycompute_error	cache-key	platform infrastructure / request-bound transport	no independent data authority; stream inherits caller request scope	source inventory; runtime adoption must pass phase 5/8
+crates/llm-protocol/provider/src/lib.rs	181	verify_key	cache-key	platform infrastructure / request-bound transport	no independent data authority; stream inherits caller request scope	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	159	redis_isolation_both_blocking_pools_leave_rate_limits_and_producers_live	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	163	redis_isolation_both_blocking_pools_leave_rate_limits_and_producers_live	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	194	redis_isolation_poll_waiters_do_not_starve_result_waiters	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	223	redis_isolation_result_waiters_do_not_starve_task_claims	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	259	redis_isolation_saturated_pools_fail_with_bounded_wait	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	308	redis_isolation_cancelled_brpop_does_not_steal_future_work_or_leak_capacity	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	349	redis_isolation_transport_failure_discards_blocked_connection	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	459	redis_isolation_outer_timeout_closes_pending_blocking_connection	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	498	redis_isolation_cancelled_pool_admission_does_not_leak_waiters	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	604	redis_isolation_internal_deadline_discards_unresponsive_socket	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis/tests.rs	613	redis_isolation_internal_deadline_discards_unresponsive_socket	job	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis.rs	119	blocking_pop_keys	cache-key	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis.rs	160	model_queue_key	cache-key	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8
+crates/node-gateway/src/redis.rs	164	native_model_queue_key	cache-key	tenant resource	node owner tenant plus consumer task tenant, fixed session/lease/owner	source inventory; runtime adoption must pass phase 5/8

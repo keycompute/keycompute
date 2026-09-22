@@ -11,9 +11,12 @@ use uuid::Uuid;
 pub struct TenantMembership {
     pub tenant_id: Uuid,
     pub user_id: Uuid,
-    pub role: String,
+    pub tenant_role: String,
     pub status: String,
-    pub version: i64,
+    pub invited_by: Option<Uuid>,
+    pub joined_at: DateTime<Utc>,
+    pub removed_at: Option<DateTime<Utc>>,
+    pub authz_version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -23,7 +26,7 @@ pub struct TenantMembership {
 pub struct CreateTenantMembershipRequest {
     pub tenant_id: Uuid,
     pub user_id: Uuid,
-    pub role: TenantRole,
+    pub tenant_role: TenantRole,
 }
 
 fn conflict(tenant: Uuid, user: Uuid) -> DbError {
@@ -35,7 +38,7 @@ fn conflict(tenant: Uuid, user: Uuid) -> DbError {
 
 impl TenantMembership {
     pub fn tenant_role(&self) -> Result<TenantRole, DbError> {
-        self.role.parse().map_err(DbError::Other)
+        self.tenant_role.parse().map_err(DbError::Other)
     }
     pub fn membership_status(&self) -> Result<MembershipStatus, DbError> {
         self.status.parse().map_err(DbError::Other)
@@ -93,8 +96,8 @@ impl TenantMembership {
             return Err(DbError::Other("tenant admin required".into()));
         }
         Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT * FROM tenant_memberships WHERE tenant_id=$1 ORDER BY created_at,user_id LIMIT $2 OFFSET $3",
-            [scope.tenant_id().into(),limit.clamp(1,100).into(),offset.max(0).into()],
+            "SELECT member.* FROM tenant_memberships member WHERE member.tenant_id=$1 AND EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' AND t.status='active') ORDER BY member.created_at,member.user_id LIMIT $3 OFFSET $4",
+            [scope.tenant_id().into(),scope.user_id().into(),limit.clamp(1,100).into(),offset.max(0).into()],
         )).all(db).await?)
     }
 
@@ -115,8 +118,8 @@ impl TenantMembership {
             .filter(|user| user.status == "active")
             .ok_or_else(|| DbError::Other("active member identity required".into()))?;
         let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,$3,'active') ON CONFLICT (tenant_id,user_id) DO NOTHING RETURNING *",
-            [req.tenant_id.into(),req.user_id.into(),req.role.as_str().into()],
+            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by) VALUES($1,$2,$3,'active',$4) ON CONFLICT (tenant_id,user_id) DO NOTHING RETURNING *",
+            [req.tenant_id.into(),req.user_id.into(),req.tenant_role.as_str().into(),actor.actor_user_id.into()],
         )).one(tx).await?.ok_or_else(||conflict(req.tenant_id,req.user_id))?;
         TenantAuditEvent::append(
             tx,
@@ -127,7 +130,7 @@ impl TenantMembership {
             "tenant_membership",
             Some(&req.user_id.to_string()),
             AuditResult::Success,
-            serde_json::json!({"user_id":req.user_id,"role":req.role.as_str()}),
+            serde_json::json!({"user_id":req.user_id,"tenant_role":req.tenant_role.as_str()}),
         )
         .await?;
         Ok(row)
@@ -153,7 +156,7 @@ impl TenantMembership {
             return Err(conflict(tenant, user));
         }
         let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "UPDATE tenant_memberships SET role=$3 WHERE tenant_id=$1 AND user_id=$2 AND status='active' AND version=$4 RETURNING *",
+            "UPDATE tenant_memberships SET tenant_role=$3 WHERE tenant_id=$1 AND user_id=$2 AND status='active' AND authz_version=$4 RETURNING *",
             [tenant.into(),user.into(),role.as_str().into(),expected.into()],
         )).one(tx).await?.ok_or_else(||conflict(tenant,user))?;
         TenantAuditEvent::append(
@@ -165,7 +168,7 @@ impl TenantMembership {
             "tenant_membership",
             Some(&user.to_string()),
             AuditResult::Success,
-            serde_json::json!({"previous_role":before.role,"role":row.role,"version":row.version}),
+            serde_json::json!({"previous_tenant_role":before.tenant_role,"tenant_role":row.tenant_role,"authz_version":row.authz_version}),
         )
         .await?;
         Ok(row)
@@ -187,28 +190,19 @@ impl TenantMembership {
         let before = Self::find_any(tx, tenant, user)
             .await?
             .ok_or_else(|| conflict(tenant, user))?;
-        if expected <= 0 || (before.status == "revoked" && status != MembershipStatus::Revoked) {
+        if expected <= 0 || (before.status == "removed" && status != MembershipStatus::Removed) {
             return Err(DbError::Other(
-                "revoked membership requires a new invitation".into(),
+                "removed membership requires a new invitation".into(),
             ));
         }
         let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "UPDATE tenant_memberships SET status=$3 WHERE tenant_id=$1 AND user_id=$2 AND version=$4 RETURNING *",
+            "UPDATE tenant_memberships SET status=$3,removed_at=CASE WHEN $3='removed' THEN clock_timestamp() ELSE NULL END WHERE tenant_id=$1 AND user_id=$2 AND authz_version=$4 RETURNING *",
             [tenant.into(),user.into(),status.as_str().into(),expected.into()],
         )).one(tx).await?.ok_or_else(||conflict(tenant,user))?;
         // The database trigger permanently revokes associated keys and pending
         // invitations. A later resume only changes this membership row.
         TenantAuditEvent::append(tx,AuditScopeType::Tenant,Some(tenant),&actor,"membership.status","tenant_membership",
-            Some(&user.to_string()),AuditResult::Success,serde_json::json!({"previous_status":before.status,"status":row.status,"version":row.version})).await?;
+            Some(&user.to_string()),AuditResult::Success,serde_json::json!({"previous_status":before.status,"status":row.status,"authz_version":row.authz_version})).await?;
         Ok(row)
-    }
-    pub async fn revoke(
-        tx: &DatabaseTransaction,
-        tenant: Uuid,
-        user: Uuid,
-        expected: i64,
-        actor: &AuditContext,
-    ) -> Result<Self, DbError> {
-        Self::set_status(tx, tenant, user, MembershipStatus::Revoked, expected, actor).await
     }
 }

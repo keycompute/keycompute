@@ -88,7 +88,7 @@ pub struct JwtIdentitySnapshot {
     pub email: String,
     pub user_name: Option<String>,
     pub tenant_id: Uuid,
-    pub membership_version: i64,
+    pub membership_authz_version: i64,
     pub authz_version: i64,
     pub token_version: i32,
     pub platform_role: String,
@@ -186,7 +186,7 @@ impl UserService {
         let Some(pool) = &self.pool else {
             return Ok(None);
         };
-        let row=JwtIdentitySnapshot::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT u.id AS user_id,u.email,u.name AS user_name,m.tenant_id,m.version AS membership_version,t.authz_version,u.token_version,u.platform_role,m.role AS tenant_role,t.name AS tenant_name,t.slug AS tenant_slug,(u.status='active' AND m.status='active' AND t.status='active') AS active,t.default_rpm_limit,t.default_tpm_limit FROM users u JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=$2 JOIN tenants t ON t.id=m.tenant_id WHERE u.id=$1",[user_id.into(),tid.into()])).one(pool.write_conn()).await.map_err(|e|KeyComputeError::DatabaseError(e.to_string()))?;
+        let row=JwtIdentitySnapshot::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT u.id AS user_id,u.email,u.name AS user_name,m.tenant_id,m.authz_version AS membership_authz_version,t.authz_version,u.token_version,u.platform_role,m.tenant_role,t.name AS tenant_name,t.slug AS tenant_slug,(u.status='active' AND m.status='active' AND t.status='active') AS active,t.default_rpm_limit,t.default_tpm_limit FROM users u JOIN tenant_memberships m ON m.user_id=u.id AND m.tenant_id=$2 JOIN tenants t ON t.id=m.tenant_id WHERE u.id=$1",[user_id.into(),tid.into()])).one(pool.write_conn()).await.map_err(|e|KeyComputeError::DatabaseError(e.to_string()))?;
         Ok(row)
     }
     pub async fn load_tenant(&self, tenant_id: Uuid) -> Result<TenantInfo> {

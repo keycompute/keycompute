@@ -131,7 +131,7 @@ async fn build_admin_app(
         .expect("protocol test admin");
     pool.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'admin','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
         [tenant_id.into(), admin.id.into()],
     )).await.expect("admin membership");
 
@@ -159,7 +159,7 @@ async fn build_admin_app(
             Some(tenant_id),
             admin.token_version,
             Some(tenant.authz_version),
-            Some(membership.version),
+            Some(membership.authz_version),
             3600,
         )
         .expect("admin token");

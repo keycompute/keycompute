@@ -73,7 +73,7 @@ impl Fixture {
             &CreateTenantMembershipRequest {
                 tenant_id: b.id,
                 user_id: user.id,
-                role: TenantRole::Member,
+                tenant_role: TenantRole::Member,
             },
             &actor(admin(&b)),
         )
@@ -285,7 +285,7 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
         f.a.id,
         f.user.id,
         TenantRole::Admin,
-        member.version,
+        member.authz_version,
         &actor(admin(&f.a)),
     )
     .await
@@ -304,7 +304,7 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
         f.a.id,
         f.user.id,
         TenantRole::Member,
-        elevated.version,
+        elevated.authz_version,
         &actor(admin(&f.a)),
     )
     .await
@@ -332,7 +332,7 @@ async fn stale_key_scopes_are_rejected_after_demotion_and_revocation() {
         f.a.id,
         f.user.id,
         MembershipStatus::Suspended,
-        lowered.version,
+        lowered.authz_version,
         &actor(admin(&f.a)),
     )
     .await
@@ -494,13 +494,13 @@ async fn key_http_create_revoke_delete_rejects_foreign_ids_and_inference_credent
     let id = value["key_id"].as_str().unwrap();
     let inference = value["key"].as_str().unwrap();
     let audit = f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT request_id,details FROM tenant_audit_events WHERE tenant_id=$1 AND resource_id=$2 AND action='key.create'",
+        "SELECT request_id,metadata FROM tenant_audit_events WHERE tenant_id=$1 AND resource_id=$2 AND action='key.create'",
         [f.a.id.into(), id.into()])).await.unwrap().unwrap();
     assert_eq!(audit.try_get::<Uuid>("", "request_id").unwrap(), request_id);
-    let details: Value = audit.try_get("", "details").unwrap();
-    assert!(!details.to_string().contains(inference));
+    let metadata: Value = audit.try_get("", "metadata").unwrap();
+    assert!(!metadata.to_string().contains(inference));
     assert!(
-        !details
+        !metadata
             .to_string()
             .contains(&ProduceAiKeyValidator::hash_key(inference))
     );
@@ -598,7 +598,7 @@ async fn queued_key_mutation_rechecks_authority_after_concurrent_demotion() {
         f.a.id,
         f.user.id,
         TenantRole::Admin,
-        member.version,
+        member.authz_version,
         &actor(admin(&f.a)),
     )
     .await
@@ -639,7 +639,7 @@ async fn queued_key_mutation_rechecks_authority_after_concurrent_demotion() {
         f.a.id,
         f.user.id,
         TenantRole::Member,
-        elevated.version,
+        elevated.authz_version,
         &actor(admin(&f.a)),
     )
     .await

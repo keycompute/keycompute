@@ -82,7 +82,7 @@ async fn tenant_admin_cannot_read_other_members_or_foreign_payment_orders_throug
     let foreign = create_test_user(&db, b.id, "payment-foreign", &run).await;
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET role='admin' WHERE tenant_id=$1 AND user_id=$2",
+        "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
         [a.id.into(), admin.id.into()],
     ))
     .await
@@ -131,7 +131,7 @@ async fn payment_dao_lists_counts_and_details_share_the_same_explicit_scope() {
     let peer = create_test_user(&db, a.id, "payment-dao-peer", &run).await;
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,role) VALUES($1,$2,'member')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role) VALUES($1,$2,'member')",
         [b.id.into(), user.id.into()],
     ))
     .await

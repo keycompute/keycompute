@@ -282,7 +282,7 @@ mod tests {
             &CreateTenantMembershipRequest {
                 tenant_id: target.id,
                 user_id: user.id,
-                role: TenantRole::Member,
+                tenant_role: TenantRole::Member,
             },
             &keycompute_db::AuditContext {
                 actor_user_id: target.owner_user_id,
@@ -294,11 +294,12 @@ mod tests {
         )
         .await
         .expect("target membership should be added");
-        TenantMembership::revoke(
+        TenantMembership::set_status(
             &move_tx,
             source.id,
             user.id,
-            source_membership.version,
+            keycompute_types::MembershipStatus::Removed,
+            source_membership.authz_version,
             &keycompute_db::AuditContext {
                 actor_user_id: source.owner_user_id,
                 credential_kind: CredentialKind::Jwt,
@@ -308,7 +309,7 @@ mod tests {
             },
         )
         .await
-        .expect("source membership should be revoked");
+        .expect("source membership should be removed");
         move_tx
             .commit()
             .await
@@ -917,7 +918,7 @@ mod tests {
                 &keycompute_db::CreateTenantMembershipRequest {
                     tenant_id: target.id,
                     user_id: user.id,
-                    role: TenantRole::Member,
+                    tenant_role: TenantRole::Member,
                 },
                 &keycompute_db::AuditContext {
                     actor_user_id: target.owner_user_id,

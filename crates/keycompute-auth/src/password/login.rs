@@ -311,7 +311,7 @@ impl LoginService {
             claims.tenant_id()?,
             user.token_version,
             current.authz_version,
-            current.membership_version,
+            current.membership_authz_version,
             self.jwt_validator.default_expiration(),
         )?;
 

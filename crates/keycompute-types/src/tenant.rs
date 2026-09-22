@@ -51,7 +51,7 @@ role_enum!(AuditResult { Success => "success", Denied => "denied", Failure => "f
 role_enum!(PlatformRole { Root => "root", Operator => "operator", None => "none" });
 role_enum!(CredentialKind { Jwt => "jwt", ApiKey => "api_key", Node => "node", System => "system" });
 role_enum!(TenantRole { Admin => "admin", Member => "member" });
-role_enum!(MembershipStatus { Active => "active", Suspended => "suspended", Revoked => "revoked" });
+role_enum!(MembershipStatus { Active => "active", Suspended => "suspended", Removed => "removed" });
 role_enum!(TenantInvitationStatus { Pending => "pending", Accepted => "accepted", Expired => "expired", Revoked => "revoked" });
 
 impl PlatformRole {

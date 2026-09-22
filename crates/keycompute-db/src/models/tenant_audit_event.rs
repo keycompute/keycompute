@@ -21,9 +21,9 @@ pub struct TenantAuditEvent {
     pub resource_id: Option<String>,
     pub request_id: Option<Uuid>,
     pub credential_kind: String,
-    pub actor_platform_role: String,
-    pub actor_tenant_role: Option<String>,
-    pub details: Value,
+    pub platform_role: String,
+    pub tenant_role: Option<String>,
+    pub metadata: Value,
     pub result: String,
     pub created_at: DateTime<Utc>,
 }
@@ -94,7 +94,7 @@ impl AuditContext {
             .ok_or_else(|| DbError::Other("active actor required".into()))?;
         let member = super::tenant_membership::TenantMembership::find_any(tx, current.id, user.id)
             .await?
-            .filter(|member| member.status == "active" && member.role == "admin")
+            .filter(|member| member.status == "active" && member.tenant_role == "admin")
             .ok_or_else(|| DbError::Other("tenant administrator membership required".into()))?;
         Ok(Self {
             actor_platform_role: user.platform_role()?,
@@ -104,10 +104,10 @@ impl AuditContext {
     }
 }
 
-fn audit_details(mut details: Value) -> Result<Value, DbError> {
-    if !details.is_object() || details.to_string().len() > 16384 {
+fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
+    if !metadata.is_object() || metadata.to_string().len() > 16384 {
         return Err(DbError::Other(
-            "audit details must be a bounded object".into(),
+            "audit metadata must be a bounded object".into(),
         ));
     }
     fn redact(value: &mut Value, depth: usize) {
@@ -123,6 +123,10 @@ fn audit_details(mut details: Value) -> Result<Value, DbError> {
                         key.as_str(),
                         "role"
                             | "previous_role"
+                            | "previous_tenant_role"
+                            | "invited_by"
+                            | "joined_at"
+                            | "removed_at"
                             | "status"
                             | "previous_status"
                             | "platform_role"
@@ -131,7 +135,7 @@ fn audit_details(mut details: Value) -> Result<Value, DbError> {
                             | "count"
                             | "version"
                             | "authz_version"
-                            | "membership_version"
+                            | "membership_authz_version"
                             | "owner_user_id"
                             | "previous_owner_user_id"
                             | "user_id"
@@ -174,8 +178,8 @@ fn audit_details(mut details: Value) -> Result<Value, DbError> {
             _ => {}
         }
     }
-    redact(&mut details, 0);
-    Ok(details)
+    redact(&mut metadata, 0);
+    Ok(metadata)
 }
 
 impl TenantAuditEvent {
@@ -189,7 +193,7 @@ impl TenantAuditEvent {
         resource_type: &str,
         resource_id: Option<&str>,
         result: AuditResult,
-        details: Value,
+        metadata: Value,
     ) -> Result<Self, DbError> {
         let valid_label = |value: &str| {
             !value.is_empty()
@@ -211,14 +215,14 @@ impl TenantAuditEvent {
         if (scope == AuditScopeType::Tenant) != tenant_id.is_some() {
             return Err(DbError::Other("audit scope and tenant must agree".into()));
         }
-        let details = audit_details(details)?;
+        let metadata = audit_metadata(metadata)?;
         Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO tenant_audit_events(scope_type,tenant_id,actor_user_id,action,resource_type,resource_id,request_id,credential_kind,actor_platform_role,actor_tenant_role,details,result) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",
+            "INSERT INTO tenant_audit_events(scope_type,tenant_id,actor_user_id,action,resource_type,resource_id,request_id,credential_kind,platform_role,tenant_role,metadata,result) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *",
             [scope.as_str().into(), tenant_id.into(), ctx.actor_user_id.into(), action.into(),
                 resource_type.into(), resource_id.map(str::to_owned).into(), ctx.request_id.into(),
                 ctx.credential_kind.as_str().into(), ctx.actor_platform_role.as_str().into(),
-                ctx.actor_tenant_role.map(|role| role.as_str()).into(), details.into(), result.as_str().into()],
+                ctx.actor_tenant_role.map(|role| role.as_str()).into(), metadata.into(), result.as_str().into()],
         )).one(tx).await?.ok_or_else(|| DbError::Other("audit insert returned no row".into()))
     }
 
@@ -232,8 +236,8 @@ impl TenantAuditEvent {
             return Err(DbError::Other("tenant admin required".into()));
         }
         Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT * FROM tenant_audit_events WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3",
-            [scope.tenant_id().into(), limit.clamp(1,100).into(), offset.max(0).into()],
+            "SELECT a.* FROM tenant_audit_events a WHERE a.tenant_id=$1 AND EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' AND t.status='active') ORDER BY a.created_at DESC,a.id DESC LIMIT $3 OFFSET $4",
+            [scope.tenant_id().into(), scope.user_id().into(), limit.clamp(1,100).into(), offset.max(0).into()],
         )).all(db).await?)
     }
 
@@ -248,8 +252,8 @@ impl TenantAuditEvent {
         }
         Ok(Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM tenant_audit_events ORDER BY created_at DESC,id DESC LIMIT $1 OFFSET $2",
-            [limit.clamp(1, 100).into(), offset.max(0).into()],
+            "SELECT a.* FROM tenant_audit_events a WHERE EXISTS (SELECT 1 FROM users u WHERE u.id=$1 AND u.status='active' AND u.platform_role='root') ORDER BY a.created_at DESC,a.id DESC LIMIT $2 OFFSET $3",
+            [scope.user_id().into(), limit.clamp(1, 100).into(), offset.max(0).into()],
         ))
         .all(db)
         .await?)
@@ -261,10 +265,18 @@ mod tests {
     use super::*;
     #[test]
     fn audit_redacts_nested_secrets_and_rejects_unbounded_input() {
-        let value = audit_details(serde_json::json!({"role":"member","before":{"password":"secret","token":"secret"},"authorization":"Bearer secret"})).unwrap();
+        let value = audit_metadata(serde_json::json!({"role":"member","before":{"password":"secret","token":"secret"},"authorization":"Bearer secret"})).unwrap();
         assert_eq!(value["role"], "member");
+        let lifecycle = audit_metadata(serde_json::json!({
+            "previous_tenant_role":"admin", "tenant_role":"member",
+            "membership_authz_version":7, "before":{"password":"never-persist"},
+        }))
+        .unwrap();
+        assert_eq!(lifecycle["previous_tenant_role"], "admin");
+        assert_eq!(lifecycle["membership_authz_version"], 7);
+        assert!(!lifecycle.to_string().contains("never-persist"));
         assert!(!value.to_string().contains("secret"));
-        assert!(audit_details(serde_json::json!({"reason":"x".repeat(17000)})).is_err());
-        assert!(audit_details(serde_json::json!([])).is_err());
+        assert!(audit_metadata(serde_json::json!({"reason":"x".repeat(17000)})).is_err());
+        assert!(audit_metadata(serde_json::json!([])).is_err());
     }
 }

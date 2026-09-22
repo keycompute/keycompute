@@ -229,7 +229,7 @@ pub struct SelectedTenant {
     #[serde(default)]
     pub authz_version: Option<i64>,
     #[serde(default)]
-    pub membership_version: Option<i64>,
+    pub membership_authz_version: Option<i64>,
 }
 
 /// A membership is an identity relationship, not a global user role.
@@ -238,11 +238,17 @@ pub struct TenantMembership {
     pub tenant_id: String,
     #[serde(default)]
     pub tenant_name: Option<String>,
-    pub role: TenantRole,
+    pub tenant_role: TenantRole,
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
-    pub version: Option<i64>,
+    pub invited_by: Option<String>,
+    #[serde(default)]
+    pub joined_at: Option<String>,
+    #[serde(default)]
+    pub removed_at: Option<String>,
+    #[serde(default)]
+    pub authz_version: Option<i64>,
 }
 
 /// Returned permissions are authoritative presentation data for the console.

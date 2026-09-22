@@ -15,7 +15,7 @@ pub struct JwtClaims {
     #[serde(default)]
     pub authz_version: Option<i64>,
     #[serde(default)]
-    pub membership_version: Option<i64>,
+    pub membership_authz_version: Option<i64>,
     pub exp: i64,
     pub iat: i64,
     pub iss: String,
@@ -34,7 +34,7 @@ impl JwtClaims {
             sub: user_id.to_string(),
             tenant_id: tenant_id.map(|v| v.to_string()),
             authz_version: None,
-            membership_version: None,
+            membership_authz_version: None,
             exp: now.saturating_add(expires),
             iat: now,
             iss: issuer.to_owned(),
@@ -118,19 +118,21 @@ impl JwtValidator {
             return Err(KeyComputeError::AuthError("negative token version".into()));
         }
         match selected {
-            Some(_) if c.authz_version.is_none() || c.membership_version.is_none() => {
+            Some(_) if c.authz_version.is_none() || c.membership_authz_version.is_none() => {
                 return Err(KeyComputeError::AuthError(
                     "selected tenant requires both authorization versions".into(),
                 ));
             }
-            None if c.authz_version.is_some() || c.membership_version.is_some() => {
+            None if c.authz_version.is_some() || c.membership_authz_version.is_some() => {
                 return Err(KeyComputeError::AuthError(
                     "tenant versions require selected tenant".into(),
                 ));
             }
             _ => {}
         }
-        if c.authz_version.is_some_and(|v| v <= 0) || c.membership_version.is_some_and(|v| v <= 0) {
+        if c.authz_version.is_some_and(|v| v <= 0)
+            || c.membership_authz_version.is_some_and(|v| v <= 0)
+        {
             return Err(KeyComputeError::AuthError(
                 "tenant versions must be positive".into(),
             ));
@@ -152,7 +154,7 @@ impl JwtValidator {
             produce_ai_key_id: Uuid::nil(),
             permissions: Vec::new(),
             token_version: c.token_version,
-            membership_version: c.membership_version,
+            membership_authz_version: c.membership_authz_version,
             authz_version: c.authz_version,
             user_info: None,
             tenant_info: None,
@@ -164,7 +166,7 @@ impl JwtValidator {
         tenant_id: Option<Uuid>,
         token_version: i32,
         authz_version: Option<i64>,
-        membership_version: Option<i64>,
+        membership_authz_version: Option<i64>,
         expires: i64,
     ) -> Result<String> {
         if user_id.is_nil() || token_version < 0 {
@@ -178,20 +180,21 @@ impl JwtValidator {
             ));
         }
         if tenant_id.is_some() != authz_version.is_some()
-            || tenant_id.is_some() != membership_version.is_some()
+            || tenant_id.is_some() != membership_authz_version.is_some()
         {
             return Err(KeyComputeError::ValidationError(
                 "selected tenant and versions must be supplied together".into(),
             ));
         }
-        if authz_version.is_some_and(|v| v <= 0) || membership_version.is_some_and(|v| v <= 0) {
+        if authz_version.is_some_and(|v| v <= 0) || membership_authz_version.is_some_and(|v| v <= 0)
+        {
             return Err(KeyComputeError::ValidationError(
                 "tenant versions must be positive".into(),
             ));
         }
         let mut c = JwtClaims::new(user_id, tenant_id, token_version, expires, &self.issuer);
         c.authz_version = authz_version;
-        c.membership_version = membership_version;
+        c.membership_authz_version = membership_authz_version;
         encode(&Header::default(), &c, &self.encoding_key)
             .map_err(|e| KeyComputeError::Internal(format!("Failed to generate token: {e}")))
     }
@@ -202,7 +205,7 @@ impl JwtValidator {
             c.tenant_id()?,
             c.token_version,
             c.authz_version,
-            c.membership_version,
+            c.membership_authz_version,
             self.default_expiration,
         )
     }

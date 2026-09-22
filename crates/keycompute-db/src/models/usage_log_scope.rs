@@ -91,7 +91,7 @@ const ACTIVE_MEMBER: &str = "EXISTS (SELECT 1 FROM tenant_memberships actor \
       AND au.status='active' AND t.status='active')";
 const ACTIVE_ADMIN: &str = "EXISTS (SELECT 1 FROM tenant_memberships actor \
     JOIN users au ON au.id=actor.user_id JOIN tenants t ON t.id=actor.tenant_id \
-    WHERE actor.tenant_id=$1 AND actor.user_id=$2 AND actor.role='admin' \
+    WHERE actor.tenant_id=$1 AND actor.user_id=$2 AND actor.tenant_role='admin' \
       AND actor.status='active' AND au.status='active' AND t.status='active')";
 const TOTALS: &str = "COUNT(*) AS total_requests, \
     COALESCE(SUM(l.input_tokens),0)::bigint AS total_input_tokens, \

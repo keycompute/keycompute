@@ -93,7 +93,7 @@ impl Fixture {
             &CreateTenantMembershipRequest {
                 tenant_id: b.id,
                 user_id: user.id,
-                role: TenantRole::Member,
+                tenant_role: TenantRole::Member,
             },
             &audit(&b),
         )
@@ -196,7 +196,7 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
         f.a.id,
         f.user.id,
         TenantRole::Member,
-        elevated.version,
+        elevated.authz_version,
         &audit(&f.a),
     )
     .await
@@ -212,7 +212,7 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
         f.a.id,
         f.user.id,
         MembershipStatus::Suspended,
-        lowered.version,
+        lowered.authz_version,
         &audit(&f.a),
     )
     .await
@@ -418,8 +418,8 @@ async fn cached_personal_usage_is_not_returned_after_membership_revocation() {
         &tx,
         f.a.id,
         f.user.id,
-        MembershipStatus::Revoked,
-        membership.version,
+        MembershipStatus::Removed,
+        membership.authz_version,
         &audit(&f.a),
     )
     .await
@@ -453,7 +453,7 @@ async fn cached_personal_usage_is_not_returned_after_membership_revocation() {
         .access_token;
     let b_stats = get(&state, &b_token, "/api/v1/usage/stats".into()).await;
     assert_eq!(b_stats["total_cost"], json!(7.0));
-    let revoked = TenantMembership::find_any(&f.db, f.a.id, f.user.id)
+    let removed = TenantMembership::find_any(&f.db, f.a.id, f.user.id)
         .await
         .unwrap()
         .unwrap();
@@ -463,13 +463,13 @@ async fn cached_personal_usage_is_not_returned_after_membership_revocation() {
         f.a.id,
         f.user.id,
         MembershipStatus::Active,
-        revoked.version,
+        removed.authz_version,
         &audit(&f.a),
     )
     .await;
     assert!(
         restore.is_err(),
-        "revocation requires a new invitation, not direct reactivation"
+        "removal requires a new invitation, not direct reactivation"
     );
     tx.rollback().await.unwrap();
     assert!(state.auth.verify_token(&token).await.is_err());

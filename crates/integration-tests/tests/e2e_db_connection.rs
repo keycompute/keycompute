@@ -1915,7 +1915,7 @@ mod tests {
         .await
         .expect("debt test user should be created");
         pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
             [tenant_id.into(),user.id.into()],
         )).await.unwrap();
         let user_id = user.id;
@@ -3234,7 +3234,7 @@ mod tests {
         let billing_request_id = Uuid::new_v4();
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO tenant_memberships (tenant_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')",
+            "INSERT INTO tenant_memberships (tenant_id, user_id, tenant_role, status) VALUES ($1, $2, 'member', 'active')",
             [tenant_id.into(), user_id.into()],
         ))
         .await
@@ -3571,7 +3571,7 @@ mod tests {
         let user_id = user.id;
         pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "INSERT INTO tenant_memberships (tenant_id, user_id, role, status) VALUES ($1, $2, 'member', 'active')",
+            "INSERT INTO tenant_memberships (tenant_id, user_id, tenant_role, status) VALUES ($1, $2, 'member', 'active')",
             [tenant_id.into(), user_id.into()],
         ))
         .await

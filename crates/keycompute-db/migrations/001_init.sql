@@ -51,39 +51,46 @@ CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status);
 CREATE TABLE IF NOT EXISTS tenant_memberships (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    role VARCHAR(20) NOT NULL DEFAULT 'member'
-        CONSTRAINT chk_tenant_memberships_role CHECK (role IN ('admin', 'member')),
+    tenant_role VARCHAR(20) NOT NULL DEFAULT 'member'
+        CONSTRAINT chk_tenant_memberships_tenant_role CHECK (tenant_role IN ('admin', 'member')),
     status VARCHAR(20) NOT NULL DEFAULT 'active'
-        CONSTRAINT chk_tenant_memberships_status CHECK (status IN ('active', 'suspended', 'revoked')),
-    version BIGINT NOT NULL DEFAULT 1 CHECK (version > 0),
+        CONSTRAINT chk_tenant_memberships_status CHECK (status IN ('active', 'suspended', 'removed')),
+    invited_by UUID REFERENCES users(id) ON DELETE RESTRICT,
+    joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    removed_at TIMESTAMPTZ,
+    authz_version BIGINT NOT NULL DEFAULT 1 CHECK (authz_version > 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (tenant_id, user_id)
+    PRIMARY KEY (tenant_id, user_id),
+    CONSTRAINT ck_tenant_memberships_removed_lifecycle CHECK (
+        (status = 'removed' AND removed_at IS NOT NULL)
+        OR (status IN ('active', 'suspended') AND removed_at IS NULL)
+    )
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user ON tenant_memberships(user_id, status);
-CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_role ON tenant_memberships(tenant_id, role, status);
+CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant_role ON tenant_memberships(tenant_id, tenant_role, status);
 
 CREATE TABLE IF NOT EXISTS tenant_invitations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-    invited_by_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    invited_by UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     email VARCHAR(255) NOT NULL,
-    role VARCHAR(20) NOT NULL DEFAULT 'member'
-        CONSTRAINT chk_tenant_invitations_role CHECK (role IN ('admin', 'member')),
+    tenant_role VARCHAR(20) NOT NULL DEFAULT 'member'
+        CONSTRAINT chk_tenant_invitations_tenant_role CHECK (tenant_role IN ('admin', 'member')),
     token_hash VARCHAR(64) NOT NULL UNIQUE CHECK (token_hash ~ '^[0-9a-f]{64}$'),
     status VARCHAR(20) NOT NULL DEFAULT 'pending'
         CONSTRAINT chk_tenant_invitations_status CHECK (status IN ('pending', 'accepted', 'expired', 'revoked')),
     expires_at TIMESTAMPTZ NOT NULL,
-    accepted_by_user_id UUID REFERENCES users(id) ON DELETE RESTRICT,
+    accepted_by UUID REFERENCES users(id) ON DELETE RESTRICT,
     accepted_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_invitation_email CHECK (email=lower(btrim(email)) AND position('@' in email)>1),
     CONSTRAINT ck_invitation_lifecycle CHECK (
-        (status='accepted' AND accepted_at IS NOT NULL AND accepted_by_user_id IS NOT NULL AND revoked_at IS NULL) OR
-        (status='revoked' AND accepted_at IS NULL AND accepted_by_user_id IS NULL AND revoked_at IS NOT NULL) OR
-        (status IN ('pending','expired') AND accepted_at IS NULL AND accepted_by_user_id IS NULL AND revoked_at IS NULL)
+        (status='accepted' AND accepted_at IS NOT NULL AND accepted_by IS NOT NULL AND revoked_at IS NULL) OR
+        (status='revoked' AND accepted_at IS NULL AND accepted_by IS NULL AND revoked_at IS NOT NULL) OR
+        (status IN ('pending','expired') AND accepted_at IS NULL AND accepted_by IS NULL AND revoked_at IS NULL)
     )
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_tenant_invitations_pending_email
@@ -101,20 +108,20 @@ CREATE TABLE IF NOT EXISTS tenant_audit_events (
     request_id UUID,
     credential_kind VARCHAR(32) NOT NULL DEFAULT 'jwt'
         CHECK (credential_kind IN ('jwt','api_key','node','system')),
-    actor_platform_role VARCHAR(20) NOT NULL
-        CHECK (actor_platform_role IN ('root','operator','none')),
+    platform_role VARCHAR(20) NOT NULL
+        CHECK (platform_role IN ('root','operator','none')),
     result VARCHAR(20) NOT NULL DEFAULT 'success' CHECK (result IN ('success','denied','failure')),
-    actor_tenant_role VARCHAR(20)
-        CHECK (actor_tenant_role IN ('admin','member')),
-    details JSONB NOT NULL DEFAULT '{}'::jsonb
-        CHECK (jsonb_typeof(details) = 'object'),
+    tenant_role VARCHAR(20)
+        CHECK (tenant_role IN ('admin','member')),
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(metadata) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT ck_audit_scope_tenant CHECK ((scope_type='platform' AND tenant_id IS NULL) OR (scope_type='tenant' AND tenant_id IS NOT NULL)),
     CONSTRAINT ck_audit_ids_real CHECK (
         actor_user_id <> '00000000-0000-0000-0000-000000000000'
         AND (tenant_id IS NULL OR tenant_id <> '00000000-0000-0000-0000-000000000000')
     ),
-    CONSTRAINT ck_audit_details_size CHECK (octet_length(details::text) <= 16384)
+    CONSTRAINT ck_audit_metadata_size CHECK (octet_length(metadata::text) <= 16384)
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_audit_events_tenant_time
     ON tenant_audit_events(tenant_id, created_at DESC);
@@ -1815,7 +1822,7 @@ CREATE TRIGGER identity_memberships_fence BEFORE INSERT OR DELETE ON tenant_memb
     FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
 DROP TRIGGER IF EXISTS identity_memberships_update_fence ON tenant_memberships;
 CREATE TRIGGER identity_memberships_update_fence
-    BEFORE UPDATE OF tenant_id, user_id, role, status ON tenant_memberships
+    BEFORE UPDATE OF tenant_id, user_id, tenant_role, status, invited_by, joined_at, removed_at ON tenant_memberships
     FOR EACH STATEMENT EXECUTE FUNCTION serialize_identity_admin();
 
 CREATE OR REPLACE FUNCTION version_user_authority() RETURNS TRIGGER AS $$
@@ -1855,11 +1862,12 @@ CREATE TRIGGER tenant_authority_version BEFORE UPDATE ON tenants
 
 CREATE OR REPLACE FUNCTION version_membership_authority() RETURNS TRIGGER AS $$
 DECLARE target_tenant UUID;
+DECLARE new_invitation BOOLEAN;
 BEGIN
     target_tenant := CASE WHEN TG_OP='DELETE' THEN OLD.tenant_id ELSE NEW.tenant_id END;
     IF TG_OP='DELETE' THEN
         IF EXISTS (SELECT 1 FROM tenants WHERE id=target_tenant) THEN
-            RAISE EXCEPTION 'memberships must be revoked, not deleted' USING ERRCODE='23514';
+            RAISE EXCEPTION 'memberships must be removed, not deleted' USING ERRCODE='23514';
         END IF;
         RETURN OLD;
     END IF;
@@ -1867,13 +1875,40 @@ BEGIN
         IF ROW(NEW.tenant_id,NEW.user_id) IS DISTINCT FROM ROW(OLD.tenant_id,OLD.user_id) THEN
             RAISE EXCEPTION 'membership identity is immutable' USING ERRCODE='23514';
         END IF;
-        IF ROW(NEW.role,NEW.status) IS DISTINCT FROM ROW(OLD.role,OLD.status) THEN
-            NEW.version := OLD.version+1;
-        ELSE
-            NEW.version := OLD.version;
+        -- An inviter or a client-supplied timestamp is not proof of admission.
+        -- The invitation must have been consumed after the prior removal,
+        -- including when the same administrator sends the new invitation.
+        new_invitation := NEW.status='active' AND NEW.removed_at IS NULL AND EXISTS (
+            SELECT 1 FROM tenant_invitations i
+            WHERE i.tenant_id=NEW.tenant_id AND i.accepted_by=NEW.user_id
+              AND i.invited_by IS NOT DISTINCT FROM NEW.invited_by
+              AND i.tenant_role=NEW.tenant_role AND i.status='accepted'
+              AND i.accepted_at=NEW.joined_at
+              AND i.accepted_at > COALESCE(OLD.removed_at,OLD.updated_at)
+        );
+        IF OLD.status='removed' AND NEW.status<>'removed' AND NOT new_invitation THEN
+            RAISE EXCEPTION 'removed memberships require a new invitation' USING ERRCODE='23514';
         END IF;
+        IF ROW(NEW.invited_by,NEW.joined_at) IS DISTINCT FROM ROW(OLD.invited_by,OLD.joined_at)
+           AND NOT new_invitation THEN
+            RAISE EXCEPTION 'membership provenance requires a new invitation' USING ERRCODE='23514';
+        END IF;
+        IF ROW(NEW.tenant_role,NEW.status) IS DISTINCT FROM ROW(OLD.tenant_role,OLD.status) THEN
+            NEW.authz_version := OLD.authz_version+1;
+        ELSE
+            NEW.authz_version := OLD.authz_version;
+        END IF;
+        IF NEW.status='removed' THEN
+            -- Use wall-clock time after lock waits; transaction-start NOW()
+            -- could allow an invitation consumed before this removal to replay.
+            NEW.removed_at := CASE WHEN OLD.status='removed' THEN OLD.removed_at ELSE clock_timestamp() END;
+        ELSIF OLD.status<>'removed' THEN
+            NEW.removed_at := NULL;
+        END IF;
+    ELSIF TG_OP='INSERT' AND NEW.status='removed' THEN
+        NEW.removed_at := clock_timestamp();
     END IF;
-    NEW.updated_at := NOW();
+    NEW.updated_at := clock_timestamp();
     RETURN NEW;
 END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS membership_authority_version ON tenant_memberships;
@@ -1893,11 +1928,11 @@ BEGIN
         UPDATE node_sessions SET accepting_tasks=FALSE
          WHERE node_id IN (SELECT id FROM nodes WHERE tenant_id=NEW.tenant_id AND owner_user_id=NEW.user_id);
     END IF;
-    IF NEW.status <> 'active' OR (OLD.role='admin' AND NEW.role<>'admin') THEN
+    IF NEW.status <> 'active' OR (OLD.tenant_role='admin' AND NEW.tenant_role<>'admin') THEN
         UPDATE tenant_invitations
            SET status='revoked', revoked_at=NOW(), updated_at=NOW()
          WHERE tenant_id=NEW.tenant_id AND status='pending'
-           AND (invited_by_user_id=NEW.user_id OR (
+           AND (invited_by=NEW.user_id OR (
                NEW.status <> 'active' AND email=(
                    SELECT lower(btrim(email)) FROM users WHERE id=NEW.user_id
                )
@@ -1908,7 +1943,7 @@ BEGIN
     RETURN NEW;
 END; $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS membership_credentials_revoked ON tenant_memberships;
-CREATE TRIGGER membership_credentials_revoked AFTER UPDATE OF role,status ON tenant_memberships
+CREATE TRIGGER membership_credentials_revoked AFTER UPDATE OF tenant_role,status ON tenant_memberships
     FOR EACH ROW EXECUTE FUNCTION revoke_membership_credentials();
 
 -- Validate final transaction state, permitting atomic create and transfer.
@@ -1916,12 +1951,12 @@ CREATE OR REPLACE FUNCTION assert_identity_invariants() RETURNS TRIGGER AS $$
 BEGIN
     IF EXISTS (
         SELECT 1 FROM tenants t WHERE NOT EXISTS (
-            SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id
+            SELECT 1 FROM tenant_memberships m JOIN users owner_identity ON owner_identity.id=m.user_id
             WHERE m.tenant_id=t.id AND m.user_id=t.owner_user_id
-              AND m.role='admin' AND m.status='active' AND u.status='active'
+              AND m.tenant_role='admin' AND m.status='active' AND owner_identity.status='active'
         )
     ) THEN
-        RAISE EXCEPTION 'tenant owner must be an active user and active admin; last admin cannot be removed' USING ERRCODE='23514';
+        RAISE EXCEPTION 'tenant owner must be an active admin; last admin cannot be removed' USING ERRCODE='23514';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM users WHERE platform_role='root' AND status='active') THEN
         RAISE EXCEPTION 'at least one active root is required' USING ERRCODE='23514';
@@ -1935,7 +1970,7 @@ DROP TRIGGER IF EXISTS identity_tenants_guard ON tenants;
 CREATE CONSTRAINT TRIGGER identity_tenants_guard AFTER INSERT OR UPDATE OF owner_user_id,status OR DELETE ON tenants
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();
 DROP TRIGGER IF EXISTS identity_memberships_guard ON tenant_memberships;
-CREATE CONSTRAINT TRIGGER identity_memberships_guard AFTER INSERT OR UPDATE OF role,status OR DELETE ON tenant_memberships
+CREATE CONSTRAINT TRIGGER identity_memberships_guard AFTER INSERT OR UPDATE OF tenant_role,status,invited_by,joined_at,removed_at OR DELETE ON tenant_memberships
     DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION assert_identity_invariants();
 
 CREATE OR REPLACE FUNCTION reject_tenant_audit_mutation() RETURNS TRIGGER AS $$
@@ -2025,7 +2060,7 @@ BEGIN
         UPDATE node_sessions SET accepting_tasks=FALSE WHERE node_id IN (SELECT id FROM nodes WHERE owner_user_id=NEW.id);
         UPDATE tenant_invitations SET status='revoked',revoked_at=NOW(),updated_at=NOW()
           WHERE status='pending' AND (
-              invited_by_user_id=NEW.id OR email=lower(btrim(NEW.email))
+              invited_by=NEW.id OR email=lower(btrim(NEW.email))
           );
     END IF;
     RETURN NEW;

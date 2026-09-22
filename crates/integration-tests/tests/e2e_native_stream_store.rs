@@ -638,7 +638,7 @@ async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
     assert_eq!(unchanged.status, "queued");
     assert!(unchanged.assigned_node_id.is_none());
     a.pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
         [b.node.tenant_id.into(),a.caller_id.into()],
     )).await.unwrap();
     let second = b

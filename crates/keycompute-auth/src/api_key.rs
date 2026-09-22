@@ -321,7 +321,7 @@ impl ProduceAiKeyValidator {
             produce_ai_key_id: produce_ai_key.id,
             permissions,
             token_version: user.token_version,
-            membership_version: Some(membership.version),
+            membership_authz_version: Some(membership.authz_version),
             authz_version: Some(tenant.authz_version),
             user_info: Some(crate::UserInfo::new(
                 user.id,

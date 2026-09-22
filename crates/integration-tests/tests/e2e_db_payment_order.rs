@@ -467,7 +467,7 @@ async fn pending_payment_keeps_original_tenant_after_membership_changes() {
         &CreateTenantMembershipRequest {
             tenant_id: target.id,
             user_id: user.id,
-            role: TenantRole::Member,
+            tenant_role: TenantRole::Member,
         },
         &keycompute_db::AuditContext {
             actor_user_id: target.owner_user_id,
@@ -479,11 +479,12 @@ async fn pending_payment_keeps_original_tenant_after_membership_changes() {
     )
     .await
     .expect("target membership should be added");
-    TenantMembership::revoke(
+    TenantMembership::set_status(
         &membership_tx,
         source.id,
         user.id,
-        source_membership.version,
+        keycompute_types::MembershipStatus::Removed,
+        source_membership.authz_version,
         &keycompute_db::AuditContext {
             actor_user_id: source.owner_user_id,
             credential_kind: CredentialKind::Jwt,
@@ -493,7 +494,7 @@ async fn pending_payment_keeps_original_tenant_after_membership_changes() {
         },
     )
     .await
-    .expect("source membership should be revoked");
+    .expect("source membership should be removed");
     membership_tx
         .commit()
         .await

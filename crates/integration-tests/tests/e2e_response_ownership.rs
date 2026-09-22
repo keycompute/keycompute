@@ -682,7 +682,7 @@ async fn immutable_ownership_prevents_takeover_and_preserves_internal_settlement
     // A user moving does not move previously accepted resources or billing work.
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$2 AND user_id=$1",
+        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$2 AND user_id=$1",
         [f.owner.id.into(), f.owner.tenant_id.into()],
     ))
     .await
@@ -691,7 +691,7 @@ async fn immutable_ownership_prevents_takeover_and_preserves_internal_settlement
     let destination = create_test_tenant(&f.db, "response-moved", &f.run_id).await;
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
         [destination.id.into(), f.owner.id.into()],
     )).await.unwrap();
     let mut moved = f.owner.clone();
@@ -710,7 +710,7 @@ async fn immutable_ownership_prevents_takeover_and_preserves_internal_settlement
     );
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2",
+        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
         [f.owner.tenant_id.into(), f.owner.id.into()],
     ))
     .await

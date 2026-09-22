@@ -43,7 +43,7 @@ impl Fixture {
                 Some(user.tenant_id),
                 user.token_version,
                 Some(tenant.authz_version),
-                Some(membership.version),
+                Some(membership.authz_version),
                 3600,
             )
             .unwrap();
@@ -134,7 +134,7 @@ async fn role_change_does_not_keep_old_jwt_permissions() {
     assert!(f.verify().await);
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET role='admin' WHERE tenant_id=$2 AND user_id=$1",
+        "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$2 AND user_id=$1",
         [f.user.id.into(), f.user.tenant_id.into()],
     ))
     .await
@@ -150,14 +150,14 @@ async fn tenant_reassignment_rejects_the_old_jwt_even_without_a_version_change()
     assert!(f.verify().await);
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$2 AND user_id=$1",
+        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$2 AND user_id=$1",
         [f.user.id.into(), f.user.tenant_id.into()],
     ))
     .await
     .unwrap();
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($2,$1,'member','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($2,$1,'member','active')",
         [f.user.id.into(), other.id.into()],
     )).await.unwrap();
     assert!(!f.verify().await);

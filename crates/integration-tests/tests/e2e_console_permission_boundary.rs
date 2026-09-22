@@ -274,7 +274,7 @@ async fn personal_billing_scopes_records_counts_totals_and_models_identically() 
     let peer = create_test_user(&db, tenant.id, "bill-peer", &run).await;
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
         [other_tenant.id.into(), user.id.into()],
     ))
     .await
@@ -335,7 +335,7 @@ async fn personal_billing_scopes_records_counts_totals_and_models_identically() 
         // mutation is a membership operation, never a global user mutation.
         db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE tenant_memberships SET role=$3 WHERE tenant_id=$1 AND user_id=$2",
+            "UPDATE tenant_memberships SET tenant_role=$3 WHERE tenant_id=$1 AND user_id=$2",
             [
                 tenant.id.into(),
                 user.id.into(),

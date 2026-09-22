@@ -330,7 +330,7 @@ BEGIN
     IF v_system_tenant_id IS NULL THEN
         RAISE EXCEPTION 'system workspace belongs to another root; refuse to change its wallet';
     END IF;
-    INSERT INTO tenant_memberships(tenant_id,user_id,role,status)
+    INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status)
     VALUES(v_system_tenant_id,v_admin_id,'admin','active')
     ON CONFLICT(tenant_id,user_id) DO NOTHING;
 
@@ -528,8 +528,8 @@ BEGIN
             v_effective_from + interval '1 microsecond'
         );
     END IF;
-    INSERT INTO tenant_audit_events(scope_type,tenant_id,actor_user_id,credential_kind,actor_platform_role,
-        action,resource_type,resource_id,details,result)
+    INSERT INTO tenant_audit_events(scope_type,tenant_id,actor_user_id,credential_kind,platform_role,
+        action,resource_type,resource_id,metadata,result)
     VALUES('platform',NULL,v_admin_id,'system','root','user.recovery','user',v_admin_id::text,
         jsonb_build_object('reason','authorized local account recovery'),'success');
 END $bootstrap$;

@@ -181,7 +181,7 @@ impl Fixture {
             &CreateTenantMembershipRequest {
                 tenant_id: self.b.id,
                 user_id: member.id,
-                role: TenantRole::Member,
+                tenant_role: TenantRole::Member,
             },
             &audit(&self.b),
         )
@@ -400,7 +400,7 @@ async fn global_identity_can_select_only_existing_memberships_and_clear_selectio
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(a["selected_tenant"]["role"], "admin");
+    assert_eq!(a["selected_tenant"]["tenant_role"], "admin");
     let (status, b) = call(
         create_router(f.state.clone()),
         a["access_token"].as_str().unwrap(),
@@ -411,7 +411,7 @@ async fn global_identity_can_select_only_existing_memberships_and_clear_selectio
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(b["selected_tenant"]["role"], "member");
+    assert_eq!(b["selected_tenant"]["tenant_role"], "member");
     let (status, global_again) = call(
         create_router(f.state.clone()),
         b["access_token"].as_str().unwrap(),
@@ -446,7 +446,7 @@ async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
         f.a.id,
         user.id,
         TenantRole::Member,
-        before.version,
+        before.authz_version,
         &audit(&f.a),
     )
     .await
@@ -463,7 +463,7 @@ async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
         f.a.id,
         user.id,
         MembershipStatus::Suspended,
-        lowered.version,
+        lowered.authz_version,
         &audit(&f.a),
     )
     .await
@@ -478,7 +478,7 @@ async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
         f.a.id,
         user.id,
         MembershipStatus::Active,
-        paused.version,
+        paused.authz_version,
         &audit(&f.a),
     )
     .await

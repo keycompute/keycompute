@@ -36,7 +36,7 @@ pub struct AuthContext {
     pub produce_ai_key_id: Uuid,
     pub permissions: Vec<Permission>,
     pub token_version: i32,
-    pub membership_version: Option<i64>,
+    pub membership_authz_version: Option<i64>,
     pub authz_version: Option<i64>,
     pub user_info: Option<UserInfo>,
     pub tenant_info: Option<TenantInfo>,
@@ -52,7 +52,7 @@ impl AuthContext {
             produce_ai_key_id: Uuid::nil(),
             permissions: Vec::new(),
             token_version: 0,
-            membership_version: None,
+            membership_authz_version: None,
             authz_version: None,
             user_info: None,
             tenant_info: None,
@@ -68,7 +68,7 @@ impl AuthContext {
             produce_ai_key_id: Uuid::nil(),
             permissions: Vec::new(),
             token_version: 0,
-            membership_version: None,
+            membership_authz_version: None,
             authz_version: None,
             user_info: None,
             tenant_info: None,
@@ -271,7 +271,7 @@ impl AuthService {
                 })?;
             if identity.token_version != ctx.token_version
                 || Some(identity.authz_version) != ctx.authz_version
-                || Some(identity.membership_version) != ctx.membership_version
+                || Some(identity.membership_authz_version) != ctx.membership_authz_version
             {
                 return Err(KeyComputeError::AuthError(
                     "authorization version is stale".into(),

@@ -16,12 +16,12 @@ use uuid::Uuid;
 pub struct TenantInvitation {
     pub id: Uuid,
     pub tenant_id: Uuid,
-    pub invited_by_user_id: Uuid,
+    pub invited_by: Uuid,
     pub email: String,
-    pub role: String,
+    pub tenant_role: String,
     pub status: String,
     pub expires_at: DateTime<Utc>,
-    pub accepted_by_user_id: Option<Uuid>,
+    pub accepted_by: Option<Uuid>,
     pub accepted_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -40,9 +40,9 @@ impl std::fmt::Debug for TenantInvitation {
 #[serde(deny_unknown_fields)]
 pub struct CreateTenantInvitationRequest {
     pub tenant_id: Uuid,
-    pub invited_by_user_id: Uuid,
+    pub invited_by: Uuid,
     pub email: String,
-    pub role: TenantRole,
+    pub tenant_role: TenantRole,
     pub expires_at: DateTime<Utc>,
 }
 #[derive(Clone)]
@@ -70,8 +70,8 @@ impl TenantInvitation {
     pub fn status(&self) -> Result<TenantInvitationStatus, DbError> {
         self.status.parse().map_err(DbError::Other)
     }
-    pub fn role(&self) -> Result<TenantRole, DbError> {
-        self.role.parse().map_err(DbError::Other)
+    pub fn tenant_role(&self) -> Result<TenantRole, DbError> {
+        self.tenant_role.parse().map_err(DbError::Other)
     }
     pub async fn create(
         tx: &DatabaseTransaction,
@@ -80,7 +80,7 @@ impl TenantInvitation {
     ) -> Result<CreatedTenantInvitation, DbError> {
         lock_identity_admin(tx).await?;
         let actor = actor.require_tenant_admin(tx, req.tenant_id).await?;
-        if actor.actor_user_id != req.invited_by_user_id {
+        if actor.actor_user_id != req.invited_by {
             return Err(DbError::Other("invitation actor mismatch".into()));
         }
         let email = normalized_email(&req.email)?;
@@ -98,7 +98,7 @@ impl TenantInvitation {
             "SELECT * FROM tenant_invitations WHERE tenant_id=$1 AND email=$2 AND status='pending' FOR UPDATE",
             [req.tenant_id.into(),email.clone().into()],
         )).one(tx).await? {
-            if existing.role!=req.role.as_str() {
+            if existing.tenant_role!=req.tenant_role.as_str() {
                 return Err(DbError::Other("a pending invitation already exists with a different role".into()));
             }
             return Ok(CreatedTenantInvitation { invitation:existing, token:None });
@@ -108,8 +108,8 @@ impl TenantInvitation {
         let token = hex::encode(bytes);
         let hash = hex::encode(Sha256::digest(token.as_bytes()));
         let invitation=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_invitations(tenant_id,invited_by_user_id,email,role,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
-            [req.tenant_id.into(),actor.actor_user_id.into(),email.into(),req.role.as_str().into(),hash.into(),req.expires_at.into()],
+            "INSERT INTO tenant_invitations(tenant_id,invited_by,email,tenant_role,token_hash,expires_at) VALUES($1,$2,$3,$4,$5,$6) RETURNING *",
+            [req.tenant_id.into(),actor.actor_user_id.into(),email.into(),req.tenant_role.as_str().into(),hash.into(),req.expires_at.into()],
         )).one(tx).await?.ok_or_else(invalid)?;
         TenantAuditEvent::append(
             tx,
@@ -120,7 +120,7 @@ impl TenantInvitation {
             "tenant_invitation",
             Some(&invitation.id.to_string()),
             AuditResult::Success,
-            serde_json::json!({"email":invitation.email,"role":invitation.role}),
+            serde_json::json!({"email":invitation.email,"tenant_role":invitation.tenant_role}),
         )
         .await?;
         Ok(CreatedTenantInvitation {
@@ -166,7 +166,7 @@ impl TenantInvitation {
         let invitation = Self::find_by_token_hash(tx, tenant, &hash)
             .await?
             .ok_or_else(invalid)?;
-        let mut users = vec![user, invitation.invited_by_user_id];
+        let mut users = vec![user, invitation.invited_by];
         users.sort_unstable();
         users.dedup();
         tx.query_all(Statement::from_sql_and_values(
@@ -194,15 +194,15 @@ impl TenantInvitation {
         if !verified || current_email != invitation.email {
             return Err(invalid());
         }
-        super::tenant_membership::TenantMembership::find(tx, tenant, invitation.invited_by_user_id)
+        super::tenant_membership::TenantMembership::find(tx, tenant, invitation.invited_by)
             .await?
-            .filter(|member| member.status == "active" && member.role == "admin")
+            .filter(|member| member.status == "active" && member.tenant_role == "admin")
             .ok_or_else(invalid)?;
         let existing =
             super::tenant_membership::TenantMembership::find_any(tx, tenant, user).await?;
         if let Some(existing) = &existing
             && existing.status == "active"
-            && existing.role != invitation.role
+            && existing.tenant_role != invitation.tenant_role
         {
             return Err(DbError::Other(
                 "existing member role must be changed through member administration".into(),
@@ -210,7 +210,7 @@ impl TenantInvitation {
         }
         // Use the wall clock again after lock waits, not transaction-start NOW().
         let accepted=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "UPDATE tenant_invitations SET status='accepted',accepted_by_user_id=$3,accepted_at=clock_timestamp(),updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND token_hash=$4 AND status='pending' AND expires_at>clock_timestamp() RETURNING *",
+            "UPDATE tenant_invitations SET status='accepted',accepted_by=$3,accepted_at=clock_timestamp(),updated_at=clock_timestamp() WHERE tenant_id=$1 AND id=$2 AND token_hash=$4 AND status='pending' AND expires_at>clock_timestamp() RETURNING *",
             [tenant.into(),invitation.id.into(),user.into(),hash.into()],
         )).one(tx).await?.ok_or_else(invalid)?;
         if existing
@@ -218,13 +218,13 @@ impl TenantInvitation {
             .is_none_or(|member| member.status != "active")
         {
             tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-                "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,$3,'active') ON CONFLICT(tenant_id,user_id) DO UPDATE SET role=EXCLUDED.role,status='active' WHERE tenant_memberships.status<>'active'",
-                [tenant.into(),user.into(),invitation.role.clone().into()],
+                "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status,invited_by,joined_at,removed_at) VALUES($1,$2,$3,'active',$4,$5,NULL) ON CONFLICT(tenant_id,user_id) DO UPDATE SET tenant_role=EXCLUDED.tenant_role,status='active',invited_by=EXCLUDED.invited_by,joined_at=EXCLUDED.joined_at,removed_at=NULL WHERE tenant_memberships.status<>'active'",
+                [tenant.into(),user.into(),invitation.tenant_role.clone().into(),invitation.invited_by.into(),accepted.accepted_at.into()],
             )).await?;
         }
         let actor = AuditContext {
             actor_platform_role: current.platform_role()?,
-            actor_tenant_role: Some(invitation.role()?),
+            actor_tenant_role: Some(invitation.tenant_role()?),
             ..*actor
         };
         TenantAuditEvent::append(
@@ -236,7 +236,7 @@ impl TenantInvitation {
             "tenant_invitation",
             Some(&invitation.id.to_string()),
             AuditResult::Success,
-            serde_json::json!({"user_id":user,"role":invitation.role}),
+            serde_json::json!({"user_id":user,"tenant_role":invitation.tenant_role}),
         )
         .await?;
         TenantAuditEvent::append(
@@ -248,7 +248,7 @@ impl TenantInvitation {
             "tenant_membership",
             Some(&user.to_string()),
             AuditResult::Success,
-            serde_json::json!({"role":accepted.role}),
+            serde_json::json!({"tenant_role":accepted.tenant_role}),
         )
         .await?;
         Ok(accepted)
@@ -336,8 +336,8 @@ impl TenantInvitation {
             return Err(DbError::Other("tenant admin required".into()));
         }
         Ok(Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT * FROM tenant_invitations WHERE tenant_id=$1 ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3",
-            [scope.tenant_id().into(),limit.clamp(1,100).into(),offset.max(0).into()],
+            "SELECT i.* FROM tenant_invitations i WHERE i.tenant_id=$1 AND EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' AND t.status='active') ORDER BY i.created_at DESC,i.id DESC LIMIT $3 OFFSET $4",
+            [scope.tenant_id().into(),scope.user_id().into(),limit.clamp(1,100).into(),offset.max(0).into()],
         )).all(db).await?)
     }
 }
@@ -357,12 +357,12 @@ mod tests {
         let invitation = TenantInvitation {
             id: Uuid::new_v4(),
             tenant_id: Uuid::new_v4(),
-            invited_by_user_id: Uuid::new_v4(),
+            invited_by: Uuid::new_v4(),
             email: "a@b.invalid".into(),
-            role: "member".into(),
+            tenant_role: "member".into(),
             status: "pending".into(),
             expires_at: now,
-            accepted_by_user_id: None,
+            accepted_by: None,
             accepted_at: None,
             revoked_at: None,
             created_at: now,

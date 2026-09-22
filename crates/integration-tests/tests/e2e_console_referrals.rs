@@ -63,7 +63,7 @@ impl Fixture {
         let tenant = create_test_tenant(&db, "referred", &seed).await.id;
         let beneficiary = create_test_user(&db, owner.id, "referrer", &seed).await;
         db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
             [tenant.into(),beneficiary.id.into()],
         )).await.unwrap();
         let mut referred_ids = Vec::new();
@@ -79,7 +79,7 @@ impl Fixture {
             .unwrap();
             db.execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,'member','active')",
+        "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'member','active')",
                 [tenant.into(), user.id.into()],
             )).await.unwrap();
             referred_ids.push(user.id);

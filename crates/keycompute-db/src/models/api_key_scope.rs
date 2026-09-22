@@ -61,7 +61,7 @@ fn read_query(
             "k.user_id=$2 AND EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.status='active' AND u.status='active' AND t.status='active')"
         }
         Scope::Tenant(_) => {
-            "EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.role='admin' AND m.status='active' AND u.status='active' AND t.status='active')"
+            "EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.tenant_role='admin' AND m.status='active' AND u.status='active' AND t.status='active')"
         }
         Scope::Platform(_, _) => {
             "EXISTS (SELECT 1 FROM users u WHERE u.id=$2 AND u.platform_role='root' AND u.status='active')"
@@ -191,7 +191,7 @@ async fn lock_authority(
         }
         Scope::Tenant(_) => {
             member
-                .filter(|m| m.status == "active" && m.role == "admin")
+                .filter(|m| m.status == "active" && m.tenant_role == "admin")
                 .ok_or_else(denied)?;
         }
         Scope::Platform(_, _) => {

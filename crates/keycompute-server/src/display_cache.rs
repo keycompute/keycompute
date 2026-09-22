@@ -119,7 +119,7 @@ impl DisplayCache {
                 .to_string(),
             auth.credential_kind.as_str().to_string(),
             auth.token_version.to_string(),
-            auth.membership_version.to_string(),
+            auth.membership_authz_version.to_string(),
             auth.authz_version.to_string(),
             format!("{:?}", auth.permissions),
             resource.to_owned(),

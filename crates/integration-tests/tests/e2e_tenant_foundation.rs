@@ -37,7 +37,7 @@ async fn global_identity_has_explicit_memberships_and_single_use_invitations() {
         &keycompute_db::CreateTenantMembershipRequest {
             tenant_id: second_tenant.id,
             user_id: member.id,
-            role: TenantRole::Admin,
+            tenant_role: TenantRole::Admin,
         },
         &member_audit,
     )
@@ -74,19 +74,19 @@ async fn global_identity_has_explicit_memberships_and_single_use_invitations() {
     let tx = db.begin().await.unwrap();
     tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2",
+        "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
         [tenant.id.into(), member.id.into()],
     ))
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let revoked = TenantMembership::find_any(&db, tenant.id, member.id)
+    let removed = TenantMembership::find_any(&db, tenant.id, member.id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
-        revoked.membership_status().unwrap(),
-        keycompute_types::MembershipStatus::Revoked
+        removed.membership_status().unwrap(),
+        keycompute_types::MembershipStatus::Removed
     );
 
     let invitee = User::create(
@@ -104,9 +104,9 @@ async fn global_identity_has_explicit_memberships_and_single_use_invitations() {
         &tx,
         &CreateTenantInvitationRequest {
             tenant_id: second_tenant.id,
-            invited_by_user_id: second_tenant.owner_user_id,
+            invited_by: second_tenant.owner_user_id,
             email: invitee.email.clone(),
-            role: TenantRole::Member,
+            tenant_role: TenantRole::Member,
             expires_at: Utc::now() + Duration::hours(1),
         },
         &audit,
@@ -181,7 +181,7 @@ async fn tenant_owner_remains_an_active_admin_under_last_admin_changes() {
     let other = create_test_user(&db, tenant.id, "last-admin-other", &run).await;
     db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenant_memberships SET role='admin' WHERE tenant_id=$1 AND user_id=$2",
+        "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
         [tenant.id.into(), other.id.into()],
     ))
     .await
@@ -205,7 +205,8 @@ async fn tenant_owner_remains_an_active_admin_under_last_admin_changes() {
     assert!(
         active_admins
             .iter()
-            .any(|m| m.user_id == tenant.owner_user_id && m.role == TenantRole::Admin.as_str())
+            .any(|m| m.user_id == tenant.owner_user_id
+                && m.tenant_role == TenantRole::Admin.as_str())
     );
     cleanup_test_data(&db, &run).await.unwrap();
 }

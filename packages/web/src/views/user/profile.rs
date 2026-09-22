@@ -217,7 +217,7 @@ pub fn UserProfile() -> Element {
                     option { value: "", "Global session (no tenant selected)" }
                     for membership in memberships.iter().filter(|m| m.status.as_deref() == Some("active")) {
                         option { value: "{membership.tenant_id}",
-                            "{membership.tenant_name.as_deref().unwrap_or(&membership.tenant_id)} ({membership.role})"
+                            "{membership.tenant_name.as_deref().unwrap_or(&membership.tenant_id)} ({membership.tenant_role})"
                         }
                     }
                 }

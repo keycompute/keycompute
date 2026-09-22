@@ -84,7 +84,7 @@ impl TestIdentity {
             user
         };
         tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,role,status) VALUES($1,$2,$3,'active')",
+            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,$3,'active')",
             [tenant.id.into(),user.id.into(),tenant_role.as_str().into()],
         )).await.unwrap();
         tx.commit().await.unwrap();

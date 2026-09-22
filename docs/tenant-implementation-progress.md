@@ -2,13 +2,39 @@
 
 The current acceptance contract is the latest phase **0–8** plan. Older
 phase-numbered entries below are historical delivery records. The current
-phase-1 field/provenance alignment is open; provider/binding/pricing scopes,
+phase-1 field/provenance alignment has passed local acceptance; provider/binding/pricing scopes,
 platform/tenant route separation, member/invitation APIs, complete resource
 management, client UI and final deployment remain unaccepted.
 
 Latest confirmed baseline: `14e88eb`, CI #105 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
 drafts are no longer present and are not an implementation dependency.
+
+
+## Current phase 1 — final contract alignment accepted locally
+
+Memberships now use `tenant_role`, `authz_version`, `active/suspended/removed`,
+`invited_by`, `joined_at`, and `removed_at`, with no old-column or enum alias.
+Invitation and audit models, SQL, JWT membership revisions, client DTOs, reset
+helpers and regression fixtures use the same final names. Removing a member
+retains resource and billing ownership and permanently revokes old credentials.
+A rejoin requires a newly accepted invitation; the same inviter is allowed,
+but changing inviter metadata or passing through suspended cannot restore access.
+Current member/invitation/audit reads validate the actor in their data query.
+
+Independent review caught a draft regression that removed global-user activity
+from the owner invariant and incorrectly changed a script assertion to accept
+owner suspension. Both were restored; suspension remains allowed after explicit
+ownership transfer. The PostgreSQL tests also verify last-root protection,
+concurrent root demotion, immutable audit retention and safe schema replay.
+
+Final validation for this source set: `cargo test --workspace` **2,426 passed,
+0 failed, 30 default ignored**, with desktop/mobile included; all-target/all-feature
+workspace Clippy with `-D warnings`, formatting and whitespace checks passed.
+The isolated DAO suite and the 11-check schema script passed. No production
+database, JWT trust, running service or deployment was changed. CI is tracked
+separately from local acceptance. This does not close phases 3–8; prepared
+provider/pricing/control/operations/Responses/UI modules are not live code yet.
 
 # Tenant subsystem implementation status
 

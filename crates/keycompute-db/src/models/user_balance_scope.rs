@@ -39,7 +39,7 @@ fn statement(scope: Scope, owners: Vec<Uuid>) -> Result<Statement, DbError> {
             "m.user_id=$2 AND m.status='active' AND u.status='active' AND EXISTS (SELECT 1 FROM tenants t WHERE t.id=$1 AND t.status='active')"
         }
         Scope::Tenant(_) => {
-            "EXISTS (SELECT 1 FROM tenant_memberships am JOIN users au ON au.id=am.user_id JOIN tenants at ON at.id=am.tenant_id WHERE am.tenant_id=$1 AND am.user_id=$2 AND am.role='admin' AND am.status='active' AND au.status='active' AND at.status='active')"
+            "EXISTS (SELECT 1 FROM tenant_memberships am JOIN users au ON au.id=am.user_id JOIN tenants at ON at.id=am.tenant_id WHERE am.tenant_id=$1 AND am.user_id=$2 AND am.tenant_role='admin' AND am.status='active' AND au.status='active' AND at.status='active')"
         }
         Scope::Platform(_, _) => {
             "EXISTS (SELECT 1 FROM users au WHERE au.id=$2 AND au.status='active' AND au.platform_role='root')"
