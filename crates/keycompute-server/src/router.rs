@@ -501,7 +501,11 @@ pub fn create_router(state: AppState) -> Router {
     let admin_tenant_routes = Router::new()
         .route("/api/v1/tenants", get(list_tenants).post(create_tenant))
         .route(
-            "/api/v1/tenants/{id}",
+            "/api/v1/platform/tenants",
+            get(list_tenants).post(create_tenant),
+        )
+        .route(
+            "/api/v1/platform/tenants/{id}",
             put(update_tenant).delete(delete_tenant),
         );
 
@@ -760,6 +764,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(anthropic_routes)
         .merge(user_routes)
         .merge(global_self_routes)
+        .merge(crate::handlers::tenant_control::router())
         .merge(admin_routes)
         .merge(billing_routes)
         .merge(debug_routes)
@@ -799,7 +804,16 @@ pub fn create_router(state: AppState) -> Router {
         ))
         .layer(axum::middleware::from_fn(request_logger))
         .layer(from_fn_with_state(state.clone(), trace_id_middleware))
-        .layer(TraceLayer::new_for_http())
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |request: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!(
+                    "http_request",
+                    method = %request.method(),
+                    uri = %crate::middleware::request_log_path(request.uri()),
+                    version = ?request.version(),
+                )
+            },
+        ))
         .layer(cors_layer())
         .with_state(state)
 }

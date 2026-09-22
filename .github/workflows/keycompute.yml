@@ -456,6 +456,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Verify capability URL log redaction
+        timeout-minutes: 5
+        run: python3 scripts/tests/nginx_capability_logs_test.py nginx:1.27-alpine
+
       - name: Verify production Web image
         uses: docker/build-push-action@v7
         timeout-minutes: 45

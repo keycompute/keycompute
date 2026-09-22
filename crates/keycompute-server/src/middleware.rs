@@ -769,11 +769,24 @@ fn anthropic_error_type(status: StatusCode) -> &'static str {
     }
 }
 
+/// Log a resource path without invitation/reset capabilities or query values.
+/// The same projection is used by request logs, spans and maintenance logs.
+pub(crate) fn request_log_path(uri: &axum::http::Uri) -> &str {
+    let path = uri.path();
+    if path.starts_with("/api/v1/invitations/") {
+        "/api/v1/invitations/[redacted]/accept"
+    } else if path.starts_with("/api/v1/auth/verify-reset-token/") {
+        "/api/v1/auth/verify-reset-token/[redacted]"
+    } else {
+        path
+    }
+}
+
 /// 请求日志中间件
 pub async fn request_logger(req: Request, next: Next) -> Response {
     let start = Instant::now();
     let method = req.method().clone();
-    let uri = req.uri().clone();
+    let uri = request_log_path(req.uri()).to_owned();
 
     // 提前克隆 request_id，避免借用冲突
     let request_id = req
@@ -1823,7 +1836,7 @@ pub async fn maintenance_mode_middleware(
     let maintenance_message = maintenance_mode_message(&state).await;
 
     warn!(
-        path = %path,
+        path = %request_log_path(req.uri()),
         "Request blocked due to maintenance mode"
     );
 
@@ -1863,6 +1876,22 @@ fn is_maintenance_excluded_path(path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capability_paths_and_query_values_never_enter_request_logs() {
+        for path in [
+            "/api/v1/invitations/private-token/accept?token=private-query",
+            "/api/v1/auth/verify-reset-token/private-token?token=private-query",
+        ] {
+            let uri = path.parse().unwrap();
+            let safe = super::request_log_path(&uri);
+            assert!(!safe.contains("private-token"));
+            assert!(!safe.contains("private-query"));
+            assert!(safe.contains("[redacted]"));
+        }
+        let uri = "/api/v1/me/profile?email=private-email".parse().unwrap();
+        assert_eq!(super::request_log_path(&uri), "/api/v1/me/profile");
+    }
+
     use super::*;
     use crate::state::{AppStateConfig, JwtConfig};
     use axum::http::Request;

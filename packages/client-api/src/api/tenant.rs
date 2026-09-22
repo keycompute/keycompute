@@ -41,9 +41,9 @@ impl TenantApi {
         token: &str,
     ) -> Result<TenantPage> {
         let path = if let Some(p) = params {
-            format!("/api/v1/tenants?{}", p.to_query_string())
+            format!("/api/v1/platform/tenants?{}", p.to_query_string())
         } else {
-            "/api/v1/tenants".to_string()
+            "/api/v1/platform/tenants".to_string()
         };
         self.client.get_json(&path, Some(token)).await
     }
@@ -84,7 +84,7 @@ impl TenantApi {
         token: &str,
     ) -> Result<TenantInfo> {
         self.client
-            .post_json("/api/v1/tenants", req, Some(token))
+            .post_json("/api/v1/platform/tenants", req, Some(token))
             .await
     }
 
@@ -95,7 +95,7 @@ impl TenantApi {
         req: &UpdateTenantRequest,
         token: &str,
     ) -> Result<TenantInfo> {
-        let path = format!("/api/v1/tenants/{}", tenant_id);
+        let path = format!("/api/v1/platform/tenants/{}", tenant_id);
         self.client.put_json(&path, req, Some(token)).await
     }
 
@@ -105,7 +105,7 @@ impl TenantApi {
         tenant_id: &str,
         token: &str,
     ) -> Result<crate::api::common::MessageResponse> {
-        let path = format!("/api/v1/tenants/{}", tenant_id);
+        let path = format!("/api/v1/platform/tenants/{}", tenant_id);
         self.client.delete_json(&path, Some(token)).await
     }
 }

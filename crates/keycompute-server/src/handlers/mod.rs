@@ -2902,3 +2902,5 @@ mod tests {
 }
 
 pub mod console_display;
+
+pub mod tenant_control;

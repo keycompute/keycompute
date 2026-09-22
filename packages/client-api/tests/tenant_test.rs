@@ -16,7 +16,7 @@ async fn test_list_tenants_success() {
     let tenant_api = TenantApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/tenants"))
+        .and(path("/api/v1/platform/tenants"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "tenants": [
             {
@@ -71,7 +71,7 @@ async fn test_list_tenants_without_pagination_collects_all_filtered_pages() {
 
     for (page, id) in [(1, "tenant_001"), (2, "tenant_002")] {
         Mock::given(method("GET"))
-            .and(path("/api/v1/tenants"))
+            .and(path("/api/v1/platform/tenants"))
             .and(query_param("search", "研发 租户"))
             .and(query_param("page", page.to_string()))
             .and(query_param("page_size", "100"))
@@ -114,7 +114,7 @@ async fn test_list_tenants_empty() {
     let tenant_api = TenantApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/tenants"))
+        .and(path("/api/v1/platform/tenants"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "tenants": [],
             "total": 0,
@@ -139,7 +139,7 @@ async fn test_list_tenants_with_pagination() {
     let tenant_api = TenantApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/tenants"))
+        .and(path("/api/v1/platform/tenants"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "tenants": [
             {
@@ -174,7 +174,7 @@ async fn test_list_tenants_unauthorized() {
     let tenant_api = TenantApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/tenants"))
+        .and(path("/api/v1/platform/tenants"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "Unauthorized"
         })))
@@ -192,7 +192,7 @@ async fn test_list_tenants_forbidden() {
     let tenant_api = TenantApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/tenants"))
+        .and(path("/api/v1/platform/tenants"))
         .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
             "error": "Admin access required"
         })))
@@ -211,7 +211,7 @@ async fn test_create_tenant_serializes_optional_slug_without_description() {
     let (client, mock_server) = create_test_client().await;
     let tenant_api = TenantApi::new(&client);
     Mock::given(method("POST"))
-        .and(path("/api/v1/tenants"))
+        .and(path("/api/v1/platform/tenants"))
         .and(body_json(serde_json::json!({
             "name": "Research Center",
             "slug": "research-center"
@@ -258,7 +258,7 @@ async fn test_update_tenant_status_and_delete() {
     let (client, mock_server) = create_test_client().await;
     let tenant_api = TenantApi::new(&client);
     Mock::given(method("PUT"))
-        .and(path("/api/v1/tenants/tenant_001"))
+        .and(path("/api/v1/platform/tenants/tenant_001"))
         .and(body_json(serde_json::json!({"status": "inactive"})))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "tenant_001",
@@ -275,7 +275,7 @@ async fn test_update_tenant_status_and_delete() {
         .mount(&mock_server)
         .await;
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/tenants/tenant_001"))
+        .and(path("/api/v1/platform/tenants/tenant_001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "message": "Tenant deleted successfully"
         })))

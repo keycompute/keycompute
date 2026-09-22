@@ -3,10 +3,11 @@
 The current acceptance contract is the latest phase **0–8** plan. Older
 phase-numbered entries below are historical delivery records. The current
 phase-1 field/provenance alignment has passed local acceptance; provider/binding/pricing scopes,
-platform/tenant route separation, member/invitation APIs, complete resource
-management, client UI and final deployment remain unaccepted.
+complete platform/resource route separation, remaining resource management,
+client UI and final deployment remain unaccepted. Tenant control/member/invitation
+APIs have passed the acceptance gate recorded below.
 
-Latest confirmed baseline: `14e88eb`, CI #105 success. The current checkout
+Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
 drafts are no longer present and are not an implementation dependency.
 
@@ -35,6 +36,43 @@ The isolated DAO suite and the 11-check schema script passed. No production
 database, JWT trust, running service or deployment was changed. CI is tracked
 separately from local acceptance. This does not close phases 3–8; prepared
 provider/pricing/control/operations/Responses/UI modules are not live code yet.
+
+## Current phases 3/4 — tenant control API accepted
+
+Canonical tenant context/configuration, member list/detail/update/removal,
+invitation list/create/revoke/accept, ownership transfer and tenant audit routes
+are now mounted under `/api/v1/tenants/{tenant_id}/**`. The path must match
+the selected verified membership. Global root authority does not substitute
+for tenant membership. Root tenant lifecycle routes and client calls use
+`/api/v1/platform/tenants`; the old collection alias retains the same root
+authorization, not an old role interpretation.
+
+Writes recheck signed user/member/tenant versions under retained locks and
+commit their audit with the change. Foreign member identifiers cannot lock
+unrelated user rows. Accepted writes fence display caches; rejected writes
+do not evict them. Personal resource scopes remain unchanged. Invitation
+acceptance checks the current signed user version after lock waits.
+
+Invitations retain hash-only one-time tokens and verified-email acceptance.
+Notification success, failure, missing configuration and duplicate-pending
+results are explicit; only initial creation returns a recovery link. Real
+loopback SMTP tests verify successful delivery and failures after commit.
+Request logs, tracing spans and nginx access/error paths protect invitation
+and reset capabilities. A network-disabled nginx test verifies 502 failures
+without leaking capability, query or Referer values; it also runs in CI.
+
+Final full workspace: **2,446 passed, 0 failed, 30 default ignored**,
+including desktop/mobile. All sixteen new control/invitation integration
+tests also pass with eight threads. Strict all-target/all-feature Clippy
+(`-D warnings`), formatting, whitespace and reviewed-source hashes passed.
+An optional additional invitation-audit fault-injection test was not written
+after a tool safety rejection and is not counted as coverage. Repeated review
+found no remaining actionable issue in this accepted control API slice.
+
+This does not close all resource routing or the complete subsystem: provider,
+binding, pricing, tenant financial/node/distribution/Responses administration,
+operator allowlists, full client UI and final release gates remain. No
+production data, credentials, running service or deployment was changed.
 
 # Tenant subsystem implementation status
 
