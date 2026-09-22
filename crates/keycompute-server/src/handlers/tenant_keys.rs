@@ -32,6 +32,7 @@ use keycompute_db::{
     },
 };
 use keycompute_types::TenantScope;
+use sea_orm::{DatabaseTransaction, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -177,6 +178,24 @@ fn pool(state: &AppState) -> Result<&keycompute_db::DbRouter> {
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::ServiceUnavailable("Tenant key storage unavailable".into()))
+}
+
+// Actual key mutations retain their validated locks until the display cache
+// is fenced and the outer transaction commits. Denied operations never flush
+// cached snapshots; uncertain commit results remain conservatively fenced.
+async fn key_mutation_transaction(state: &AppState) -> Result<DatabaseTransaction> {
+    pool(state)?
+        .begin()
+        .await
+        .map_err(keycompute_db::DbError::from)
+        .map_err(map_db_error)
+}
+async fn commit_key_mutation(state: &AppState, tx: DatabaseTransaction) -> Result<()> {
+    let _fence = state.display_cache.mutation_guard();
+    tx.commit()
+        .await
+        .map_err(keycompute_db::DbError::from)
+        .map_err(map_db_error)
 }
 
 fn snapshot(auth: &ConsoleAuth) -> TenantAuthzSnapshot {
@@ -349,8 +368,9 @@ pub async fn patch_tenant_key(
         name: request.name,
         expires_at: request.expires_at,
     };
+    let tx = key_mutation_transaction(&state).await?;
     let updated = key_issuance::update_key(
-        pool(&state)?.write_conn(),
+        &tx,
         access.scope(),
         snapshot(access.auth()),
         path.id,
@@ -359,6 +379,7 @@ pub async fn patch_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx).await?;
     Ok(Json(key_metadata(updated)))
 }
 
@@ -370,8 +391,9 @@ pub async fn revoke_tenant_key(
 ) -> Result<Json<KeyMutationResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
+    let tx = key_mutation_transaction(&state).await?;
     let result = key_issuance::remove_key(
-        pool(&state)?.write_conn(),
+        &tx,
         access.scope(),
         snapshot(access.auth()),
         path.id,
@@ -380,6 +402,7 @@ pub async fn revoke_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx).await?;
     Ok(Json(KeyMutationResponse {
         success: true,
         key: key_metadata_from_removal(&result),
@@ -403,8 +426,9 @@ pub async fn delete_tenant_key(
 ) -> Result<Json<KeyMutationResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
+    let tx = key_mutation_transaction(&state).await?;
     let result = key_issuance::remove_key(
-        pool(&state)?.write_conn(),
+        &tx,
         access.scope(),
         snapshot(access.auth()),
         path.id,
@@ -413,6 +437,7 @@ pub async fn delete_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx).await?;
     Ok(Json(KeyMutationResponse {
         success: true,
         key: key_metadata_from_removal(&result),
@@ -594,8 +619,9 @@ pub async fn claim_my_key_issuance(
     State(state): State<AppState>,
 ) -> Result<Response> {
     let scope = self_mutation_scope(&auth)?;
+    let tx = key_mutation_transaction(&state).await?;
     let claimed = key_issuance::claim(
-        pool(&state)?.write_conn(),
+        &tx,
         scope,
         snapshot(&auth),
         path.id,
@@ -609,6 +635,7 @@ pub async fn claim_my_key_issuance(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx).await?;
     Ok((
         [
             (header::CACHE_CONTROL, "private, no-store"),

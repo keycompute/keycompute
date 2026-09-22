@@ -826,3 +826,82 @@ async fn expired_issuance_never_creates_a_credential() {
     );
     f.guard.cleanup().await.unwrap();
 }
+
+#[tokio::test]
+async fn committed_key_claim_and_admin_revocation_refresh_cached_owner_dashboard() {
+    let mut f = Fixture::new().await;
+    let intent = f.issue().await;
+    let owner = f.token(f.a.id, f.owner.id).await;
+    let admin = f.token(f.a.id, f.a.owner_user_id).await;
+    let dashboard = "/api/v1/dashboard/overview";
+    let (status, initial, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{initial}");
+    assert_eq!(initial["active_key_count"], 0);
+    let (_, cached, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
+    assert_eq!(cached["active_key_count"], 0);
+    assert!(f.state.display_cache.metrics()["hit"].as_u64().unwrap() > 0);
+    let peer = f.token(f.a.id, f.peer.id).await;
+    let origin_before = f.state.display_cache.metrics()["origin"].clone();
+    assert_eq!(
+        request(
+            &f.state,
+            "POST",
+            &format!("/api/v1/me/key-issuance/{}/claim", intent.id),
+            &peer,
+            Value::Null
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    request(&f.state, "GET", dashboard, &owner, Value::Null).await;
+    assert_eq!(
+        f.state.display_cache.metrics()["origin"],
+        origin_before,
+        "denied claims must not flush cached snapshots"
+    );
+    let (status, claimed, _) = request(
+        &f.state,
+        "POST",
+        &format!("/api/v1/me/key-issuance/{}/claim", intent.id),
+        &owner,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, current, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
+    assert_eq!(
+        current["active_key_count"], 1,
+        "committed claim must fence the cached owner view"
+    );
+    let key_id = id(&claimed["key_id"]);
+    let key_path = format!("/api/v1/tenants/{}/keys/{key_id}", f.a.id);
+    let (_, metadata, _) = request(&f.state, "GET", &key_path, &admin, Value::Null).await;
+    let (status, value, _) = request(
+        &f.state,
+        "PATCH",
+        &key_path,
+        &admin,
+        json!({"expected_updated_at":metadata["updated_at"],"name":"Updated dashboard key"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    let (_, current, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
+    assert_eq!(current["active_keys"][0]["name"], "Updated dashboard key");
+
+    let (status, _, _) = request(
+        &f.state,
+        "POST",
+        &format!("/api/v1/tenants/{}/keys/{key_id}/revoke", f.a.id),
+        &admin,
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, current, _) = request(&f.state, "GET", dashboard, &owner, Value::Null).await;
+    assert_eq!(
+        current["active_key_count"], 0,
+        "committed revocation must fence the cached owner view"
+    );
+    f.guard.cleanup().await.unwrap();
+}

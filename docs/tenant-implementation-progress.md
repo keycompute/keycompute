@@ -214,6 +214,34 @@ claim concurrency and atomic rotation tests passed. Node/task/distribution/
 Responses administration, remaining platform/operator routing, client UI and
 final release gates are still open. CI is verified separately after the push.
 
+## Key-pool cache and CI112 follow-up accepted locally
+
+Actual key claims, metadata updates, revocations and removals now retain an
+outer transaction until the established display-cache mutation guard fences
+commit/refill. A secret is never returned before that outer commit. The real
+cache-hit regression first reproduced a stale zero active-key count after
+claim; it now verifies claim, rename and revocation refresh while denied peer
+claims leave cached snapshots intact. This preserves the presentation cache's
+existing cross-instance maximum five-second TTL; inference authentication does
+not use that cache and continues to validate current credentials in the database.
+
+CI112 failed before the lifecycle isolation assertion: start_request timed out
+while preparing one of five request fixtures. The test now inserts the same
+schema-constrained initial rows in one bounded setup operation. No production
+tracing code or its 250 ms timeout was changed. The four unrelated row locks,
+500 ms healthy-request barrier, trace-quality checks and independent production
+timeout tests remain. The exact scheduling/lock source of the CI preparation
+delay was not determined from the failure log. No test was skipped, retried or
+made globally serial. The complete 40-test database file passed twice at twelve
+threads; the 18-test key suite passed at eight threads.
+
+Final frozen native default-parallel workspace: **2,499 passed, 0 failed,
+30 default ignored**, including desktop/mobile. All-target workspace check,
+all-target/all-feature strict Clippy, formatting, whitespace and exact source
+hashes passed. Counts above are subsets/repeats, not additional workspace tests.
+Remote CI is checked after this follow-up push. No frontend, distribution,
+production database, credential or deployment changes are included.
+
 # Tenant subsystem implementation status
 
 ## Phase 1 — global identity and membership foundation

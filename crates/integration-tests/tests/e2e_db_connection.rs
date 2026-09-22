@@ -4548,27 +4548,39 @@ mod tests {
         let blocked_request_ids = (0..4).map(|_| Uuid::new_v4()).collect::<Vec<_>>();
         let healthy_request_id = Uuid::new_v4();
 
-        for request_id in blocked_request_ids
+        // Fixture creation is not the behavior timed by this test. CI #112
+        // exhausted start_request's production 250 ms budget before any
+        // intermediate update was queued. Insert the same initial row shape in
+        // one finite fixture operation, retaining the recorder's default
+        // synchronous/intermediate budgets and the 500 ms isolation assertion.
+        let fixture_ids = blocked_request_ids
             .iter()
             .copied()
             .chain(std::iter::once(healthy_request_id))
-        {
-            recorder
-                .start_request(RequestTraceStart {
-                    request_id,
-                    client_request_id: None,
-                    tenant_id: trace_tenant,
-                    user_id: trace_user,
-                    produce_ai_key_id: Uuid::new_v4(),
-                    protocol: "openai".to_string(),
-                    request_path: "/v1/chat/completions".to_string(),
-                    requested_model: "test-model".to_string(),
-                    is_stream: true,
-                    received_at,
-                })
-                .await
-                .expect("request trace should start");
-        }
+            .collect::<Vec<_>>();
+        let inserted = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            pool.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO gateway_requests (
+                    request_id,tenant_id,user_id,produce_ai_key_id,protocol,
+                    request_path,requested_model,is_stream,status,received_at,
+                    billing_status,trace_quality,trace_version
+                 ) SELECT request_id,$2,$3,gen_random_uuid(),'openai',
+                    '/v1/chat/completions','test-model',TRUE,'received',$4,
+                    'pending','actual',1 FROM UNNEST($1::uuid[]) AS fixture(request_id)",
+                [
+                    fixture_ids.clone().into(),
+                    trace_tenant.into(),
+                    trace_user.into(),
+                    received_at.into(),
+                ],
+            )),
+        )
+        .await
+        .expect("fixture insertion must complete within its setup deadline")
+        .expect("request trace fixtures must satisfy the real schema");
+        assert_eq!(inserted.rows_affected(), fixture_ids.len() as u64);
 
         // Hold unrelated request rows long enough that a single global worker
         // would spend four 250 ms write timeouts ahead of the healthy barrier.
