@@ -889,6 +889,25 @@ async fn concurrent_same_row_default_is_idempotent() {
     fixture.guard.cleanup().await.unwrap();
 }
 
+// Fault-injection DDL takes a ShareRowExclusive table lock. Acquire the
+// production administration fence first, just as a pricing mutation does.
+// Otherwise a parallel writer can hold the fence and wait to insert its audit,
+// while this test holds the audit table and waits for that same fence (40P01).
+// This orders only the fault transaction; it does not serialize the test suite.
+async fn install_pricing_audit_fault(tx: &sea_orm::DatabaseTransaction) {
+    let fence = tx
+        .execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+        .await
+        .unwrap();
+    assert_eq!(fence.rows_affected(), 1);
+    tx.execute_unprepared(
+        "CREATE FUNCTION pg_temp.reject_pricing_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'pricing audit rejected'; END $$;
+         CREATE TRIGGER reject_pricing_audit BEFORE INSERT ON tenant_audit_events
+         FOR EACH ROW WHEN (NEW.action='pricing.update')
+         EXECUTE FUNCTION pg_temp.reject_pricing_audit()",
+    ).await.unwrap();
+}
+
 #[tokio::test]
 async fn failed_audit_rolls_back_pricing_mutation_inside_savepoint() {
     let mut fixture = Fixture::new().await;
@@ -909,14 +928,7 @@ async fn failed_audit_rolls_back_pricing_mutation_inside_savepoint() {
     let pricing_audits_before = fixture.pricing_audit_count(row.id, None).await;
     let tenant_audits_before = fixture.tenant_audit_count(row.id, None).await;
     let tx = fixture.db.begin().await.unwrap();
-    tx.execute_unprepared(
-        "CREATE FUNCTION pg_temp.reject_pricing_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'pricing audit rejected'; END $$;
-         CREATE TRIGGER reject_pricing_audit BEFORE INSERT ON tenant_audit_events
-         FOR EACH ROW WHEN (NEW.action='pricing.update')
-         EXECUTE FUNCTION pg_temp.reject_pricing_audit()",
-    )
-    .await
-    .unwrap();
+    install_pricing_audit_fault(&tx).await;
     let result = PricingModel::update_platform(
         &tx,
         fixture.platform_scope(fixture.root),
@@ -1090,5 +1102,93 @@ async fn platform_price_reads_use_real_global_authority_without_tenant_role_inhe
             .unwrap();
         assert_eq!(response.status(), expected);
     }
+    fixture.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn audit_fault_waits_for_admin_fence_without_locking_the_audit_table() {
+    let mut fixture = Fixture::new().await;
+    let blocker = fixture.db.begin().await.unwrap();
+    blocker
+        .execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+        .await
+        .unwrap();
+    let blocker_pid: i32 = blocker
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT pg_backend_pid()",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap();
+    let (send_pid, receive_pid) = tokio::sync::oneshot::channel();
+    let db = fixture.db.clone();
+    let mut fault = tokio::spawn(async move {
+        let tx = db.begin().await.unwrap();
+        let pid: i32 = tx
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT pg_backend_pid()",
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get_by_index(0)
+            .unwrap();
+        send_pid.send(pid).unwrap();
+        install_pricing_audit_fault(&tx).await;
+        // Rollback removes both the temporary trigger and its table locks.
+        tx.rollback().await.unwrap();
+    });
+    let waiter = receive_pid.await.unwrap();
+    // Other parallel cases may be ahead in the tuple-lock queue. Follow the
+    // complete wait chain, not just its immediate predecessor.
+    let observed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row = fixture.db.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "WITH RECURSIVE blockers(pid,visited) AS (SELECT p,ARRAY[$1,p] FROM unnest(pg_blocking_pids($1)) AS p UNION ALL SELECT p,b.visited||p FROM blockers b CROSS JOIN LATERAL unnest(pg_blocking_pids(b.pid)) AS p WHERE p<>ALL(b.visited) AND cardinality(b.visited)<64) SELECT EXISTS(SELECT 1 FROM blockers WHERE pid=$2) AS waiting, EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND relation='tenant_audit_events'::regclass AND granted) AS audit_locked",
+                [waiter.into(), blocker_pid.into()],
+            )).await.unwrap().unwrap();
+            if row.try_get::<bool>("", "waiting").unwrap() {
+                break row.try_get::<bool>("", "audit_locked").unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await;
+    // Always release the blocker before asserting, including on regressions.
+    // No background waiter should outlive a failed lock-order assertion.
+    let audit_locked = observed.as_ref().copied().unwrap_or(true);
+    let writer_can_lock =
+        if !audit_locked {
+            blocker.execute_unprepared(
+            "SET LOCAL lock_timeout='2s'; LOCK TABLE tenant_audit_events IN ROW EXCLUSIVE MODE",
+        ).await.is_ok()
+        } else {
+            false
+        };
+    blocker.rollback().await.unwrap();
+    let completed = tokio::time::timeout(Duration::from_secs(5), &mut fault).await;
+    if completed.is_err() {
+        fault.abort();
+        let _ = fault.await;
+    }
+    assert!(
+        observed.is_ok(),
+        "fault installer did not wait on the expected fence"
+    );
+    assert!(
+        !audit_locked,
+        "fault installer acquired the audit table before its admin fence"
+    );
+    assert!(
+        writer_can_lock,
+        "the fenced writer must still be able to acquire its audit lock"
+    );
+    completed
+        .expect("fault installer did not finish after releasing the fence")
+        .unwrap();
     fixture.guard.cleanup().await.unwrap();
 }
