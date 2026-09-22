@@ -2,10 +2,10 @@
 
 The current acceptance contract is the latest phase **0–8** plan. Older
 phase-numbered entries below are historical delivery records. The current
-phase-1 field/provenance alignment has passed local acceptance; provider/binding/pricing scopes,
-complete platform/resource route separation, remaining resource management,
-client UI and final deployment remain unaccepted. Tenant control/member/invitation
-APIs have passed the acceptance gate recorded below.
+phase-1 field/provenance alignment, tenant control/member/invitation APIs and
+scoped tenant/platform pricing have passed the acceptance gates recorded below.
+Provider/binding scopes, complete platform/resource route separation, remaining
+resource management, client UI and final deployment remain unaccepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
