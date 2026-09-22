@@ -201,6 +201,7 @@ pub async fn admin_list_pending_tokens(
             status: Some("pending".into()),
             search: params.search,
             owner_user_id: params.owner_user_id,
+            archived: None,
         },
     )
     .await

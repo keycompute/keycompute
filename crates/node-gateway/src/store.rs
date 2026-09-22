@@ -2022,13 +2022,11 @@ impl NodeGatewayStore {
         let mut task = NodeTask::create(&tx, &request).await?;
         let required = serde_json::to_value(required)
             .map_err(|_| DbError::Other("invalid control requirements".into()))?;
-        tx.execute(Statement::from_sql_and_values(
+        task = NodeTask::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE node_tasks SET native_requirements_json=$2 WHERE id=$1",
-            [task.id.into(), required.clone().into()],
-        ))
-        .await?;
-        task.native_requirements_json = Some(required);
+            "UPDATE node_tasks SET native_requirements_json=$4 WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND status='queued' RETURNING *",
+            [tenant_id.into(),user_id.into(),task.id.into(),required.into()],
+        )).one(&tx).await?.ok_or_else(||DbError::not_found("cancellable task",task.id))?;
         tx.commit().await?;
         Ok(task)
     }

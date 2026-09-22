@@ -33,6 +33,10 @@ pub struct NodeTask {
     pub failure_threshold: i32,
     pub result_json: Option<serde_json::Value>,
     pub error_json: Option<serde_json::Value>,
+    pub cancellation_requested_at: Option<DateTime<Utc>>,
+    pub cancellation_requested_by: Option<Uuid>,
+    pub archived_at: Option<DateTime<Utc>>,
+    pub archived_by: Option<Uuid>,
     pub queued_at: DateTime<Utc>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -164,6 +168,7 @@ impl NodeTask {
                 updated_at = NOW()
             WHERE id = $5
               AND status = $6
+              AND cancellation_requested_at IS NULL AND archived_at IS NULL
               AND deadline_at >= NOW()
               AND EXISTS (
                 SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id
@@ -232,6 +237,7 @@ impl NodeTask {
                   AND cm.user_id=nt.user_id AND cm.status='active'
                 JOIN tenants ct ON ct.id=nt.tenant_id
                 WHERE nt.status='queued' AND nt.deadline_at>NOW() AND ct.status='active'
+                  AND nt.cancellation_requested_at IS NULL AND nt.archived_at IS NULL
                   AND nt.native_requirements_json IS NOT NULL
                   AND EXISTS(SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
                     JOIN tenants ot ON ot.id=n.tenant_id
@@ -359,6 +365,7 @@ impl NodeTask {
                 failure_count = failure_count + 1,
                 updated_at = NOW()
             WHERE id = $2
+              AND cancellation_requested_at IS NULL AND archived_at IS NULL
               AND NOT (claimed_at IS NOT NULL AND payload_json->'native' IS NOT NULL AND payload_json->'native'<>'null'::jsonb)
             RETURNING *
             "#,

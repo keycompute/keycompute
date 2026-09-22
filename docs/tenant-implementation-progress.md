@@ -6,8 +6,8 @@ identity/membership foundations and tenant control/invitation APIs are accepted.
 Scoped pricing, providers/bindings, financial/distribution reports, owner-only
 key issuance and distribution policy mutations are also accepted. Live scoped
 Responses replay now revalidates credentials and authorization versions.
-Node/registration control is accepted; task mutations and Responses administration,
-financial mutations, complete
+Node/registration control and task cancellation/archival are accepted. Remaining
+async-new-work authorization and Responses administration, financial mutations, complete
 platform/operator routing, frontend delivery and final release are not accepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
@@ -396,6 +396,54 @@ No production database, credential, service restart or deployment changed.
 Task cancellation/archival, full Responses administration, remaining financial
 operations, other platform/operator routes, full frontend and release gates
 remain unaccepted.
+
+## Current phases 3/5 — task cancellation and archival accepted
+
+Canonical tenant, explicit-root and personal task commands now share one
+transaction-bound scope with current signed identity/member/tenant versions,
+resource owner predicates, expected_updated_at and atomic audit. Operator
+diagnostics do not acquire task write authority. Task locks select lifecycle
+metadata only, not private prompts or result bodies. The original tenant, user,
+request, lease and settlement identity are never replaced by an administrator.
+
+Unleased tasks can be cancelled before dispatch. A leased task accepts a durable
+cancellation request only when its immutable native requirements require a
+cancellation-aware worker. Its leased status and authentic completion channel
+remain intact; lease-status exposes the stop signal. Unsupported leased workers
+return an explicit conflict rather than a false cancellation success. A durable
+terminal stream result wins over cancellation. A cancellation request is not a
+claim that the worker has stopped; a racing genuine completion is still settled.
+
+Terminal archival is explicit metadata retention, not physical deletion. Normal
+task lists/counts omit archives; archived=true returns that history and scoped
+detail remains available. Payloads, result and financial evidence are retained.
+Greenfield paired actor/timestamp constraints and immutable markers prevent
+identity reassignment, cancellation reversal, archival reversal and controlled
+terminal task reactivation. Runtime updates advance exact revisions; claim and
+requeue predicates exclude cancelled/archived tasks. Tenant/owner indexes bound
+normal and archived pagination. No runtime upgrade or legacy role path was added.
+
+Six new PostgreSQL/router control tests cover own/peer/foreign scopes, operator
+rejection, authentic leased completion, terminal-result conflicts, same-revision
+races, no-op replay, forged/stale actors, nested audit rollback and database
+immutability. Two actual managed Responses-to-node regressions verify that an
+unleased cancellation releases the original reservation without charging or
+reexecuting, while a racing original-worker result is billed once to the original
+user, not the administrator. A typed client wire test checks personal and explicit
+platform targets. Eighty-four focused node/ingress/control/resource tests pass
+with eight threads; all are subsets/repeats of the complete workspace.
+
+Final native default-parallel workspace: **2,550 passed, 0 failed, 30 original
+default ignored**, including desktop/mobile. All-target check, all-target/all-
+feature Clippy with -D warnings, client/Web WASM compilation, formatting,
+whitespace and 19 frozen source hashes pass. No production database, secret,
+service or deployment changes. CI is checked separately after this push.
+
+This accepts task commands and their existing completion/settlement integration,
+not every async-new-work authorization path or the complete tenant subsystem.
+Full queued-work authorization version propagation, tenant Responses/Conversation
+administration, remaining financial mutations, other platform/operator routes,
+full frontend and release/rollback gates are still open.
 
 # Tenant subsystem implementation status
 

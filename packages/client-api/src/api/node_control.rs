@@ -43,6 +43,8 @@ pub struct TaskInfo {
     pub deadline_at: String,
     pub created_at: String,
     pub updated_at: String,
+    pub cancellation_requested_at: Option<String>,
+    pub archived_at: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize)]
 pub struct RegistrationInfo {
@@ -78,6 +80,7 @@ pub struct NodeListQuery {
     pub owner_user_id: Option<Uuid>,
     pub status: Option<String>,
     pub search: Option<String>,
+    pub archived: Option<bool>,
 }
 impl NodeListQuery {
     fn query(&self) -> String {
@@ -97,6 +100,9 @@ impl NodeListQuery {
         }
         if let Some(v) = &self.search {
             values.push(format!("search={}", encode_query_value(v)));
+        }
+        if let Some(v) = self.archived {
+            values.push(format!("archived={v}"));
         }
         values.join("&")
     }
@@ -134,6 +140,18 @@ pub enum NodeOperation {
     Exclude,
     Recover,
     Revoke,
+}
+#[derive(Debug, Clone, Copy)]
+pub enum TaskOperation {
+    Cancel,
+    Archive,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct TaskChange {
+    pub task: TaskInfo,
+    pub changed: bool,
+    pub cancellation_requested: bool,
+    pub archived: bool,
 }
 #[derive(Debug, Clone)]
 pub struct NodeControlApi {
@@ -203,6 +221,26 @@ impl NodeControlApi {
     pub async fn task(&self, id: Uuid, token: &str) -> Result<TaskInfo> {
         self.client
             .get_json_fresh(&self.resource("tasks", id)?, Some(token))
+            .await
+    }
+    /// Owner commands stay on personal routes; administration uses an explicit tenant.
+    pub async fn operate_task(
+        &self,
+        id: Uuid,
+        operation: TaskOperation,
+        command: &NodeCommand,
+        token: &str,
+    ) -> Result<TaskChange> {
+        let action = match operation {
+            TaskOperation::Cancel => "cancel",
+            TaskOperation::Archive => "archive",
+        };
+        self.client
+            .post_json(
+                &format!("{}/{action}", self.resource("tasks", id)?),
+                command,
+                Some(token),
+            )
             .await
     }
     pub async fn registrations(

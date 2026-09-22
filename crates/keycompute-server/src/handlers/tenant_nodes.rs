@@ -46,6 +46,7 @@ pub struct ListQuery {
     pub owner_user_id: Option<Uuid>,
     pub status: Option<String>,
     pub search: Option<String>,
+    pub archived: Option<bool>,
 }
 impl ListQuery {
     pub fn filter(&self) -> NodeFilter {
@@ -53,6 +54,7 @@ impl ListQuery {
             owner_user_id: self.owner_user_id,
             status: self.status.clone(),
             search: self.search.clone(),
+            archived: self.archived,
         }
     }
 }
@@ -95,6 +97,9 @@ pub(crate) fn map(e: keycompute_db::DbError) -> ApiError {
         keycompute_db::DbError::NotFound { .. } => {
             ApiError::NotFound("Node control resource not found".into())
         }
+        keycompute_db::DbError::OptimisticConflict { entity, .. } if entity=="leased worker has no cancellation contract" => ApiError::Conflict("This leased task has no cancellation-aware worker; it must complete or expire.".into()),
+        keycompute_db::DbError::OptimisticConflict { entity, .. } if entity=="terminal native result is awaiting completion" => ApiError::Conflict("A durable terminal result is awaiting completion and cannot be discarded by cancellation.".into()),
+        keycompute_db::DbError::OptimisticConflict { entity, .. } if entity=="only terminal tasks can be archived" => ApiError::Conflict("Only completed, failed or expired tasks can be archived; task evidence is retained.".into()),
         keycompute_db::DbError::OptimisticConflict { .. } => ApiError::Conflict(
             "Node resource changed or retains required work; refresh before retrying".into(),
         ),
@@ -141,7 +146,7 @@ pub(crate) fn platform_audit(a: &GlobalConsoleAuth, id: RequestId) -> AuditConte
         request_id: Some(id.0),
     }
 }
-fn tenant_scope(a: &TenantAdmin, t: Uuid) -> Result<NodeControlScope> {
+pub(super) fn tenant_scope(a: &TenantAdmin, t: Uuid) -> Result<NodeControlScope> {
     a.require_path_tenant(t)?;
     NodeControlScope::tenant(
         a.require(AuthorizationAction::ManageTenantResource)?,
@@ -150,7 +155,7 @@ fn tenant_scope(a: &TenantAdmin, t: Uuid) -> Result<NodeControlScope> {
     )
     .map_err(map)
 }
-fn owned_scope(a: &ConsoleAuth) -> Result<NodeControlScope> {
+pub(super) fn owned_scope(a: &ConsoleAuth) -> Result<NodeControlScope> {
     NodeControlScope::owned(
         a.require_owner(a.user_id, AuthorizationAction::ReadPersonalResource)?,
         snapshot(a),

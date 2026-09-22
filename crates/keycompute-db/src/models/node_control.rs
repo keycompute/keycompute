@@ -16,6 +16,10 @@ use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
 
+#[path = "node_task_control.rs"]
+mod task_control;
+pub use task_control::{TaskAction, TaskChange, TaskMutation, change_task};
+
 #[derive(Debug, Clone, Copy)]
 enum Authority {
     Tenant(TenantScope, TenantAuthzSnapshot),
@@ -38,6 +42,7 @@ pub enum NodeAction {
     RejectToken,
     RevokeToken,
     CancelTask,
+    ArchiveTask,
 }
 fn denied() -> DbError {
     DbError::Other("node control authorization denied".into())
@@ -126,6 +131,11 @@ impl NodeControlScope {
     }
     pub fn require_action(self, action: NodeAction) -> Result<(), DbError> {
         match self.authority {
+            Authority::Owned(..)
+                if matches!(action, NodeAction::CancelTask | NodeAction::ArchiveTask) =>
+            {
+                Ok(())
+            }
             Authority::Tenant(_, _) => Ok(()),
             Authority::Platform(s, _) if s.platform_role() == PlatformRole::Root => Ok(()),
             Authority::Platform(s, _)
@@ -206,7 +216,7 @@ impl NodeResource {
                 "r.id,r.tenant_id,r.owner_user_id,r.display_name,r.status,r.consecutive_failure_count,r.failure_threshold,r.last_heartbeat_at,r.created_at,r.updated_at"
             }
             Self::Task => {
-                "r.id,r.request_id,r.tenant_id,r.user_id,r.model,r.status,r.assigned_node_id,r.failure_count,r.failure_threshold,r.queued_at,r.claimed_at,r.finished_at,r.deadline_at,r.created_at,r.updated_at"
+                "r.id,r.request_id,r.tenant_id,r.user_id,r.model,r.status,r.assigned_node_id,r.failure_count,r.failure_threshold,r.queued_at,r.claimed_at,r.finished_at,r.deadline_at,r.created_at,r.updated_at,r.cancellation_requested_at,r.archived_at"
             }
             Self::Token => {
                 "r.id,r.tenant_id,r.user_id,r.token_preview,r.status,r.is_revealed,r.approved_by,r.actioned_at,r.consumed_at,r.consumed_node_id,r.issued_at,r.updated_at"
@@ -219,6 +229,7 @@ pub struct NodeFilter {
     pub owner_user_id: Option<Uuid>,
     pub status: Option<String>,
     pub search: Option<String>,
+    pub archived: Option<bool>,
 }
 fn filters(
     scope: NodeControlScope,
@@ -231,8 +242,18 @@ fn filters(
     {
         return Err(denied());
     }
+    if filter.archived.is_some() && !matches!(kind, NodeResource::Task) {
+        return Err(invalid("archive filter applies only to tasks"));
+    }
     let (auth, mut values) = scope.parts();
     let mut predicate = format!("r.tenant_id=$1 AND {auth}");
+    if matches!(kind, NodeResource::Task) && id.is_none() {
+        values.push(filter.archived.unwrap_or(false).into());
+        predicate.push_str(&format!(
+            " AND (r.archived_at IS NOT NULL)=${}",
+            values.len()
+        ));
+    }
     if matches!(scope.authority, Authority::Owned(..)) {
         predicate.push_str(&format!(" AND r.{}=$2", kind.owner()));
     }
@@ -311,6 +332,8 @@ pub struct TaskInfo {
     pub deadline_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub cancellation_requested_at: Option<DateTime<Utc>>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct TokenInfo {
@@ -461,7 +484,13 @@ pub async fn lock_for_action(
                 },
             ))
         }
-        Authority::Owned(..) => Err(denied()),
+        Authority::Owned(..) => {
+            let actor = lock_owned_console(tx, scope, audit).await?;
+            let tenant = Tenant::find_by_id(tx, scope.tenant)
+                .await?
+                .ok_or_else(denied)?;
+            Ok((tenant, actor))
+        }
     }
 }
 pub fn validate_reason(reason: &str) -> Result<&str, DbError> {
@@ -720,7 +749,7 @@ pub async fn task_stats(
     TaskStats::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,format!("SELECT COUNT(*)::bigint AS total,COUNT(*) FILTER(WHERE r.status='queued')::bigint AS queued,COUNT(*) FILTER(WHERE r.status='leased')::bigint AS leased,COUNT(*) FILTER(WHERE r.status='succeeded')::bigint AS succeeded,COUNT(*) FILTER(WHERE r.status='failed')::bigint AS failed,COUNT(*) FILTER(WHERE r.status='expired')::bigint AS expired FROM node_tasks r WHERE {p}"),v)).one(db).await?.ok_or_else(||DbError::Other("task totals unavailable".into()))
 }
 
-async fn lock_owned_registration(
+async fn lock_owned_console(
     tx: &DatabaseTransaction,
     scope: NodeControlScope,
     audit: &AuditContext,
@@ -760,7 +789,7 @@ pub async fn owner_registration_for_reveal(
     scope: NodeControlScope,
     audit: &AuditContext,
 ) -> Result<super::user_node_gateway_token::UserNodeGatewayToken, DbError> {
-    let actor = lock_owned_registration(tx, scope, audit).await?;
+    let actor = lock_owned_console(tx, scope, audit).await?;
     let mut record=super::user_node_gateway_token::UserNodeGatewayToken::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT * FROM user_node_gateway_tokens WHERE tenant_id=$1 AND user_id=$2 ORDER BY issued_at DESC,id DESC LIMIT 1 FOR UPDATE",[scope.tenant.into(),actor.actor_user_id.into()])).one(tx).await?.ok_or_else(||DbError::not_found("Node registration",scope.actor_user_id()))?;
     if record.status == "approved" {
         tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,"UPDATE user_node_gateway_tokens SET is_revealed=TRUE WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND status='approved'",[scope.tenant.into(),actor.actor_user_id.into(),record.id.into()])).await?;
@@ -800,7 +829,7 @@ pub async fn request_owner_registration(
     }
     let tx = begin(db).await?;
     let result=async{
-        let actor=lock_owned_registration(&tx,scope,audit).await?;
+        let actor=lock_owned_console(&tx,scope,audit).await?;
         let existing=TokenInfo::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,format!("SELECT {} FROM user_node_gateway_tokens r WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.status IN ('pending','approved') ORDER BY r.issued_at DESC,r.id DESC LIMIT 1 FOR UPDATE",NodeResource::Token.columns()),[scope.tenant.into(),actor.actor_user_id.into()])).one(&tx).await?;
         if let Some(record)=existing{return Ok(record);}
         // Historical consumed/revoked tokens are not revived. A replacement is
@@ -819,7 +848,7 @@ pub async fn delete_owner_rejected_registration(
 ) -> Result<(), DbError> {
     let tx = begin(db).await?;
     let result=async{
-        let actor=lock_owned_registration(&tx,scope,audit).await?;
+        let actor=lock_owned_console(&tx,scope,audit).await?;
         let row=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,"DELETE FROM user_node_gateway_tokens WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND status='rejected' AND revoke_reason IS NULL AND consumed_node_id IS NULL AND consumed_at IS NULL",[scope.tenant.into(),actor.actor_user_id.into(),id.into()])).await?;
         if row.rows_affected()!=1{return Err(DbError::not_found("Rejected node registration",id));}
         TenantAuditEvent::append(&tx,AuditScopeType::Tenant,Some(scope.tenant),&actor,"node.registration.delete","node_registration",Some(&id.to_string()),AuditResult::Success,json!({"user_id":actor.actor_user_id})).await?;Ok(())
@@ -889,6 +918,7 @@ mod tests {
             NodeAction::RejectToken,
             NodeAction::RevokeToken,
             NodeAction::CancelTask,
+            NodeAction::ArchiveTask,
         ] {
             assert!(s.require_action(a).is_err());
         }

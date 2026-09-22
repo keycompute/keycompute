@@ -78,6 +78,8 @@ existing_path	source_file	line_at_audit	resource_category	authority_contract	can
 /api/v1/me/referral/invite-link	crates/keycompute-server/src/router.rs	410	user_owned_resource	console; current tenant and self	unchanged
 /api/v1/me/tasks	crates/keycompute-server/src/handlers/tenant_nodes.rs	618	user_owned_resource	console; selected tenant and self only	unchanged
 /api/v1/me/tasks/{id}	crates/keycompute-server/src/handlers/tenant_nodes.rs	619	user_owned_resource	console; selected tenant and self only	unchanged
+/api/v1/me/tasks/{id}/archive	crates/keycompute-server/src/handlers/tenant_tasks.rs	127	user_owned_resource	console self; selected tenant and owner; current signed versions	unchanged
+/api/v1/me/tasks/{id}/cancel	crates/keycompute-server/src/handlers/tenant_tasks.rs	126	user_owned_resource	console self; selected tenant and owner; current signed versions	unchanged
 /api/v1/me/tenant	crates/keycompute-server/src/router.rs	371	platform_resource	global console identity; self only	unchanged
 /api/v1/me/tips	crates/keycompute-server/src/router.rs	428	user_owned_resource	console; current tenant and self	unchanged
 /api/v1/me/tips/history	crates/keycompute-server/src/router.rs	429	user_owned_resource	console; current tenant and self	unchanged
@@ -119,6 +121,8 @@ existing_path	source_file	line_at_audit	resource_category	authority_contract	can
 /api/v1/platform/tenants/{tenant_id}/nodes/{id}/revoke	crates/keycompute-server/src/handlers/tenant_nodes.rs	596	platform_resource_or_explicit_tenant_target	console; explicit target; current root/operator action allowlist	unchanged
 /api/v1/platform/tenants/{tenant_id}/tasks	crates/keycompute-server/src/handlers/tenant_nodes.rs	600	platform_resource_or_explicit_tenant_target	console; explicit target; current root/operator action allowlist	unchanged
 /api/v1/platform/tenants/{tenant_id}/tasks/{id}	crates/keycompute-server/src/handlers/tenant_nodes.rs	604	platform_resource_or_explicit_tenant_target	console; explicit target; current root/operator action allowlist	unchanged
+/api/v1/platform/tenants/{tenant_id}/tasks/{id}/archive	crates/keycompute-server/src/handlers/tenant_tasks.rs	122	user_owned_resource	console root; explicit tenant; current token version; owner-preserving task command	unchanged
+/api/v1/platform/tenants/{tenant_id}/tasks/{id}/cancel	crates/keycompute-server/src/handlers/tenant_tasks.rs	118	user_owned_resource	console root; explicit tenant; current token version; owner-preserving task command	unchanged
 /api/v1/pricing	crates/keycompute-server/src/router.rs	541	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/pricing
 /api/v1/pricing/batch-defaults	crates/keycompute-server/src/router.rs	542	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/pricing/batch-defaults
 /api/v1/pricing/calculate	crates/keycompute-server/src/router.rs	551	platform_resource_or_explicit_tenant_target	platform scope; root or explicitly allowlisted operator action	/api/v1/platform/pricing/calculate
@@ -170,6 +174,8 @@ existing_path	source_file	line_at_audit	resource_category	authority_contract	can
 /api/v1/tenants/{tenant_id}/pricing/{id}/make-default	crates/keycompute-server/src/handlers/tenant_pricing.rs	232	tenant_resource	JWT; selected path membership; current signed versions; active tenant admin	/api/v1/tenants/{tenant_id}/pricing/{id}/make-default
 /api/v1/tenants/{tenant_id}/tasks	crates/keycompute-server/src/handlers/tenant_nodes.rs	568	tenant_resource	console; path-matched current admin; signed authority versions	unchanged
 /api/v1/tenants/{tenant_id}/tasks/{id}	crates/keycompute-server/src/handlers/tenant_nodes.rs	569	tenant_resource	console; path-matched current admin; signed authority versions	unchanged
+/api/v1/tenants/{tenant_id}/tasks/{id}/archive	crates/keycompute-server/src/handlers/tenant_tasks.rs	114	user_owned_resource	console tenant admin; path-bound active membership; current signed versions	unchanged
+/api/v1/tenants/{tenant_id}/tasks/{id}/cancel	crates/keycompute-server/src/handlers/tenant_tasks.rs	110	user_owned_resource	console tenant admin; path-bound active membership; current signed versions	unchanged
 /api/v1/tenants/{tenant_id}/usage	crates/keycompute-server/src/handlers/tenant_reporting.rs	262	tenant_resource	console JWT; selected tenant admin; primary scoped metadata; no financial mutation	/api/v1/tenants/{tenant_id}/usage
 /api/v1/tenants/{tenant_id}/usage/stats	crates/keycompute-server/src/handlers/tenant_reporting.rs	263	tenant_resource	console JWT; selected tenant admin; primary scoped metadata; no financial mutation	/api/v1/tenants/{tenant_id}/usage/stats
 /api/v1/tenants/{tenant_id}/usage/{id}	crates/keycompute-server/src/handlers/tenant_reporting.rs	264	tenant_resource	console JWT; selected tenant admin; primary scoped metadata; no financial mutation	/api/v1/tenants/{tenant_id}/usage/{id}

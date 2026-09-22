@@ -1190,3 +1190,526 @@ async fn old_runtime_transactions_cannot_regress_node_control_revisions() {
         approved.token.updated_at
     );
 }
+
+#[tokio::test]
+async fn queued_task_commands_preserve_scope_and_archive_instead_of_erasing_evidence() {
+    let mut f = Fixture::new().await;
+    let task = f.task(f.a.id, f.member.id, "queued-control").await;
+    let peer = f.task(f.a.id, f.a.owner_user_id, "peer-control").await;
+    let foreign = f.task(f.b.id, f.b.owner_user_id, "foreign-control").await;
+    let command = json!({"expected_updated_at":task.updated_at,"reason":"cancel unused fixture"});
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &f.path(&format!("tasks/{}/cancel", task.id)),
+            &f.member_token,
+            command.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &format!("/api/v1/me/tasks/{}/cancel", peer.id),
+            &f.member_token,
+            json!({"expected_updated_at":peer.updated_at,"reason":"foreign owner"})
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &f.path(&format!("tasks/{}/cancel", foreign.id)),
+            &f.admin,
+            json!({"expected_updated_at":foreign.updated_at,"reason":"foreign tenant"})
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &f.platform(&format!("tasks/{}/cancel", task.id)),
+            &f.operator_token,
+            command.clone()
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &f.path(&format!("tasks/{}/archive", task.id)),
+            &f.admin,
+            command.clone()
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (status, cancelled, _) = call(
+        create_router(f.state.clone()),
+        "POST",
+        &format!("/api/v1/me/tasks/{}/cancel", task.id),
+        &f.member_token,
+        command.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!(cancelled["task"]["status"], "failed");
+    assert_eq!(cancelled["cancellation_requested"], true);
+    assert_eq!(cancelled["task"]["user_id"], f.member.id.to_string());
+    assert!(
+        !cancelled
+            .to_string()
+            .contains("never-leak-task-payload-marker")
+    );
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &f.path(&format!("tasks/{}/cancel", task.id)),
+            &f.admin,
+            command
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let(status,archived,_)=call(create_router(f.state.clone()),"POST",&f.platform(&format!("tasks/{}/archive",task.id)),&f.root_token,json!({"expected_updated_at":cancelled["task"]["updated_at"],"reason":"retain completed task evidence"})).await;
+    assert_eq!(status, StatusCode::OK, "{archived}");
+    assert_eq!(archived["archived"], true);
+    let (_, active, _) = f.get(&f.member_token, "/api/v1/me/tasks").await;
+    assert_eq!(active["total"], 0);
+    let (_, history, _) = f
+        .get(&f.member_token, "/api/v1/me/tasks?archived=true")
+        .await;
+    assert_eq!(history["total"], 1);
+    assert_eq!(history["items"][0]["id"], task.id.to_string());
+    assert_eq!(
+        f.get(&f.admin, &f.path(&format!("tasks/{}", task.id)))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let kept = NodeTask::find_by_id(&f.db, task.id).await.unwrap().unwrap();
+    assert_eq!(kept.tenant_id, task.tenant_id);
+    assert_eq!(kept.user_id, task.user_id);
+    assert_eq!(kept.request_id, task.request_id);
+    assert_eq!(kept.payload_json, task.payload_json);
+    assert!(kept.archived_at.is_some());
+    assert!(kept.assigned_node_id.is_none());
+    f.guard.cleanup().await.unwrap();
+}
+async fn task_control_lease(f: &Fixture, native: bool) -> (Node, NodeSession, NodeTask, String) {
+    use keycompute_types::{
+        node::NodeTaskPayload,
+        node_capability::{NativeFeature, NativeModelProfile},
+        node_native::{NodeNativeOperation, NodeNativeRequest},
+    };
+    let original = f.node(f.a.id, f.member.id, "cancellation worker").await;
+    let node = Node::update_status(&f.db, original.id, "online")
+        .await
+        .unwrap();
+    let model = format!("cancel:{}", Uuid::new_v4());
+    let secret = format!("fixture-only-lease:{}", Uuid::new_v4());
+    let profile = NativeModelProfile::for_operation(model.clone(), NodeNativeOperation::Chat)
+        .with_features(vec![NativeFeature::Cancellation]);
+    let session = NodeSession::create(
+        &f.db,
+        &CreateNodeSessionRequest {
+            node_id: node.id,
+            session_token_hash: UserNodeGatewayToken::hash_token(&secret),
+            expires_at: Utc::now() + Duration::minutes(5),
+            accepted_models_json: json!([model]),
+            native_operations_json: json!(["chat"]),
+            native_profiles_json: json!([profile]),
+        },
+    )
+    .await
+    .unwrap();
+    let store = &f.state.node_gateway.as_ref().unwrap().store;
+    let task = if native {
+        store.create_cancellable_native_task(f.a.id,f.member.id,model.clone(),NodeTaskPayload{request_id:Uuid::new_v4(),chat:None,image_generation:None,image_edit:None,native:Some(NodeNativeRequest{operation:NodeNativeOperation::Chat,body:json!({"model":model,"messages":[{"role":"user","content":"private task control fixture"}]}),headers:vec![]})}).await.unwrap()
+    } else {
+        f.task(f.a.id, f.member.id, &model).await
+    };
+    let (leased, envelope) = store
+        .claim_task(task.id, node.id, session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(envelope.requires_cancellation, native);
+    (node, session, leased, secret)
+}
+#[tokio::test]
+async fn leased_task_cancellation_is_a_durable_request_not_a_transfer_or_early_completion() {
+    let mut f = Fixture::new().await;
+    let (node, session, task, secret) = task_control_lease(&f, true).await;
+    let lease = task.lease_id.unwrap();
+    let payload = json!({"protocol_version":"node.v1","node_id":node.id,"session_id":session.id,"task_id":task.id,"lease_id":lease});
+    let (status, before, _) = call(
+        create_router(f.state.clone()),
+        "POST",
+        &format!("/node/v1/tasks/{}/lease-status", task.id),
+        &secret,
+        payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert_eq!(before["active"], true);
+    let (status, cancelled, _) = call(
+        create_router(f.state.clone()),
+        "POST",
+        &f.path(&format!("tasks/{}/cancel", task.id)),
+        &f.admin,
+        json!({"expected_updated_at":task.updated_at,"reason":"stop cancellation-aware worker"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cancelled}");
+    assert_eq!(cancelled["cancellation_requested"], true);
+    assert_eq!(cancelled["task"]["status"], "leased");
+    let (status, after, _) = call(
+        create_router(f.state.clone()),
+        "POST",
+        &format!("/node/v1/tasks/{}/lease-status", task.id),
+        &secret,
+        payload.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["active"], false);
+    let mut completion = payload;
+    completion["result"] = json!(NodeTaskResult::Failed {
+        code: "cancelled".into(),
+        message: "fixture cooperative cancellation".into(),
+        is_client_error: true
+    });
+    for _ in 0..2 {
+        let (status, result, _) = call(
+            create_router(f.state.clone()),
+            "POST",
+            &format!("/node/v1/tasks/{}/complete", task.id),
+            &secret,
+            completion.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+    }
+    let saved = NodeTask::find_by_id(&f.db, task.id).await.unwrap().unwrap();
+    assert_eq!(saved.status, "failed");
+    assert_eq!(saved.user_id, task.user_id);
+    assert_eq!(saved.tenant_id, task.tenant_id);
+    assert_eq!(saved.request_id, task.request_id);
+    assert_eq!(saved.lease_id, task.lease_id);
+    assert_eq!(saved.assigned_session_id, task.assigned_session_id);
+    let submissions: i64 =
+        f.db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT COUNT(*)::bigint FROM node_task_submissions WHERE task_id=$1 AND lease_id=$2",
+            [task.id.into(), lease.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index(0)
+        .unwrap();
+    assert_eq!(submissions, 1);
+    f.guard.cleanup().await.unwrap();
+}
+#[tokio::test]
+async fn cancellation_cannot_override_an_uncancellable_lease_or_a_durable_terminal_result() {
+    let mut f = Fixture::new().await;
+    let (_, _, legacy, _) = task_control_lease(&f, false).await;
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &f.path(&format!("tasks/{}/cancel", legacy.id)),
+            &f.admin,
+            json!({"expected_updated_at":legacy.updated_at,"reason":"unsupported cancellation"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let (node, session, task, _) = task_control_lease(&f, true).await;
+    f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,"INSERT INTO node_native_streams(task_id,lease_id,node_id,session_id,state,inspector_json,head_status,head_headers) VALUES($1,$2,$3,$4,'terminal','{}',200,'[]')",[task.id.into(),task.lease_id.into(),node.id.into(),session.id.into()])).await.unwrap();
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
+            "POST",
+            &f.path(&format!("tasks/{}/cancel", task.id)),
+            &f.admin,
+            json!({"expected_updated_at":task.updated_at,"reason":"terminal result must win"})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    for old in [legacy, task] {
+        let saved = NodeTask::find_by_id(&f.db, old.id).await.unwrap().unwrap();
+        assert!(saved.cancellation_requested_at.is_none());
+        assert_eq!(saved.status, "leased");
+        assert_eq!(saved.updated_at, old.updated_at);
+    }
+    f.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn task_command_audit_failure_rolls_back_cancellation_and_archive() {
+    let mut f = Fixture::new().await;
+    let task = f.task(f.a.id, f.member.id, "audit-task").await;
+    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
+    let actor = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let suffix = Uuid::new_v4().simple().to_string();
+    let function = format!("task_audit_{suffix}");
+    let trigger = format!("task_trigger_{suffix}");
+    for action in [dao::TaskAction::Cancel, dao::TaskAction::Archive] {
+        if action == dao::TaskAction::Archive {
+            dao::change_task(
+                &f.db,
+                scope,
+                &actor,
+                dao::TaskMutation {
+                    id: task.id,
+                    expected_updated_at: task.updated_at,
+                    action: dao::TaskAction::Cancel,
+                    reason: "prepare terminal fixture",
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let before = NodeTask::find_by_id(&f.db, task.id).await.unwrap().unwrap();
+        let tx = f.db.begin().await.unwrap();
+        // Match production lock ordering before holding an audit-table DDL lock.
+        tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
+            .await
+            .unwrap();
+        tx.execute_unprepared(&format!("CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.tenant_id='{}'::uuid THEN RAISE EXCEPTION 'fixture task audit failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER {trigger} BEFORE INSERT ON tenant_audit_events FOR EACH ROW EXECUTE FUNCTION {function}();",f.a.id)).await.unwrap();
+        let error = dao::change_task(
+            &tx,
+            scope,
+            &actor,
+            dao::TaskMutation {
+                id: task.id,
+                expected_updated_at: before.updated_at,
+                action,
+                reason: "audit failure fixture",
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("fixture task audit failure"),
+            "{error}"
+        );
+        tx.execute_unprepared(&format!(
+            "DROP TRIGGER {trigger} ON tenant_audit_events; DROP FUNCTION {function}();"
+        ))
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let after = NodeTask::find_by_id(&f.db, task.id).await.unwrap().unwrap();
+        assert_eq!(before.status, after.status);
+        assert_eq!(before.updated_at, after.updated_at);
+        assert_eq!(
+            before.cancellation_requested_at,
+            after.cancellation_requested_at
+        );
+        assert_eq!(before.archived_at, after.archived_at);
+        assert_eq!(before.payload_json, after.payload_json);
+        assert_eq!(before.user_id, after.user_id);
+    }
+    f.guard.cleanup().await.unwrap();
+}
+#[tokio::test]
+async fn task_commands_compare_exact_revisions_and_current_authority() {
+    let mut f = Fixture::new().await;
+    let task = f.task(f.a.id, f.member.id, "concurrent-task").await;
+    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
+    let a = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let b = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let cmd = dao::TaskMutation {
+        id: task.id,
+        expected_updated_at: task.updated_at,
+        action: dao::TaskAction::Cancel,
+        reason: "concurrent cancellation",
+    };
+    let (left, right) = tokio::join!(
+        dao::change_task(&f.db, scope, &a, cmd),
+        dao::change_task(&f.db, scope, &b, cmd)
+    );
+    assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+    let success = match (left, right) {
+        (Ok(ok), Err(error)) | (Err(error), Ok(ok)) => {
+            assert!(matches!(
+                error,
+                keycompute_db::DbError::OptimisticConflict { .. }
+            ));
+            ok
+        }
+        _ => panic!("one exact revision must win"),
+    };
+    let repeat = dao::change_task(
+        &f.db,
+        scope,
+        &a,
+        dao::TaskMutation {
+            expected_updated_at: success.task.updated_at,
+            ..cmd
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!repeat.changed);
+    assert_eq!(repeat.task.updated_at, success.task.updated_at);
+    let mut forged = a;
+    forged.actor_user_id = f.member.id;
+    assert!(
+        dao::change_task(
+            &f.db,
+            scope,
+            &forged,
+            dao::TaskMutation {
+                action: dao::TaskAction::Archive,
+                expected_updated_at: repeat.task.updated_at,
+                ..cmd
+            }
+        )
+        .await
+        .is_err()
+    );
+    for credential in [
+        CredentialKind::ApiKey,
+        CredentialKind::Node,
+        CredentialKind::System,
+    ] {
+        forged = a;
+        forged.credential_kind = credential;
+        assert!(
+            dao::change_task(
+                &f.db,
+                scope,
+                &forged,
+                dao::TaskMutation {
+                    expected_updated_at: repeat.task.updated_at,
+                    ..cmd
+                }
+            )
+            .await
+            .is_err()
+        );
+    }
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+        [a.actor_user_id.into()],
+    ))
+    .await
+    .unwrap();
+    assert!(
+        dao::change_task(
+            &f.db,
+            scope,
+            &a,
+            dao::TaskMutation {
+                action: dao::TaskAction::Archive,
+                expected_updated_at: repeat.task.updated_at,
+                ..cmd
+            }
+        )
+        .await
+        .is_err()
+    );
+    let saved = NodeTask::find_by_id(&f.db, task.id).await.unwrap().unwrap();
+    assert!(saved.archived_at.is_none());
+    assert_eq!(saved.updated_at, repeat.task.updated_at);
+    f.guard.cleanup().await.unwrap();
+}
+#[tokio::test]
+async fn database_keeps_task_control_markers_and_original_request_immutable() {
+    let mut f = Fixture::new().await;
+    let task = f.task(f.a.id, f.member.id, "immutable-task").await;
+    let scope = f.scope(f.a.owner_user_id, f.a.id, false).await;
+    let actor = audit(f.a.owner_user_id, Some(TenantRole::Admin));
+    let cancelled = dao::change_task(
+        &f.db,
+        scope,
+        &actor,
+        dao::TaskMutation {
+            id: task.id,
+            expected_updated_at: task.updated_at,
+            action: dao::TaskAction::Cancel,
+            reason: "immutable cancellation",
+        },
+    )
+    .await
+    .unwrap();
+    let archived = dao::change_task(
+        &f.db,
+        scope,
+        &actor,
+        dao::TaskMutation {
+            id: task.id,
+            expected_updated_at: cancelled.task.updated_at,
+            action: dao::TaskAction::Archive,
+            reason: "retain metadata",
+        },
+    )
+    .await
+    .unwrap();
+    for set in [
+        "request_id=gen_random_uuid()",
+        "cancellation_requested_at=NULL,cancellation_requested_by=NULL",
+        "archived_at=NULL,archived_by=NULL",
+        "status='queued'",
+        "status='succeeded'",
+    ] {
+        let tx = f.db.begin().await.unwrap();
+        let error = tx
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!("UPDATE node_tasks SET {set} WHERE tenant_id=$1 AND user_id=$2 AND id=$3"),
+                [task.tenant_id.into(), task.user_id.into(), task.id.into()],
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("immutable")
+                || error.to_string().contains("reversed")
+                || error.to_string().contains("restarted"),
+            "{error}"
+        );
+        tx.rollback().await.unwrap();
+    }
+    assert!(NodeTask::requeue(&f.db, task.id).await.is_err());
+    let no_op = dao::change_task(
+        &f.db,
+        scope,
+        &actor,
+        dao::TaskMutation {
+            id: task.id,
+            expected_updated_at: archived.task.updated_at,
+            action: dao::TaskAction::Archive,
+            reason: "already archived",
+        },
+    )
+    .await
+    .unwrap();
+    assert!(!no_op.changed);
+    assert_eq!(no_op.task.updated_at, archived.task.updated_at);
+    f.guard.cleanup().await.unwrap();
+}

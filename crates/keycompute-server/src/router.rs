@@ -819,6 +819,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(crate::handlers::tenant_control::router())
         .merge(crate::handlers::tenant_distribution::router())
         .merge(crate::handlers::tenant_nodes::router())
+        .merge(crate::handlers::tenant_tasks::router())
         .merge(crate::handlers::tenant_pricing::router())
         .merge(crate::handlers::tenant_providers::router())
         .merge(crate::handlers::tenant_bindings::router())

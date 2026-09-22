@@ -44,6 +44,7 @@ impl NodeGatewayStore {
             r#"
             SELECT nt.status,
                 (nt.status='leased' AND nt.deadline_at>NOW()
+                 AND nt.cancellation_requested_at IS NULL AND nt.archived_at IS NULL
                  AND ns.revoked_at IS NULL AND ns.expires_at>NOW()
                  AND n.status='online' AND owner_t.status='active' AND caller_t.status='active'
                  AND (trace.tenant_id IS NULL OR trace.tenant_id=nt.tenant_id)

@@ -34,6 +34,7 @@ impl TargetQuery {
             status: self.status,
             search: self.search,
             owner_user_id: self.owner_user_id,
+            archived: None,
         }
     }
 }

@@ -575,6 +575,10 @@ mod tests {
         let sql = include_str!("../migrations/001_init.sql");
         for guard in [
             "guard_node_session_identity",
+            "guard_node_task_control",
+            "task_cancel_actor_pair",
+            "task_archive_actor_pair",
+            "task request and ownership are immutable",
             "advance_node_control_revision",
             "node_control_revision BEFORE UPDATE ON nodes",
             "node_control_revision BEFORE UPDATE ON user_node_gateway_tokens",

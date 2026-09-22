@@ -105,3 +105,52 @@ async fn node_list_and_delete_preserve_filters_and_escape_revision_query() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn task_commands_preserve_personal_scope_and_explicit_platform_target() {
+    use client_api::api::node_control::{NodeCommand, NodeControlApi, TaskOperation};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    let (client, server) = common::create_test_client().await;
+    let tenant = uuid::Uuid::new_v4();
+    let id = uuid::Uuid::new_v4();
+    let owner = uuid::Uuid::new_v4();
+    let revision = "2026-09-22T13:00:00.000001Z";
+    let command = NodeCommand {
+        expected_updated_at: revision.into(),
+        reason: "fixture task control".into(),
+    };
+    let mut result = serde_json::json!({"task":{"id":id,"request_id":uuid::Uuid::new_v4(),"tenant_id":tenant,"user_id":owner,"model":"fixture","status":"failed","assigned_node_id":null,"failure_count":0,"failure_threshold":3,"queued_at":revision,"claimed_at":null,"finished_at":revision,"deadline_at":revision,"created_at":revision,"updated_at":revision,"cancellation_requested_at":revision,"archived_at":null},"changed":true,"cancellation_requested":true,"archived":false});
+    Mock::given(method("POST"))
+        .and(path(format!("/api/v1/me/tasks/{id}/cancel")))
+        .and(body_json(&command))
+        .respond_with(ResponseTemplate::new(200).set_body_json(result.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let cancelled = NodeControlApi::personal(&client)
+        .operate_task(id, TaskOperation::Cancel, &command, "fixture")
+        .await
+        .unwrap();
+    assert!(cancelled.cancellation_requested);
+    assert_eq!(cancelled.task.user_id, owner);
+    assert!(!cancelled.archived);
+    result["task"]["archived_at"] = revision.into();
+    result["archived"] = true.into();
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant}/tasks/{id}/archive"
+        )))
+        .and(body_json(&command))
+        .respond_with(ResponseTemplate::new(200).set_body_json(result))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let archived = NodeControlApi::platform_tenant(&client, tenant)
+        .unwrap()
+        .operate_task(id, TaskOperation::Archive, &command, "fixture")
+        .await
+        .unwrap();
+    assert!(archived.archived);
+    assert_eq!(archived.task.tenant_id, tenant);
+}

@@ -1607,6 +1607,12 @@ CREATE TABLE IF NOT EXISTS node_tasks (
     failure_threshold INTEGER NOT NULL DEFAULT 3,
     result_json JSONB,
     error_json JSONB,
+    cancellation_requested_at TIMESTAMPTZ,
+    cancellation_requested_by UUID REFERENCES users(id) ON DELETE RESTRICT,
+    archived_at TIMESTAMPTZ,
+    archived_by UUID REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT task_cancel_actor_pair CHECK ((cancellation_requested_at IS NULL) = (cancellation_requested_by IS NULL)),
+    CONSTRAINT task_archive_actor_pair CHECK ((archived_at IS NULL) = (archived_by IS NULL)),
     queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     claimed_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
@@ -1624,6 +1630,14 @@ CREATE INDEX IF NOT EXISTS idx_node_tasks_status_model_deadline ON node_tasks(st
 CREATE INDEX IF NOT EXISTS idx_node_tasks_status_created_at_desc ON node_tasks(status, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_node_tasks_assigned_node_status ON node_tasks(assigned_node_id, status);
 CREATE INDEX IF NOT EXISTS idx_node_tasks_assigned_session_lease ON node_tasks(assigned_session_id, lease_id);
+-- Bound console/history pagination by the verified tenant before ordering.
+CREATE INDEX IF NOT EXISTS idx_node_tasks_tenant_active_page
+    ON node_tasks(tenant_id,created_at DESC,id DESC) WHERE archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_node_tasks_owner_active_page
+    ON node_tasks(tenant_id,user_id,created_at DESC,id DESC) WHERE archived_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_node_tasks_tenant_archived_page
+    ON node_tasks(tenant_id,created_at DESC,id DESC) WHERE archived_at IS NOT NULL;
+
 
 -- node_task_submissions: 节点任务提交结果表 (幂等控制)
 CREATE TABLE IF NOT EXISTS node_task_submissions (
@@ -2313,3 +2327,41 @@ CREATE TRIGGER node_control_revision BEFORE UPDATE ON nodes
 DROP TRIGGER IF EXISTS node_control_revision ON user_node_gateway_tokens;
 CREATE TRIGGER node_control_revision BEFORE UPDATE ON user_node_gateway_tokens
     FOR EACH ROW EXECUTE FUNCTION advance_node_control_revision();
+
+-- Cancellation/archival are durable metadata, never a new execution identity.
+CREATE OR REPLACE FUNCTION guard_node_task_control() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        IF ROW(NEW.id,NEW.request_id,NEW.tenant_id,NEW.user_id)
+            IS DISTINCT FROM ROW(OLD.id,OLD.request_id,OLD.tenant_id,OLD.user_id) THEN
+            RAISE EXCEPTION 'task request and ownership are immutable' USING ERRCODE='23514';
+        END IF;
+        IF OLD.cancellation_requested_at IS NOT NULL AND
+            ROW(NEW.cancellation_requested_at,NEW.cancellation_requested_by)
+            IS DISTINCT FROM ROW(OLD.cancellation_requested_at,OLD.cancellation_requested_by) THEN
+            RAISE EXCEPTION 'task cancellation cannot be reversed' USING ERRCODE='23514';
+        END IF;
+        IF OLD.archived_at IS NOT NULL AND ROW(NEW.archived_at,NEW.archived_by)
+            IS DISTINCT FROM ROW(OLD.archived_at,OLD.archived_by) THEN
+            RAISE EXCEPTION 'task archival cannot be reversed' USING ERRCODE='23514';
+        END IF;
+        IF (OLD.archived_at IS NOT NULL OR (OLD.cancellation_requested_at IS NOT NULL
+                AND OLD.status IN ('succeeded','failed','expired')))
+            AND NEW.status IS DISTINCT FROM OLD.status THEN
+            RAISE EXCEPTION 'terminal controlled tasks cannot be restarted' USING ERRCODE='23514';
+        END IF;
+        -- Do not copy the possibly large prompt/result to compare timestamps.
+        -- Task control no-ops skip UPDATE; every runtime UPDATE advances the CAS.
+        NEW.updated_at := GREATEST(clock_timestamp(),OLD.updated_at+INTERVAL '1 microsecond');
+    END IF;
+    IF NEW.cancellation_requested_at IS NOT NULL AND NEW.status='queued' THEN
+        RAISE EXCEPTION 'cancelled tasks cannot be queued again' USING ERRCODE='23514';
+    END IF;
+    IF NEW.archived_at IS NOT NULL AND NEW.status NOT IN ('succeeded','failed','expired') THEN
+        RAISE EXCEPTION 'only terminal tasks can be archived' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS node_task_control_guard ON node_tasks;
+CREATE TRIGGER node_task_control_guard BEFORE INSERT OR UPDATE ON node_tasks
+    FOR EACH ROW EXECUTE FUNCTION guard_node_task_control();

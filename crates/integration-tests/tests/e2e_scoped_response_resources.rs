@@ -1800,3 +1800,209 @@ async fn replay_connections_enforce_jwt_expiration_and_live_key_expiration() {
     replay_revocation_case("jwt_expiry").await;
     replay_revocation_case("key_expiry").await;
 }
+
+#[tokio::test]
+async fn tenant_cancels_unleased_managed_node_task_without_charging_or_reexecuting() {
+    let mut f = Fixture::new().await;
+    let before = UserBalance::find_by_user(&f.db, f.user.tenant_id, f.user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.user.tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = keycompute_db::User::find_by_id(&f.db, tenant.owner_user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let raw = f
+        .state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(owner.id, None, owner.token_version, None, None, 3600)
+        .unwrap();
+    let global = f.state.auth.verify_token(&raw).await.unwrap();
+    let admin = f
+        .state
+        .auth
+        .select_tenant(&global, Some(tenant.id))
+        .await
+        .unwrap()
+        .access_token;
+    let mut body = f.body(Op::Responses);
+    body["background"] = true.into();
+    body["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/nt/v1/responses", Some(body))
+            .await,
+        StatusCode::OK,
+    );
+    let response_id = created["id"].as_str().unwrap();
+    let task=tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let task=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+                "SELECT t.id,t.request_id,t.updated_at FROM node_tasks t JOIN scoped_responses r ON r.request_id=t.request_id AND r.tenant_id=t.tenant_id AND r.user_id=t.user_id WHERE r.id=$1 AND t.tenant_id=$2 AND t.user_id=$3 AND t.status='queued'",
+                [response_id.into(),tenant.id.into(),f.user.id.into()])).await.unwrap();
+            if let Some(task)=task {break task;}
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("managed task should be queued without a worker");
+    let id: Uuid = task.try_get("", "id").unwrap();
+    let request_id: Uuid = task.try_get("", "request_id").unwrap();
+    let revision: chrono::DateTime<Utc> = task.try_get("", "updated_at").unwrap();
+    let cancelled = expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            &format!("/api/v1/tenants/{}/tasks/{id}/cancel", tenant.id),
+            Some(&admin),
+            Some(json!({"expected_updated_at":revision,"reason":"cancel queued response fixture"})),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(cancelled["task"]["status"], "failed");
+    assert_eq!(cancelled["task"]["user_id"], f.user.id.to_string());
+    wait_state(&f, &format!("/nt/v1/responses/{response_id}"), "failed").await;
+    tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let active:i64=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+                "SELECT COUNT(*)::bigint FROM balance_reservations WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND status='active'",
+                [tenant.id.into(),f.user.id.into(),request_id.into()])).await.unwrap().unwrap().try_get_by_index(0).unwrap();
+            if active==0 {break;}tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("cancelled unleased task releases its original reservation");
+    let after = UserBalance::find_by_user(&f.db, tenant.id, f.user.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.available_balance, after.available_balance);
+    let charged:i64=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT COUNT(*)::bigint FROM usage_logs WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3 AND user_amount>0",
+        [tenant.id.into(),f.user.id.into(),request_id.into()])).await.unwrap().unwrap().try_get_by_index(0).unwrap();
+    assert_eq!(charged, 0);
+    assert!(f.upstream.calls.lock().unwrap().is_empty());
+    assert!(
+        f.state
+            .node_gateway
+            .as_ref()
+            .unwrap()
+            .store
+            .claim_next_native_task(f.node.id, f.session.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let retained = keycompute_db::models::node_task::NodeTask::find_by_id(&f.db, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.user_id, f.user.id);
+    assert_eq!(retained.tenant_id, tenant.id);
+    assert_eq!(retained.request_id, request_id);
+    assert!(retained.assigned_node_id.is_none());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn accepted_node_result_after_cancel_request_keeps_one_original_owner_charge() {
+    let mut f = Fixture::new().await;
+    let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.user.tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let owner = keycompute_db::User::find_by_id(&f.db, tenant.owner_user_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let raw = f
+        .state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(owner.id, None, owner.token_version, None, None, 3600)
+        .unwrap();
+    let global = f.state.auth.verify_token(&raw).await.unwrap();
+    let admin = f
+        .state
+        .auth
+        .select_tenant(&global, Some(tenant.id))
+        .await
+        .unwrap()
+        .access_token;
+    let mut body = f.body(Op::Responses);
+    body["background"] = true.into();
+    body["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/nt/v1/responses", Some(body))
+            .await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap();
+    let task=tokio::time::timeout(Duration::from_secs(5),async {
+        loop {
+            let row=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+                "SELECT t.id FROM node_tasks t JOIN scoped_responses r ON r.request_id=t.request_id AND r.tenant_id=t.tenant_id AND r.user_id=t.user_id WHERE r.id=$1 AND t.tenant_id=$2 AND t.user_id=$3 AND t.status='queued'",
+                [id.into(),tenant.id.into(),f.user.id.into()])).await.unwrap();
+            if let Some(row)=row {
+                let task_id:Uuid=row.try_get_by_index(0).unwrap();
+                if let Some((task,_))=f.state.node_gateway.as_ref().unwrap().store.claim_task(task_id,f.node.id,f.session.id).await.unwrap(){break task;}
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.expect("managed node task must be claimed");
+    let cancelled=expect(http(f.app.clone(),Method::POST,&format!("/api/v1/tenants/{}/tasks/{}/cancel",tenant.id,task.id),Some(&admin),Some(json!({"expected_updated_at":task.updated_at,"reason":"cancellation racing worker result"}))).await,StatusCode::OK);
+    assert_eq!(cancelled["task"]["status"], "leased");
+    let result = NodeTaskResult::NativeSucceeded {
+        response: NodeNativeHttpResult {
+            status: 200,
+            headers: vec![],
+            body: sample_response(Op::Responses, &f.model),
+        },
+    };
+    // A worker may have completed just before seeing its cancellation signal.
+    // The authentic original result must remain chargeable exactly once.
+    for _ in 0..2 {
+        f.state
+            .node_gateway
+            .as_ref()
+            .unwrap()
+            .complete_task(
+                task.id,
+                task.lease_id.unwrap(),
+                f.node.id,
+                f.session.id,
+                result.clone(),
+            )
+            .await
+            .unwrap();
+    }
+    wait_state(&f, &format!("/nt/v1/responses/{id}"), "completed").await;
+    let rows=f.db.query_all(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT tenant_id,user_id,input_tokens,output_tokens,user_amount FROM usage_logs WHERE request_id=$1",
+        [task.request_id.into()])).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    assert_eq!(row.try_get::<Uuid>("", "tenant_id").unwrap(), tenant.id);
+    assert_eq!(row.try_get::<Uuid>("", "user_id").unwrap(), f.user.id);
+    assert_ne!(
+        f.user.id, owner.id,
+        "administrator must not become billing owner"
+    );
+    assert_eq!(row.try_get::<i32>("", "input_tokens").unwrap(), 7);
+    assert_eq!(row.try_get::<i32>("", "output_tokens").unwrap(), 3);
+    let amount: bigdecimal::BigDecimal = row.try_get("", "user_amount").unwrap();
+    assert!(amount > 0);
+    let saved = keycompute_db::models::node_task::NodeTask::find_by_id(&f.db, task.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.user_id, task.user_id);
+    assert_eq!(saved.tenant_id, task.tenant_id);
+    assert_eq!(saved.lease_id, task.lease_id);
+    assert!(saved.cancellation_requested_at.is_some());
+    assert!(f.upstream.calls.lock().unwrap().is_empty());
+    f.finish().await;
+}

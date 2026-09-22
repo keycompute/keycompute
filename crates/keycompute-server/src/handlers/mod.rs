@@ -2919,3 +2919,4 @@ pub mod tenant_keys;
 pub mod distribution_policy;
 
 pub mod tenant_nodes;
+pub mod tenant_tasks;
