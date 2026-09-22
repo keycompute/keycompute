@@ -159,7 +159,7 @@ pub async fn transaction(pool: &DbRouter, scope: Scope) -> Result<DatabaseTransa
 }
 pub async fn check_scope(db: &impl ConnectionTrait, scope: Scope) -> Result<()> {
     let row=timed(db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT 1 FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id WHERE m.user_id=$1 AND m.tenant_id=$2 AND m.status='active' AND t.status='active'",
+        "SELECT 1 FROM tenant_memberships m JOIN tenants t ON t.id=m.tenant_id JOIN users u ON u.id=m.user_id WHERE m.user_id=$1 AND m.tenant_id=$2 AND m.status='active' AND t.status='active' AND u.status='active'",
         [scope.user.into(),scope.tenant.into()]))).await?;
     if row.is_none() {
         return Err(missing());
@@ -1056,15 +1056,24 @@ impl StreamStatus {
         matches!(self.status.as_str(), "queued" | "in_progress")
     }
 }
-pub async fn read_events(
+pub(super) async fn read_events(
     db: &impl ConnectionTrait,
     scope: Scope,
     id: &str,
     after: i64,
+    authority: super::access::ReplayAuthority,
 ) -> Result<(StreamStatus, Vec<StoredEvent>)> {
+    let proof = authority.values(scope)?;
+    let values: Vec<sea_orm::Value> = scope
+        .values()
+        .into_iter()
+        .chain([id.into()])
+        .chain(proof)
+        .collect();
+    let predicate = super::access::CURRENT_REPLAY_ACTOR;
     let record=timed(StreamStatus::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT account_id,status,background,store_response,stream,next_seq FROM scoped_responses WHERE tenant_id=$1 AND user_id=$2 AND access_mode=$3 AND id=$4 AND deleted_at IS NULL AND expires_at>NOW()",
-        scope.values().into_iter().chain([id.into()]))).one(db)).await?.ok_or_else(missing)?;
+        format!("SELECT r.account_id,r.status,r.background,r.store_response,r.stream,r.next_seq FROM scoped_responses r WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.access_mode=$3 AND r.id=$4 AND r.deleted_at IS NULL AND r.expires_at>statement_timestamp() AND {predicate}"),
+        values.clone())).one(db)).await?.ok_or_else(missing)?;
     check_account(db, scope, record.account_id).await?;
     if !(record.background || record.store_response) || !record.stream {
         return Err(missing());
@@ -1075,8 +1084,8 @@ pub async fn read_events(
         ));
     }
     let events=timed(StoredEvent::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "SELECT e.seq,e.frame FROM scoped_response_events e JOIN scoped_responses r ON r.id=e.response_id WHERE e.response_id=$1 AND r.tenant_id=$3 AND r.user_id=$4 AND r.access_mode=$5 AND e.seq>$2 ORDER BY e.seq LIMIT 4",
-        [id.into(),after.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()])).all(db)).await?;
+        format!("SELECT e.seq,e.frame FROM scoped_response_events e JOIN scoped_responses r ON r.id=e.response_id WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.access_mode=$3 AND r.id=$4 AND r.deleted_at IS NULL AND r.expires_at>statement_timestamp() AND e.seq>$10 AND {predicate} ORDER BY e.seq LIMIT 4"),
+        values.into_iter().chain([after.into()]))).all(db)).await?;
     Ok((record, events))
 }
 #[derive(Debug, Clone, serde::Deserialize, Default)]

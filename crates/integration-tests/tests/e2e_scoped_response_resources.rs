@@ -1594,3 +1594,209 @@ async fn deleting_an_active_conversation_persists_a_native_cancellation_event() 
     assert_eq!(f.upstream.calls.lock().unwrap().len(), 1);
     f.finish().await;
 }
+
+// An established replay socket is not a perpetual grant. Revocation must not
+// cancel the original accepted request's mandatory accounting or change owner.
+async fn replay_revocation_case(change: &str) {
+    use http_body_util::BodyExt;
+    let mut f = Fixture::new().await;
+    let mut payload = f.body(Op::Responses);
+    payload["background"] = true.into();
+    payload["stream"] = true.into();
+    payload["store"] = true.into();
+    let response = f
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/pt/v1/responses")
+                .header("authorization", format!("Bearer {}", f.key))
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let id = tokio::time::timeout(Duration::from_secs(5), async {
+        'outer: loop {
+            let frame = body
+                .frame()
+                .await
+                .expect("stream ended before response ID")
+                .expect("initial stream failed");
+            if let Some(bytes) = frame.data_ref() {
+                for line in std::str::from_utf8(bytes).unwrap().lines() {
+                    if let Some(data) = line.strip_prefix("data: ")
+                        && let Ok(value) = serde_json::from_str::<Value>(data)
+                        && let Some(id) = value.pointer("/response/id").and_then(Value::as_str)
+                    {
+                        break 'outer id.to_owned();
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .unwrap();
+    wait_calls(&f, 1).await;
+    // Receipt by the mock server is not yet upstream acceptance. Wait for the
+    // actual durable checkpoint before testing the accepted-work drain rule.
+    tokio::time::timeout(Duration::from_secs(5),async{loop{
+        let accepted=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT 1 FROM scoped_responses WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND execution_json->>'upstream_accepted'='true'",
+            [f.user.tenant_id.into(),f.user.id.into(),id.clone().into()])).await.unwrap();
+        if accepted.is_some(){break;}
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.expect("upstream acceptance must be durably observed before revocation");
+    if change == "jwt_expiry" {
+        drop(body);
+        let user = keycompute_db::User::find_by_id(&f.db, f.user.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.user.tenant_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let member = keycompute_db::TenantMembership::find(&f.db, tenant.id, user.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let token = f
+            .state
+            .auth
+            .get_jwt_validator()
+            .unwrap()
+            .generate_identity_token(
+                user.id,
+                Some(tenant.id),
+                user.token_version,
+                Some(tenant.authz_version),
+                Some(member.authz_version),
+                5,
+            )
+            .unwrap();
+        let replay = f
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/pt/v1/responses/{id}?stream=true"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replay.status(),
+            StatusCode::OK,
+            "valid owner JWT must retain inference-resource access"
+        );
+        body = replay.into_body();
+        tokio::time::timeout(Duration::from_secs(3), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    let statement = match change {
+        "jwt_expiry" => Statement::from_string(DbBackend::Postgres, "SELECT 1"),
+        "key_expiry" => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE produce_ai_keys SET expires_at=statement_timestamp()-interval '1 second' WHERE tenant_id=$1 AND user_id=$2",
+            [f.user.tenant_id.into(), f.user.id.into()],
+        ),
+        "key" => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE produce_ai_keys SET revoked=TRUE,revoked_at=NOW() WHERE tenant_id=$1 AND user_id=$2",
+            [f.user.tenant_id.into(), f.user.id.into()],
+        ),
+        "user" => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET status='suspended' WHERE id=$1",
+            [f.user.id.into()],
+        ),
+        "token" => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+            [f.user.id.into()],
+        ),
+        "membership" => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
+            [f.user.tenant_id.into(), f.user.id.into()],
+        ),
+        "tenant" => Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenants SET authz_version=authz_version+1 WHERE id=$1",
+            [f.user.tenant_id.into()],
+        ),
+        _ => unreachable!(),
+    };
+    f.db.execute(statement).await.unwrap();
+    let next = tokio::time::timeout(
+        Duration::from_secs(if change == "jwt_expiry" { 7 } else { 4 }),
+        body.frame(),
+    )
+    .await;
+    let stopped = matches!(next, Ok(None) | Ok(Some(Err(_))));
+    drop(body);
+    f.upstream.stream_release.notify_one();
+    // Poll the immutable owner scope directly: invalidated credentials are not
+    // used as a workaround to retrieve the result after revocation.
+    let settled=tokio::time::timeout(Duration::from_secs(10),async{loop{
+        let row=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT r.user_id,r.request_id,r.status,(SELECT count(*) FROM usage_logs u WHERE u.tenant_id=r.tenant_id AND u.user_id=r.user_id AND u.request_id=r.request_id)::bigint AS charges FROM scoped_responses r WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.id=$3",
+            [f.user.tenant_id.into(),f.user.id.into(),id.clone().into()])).await.unwrap().unwrap();
+        if row.try_get::<String>("","status").unwrap()=="completed" && row.try_get::<i64>("","charges").unwrap()==1 {break row;}
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }}).await;
+    let calls = f.upstream.calls.lock().unwrap().len();
+    let diagnostic = f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT r.status,r.response_json->'error'->>'code' AS error_code,r.execution_json->>'accounting_pending' AS accounting_pending,(SELECT COUNT(*)::bigint FROM usage_logs u WHERE u.tenant_id=r.tenant_id AND u.user_id=r.user_id AND u.request_id=r.request_id) AS charges FROM scoped_responses r WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.id=$3",
+        [f.user.tenant_id.into(),f.user.id.into(),id.into()])).await.unwrap().unwrap();
+    let diagnostic = (
+        diagnostic.try_get::<String>("", "status").unwrap(),
+        diagnostic
+            .try_get::<Option<String>>("", "error_code")
+            .unwrap(),
+        diagnostic
+            .try_get::<Option<String>>("", "accounting_pending")
+            .unwrap(),
+        diagnostic.try_get::<i64>("", "charges").unwrap(),
+    );
+    f.finish().await;
+    assert!(
+        stopped,
+        "{change}: established replay continued after authority was invalidated"
+    );
+    let settled = settled
+        .unwrap_or_else(|_| panic!("{change}: accepted-work accounting state {diagnostic:?}"));
+    assert_eq!(settled.try_get::<Uuid>("", "user_id").unwrap(), f.user.id);
+    assert_eq!(
+        calls, 1,
+        "replay revocation must not start another inference"
+    );
+}
+#[tokio::test]
+async fn replay_connections_stop_after_key_revocation_or_global_user_suspension() {
+    replay_revocation_case("key").await;
+    replay_revocation_case("user").await;
+}
+#[tokio::test]
+async fn replay_connections_compare_live_user_tenant_and_membership_versions() {
+    for change in ["token", "membership", "tenant"] {
+        replay_revocation_case(change).await;
+    }
+}
+
+#[tokio::test]
+async fn replay_connections_enforce_jwt_expiration_and_live_key_expiration() {
+    replay_revocation_case("jwt_expiry").await;
+    replay_revocation_case("key_expiry").await;
+}

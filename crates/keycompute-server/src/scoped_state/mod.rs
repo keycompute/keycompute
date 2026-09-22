@@ -1,4 +1,5 @@
 //! Platform-managed Responses state; upstream executors remain stateless.
+mod access;
 mod events;
 pub(crate) mod execution;
 pub(crate) mod maintenance;
@@ -133,6 +134,7 @@ pub(crate) async fn create(
     store::metadata(body.get("metadata"))?;
     crate::admission::ensure_generation(&state, &mut auth).await?;
     let scope = Scope::new(&auth, mode)?;
+    let replay_authority = access::ReplayAuthority::new(&state, &auth, scope, &headers)?;
     let pool = state
         .pool
         .as_deref()
@@ -204,7 +206,7 @@ pub(crate) async fn create(
             return Err(store::missing());
         }
         if record.stream && record.background {
-            return resource_stream(state, scope, record.id, None).await;
+            return resource_stream(state, scope, record.id, None, replay_authority).await;
         }
         if record.active() && !record.background {
             return Err(store::conflict(
@@ -291,7 +293,7 @@ pub(crate) async fn create(
             }
         });
         if streaming {
-            resource_stream(state, scope, record.id, None).await
+            resource_stream(state, scope, record.id, None, replay_authority).await
         } else {
             Ok(Json(store::public_response(&record)).into_response())
         }
@@ -310,6 +312,7 @@ async fn resource_stream(
     scope: Scope,
     id: String,
     starting_after: Option<i64>,
+    authority: access::ReplayAuthority,
 ) -> Result<Response> {
     let slot = RESOURCE_STREAM_SLOTS
         .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(32)))
@@ -321,13 +324,15 @@ async fn resource_stream(
         .clone()
         .ok_or_else(|| ApiError::ServiceUnavailable("Platform state unavailable".into()))?;
     let mut after = starting_after.unwrap_or(-1);
-    let initial = store::read_events(pool.write_conn(), scope, &id, after).await?;
+    // Validate status/cursor before sending HTTP headers, but do not retain
+    // prefetched events as a grant across the body's first poll.
+    store::read_events(pool.write_conn(), scope, &id, after, authority).await?;
     let stream = async_stream::stream! {
-        let _slot=slot;let mut initial=Some(initial);
+        let _slot=slot;
         let deadline=tokio::time::Instant::now()+Duration::from_secs(3600);
         loop {
             if tokio::time::Instant::now()>=deadline {yield Err::<bytes::Bytes,std::io::Error>(std::io::Error::other("Response replay connection expired; resume using its cursor"));break;}
-            let next=if let Some(initial)=initial.take(){Ok(initial)}else{store::read_events(pool.write_conn(),scope,&id,after).await};
+            let next=store::read_events(pool.write_conn(),scope,&id,after,authority).await;
             let (record,events)=match next {Ok(v)=>v,Err(_)=>{yield Err(std::io::Error::other("Response state is no longer available"));break;}};
             if events.is_empty() {
                 if !record.active() {
@@ -336,7 +341,12 @@ async fn resource_stream(
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;continue;
             }
-            for event in events {after=event.seq;yield Ok(bytes::Bytes::from(event.frame));}
+            // One authorization snapshot releases at most four events. Never
+            // keep a multi-yield event batch alive across later body polls.
+            if authority.values(scope).is_err() {yield Err(std::io::Error::other("Replay authorization expired"));break;}
+            let mut frames=String::new();
+            for event in events {after=event.seq;frames.push_str(&event.frame);}
+            yield Ok(bytes::Bytes::from(frames));
         }
     };
     Ok((

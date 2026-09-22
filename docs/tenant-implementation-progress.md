@@ -1,15 +1,13 @@
 # Current contract and acceptance status
 
 The current acceptance contract is the latest phase **0–8** plan. Older
-phase-numbered entries below are historical delivery records. The current
-phase-1 field/provenance alignment, tenant control/member/invitation APIs and
-scoped tenant/platform pricing and provider/binding administration have passed
-local acceptance gates recorded below. Tenant usage/billing/payment/wallet
-reporting and owner-only tenant key-pool backend APIs are also accepted.
-Distribution reporting and scoped/audited policy writes are accepted as recorded
-below. Other remaining resource families and full client UI are not included.
-Remaining resource mutations, complete platform
-routing/operator allowlists, client UI and final deployment remain unaccepted.
+phase-numbered entries below are historical delivery records. Final global
+identity/membership foundations and tenant control/invitation APIs are accepted.
+Scoped pricing, providers/bindings, financial/distribution reports, owner-only
+key issuance and distribution policy mutations are also accepted. Live scoped
+Responses replay now revalidates credentials and authorization versions.
+Remaining node/task and Responses administration, financial mutations, complete
+platform/operator routing, frontend delivery and final release are not accepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
@@ -324,6 +322,41 @@ client WASM compilation, formatting, whitespace and all 20 frozen-source hashes 
 CI is verified separately after pushing. No deployment, production data or credentials
 changed. Node/task, Responses administration/live authority, remaining financial
 operations, operator routes, full UI and release gates remain open.
+
+## Current phase 5 — live scoped Responses replay authorization accepted
+
+Real SSE regressions reproduced established replay continuing after inference-key
+revocation and user token-version invalidation. Replay now carries only verified
+identity/version metadata, plus a JWT expiration verified against the original
+signed credential; no bearer secret is persisted or retained by the stream.
+Current active user/member/tenant, exact authorization versions, current key state
+and expiry, and JWT expiry are enforced in the existing writer-side state and
+event SELECTs. General resource scope checks also include global user status.
+Valid owner JWT resource access remains supported; API-key-only behavior was not
+silently imposed on the previously supported inference permission model.
+
+Initial prefetched events are not retained across body polling. Each subsequent
+bounded batch reauthorizes before delivery and emits at most four native events
+as one byte batch, preserving event bytes and cursor semantics. This adds no
+per-event database round trip. Data already sent cannot be recalled, but later
+batch queries do not inherit an obsolete connection-level grant.
+
+Accepted-work execution and settlement continue under the original immutable
+resource/billing owner; stopping replay does not cancel or redirect accounting.
+Three new real PostgreSQL/SSE tests cover seven cases: key revocation, user
+suspension, token/member/tenant version changes, JWT expiry and key expiry. They
+wait for the actual durable upstream-acceptance checkpoint, then verify replay
+stops while exactly one original-owner charge completes without another inference.
+Existing resource ownership, cancellation, history, stream and recovery tests
+remain. This is live-read authorization, not tenant-admin Responses CRUD or
+complete asynchronous new-work authorization acceptance.
+
+Final default-parallel native workspace: **2,525 passed, 0 failed, 30 default
+ignored**, including desktop/mobile. All-target check, all-target/all-feature
+strict Clippy, formatting, whitespace and all five frozen-source hashes passed.
+The resource/stream/owner focused rerun passed at eight threads and is a subset,
+not an additional workspace count. No production schema, credentials, services
+or deployment changed. CI is checked independently after push.
 
 # Tenant subsystem implementation status
 

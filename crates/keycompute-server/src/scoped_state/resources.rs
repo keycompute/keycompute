@@ -98,6 +98,7 @@ async fn response_retrieve(
     mode: ModelAccessMode,
     id: String,
     query: Option<String>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Response> {
     let scope = scope(&auth, mode)?;
     let streaming = bool_query(query.as_deref(), "stream")?;
@@ -109,7 +110,8 @@ async fn response_retrieve(
                 ApiError::BadRequest("starting_after must be an event cursor".into())
             })?),
         };
-        return resource_stream(state, scope, id, cursor).await;
+        let authority = super::access::ReplayAuthority::new(&state, &auth, scope, &headers)?;
+        return resource_stream(state, scope, id, cursor, authority).await;
     }
     if starting_after.is_some() {
         return Err(ApiError::BadRequest(
@@ -203,8 +205,9 @@ macro_rules! response_handlers {
             auth: AuthExtractor,
             Path(id): Path<String>,
             RawQuery(query): RawQuery,
+            headers: axum::http::HeaderMap,
         ) -> Result<Response> {
-            response_retrieve(state, auth, ModelAccessMode::$mode, id, query).await
+            response_retrieve(state, auth, ModelAccessMode::$mode, id, query, headers).await
         }
         pub async fn $delete(
             State(state): State<AppState>,
