@@ -7,7 +7,7 @@ use keycompute_types::{
 };
 use sea_orm::DatabaseTransaction;
 
-const COLUMNS: &str = "k.id,k.tenant_id,k.user_id,k.name,k.produce_ai_key_preview,k.revoked,k.revoked_at,k.expires_at,k.last_used_at,k.created_at";
+const COLUMNS: &str = "k.id,k.tenant_id,k.user_id,k.name,k.produce_ai_key_preview,k.revoked,k.revoked_at,k.expires_at,k.last_used_at,k.created_at,k.updated_at";
 
 #[derive(Clone, Copy)]
 enum Scope {

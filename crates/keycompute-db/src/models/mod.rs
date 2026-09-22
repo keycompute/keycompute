@@ -114,3 +114,5 @@ pub mod referral_display;
 pub mod console_display;
 
 pub mod tenant_control;
+
+pub mod key_issuance;

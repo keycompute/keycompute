@@ -46,6 +46,7 @@ pub struct ProduceAiKeyResponse {
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl From<ProduceAiKey> for ProduceAiKeyResponse {
@@ -61,6 +62,7 @@ impl From<ProduceAiKey> for ProduceAiKeyResponse {
             expires_at: key.expires_at,
             last_used_at: key.last_used_at,
             created_at: key.created_at,
+            updated_at: key.updated_at,
         }
     }
 }

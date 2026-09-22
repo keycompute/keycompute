@@ -174,6 +174,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn key_issuance_schema_retains_scoped_identity_without_storing_secrets() {
+        let sql = include_str!("../migrations/001_init.sql");
+        let body = sql
+            .split("CREATE TABLE IF NOT EXISTS tenant_key_issuance_intents (")
+            .nth(1)
+            .unwrap()
+            .split("\n);")
+            .next()
+            .unwrap();
+        for expected in [
+            "FOREIGN KEY (tenant_id, owner_user_id)",
+            "FOREIGN KEY (tenant_id, requested_by_user_id)",
+            "created_key_id UUID",
+            "tenant_authz_version BIGINT",
+        ] {
+            assert!(body.contains(expected));
+        }
+        for forbidden in [
+            "token_hash ",
+            "secret ",
+            "ciphertext ",
+            "produce_ai_key_hash ",
+            "created_key_id UUID REFERENCES",
+        ] {
+            assert!(!body.contains(forbidden));
+        }
+        assert!(sql.contains("terminal key issuance is immutable"));
+        assert!(sql.contains("replacement key must belong to issuance owner"));
+    }
+
+    #[test]
     fn native_worker_permissions_are_immutable_session_metadata() {
         let sql = include_str!("../migrations/001_init.sql");
         assert!(sql.contains("native_operations_json JSONB NOT NULL DEFAULT '[]'::jsonb"));

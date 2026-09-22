@@ -153,6 +153,119 @@ CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_tenant ON produce_ai_keys(tenant_
 CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_user ON produce_ai_keys(user_id);
 CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_hash ON produce_ai_keys(produce_ai_key_hash);
 CREATE INDEX IF NOT EXISTS idx_produce_ai_keys_revoked ON produce_ai_keys(revoked) WHERE revoked = FALSE;
+-- Paste this block into the final greenfield
+-- crates/keycompute-db/migrations/001_init.sql after produce_ai_keys.
+-- It is intentionally create-only: do not turn it into 002_* or add ALTER
+-- compatibility paths.  No plaintext key, ciphertext, key hash, password, or
+-- outbox payload is stored here.
+
+CREATE TABLE IF NOT EXISTS tenant_key_issuance_intents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    owner_user_id UUID NOT NULL,
+    requested_by_user_id UUID NOT NULL,
+    replaces_key_id UUID,
+    requested_name VARCHAR(255) NOT NULL,
+    requested_expires_at TIMESTAMPTZ,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'claimed', 'cancelled', 'expired')),
+    expires_at TIMESTAMPTZ NOT NULL,
+    claimed_at TIMESTAMPTZ,
+    -- Immutable accounting identity snapshot.  This is intentionally not a
+    -- foreign key: claimed intent history must survive safe deletion of the
+    -- revoked credential and must never become CHECK-invalid via SET NULL.
+    created_key_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    requested_by_token_version INTEGER NOT NULL CHECK (requested_by_token_version >= 0),
+    requested_by_authz_version BIGINT NOT NULL CHECK (requested_by_authz_version > 0),
+    owner_token_version INTEGER NOT NULL CHECK (owner_token_version >= 0),
+    owner_authz_version BIGINT NOT NULL CHECK (owner_authz_version > 0),
+    tenant_authz_version BIGINT NOT NULL CHECK (tenant_authz_version > 0),
+    CONSTRAINT fk_key_issuance_owner_membership
+        FOREIGN KEY (tenant_id, owner_user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id)
+        ON DELETE CASCADE,
+    CONSTRAINT fk_key_issuance_requester_membership
+        FOREIGN KEY (tenant_id, requested_by_user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id)
+        ON DELETE CASCADE,
+    CONSTRAINT ck_key_issuance_name
+        CHECK (requested_name = BTRIM(requested_name) AND requested_name <> ''),
+    CONSTRAINT ck_key_issuance_expiration
+        CHECK (requested_expires_at IS NULL OR requested_expires_at > created_at),
+    CONSTRAINT ck_key_issuance_ttl
+        CHECK (expires_at > created_at),
+    CONSTRAINT ck_key_issuance_lifecycle
+        CHECK (
+            (status = 'pending' AND claimed_at IS NULL AND created_key_id IS NULL)
+            OR (status = 'claimed' AND claimed_at IS NOT NULL AND created_key_id IS NOT NULL)
+            OR (status IN ('cancelled', 'expired') AND claimed_at IS NULL AND created_key_id IS NULL)
+        )
+);
+
+CREATE INDEX IF NOT EXISTS idx_key_issuance_pending_owner
+    ON tenant_key_issuance_intents(tenant_id, owner_user_id, created_at DESC, id DESC)
+    WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS idx_key_issuance_pending_tenant
+    ON tenant_key_issuance_intents(tenant_id, expires_at, created_at DESC, id DESC)
+    WHERE status = 'pending';
+
+CREATE UNIQUE INDEX IF NOT EXISTS uk_key_issuance_pending_replacement
+    ON tenant_key_issuance_intents(tenant_id, replaces_key_id)
+    WHERE status = 'pending' AND replaces_key_id IS NOT NULL;
+
+-- Intent metadata follows physical tenant removal. Soft membership removal
+-- retains the row, and independent immutable audit snapshots retain evidence.
+-- Key deletion never changes the retained created_key_id identity snapshot.
+CREATE OR REPLACE FUNCTION enforce_key_issuance_identity() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='INSERT' AND (NEW.status<>'pending' OR NEW.id IS NULL) THEN
+        RAISE EXCEPTION 'key issuance must begin pending' USING ERRCODE='23514';
+    END IF;
+    IF TG_OP='UPDATE' THEN
+        IF ROW(NEW.id,NEW.tenant_id,NEW.owner_user_id,NEW.requested_by_user_id,
+               NEW.replaces_key_id,NEW.requested_name,NEW.requested_expires_at,
+               NEW.expires_at,NEW.created_at,NEW.requested_by_token_version,
+               NEW.requested_by_authz_version,NEW.owner_token_version,
+               NEW.owner_authz_version,NEW.tenant_authz_version)
+           IS DISTINCT FROM
+           ROW(OLD.id,OLD.tenant_id,OLD.owner_user_id,OLD.requested_by_user_id,
+               OLD.replaces_key_id,OLD.requested_name,OLD.requested_expires_at,
+               OLD.expires_at,OLD.created_at,OLD.requested_by_token_version,
+               OLD.requested_by_authz_version,OLD.owner_token_version,
+               OLD.owner_authz_version,OLD.tenant_authz_version) THEN
+            RAISE EXCEPTION 'key issuance identity is immutable' USING ERRCODE='23514';
+        END IF;
+        IF OLD.status<>'pending' AND ROW(NEW.status,NEW.claimed_at,NEW.created_key_id)
+             IS DISTINCT FROM ROW(OLD.status,OLD.claimed_at,OLD.created_key_id) THEN
+            RAISE EXCEPTION 'terminal key issuance is immutable' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    IF TG_OP='INSERT' AND NEW.replaces_key_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM produce_ai_keys k WHERE k.id=NEW.replaces_key_id
+          AND k.tenant_id=NEW.tenant_id AND k.user_id=NEW.owner_user_id
+    ) THEN
+        RAISE EXCEPTION 'replacement key must belong to issuance owner' USING ERRCODE='23514';
+    END IF;
+    IF TG_OP='UPDATE' AND OLD.status='pending' AND NEW.status='claimed' THEN
+        IF NEW.expires_at<=clock_timestamp() OR NEW.claimed_at IS NULL
+           OR NEW.created_key_id IS NULL OR NEW.created_key_id=NEW.replaces_key_id
+           OR NOT EXISTS (
+               SELECT 1 FROM produce_ai_keys k WHERE k.id=NEW.created_key_id
+                 AND k.tenant_id=NEW.tenant_id AND k.user_id=NEW.owner_user_id
+           ) THEN
+            RAISE EXCEPTION 'claim requires a new owner-scoped key before expiry' USING ERRCODE='23514';
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_key_issuance_identity ON tenant_key_issuance_intents;
+CREATE TRIGGER trg_key_issuance_identity BEFORE INSERT OR UPDATE ON tenant_key_issuance_intents
+FOR EACH ROW EXECUTE FUNCTION enforce_key_issuance_identity();
+
 -- accounts: 上游 Provider 账号池
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

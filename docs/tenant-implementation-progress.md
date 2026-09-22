@@ -5,7 +5,8 @@ phase-numbered entries below are historical delivery records. The current
 phase-1 field/provenance alignment, tenant control/member/invitation APIs and
 scoped tenant/platform pricing and provider/binding administration have passed
 local acceptance gates recorded below. Tenant usage/billing/payment/wallet
-reporting is also accepted. Remaining resource mutations, complete platform
+reporting and owner-only tenant key-pool backend APIs are also accepted.
+Remaining resource mutations, complete platform
 routing/operator allowlists, client UI and final deployment remain unaccepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
@@ -171,6 +172,47 @@ ignored**, including desktop/mobile. Strict all-target/all-feature Clippy,
 formatting, whitespace and exact reviewed-source hashes passed. No production
 state or deployment changed. This is reporting acceptance, not permission to
 mint funds or modify immutable billing records, nor complete subsystem release.
+
+## Current phases 3/5 — tenant key-pool backend accepted
+
+Tenant key metadata, creation/rotation requests, cancellation, owner-only claim
+and owner decline now have canonical tenant/personal routes. An administrator
+receives only an inert issuance intent. The current owner alone can claim the
+raw key once; a claim response has private/no-store and no-cache headers.
+Intent storage contains no credential hash, ciphertext or raw secret. Internal
+authorization snapshots are excluded from API serialization and raw secrets
+are excluded from Debug and audit. Metadata updates have owner-bound SQL,
+monotonic optimistic revisions and distinct omitted/null expiration semantics.
+
+A claim rechecks the exact signed tenant/member/user versions and the original
+requester's current administrator grant while holding deterministic locks.
+Demotion, suspension and later regrant do not revive old requests. Rotation
+retains the old credential until the successful claim transaction revokes it,
+creates the new owner-scoped key, records audit and finalizes the intent.
+Audit failure rolls the entire savepoint back even when an outer caller catches
+the error and commits. The existing scoped key CRUD and shared-parent lock
+order remain unchanged rather than inheriting the draft's weakened predicates.
+
+Greenfield 001_init.sql adds one tenant/owner-scoped intent table, immutable
+identity/terminal-state guards and pending indexes. No incremental migration,
+production database update, credential rotation or deployment was performed.
+Ten new real PostgreSQL/HTTP tests cover one-time and concurrent claims, safe
+fields, personal/admin/foreign scopes, actor/credential/version forgery,
+metadata CAS, sequential rotation, regrant invalidation, audit rollback,
+expiry and database ownership/terminal constraints. The original seven scoped
+key tests also pass with eight threads. Two handler tests and a schema test
+add exact contract checks. Full native default-parallel workspace: **2,498
+passed, 0 failed, 30 default ignored**, including desktop/mobile. All-target
+check, all-target/all-feature Clippy with -D warnings, formatting, whitespace
+and frozen-source hashes passed. The 17-test key suite is included in that total.
+
+This is backend acceptance, not the whole subsystem or client/UI delivery.
+Client integration and supplemental combined rotation/history-deletion and
+exact-PID queued-claim test writes were tool-denied and are not claimed as
+coverage. Existing core deletion/queued-key tests remain; independent fresh
+claim concurrency and atomic rotation tests passed. Node/task/distribution/
+Responses administration, remaining platform/operator routing, client UI and
+final release gates are still open. CI is verified separately after the push.
 
 # Tenant subsystem implementation status
 
