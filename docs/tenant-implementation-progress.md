@@ -4,9 +4,9 @@ The current acceptance contract is the latest phase **0–8** plan. Older
 phase-numbered entries below are historical delivery records. The current
 phase-1 field/provenance alignment, tenant control/member/invitation APIs and
 scoped tenant/platform pricing and provider/binding administration have passed
-local acceptance gates recorded below. Remaining resource administration,
-complete platform routing/operator allowlists, client UI and final deployment
-remain unaccepted.
+local acceptance gates recorded below. Tenant usage/billing/payment/wallet
+reporting is also accepted. Remaining resource mutations, complete platform
+routing/operator allowlists, client UI and final deployment remain unaccepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
@@ -144,6 +144,33 @@ contract. Tenant key-pool owner-only issuance, reporting and financial operation
 node/distribution/Responses administration, full operator routing, UI and final
 release gates remain. Scratch preparation is not accepted runtime code. CI
 is verified separately after this commit.
+
+## Current phases 3/5 — tenant financial reporting accepted
+
+Canonical tenant reporting now exposes usage and billing list/detail/statistics,
+payment metadata list/detail, and member balance snapshots. Every route requires
+the selected path-bound active administrator membership. Owner filters only
+narrow the verified tenant; personal APIs are not widened. Usage list/count and
+currency totals share one scoped predicate builder with half-open time windows
+and stable pagination. Monetary totals are grouped by currency, never mixed.
+
+Payment console DAO queries recheck current user/membership/tenant or current
+root authority in the same primary query. Tenant payment projections do not
+select payment capability URLs, callbacks, provider payloads, body/subject,
+remarks, raw errors or credentials. Historical provider callbacks and settlement
+remain unchanged. Wallet reports preserve the accepted read-only semantics:
+no initialization, row lock, reclamation or financial mutation, and no fabricated
+zero wallet for a foreign owner. Statistics retain the HeavyRead console budget.
+
+Three new PostgreSQL/HTTP tests and focused query/budget checks cover tenant
+list/detail/count boundaries, separate CNY/USD totals, safe payment fields,
+member refusal, bounded strict queries and wallet no-write behavior. Existing
+scoped usage/payment/wallet and credential tests remain in the full suite.
+Final native default-parallel workspace: **2,485 passed, 0 failed, 30 default
+ignored**, including desktop/mobile. Strict all-target/all-feature Clippy,
+formatting, whitespace and exact reviewed-source hashes passed. No production
+state or deployment changed. This is reporting acceptance, not permission to
+mint funds or modify immutable billing records, nor complete subsystem release.
 
 # Tenant subsystem implementation status
 

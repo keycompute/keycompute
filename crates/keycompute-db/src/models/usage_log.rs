@@ -76,7 +76,9 @@ pub struct UserUsageStats {
 
 #[path = "usage_log_scope.rs"]
 mod scope;
-pub use scope::{CurrencyUsageStats, PlatformUsageScope, TenantUsageScope, UserUsageScope};
+pub use scope::{
+    CurrencyUsageStats, PlatformUsageScope, TenantUsageScope, UsageLogReportRow, UserUsageScope,
+};
 
 impl UsageLog {
     /// 创建用量日志

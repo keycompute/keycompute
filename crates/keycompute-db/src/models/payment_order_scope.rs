@@ -9,6 +9,17 @@ enum ReadScope {
     Platform(PlatformScope),
 }
 
+fn current_tenant_actor(require_admin: bool) -> String {
+    let role = if require_admin {
+        " AND m.tenant_role='admin'"
+    } else {
+        ""
+    };
+    format!(
+        "EXISTS (SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id JOIN tenants t ON t.id=m.tenant_id WHERE m.tenant_id=$1 AND m.user_id=$2 AND m.status='active' AND u.status='active' AND t.status='active'{role})"
+    )
+}
+
 /// One predicate builder for detail, list, count and aggregate queries.
 /// Table/column expressions below are internal constants, never request data.
 fn predicate(
@@ -23,13 +34,15 @@ fn predicate(
             predicates.push("tenant_id=$1".to_string());
             predicates.push("user_id=$2".to_string());
             values.extend([scope.tenant_id().into(), scope.user_id().into()]);
+            predicates.push(current_tenant_actor(false));
         }
         ReadScope::Tenant(scope) => {
             if scope.tenant_role() != TenantRole::Admin {
                 return Err(DbError::Other("tenant administrator scope required".into()));
             }
             predicates.push("tenant_id=$1".to_string());
-            values.push(scope.tenant_id().into());
+            values.extend([scope.tenant_id().into(), scope.user_id().into()]);
+            predicates.push(current_tenant_actor(true));
         }
         ReadScope::Platform(scope) => {
             // Operator may consume separate aggregate diagnostics, not raw
@@ -37,6 +50,8 @@ fn predicate(
             if scope.platform_role() != PlatformRole::Root {
                 return Err(DbError::Other("platform billing scope required".into()));
             }
+            values.push(scope.user_id().into());
+            predicates.push("EXISTS (SELECT 1 FROM users actor WHERE actor.id=$1 AND actor.status='active' AND actor.platform_role='root')".into());
         }
     }
     if let Some(status) = status {
@@ -239,7 +254,9 @@ mod tests {
         for role in [TenantRole::Admin, TenantRole::Member] {
             let scope = TenantScope::checked(tenant, user, role).unwrap();
             let (sql, values) = predicate(ReadScope::Personal(scope), Some("paid"), None).unwrap();
-            assert_eq!(sql, "tenant_id=$1 AND user_id=$2 AND status=$3");
+            assert!(sql.starts_with("tenant_id=$1 AND user_id=$2 AND "));
+            assert!(sql.contains(&current_tenant_actor(false)));
+            assert!(sql.ends_with(" AND status=$3"));
             assert_eq!(values, vec![tenant.into(), user.into(), "paid".into()]);
         }
     }
@@ -250,5 +267,88 @@ mod tests {
         assert!(predicate(ReadScope::Tenant(tenant), None, None).is_err());
         let operator = PlatformScope::checked(user, PlatformRole::Operator).unwrap();
         assert!(predicate(ReadScope::Platform(operator), None, None).is_err());
+    }
+}
+
+/// Tenant reporting never fetches provider credentials, capability URLs or payloads.
+#[derive(Debug, Clone, FromQueryResult, Serialize)]
+pub struct PaymentOrderReportRow {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub amount: Decimal,
+    pub currency: String,
+    pub status: String,
+    pub payment_method: String,
+    pub payment_scene: String,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub expired_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+const REPORT_COLUMNS: &str = "id,tenant_id,user_id,amount,currency,status,payment_method,payment_scene,paid_at,closed_at,expired_at,created_at,updated_at";
+
+impl PaymentOrder {
+    pub async fn find_report_in_tenant(
+        db: &impl ConnectionTrait,
+        scope: TenantScope,
+        id: Uuid,
+    ) -> Result<Option<PaymentOrderReportRow>, DbError> {
+        let (predicate, mut values) = predicate(ReadScope::Tenant(scope), None, None)?;
+        values.push(id.into());
+        Ok(
+            PaymentOrderReportRow::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!(
+                    "SELECT {REPORT_COLUMNS} FROM payment_orders WHERE {predicate} AND id=${}",
+                    values.len()
+                ),
+                values,
+            ))
+            .one(db)
+            .await?,
+        )
+    }
+    pub async fn list_report_in_tenant(
+        db: &impl ConnectionTrait,
+        scope: TenantScope,
+        status: Option<&str>,
+        owner: Option<Uuid>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<PaymentOrderReportRow>, DbError> {
+        let (predicate, mut values) = predicate(ReadScope::Tenant(scope), status, owner)?;
+        let index = values.len() + 1;
+        values.extend([limit.clamp(1, 100).into(), offset.max(0).into()]);
+        Ok(PaymentOrderReportRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            format!("SELECT {REPORT_COLUMNS} FROM payment_orders WHERE {predicate} ORDER BY created_at DESC,id DESC LIMIT ${index} OFFSET ${}",index+1),values,
+        )).all(db).await?)
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::*;
+    #[test]
+    fn metadata_projection_and_scope_never_include_payment_secrets() {
+        for column in [
+            "pay_url",
+            "notify_data",
+            "provider_payload",
+            "body",
+            "remarks",
+            "last_error_message",
+        ] {
+            assert!(!REPORT_COLUMNS.split(',').any(|actual| actual == column));
+        }
+        let scope =
+            TenantScope::checked(Uuid::new_v4(), Uuid::new_v4(), TenantRole::Admin).unwrap();
+        let (sql, values) =
+            predicate(ReadScope::Tenant(scope), Some("paid"), Some(Uuid::new_v4())).unwrap();
+        assert!(sql.contains("m.tenant_role='admin'"));
+        assert!(sql.contains("u.status='active'"));
+        assert_eq!(values.len(), 4);
     }
 }

@@ -2910,3 +2910,5 @@ pub mod tenant_pricing;
 pub mod tenant_providers;
 
 pub mod tenant_bindings;
+
+pub mod tenant_reporting;

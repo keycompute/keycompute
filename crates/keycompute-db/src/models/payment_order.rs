@@ -578,3 +578,4 @@ impl PaymentOrder {
 
 #[path = "payment_order_scope.rs"]
 mod scope;
+pub use scope::PaymentOrderReportRow;

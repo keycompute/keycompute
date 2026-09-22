@@ -20,6 +20,32 @@ impl Window {
     }
 }
 
+/// Stable, secret-free tenant reporting projection, independent of future ledger fields.
+#[derive(Debug, Clone, FromQueryResult, Serialize)]
+pub struct UsageLogReportRow {
+    pub id: Uuid,
+    pub request_id: Uuid,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub produce_ai_key_id: Uuid,
+    pub model_name: String,
+    pub provider_name: String,
+    pub account_id: Uuid,
+    pub input_tokens: i32,
+    pub output_tokens: i32,
+    pub total_tokens: i32,
+    pub input_unit_price_snapshot: BigDecimal,
+    pub output_unit_price_snapshot: BigDecimal,
+    pub user_amount: BigDecimal,
+    pub currency: String,
+    pub usage_source: String,
+    pub status: String,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+const REPORT_COLUMNS: &str = "l.id,l.request_id,l.tenant_id,l.user_id,l.produce_ai_key_id,l.model_name,l.provider_name,l.account_id,l.input_tokens,l.output_tokens,l.total_tokens,l.input_unit_price_snapshot,l.output_unit_price_snapshot,l.user_amount,l.currency,l.usage_source,l.status,l.started_at,l.finished_at,l.created_at";
+
 /// All selectors are private SQL constants; all request values are bound.
 fn query(
     scope: ReadScope,
@@ -28,6 +54,18 @@ fn query(
     window: Window,
     pagination: Option<(i64, i64)>,
     id: Option<Uuid>,
+) -> Result<Statement, DbError> {
+    query_filtered(scope, select, suffix, window, pagination, id, None)
+}
+
+fn query_filtered(
+    scope: ReadScope,
+    select: &str,
+    suffix: &str,
+    window: Window,
+    pagination: Option<(i64, i64)>,
+    id: Option<Uuid>,
+    owner: Option<Uuid>,
 ) -> Result<Statement, DbError> {
     if matches!((window.from, window.to), (Some(from), Some(to)) if from >= to) {
         return Err(DbError::Other(
@@ -67,6 +105,13 @@ fn query(
     if let Some(id) = id {
         values.push(id.into());
         sql.push_str(&format!(" AND l.id=${}", values.len()));
+    }
+    if let Some(owner) = owner {
+        if owner.is_nil() {
+            return Err(DbError::Other("usage owner must be a real UUID".into()));
+        }
+        values.push(owner.into());
+        sql.push_str(&format!(" AND l.user_id=${}", values.len()));
     }
     sql.push(' ');
     sql.push_str(suffix);
@@ -397,5 +442,115 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+impl TenantUsageScope {
+    pub async fn find_report(
+        &self,
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<UsageLogReportRow>, DbError> {
+        Ok(UsageLogReportRow::find_by_statement(query_filtered(
+            ReadScope::Tenant(self.0),
+            REPORT_COLUMNS,
+            "",
+            Window::default(),
+            None,
+            Some(id),
+            None,
+        )?)
+        .one(db)
+        .await?)
+    }
+    pub async fn list_report(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        owner: Option<Uuid>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<UsageLogReportRow>, DbError> {
+        Ok(UsageLogReportRow::find_by_statement(query_filtered(
+            ReadScope::Tenant(self.0),
+            REPORT_COLUMNS,
+            "ORDER BY l.created_at DESC,l.id DESC",
+            Window::new(from, to),
+            Some((limit, offset)),
+            None,
+            owner,
+        )?)
+        .all(db)
+        .await?)
+    }
+    pub async fn count_report(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        owner: Option<Uuid>,
+    ) -> Result<i64, DbError> {
+        let row = db
+            .query_one(query_filtered(
+                ReadScope::Tenant(self.0),
+                "COUNT(*)",
+                "",
+                Window::new(from, to),
+                None,
+                None,
+                owner,
+            )?)
+            .await?
+            .ok_or_else(|| DbError::Other("usage report count returned no row".into()))?;
+        Ok(row.try_get_by_index(0)?)
+    }
+    pub async fn currency_stats(
+        &self,
+        db: &impl ConnectionTrait,
+        from: Option<DateTime<Utc>>,
+        to: Option<DateTime<Utc>>,
+        owner: Option<Uuid>,
+    ) -> Result<Vec<CurrencyUsageStats>, DbError> {
+        Ok(CurrencyUsageStats::find_by_statement(query_filtered(
+            ReadScope::Tenant(self.0),
+            &format!("l.currency,{TOTALS}"),
+            "GROUP BY l.currency ORDER BY l.currency",
+            Window::new(from, to),
+            None,
+            None,
+            owner,
+        )?)
+        .all(db)
+        .await?)
+    }
+}
+
+#[cfg(test)]
+mod reporting_tests {
+    use super::*;
+    #[test]
+    fn report_count_and_currency_totals_share_tenant_owner_and_time_predicates() {
+        let scope = ReadScope::Tenant(
+            TenantScope::checked(Uuid::new_v4(), Uuid::new_v4(), TenantRole::Admin).unwrap(),
+        );
+        let owner = Some(Uuid::new_v4());
+        let count =
+            query_filtered(scope, "COUNT(*)", "", Window::default(), None, None, owner).unwrap();
+        let stats = query_filtered(
+            scope,
+            "l.currency",
+            "GROUP BY l.currency",
+            Window::default(),
+            None,
+            None,
+            owner,
+        )
+        .unwrap();
+        assert_eq!(count.values, stats.values);
+        assert!(count.sql.contains(ACTIVE_ADMIN));
+        assert!(count.sql.contains("l.user_id=$5"));
+        assert!(!count.sql.contains("ORDER BY"));
+        assert!(!count.sql.contains("FOR UPDATE"));
     }
 }
