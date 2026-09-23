@@ -697,6 +697,7 @@ CREATE TABLE IF NOT EXISTS usage_logs (
     -- unique key so PostgreSQL can enforce that they reference a usage row in
     -- the same tenant rather than merely an existing global UUID.
     CONSTRAINT uk_usage_logs_tenant_id_id UNIQUE (tenant_id, id),
+    CONSTRAINT uq_usage_logs_tip_owner UNIQUE (tenant_id, id, user_id),
     CONSTRAINT fk_usage_logs_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
 
@@ -1375,7 +1376,8 @@ CREATE TABLE IF NOT EXISTS balance_transactions (
     description TEXT,
     -- 创建时间
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT fk_balance_transactions_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
+    CONSTRAINT fk_balance_transactions_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT,
+    CONSTRAINT uq_balance_transactions_tip_owner UNIQUE (tenant_id, user_id, id)
 );
 
 -- 创建索引
@@ -1805,103 +1807,113 @@ COMMENT ON COLUMN user_node_gateway_tokens.updated_at IS '最后更新时间';
 -- tips = usage_log.user_amount * node_tip_ratio
 -- ============================================================================
 
+-- Node earnings retain the actual billing tenant, consumer and provider owner.
 CREATE TABLE IF NOT EXISTS node_tips (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- 关联的计费记录
-    usage_log_id UUID NOT NULL
-        CONSTRAINT uk_node_tips_usage_log_id UNIQUE
-        REFERENCES usage_logs(id) ON DELETE RESTRICT,
-    -- 提供服务的节点 ID
-    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE RESTRICT,
-    -- 节点所有者（同时也是 tips 受益人）
-    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    -- 消费该服务的用户（付费方）
-    consumer_user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    -- 小费金额（10 位小数，与 usage_logs.user_amount DECIMAL(20,10) 对齐）
-    tip_amount DECIMAL(20, 10) NOT NULL,
-    -- 币种
-    currency VARCHAR(8) NOT NULL DEFAULT 'CNY',
-    -- 计算比例（快照，如 0.9000）
-    tip_ratio DECIMAL(5, 4) NOT NULL,
-    -- 原始计费金额（快照，审计用，10 位小数与 usage_logs.user_amount DECIMAL(20,10) 对齐）
-    bill_amount DECIMAL(20, 10) NOT NULL,
-    -- 创建时间
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    usage_log_id UUID NOT NULL,
+    node_id UUID NOT NULL,
+    owner_user_id UUID NOT NULL,
+    consumer_user_id UUID NOT NULL,
+    tip_amount DECIMAL(20,10) NOT NULL CHECK(tip_amount>0),
+    currency VARCHAR(8) NOT NULL CHECK(currency ~ '^[A-Z]{3}$'),
+    tip_ratio DECIMAL(5,4) NOT NULL CHECK(tip_ratio>0 AND tip_ratio<=1),
+    bill_amount DECIMAL(20,10) NOT NULL CHECK(bill_amount>0 AND tip_amount<=bill_amount),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- 最后更新时间
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uk_node_tips_usage_log_id UNIQUE (usage_log_id),
+    CONSTRAINT fk_node_tips_usage_owner FOREIGN KEY(tenant_id,usage_log_id,consumer_user_id)
+        REFERENCES usage_logs(tenant_id,id,user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_node_tips_node_owner FOREIGN KEY(tenant_id,node_id,owner_user_id)
+        REFERENCES nodes(tenant_id,id,owner_user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_node_tips_owner_membership FOREIGN KEY(tenant_id,owner_user_id)
+        REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
 );
-
-CREATE INDEX IF NOT EXISTS idx_node_tips_owner_user_id ON node_tips(owner_user_id);
--- usage_log_id 上有 UNIQUE 约束，已自动创建唯一索引，无需额外 B-tree 索引
--- 按用户查询历史记录的复合索引（覆盖 list_by_user 的 ORDER BY created_at DESC）
-CREATE INDEX IF NOT EXISTS idx_node_tips_owner_created ON node_tips(owner_user_id, created_at DESC);
-COMMENT ON TABLE node_tips IS '节点租赁小费表';
-COMMENT ON COLUMN node_tips.usage_log_id IS '关联的计费记录 ID';
-COMMENT ON COLUMN node_tips.node_id IS '提供服务的节点 ID';
-COMMENT ON COLUMN node_tips.owner_user_id IS '节点所有者（tips 受益人）';
-COMMENT ON COLUMN node_tips.consumer_user_id IS '消费用户（付费方）';
-COMMENT ON COLUMN node_tips.tip_amount IS '小费金额（元）';
-COMMENT ON COLUMN node_tips.tip_ratio IS '计算比例（快照）';
-COMMENT ON COLUMN node_tips.bill_amount IS '原始计费金额（快照，审计用）';
-
--- ============================================================================
--- node_tip_withdrawals: 小费提现记录表
---
--- 支持两种提现方式：
---   1. alipay  - 用户提供支付宝账户+姓名，管理员线下打款
---   2. balance - 直接转入用户 available_balance
---
--- PII 敏感信息加密存储：
---   - alipay_account 和 real_name 使用 AES-256-GCM 加密
---   - 加密格式：base64(nonce || ciphertext)
---   - 密钥复用 CRYPTO__SECRET_KEY 配置
--- ============================================================================
+CREATE INDEX IF NOT EXISTS idx_node_tips_scope
+    ON node_tips(tenant_id,owner_user_id,currency,created_at DESC,id DESC);
+CREATE OR REPLACE FUNCTION guard_node_tip_immutable() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'node earnings are immutable accounting records' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS node_tip_immutable ON node_tips;
+CREATE TRIGGER node_tip_immutable BEFORE UPDATE ON node_tips
+    FOR EACH ROW EXECUTE FUNCTION guard_node_tip_immutable();
 
 CREATE TABLE IF NOT EXISTS node_tip_withdrawals (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    -- 申请人
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
-    -- 提现方式：alipay / balance
-    withdrawal_type VARCHAR(20) NOT NULL
-        CONSTRAINT chk_node_tip_withdrawals_type CHECK (withdrawal_type IN ('alipay', 'balance')),
-    -- 提现总额（10 位小数与计费精度对齐）
-    total_amount DECIMAL(20, 10) NOT NULL,
-    -- 币种
-    currency VARCHAR(8) NOT NULL DEFAULT 'CNY',
-    -- 加密的支付宝账号（仅 alipay 方式）
-    -- 格式：base64(nonce || ciphertext)，使用 AES-256-GCM 加密
-    -- 密钥复用 CRYPTO__SECRET_KEY 配置
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    owner_user_id UUID NOT NULL,
+    request_id UUID NOT NULL,
+    request_fingerprint VARCHAR(64) NOT NULL CHECK(request_fingerprint ~ '^[0-9a-f]{64}$'),
+    withdrawal_type VARCHAR(20) NOT NULL CHECK(withdrawal_type IN ('alipay','balance')),
+    total_amount DECIMAL(20,10) NOT NULL CHECK(total_amount>0),
+    currency VARCHAR(8) NOT NULL CHECK(currency='CNY'),
     encrypted_alipay_account TEXT,
-    -- 加密的真实姓名（仅 alipay 方式）
-    -- 格式：base64(nonce || ciphertext)，使用 AES-256-GCM 加密
-    -- 密钥复用 CRYPTO__SECRET_KEY 配置
     encrypted_real_name TEXT,
-    -- 状态：pending / approved / completed / rejected
-    status VARCHAR(20) NOT NULL DEFAULT 'pending'
-        CONSTRAINT chk_node_tip_withdrawals_status CHECK (status IN ('pending', 'approved', 'completed', 'rejected')),
-    -- 处理该提现的管理员
-    admin_id UUID REFERENCES users(id),
-    -- 管理员备注
-    admin_remark TEXT,
-    -- 管理员操作时间
+    status VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','completed','rejected')),
+    admin_id UUID REFERENCES users(id) ON DELETE RESTRICT,
+    admin_remark TEXT CHECK(admin_remark IS NULL OR octet_length(admin_remark)<=500),
+    payout_reference TEXT CHECK(payout_reference IS NULL OR octet_length(payout_reference) BETWEEN 1 AND 500),
+    balance_transaction_id UUID,
+    revision BIGINT NOT NULL DEFAULT 1 CHECK(revision>0),
     actioned_at TIMESTAMPTZ,
-    -- 创建时间
+    completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    -- 更新时间
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_tip_withdrawal_request UNIQUE(tenant_id,owner_user_id,request_id),
+    CONSTRAINT fk_tip_withdrawal_owner FOREIGN KEY(tenant_id,owner_user_id)
+        REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_tip_withdrawal_credit_owner FOREIGN KEY(tenant_id,owner_user_id,balance_transaction_id)
+        REFERENCES balance_transactions(tenant_id,user_id,id) ON DELETE RESTRICT,
+    CONSTRAINT ck_tip_withdrawal_payload CHECK(
+        (withdrawal_type='balance' AND encrypted_alipay_account IS NULL AND encrypted_real_name IS NULL
+         AND payout_reference IS NULL AND admin_id IS NULL AND status IN ('pending','completed')
+         AND (status='completed')=(balance_transaction_id IS NOT NULL))
+        OR
+        (withdrawal_type='alipay' AND encrypted_alipay_account IS NOT NULL AND encrypted_real_name IS NOT NULL
+         AND balance_transaction_id IS NULL AND (status='completed')=(payout_reference IS NOT NULL)
+         AND (status='pending' OR admin_id IS NOT NULL))
+    ),
+    CONSTRAINT ck_tip_withdrawal_completion CHECK((status='completed')=(completed_at IS NOT NULL))
 );
+CREATE INDEX IF NOT EXISTS idx_tip_withdrawal_scope
+    ON node_tip_withdrawals(tenant_id,owner_user_id,currency,created_at DESC,id DESC);
+CREATE INDEX IF NOT EXISTS idx_tip_withdrawal_tenant_status
+    ON node_tip_withdrawals(tenant_id,status,created_at DESC,id DESC);
+CREATE OR REPLACE FUNCTION guard_tip_withdrawal_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.id,NEW.tenant_id,NEW.owner_user_id,NEW.request_id,NEW.request_fingerprint,
+           NEW.withdrawal_type,NEW.total_amount,NEW.currency,NEW.encrypted_alipay_account,NEW.encrypted_real_name,NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.id,OLD.tenant_id,OLD.owner_user_id,OLD.request_id,OLD.request_fingerprint,
+           OLD.withdrawal_type,OLD.total_amount,OLD.currency,OLD.encrypted_alipay_account,OLD.encrypted_real_name,OLD.created_at) THEN
+        RAISE EXCEPTION 'withdrawal identity and amount are immutable' USING ERRCODE='23514';
+    END IF;
+    IF OLD.status IN ('completed','rejected') AND NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'terminal withdrawal is immutable' USING ERRCODE='23514';
+    END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status AND NOT(
+        (OLD.status='pending' AND OLD.withdrawal_type='alipay' AND NEW.status IN ('approved','rejected'))
+        OR (OLD.status='pending' AND OLD.withdrawal_type='balance' AND NEW.status='completed')
+        OR (OLD.status='approved' AND OLD.withdrawal_type='alipay' AND NEW.status='completed')
+    ) THEN
+        RAISE EXCEPTION 'invalid withdrawal transition' USING ERRCODE='23514';
+    END IF;
+    IF ROW(NEW.status,NEW.admin_id,NEW.admin_remark,NEW.payout_reference,NEW.balance_transaction_id,NEW.actioned_at,NEW.completed_at)
+       IS DISTINCT FROM ROW(OLD.status,OLD.admin_id,OLD.admin_remark,OLD.payout_reference,OLD.balance_transaction_id,OLD.actioned_at,OLD.completed_at) THEN
+        NEW.revision:=OLD.revision+1;
+        NEW.updated_at:=GREATEST(clock_timestamp(),OLD.updated_at+interval '1 microsecond');
+    ELSE
+        NEW.revision:=OLD.revision; NEW.updated_at:=OLD.updated_at;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS tip_withdrawal_identity_guard ON node_tip_withdrawals;
+CREATE TRIGGER tip_withdrawal_identity_guard BEFORE UPDATE ON node_tip_withdrawals
+    FOR EACH ROW EXECUTE FUNCTION guard_tip_withdrawal_identity();
 
-CREATE INDEX IF NOT EXISTS idx_node_tip_withdrawals_user_id ON node_tip_withdrawals(user_id);
-CREATE INDEX IF NOT EXISTS idx_node_tip_withdrawals_status ON node_tip_withdrawals(status);
--- 待审批提现列表查询优化
-CREATE INDEX IF NOT EXISTS idx_node_tip_withdrawals_pending ON node_tip_withdrawals(status) WHERE status = 'pending';
-
-COMMENT ON TABLE node_tip_withdrawals IS '小费提现记录表';
-COMMENT ON COLUMN node_tip_withdrawals.withdrawal_type IS '提现方式：alipay / balance';
-COMMENT ON COLUMN node_tip_withdrawals.encrypted_alipay_account IS '加密的支付宝账号（仅 alipay 方式，AES-256-GCM 加密，格式：base64(nonce || ciphertext)）';
-COMMENT ON COLUMN node_tip_withdrawals.encrypted_real_name IS '加密的真实姓名（仅 alipay 方式，AES-256-GCM 加密，格式：base64(nonce || ciphertext)）';
-COMMENT ON COLUMN node_tip_withdrawals.status IS '状态：pending / approved / completed / rejected';
-COMMENT ON COLUMN node_tip_withdrawals.admin_remark IS '管理员备注（审批/操作备注，非审计日志，生产环境建议独立审计表）';
 
 -- Platform-owned Responses state; it never shares the upstream resource namespace.
 CREATE TABLE IF NOT EXISTS scoped_conversations (

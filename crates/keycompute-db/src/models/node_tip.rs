@@ -1,19 +1,17 @@
-//! 节点租赁小费模型
-
+//! Tenant/currency-scoped node earnings and immutable accepted-work credits.
+use super::financial_scope::FinancialScope;
 use crate::DbError;
 use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
-use sea_orm::{
-    TransactionTrait, {ConnectionTrait, DbBackend, FromQueryResult, Statement},
-};
-use serde::{Deserialize, Serialize};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
+use serde::Serialize;
 use std::str::FromStr;
 use uuid::Uuid;
 
-/// 节点租赁小费记录
-#[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct NodeTip {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub usage_log_id: Uuid,
     pub node_id: Uuid,
     pub owner_user_id: Uuid,
@@ -25,304 +23,166 @@ pub struct NodeTip {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-/// 小费汇总信息
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct NodeTipSummary {
     pub pending_amount: Decimal,
+    pub reserved_amount: Decimal,
     pub withdrawn_amount: Decimal,
     pub total_amount: Decimal,
     pub pending_count: i64,
 }
-
-/// 小费汇总查询结果（内部用）
-#[derive(Debug, Clone, FromQueryResult)]
-struct TipSummaryRow {
-    pending_amount: Option<Decimal>,
-    withdrawn_amount: Option<Decimal>,
-    total_amount: Option<Decimal>,
-    pending_count: Option<i64>,
+pub(super) fn currency(value: &str) -> Result<String, DbError> {
+    let value = value.trim().to_ascii_uppercase();
+    if value.len() != 3 || !value.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(DbError::Other("tip_currency_invalid".into()));
+    }
+    Ok(value)
 }
-
+pub(super) fn page(limit: i64, offset: i64) -> Result<(), DbError> {
+    if !(1..=100).contains(&limit) || !(0..=1_000_000).contains(&offset) {
+        return Err(DbError::Other("tip_page_invalid".into()));
+    }
+    Ok(())
+}
 impl NodeTip {
-    /// 获取用户的小费汇总
-    pub async fn get_summary(
+    pub async fn summary(
         db: &impl ConnectionTrait,
-        user_id: Uuid,
+        scope: FinancialScope,
+        money: &str,
     ) -> Result<NodeTipSummary, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            SELECT
-                COALESCE((
-                    SELECT SUM(nt.tip_amount)
-                    FROM node_tips nt
-                    WHERE nt.owner_user_id = $1
-                ), 0)
-                - COALESCE((
-                    SELECT SUM(ntw.total_amount)
-                    FROM node_tip_withdrawals ntw
-                    WHERE ntw.user_id = $1 AND ntw.status != 'rejected'
-                ), 0) AS pending_amount,
-                COALESCE((
-                    SELECT SUM(ntw.total_amount)
-                    FROM node_tip_withdrawals ntw
-                    WHERE ntw.user_id = $1 AND ntw.status != 'rejected'
-                ), 0) AS withdrawn_amount,
-                COALESCE((
-                    SELECT SUM(nt.tip_amount)
-                    FROM node_tips nt
-                    WHERE nt.owner_user_id = $1
-                ), 0) AS total_amount,
-                COALESCE((
-                    SELECT COUNT(*)
-                    FROM node_tips nt
-                    WHERE nt.owner_user_id = $1
-                ), 0) AS pending_count
-            "#,
-            [user_id.into()],
+        scope.tenant_id()?;
+        let mut values = scope.values();
+        values.push(currency(money)?.into());
+        let sql = format!(
+            "WITH credits AS (SELECT COALESCE(SUM(t.tip_amount),0) AS amount,COUNT(*)::bigint AS n FROM node_tips t WHERE t.tenant_id=$8 AND t.currency=$10 {}), withdrawals AS (SELECT COALESCE(SUM(w.total_amount) FILTER(WHERE w.status IN ('pending','approved')),0) AS reserved,COALESCE(SUM(w.total_amount) FILTER(WHERE w.status='completed'),0) AS paid FROM node_tip_withdrawals w WHERE w.tenant_id=$8 AND w.currency=$10 {}) SELECT c.amount-w.reserved-w.paid AS pending_amount,w.reserved AS reserved_amount,w.paid AS withdrawn_amount,c.amount AS total_amount,c.n AS pending_count FROM credits c CROSS JOIN withdrawals w WHERE {}",
+            scope.owner_predicate("t"),
+            scope.owner_predicate("w"),
+            scope.predicate()
         );
-        let row = TipSummaryRow::find_by_statement(stmt)
+        Self::validate_summary(
+            NodeTipSummary::find_by_statement(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                sql,
+                values,
+            ))
             .one(db)
             .await?
-            .ok_or_else(|| DbError::Other("summary query failed".to_string()))?;
-
-        Ok(NodeTipSummary {
-            pending_amount: row.pending_amount.unwrap_or_default(),
-            withdrawn_amount: row.withdrawn_amount.unwrap_or_default(),
-            total_amount: row.total_amount.unwrap_or_default(),
-            pending_count: row.pending_count.unwrap_or_default(),
-        })
+            .ok_or_else(|| DbError::Other("financial_authority_invalid".into()))?,
+        )
     }
-
-    /// 获取用户的小费历史记录（分页）
-    pub async fn list_by_user(
+    fn validate_summary(row: NodeTipSummary) -> Result<NodeTipSummary, DbError> {
+        if row.pending_amount < Decimal::ZERO {
+            return Err(DbError::Other("tip_ledger_inconsistent".into()));
+        }
+        Ok(row)
+    }
+    pub async fn list_in_scope(
         db: &impl ConnectionTrait,
-        user_id: Uuid,
+        scope: FinancialScope,
+        money: &str,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<NodeTip>, DbError> {
-        let stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM node_tips WHERE owner_user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            [user_id.into(), limit.into(), offset.into()],
+    ) -> Result<Vec<Self>, DbError> {
+        scope.tenant_id()?;
+        page(limit, offset)?;
+        let mut values = scope.values();
+        values.extend([currency(money)?.into(), limit.into(), offset.into()]);
+        let sql = format!(
+            "SELECT t.* FROM node_tips t WHERE t.tenant_id=$8 AND t.currency=$10 {} AND {} ORDER BY t.created_at DESC,t.id DESC LIMIT $11 OFFSET $12",
+            scope.owner_predicate("t"),
+            scope.predicate()
         );
-        let tips = NodeTip::find_by_statement(stmt).all(db).await?;
-
-        Ok(tips)
-    }
-
-    /// 获取用户小费记录总数
-    pub async fn count_by_user(db: &impl ConnectionTrait, user_id: Uuid) -> Result<i64, DbError> {
-        let stmt = Statement::from_sql_and_values(
+        Ok(Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT COUNT(*) FROM node_tips WHERE owner_user_id = $1",
-            [user_id.into()],
-        );
-        let result = db
-            .query_one(stmt)
-            .await?
-            .ok_or_else(|| DbError::Other("count query failed".to_string()))?;
-        let count: i64 = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
-
-        Ok(count)
+            sql,
+            values,
+        ))
+        .all(db)
+        .await?)
     }
-
-    /// 根据 usage_log 自动创建小费记录（计费完成后调用）
-    pub async fn create_from_usage_log(
-        db: &(impl ConnectionTrait + TransactionTrait),
-        usage_log_id: Uuid,
-    ) -> Result<Option<NodeTip>, DbError> {
-        // Most completions are external providers. A single writer-fresh probe
-        // avoids BEGIN + two reads + ROLLBACK for that path. Lock syntax routes
-        // DbRouter callers to the writer; this statement-scoped lock is NOT used
-        // as authorization. Eligible Node calls still re-read everything in the
-        // original transaction below, including terminal task and tip ratio.
-        let candidate = db
+    pub async fn count_in_scope(
+        db: &impl ConnectionTrait,
+        scope: FinancialScope,
+        money: &str,
+    ) -> Result<i64, DbError> {
+        scope.tenant_id()?;
+        let mut values = scope.values();
+        values.push(currency(money)?.into());
+        let sql = format!(
+            "SELECT (SELECT COUNT(*)::bigint FROM node_tips t WHERE t.tenant_id=$8 AND t.currency=$10 {}) AS n WHERE {}",
+            scope.owner_predicate("t"),
+            scope.predicate()
+        );
+        Ok(db
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                r#"SELECT u.id FROM usage_logs u
-               WHERE u.id=$1 AND EXISTS (
-                   SELECT 1 FROM node_tasks t WHERE t.request_id=u.request_id
-                   AND t.status='succeeded' AND t.assigned_node_id IS NOT NULL
-               ) FOR KEY SHARE OF u"#,
-                [usage_log_id.into()],
+                sql,
+                values,
             ))
-            .await?;
+            .await?
+            .ok_or_else(|| DbError::Other("financial_authority_invalid".into()))?
+            .try_get("", "n")?)
+    }
+    /// This is an internal settlement capability, never a console authorization
+    /// shortcut. It consumes a fixed tenant and already-recorded usage identity.
+    pub async fn create_from_usage_log(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        tenant_id: Uuid,
+        usage_log_id: Uuid,
+    ) -> Result<Option<Self>, DbError> {
+        let candidate=db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT u.id FROM usage_logs u WHERE u.id=$1 AND u.tenant_id=$2 AND EXISTS(SELECT 1 FROM node_tasks t WHERE t.request_id=u.request_id AND t.tenant_id=u.tenant_id AND t.user_id=u.user_id AND t.status='succeeded' AND t.assigned_node_id IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM node_tips credited WHERE credited.tenant_id=u.tenant_id AND credited.usage_log_id=u.id) FOR KEY SHARE OF u",[usage_log_id.into(),tenant_id.into()])).await?;
         if candidate.is_none() {
             return Ok(None);
         }
-        let txn = db.begin().await?;
-
-        // 1. 查询 usage_log
-        let usage_log_stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM usage_logs WHERE id = $1",
-            [usage_log_id.into()],
-        );
-        let usage_log = super::usage_log::UsageLog::find_by_statement(usage_log_stmt)
-            .one(&txn)
-            .await?;
-
-        let usage_log = match usage_log {
-            Some(log) => log,
-            None => {
-                tracing::warn!(%usage_log_id, "UsageLog not found, skipping tip creation");
-                txn.rollback().await?;
-                return Ok(None);
-            }
-        };
-
-        // 2. 查询对应的 node_task（仅成功的任务)
-        let task_stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            SELECT assigned_node_id, user_id
-            FROM node_tasks
-            WHERE request_id = $1
-              AND status = 'succeeded'
-              AND assigned_node_id IS NOT NULL
-            "#,
-            [usage_log.request_id.into()],
-        );
-        let task_row: Option<(Uuid, Uuid)> = {
-            let result = txn.query_one(task_stmt).await?;
-            match result {
-                Some(row) => {
-                    let node_id: Uuid = row.try_get_by_index(0).map_err(DbError::DatabaseError)?;
-                    let user_id: Uuid = row.try_get_by_index(1).map_err(DbError::DatabaseError)?;
-                    Some((node_id, user_id))
-                }
-                None => None,
-            }
-        };
-
-        let (node_id, consumer_user_id) = match task_row {
-            Some(row) => row,
-            None => {
-                txn.rollback().await?;
-                return Ok(None);
-            }
-        };
-
-        // 3. 查询节点所有者
-        let node_stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM nodes WHERE id = $1",
-            [node_id.into()],
-        );
-        let node = super::node::Node::find_by_statement(node_stmt)
-            .one(&txn)
-            .await?;
-
-        let node = match node {
-            Some(n) => n,
-            None => {
-                tracing::warn!(%node_id, "Node not found, skipping tip creation");
-                txn.rollback().await?;
-                return Ok(None);
-            }
-        };
-
-        if node.owner_user_id == consumer_user_id {
-            txn.rollback().await?;
-            return Ok(None);
-        }
-
-        // 4. 读取小费比例（事务内读取）
-        let ratio_stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT value FROM system_settings WHERE key = $1",
-            [super::system_setting::setting_keys::NODE_TIP_RATIO.into()],
-        );
-        let ratio_str: String = txn
-            .query_one(ratio_stmt)
+        let tx = db.begin().await?;
+        super::tenant::Tenant::find_by_id_for_key_share(&tx, tenant_id)
             .await?
-            .and_then(|r| r.try_get_by_index::<String>(0).ok())
-            .unwrap_or_else(|| "0.90".to_string());
-
-        let tip_ratio: Decimal = ratio_str.parse().unwrap_or_else(|_| {
-            tracing::warn!(
-                ratio_str = %ratio_str,
-                "Invalid node_tip_ratio in system_settings, falling back to 0.9"
-            );
-            Decimal::new(9, 1)
-        });
-
-        if tip_ratio <= Decimal::ZERO {
-            txn.rollback().await?;
+            .ok_or_else(|| DbError::not_found("Tenant", tenant_id))?;
+        // Compatible source locks retain immutable IDs without taking the
+        // task/node write-lock order in reverse of normal worker completion.
+        let row=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+            "SELECT u.user_id,u.currency,u.user_amount::text AS amount,n.id AS node_id,n.owner_user_id FROM usage_logs u JOIN node_tasks t ON t.request_id=u.request_id AND t.tenant_id=u.tenant_id AND t.user_id=u.user_id JOIN nodes n ON n.id=t.assigned_node_id AND n.tenant_id=u.tenant_id WHERE u.id=$1 AND u.tenant_id=$2 AND t.status='succeeded' FOR KEY SHARE OF u,t,n",[usage_log_id.into(),tenant_id.into()])).await?;
+        let Some(row) = row else {
+            tx.rollback().await?;
             return Ok(None);
-        }
-
-        // 5. 转换 BigDecimal → Decimal
-        let bill_amount: Decimal =
-            Decimal::from_str(&usage_log.user_amount.to_string()).map_err(|e| {
-                tracing::error!(
-                    %usage_log_id,
-                    amount = %usage_log.user_amount,
-                    error = %e,
-                    "Failed to convert BigDecimal to Decimal for tip calculation"
-                );
-                DbError::Other(format!(
-                    "Failed to convert BigDecimal to Decimal for usage_log {}: {}",
-                    usage_log_id, e
-                ))
-            })?;
-
-        if bill_amount <= Decimal::ZERO {
-            txn.rollback().await?;
-            return Ok(None);
-        }
-
-        let bill_amount = bill_amount.round_dp(10);
-        let tip_amount = (bill_amount * tip_ratio).round_dp(10);
-
-        // 7. 创建小费记录
-        let tip_stmt = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            INSERT INTO node_tips (
-                usage_log_id, node_id, owner_user_id, consumer_user_id,
-                tip_amount, tip_ratio, bill_amount
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (usage_log_id) DO NOTHING
-            RETURNING *
-            "#,
-            [
-                usage_log_id.into(),
-                node_id.into(),
-                node.owner_user_id.into(),
-                consumer_user_id.into(),
-                tip_amount.into(),
-                tip_ratio.into(),
-                bill_amount.into(),
-            ],
-        );
-        let tip = NodeTip::find_by_statement(tip_stmt).one(&txn).await?;
-
-        let tip = match tip {
-            Some(t) => {
-                txn.commit().await?;
-                t
-            }
-            None => {
-                tracing::debug!(%usage_log_id, "Tip already exists (ON CONFLICT), skipping duplicate creation");
-                txn.rollback().await?;
-                return Ok(None);
-            }
         };
-
-        tracing::info!(
-            %usage_log_id,
-            %node_id,
-            owner_user_id = %node.owner_user_id,
-            %tip_amount,
-            %tip_ratio,
-            "Tip created for node lease"
-        );
-
-        Ok(Some(tip))
+        let consumer: Uuid = row.try_get("", "user_id")?;
+        let owner: Uuid = row.try_get("", "owner_user_id")?;
+        if consumer == owner {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let node_id: Uuid = row.try_get("", "node_id")?;
+        let money = currency(&row.try_get::<String>("", "currency")?)?;
+        let amount = Decimal::from_str(&row.try_get::<String>("", "amount")?)
+            .map_err(|_| DbError::Other("tip_amount_invalid".into()))?
+            .round_dp(10);
+        let ratio = tx
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT value FROM system_settings WHERE key=$1",
+                [super::system_setting::setting_keys::NODE_TIP_RATIO.into()],
+            ))
+            .await?
+            .map(|r| r.try_get_by_index::<String>(0))
+            .transpose()?
+            .unwrap_or_else(|| "0.90".into());
+        let ratio =
+            Decimal::from_str(&ratio).map_err(|_| DbError::Other("tip_ratio_invalid".into()))?;
+        if ratio < Decimal::ZERO || ratio > Decimal::ONE {
+            return Err(DbError::Other("tip_ratio_invalid".into()));
+        }
+        let tip = (amount * ratio).round_dp(10);
+        if amount <= Decimal::ZERO || tip <= Decimal::ZERO {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+        let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO node_tips(tenant_id,usage_log_id,node_id,owner_user_id,consumer_user_id,tip_amount,currency,tip_ratio,bill_amount) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(usage_log_id) DO NOTHING RETURNING *",
+            [tenant_id.into(),usage_log_id.into(),node_id.into(),owner.into(),consumer.into(),tip.into(),money.into(),ratio.into(),amount.into()])).one(&tx).await?;
+        tx.commit().await?;
+        Ok(row)
     }
 }
 
@@ -380,7 +240,7 @@ mod capacity_tests {
         .await
         .unwrap();
         assert!(
-            NodeTip::create_from_usage_log(&db, Uuid::new_v4())
+            NodeTip::create_from_usage_log(&db, Uuid::new_v4(), Uuid::new_v4())
                 .await
                 .unwrap()
                 .is_none()

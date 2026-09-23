@@ -12,6 +12,17 @@ use crate::utils::{display::short_id, format_precise_cny_str, time::format_time}
 
 const HISTORY_PAGE_SIZE: u32 = 20;
 
+// Token refresh does not change the financial owner of an accepted command.
+// Tenant switches, logout and a different login must still discard its result.
+fn withdrawal_completion_matches(
+    current: &crate::stores::auth_store::AuthState,
+    observed: &crate::stores::auth_store::AuthState,
+) -> bool {
+    current.is_authenticated
+        && current.session_id == observed.session_id
+        && current.selected_tenant_id == observed.selected_tenant_id
+}
+
 /// 计算简单分页当前页可见的记录范围（1-based，含首尾）。
 /// `offset` 为已跳过的记录数；结束值截断到 total；total 为 0 时返回 (0, 0)。
 #[allow(dead_code)]
@@ -405,6 +416,12 @@ fn WithdrawModal(
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();
+    let opened_identity = use_hook(|| {
+        let state = auth_store.state.peek();
+        (state.session_id, state.selected_tenant_id.clone())
+    });
+
+    let mut submitted = use_signal(|| None::<client_api::api::node_tips::CreateWithdrawalRequest>);
 
     rsx! {
         div {
@@ -508,6 +525,11 @@ fn WithdrawModal(
                         size: ButtonSize::Medium,
                         disabled: withdraw_loading(),
                         onclick: move |_| {
+                            let current=auth_store.state.peek().clone();
+                            if current.session_id!=opened_identity.0 || current.selected_tenant_id!=opened_identity.1 {
+                                withdraw_modal.set(WithdrawModalState::Closed);
+                                return;
+                            }
                             let needs_alipay = withdraw_method() == WithdrawMethod::Alipay;
                             if needs_alipay
                                 && (alipay_account().trim().is_empty() || real_name().trim().is_empty())
@@ -528,16 +550,30 @@ fn WithdrawModal(
                                 None
                             };
                             let name_opt = if needs_alipay { Some(real_name().to_string()) } else { None };
+                            let observed = auth.state.peek().clone();
+                            let mut intent = client_api::api::node_tips::CreateWithdrawalRequest {
+                                request_id: uuid::Uuid::new_v4(), currency: "CNY".into(),
+                                withdrawal_type: method_val.clone(),alipay_account:alipay_opt.clone(),real_name:name_opt.clone(),
+                            };
+                            if let Some(previous) = submitted.peek().as_ref()
+                                && previous.withdrawal_type==intent.withdrawal_type
+                                && previous.alipay_account==intent.alipay_account
+                                && previous.real_name==intent.real_name {
+                                intent.request_id=previous.request_id;
+                            }
+                            let request_id = intent.request_id;
+                            submitted.set(Some(intent));
                             let mut wm = withdraw_modal.clone();
                             let mut aa = alipay_account.clone();
                             let mut rn = real_name.clone();
                             let mut wl = withdraw_loading.clone();
                             spawn(async move {
-                                let token = auth.token().unwrap_or_default();
+                                let token = observed.access_token.clone().unwrap_or_default();
                                 let alipay_str = alipay_opt.as_deref();
                                 let name_str = name_opt.as_deref();
                                 match node_tips_service::create_withdrawal(
                                         &token,
+                                        request_id,
                                         &method_val,
                                         alipay_str,
                                         name_str,
@@ -545,6 +581,7 @@ fn WithdrawModal(
                                     .await
                                 {
                                     Ok(_) => {
+                                        if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
                                         wl.set(false);
                                         wm.set(WithdrawModalState::Closed);
                                         aa.set(String::new());
@@ -557,6 +594,7 @@ fn WithdrawModal(
                                         ui.show_success(msg);
                                     }
                                     Err(e) => {
+                                        if !withdrawal_completion_matches(&auth.state.peek(), &observed) { return; }
                                         wl.set(false);
                                         withdraw_error
                                             .set(
@@ -610,5 +648,34 @@ mod tests {
     fn visible_range_empty_total_returns_zero() {
         assert_eq!(visible_range(0, 20, 0), (0, 0));
         assert_eq!(visible_range(40, 20, 0), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod withdrawal_completion_tests {
+    use super::withdrawal_completion_matches;
+    use crate::stores::auth_store::AuthState;
+    #[test]
+    fn refreshed_same_tenant_session_completes_the_original_command() {
+        let mut observed = AuthState::logged_in("fixture-original".into());
+        observed.selected_tenant_id = Some("tenant-a".into());
+        let mut refreshed = observed.clone();
+        refreshed.access_token = Some("fixture-refreshed".into());
+        refreshed.token_revision += 1;
+        assert!(withdrawal_completion_matches(&refreshed, &observed));
+    }
+    #[test]
+    fn another_tenant_login_or_logout_cannot_receive_a_late_completion() {
+        let mut observed = AuthState::logged_in("fixture-original".into());
+        observed.selected_tenant_id = Some("tenant-a".into());
+        let mut current = observed.clone();
+        current.selected_tenant_id = Some("tenant-b".into());
+        assert!(!withdrawal_completion_matches(&current, &observed));
+        current = observed.clone();
+        current.session_id = uuid::Uuid::new_v4();
+        assert!(!withdrawal_completion_matches(&current, &observed));
+        current = observed.clone();
+        current.is_authenticated = false;
+        assert!(!withdrawal_completion_matches(&current, &observed));
     }
 }

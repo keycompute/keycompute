@@ -41,6 +41,12 @@ struct TipWithdrawalTestEnv {
 impl TipWithdrawalTestEnv {
     /// 创建测试环境
     async fn new(suffix: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            std::env::var("KC_TENANT_TEST_ACK_ISOLATED").as_deref() == Ok("1")
+                || std::env::var_os("CI").is_some(),
+            "an isolated PostgreSQL test environment must be explicitly acknowledged"
+        );
+        let suffix = format!("{suffix}-{}", Uuid::new_v4().simple());
         // Always use the task-isolated URL supplied by test-env.sh. Never
         // fall back to the host's default 5432 instance or print credentials.
         let database_url = resolve_database_url();
@@ -56,8 +62,8 @@ impl TipWithdrawalTestEnv {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to initialize database schema: {}", e))?;
 
-        // 清理历史测试数据
-        Self::cleanup_test_data(&pool).await?;
+        // Each fixture owns a distinct namespace. The isolated runner drops
+        // its disposable database; no test deletes another fixture's users.
 
         // 创建测试租户及其真实 owner membership
         let owner = User::create(
@@ -116,6 +122,13 @@ impl TipWithdrawalTestEnv {
         ))
         .await?;
 
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='root' WHERE id=$1",
+            [admin_user.id.into()],
+        ))
+        .await?;
+
         // 为测试用户创建 API Key（用于创建 usage_log）
         let api_key = integration_tests::db::create_test_api_key(
             &pool,
@@ -162,45 +175,93 @@ impl TipWithdrawalTestEnv {
         })
     }
 
-    /// 清理测试数据
-    async fn cleanup_test_data(pool: &DatabaseConnection) -> anyhow::Result<()> {
-        // 按 FK 依赖逆序删除
-        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tip_withdrawals WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
-            .await?;
-
-        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tips WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
-            .await?;
-
-        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM usage_logs WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
-            .await?;
-
-        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tasks WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
-            .await?;
-
-        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM nodes WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
-            .await?;
-
-        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM user_node_gateway_tokens WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
-            .await?;
-
-        pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM produce_ai_keys WHERE user_id IN (SELECT id FROM users WHERE email LIKE 'tip-test-%')", []))
-            .await?;
-
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "DELETE FROM users WHERE email LIKE 'tip-test-%'",
-            [],
-        ))
-        .await?;
-
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "DELETE FROM tenants WHERE slug LIKE 'tip-test-%'",
-            [],
-        ))
-        .await?;
-
-        Ok(())
+    async fn scope(
+        &self,
+        user: Uuid,
+        admin: bool,
+        root: bool,
+    ) -> anyhow::Result<keycompute_db::models::financial_scope::FinancialScope> {
+        use keycompute_db::models::financial_scope::{
+            FinancialMembership, FinancialScope, FinancialSession,
+        };
+        use keycompute_types::{
+            CredentialKind, PlatformRole, PlatformScope, TenantRole, TenantScope,
+        };
+        let u = User::find_by_id(&self.pool, user).await?.unwrap();
+        let t = Tenant::find_by_id(&self.pool, self.tenant_id)
+            .await?
+            .unwrap();
+        let m = keycompute_db::TenantMembership::find(&self.pool, t.id, user)
+            .await?
+            .unwrap();
+        let role = m.tenant_role()?;
+        let session = FinancialSession {
+            user_id: user,
+            credential_kind: CredentialKind::Jwt,
+            token_version: u.token_version,
+            expires_at: Utc::now().timestamp() + 3600,
+            selected: Some(FinancialMembership {
+                tenant_id: t.id,
+                tenant_role: role,
+                tenant_authz_version: t.authz_version,
+                membership_authz_version: m.authz_version,
+            }),
+        };
+        Ok(if root {
+            FinancialScope::platform_tenant(
+                PlatformScope::checked(user, PlatformRole::Root).unwrap(),
+                session,
+                t.id,
+            )?
+        } else if admin {
+            assert_eq!(role, TenantRole::Admin);
+            FinancialScope::tenant_admin(TenantScope::checked(t.id, user, role).unwrap(), session)?
+        } else {
+            FinancialScope::personal(TenantScope::checked(t.id, user, role).unwrap(), session)?
+        })
+    }
+    fn audit(&self, user: Uuid) -> AuditContext {
+        AuditContext {
+            actor_user_id: user,
+            credential_kind: keycompute_types::CredentialKind::Jwt,
+            actor_platform_role: keycompute_types::PlatformRole::None,
+            actor_tenant_role: None,
+            request_id: Some(Uuid::new_v4()),
+        }
+    }
+    async fn withdraw(
+        &self,
+        tx: &sea_orm::DatabaseTransaction,
+        kind: &str,
+    ) -> anyhow::Result<WithdrawalView> {
+        let recipient = NodeTipWithdrawal::recipient_fingerprint(
+            kind,
+            if kind == "alipay" {
+                Some("fixture@example.invalid")
+            } else {
+                None
+            },
+            if kind == "alipay" {
+                Some("Fixture")
+            } else {
+                None
+            },
+        )?;
+        Ok(NodeTipWithdrawal::create(
+            tx,
+            self.scope(self.test_user_id, false, false).await?,
+            &self.audit(self.test_user_id),
+            &WithdrawalIntent {
+                request_id: Uuid::new_v4(),
+                withdrawal_type: kind.into(),
+                currency: "CNY".into(),
+                recipient_fingerprint: recipient,
+                encrypted_alipay_account: (kind == "alipay")
+                    .then(|| "fixture-cipher-account".into()),
+                encrypted_real_name: (kind == "alipay").then(|| "fixture-cipher-name".into()),
+            },
+        )
+        .await?)
     }
 
     /// 创建模拟的 usage_log 和对应的 node_task，触发小费计算
@@ -241,10 +302,10 @@ impl TipWithdrawalTestEnv {
         self.pool.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id)
-            VALUES ($1, $2, 'deepseek-chat', '{}', 'succeeded', $3)
+            INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, tenant_id, deadline_at, complete_grace_until)
+            VALUES ($1, $2, 'deepseek-chat', $5, 'succeeded', $3, $4, clock_timestamp()+interval '1 minute', clock_timestamp()+interval '2 minutes')
             "#,
-            [request_id.into(), self.admin_user_id.into(), self.node_id.into()],
+            [request_id.into(), self.admin_user_id.into(), self.node_id.into(), self.tenant_id.into(), serde_json::json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&self.pool,self.tenant_id,self.admin_user_id).await}).into()],
         ))
         .await?;
 
@@ -303,6 +364,9 @@ async fn test_token_approval_workflow() -> anyhow::Result<()> {
         approved_token.status == TOKEN_STATUS_APPROVED,
     );
 
+    // A user may have only one active registration. Revoke the first before
+    // requesting another; this test must not weaken the unique active grant.
+    assert!(approved_token.revoke(&env.pool).await?);
     // 4. 拒绝另一个 token
     let (token_id2, _, token_hash2, token_preview2) =
         UserNodeGatewayToken::generate_hmac_token(b"test-secret-key-2");
@@ -362,7 +426,7 @@ async fn test_tip_calculation() -> anyhow::Result<()> {
     );
 
     // 2. 调用小费计算
-    let tip = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
+    let tip = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, usage_log_id).await?;
 
     chain.add_step(
         "keycompute-db",
@@ -391,7 +455,12 @@ async fn test_tip_calculation() -> anyhow::Result<()> {
     }
 
     // 4. 验证小费汇总
-    let summary = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
+    let summary = NodeTip::summary(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
+    )
+    .await?;
 
     chain.add_step(
         "keycompute-db",
@@ -420,7 +489,7 @@ async fn test_tip_calculation_idempotency() -> anyhow::Result<()> {
     let usage_log_id = env.create_usage_log_with_tip(50.0).await?;
 
     // 2. 第一次调用小费计算
-    let tip1 = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
+    let tip1 = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, usage_log_id).await?;
 
     chain.add_step(
         "keycompute-db",
@@ -430,7 +499,7 @@ async fn test_tip_calculation_idempotency() -> anyhow::Result<()> {
     );
 
     // 3. 第二次调用（应该返回 None，因为 ON CONFLICT DO NOTHING）
-    let tip2 = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
+    let tip2 = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, usage_log_id).await?;
 
     chain.add_step(
         "keycompute-db",
@@ -440,7 +509,12 @@ async fn test_tip_calculation_idempotency() -> anyhow::Result<()> {
     );
 
     // 4. 验证只有一条小费记录
-    let tips_count = NodeTip::count_by_user(&env.pool, env.test_user_id).await?;
+    let tips_count = NodeTip::count_in_scope(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
+    )
+    .await?;
 
     chain.add_step(
         "keycompute-db",
@@ -464,7 +538,7 @@ async fn test_create_balance_withdrawal() -> anyhow::Result<()> {
 
     // 1. 创建小费记录
     let usage_log_id = env.create_usage_log_with_tip(100.0).await?;
-    let _tip = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
+    let _tip = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, usage_log_id).await?;
 
     chain.add_step(
         "keycompute-db",
@@ -474,7 +548,12 @@ async fn test_create_balance_withdrawal() -> anyhow::Result<()> {
     );
 
     // 2. 验证有待提现小费
-    let summary = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
+    let summary = NodeTip::summary(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
+    )
+    .await?;
 
     chain.add_step(
         "keycompute-db",
@@ -489,25 +568,10 @@ async fn test_create_balance_withdrawal() -> anyhow::Result<()> {
     // 3. 创建提现记录（模拟 balance 方式）
     let tx = env.pool.begin().await?;
 
-    let withdrawal = NodeTipWithdrawal::create(
-        &tx,
-        env.test_user_id,
-        WITHDRAWAL_TYPE_BALANCE,
-        summary.pending_amount,
-        None, // 不需要加密的支付宝账号
-        None, // 不需要加密的真实姓名
-    )
-    .await?;
+    let withdrawal = env.withdraw(&tx, WITHDRAWAL_TYPE_BALANCE).await?;
 
-    // balance 方式自动完成
-    let completed_withdrawal = NodeTipWithdrawal::mark_completed(
-        &tx,
-        withdrawal.id,
-        None, // 自助提现，无 admin
-        None, // 保留 admin_remark
-        None, // 使用创建时的金额
-    )
-    .await?;
+    // The audited balance command completes and credits in its transaction.
+    let completed_withdrawal = withdrawal.clone();
 
     tx.commit().await?;
 
@@ -533,26 +597,22 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
 
     // 1. 创建小费记录
     let usage_log_id = env.create_usage_log_with_tip(200.0).await?;
-    let _tip = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
+    let _tip = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, usage_log_id).await?;
 
     // 2. 创建 alipay 提现申请
     let tx = env.pool.begin().await?;
 
-    let summary = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
-
-    // 模拟加密的支付宝账号和姓名
-    let encrypted_alipay = Some("encrypted_alipay_account_data".to_string());
-    let encrypted_name = Some("encrypted_real_name_data".to_string());
-
-    let withdrawal = NodeTipWithdrawal::create(
-        &tx,
-        env.test_user_id,
-        WITHDRAWAL_TYPE_ALIPAY,
-        summary.pending_amount,
-        encrypted_alipay.as_deref(),
-        encrypted_name.as_deref(),
+    let summary = NodeTip::summary(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
     )
     .await?;
+
+    // 模拟加密的支付宝账号和姓名
+
+    let withdrawal = env.withdraw(&tx, WITHDRAWAL_TYPE_ALIPAY).await?;
+    assert_eq!(withdrawal.total_amount, summary.pending_amount);
 
     tx.commit().await?;
 
@@ -569,11 +629,16 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
     // 3. 管理员审批通过
     let tx2 = env.pool.begin().await?;
 
-    let approved_withdrawal = NodeTipWithdrawal::approve(
+    let approved_withdrawal = NodeTipWithdrawal::review(
         &tx2,
-        withdrawal.id,
-        env.admin_user_id,
-        Some("Approved by admin"),
+        env.scope(env.admin_user_id, true, false).await?,
+        &env.audit(env.admin_user_id),
+        &ReviewWithdrawal {
+            id: withdrawal.id,
+            expected_revision: withdrawal.revision,
+            action: WithdrawalReview::Approve,
+            reason: "approved fixture".into(),
+        },
     )
     .await?;
 
@@ -592,12 +657,16 @@ async fn test_alipay_withdrawal_approval_workflow() -> anyhow::Result<()> {
     // 4. 管理员完成提现（线下打款后）
     let tx3 = env.pool.begin().await?;
 
-    let completed_withdrawal = NodeTipWithdrawal::mark_completed(
+    let completed_withdrawal = NodeTipWithdrawal::complete_external(
         &tx3,
-        withdrawal.id,
-        Some(env.admin_user_id),
-        Some("Payment sent"),
-        None, // 使用创建时的金额
+        env.scope(env.admin_user_id, false, true).await?,
+        &env.audit(env.admin_user_id),
+        &CompleteWithdrawal {
+            id: withdrawal.id,
+            expected_revision: approved_withdrawal.revision,
+            reason: "fixture external payout attestation".into(),
+            payout_reference: "fixture-bank-reference".into(),
+        },
     )
     .await?;
 
@@ -628,22 +697,20 @@ async fn test_reject_withdrawal() -> anyhow::Result<()> {
 
     // 1. 创建小费记录
     let usage_log_id = env.create_usage_log_with_tip(150.0).await?;
-    let _tip = NodeTip::create_from_usage_log(&env.pool, usage_log_id).await?;
+    let _tip = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, usage_log_id).await?;
 
     // 2. 创建 alipay 提现申请
     let tx = env.pool.begin().await?;
 
-    let summary = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
-
-    let withdrawal = NodeTipWithdrawal::create(
-        &tx,
-        env.test_user_id,
-        WITHDRAWAL_TYPE_ALIPAY,
-        summary.pending_amount,
-        Some("encrypted_alipay"),
-        Some("encrypted_name"),
+    let summary = NodeTip::summary(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
     )
     .await?;
+
+    let withdrawal = env.withdraw(&tx, WITHDRAWAL_TYPE_ALIPAY).await?;
+    assert_eq!(withdrawal.total_amount, summary.pending_amount);
 
     tx.commit().await?;
 
@@ -657,11 +724,16 @@ async fn test_reject_withdrawal() -> anyhow::Result<()> {
     // 3. 拒绝提现
     let tx2 = env.pool.begin().await?;
 
-    let rejected_withdrawal = NodeTipWithdrawal::reject(
+    let rejected_withdrawal = NodeTipWithdrawal::review(
         &tx2,
-        withdrawal.id,
-        env.admin_user_id,
-        Some("Rejected by admin"),
+        env.scope(env.admin_user_id, true, false).await?,
+        &env.audit(env.admin_user_id),
+        &ReviewWithdrawal {
+            id: withdrawal.id,
+            expected_revision: withdrawal.revision,
+            action: WithdrawalReview::Reject,
+            reason: "rejected fixture".into(),
+        },
     )
     .await?;
 
@@ -678,7 +750,12 @@ async fn test_reject_withdrawal() -> anyhow::Result<()> {
     );
 
     // 4. 验证 rejected 提现不影响待提现金额
-    let summary = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
+    let summary = NodeTip::summary(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
+    )
+    .await?;
 
     chain.add_step(
         "keycompute-db",
@@ -734,19 +811,21 @@ async fn test_tip_self_consumption_no_tip() -> anyhow::Result<()> {
         .execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id)
-        VALUES ($1, $2, 'deepseek-chat', '{}', 'succeeded', $3)
+        INSERT INTO node_tasks (request_id, user_id, model, payload_json, status, assigned_node_id, tenant_id, deadline_at, complete_grace_until)
+        VALUES ($1, $2, 'deepseek-chat', $5, 'succeeded', $3, $4, clock_timestamp()+interval '1 minute', clock_timestamp()+interval '2 minutes')
         "#,
             [
                 request_id.into(),
                 env.test_user_id.into(),
                 env.node_id.into(),
+                env.tenant_id.into(),
+                serde_json::json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&env.pool,env.tenant_id,env.test_user_id).await}).into(),
             ],
         ))
         .await?;
 
     // 调用小费计算
-    let tip = NodeTip::create_from_usage_log(&env.pool, usage_log.id).await?;
+    let tip = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, usage_log.id).await?;
 
     chain.add_step(
         "keycompute-db",
@@ -782,10 +861,15 @@ async fn test_withdrawal_pending_amount_calculation() -> anyhow::Result<()> {
     let usage_logs = UsageLog::find_by_statement(stmt).all(&env.pool).await?;
 
     for log in usage_logs {
-        let _ = NodeTip::create_from_usage_log(&env.pool, log.id).await?;
+        let _ = NodeTip::create_from_usage_log(&env.pool, env.tenant_id, log.id).await?;
     }
 
-    let summary_before = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
+    let summary_before = NodeTip::summary(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
+    )
+    .await?;
 
     chain.add_step(
         "keycompute-db",
@@ -797,22 +881,19 @@ async fn test_withdrawal_pending_amount_calculation() -> anyhow::Result<()> {
     // 3. 创建提现（balance 方式）
     let tx = env.pool.begin().await?;
 
-    let withdrawal = NodeTipWithdrawal::create(
-        &tx,
-        env.test_user_id,
-        WITHDRAWAL_TYPE_BALANCE,
-        summary_before.pending_amount,
-        None,
-        None,
-    )
-    .await?;
+    let withdrawal = env.withdraw(&tx, WITHDRAWAL_TYPE_BALANCE).await?;
 
-    NodeTipWithdrawal::mark_completed(&tx, withdrawal.id, None, None, None).await?;
+    assert_eq!(withdrawal.status, WITHDRAWAL_STATUS_COMPLETED);
 
     tx.commit().await?;
 
     // 4. 验证 pending_amount 变为 0
-    let summary_after = NodeTip::get_summary(&env.pool, env.test_user_id).await?;
+    let summary_after = NodeTip::summary(
+        &env.pool,
+        env.scope(env.test_user_id, false, false).await?,
+        "CNY",
+    )
+    .await?;
 
     chain.add_step(
         "keycompute-db",

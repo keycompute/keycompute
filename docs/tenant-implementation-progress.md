@@ -8,8 +8,10 @@ key issuance and distribution policy mutations are also accepted. Live scoped
 Responses replay now revalidates credentials and authorization versions.
 Node/registration control and task cancellation/archival are accepted. Original-authority physical dispatch and node-queue claim checks are also accepted.
 Local passthrough/node Responses and Conversation administration is accepted.
-Remaining native account-pool resource administration, financial mutations, complete
-platform/operator routing, frontend delivery and final release are not accepted.
+Explicit node-session ownership and tenant/currency-scoped node earnings and
+withdrawal management are accepted. Remaining native account-pool resource
+administration, manual wallet/reservation writes, global tip-ratio configuration,
+complete platform/operator routing, full frontend and final release are not accepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
@@ -793,3 +795,59 @@ They are not included in this wallet delivery or counted as completed phases.
 ## Remaining phase gates
 
 Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security and client acceptance. Phase 9: verified offline cutover and release.
+
+
+## Current phases 3/5 — tenant earnings and withdrawals accepted
+
+The entry checkout was already at `6862ec4` (node-session ownership, CI121
+success), with an uncommitted financial slice. Entry sources were archived before
+review; the older session draft was not reapplied. This slice replaces unscoped
+tip/withdrawal access with explicit personal, tenant-admin and root-target scopes.
+Current primary identity, membership/tenant versions and expiry are checked in
+queries and again under retained transaction locks. A final expiry check covers
+wallet/audit lock waits. Personal financial access never widens for administrators.
+
+Node earnings now carry trusted tenant, original consumer/node owner and actual
+ledger currency. Composite foreign keys bind their immutable sources; an existing
+credit returns before consulting later policy. Accepted settlement still records
+owed earnings for removed members, while those members cannot make new withdrawals.
+Lists/counts/statistics share scope and currency predicates. Summaries distinguish
+available, reserved and completed amounts instead of presenting pending approvals
+as paid. Current withdrawals and balance conversion explicitly support CNY only;
+other-currency earnings remain separate and are never implicitly converted.
+
+Withdrawal request IDs are unique per tenant and owner. Matching concurrent
+retries return one stored outcome and cannot consume future earnings. Conversion
+and its original-owner balance transaction commit with the withdrawal and audit.
+Tenant admins approve/reject own-tenant applications without payout secrets.
+Explicit-root payout detail requires an audited reason; completion records an
+external-payment attestation/reference, it does not initiate a real payment.
+List projections never select ciphertext or recipient fingerprints. Payout access,
+review and completion audit failures withhold private data or roll back changes,
+even when an outer transaction catches the error and commits.
+
+Database guards protect amounts, identity, terminal states and monotonic revisions.
+Old global withdrawal URLs are removed; ten explicit tenant/platform paths are
+inventoried and private/no-store. Personal client reads bypass display caches;
+request UUIDs survive matching retries. Same-tenant token refresh can complete an
+accepted UI command, but a different tenant/login or logout cannot receive its
+late result. Full tenant-console UI acceptance remains a separate phase.
+
+Review restored the original named earnings-uniqueness constraint, repaired old
+opt-in fixtures to use unique namespaces, authentic dispatch snapshots and one
+active registration, and removed their broad cross-fixture deletion. No production
+constraint, default ignored marker or regression assertion was weakened.
+
+Final default-parallel native workspace: **2,595 passed, 0 failed, 30 original
+default ignored**, including desktop/mobile. Eight formerly ignored tip-flow cases
+were explicitly run separately at eight threads and all passed; they are not
+included in the default-workspace pass count. Eleven financial isolation/audit
+cases and the expiry case passed again as included-subset repeats. Strict all-
+target/all-feature Clippy, all-target check, Web/client WASM, formatting, whitespace
+and exact frozen18-source checks passed. CI is checked separately after pushing.
+
+The old global ratio handler and manual wallet/reservation authorization still
+need their separate platform consolidation. A ratio integration attempt was
+refused by the tool safety gateway and was not applied or routed around; its
+prototype is archived outside main. No production schema/data, credentials,
+external payment/SMTP, service restart or deployment was changed by this slice.

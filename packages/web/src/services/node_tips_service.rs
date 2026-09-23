@@ -26,11 +26,14 @@ pub async fn get_my_tips_history(
 /// 发起小费提现
 pub async fn create_withdrawal(
     token: &str,
+    request_id: uuid::Uuid,
     withdrawal_type: &str,
     alipay_account: Option<&str>,
     real_name: Option<&str>,
 ) -> Result<()> {
     let req = CreateWithdrawalRequest {
+        request_id,
+        currency: "CNY".into(),
         withdrawal_type: withdrawal_type.to_string(),
         alipay_account: alipay_account.map(|s| s.to_string()),
         real_name: real_name.map(|s| s.to_string()),

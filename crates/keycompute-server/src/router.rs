@@ -17,14 +17,11 @@ use crate::handlers::{
 use crate::{
     handlers::{
         admin_approve_token,
-        admin_approve_withdrawal,
-        admin_complete_withdrawal,
         admin_get_tip_ratio,
         // 支付相关
         admin_list_payment_orders,
         // 节点网关 token 审批（Admin）
         admin_list_pending_tokens,
-        admin_list_pending_withdrawals,
         admin_payment_providers,
         admin_update_tip_ratio,
         admin_verify_payment_provider,
@@ -638,23 +635,10 @@ pub fn create_router(state: AppState) -> Router {
         );
 
     // 小费管理（仅 Admin）
-    let admin_tips_routes = Router::new()
-        .route(
-            "/api/v1/admin/tips/withdrawals/pending",
-            get(admin_list_pending_withdrawals),
-        )
-        .route(
-            "/api/v1/admin/tips/withdrawals/{id}/approve",
-            post(admin_approve_withdrawal),
-        )
-        .route(
-            "/api/v1/admin/tips/withdrawals/{id}/complete",
-            post(admin_complete_withdrawal),
-        )
-        .route(
-            "/api/v1/admin/tips/settings/ratio",
-            get(admin_get_tip_ratio).put(admin_update_tip_ratio),
-        );
+    let admin_tips_routes = Router::new().route(
+        "/api/v1/admin/tips/settings/ratio",
+        get(admin_get_tip_ratio).put(admin_update_tip_ratio),
+    );
 
     // 监控追踪（仅 Admin）
     let admin_monitoring_routes = Router::new()
@@ -824,6 +808,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(crate::handlers::tenant_providers::router())
         .merge(crate::handlers::tenant_bindings::router())
         .merge(crate::handlers::tenant_reporting::router())
+        .merge(crate::handlers::tenant_tips::router())
         .merge(crate::handlers::tenant_responses::router())
         .merge(crate::handlers::tenant_keys::router())
         .merge(admin_routes)

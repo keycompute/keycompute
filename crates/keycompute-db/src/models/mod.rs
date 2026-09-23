@@ -7,6 +7,7 @@ pub mod api_key;
 pub mod distribution_policy;
 pub mod distribution_record;
 pub mod distribution_scope;
+pub mod financial_scope;
 pub mod native_capability;
 pub mod node;
 pub mod node_control;
@@ -57,10 +58,10 @@ pub use node_task::{
 pub use node_task_submission::{CreateNodeTaskSubmissionRequest, NodeTaskSubmission};
 pub use node_tip::{NodeTip, NodeTipSummary};
 pub use node_tip_withdrawal::{
-    ApproveWithdrawalRequest, CreateTipWithdrawalRequest, NodeTipWithdrawal,
-    NodeTipWithdrawalWithUser, WITHDRAWAL_STATUS_APPROVED, WITHDRAWAL_STATUS_COMPLETED,
-    WITHDRAWAL_STATUS_PENDING, WITHDRAWAL_STATUS_REJECTED, WITHDRAWAL_TYPE_ALIPAY,
-    WITHDRAWAL_TYPE_BALANCE,
+    CompleteWithdrawal, NodeTipWithdrawal, ReviewWithdrawal, WITHDRAWAL_STATUS_APPROVED,
+    WITHDRAWAL_STATUS_COMPLETED, WITHDRAWAL_STATUS_PENDING, WITHDRAWAL_STATUS_REJECTED,
+    WITHDRAWAL_TYPE_ALIPAY, WITHDRAWAL_TYPE_BALANCE, WithdrawalFilter, WithdrawalIntent,
+    WithdrawalReview, WithdrawalView,
 };
 pub use passthrough_binding::{
     AccountModelHealth, AccountModelHealthProbe, CreatePassthroughBindingRequest,

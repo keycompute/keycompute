@@ -75,13 +75,13 @@ async fn tip_probe_preserves_successful_node_replay_and_skips_other_completions(
     let owner = create_test_user(&db, tenant.id, "owner", &run).await;
     let log = ledger(&db, tenant.id, user.id).await;
     assert!(
-        NodeTip::create_from_usage_log(&db, log.id)
+        NodeTip::create_from_usage_log(&db, tenant.id, log.id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        NodeTip::create_from_usage_log(&db, Uuid::new_v4())
+        NodeTip::create_from_usage_log(&db, tenant.id, Uuid::new_v4())
             .await
             .unwrap()
             .is_none()
@@ -94,7 +94,7 @@ async fn tip_probe_preserves_successful_node_replay_and_skips_other_completions(
         "INSERT INTO node_tasks(request_id,tenant_id,user_id,model,payload_json,status,assigned_node_id,deadline_at,complete_grace_until) VALUES($1,$4,$2,'test',$5,'queued',$3,NOW()+INTERVAL '1 minute',NOW()+INTERVAL '2 minutes')",
         [log.request_id.into(),user.id.into(),node.into(),tenant.id.into(),serde_json::json!({"dispatch_identity":integration_tests::db::fixture_dispatch_identity(&db,tenant.id,user.id).await}).into()])).await.unwrap();
     assert!(
-        NodeTip::create_from_usage_log(&db, log.id)
+        NodeTip::create_from_usage_log(&db, tenant.id, log.id)
             .await
             .unwrap()
             .is_none()
@@ -106,7 +106,7 @@ async fn tip_probe_preserves_successful_node_replay_and_skips_other_completions(
     ))
     .await
     .unwrap();
-    let tip = NodeTip::create_from_usage_log(&db, log.id)
+    let tip = NodeTip::create_from_usage_log(&db, tenant.id, log.id)
         .await
         .unwrap()
         .unwrap();
@@ -114,7 +114,7 @@ async fn tip_probe_preserves_successful_node_replay_and_skips_other_completions(
     assert_eq!(tip.consumer_user_id, user.id);
     assert!(tip.tip_amount > Decimal::ZERO);
     assert!(
-        NodeTip::create_from_usage_log(&db, log.id)
+        NodeTip::create_from_usage_log(&db, tenant.id, log.id)
             .await
             .unwrap()
             .is_none()

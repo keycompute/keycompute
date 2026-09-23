@@ -31,6 +31,7 @@ pub mod responses;
 pub mod responses_websocket;
 pub mod routing;
 pub mod tenant_distribution;
+pub mod tenant_tips;
 pub mod user;
 
 // 认证相关
@@ -145,10 +146,9 @@ pub use node_gateway_token::{
 };
 
 // 节点租赁小费管理
-pub use node_tips::{
-    admin_approve_withdrawal, admin_complete_withdrawal, admin_get_tip_ratio,
-    admin_list_pending_withdrawals, admin_update_tip_ratio, create_tip_withdrawal,
-    get_my_tips_history, get_my_tips_summary, get_my_withdrawals,
+pub use node_tips::{admin_get_tip_ratio, admin_update_tip_ratio};
+pub use tenant_tips::{
+    create_tip_withdrawal, get_my_tips_history, get_my_tips_summary, get_my_withdrawals,
 };
 
 // 支付相关

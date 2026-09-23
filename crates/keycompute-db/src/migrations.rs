@@ -223,6 +223,38 @@ mod tests {
     }
 
     #[test]
+    fn node_financial_schema_binds_sources_and_preserves_withdrawal_identity() {
+        let sql = include_str!("../migrations/001_init.sql");
+        for expected in [
+            "fk_node_tips_usage_owner",
+            "fk_node_tips_node_owner",
+            "fk_node_tips_owner_membership",
+            "uq_tip_withdrawal_request UNIQUE(tenant_id,owner_user_id,request_id)",
+            "fk_tip_withdrawal_credit_owner",
+            "withdrawal identity and amount are immutable",
+            "terminal withdrawal is immutable",
+            "node earnings are immutable accounting records",
+        ] {
+            assert!(
+                sql.contains(expected),
+                "missing financial invariant: {expected}"
+            );
+        }
+        for name in ["node_tips", "node_tip_withdrawals"] {
+            let marker = format!("CREATE TABLE IF NOT EXISTS {name} (");
+            let body = sql
+                .split(&marker)
+                .nth(1)
+                .unwrap()
+                .split("\n);")
+                .next()
+                .unwrap();
+            assert!(body.contains("tenant_id UUID NOT NULL"));
+            assert!(body.contains("owner_user_id UUID NOT NULL"));
+        }
+    }
+
+    #[test]
     fn node_session_schema_has_explicit_immutable_tenant_ownership() {
         let sql = include_str!("../migrations/001_init.sql");
         let table = sql

@@ -28,7 +28,7 @@ impl NodeTipsApi {
     /// GET /api/v1/me/tips
     pub async fn get_my_tips_summary(&self, auth_token: &str) -> Result<TipsSummary> {
         self.client
-            .get_json("/api/v1/me/tips", Some(auth_token))
+            .get_json_fresh("/api/v1/me/tips", Some(auth_token))
             .await
     }
 
@@ -42,7 +42,7 @@ impl NodeTipsApi {
         offset: u32,
     ) -> Result<TipsHistoryResponse> {
         let path = format!("/api/v1/me/tips/history?limit={}&offset={}", limit, offset);
-        self.client.get_json(&path, Some(auth_token)).await
+        self.client.get_json_fresh(&path, Some(auth_token)).await
     }
 
     /// 发起小费提现
@@ -66,7 +66,7 @@ impl NodeTipsApi {
     /// GET /api/v1/me/tips/withdrawals
     pub async fn get_my_withdrawals(&self, auth_token: &str) -> Result<WithdrawalsListResponse> {
         self.client
-            .get_json("/api/v1/me/tips/withdrawals", Some(auth_token))
+            .get_json_fresh("/api/v1/me/tips/withdrawals", Some(auth_token))
             .await
     }
 }
@@ -74,6 +74,9 @@ impl NodeTipsApi {
 /// 小费汇总响应
 #[derive(Debug, Clone, Deserialize)]
 pub struct TipsSummary {
+    pub tenant_id: uuid::Uuid,
+    pub currency: String,
+    pub reserved_amount: String,
     /// 待提现总额
     pub pending_amount: String,
     /// 已提现总额
@@ -102,8 +105,11 @@ pub struct TipsHistoryItem {
 }
 
 /// 发起提现请求
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CreateWithdrawalRequest {
+    pub request_id: uuid::Uuid,
+    pub currency: String,
     /// 提现方式：alipay | balance
     pub withdrawal_type: String,
     /// 支付宝账号（仅 alipay）
@@ -139,11 +145,22 @@ pub struct WithdrawalRecord {
     pub withdrawal_type: String,
     pub total_amount: String,
     pub status: String,
-    pub alipay_account: Option<String>,
-    pub real_name: Option<String>,
+    pub payout_details_present: bool,
+    pub revision: i64,
+    pub currency: String,
     pub admin_remark: Option<String>,
     pub created_at: String,
     /// 更新时间（服务端暂不返回此字段，使用 default 兜底）
     #[serde(default)]
     pub updated_at: String,
+}
+
+impl std::fmt::Debug for CreateWithdrawalRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateWithdrawalRequest")
+            .field("request_id", &self.request_id)
+            .field("withdrawal_type", &self.withdrawal_type)
+            .field("recipient", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }

@@ -393,7 +393,7 @@ impl BillingService {
         // 触发节点租赁小费。瞬时错误返回给 durable settlement 重试。
         let tips_result = keycompute_observability::capacity::measure(
             keycompute_observability::capacity::Stage::NodeTips,
-            self.process_tips_if_configured(usage_log.id),
+            self.process_tips_if_configured(usage_log.tenant_id, usage_log.id),
         )
         .await;
 
@@ -690,7 +690,7 @@ impl BillingService {
     ///
     /// 根据 usage_log 查询对应的 node_task，为节点所有者创建小费记录。
     /// 小费创建失败返回给调用方；请求结果不受影响，由 durable settlement 重试。
-    async fn process_tips_if_configured(&self, usage_log_id: Uuid) -> Result<()> {
+    async fn process_tips_if_configured(&self, tenant_id: Uuid, usage_log_id: Uuid) -> Result<()> {
         let Some(pool) = &self.pool else {
             tracing::debug!(
                 %usage_log_id,
@@ -699,7 +699,7 @@ impl BillingService {
             return Ok(());
         };
 
-        match NodeTip::create_from_usage_log(pool.write_conn(), usage_log_id).await {
+        match NodeTip::create_from_usage_log(pool.write_conn(), tenant_id, usage_log_id).await {
             Ok(Some(tip)) => {
                 tracing::info!(
                     %usage_log_id,
