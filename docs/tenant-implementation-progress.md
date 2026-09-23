@@ -1604,3 +1604,36 @@ This closes the key-control original-session boundary, not every resource's
 transaction timing gap. Key/Provider/finance/resource UI, native account-pool
 management and final endpoint/release gates remain. Next resource UI preparation
 is outside main and has not been accepted. See key-control-session-boundary.md.
+
+
+## Current phase 7 — scoped managed-resource client contract accepted
+
+The Responses/Conversation client now validates explicit tenant, original owner,
+resource family and object identity, real local revisions and pagination. It
+rejects foreign rows and duplicate logical identities, while preserving legitimate
+equal resource IDs belonging to different owners. Local detail envelopes cannot
+silently become absent or native content. No native account-pool implementation
+or backend authorization grant is added.
+
+Typed item queries preserve literal resource IDs/cursors and bounded order/limit.
+Returned page boundaries, item IDs and has-more semantics are verified; duplicate
+items and repeated input cursors fail. Existing default-page helper methods use
+this same validation. Commands remain single dispatch, including uncertain errors,
+and validate returned object identities before reporting success.
+
+Eight new wire tests and the existing five resource-client tests passed. A real
+SDK/Axum/PostgreSQL integration covers both local execution families, original
+owner lists/details, member/Key denial, revision conflicts, cursor pages, metadata
+and item changes, deletion and retained ownership without additional inference.
+The independent full default-parallel workspace passed, including desktop/mobile;
+all-target compilation, strict all-target/all-feature Clippy, Web/client WASM,
+formatting, whitespace, Python CI tests and the foundation checker passed.
+All four source/test files match their frozen validation hashes.
+
+The separate /tenant/responses Web draft remains UNACCEPTED. Intermediate Web and
+browser checks passed after full owner/mode/type state keys were added, but its
+remaining strict lint correction was safety-denied and not replayed. All fifteen
+UI/workflow/browser files were archived and excluded from this client commit.
+Key/Provider/financial UI, native resources, other transaction boundaries and final
+release gates remain unfinished. No production DB, credential, payment, email,
+service or deployment was changed. See response-control-client.md.

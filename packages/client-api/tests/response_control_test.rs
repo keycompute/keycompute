@@ -98,7 +98,7 @@ async fn platform_detail_carries_bounded_reason_in_query() {
                 "expires_at":"2026-02-01T00:00:00Z",
                 "deleted":false,"local_content_available":true,"native_content_available":false
             },
-            "response": {"id":"resp_1"}
+            "response": {"id":"resp_1","object":"response"}
         })))
         .mount(&server)
         .await;

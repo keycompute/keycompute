@@ -1054,3 +1054,266 @@ async fn post_audit_expiry_case(platform: bool) {
         .unwrap();
     outcome.unwrap();
 }
+
+#[tokio::test]
+async fn real_resource_control_client_preserves_owner_and_item_cursor_contracts() {
+    use client_api::{
+        ApiClient, ClientConfig, ClientError,
+        api::response_control::{
+            AppendItemsCommand, ItemOrder, ItemQuery, MetadataCommand, ResourceAddress,
+            ResourceListQuery, ResponseControlApi, ResponseMode, RevisionCommand,
+        },
+    };
+    struct HttpServer(tokio::task::JoinHandle<()>);
+    impl Drop for HttpServer {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut f = Fixture::new().await;
+    let admin = tenant_owner_console_token(&f).await;
+    let member = scoped_jwt(&f.state, &f.user).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = f.app.clone();
+    let server = HttpServer(tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    }));
+    let client =
+        ApiClient::new(ClientConfig::new(format!("http://{address}")).with_no_proxy(true)).unwrap();
+    let api = ResponseControlApi::tenant(&client, f.user.tenant_id).unwrap();
+    for (mode, prefix) in [
+        (ResponseMode::Passthrough, "/pt/v1"),
+        (ResponseMode::NodeDispatch, "/nt/v1"),
+    ] {
+        let response_id = stored_response(&f, mode.as_str()).await;
+        let query = ResourceListQuery {
+            mode: Some(mode),
+            owner_user_id: Some(f.user.id),
+            page: Some(1),
+            page_size: Some(20),
+            reason: None,
+        };
+        for denied in [&member, &f.key] {
+            assert!(matches!(
+                api.responses(&query, denied).await,
+                Err(ClientError::Forbidden(_) | ClientError::Unauthorized(_))
+            ));
+        }
+        let list = api.responses(&query, &admin).await.unwrap();
+        assert!(list.items.iter().any(|r| r.id == response_id));
+        assert_eq!(
+            api.response_count(&query, &admin).await.unwrap().total,
+            list.total
+        );
+        let detail = api
+            .response(mode, f.user.id, &response_id, None, &admin)
+            .await
+            .unwrap();
+        assert_eq!(detail.summary.owner_user_id, f.user.id);
+        assert_eq!(detail.summary.tenant_id, f.user.tenant_id);
+        assert!(
+            api.response(mode, Uuid::new_v4(), &response_id, None, &admin)
+                .await
+                .is_err()
+        );
+        let input = api
+            .response_input_items_page(
+                &ResourceAddress {
+                    mode,
+                    owner: f.user.id,
+                    id: response_id.clone(),
+                },
+                &ItemQuery {
+                    limit: 1,
+                    order: ItemOrder::Asc,
+                    ..Default::default()
+                },
+                None,
+                &admin,
+            )
+            .await
+            .unwrap();
+        assert_eq!(input.data.len(), 1);
+        let created=expect(f.request(Method::POST,&format!("{prefix}/conversations"),Some(json!({"metadata":{"case":"before"},"items":[{"role":"user","content":"first fixture item"},{"role":"user","content":"second fixture item"}]}))).await,StatusCode::OK);
+        let conversation_id = created["id"].as_str().unwrap().to_owned();
+        let address = ResourceAddress {
+            mode,
+            owner: f.user.id,
+            id: conversation_id.clone(),
+        };
+        let listed = api.conversations(&query, &admin).await.unwrap();
+        assert!(listed.items.iter().any(|r| r.id == conversation_id));
+        assert_eq!(
+            api.conversation_count(&query, &admin).await.unwrap().total,
+            listed.total
+        );
+        let original = api
+            .conversation(mode, f.user.id, &conversation_id, None, &admin)
+            .await
+            .unwrap();
+        let rev = original.summary.revision.unwrap();
+        let first = api
+            .conversation_items_page(
+                &address,
+                &ItemQuery {
+                    limit: 1,
+                    order: ItemOrder::Asc,
+                    ..Default::default()
+                },
+                None,
+                &admin,
+            )
+            .await
+            .unwrap();
+        assert!(first.has_more);
+        assert_eq!(first.data[0]["content"], "first fixture item");
+        let second = api
+            .conversation_items_page(
+                &address,
+                &ItemQuery {
+                    after: first.last_id.clone(),
+                    limit: 1,
+                    order: ItemOrder::Asc,
+                },
+                None,
+                &admin,
+            )
+            .await
+            .unwrap();
+        assert!(!second.has_more);
+        assert_eq!(second.data[0]["content"], "second fixture item");
+        let changed = api
+            .update_conversation(
+                mode,
+                f.user.id,
+                &conversation_id,
+                &MetadataCommand {
+                    expected_revision: rev,
+                    metadata: json!({"case":"after"}),
+                    reason: None,
+                },
+                &admin,
+            )
+            .await
+            .unwrap();
+        assert_eq!(changed["metadata"]["case"], "after");
+        assert!(
+            api.update_conversation(
+                mode,
+                f.user.id,
+                &conversation_id,
+                &MetadataCommand {
+                    expected_revision: rev,
+                    metadata: json!({"case":"stale"}),
+                    reason: None
+                },
+                &admin
+            )
+            .await
+            .is_err()
+        );
+        let changed = api
+            .conversation(mode, f.user.id, &conversation_id, None, &admin)
+            .await
+            .unwrap();
+        api.append_conversation_items(
+            mode,
+            f.user.id,
+            &conversation_id,
+            &AppendItemsCommand {
+                expected_revision: changed.summary.revision.unwrap(),
+                items: vec![json!({"role":"assistant","content":"third fixture item"})],
+                reason: None,
+            },
+            &admin,
+        )
+        .await
+        .unwrap();
+        let changed = api
+            .conversation(mode, f.user.id, &conversation_id, None, &admin)
+            .await
+            .unwrap();
+        api.remove_conversation_item(
+            mode,
+            f.user.id,
+            &conversation_id,
+            first.first_id.as_deref().unwrap(),
+            &RevisionCommand {
+                expected_revision: changed.summary.revision.unwrap(),
+                reason: None,
+            },
+            &admin,
+        )
+        .await
+        .unwrap();
+        let remaining = api
+            .conversation_items_page(
+                &address,
+                &ItemQuery {
+                    limit: 100,
+                    order: ItemOrder::Asc,
+                    ..Default::default()
+                },
+                None,
+                &admin,
+            )
+            .await
+            .unwrap();
+        assert_eq!(remaining.data.len(), 2);
+        assert_eq!(remaining.data[0]["content"], "second fixture item");
+        let changed = api
+            .conversation(mode, f.user.id, &conversation_id, None, &admin)
+            .await
+            .unwrap();
+        assert!(
+            api.delete_conversation(
+                mode,
+                f.user.id,
+                &conversation_id,
+                &RevisionCommand {
+                    expected_revision: changed.summary.revision.unwrap(),
+                    reason: None
+                },
+                &admin
+            )
+            .await
+            .unwrap()
+            .deleted
+        );
+        let calls = f.upstream.calls.lock().unwrap().len();
+        assert!(
+            api.delete_response(
+                mode,
+                f.user.id,
+                &response_id,
+                &RevisionCommand {
+                    expected_revision: detail.summary.revision.unwrap(),
+                    reason: None
+                },
+                &admin
+            )
+            .await
+            .unwrap()
+            .deleted
+        );
+        assert_eq!(
+            f.upstream.calls.lock().unwrap().len(),
+            calls,
+            "resource deletion cannot invoke upstream inference"
+        );
+        let row=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT tenant_id,user_id,deleted_at FROM scoped_responses WHERE tenant_id=$1 AND user_id=$2 AND access_mode=$3 AND id=$4",[f.user.tenant_id.into(),f.user.id.into(),mode.as_str().into(),response_id.into()])).await.unwrap().unwrap();
+        assert_eq!(
+            row.try_get::<Uuid>("", "tenant_id").unwrap(),
+            f.user.tenant_id
+        );
+        assert_eq!(row.try_get::<Uuid>("", "user_id").unwrap(), f.user.id);
+        assert!(
+            row.try_get::<Option<chrono::DateTime<Utc>>>("", "deleted_at")
+                .unwrap()
+                .is_some()
+        );
+    }
+    drop(server);
+    f.finish().await;
+}
