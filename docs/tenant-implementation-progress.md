@@ -1637,3 +1637,37 @@ UI/workflow/browser files were archived and excluded from this client commit.
 Key/Provider/financial UI, native resources, other transaction boundaries and final
 release gates remain unfinished. No production DB, credential, payment, email,
 service or deployment was changed. See response-control-client.md.
+
+
+## Current phases 2/3/5 — pricing effects retain the original console proof
+
+A shared ConsoleSessionProof now verifies current user/platform identity and the
+original signed token/optional selected-tenant/member versions and expiry. It is
+provenance only: existing extractors/action checks and scoped DAOs retain authority.
+Key control reuses this helper without adding a global exclusive lock to personal
+operations or changing original owner/one-time-secret/cache semantics.
+
+Real red/green HTTP regressions reproduced expired pricing creation in tenant,
+root-explicit-tenant and global modes, plus a queued root request accepting a
+suspend/regrant of its selected membership. All ten pricing write handlers now
+revalidate before the outer commit; pricing and both audit tables roll back on
+rejection. Reads recheck after querying. Commit attempts invalidate pricing/display
+snapshots even if acknowledgement is uncertain. Late expiry after acknowledgement
+is an uncertain outcome, not an assertion that committed data rolled back.
+
+Six isolated HTTP groups cover fourteen write combinations, four read forms and
+a selected-membership race using exact observed DB waits. Fresh root selected in
+A still manages B without joining B. Two unit tests prove malformed credential
+rejection and that the shared proof grants no action. Existing key and pricing
+scope, audit, concurrency, cache and SDK contracts pass unchanged.
+
+Independent default-parallel full workspace: 2762 passed, 0 failed, 30 original
+ignored, including desktop/mobile. All-target check, strict all-target/all-feature
+Clippy, Web/client WASM, formatting, whitespace, Python CI and foundation checks
+passed. The final eighteen pricing/key-expiry/concurrent-read repetitions are an
+included subset. All six frozen source/test files match their verified bytes.
+
+No schema, production DB, credentials, payment, notifications or deployment changed.
+Other resource transaction boundaries and native account-pool administration remain.
+The separately prepared Key pages and personal-client correction are outside main,
+not part of this accepted slice. See pricing-session-boundary.md.

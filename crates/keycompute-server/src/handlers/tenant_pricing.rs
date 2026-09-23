@@ -1,5 +1,6 @@
 //! Tenant pricing administration. Path/credential authority never comes from payload fields.
 use crate::{
+    console_session_proof::ConsoleSessionProof,
     error::{ApiError, Result},
     extractors::RequestId,
     handlers::{
@@ -22,7 +23,7 @@ use keycompute_db::{
     DbRouter,
     models::pricing_model::{PricingModel, PricingScopeType, TenantPricingScope},
 };
-use sea_orm::{DatabaseTransaction, TransactionTrait};
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -79,21 +80,13 @@ fn pool(state: &AppState) -> Result<&DbRouter> {
 fn error(e: keycompute_db::DbError) -> ApiError {
     admin_pricing::map_pricing_db_error(e, "tenant pricing")
 }
-async fn begin(state: &AppState) -> Result<DatabaseTransaction> {
-    pool(state)?.begin().await.map_err(|e| error(e.into()))
-}
-async fn commit(state: &AppState, tx: DatabaseTransaction) -> Result<()> {
-    let _fence = state.display_cache.mutation_guard();
-    tx.commit().await.map_err(|e| error(e.into()))?;
-    state.pricing.clear_cache().await;
-    Ok(())
-}
 pub async fn list(
     access: TenantAdmin,
     State(state): State<AppState>,
     Query(q): Query<PricingQuery>,
 ) -> Result<Json<PricingListResponse>> {
     let scope = scope(&access)?;
+    let proof = ConsoleSessionProof::from_console(access.auth())?;
     let (page, page_size, offset) = normalize_list_pagination(q.page, q.page_size, None, None);
     let db = pool(&state)?.write_conn();
     let rows = PricingModel::find_in_tenant(db, scope, q.search.as_deref(), page_size, offset)
@@ -102,6 +95,7 @@ pub async fn list(
     let total = PricingModel::count_in_tenant(db, scope, q.search.as_deref())
         .await
         .map_err(error)?;
+    proof.verify_current(db).await?;
     Ok(Json(PricingListResponse {
         pricing: rows.into_iter().map(Into::into).collect(),
         total,
@@ -121,6 +115,9 @@ pub async fn detail(
             .await
             .map_err(error)?
             .ok_or_else(|| ApiError::NotFound("Pricing target not found".into()))?;
+    ConsoleSessionProof::from_console(access.auth())?
+        .verify_current(pool(&state)?.write_conn())
+        .await?;
     Ok(Json(row.into()))
 }
 pub async fn create(
@@ -130,6 +127,7 @@ pub async fn create(
     Json(req): Json<CreateTenantPricing>,
 ) -> Result<Json<PricingInfo>> {
     let scope = scope(&access)?;
+    let proof = ConsoleSessionProof::from_console(access.auth())?;
     let (_, req) = admin_pricing::create_request(CreatePricingAdminRequest {
         scope_type: PricingScopeType::Tenant,
         tenant_id: Some(access.tenant_id()),
@@ -142,11 +140,11 @@ pub async fn create(
         effective_from: req.effective_from,
         effective_until: req.effective_until,
     })?;
-    let tx = begin(&state).await?;
+    let tx = proof.begin(&state).await?;
     let row = PricingModel::create_in_tenant(&tx, scope, &req, &access.audit(request_id))
         .await
         .map_err(error)?;
-    commit(&state, tx).await?;
+    admin_pricing::commit_pricing(&state, tx, proof).await?;
     Ok(Json(row.into()))
 }
 pub async fn update(
@@ -158,12 +156,13 @@ pub async fn update(
 ) -> Result<Json<PricingInfo>> {
     access.require_path_tenant(path.tenant_id)?;
     let scope = scope(&access)?;
+    let proof = ConsoleSessionProof::from_console(access.auth())?;
     let req = admin_pricing::platform_update_request(req)?;
-    let tx = begin(&state).await?;
+    let tx = proof.begin(&state).await?;
     let row = PricingModel::update_in_tenant(&tx, scope, path.id, &req, &access.audit(request_id))
         .await
         .map_err(error)?;
-    commit(&state, tx).await?;
+    admin_pricing::commit_pricing(&state, tx, proof).await?;
     Ok(Json(row.into()))
 }
 pub async fn remove(
@@ -174,11 +173,12 @@ pub async fn remove(
 ) -> Result<Json<Value>> {
     access.require_path_tenant(path.tenant_id)?;
     let scope = scope(&access)?;
-    let tx = begin(&state).await?;
+    let proof = ConsoleSessionProof::from_console(access.auth())?;
+    let tx = proof.begin(&state).await?;
     PricingModel::delete_in_tenant(&tx, scope, path.id, &access.audit(request_id))
         .await
         .map_err(error)?;
-    commit(&state, tx).await?;
+    admin_pricing::commit_pricing(&state, tx, proof).await?;
     Ok(Json(json!({"success":true,"pricing_id":path.id})))
 }
 pub async fn make_default(
@@ -189,11 +189,12 @@ pub async fn make_default(
 ) -> Result<Json<PricingInfo>> {
     access.require_path_tenant(path.tenant_id)?;
     let scope = scope(&access)?;
-    let tx = begin(&state).await?;
+    let proof = ConsoleSessionProof::from_console(access.auth())?;
+    let tx = proof.begin(&state).await?;
     let row = PricingModel::make_default_in_tenant(&tx, scope, path.id, &access.audit(request_id))
         .await
         .map_err(error)?;
-    commit(&state, tx).await?;
+    admin_pricing::commit_pricing(&state, tx, proof).await?;
     Ok(Json(row.into()))
 }
 pub async fn batch_defaults(
@@ -203,7 +204,8 @@ pub async fn batch_defaults(
     Json(req): Json<DefaultSelection>,
 ) -> Result<Json<Vec<PricingInfo>>> {
     let scope = scope(&access)?;
-    let tx = begin(&state).await?;
+    let proof = ConsoleSessionProof::from_console(access.auth())?;
+    let tx = proof.begin(&state).await?;
     let rows = PricingModel::batch_make_defaults_in_tenant(
         &tx,
         scope,
@@ -212,7 +214,7 @@ pub async fn batch_defaults(
     )
     .await
     .map_err(error)?;
-    commit(&state, tx).await?;
+    admin_pricing::commit_pricing(&state, tx, proof).await?;
     Ok(Json(rows.into_iter().map(Into::into).collect()))
 }
 pub fn router() -> Router<AppState> {

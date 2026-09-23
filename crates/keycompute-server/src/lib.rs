@@ -6,6 +6,7 @@
 pub mod account_capacity;
 pub mod admission;
 pub mod console;
+mod console_session_proof;
 pub mod display_cache;
 pub mod error;
 pub mod extractors;

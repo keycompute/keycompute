@@ -5,6 +5,7 @@
 //! methods; this module never treats a selected tenant as a management grant.
 
 use crate::{
+    console_session_proof::ConsoleSessionProof,
     error::{ApiError, Result},
     extractors::{GlobalConsoleAuth, RequestId},
     handlers::pagination::{normalize_list_pagination, total_pages},
@@ -22,7 +23,7 @@ use keycompute_db::models::pricing_model::{
     BillingDimension, CreatePricingRequest, PlatformPricingScope, PricingModel, PricingScopeType,
     PricingTarget, UpdatePricingRequest,
 };
-use sea_orm::TransactionTrait;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -30,6 +31,25 @@ fn require_platform_scope(auth: &GlobalConsoleAuth) -> Result<PlatformPricingSco
     auth.require_platform(AuthorizationAction::ManagePlatform)?;
     PlatformPricingScope::checked(auth.user_id, auth.credential_kind, auth.token_version)
         .map_err(|error| ApiError::Forbidden(error.to_string()))
+}
+
+pub(crate) async fn commit_pricing(
+    state: &AppState,
+    tx: sea_orm::DatabaseTransaction,
+    proof: ConsoleSessionProof,
+) -> Result<()> {
+    let tx = proof.prepare_commit(tx).await?;
+    let _fence = state.display_cache.mutation_guard();
+    let committed = tx.commit().await;
+    // An unconfirmed commit may still have persisted. Drop local price snapshots
+    // before returning either the acknowledgement error or an expired-session error.
+    state.pricing.clear_cache().await;
+    committed.map_err(|_| {
+        ApiError::ServiceUnavailable(
+            "Pricing commit is unconfirmed; refresh records before retrying".into(),
+        )
+    })?;
+    proof.check_deadline()
 }
 
 fn audit_context(auth: &GlobalConsoleAuth, request_id: RequestId) -> AuditContext {
@@ -342,6 +362,7 @@ pub async fn list_pricing(
     Query(params): Query<PricingListQueryParams>,
 ) -> Result<Json<PricingListResponse>> {
     let scope = require_platform_scope(&auth)?;
+    let proof = ConsoleSessionProof::from_context(&auth)?;
     let target = target_from_query(&auth, params.scope_type, params.tenant_id)?;
     let pool = state
         .pool
@@ -367,6 +388,7 @@ pub async fn list_pricing(
     )
     .await
     .map_err(|error| map_pricing_db_error(error, "count pricing"))?;
+    proof.verify_current(pool.write_conn()).await?;
     Ok(Json(PricingListResponse {
         pricing: rows.into_iter().map(PricingInfo::from).collect(),
         total,
@@ -383,14 +405,9 @@ pub async fn create_pricing(
     Json(req): Json<CreatePricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let scope = require_platform_scope(&auth)?;
+    let proof = ConsoleSessionProof::from_context(&auth)?;
     let (target, request) = create_request(req)?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let tx = pool.begin().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to begin pricing creation: {error}"))
-    })?;
+    let tx = proof.begin(&state).await?;
     let row = PricingModel::create_platform(
         &tx,
         scope,
@@ -400,10 +417,7 @@ pub async fn create_pricing(
     )
     .await
     .map_err(|error| map_pricing_db_error(error, "create pricing"))?;
-    tx.commit().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to commit pricing creation: {error}"))
-    })?;
-    state.pricing.clear_cache().await;
+    commit_pricing(&state, tx, proof).await?;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing created",
@@ -427,15 +441,9 @@ pub async fn update_pricing(
     Json(req): Json<UpdatePricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let scope = require_platform_scope(&auth)?;
+    let proof = ConsoleSessionProof::from_context(&auth)?;
     let request = platform_update_request(req)?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let tx = pool
-        .begin()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Failed to begin pricing update: {error}")))?;
+    let tx = proof.begin(&state).await?;
     let target = mutation_target(&tx, scope, &auth, &target_query, pricing_id).await?;
     let row = PricingModel::update_platform(
         &tx,
@@ -447,10 +455,7 @@ pub async fn update_pricing(
     )
     .await
     .map_err(|error| map_pricing_db_error(error, "update pricing"))?;
-    tx.commit()
-        .await
-        .map_err(|error| ApiError::Internal(format!("Failed to commit pricing update: {error}")))?;
-    state.pricing.clear_cache().await;
+    commit_pricing(&state, tx, proof).await?;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing updated",
@@ -468,13 +473,8 @@ pub async fn delete_pricing(
     Query(target_query): Query<PricingTargetQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
     let scope = require_platform_scope(&auth)?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let tx = pool.begin().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to begin pricing deletion: {error}"))
-    })?;
+    let proof = ConsoleSessionProof::from_context(&auth)?;
+    let tx = proof.begin(&state).await?;
     let target = mutation_target(&tx, scope, &auth, &target_query, pricing_id).await?;
     PricingModel::delete_platform(
         &tx,
@@ -485,10 +485,7 @@ pub async fn delete_pricing(
     )
     .await
     .map_err(|error| map_pricing_db_error(error, "delete pricing"))?;
-    tx.commit().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to commit pricing deletion: {error}"))
-    })?;
-    state.pricing.clear_cache().await;
+    commit_pricing(&state, tx, proof).await?;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing deleted",
@@ -505,13 +502,8 @@ pub async fn make_pricing_default(
     Query(target_query): Query<PricingTargetQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
     let scope = require_platform_scope(&auth)?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let tx = pool.begin().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to begin default pricing update: {error}"))
-    })?;
+    let proof = ConsoleSessionProof::from_context(&auth)?;
+    let tx = proof.begin(&state).await?;
     let target = mutation_target(&tx, scope, &auth, &target_query, pricing_id).await?;
     let row = PricingModel::make_default_platform(
         &tx,
@@ -522,10 +514,7 @@ pub async fn make_pricing_default(
     )
     .await
     .map_err(|error| map_pricing_db_error(error, "set pricing default"))?;
-    tx.commit().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to commit default pricing update: {error}"))
-    })?;
-    state.pricing.clear_cache().await;
+    commit_pricing(&state, tx, proof).await?;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing set as default",
@@ -542,19 +531,14 @@ pub async fn set_default_pricing(
     Json(req): Json<SetDefaultPricingAdminRequest>,
 ) -> Result<Json<serde_json::Value>> {
     let scope = require_platform_scope(&auth)?;
+    let proof = ConsoleSessionProof::from_context(&auth)?;
     let target = target_from_query(&auth, target_query.scope_type, target_query.tenant_id)?;
     if req.model_ids.is_empty() {
         return Err(ApiError::BadRequest(
             "model_ids must contain at least one pricing id".into(),
         ));
     }
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let tx = pool.begin().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to begin batch default update: {error}"))
-    })?;
+    let tx = proof.begin(&state).await?;
     let rows = PricingModel::batch_make_defaults_platform(
         &tx,
         scope,
@@ -564,10 +548,7 @@ pub async fn set_default_pricing(
     )
     .await
     .map_err(|error| map_pricing_db_error(error, "set pricing defaults"))?;
-    tx.commit().await.map_err(|error| {
-        ApiError::Internal(format!("Failed to commit batch default update: {error}"))
-    })?;
-    state.pricing.clear_cache().await;
+    commit_pricing(&state, tx, proof).await?;
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Pricing defaults set",
