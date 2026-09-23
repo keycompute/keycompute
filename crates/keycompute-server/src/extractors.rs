@@ -32,8 +32,8 @@ pub(crate) fn authentication_error(error: keycompute_types::KeyComputeError) -> 
     }
 }
 
-const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM node_sessions ns \
-     INNER JOIN nodes n ON n.id = ns.node_id \
+const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id, ns.tenant_id, ns.owner_user_id FROM node_sessions ns \
+     INNER JOIN nodes n ON n.id=ns.node_id AND n.tenant_id=ns.tenant_id AND n.owner_user_id=ns.owner_user_id \
      INNER JOIN tenants t ON t.id = n.tenant_id \
      INNER JOIN tenant_memberships m ON m.tenant_id=n.tenant_id AND m.user_id=n.owner_user_id AND m.status='active' \
      INNER JOIN users u ON u.id=n.owner_user_id AND u.status='active' \
@@ -47,8 +47,8 @@ const ACTIVE_NODE_SESSION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM nod
 // NodeGatewayStore still enforce the authenticated node identity and expiry;
 // this query only omits the lifecycle gate that would otherwise reject the
 // in-flight result before the handler can apply those checks.
-const NODE_SESSION_COMPLETION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id FROM node_sessions ns \
-     INNER JOIN nodes n ON n.id = ns.node_id \
+const NODE_SESSION_COMPLETION_TOKEN_QUERY: &str = "SELECT ns.node_id, ns.id, ns.tenant_id, ns.owner_user_id FROM node_sessions ns \
+     INNER JOIN nodes n ON n.id=ns.node_id AND n.tenant_id=ns.tenant_id AND n.owner_user_id=ns.owner_user_id \
      INNER JOIN tenants t ON t.id = n.tenant_id \
      WHERE ns.session_token_hash = $1 \
        AND ns.revoked_at IS NULL \
@@ -442,6 +442,9 @@ where
 /// 从 Authorization header 中提取 session token 并验证
 /// 认证成功后返回 node_id 和 session_id
 pub struct NodeSessionAuth {
+    /// Immutable ownership from the verified session, not request selectors.
+    pub tenant_id: Uuid,
+    pub owner_user_id: Uuid,
     /// 节点 ID
     pub node_id: Uuid,
     /// 会话 ID
@@ -455,11 +458,13 @@ impl FromRequestParts<AppState> for NodeSessionAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> std::result::Result<Self, Self::Rejection> {
-        let (node_id, session_id) =
+        let (node_id, session_id, tenant_id, owner_user_id) =
             authenticate_node_session(parts, state, ACTIVE_NODE_SESSION_TOKEN_QUERY).await?;
         Ok(Self {
             node_id,
             session_id,
+            tenant_id,
+            owner_user_id,
         })
     }
 }
@@ -469,6 +474,9 @@ impl FromRequestParts<AppState> for NodeSessionAuth {
 /// tenant so in-flight work can be finalized, while retaining session expiry
 /// and revocation checks.
 pub struct NodeSessionCompletionAuth {
+    /// Immutable ownership from the verified session, not request selectors.
+    pub tenant_id: Uuid,
+    pub owner_user_id: Uuid,
     /// 节点 ID
     pub node_id: Uuid,
     /// 会话 ID
@@ -482,11 +490,13 @@ impl FromRequestParts<AppState> for NodeSessionCompletionAuth {
         parts: &mut Parts,
         state: &AppState,
     ) -> std::result::Result<Self, Self::Rejection> {
-        let (node_id, session_id) =
+        let (node_id, session_id, tenant_id, owner_user_id) =
             authenticate_node_session(parts, state, NODE_SESSION_COMPLETION_TOKEN_QUERY).await?;
         Ok(Self {
             node_id,
             session_id,
+            tenant_id,
+            owner_user_id,
         })
     }
 }
@@ -495,7 +505,7 @@ async fn authenticate_node_session(
     parts: &Parts,
     state: &AppState,
     query: &str,
-) -> Result<(Uuid, Uuid)> {
+) -> Result<(Uuid, Uuid, Uuid, Uuid)> {
     let auth_header = parts
         .headers
         .get("Authorization")
@@ -530,7 +540,15 @@ async fn authenticate_node_session(
     let session_id: Uuid = row
         .try_get_by_index(1)
         .map_err(|e| ApiError::Internal(format!("Failed to parse session_id: {e}")))?;
-    Ok((node_id, session_id))
+    let tenant_id: Uuid = row
+        .try_get_by_index(2)
+        .map_err(|_| ApiError::Internal("Invalid session tenant identity".into()))?;
+    let owner_user_id: Uuid = row
+        .try_get_by_index(3)
+        .map_err(|_| ApiError::Internal("Invalid session owner identity".into()))?;
+    keycompute_db::NodeSessionScope::checked(tenant_id, node_id, owner_user_id)
+        .map_err(|_| ApiError::Auth("Invalid session identity".into()))?;
+    Ok((node_id, session_id, tenant_id, owner_user_id))
 }
 
 /// 计算 SHA-256 hash
@@ -646,6 +664,18 @@ mod tests {
         assert!(ACTIVE_NODE_SESSION_TOKEN_QUERY.contains("revoked_at IS NULL"));
         assert!(ACTIVE_NODE_SESSION_TOKEN_QUERY.contains("expires_at > NOW()"));
         assert!(ACTIVE_NODE_SESSION_TOKEN_QUERY.contains("t.status = 'active'"));
+    }
+
+    #[test]
+    fn node_credentials_bind_stored_tenant_and_owner_in_both_grant_kinds() {
+        for sql in [
+            ACTIVE_NODE_SESSION_TOKEN_QUERY,
+            NODE_SESSION_COMPLETION_TOKEN_QUERY,
+        ] {
+            assert!(sql.contains("ns.tenant_id, ns.owner_user_id"));
+            assert!(sql.contains("n.tenant_id=ns.tenant_id"));
+            assert!(sql.contains("n.owner_user_id=ns.owner_user_id"));
+        }
     }
 
     #[test]

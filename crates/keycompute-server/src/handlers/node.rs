@@ -138,8 +138,10 @@ pub async fn node_poll(
 
     // Heartbeat persists accepted_models on the writer. Polling must observe
     // that fresh authorization state instead of a potentially lagging replica.
-    let session = keycompute_db::models::node_session::NodeSession::find_by_id(
+    let session = keycompute_db::models::node_session::NodeSession::find_in_scope(
         pool.write_conn(),
+        keycompute_db::NodeSessionScope::checked(auth.tenant_id, auth.node_id, auth.owner_user_id)
+            .map_err(ApiError::from)?,
         auth.session_id,
     )
     .await

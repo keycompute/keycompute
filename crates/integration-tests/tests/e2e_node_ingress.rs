@@ -299,7 +299,7 @@ impl Fixture {
                     )
                 ]),
                 native_operations_json: serde_json::json!(["chat"]),
-                node_id: node.id,
+                scope: keycompute_db::NodeSessionScope::for_node(&node),
                 session_token_hash: hex::encode(Sha256::digest(Uuid::new_v4().as_bytes())),
                 expires_at: Utc::now() + ChronoDuration::hours(1),
                 accepted_models_json: json!([shared, node_only]),
@@ -1107,7 +1107,7 @@ async fn native_claim_uses_immutable_session_permission_not_node_metadata() {
         &f.db,
         &CreateNodeSessionRequest {
             native_profiles_json: json!([]),
-            node_id: f.node.id,
+            scope: keycompute_db::NodeSessionScope::for_node(&f.node),
             session_token_hash: hex::encode(Sha256::digest(Uuid::new_v4().as_bytes())),
             accepted_models_json: json!([f.shared]),
             native_operations_json: json!([]),
@@ -1433,13 +1433,17 @@ async fn capability_renewal_is_retry_safe_and_old_session_only_finishes_existing
     let secret = format!("isolated-session-{}", Uuid::new_v4());
     // A credential hash is immutable. Give this fixture a real fresh session
     // with a known credential before any task is leased to it.
-    keycompute_db::models::node_session::NodeSession::revoke(&f.db, f.session.id)
-        .await
-        .unwrap();
+    keycompute_db::models::node_session::NodeSession::revoke_in_scope(
+        &f.db,
+        f.session.scope(),
+        f.session.id,
+    )
+    .await
+    .unwrap();
     f.session = keycompute_db::models::node_session::NodeSession::create(
         &f.db,
         &keycompute_db::models::node_session::CreateNodeSessionRequest {
-            node_id: f.node.id,
+            scope: keycompute_db::NodeSessionScope::for_node(&f.node),
             session_token_hash: hex::encode(Sha256::digest(secret.as_bytes())),
             expires_at: f.session.expires_at,
             accepted_models_json: f.session.accepted_models_json.clone(),
@@ -1521,7 +1525,7 @@ async fn capability_renewal_is_retry_safe_and_old_session_only_finishes_existing
     );
     assert_eq!(renewed, repeated);
     assert_ne!(renewed["session_id"], f.session.id.to_string());
-    let stored = NodeSession::find_by_id(&f.db, f.session.id)
+    let stored = NodeSession::find_in_scope(&f.db, f.session.scope(), f.session.id)
         .await
         .unwrap()
         .unwrap();
@@ -1685,7 +1689,7 @@ async fn heartbeat_cannot_expand_immutable_registered_model_scope() {
         .heartbeat(f.node.id, f.session.id, vec![other])
         .await;
     assert!(result.is_err());
-    let stored = NodeSession::find_by_id(&f.db, f.session.id)
+    let stored = NodeSession::find_in_scope(&f.db, f.session.scope(), f.session.id)
         .await
         .unwrap()
         .unwrap();

@@ -223,6 +223,35 @@ mod tests {
     }
 
     #[test]
+    fn node_session_schema_has_explicit_immutable_tenant_ownership() {
+        let sql = include_str!("../migrations/001_init.sql");
+        let table = sql
+            .split("CREATE TABLE IF NOT EXISTS node_sessions (")
+            .nth(1)
+            .unwrap()
+            .split("\n);")
+            .next()
+            .unwrap();
+        for expected in [
+            "tenant_id UUID NOT NULL",
+            "owner_user_id UUID NOT NULL",
+            "FOREIGN KEY (tenant_id, node_id, owner_user_id)",
+            "REFERENCES nodes(tenant_id, id, owner_user_id)",
+            "FOREIGN KEY (tenant_id, owner_user_id)",
+        ] {
+            assert!(
+                table.contains(expected),
+                "missing session invariant: {expected}"
+            );
+        }
+        assert!(
+            sql.contains("CONSTRAINT uq_nodes_session_owner UNIQUE (tenant_id, id, owner_user_id)")
+        );
+        assert!(sql.contains("idx_node_sessions_tenant_owner"));
+        assert!(sql.contains("NEW.id,NEW.tenant_id,NEW.owner_user_id,NEW.node_id,NEW.session_token_hash,NEW.issued_at"));
+    }
+
+    #[test]
     fn native_worker_permissions_are_immutable_session_metadata() {
         let sql = include_str!("../migrations/001_init.sql");
         assert!(sql.contains("native_operations_json JSONB NOT NULL DEFAULT '[]'::jsonb"));

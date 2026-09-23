@@ -186,7 +186,7 @@ impl NodeTask {
               AND dispatch_identity_is_active(payload_json->'dispatch_identity',tenant_id,user_id)
               AND deadline_at >= NOW()
               AND EXISTS (
-                SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id
+                SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id AND ns.tenant_id=n.tenant_id AND ns.owner_user_id=n.owner_user_id
                 JOIN tenant_memberships owner_m ON owner_m.tenant_id=n.tenant_id AND owner_m.user_id=n.owner_user_id AND owner_m.status='active'
                 JOIN users owner_u ON owner_u.id=n.owner_user_id AND owner_u.status='active'
                 JOIN tenant_memberships caller_m ON caller_m.tenant_id=node_tasks.tenant_id AND caller_m.user_id=node_tasks.user_id AND caller_m.status='active'
@@ -199,7 +199,7 @@ impl NodeTask {
               AND (payload_json->'native' IS NULL OR payload_json->'native'='null'::jsonb
                 OR (payload_json->'native'->'body'->>'model'=node_tasks.model
                     AND EXISTS (
-                      SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
+                      SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id AND n.tenant_id=ns.tenant_id AND n.owner_user_id=ns.owner_user_id
                       JOIN tenants t ON t.id=n.tenant_id
                       WHERE ns.id=$3 AND ns.node_id=$2 AND n.status='online' AND t.status='active'
                         AND ns.expires_at>NOW() AND ns.revoked_at IS NULL AND ns.accepting_tasks=TRUE
@@ -255,7 +255,7 @@ impl NodeTask {
                   AND nt.cancellation_requested_at IS NULL AND nt.archived_at IS NULL
                   AND dispatch_identity_is_active(nt.payload_json->'dispatch_identity',nt.tenant_id,nt.user_id)
                   AND nt.native_requirements_json IS NOT NULL
-                  AND EXISTS(SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id
+                  AND EXISTS(SELECT 1 FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id AND n.tenant_id=ns.tenant_id AND n.owner_user_id=ns.owner_user_id
                     JOIN tenants ot ON ot.id=n.tenant_id
                     WHERE ns.id=$2 AND n.id=$1 AND n.tenant_id=nt.tenant_id AND n.status='online' AND ot.status='active'
                       AND EXISTS(SELECT 1 FROM users u WHERE u.id=nt.user_id AND u.status='active')

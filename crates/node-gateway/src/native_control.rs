@@ -51,7 +51,7 @@ impl NodeGatewayStore {
                  AND (managed.id IS NULL OR (managed.status IN ('queued','in_progress') AND managed.deleted_at IS NULL))) AS active
             FROM node_tasks nt
             JOIN node_sessions ns ON ns.id=nt.assigned_session_id AND ns.node_id=nt.assigned_node_id
-            JOIN nodes n ON n.id=ns.node_id
+            JOIN nodes n ON n.id=ns.node_id AND n.tenant_id=ns.tenant_id AND n.owner_user_id=ns.owner_user_id
             JOIN tenants owner_t ON owner_t.id=n.tenant_id
             JOIN tenant_memberships cm ON cm.tenant_id=nt.tenant_id
               AND cm.user_id=nt.user_id AND cm.status='active'

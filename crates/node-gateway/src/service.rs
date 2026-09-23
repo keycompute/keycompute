@@ -588,8 +588,9 @@ impl NodeGatewayService {
         }
 
         // 2. 检查 session 是否过期或撤销 (ready predicate)
-        let session = keycompute_db::models::node_session::NodeSession::find_by_id(
+        let session = keycompute_db::models::node_session::NodeSession::find_in_scope(
             self.store.pool().write_conn(),
+            keycompute_db::NodeSessionScope::for_node(&node),
             session_id,
         )
         .await?

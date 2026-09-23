@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
                             )
                         ]),
                         native_operations_json: serde_json::json!(["chat"]),
-                        node_id: node.id,
+                        scope: keycompute_db::NodeSessionScope::for_node(&node),
                         session_token_hash: hex::encode(Sha256::digest(session_token.as_bytes())),
                         expires_at: chrono::Utc::now() + chrono::Duration::hours(2),
                         accepted_models_json: json!([model]),

@@ -685,7 +685,16 @@ async fn test_node_registration() -> anyhow::Result<()> {
     );
 
     // 2. 验证 session 已创建
-    let session = NodeSession::find_by_id(&env.pool, register_resp.session_id).await?;
+    let session = NodeSession::find_in_scope(
+        &env.pool,
+        keycompute_db::NodeSessionScope::checked(
+            test_tenant_id,
+            register_resp.node_id,
+            test_user_id,
+        )?,
+        register_resp.session_id,
+    )
+    .await?;
     chain.add_step(
         "node-gateway",
         "register_node::session_created",
@@ -757,9 +766,13 @@ async fn test_expired_session_cannot_authenticate_or_renew() -> anyhow::Result<(
         "expired session must not be renewed by heartbeat"
     );
 
-    let session = NodeSession::find_by_id(&env.pool, registration.session_id)
-        .await?
-        .expect("expired session should remain stored for audit");
+    let session = NodeSession::find_in_scope(
+        &env.pool,
+        keycompute_db::NodeSessionScope::checked(tenant_id, registration.node_id, user_id)?,
+        registration.session_id,
+    )
+    .await?
+    .expect("expired session should remain stored for audit");
     assert!(
         session.is_expired(),
         "failed heartbeat must not extend expiry"

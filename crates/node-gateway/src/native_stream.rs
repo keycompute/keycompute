@@ -165,7 +165,7 @@ impl NodeGatewayStore {
             return Err(error("native_stream_tenant_inactive"));
         }
         let session=NodeSession::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT ns.* FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id WHERE ns.id=$1 AND ns.node_id=$2 AND ns.revoked_at IS NULL AND ns.expires_at>NOW() AND n.status='online' FOR UPDATE",
+            "SELECT ns.* FROM node_sessions ns JOIN nodes n ON n.id=ns.node_id AND n.tenant_id=ns.tenant_id AND n.owner_user_id=ns.owner_user_id WHERE ns.id=$1 AND ns.node_id=$2 AND ns.revoked_at IS NULL AND ns.expires_at>NOW() AND n.status='online' FOR UPDATE",
             [r.session_id.into(),r.node_id.into()])).one(&tx).await?.ok_or_else(||error("native_stream_session_inactive"))?;
         let native: NodeNativeRequest = serde_json::from_value(
             task.payload_json

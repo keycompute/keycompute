@@ -289,7 +289,7 @@ impl Fixture {
         let session = NodeSession::create(
             &db,
             &CreateNodeSessionRequest {
-                node_id: node.id,
+                scope: keycompute_db::NodeSessionScope::for_node(&node),
                 session_token_hash: format!("native-fixture-{}", Uuid::new_v4()),
                 expires_at: Utc::now() + ChronoDuration::hours(1),
                 accepted_models_json: json!([model]),

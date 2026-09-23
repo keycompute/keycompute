@@ -23,7 +23,7 @@ impl PostgresNodeIndex {
     async fn query(&self, tenant_id: Uuid, required: serde_json::Value) -> Result<bool> {
         let sql = format!(
             r#"WITH required AS (SELECT $1::jsonb r)
-            SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id
+            SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_sessions ns ON ns.node_id=n.id AND ns.tenant_id=n.tenant_id AND ns.owner_user_id=n.owner_user_id
             JOIN tenants t ON t.id=n.tenant_id CROSS JOIN required
             WHERE n.tenant_id=$2 AND EXISTS(SELECT 1 FROM tenant_memberships m JOIN users u ON u.id=m.user_id AND u.status='active' WHERE m.tenant_id=n.tenant_id AND m.user_id=n.owner_user_id AND m.status='active') AND {READY_NODE_CONDITION} AND ns.accepted_models_json @> jsonb_build_array(r->>'model')
               AND ns.native_operations_json @> jsonb_build_array(r->>'operation')

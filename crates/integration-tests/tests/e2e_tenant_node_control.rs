@@ -515,7 +515,7 @@ async fn node_revocation_drains_accepted_lease_without_restoring_credentials_or_
     let session = NodeSession::create(
         &f.db,
         &CreateNodeSessionRequest {
-            node_id: n.id,
+            scope: keycompute_db::NodeSessionScope::for_node(&n),
             session_token_hash: UserNodeGatewayToken::hash_token(&session_secret),
             expires_at: Utc::now() + Duration::minutes(1),
             accepted_models_json: json!([model]),
@@ -549,7 +549,7 @@ async fn node_revocation_drains_accepted_lease_without_restoring_credentials_or_
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{revoked}");
-    let draining = NodeSession::find_by_id(&f.db, session.id)
+    let draining = NodeSession::find_in_scope(&f.db, session.scope(), session.id)
         .await
         .unwrap()
         .unwrap();
@@ -603,7 +603,7 @@ async fn node_revocation_drains_accepted_lease_without_restoring_credentials_or_
     assert_eq!(status, StatusCode::OK, "{recovered}");
     assert_eq!(recovered["node"]["status"], "offline");
     assert!(
-        !NodeSession::find_by_id(&f.db, session.id)
+        !NodeSession::find_in_scope(&f.db, session.scope(), session.id)
             .await
             .unwrap()
             .unwrap()
@@ -967,7 +967,7 @@ async fn database_rejects_node_credential_reassignment_and_terminal_reactivation
     let session = NodeSession::create(
         &f.db,
         &CreateNodeSessionRequest {
-            node_id: n.id,
+            scope: keycompute_db::NodeSessionScope::for_node(&n),
             session_token_hash: format!("session-{}", Uuid::new_v4()),
             expires_at: Utc::now() + Duration::hours(1),
             accepted_models_json: json!([]),
@@ -1020,7 +1020,7 @@ async fn database_rejects_node_credential_reassignment_and_terminal_reactivation
     assert!(deleted.deleted);
     assert!(Node::find_by_id(&f.db, n.id).await.unwrap().is_none());
     assert!(
-        NodeSession::find_by_id(&f.db, session.id)
+        NodeSession::find_in_scope(&f.db, session.scope(), session.id)
             .await
             .unwrap()
             .is_none()
@@ -1329,7 +1329,7 @@ async fn task_control_lease(f: &Fixture, native: bool) -> (Node, NodeSession, No
     let session = NodeSession::create(
         &f.db,
         &CreateNodeSessionRequest {
-            node_id: node.id,
+            scope: keycompute_db::NodeSessionScope::for_node(&node),
             session_token_hash: UserNodeGatewayToken::hash_token(&secret),
             expires_at: Utc::now() + Duration::minutes(5),
             accepted_models_json: json!([model]),
@@ -1711,5 +1711,174 @@ async fn database_keeps_task_control_markers_and_original_request_immutable() {
     .unwrap();
     assert!(!no_op.changed);
     assert_eq!(no_op.task.updated_at, archived.task.updated_at);
+    f.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn session_scope_rejects_foreign_owners_at_dao_and_database_layers() {
+    let mut f = Fixture::new().await;
+    let node = f.node(f.a.id, f.member.id, "session-owner").await;
+    let foreign = f.node(f.b.id, f.b.owner_user_id, "session-foreign").await;
+    let scope = keycompute_db::NodeSessionScope::for_node(&node);
+    let secret_hash = format!("must-not-appear-in-debug-{}", Uuid::new_v4());
+    let request = CreateNodeSessionRequest {
+        scope,
+        session_token_hash: secret_hash.clone(),
+        expires_at: Utc::now() + Duration::hours(1),
+        accepted_models_json: json!([]),
+        native_operations_json: json!([]),
+        native_profiles_json: json!([]),
+    };
+    let session = NodeSession::create(&f.db, &request).await.unwrap();
+    assert_eq!(session.tenant_id, node.tenant_id);
+    assert_eq!(session.owner_user_id, node.owner_user_id);
+    assert_eq!(session.scope(), scope);
+    assert!(!format!("{session:?}").contains(&secret_hash));
+    assert!(!format!("{request:?}").contains(&secret_hash));
+    assert!(
+        NodeSession::find_credential_candidate(&f.db, &secret_hash)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        NodeSession::find_in_scope(&f.db, scope, session.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let wrong_tenant =
+        keycompute_db::NodeSessionScope::checked(f.b.id, node.id, f.member.id).unwrap();
+    let wrong_owner =
+        keycompute_db::NodeSessionScope::checked(f.a.id, node.id, f.a.owner_user_id).unwrap();
+    for denied in [
+        wrong_tenant,
+        wrong_owner,
+        keycompute_db::NodeSessionScope::for_node(&foreign),
+    ] {
+        assert!(
+            NodeSession::find_in_scope(&f.db, denied, session.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            NodeSession::revoke_in_scope(&f.db, denied, session.id)
+                .await
+                .is_err()
+        );
+    }
+    for denied in [wrong_tenant, wrong_owner] {
+        let rejected = CreateNodeSessionRequest {
+            scope: denied,
+            session_token_hash: format!("rejected-{}", Uuid::new_v4()),
+            ..request.clone()
+        };
+        assert!(NodeSession::create(&f.db, &rejected).await.is_err());
+    }
+    // A raw INSERT cannot evade the composite node identity, even when all
+    // individual UUIDs and memberships are real.
+    for (tenant, owner) in [(f.b.id, f.b.owner_user_id), (f.a.id, f.a.owner_user_id)] {
+        let error = f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+            "INSERT INTO node_sessions(tenant_id,owner_user_id,node_id,session_token_hash,expires_at) VALUES($1,$2,$3,$4,clock_timestamp()+interval '1 hour')",
+            [tenant.into(),owner.into(),node.id.into(),Uuid::new_v4().to_string().into()]))
+            .await.expect_err("mismatched raw session identity must fail");
+        assert!(
+            error.to_string().contains("fk_node_sessions_node_owner"),
+            "{error}"
+        );
+    }
+    let error =
+        f.db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE node_sessions SET tenant_id=$2,owner_user_id=$3,node_id=$4 WHERE id=$1",
+            [
+                session.id.into(),
+                foreign.tenant_id.into(),
+                foreign.owner_user_id.into(),
+                foreign.id.into(),
+            ],
+        ))
+        .await
+        .expect_err("even a valid alternative tuple cannot transfer a credential");
+    assert!(
+        error
+            .to_string()
+            .contains("node session identity is immutable")
+    );
+    let stored = NodeSession::find_in_scope(&f.db, scope, session.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.revoked_at.is_none());
+    assert_eq!(stored.scope(), scope);
+    let revoked = NodeSession::revoke_in_scope(&f.db, scope, session.id)
+        .await
+        .unwrap();
+    let repeated = NodeSession::revoke_in_scope(&f.db, scope, session.id)
+        .await
+        .unwrap();
+    assert!(revoked.revoked_at.is_some());
+    assert_eq!(revoked.revoked_at, repeated.revoked_at);
+    f.guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn node_http_identity_comes_from_session_and_not_caller_scope_fields() {
+    let mut f = Fixture::new().await;
+    let node = f.node(f.a.id, f.member.id, "session-http-owner").await;
+    let foreign = f
+        .node(f.b.id, f.b.owner_user_id, "session-http-foreign")
+        .await;
+    let secret = format!("isolated-http-session-{}", Uuid::new_v4());
+    let session = NodeSession::create(
+        &f.db,
+        &CreateNodeSessionRequest {
+            scope: keycompute_db::NodeSessionScope::for_node(&node),
+            session_token_hash: UserNodeGatewayToken::hash_token(&secret),
+            expires_at: Utc::now() + Duration::hours(1),
+            accepted_models_json: json!([]),
+            native_operations_json: json!([]),
+            native_profiles_json: json!([]),
+        },
+    )
+    .await
+    .unwrap();
+    let app = create_router(f.state.clone());
+    let (status, body, _) = call(
+        app.clone(),
+        "POST",
+        "/node/v1/tasks/poll",
+        &secret,
+        json!({"protocol_version":"node.v1","node_id":foreign.id,"session_id":session.id}),
+    )
+    .await;
+    assert!(
+        matches!(status, StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED),
+        "{status} {body}"
+    );
+    let (status, body, _) = call(
+        app.clone(),
+        "POST",
+        "/node/v1/tasks/poll",
+        &secret,
+        json!({"protocol_version":"node.v1","node_id":node.id,"session_id":session.id}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body["task"].is_null());
+    let (status, _, _) = call(app, "GET", &f.path("nodes"), &secret, Value::Null).await;
+    assert!(matches!(
+        status,
+        StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+    ));
+    assert_eq!(
+        NodeSession::find_in_scope(&f.db, session.scope(), session.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .scope(),
+        session.scope()
+    );
     f.guard.cleanup().await.unwrap();
 }

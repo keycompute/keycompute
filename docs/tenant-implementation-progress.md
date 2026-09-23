@@ -531,6 +531,37 @@ No production database, secrets, services or deployment changed. CI is verified
 separately after push. Native resource networking, remaining finance/platform/UI,
 explicit session-table scope and final release acceptance remain open.
 
+## Current phases 1/3/5 — explicit node session ownership accepted
+
+`node_sessions` now records NOT NULL tenant and owner identities, tied to the
+exact node by a composite foreign key and retained membership constraint. The
+credential/tenant/owner/node/issued-at tuple cannot be reassigned. Registration
+and capability renewal derive this identity from the locked real node; HTTP
+authentication reads the same tuple, not request selectors.
+
+The DAO separates credential candidate discovery from `NodeSessionScope` reads
+and revocation. Bare-ID session helpers and unrestricted renewal methods were
+removed. Poll, normal/native claim, discovery, heartbeat, native lease checks
+and completion use the same ownership tuple. The existing accepted-lease drain,
+completion grace, immutable capabilities, cancellation and accounting behavior
+remain unchanged. Secret-bearing session entities no longer implement generic
+serialization and Debug is redacted.
+
+Independent PostgreSQL/HTTP regression checks wrong-tenant and wrong-owner
+creation/read/revoke, raw composite-FK violations, transfer to another valid
+node tuple, repeated revocation, credential redaction and actual HTTP identity
+mismatch. Existing accepted completion and audit rollback regressions remain.
+
+Final native default-parallel workspace: **2581 passed, 0 failed, 30
+original default ignored**, including desktop/mobile. Focused node/ingress/
+stream suite: 72 passed at eight threads (included subset). Strict whole-
+workspace all-target/all-feature Clippy, all-target check, Web/client WASM,
+format/whitespace and all 21 frozen source hashes pass. This closes only the
+explicit node-session ownership gap, not all phases 3/5. Native account-pool
+resource control, scoped tip/financial mutations, complete platform/operator
+routes, frontend and final release gates remain open. No production database,
+credentials, service restart or deployment changed. CI is checked after push.
+
 # Tenant subsystem implementation status
 
 ## Phase 1 — global identity and membership foundation

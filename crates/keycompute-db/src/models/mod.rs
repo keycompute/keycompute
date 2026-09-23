@@ -49,7 +49,7 @@ pub use distribution_scope::{DistributionCurrencyStats, DistributionRecordReport
 pub use node::{
     CreateNodeRequest, NODE_STATUS_EXCLUDED, NODE_STATUS_OFFLINE, NODE_STATUS_ONLINE, Node,
 };
-pub use node_session::{CreateNodeSessionRequest, NodeSession};
+pub use node_session::{CreateNodeSessionRequest, NodeSession, NodeSessionScope};
 pub use node_task::{
     CreateNodeTaskRequest, NodeTask, TASK_STATUS_EXPIRED, TASK_STATUS_FAILED, TASK_STATUS_LEASED,
     TASK_STATUS_QUEUED, TASK_STATUS_SUCCEEDED,

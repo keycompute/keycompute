@@ -75,7 +75,7 @@ impl Fixture {
         let session = NodeSession::create(
             &pool,
             &CreateNodeSessionRequest {
-                node_id: node.id,
+                scope: keycompute_db::NodeSessionScope::for_node(&node),
                 session_token_hash: format!("test-{run}"),
                 expires_at: Utc::now() + ChronoDuration::hours(1),
                 accepted_models_json: json!([MODEL]),
@@ -436,7 +436,8 @@ async fn stream_authorization_profile_revocation_and_cancel_persist_partial_usag
     assert!(late.is_err(), "canceled task must not be revived");
 
     let (revoked_task, revoked_lease) = fixture.leased_task().await;
-    NodeSession::revoke(&fixture.pool, fixture.session.id).await?;
+    NodeSession::revoke_in_scope(&fixture.pool, fixture.session.scope(), fixture.session.id)
+        .await?;
     let denied = fixture
         .store
         .accept_native_stream_event(event(&fixture, revoked_task.id, revoked_lease, 0, start()))

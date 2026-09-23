@@ -1561,7 +1561,8 @@ CREATE TABLE IF NOT EXISTS nodes (
         FOREIGN KEY (tenant_id, owner_user_id)
         REFERENCES tenant_memberships(tenant_id, user_id)
         ON DELETE CASCADE,
-    UNIQUE (tenant_id, owner_user_id, client_instance_id)
+    UNIQUE (tenant_id, owner_user_id, client_instance_id),
+    CONSTRAINT uq_nodes_session_owner UNIQUE (tenant_id, id, owner_user_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_nodes_status ON nodes(status);
@@ -1573,7 +1574,9 @@ CREATE INDEX IF NOT EXISTS idx_nodes_created_at_desc
 -- node_sessions: 节点会话管理表
 CREATE TABLE IF NOT EXISTS node_sessions (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    node_id UUID NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    owner_user_id UUID NOT NULL,
+    node_id UUID NOT NULL,
     session_token_hash TEXT NOT NULL UNIQUE,
     accepted_models_json JSONB NOT NULL DEFAULT '[]'::jsonb,
     registered_models_json JSONB NOT NULL DEFAULT '[]'::jsonb,
@@ -1583,10 +1586,18 @@ CREATE TABLE IF NOT EXISTS node_sessions (
     expires_at TIMESTAMPTZ NOT NULL,
     last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     accepting_tasks BOOLEAN NOT NULL DEFAULT TRUE,
-    revoked_at TIMESTAMPTZ
+    revoked_at TIMESTAMPTZ,
+    CONSTRAINT fk_node_sessions_node_owner
+        FOREIGN KEY (tenant_id, node_id, owner_user_id)
+        REFERENCES nodes(tenant_id, id, owner_user_id) ON DELETE CASCADE,
+    CONSTRAINT fk_node_sessions_membership
+        FOREIGN KEY (tenant_id, owner_user_id)
+        REFERENCES tenant_memberships(tenant_id, user_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_node_sessions_node_id_expires_at ON node_sessions(node_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_node_sessions_tenant_owner
+    ON node_sessions(tenant_id,owner_user_id,node_id,id);
 CREATE INDEX IF NOT EXISTS idx_node_sessions_accepted_models ON node_sessions USING GIN (accepted_models_json);
 CREATE INDEX IF NOT EXISTS idx_node_sessions_native_operations ON node_sessions USING GIN (native_operations_json);
 
@@ -2272,8 +2283,8 @@ CREATE TRIGGER node_identity_immutable BEFORE UPDATE OF tenant_id,owner_user_id 
 -- Session credentials and their node identity cannot be transferred or revived.
 CREATE OR REPLACE FUNCTION guard_node_session_identity() RETURNS TRIGGER AS $$
 BEGIN
-    IF ROW(NEW.id,NEW.node_id,NEW.session_token_hash,NEW.issued_at)
-       IS DISTINCT FROM ROW(OLD.id,OLD.node_id,OLD.session_token_hash,OLD.issued_at) THEN
+    IF ROW(NEW.id,NEW.tenant_id,NEW.owner_user_id,NEW.node_id,NEW.session_token_hash,NEW.issued_at)
+       IS DISTINCT FROM ROW(OLD.id,OLD.tenant_id,OLD.owner_user_id,OLD.node_id,OLD.session_token_hash,OLD.issued_at) THEN
         RAISE EXCEPTION 'node session identity is immutable' USING ERRCODE='23514';
     END IF;
     IF (OLD.revoked_at IS NOT NULL AND NEW.revoked_at IS DISTINCT FROM OLD.revoked_at)

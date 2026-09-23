@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
-const ACTIVE_NODE_SESSION_FOR_UPDATE_SQL: &str = "SELECT * FROM node_sessions WHERE id = $1 AND node_id = $2 \
+const ACTIVE_NODE_SESSION_FOR_UPDATE_SQL: &str = "SELECT * FROM node_sessions WHERE id = $1 AND node_id = $2 AND tenant_id=$3 AND owner_user_id=$4 \
      AND revoked_at IS NULL AND expires_at > NOW() AND accepting_tasks=TRUE FOR UPDATE";
 
 // Lock the owning tenant before mutating node/session state. Tenant lifecycle
@@ -209,7 +209,7 @@ impl NodeGatewayStore {
             return Err(DbError::Other("excluded node cannot negotiate".into()));
         }
         let predecessor=NodeSession::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-            "SELECT * FROM node_sessions WHERE id=$1 AND node_id=$2 AND expires_at>NOW() AND revoked_at IS NULL FOR UPDATE",[session_id.into(),node_id.into()])).one(&tx).await?
+            "SELECT * FROM node_sessions WHERE id=$1 AND node_id=$2 AND tenant_id=$3 AND owner_user_id=$4 AND expires_at>NOW() AND revoked_at IS NULL FOR UPDATE",[session_id.into(),node_id.into(),node.tenant_id.into(),node.owner_user_id.into()])).one(&tx).await?
             .ok_or_else(||DbError::not_found("active session",session_id.to_string()))?;
         use hmac::{Hmac, Mac};
         let encoded = serde_json::to_vec(caps)
@@ -222,9 +222,9 @@ impl NodeGatewayStore {
         mac.update(&encoded);
         let session_token = format!("ns_{}", hex::encode(mac.finalize().into_bytes()));
         let hash = UserNodeGatewayToken::hash_token(&session_token);
-        let existing = NodeSession::find_by_token_hash(&tx, &hash).await?;
+        let existing = NodeSession::find_credential_candidate(&tx, &hash).await?;
         let session = if let Some(existing) = existing {
-            if existing.node_id != node_id
+            if existing.scope() != NodeSessionScope::for_node(&node)
                 || existing.revoked_at.is_some()
                 || !existing.accepting_tasks
                 || existing.expires_at <= Utc::now()
@@ -241,7 +241,7 @@ impl NodeGatewayStore {
             NodeSession::create(
                 &tx,
                 &CreateNodeSessionRequest {
-                    node_id,
+                    scope: keycompute_db::NodeSessionScope::for_node(&node),
                     session_token_hash: hash,
                     expires_at: Utc::now() + self.config.session_ttl(),
                     accepted_models_json: serde_json::json!(
@@ -260,8 +260,8 @@ impl NodeGatewayStore {
         // session; only new work and heartbeat renewal are disabled.
         tx.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "UPDATE node_sessions ns SET accepting_tasks=FALSE,expires_at=GREATEST(ns.expires_at,COALESCE((SELECT MAX(nt.complete_grace_until) FROM node_tasks nt WHERE nt.assigned_session_id=ns.id AND nt.status='leased'),ns.expires_at)) WHERE ns.node_id=$1 AND ns.id<>$2",
-            [node_id.into(), session.id.into()],
+            "UPDATE node_sessions ns SET accepting_tasks=FALSE,expires_at=GREATEST(ns.expires_at,COALESCE((SELECT MAX(nt.complete_grace_until) FROM node_tasks nt WHERE nt.assigned_session_id=ns.id AND nt.status='leased'),ns.expires_at)) WHERE ns.node_id=$1 AND ns.id<>$2 AND ns.tenant_id=$3 AND ns.owner_user_id=$4",
+            [node_id.into(), session.id.into(), node.tenant_id.into(), node.owner_user_id.into()],
         ))
         .await?;
         tx.execute(Statement::from_sql_and_values(
@@ -452,7 +452,7 @@ impl NodeGatewayStore {
             .collect();
 
         let create_session_req = CreateNodeSessionRequest {
-            node_id: node.id,
+            scope: keycompute_db::NodeSessionScope::for_node(&node),
             session_token_hash,
             expires_at,
             accepted_models_json: serde_json::to_value(&accepted_models)
@@ -463,26 +463,8 @@ impl NodeGatewayStore {
                 .map_err(|e| DbError::Other(e.to_string()))?,
         };
 
-        // 4.1 创建 session (在事务中)
-        let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"
-            INSERT INTO node_sessions (node_id, session_token_hash, expires_at, accepted_models_json,registered_models_json,native_operations_json,native_profiles_json)
-            VALUES ($1, $2, $3, $4, $4, $5,$6)
-            RETURNING *
-            "#,
-            [
-                create_session_req.node_id.into(),
-                create_session_req.session_token_hash.as_str().into(),
-                create_session_req.expires_at.into(),
-                create_session_req.accepted_models_json.clone().into(),
-                create_session_req.native_operations_json.clone().into(),
-                create_session_req.native_profiles_json.clone().into(),
-            ],
-        ))
-        .one(&tx)
-        .await?
-        .ok_or_else(|| DbError::Other("Failed to create session".to_string()))?;
+        // Snapshot session ownership in the existing registration transaction.
+        let session = NodeSession::create(&tx, &create_session_req).await?;
 
         // 4.2 更新节点状态为 online (如果原来是 offline,在事务中)
         if node.status == NODE_STATUS_OFFLINE {
@@ -531,7 +513,8 @@ impl NodeGatewayStore {
         let token_hash = UserNodeGatewayToken::hash_token(session_token);
 
         // Authentication and exclusion checks must not observe stale replicas.
-        let session = NodeSession::find_by_token_hash(self.pool.write_conn(), &token_hash).await?;
+        let session =
+            NodeSession::find_credential_candidate(self.pool.write_conn(), &token_hash).await?;
 
         match session {
             Some(s) => {
@@ -545,6 +528,9 @@ impl NodeGatewayStore {
                     .await?
                     .ok_or_else(|| DbError::not_found("Node", s.node_id.to_string()))?;
 
+                if s.scope() != NodeSessionScope::for_node(&node) {
+                    return Err(DbError::Other("Session ownership mismatch".into()));
+                }
                 Ok((node, s))
             }
             None => Err(DbError::not_found("Session", "token")),
@@ -589,7 +575,12 @@ impl NodeGatewayStore {
         let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             ACTIVE_NODE_SESSION_FOR_UPDATE_SQL,
-            [session_id.into(), node_id.into()],
+            [
+                session_id.into(),
+                node_id.into(),
+                node.tenant_id.into(),
+                node.owner_user_id.into(),
+            ],
         ))
         .one(&tx)
         .await?
@@ -608,9 +599,15 @@ impl NodeGatewayStore {
                 r#"
                 UPDATE node_sessions
                 SET last_seen_at = NOW(), expires_at = $1
-                WHERE id = $2
+                WHERE id=$2 AND tenant_id=$3 AND node_id=$4 AND owner_user_id=$5
                 "#,
-                [expires_at.into(), session_id.into()],
+                [
+                    expires_at.into(),
+                    session_id.into(),
+                    node.tenant_id.into(),
+                    node.id.into(),
+                    node.owner_user_id.into(),
+                ],
             ))
             .await?;
         } else {
@@ -637,12 +634,15 @@ impl NodeGatewayStore {
                 r#"
                 UPDATE node_sessions
                 SET accepted_models_json = $1, last_seen_at = NOW(), expires_at = $2
-                WHERE id = $3
+                WHERE id=$3 AND tenant_id=$4 AND node_id=$5 AND owner_user_id=$6
                 "#,
                 [
                     accepted_models_value.into(),
                     expires_at.into(),
                     session_id.into(),
+                    node.tenant_id.into(),
+                    node.id.into(),
+                    node.owner_user_id.into(),
                 ],
             ))
             .await?;
@@ -1063,6 +1063,15 @@ impl NodeGatewayStore {
         .await?
         .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
 
+        let node = Node::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM nodes WHERE id=$1 AND tenant_id=$2",
+            [authenticated_node_id.into(), task.tenant_id.into()],
+        ))
+        .one(&tx)
+        .await?
+        .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
+
         // 2. 查询已有 submission
         let existing_submission =
             NodeTaskSubmission::find_by_statement(Statement::from_sql_and_values(
@@ -1076,7 +1085,12 @@ impl NodeGatewayStore {
         // 3. 如果已有 submission,处理幂等逻辑
         if let Some(submission) = existing_submission {
             // 先检查 session 是否被撤销
-            let session = NodeSession::find_by_id(&tx, authenticated_session_id).await?;
+            let session = NodeSession::find_in_scope(
+                &tx,
+                NodeSessionScope::for_node(&node),
+                authenticated_session_id,
+            )
+            .await?;
             if session.map(|s| s.is_revoked()).unwrap_or(true) {
                 return Err(DbError::Other("Session has been revoked".to_string()));
             }
@@ -1098,14 +1112,6 @@ impl NodeGatewayStore {
                 return Err(DbError::Other("duplicate_submission_conflict".to_string()));
             }
             let action = parse_action(&submission.action)?;
-            let node = Node::find_by_statement(Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                "SELECT * FROM nodes WHERE id = $1",
-                [authenticated_node_id.into()],
-            ))
-            .one(&tx)
-            .await?
-            .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
             return Ok(NodeTaskCompletionOutcome {
                 response: NodeTaskCompleteResponse {
                     action,
@@ -1121,27 +1127,16 @@ impl NodeGatewayStore {
         }
 
         // 4. 无 submission，检查 session 状态
-        let session = NodeSession::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM node_sessions WHERE id = $1",
-            [authenticated_session_id.into()],
-        ))
-        .one(&tx)
+        let session = NodeSession::find_in_scope(
+            &tx,
+            NodeSessionScope::for_node(&node),
+            authenticated_session_id,
+        )
         .await?
         .ok_or_else(|| DbError::not_found("Session", authenticated_session_id.to_string()))?;
-
         if session.is_revoked() {
             return Err(DbError::Other("Session revoked".to_string()));
         }
-
-        let node = Node::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT * FROM nodes WHERE id = $1",
-            [authenticated_node_id.into()],
-        ))
-        .one(&tx)
-        .await?
-        .ok_or_else(|| DbError::not_found("Node", authenticated_node_id.to_string()))?;
 
         let session_expired = session.is_expired();
         let task_expired = task.is_expired();
@@ -1440,13 +1435,13 @@ impl NodeGatewayStore {
         &self,
         tx: &DatabaseTransaction,
         task: &NodeTask,
-        _node: &Node,
+        node: &Node,
         _node_id: Uuid,
         session_id: Uuid,
         _lease_id: Uuid,
         response: keycompute_types::node_native::NodeNativeHttpResult,
     ) -> Result<NodeTaskCompleteResponse, DbError> {
-        let session = NodeSession::find_by_id(tx, session_id)
+        let session = NodeSession::find_in_scope(tx, NodeSessionScope::for_node(node), session_id)
             .await?
             .ok_or_else(|| DbError::not_found("Session", session_id.to_string()))?;
         let profiles: Vec<keycompute_types::node_capability::NativeModelProfile> =
@@ -1497,7 +1492,7 @@ impl NodeGatewayStore {
         self.handle_success_submission_inner(
             tx,
             task,
-            _node,
+            node,
             _node_id,
             session_id,
             _lease_id,

@@ -571,7 +571,7 @@ async fn drain(
     // A disabled session can finish only its already-issued leases. Do not set
     // revoked_at: that would strand accepted result/settlement submissions.
     let sessions=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE node_sessions s SET accepting_tasks=FALSE,expires_at=GREATEST(s.expires_at,COALESCE((SELECT MAX(nt.complete_grace_until) FROM node_tasks nt WHERE nt.assigned_session_id=s.id AND nt.status='leased'),s.expires_at)) WHERE s.node_id=$1 AND s.accepting_tasks AND EXISTS(SELECT 1 FROM nodes n WHERE n.id=s.node_id AND n.tenant_id=$2 AND n.owner_user_id=$3)",
+        "UPDATE node_sessions s SET accepting_tasks=FALSE,expires_at=GREATEST(s.expires_at,COALESCE((SELECT MAX(nt.complete_grace_until) FROM node_tasks nt WHERE nt.assigned_session_id=s.id AND nt.status='leased'),s.expires_at)) WHERE s.node_id=$1 AND s.tenant_id=$2 AND s.owner_user_id=$3 AND s.accepting_tasks",
         [node.id.into(),node.tenant_id.into(),node.owner_user_id.into()])).await?.rows_affected();
     let tokens=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE user_node_gateway_tokens SET status='rejected',revoke_reason=$4,approved_by=$5,actioned_at=clock_timestamp(),updated_at=GREATEST(clock_timestamp(),updated_at+INTERVAL '1 microsecond') WHERE consumed_node_id=$1 AND tenant_id=$2 AND user_id=$3 AND status<>'rejected'",
@@ -639,7 +639,7 @@ pub async fn change_node(
                 owner_active(&tx,&tenant,old.owner_user_id).await?;
                 // Recovery clears operational exclusion, never resurrects a
                 // revoked registration token or a draining/superseded session.
-                let valid=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT 1 FROM node_sessions WHERE node_id=$1 AND accepting_tasks AND revoked_at IS NULL AND expires_at>clock_timestamp() LIMIT 1",[id.into()])).await?.is_some();
+                let valid=tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT 1 FROM node_sessions WHERE node_id=$1 AND tenant_id=$2 AND owner_user_id=$3 AND accepting_tasks AND revoked_at IS NULL AND expires_at>clock_timestamp() LIMIT 1",[id.into(),scope.tenant.into(),old.owner_user_id.into()])).await?.is_some();
                 status=if valid {"online"} else {"offline"}.into();failures=0;
             }
             NodeAction::Revoke=>{status="excluded".into();changed=drain(&tx,&old,&actor,reason).await?>0;}
