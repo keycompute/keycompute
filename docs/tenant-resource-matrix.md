@@ -15,7 +15,7 @@ The matrix is the source of truth for the hard-cutover authorization implementat
 | usage_logs | tenant + user owner | read own tenant | own records | operator aggregate only |
 | user_balances | user-owned | view tenant records; mutation requires explicit billing action | own balance | root audited billing; operator aggregate read |
 | payment_orders | user/tenant billing | own tenant records | own orders | root audited billing; operator aggregate read |
-| balance_reservations | user/tenant request | inspect/release own tenant request | own request | root audited recovery; operator diagnostics |
+| balance_reservations | user/tenant request | read-only inspection; recover only expired own-tenant reservations | own request | root explicit audited force recovery; operator diagnostics |
 | responses/scoped_responses | tenant + owner | all own-tenant Responses | own or shared | root audited |
 | response_affinities | tenant + owner | tenant lookup without changing owner | own resources | root audited |
 | conversations | tenant + owner | own-tenant management | own/shared | root audited |
@@ -67,3 +67,19 @@ The line numbers are phase-0 navigation aids, not final source positions.
 `tenant-implementation-decisions.md` resolves earlier draft differences in favor
 of the latest request, including main-only delivery, membership status names,
 explicit tenant selection and the independently deployed Go-service boundary.
+
+## Wallet control state policy
+
+Canonical root wallet commands require an explicit target tenant and owner,
+current signed console authority, durable idempotency, and atomic audit. Tenant
+administrators cannot mint, debit or freeze another member’s money. Their
+reservation recovery capability requires the current ownership version and an
+already-expired reservation. This restriction applies resource state in addition
+to role; it does not transfer the request or billing owner. Root force recovery
+retains the warning that already accepted late usage may still debit the original
+wallet. Personal inference settlement remains an internal original-owner capability.
+
+Console reservation pages are one primary read-only snapshot. They show the exact
+persisted active-reservation total, including expired rows not yet reclaimed,
+and never reclaim money as a side effect of a GET. Internal reclamation helpers
+remain separate from these console queries.

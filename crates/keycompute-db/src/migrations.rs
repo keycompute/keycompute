@@ -171,6 +171,23 @@ fn schema_error(error: sea_orm::DbErr) -> DbError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_balance_schema_binds_outcomes_to_original_owner_and_ledger() {
+        let sql = include_str!("../migrations/001_init.sql");
+        for rule in [
+            "fk_admin_balance_operation_result_owner",
+            "guard_manual_balance_identity",
+            "completed manual balance result is immutable",
+            "manual balance commands must start pending",
+            "b.tenant_id=NEW.tenant_id AND b.user_id=NEW.user_id",
+            "abs(b.amount)=NEW.amount",
+        ] {
+            assert!(
+                sql.contains(rule),
+                "missing manual wallet invariant: {rule}"
+            );
+        }
+    }
     use super::*;
 
     #[test]

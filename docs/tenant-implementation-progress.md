@@ -851,3 +851,57 @@ need their separate platform consolidation. A ratio integration attempt was
 refused by the tool safety gateway and was not applied or routed around; its
 prototype is archived outside main. No production schema/data, credentials,
 external payment/SMTP, service restart or deployment was changed by this slice.
+
+## Current phases 3/5 — manual wallet and reservation control
+
+Manual recharge, consumption, freeze and unfreeze now require an explicit root
+financial tenant scope, the original target owner and the canonical request audit
+identity. The signed credential, user/member/tenant versions and expiry are
+revalidated inside the same retained transaction before claiming or replaying
+idempotency. There is no loose actor-UUID management entry point. Every result
+lookup and completion predicate includes tenant, owner and actor. Matching
+retries replay the original outcome without duplicating money or audit events.
+
+All four mutations and their tenant audit are atomic, including savepoint rollback
+when an outer caller catches an error and commits. Existing insufficient-unfreeze
+expiry repair remains possible only with an atomic denial audit and a final
+current-authority check. Expiry after wallet or audit lock waits rolls back the
+command. Exact DECIMAL(20,10) input checks prevent rounding from stranding a
+pending claim. Database guards bind completed result snapshots to the original
+ledger and prevent command identity or completed-result rewriting.
+
+Reservation display is a single primary read-only SQL snapshot: the exact total
+and bounded stable keyset page share tenant/owner/current-authority predicates.
+No wallet creation, row lock, expiry reclamation or balance write occurs on GET.
+Persisted active reservations, including expired entries not yet reclaimed, are
+shown consistently. An inaccessible/nonexistent member is not a zero balance.
+
+Tenant administrators may recover only an expired reservation with its current
+ownership version; live requests are rejected. Root keeps explicit force recovery
+with a reason and the existing warning about accepted late usage. Recovery and
+audit commit together, preserve tenant/user/request/settlement identity, and retain
+exact actor/version/reason retry behavior. Already accepted inference settlement
+continues to use its distinct internal capability, not current console roles.
+
+Seven canonical tenant/platform wallet paths are wired with explicit selectors,
+strict request bodies, bounded ingress and private/no-store responses. Legacy
+wallet URLs call the same new authority chain. The SDK uses exact decimal strings,
+fresh reservation reads, encoded cursors and stable idempotency headers; a tenant
+client cannot construct a root money-adjustment request. No full frontend page
+redesign is claimed by this backend/client slice.
+
+Independent review retained all 32 existing balance tests and added 12 real
+PostgreSQL/HTTP cases plus three SDK wire tests. The new tests include forged
+role/audit/credential rejection, no-op replay after revocation, four-kind audit
+rollback, exact backend-PID lock-wait demotion and expiry, read-only paging,
+expired-only tenant recovery, original-owner late-settlement behavior, direct SQL
+result immutability, and denied-unfreeze repair auditing. Strict Clippy redundant
+field diagnostics were corrected without suppression.
+
+Final default-parallel native workspace: **2,611 passed, 0 failed, 30 original
+default ignored**, including desktop/mobile. Strict all-target/all-feature Clippy, native all-target
+check and Web/client WASM compilation all passed; final source hashes match the
+reviewed snapshot. Focused32+12 and SDK3 are included subsets, not extra workspace counts.
+No production database, credentials, service, payment or deployment was changed.
+The broader platform/settings, native resource adapter, UI and release gates
+remain open; this does not close the complete tenant subsystem.

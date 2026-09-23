@@ -4,7 +4,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::GlobalConsoleAuth,
+    extractors::{GlobalConsoleAuth, RequestId},
     handlers::pagination::{normalize_list_pagination, total_pages},
     state::AppState,
 };
@@ -305,6 +305,7 @@ pub async fn delete_user(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateBalanceRequest {
     pub tenant_id: Uuid,
     pub amount: String, // 使用字符串避免浮点精度问题
@@ -327,6 +328,7 @@ pub struct AdminBalanceReservationInfo {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdminBalanceReservationsQuery {
     pub tenant_id: Uuid,
     /// Opaque keyset cursor returned by the previous page.
@@ -353,7 +355,9 @@ fn encode_balance_reservation_cursor(cursor: &BalanceReservationPageCursor) -> S
     URL_SAFE_NO_PAD.encode(serde_json::to_vec(cursor).expect("cursor serialization"))
 }
 
-fn decode_balance_reservation_cursor(value: &str) -> Result<BalanceReservationPageCursor> {
+pub(crate) fn decode_balance_reservation_cursor(
+    value: &str,
+) -> Result<BalanceReservationPageCursor> {
     let decoded = URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| ApiError::BadRequest("balance_reservations_invalid_cursor".to_string()))?;
@@ -362,6 +366,7 @@ fn decode_balance_reservation_cursor(value: &str) -> Result<BalanceReservationPa
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReleaseBalanceReservationRequest {
     pub tenant_id: Uuid,
     /// Version returned by the latest reservations listing. Requiring it
@@ -549,10 +554,21 @@ pub async fn list_user_balance_reservations(
         .balance_service()
         .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?;
     let page = balance_service
-        .find_breakdown_page_by_user(query.tenant_id, user_id, cursor, limit)
+        .find_breakdown_page_in_scope(
+            crate::financial_auth::root_scope(&auth.0, query.tenant_id)?,
+            user_id,
+            cursor,
+            limit,
+        )
         .await
         .map_err(ApiError::from)?;
 
+    reservation_page_response(user_id, page)
+}
+pub(crate) fn reservation_page_response(
+    user_id: Uuid,
+    page: Option<keycompute_billing::balance::UserBalanceBreakdownPage>,
+) -> Result<Json<AdminBalanceReservationsResponse>> {
     let (
         available_balance,
         total_frozen_balance,
@@ -615,6 +631,7 @@ pub async fn list_user_balance_reservations(
 /// while changing the version, actor, or normalized reason returns 409.
 pub async fn release_user_balance_reservation(
     auth: GlobalConsoleAuth,
+    audit_request_id: RequestId,
     Path((user_id, request_id)): Path<(Uuid, Uuid)>,
     State(state): State<AppState>,
     Json(req): Json<ReleaseBalanceReservationRequest>,
@@ -628,12 +645,14 @@ pub async fn release_user_balance_reservation(
         .ok_or_else(|| ApiError::Internal("Balance service not configured".to_string()))?;
     let Some(release) = balance_service
         .admin_release_request_reservation(
-            req.tenant_id,
-            user_id,
-            request_id,
-            req.expected_version,
-            auth.user_id,
-            reason,
+            crate::financial_auth::root_scope(&auth.0, req.tenant_id)?,
+            &crate::financial_auth::audit(&auth.0, audit_request_id),
+            &keycompute_billing::balance::ReleaseReservationCommand {
+                user_id,
+                request_id,
+                expected_owner_token: req.expected_version,
+                reason,
+            },
         )
         .await
         .map_err(ApiError::from)?
@@ -642,6 +661,15 @@ pub async fn release_user_balance_reservation(
             "Balance reservation {request_id} is no longer active or its version changed; refresh the balance details before retrying"
         )));
     };
+    reservation_release_response(user_id, request_id, auth.user_id, reason, release)
+}
+pub(crate) fn reservation_release_response(
+    user_id: Uuid,
+    request_id: Uuid,
+    actor_user_id: Uuid,
+    reason: &str,
+    release: keycompute_billing::balance::AdminRequestReservationRelease,
+) -> Result<Json<ReleaseBalanceReservationResponse>> {
     let breakdown = release.breakdown;
     let released_reservation = release.released_reservation;
 
@@ -656,7 +684,7 @@ pub async fn release_user_balance_reservation(
         new_total_frozen_balance: breakdown.balance.frozen_balance.to_string(),
         request_reserved_balance: breakdown.active_reserved.to_string(),
         manually_frozen_balance: breakdown.manually_frozen.to_string(),
-        released_by: auth.user_id,
+        released_by: actor_user_id,
         warning: ADMIN_RESERVATION_RELEASE_WARNING.to_string(),
     }))
 }
@@ -670,6 +698,7 @@ pub async fn release_user_balance_reservation(
 /// while reusing it returns HTTP 409.
 pub async fn update_user_balance(
     auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Path(user_id): Path<Uuid>,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -698,13 +727,15 @@ pub async fn update_user_balance(
     };
     let outcome = balance_service
         .apply_admin_manual_operation(
-            kind,
-            ctx.tenant_id,
-            user_id,
-            auth.user_id,
-            amount,
-            &ctx.reason,
-            &idempotency_key,
+            crate::financial_auth::root_scope(&auth.0, ctx.tenant_id)?,
+            &crate::financial_auth::audit(&auth.0, request_id),
+            &keycompute_billing::balance::ManualBalanceCommand {
+                kind,
+                user_id,
+                amount,
+                reason: &ctx.reason,
+                idempotency_key: &idempotency_key,
+            },
         )
         .await
         .map_err(ApiError::from)?;
@@ -743,6 +774,7 @@ pub async fn update_user_balance(
 /// while reusing it returns HTTP 409.
 pub async fn freeze_user_balance(
     auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Path(user_id): Path<Uuid>,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -758,13 +790,15 @@ pub async fn freeze_user_balance(
 
     let outcome = balance_service
         .apply_admin_manual_operation(
-            keycompute_billing::balance::ManualBalanceOperationKind::Freeze,
-            ctx.tenant_id,
-            user_id,
-            auth.user_id,
-            ctx.amount,
-            &ctx.reason,
-            &idempotency_key,
+            crate::financial_auth::root_scope(&auth.0, ctx.tenant_id)?,
+            &crate::financial_auth::audit(&auth.0, request_id),
+            &keycompute_billing::balance::ManualBalanceCommand {
+                kind: keycompute_billing::balance::ManualBalanceOperationKind::Freeze,
+                user_id,
+                amount: ctx.amount,
+                reason: &ctx.reason,
+                idempotency_key: &idempotency_key,
+            },
         )
         .await
         .map_err(ApiError::from)?;
@@ -798,6 +832,7 @@ pub async fn freeze_user_balance(
 /// while reusing it returns HTTP 409.
 pub async fn unfreeze_user_balance(
     auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Path(user_id): Path<Uuid>,
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -813,13 +848,15 @@ pub async fn unfreeze_user_balance(
 
     let outcome = balance_service
         .apply_admin_manual_operation(
-            keycompute_billing::balance::ManualBalanceOperationKind::Unfreeze,
-            ctx.tenant_id,
-            user_id,
-            auth.user_id,
-            ctx.amount,
-            &ctx.reason,
-            &idempotency_key,
+            crate::financial_auth::root_scope(&auth.0, ctx.tenant_id)?,
+            &crate::financial_auth::audit(&auth.0, request_id),
+            &keycompute_billing::balance::ManualBalanceCommand {
+                kind: keycompute_billing::balance::ManualBalanceOperationKind::Unfreeze,
+                user_id,
+                amount: ctx.amount,
+                reason: &ctx.reason,
+                idempotency_key: &idempotency_key,
+            },
         )
         .await
         .map_err(ApiError::from)?;

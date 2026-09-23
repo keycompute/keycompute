@@ -10,8 +10,9 @@ pub use keycompute_db::models::user_balance::{
     AdminRequestReservationRelease, BalanceReservationPageCursor,
     MAX_ADMIN_BALANCE_IDEMPOTENCY_KEY_BYTES, MAX_ADMIN_BALANCE_OPERATION_REASON_CHARS,
     MAX_BALANCE_RESERVATION_PAGE_SIZE, MAX_BALANCE_RESERVATION_RELEASE_REASON_CHARS,
-    ManualBalanceOperationDecision, ManualBalanceOperationKind, ManualBalanceOperationOutcome,
-    UserBalanceBreakdown, UserBalanceBreakdownPage, UserBalanceDisplaySnapshot,
+    ManualBalanceCommand, ManualBalanceOperationDecision, ManualBalanceOperationKind,
+    ManualBalanceOperationOutcome, ReleaseReservationCommand, UserBalanceBreakdown,
+    UserBalanceBreakdownPage, UserBalanceDisplaySnapshot,
 };
 use keycompute_db::{BalanceReservation, BalanceTransaction, DbRouter, UserBalance};
 use keycompute_types::{KeyComputeError, Result};
@@ -352,17 +353,14 @@ impl BalanceService {
     /// an exact retry replays successfully without releasing funds twice.
     pub async fn admin_release_request_reservation(
         &self,
-        tenant_id: Uuid,
-        user_id: Uuid,
-        request_id: Uuid,
-        expected_owner_token: Uuid,
-        released_by: Uuid,
-        reason: &str,
+        scope: keycompute_db::models::financial_scope::FinancialScope,
+        audit: &keycompute_db::AuditContext,
+        command: &ReleaseReservationCommand<'_>,
     ) -> Result<Option<AdminRequestReservationRelease>> {
-        let reason = reason.trim();
+        let reason = command.reason.trim();
         if reason.is_empty() {
             return Err(KeyComputeError::ValidationError(
-                "Balance reservation release reason must not be empty".to_string(),
+                "Balance reservation release reason must not be empty".into(),
             ));
         }
         if reason.chars().count() > MAX_BALANCE_RESERVATION_RELEASE_REASON_CHARS {
@@ -370,21 +368,27 @@ impl BalanceService {
                 "Balance reservation release reason must not exceed {MAX_BALANCE_RESERVATION_RELEASE_REASON_CHARS} characters"
             )));
         }
-        BalanceReservation::admin_release(
-            self.pool.as_ref(),
-            tenant_id,
+        BalanceReservation::admin_release(self.pool.as_ref(), scope, audit, command)
+            .await
+            .map_err(map_financial_error)
+    }
+
+    pub async fn find_breakdown_page_in_scope(
+        &self,
+        scope: keycompute_db::models::financial_scope::FinancialScope,
+        user_id: Uuid,
+        cursor: Option<BalanceReservationPageCursor>,
+        limit: u64,
+    ) -> Result<Option<UserBalanceBreakdownPage>> {
+        UserBalance::find_breakdown_page_in_scope(
+            self.pool.write_conn(),
+            scope,
             user_id,
-            request_id,
-            expected_owner_token,
-            released_by,
-            reason,
+            cursor,
+            limit,
         )
         .await
-        .map_err(|error| {
-            KeyComputeError::DatabaseError(format!(
-                "Failed to administratively release request balance reservation: {error}"
-            ))
-        })
+        .map_err(map_financial_error)
     }
 
     /// Apply a usage-ledger charge to a matching active reservation.
@@ -638,68 +642,13 @@ impl BalanceService {
     #[allow(clippy::too_many_arguments)]
     pub async fn apply_admin_manual_operation(
         &self,
-        kind: ManualBalanceOperationKind,
-        tenant_id: Uuid,
-        user_id: Uuid,
-        actor_user_id: Uuid,
-        amount: Decimal,
-        reason: &str,
-        idempotency_key: &str,
+        scope: keycompute_db::models::financial_scope::FinancialScope,
+        audit: &keycompute_db::AuditContext,
+        command: &ManualBalanceCommand<'_>,
     ) -> Result<ManualBalanceOperationDecision> {
-        if amount <= Decimal::ZERO {
-            return Err(KeyComputeError::ValidationError(
-                "Administrator balance operation amount must be greater than zero".to_string(),
-            ));
-        }
-        let reason = reason.trim();
-        if reason.is_empty() {
-            return Err(KeyComputeError::ValidationError(
-                "Administrator balance operation reason must not be empty".to_string(),
-            ));
-        }
-        if reason.chars().count() > MAX_ADMIN_BALANCE_OPERATION_REASON_CHARS {
-            return Err(KeyComputeError::ValidationError(format!(
-                "Administrator balance operation reason must not exceed {MAX_ADMIN_BALANCE_OPERATION_REASON_CHARS} characters"
-            )));
-        }
-        if idempotency_key.is_empty()
-            || idempotency_key.len() > MAX_ADMIN_BALANCE_IDEMPOTENCY_KEY_BYTES
-            || !idempotency_key
-                .bytes()
-                .all(|byte| (0x21..=0x7e).contains(&byte))
-        {
-            return Err(KeyComputeError::ValidationError(format!(
-                "Administrator balance Idempotency-Key must contain between 1 and {MAX_ADMIN_BALANCE_IDEMPOTENCY_KEY_BYTES} visible ASCII bytes"
-            )));
-        }
-        UserBalance::apply_admin_manual_operation(
-            self.pool.as_ref(),
-            kind,
-            tenant_id,
-            user_id,
-            actor_user_id,
-            amount,
-            reason,
-            idempotency_key,
-        )
-        .await
-        .map_err(|error| {
-            if error.is_insufficient_balance() {
-                KeyComputeError::ValidationError(format!(
-                    "Insufficient balance for administrator {} operation on user {user_id}: {error}",
-                    kind.as_str()
-                ))
-            } else if error.is_not_found() {
-                KeyComputeError::ValidationError(format!(
-                    "User balance not found for user {user_id}"
-                ))
-            } else {
-                KeyComputeError::DatabaseError(format!(
-                    "Failed to apply administrator {} operation: {error}",
-                    kind.as_str()
-                ))
-            }
-        })
+        UserBalance::apply_admin_manual_operation(self.pool.as_ref(), scope, audit, command)
+            .await
+            .map_err(map_financial_error)
     }
 
     /// 查询用户交易记录
@@ -720,6 +669,26 @@ impl BalanceService {
             .map_err(|e| {
                 KeyComputeError::DatabaseError(format!("Failed to list transactions: {}", e))
             })
+    }
+}
+
+fn map_financial_error(error: keycompute_db::DbError) -> KeyComputeError {
+    if matches!(&error, keycompute_db::DbError::Other(code) if code=="financial_authority_invalid")
+    {
+        KeyComputeError::PermissionDenied("Current financial authority required".into())
+    } else if error.is_insufficient_balance() {
+        KeyComputeError::ValidationError("Insufficient balance for the requested operation".into())
+    } else if error.is_not_found() {
+        KeyComputeError::ValidationError("Financial target unavailable".into())
+    } else if matches!(&error, keycompute_db::DbError::Other(code) if
+        code.starts_with("administrator balance operation amount must") ||
+        code.starts_with("administrator balance operation reason must") ||
+        code.starts_with("administrator balance Idempotency-Key must") ||
+        code=="financial_target_invalid" || code=="financial_reason_invalid")
+    {
+        KeyComputeError::ValidationError("Invalid financial command".into())
+    } else {
+        KeyComputeError::ServiceUnavailable("Financial operation temporarily unavailable".into())
     }
 }
 

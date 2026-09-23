@@ -102,9 +102,9 @@ pub use usage_log::{CreateUsageLogRequest, UsageLog, UsageStats, UserUsageStats}
 pub use user::{CreateUserRequest, UpdateUserRequest, User};
 pub use user_balance::{
     BalanceReservation, BalanceReservationEvent, BalanceReservationPageCursor, BalanceTransaction,
-    ManualBalanceOperationDecision, ManualBalanceOperationKind, ManualBalanceOperationOutcome,
-    TransactionType, UserBalance, UserBalanceBreakdown, UserBalanceBreakdownPage,
-    UserBalanceDisplaySnapshot,
+    ManualBalanceCommand, ManualBalanceOperationDecision, ManualBalanceOperationKind,
+    ManualBalanceOperationOutcome, ReleaseReservationCommand, TransactionType, UserBalance,
+    UserBalanceBreakdown, UserBalanceBreakdownPage, UserBalanceDisplaySnapshot,
 };
 pub use user_credential::{
     CreateUserCredentialRequest, UpdateUserCredentialRequest, UserCredential,

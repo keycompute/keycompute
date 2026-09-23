@@ -23,6 +23,7 @@ pub mod settings;
 pub mod tenant;
 pub mod usage;
 pub mod user;
+pub mod wallet_control;
 
 use crate::client::ApiClient;
 

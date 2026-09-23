@@ -30,6 +30,54 @@ mod tests {
     use tokio::sync::Barrier;
     use tokio::task::JoinSet;
 
+    async fn root_scope(
+        pool: &DatabaseConnection,
+        actor: uuid::Uuid,
+        tenant: uuid::Uuid,
+    ) -> keycompute_db::models::financial_scope::FinancialScope {
+        use keycompute_db::models::financial_scope::{FinancialScope, FinancialSession};
+        use keycompute_types::{CredentialKind, PlatformRole, PlatformScope};
+        let current = keycompute_db::User::find_by_id(pool, actor)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current.platform_role().unwrap(),
+            PlatformRole::Root,
+            "test command needs a real current root"
+        );
+        FinancialScope::platform_tenant(
+            PlatformScope::checked(actor, PlatformRole::Root).unwrap(),
+            FinancialSession {
+                user_id: actor,
+                credential_kind: CredentialKind::Jwt,
+                token_version: current.token_version,
+                expires_at: Utc::now().timestamp() + 3600,
+                selected: None,
+            },
+            tenant,
+        )
+        .unwrap()
+    }
+    fn command_audit(actor: uuid::Uuid) -> keycompute_db::AuditContext {
+        keycompute_db::AuditContext {
+            actor_user_id: actor,
+            credential_kind: keycompute_types::CredentialKind::Jwt,
+            actor_platform_role: keycompute_types::PlatformRole::Root,
+            actor_tenant_role: None,
+            request_id: Some(uuid::Uuid::new_v4()),
+        }
+    }
+    async fn make_fixture_root(pool: &DatabaseConnection, actor: uuid::Uuid) {
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='root' WHERE id=$1",
+            [actor.into()],
+        ))
+        .await
+        .unwrap();
+    }
+
     /// Provider double that preserves the real upstream HTTP 429 response through
     /// `GatewayExecutor`; no token event is emitted before the terminal failure.
     #[derive(Debug)]
@@ -88,6 +136,7 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     async fn run_concurrent_admin_balance_operation(
+        pool: &DatabaseConnection,
         service: &BalanceService,
         kind: ManualBalanceOperationKind,
         tenant_id: uuid::Uuid,
@@ -97,6 +146,7 @@ mod tests {
         reason: &str,
         idempotency_key: &str,
     ) -> Vec<ManualBalanceOperationOutcome> {
+        let command_scope = root_scope(pool, actor_user_id, tenant_id).await;
         const CONCURRENCY: usize = 8;
         let barrier = Arc::new(Barrier::new(CONCURRENCY));
         let mut tasks = JoinSet::new();
@@ -109,13 +159,15 @@ mod tests {
                 barrier.wait().await;
                 service
                     .apply_admin_manual_operation(
-                        kind,
-                        tenant_id,
-                        user_id,
-                        actor_user_id,
-                        amount,
-                        &reason,
-                        &idempotency_key,
+                        command_scope,
+                        &command_audit(actor_user_id),
+                        &keycompute_billing::balance::ManualBalanceCommand {
+                            kind,
+                            user_id,
+                            amount,
+                            reason: &reason,
+                            idempotency_key: &idempotency_key,
+                        },
                     )
                     .await
             });
@@ -1489,8 +1541,10 @@ mod tests {
             create_test_user(&pool, tenant.id, "admin-release-replay-target", &test_id).await;
         let administrator =
             create_test_user(&pool, tenant.id, "admin-release-replay-actor", &test_id).await;
+        make_fixture_root(&pool, administrator.id).await;
         let other_administrator =
             create_test_user(&pool, tenant.id, "admin-release-replay-other", &test_id).await;
+        make_fixture_root(&pool, other_administrator.id).await;
         let other_user =
             create_test_user(&pool, tenant.id, "admin-release-replay-user", &test_id).await;
         let tenant_id = tenant.id;
@@ -1517,6 +1571,7 @@ mod tests {
             .await
             .expect("request reservation should succeed");
 
+        let release_scope = root_scope(&pool, administrator_id, tenant_id).await;
         let barrier = Arc::new(Barrier::new(CONCURRENCY));
         let mut tasks = JoinSet::new();
         for _ in 0..CONCURRENCY {
@@ -1527,12 +1582,14 @@ mod tests {
                 barrier.wait().await;
                 service
                     .admin_release_request_reservation(
-                        tenant_id,
-                        user_id,
-                        request_id,
-                        owner_token,
-                        administrator_id,
-                        "  confirmed orphan  ",
+                        release_scope,
+                        &command_audit(administrator_id),
+                        &keycompute_billing::balance::ReleaseReservationCommand {
+                            user_id,
+                            request_id,
+                            expected_owner_token: owner_token,
+                            reason: "  confirmed orphan  ",
+                        },
                     )
                     .await
             });
@@ -1561,12 +1618,14 @@ mod tests {
 
         let sequential_replay = service
             .admin_release_request_reservation(
-                tenant.id,
-                user.id,
-                request_id,
-                reservation.owner_token,
-                administrator.id,
-                "confirmed orphan",
+                root_scope(&pool, administrator.id, tenant.id).await,
+                &command_audit(administrator.id),
+                &keycompute_billing::balance::ReleaseReservationCommand {
+                    user_id: user.id,
+                    request_id,
+                    expected_owner_token: reservation.owner_token,
+                    reason: "confirmed orphan",
+                },
             )
             .await
             .expect("sequential admin release replay should succeed")
@@ -1610,12 +1669,14 @@ mod tests {
             assert!(
                 service
                     .admin_release_request_reservation(
-                        tenant.id,
-                        conflict_user,
-                        request_id,
-                        conflict_owner,
-                        conflict_actor,
-                        conflict_reason,
+                        root_scope(&pool, conflict_actor, tenant.id).await,
+                        &command_audit(conflict_actor),
+                        &keycompute_billing::balance::ReleaseReservationCommand {
+                            user_id: conflict_user,
+                            request_id,
+                            expected_owner_token: conflict_owner,
+                            reason: conflict_reason
+                        }
                     )
                     .await
                     .expect("conflicting release should be a safe decision")
@@ -1839,6 +1900,7 @@ mod tests {
         let user = create_test_user(&pool, tenant.id, "admin-release-target", &test_id).await;
         let administrator =
             create_test_user(&pool, tenant.id, "admin-release-actor", &test_id).await;
+        make_fixture_root(&pool, administrator.id).await;
         let other_user = create_test_user(&pool, tenant.id, "admin-release-other", &test_id).await;
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         service
@@ -1898,12 +1960,14 @@ mod tests {
         assert!(
             service
                 .admin_release_request_reservation(
-                    tenant.id,
-                    other_user.id,
-                    request_id,
-                    reservation.owner_token,
-                    administrator.id,
-                    "wrong target",
+                    root_scope(&pool, administrator.id, tenant.id).await,
+                    &command_audit(administrator.id),
+                    &keycompute_billing::balance::ReleaseReservationCommand {
+                        user_id: other_user.id,
+                        request_id,
+                        expected_owner_token: reservation.owner_token,
+                        reason: "wrong target"
+                    }
                 )
                 .await
                 .expect("cross-user release should be a safe no-op")
@@ -1913,12 +1977,14 @@ mod tests {
             .repeat(keycompute_billing::balance::MAX_BALANCE_RESERVATION_RELEASE_REASON_CHARS + 1);
         let oversized_error = service
             .admin_release_request_reservation(
-                tenant.id,
-                user.id,
-                request_id,
-                reservation.owner_token,
-                administrator.id,
-                &oversized_reason,
+                root_scope(&pool, administrator.id, tenant.id).await,
+                &command_audit(administrator.id),
+                &keycompute_billing::balance::ReleaseReservationCommand {
+                    user_id: user.id,
+                    request_id,
+                    expected_owner_token: reservation.owner_token,
+                    reason: &oversized_reason,
+                },
             )
             .await
             .expect_err("oversized release reason must be rejected");
@@ -1926,12 +1992,14 @@ mod tests {
         assert!(
             service
                 .admin_release_request_reservation(
-                    tenant.id,
-                    user.id,
-                    request_id,
-                    first_owner.owner_token,
-                    administrator.id,
-                    "stale selection",
+                    root_scope(&pool, administrator.id, tenant.id).await,
+                    &command_audit(administrator.id),
+                    &keycompute_billing::balance::ReleaseReservationCommand {
+                        user_id: user.id,
+                        request_id,
+                        expected_owner_token: first_owner.owner_token,
+                        reason: "stale selection"
+                    }
                 )
                 .await
                 .expect("stale owner release should be a safe no-op")
@@ -1947,12 +2015,14 @@ mod tests {
         assert_eq!(after_stale_release.frozen_balance, Decimal::from(7));
         let released_result = service
             .admin_release_request_reservation(
-                tenant.id,
-                user.id,
-                request_id,
-                reservation.owner_token,
-                administrator.id,
-                "operator confirmed orphaned request",
+                root_scope(&pool, administrator.id, tenant.id).await,
+                &command_audit(administrator.id),
+                &keycompute_billing::balance::ReleaseReservationCommand {
+                    user_id: user.id,
+                    request_id,
+                    expected_owner_token: reservation.owner_token,
+                    reason: "operator confirmed orphaned request",
+                },
             )
             .await
             .expect("administrative release should succeed")
@@ -1978,12 +2048,14 @@ mod tests {
         );
         let exact_replay = service
             .admin_release_request_reservation(
-                tenant.id,
-                user.id,
-                request_id,
-                reservation.owner_token,
-                administrator.id,
-                "  operator confirmed orphaned request  ",
+                root_scope(&pool, administrator.id, tenant.id).await,
+                &command_audit(administrator.id),
+                &keycompute_billing::balance::ReleaseReservationCommand {
+                    user_id: user.id,
+                    request_id,
+                    expected_owner_token: reservation.owner_token,
+                    reason: "  operator confirmed orphaned request  ",
+                },
             )
             .await
             .expect("exact administrative release replay should succeed")
@@ -2050,12 +2122,14 @@ mod tests {
         assert!(
             service
                 .admin_release_request_reservation(
-                    tenant.id,
-                    user.id,
-                    request_id,
-                    reservation.owner_token,
-                    administrator.id,
-                    "idempotent replay",
+                    root_scope(&pool, administrator.id, tenant.id).await,
+                    &command_audit(administrator.id),
+                    &keycompute_billing::balance::ReleaseReservationCommand {
+                        user_id: user.id,
+                        request_id,
+                        expected_owner_token: reservation.owner_token,
+                        reason: "idempotent replay"
+                    }
                 )
                 .await
                 .expect("repeated release should be a safe no-op")
@@ -2801,6 +2875,7 @@ mod tests {
             .expect("administrator idempotency cleanup should succeed");
         let tenant = create_test_tenant(&pool, "admin-idempotency", &test_id).await;
         let actor = create_test_user(&pool, tenant.id, "admin-idempotency-actor", &test_id).await;
+        make_fixture_root(&pool, actor.id).await;
         let recharge_user =
             create_test_user(&pool, tenant.id, "admin-idempotency-recharge", &test_id).await;
         let consume_user =
@@ -2870,7 +2945,7 @@ mod tests {
         for (kind, user_id, amount, reason, expected_available, expected_frozen) in cases {
             let key = format!("admin-balance-{kind:?}-{}", uuid::Uuid::new_v4());
             let outcomes = run_concurrent_admin_balance_operation(
-                &service, kind, tenant.id, user_id, actor.id, amount, reason, &key,
+                &pool, &service, kind, tenant.id, user_id, actor.id, amount, reason, &key,
             )
             .await;
             let outcome = &outcomes[0];
@@ -2926,6 +3001,7 @@ mod tests {
         let tenant = create_test_tenant(&pool, "admin-conflict", &test_id).await;
         let other_tenant = create_test_tenant(&pool, "admin-conflict-other", &test_id).await;
         let actor = create_test_user(&pool, tenant.id, "admin-conflict-actor", &test_id).await;
+        make_fixture_root(&pool, actor.id).await;
         let target = create_test_user(&pool, tenant.id, "admin-conflict-target", &test_id).await;
         let other_target =
             create_test_user(&pool, tenant.id, "admin-conflict-other-target", &test_id).await;
@@ -2936,16 +3012,21 @@ mod tests {
                 .await
                 .expect("balance creation should succeed");
         }
+        let other_actor =
+            create_test_user(&pool, tenant.id, "admin-conflict-other-actor", &test_id).await;
+        make_fixture_root(&pool, other_actor.id).await;
         let key = format!("admin-balance-conflict-{}", uuid::Uuid::new_v4());
         let first = service
             .apply_admin_manual_operation(
-                ManualBalanceOperationKind::Recharge,
-                tenant.id,
-                target.id,
-                actor.id,
-                Decimal::from(2),
-                "initial grant",
-                &key,
+                root_scope(&pool, actor.id, tenant.id).await,
+                &command_audit(actor.id),
+                &keycompute_billing::balance::ManualBalanceCommand {
+                    kind: ManualBalanceOperationKind::Recharge,
+                    user_id: target.id,
+                    amount: Decimal::from(2),
+                    reason: "initial grant",
+                    idempotency_key: &key,
+                },
             )
             .await
             .expect("initial administrator operation should succeed");
@@ -2955,13 +3036,15 @@ mod tests {
 
         let normalized_replay = service
             .apply_admin_manual_operation(
-                ManualBalanceOperationKind::Recharge,
-                tenant.id,
-                target.id,
-                actor.id,
-                Decimal::new(200, 2),
-                "  initial grant  ",
-                &key,
+                root_scope(&pool, actor.id, tenant.id).await,
+                &command_audit(actor.id),
+                &keycompute_billing::balance::ManualBalanceCommand {
+                    kind: ManualBalanceOperationKind::Recharge,
+                    user_id: target.id,
+                    amount: Decimal::new(200, 2),
+                    reason: "  initial grant  ",
+                    idempotency_key: &key,
+                },
             )
             .await
             .expect("normalized replay should succeed");
@@ -3015,7 +3098,7 @@ mod tests {
                 ManualBalanceOperationKind::Recharge,
                 tenant.id,
                 target.id,
-                uuid::Uuid::new_v4(),
+                other_actor.id,
                 Decimal::from(2),
                 "initial grant",
             ),
@@ -3024,13 +3107,15 @@ mod tests {
             assert_eq!(
                 service
                     .apply_admin_manual_operation(
-                        kind,
-                        tenant_id,
-                        user_id,
-                        actor_user_id,
-                        amount,
-                        reason,
-                        &key,
+                        root_scope(&pool, actor_user_id, tenant_id).await,
+                        &command_audit(actor_user_id),
+                        &keycompute_billing::balance::ManualBalanceCommand {
+                            kind,
+                            user_id,
+                            amount,
+                            reason,
+                            idempotency_key: &key
+                        }
                     )
                     .await
                     .expect("conflicting reuse should return a decision"),
@@ -3276,6 +3361,7 @@ mod tests {
             .expect("failed administrator operation cleanup should succeed");
         let tenant = create_test_tenant(&pool, "admin-failed-claim", &test_id).await;
         let actor = create_test_user(&pool, tenant.id, "admin-failed-claim-actor", &test_id).await;
+        make_fixture_root(&pool, actor.id).await;
         let freeze_user = create_test_user(&pool, tenant.id, "admin-failed-freeze", &test_id).await;
         let consume_user =
             create_test_user(&pool, tenant.id, "admin-failed-consume", &test_id).await;
@@ -3292,13 +3378,15 @@ mod tests {
         let freeze_key = format!("failed-freeze-{}", uuid::Uuid::new_v4());
         service
             .apply_admin_manual_operation(
-                ManualBalanceOperationKind::Freeze,
-                tenant.id,
-                freeze_user.id,
-                actor.id,
-                Decimal::from(2),
-                "freeze after funding",
-                &freeze_key,
+                root_scope(&pool, actor.id, tenant.id).await,
+                &command_audit(actor.id),
+                &keycompute_billing::balance::ManualBalanceCommand {
+                    kind: ManualBalanceOperationKind::Freeze,
+                    user_id: freeze_user.id,
+                    amount: Decimal::from(2),
+                    reason: "freeze after funding",
+                    idempotency_key: &freeze_key,
+                },
             )
             .await
             .expect_err("freeze without available funds should fail");
@@ -3306,13 +3394,15 @@ mod tests {
         let consume_key = format!("failed-consume-{}", uuid::Uuid::new_v4());
         service
             .apply_admin_manual_operation(
-                ManualBalanceOperationKind::Consume,
-                tenant.id,
-                consume_user.id,
-                actor.id,
-                Decimal::from(2),
-                "consume after funding",
-                &consume_key,
+                root_scope(&pool, actor.id, tenant.id).await,
+                &command_audit(actor.id),
+                &keycompute_billing::balance::ManualBalanceCommand {
+                    kind: ManualBalanceOperationKind::Consume,
+                    user_id: consume_user.id,
+                    amount: Decimal::from(2),
+                    reason: "consume after funding",
+                    idempotency_key: &consume_key,
+                },
             )
             .await
             .expect_err("consume without available funds should fail");
@@ -3320,13 +3410,15 @@ mod tests {
         let unfreeze_key = format!("failed-unfreeze-{}", uuid::Uuid::new_v4());
         service
             .apply_admin_manual_operation(
-                ManualBalanceOperationKind::Unfreeze,
-                tenant.id,
-                unfreeze_user.id,
-                actor.id,
-                Decimal::from(2),
-                "unfreeze after hold",
-                &unfreeze_key,
+                root_scope(&pool, actor.id, tenant.id).await,
+                &command_audit(actor.id),
+                &keycompute_billing::balance::ManualBalanceCommand {
+                    kind: ManualBalanceOperationKind::Unfreeze,
+                    user_id: unfreeze_user.id,
+                    amount: Decimal::from(2),
+                    reason: "unfreeze after hold",
+                    idempotency_key: &unfreeze_key,
+                },
             )
             .await
             .expect_err("unfreeze without manual funds should fail");
@@ -3382,13 +3474,15 @@ mod tests {
             assert!(matches!(
                 service
                     .apply_admin_manual_operation(
-                        kind,
-                        tenant.id,
-                        user_id,
-                        actor.id,
-                        Decimal::from(2),
-                        reason,
-                        &key,
+                        root_scope(&pool, actor.id, tenant.id).await,
+                        &command_audit(actor.id),
+                        &keycompute_billing::balance::ManualBalanceCommand {
+                            kind,
+                            user_id,
+                            amount: Decimal::from(2),
+                            reason,
+                            idempotency_key: &key
+                        }
                     )
                     .await
                     .expect("same key should succeed after the balance condition is repaired"),

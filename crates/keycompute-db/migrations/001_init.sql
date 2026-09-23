@@ -1433,8 +1433,43 @@ CREATE TABLE IF NOT EXISTS admin_balance_operations (
             AND balance_before IS NOT NULL AND balance_after IS NOT NULL
             AND frozen_balance_after IS NOT NULL AND frozen_balance_after >= 0)
     ),
-    CONSTRAINT fk_admin_balance_operations_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT
+    CONSTRAINT fk_admin_balance_operations_membership FOREIGN KEY (tenant_id,user_id) REFERENCES tenant_memberships(tenant_id,user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_admin_balance_operation_result_owner FOREIGN KEY(tenant_id,user_id,balance_transaction_id)
+        REFERENCES balance_transactions(tenant_id,user_id,id) ON DELETE RESTRICT
 );
+
+-- Completed manual-command results cannot be reassigned or rewritten.
+CREATE OR REPLACE FUNCTION guard_manual_balance_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        IF NEW.completed_at IS NOT NULL THEN
+            RAISE EXCEPTION 'manual balance commands must start pending' USING ERRCODE='23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF ROW(NEW.id,NEW.idempotency_key_hash,NEW.request_fingerprint,NEW.operation_type,
+           NEW.tenant_id,NEW.user_id,NEW.actor_user_id,NEW.amount,NEW.reason,NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.id,OLD.idempotency_key_hash,OLD.request_fingerprint,OLD.operation_type,
+           OLD.tenant_id,OLD.user_id,OLD.actor_user_id,OLD.amount,OLD.reason,OLD.created_at) THEN
+        RAISE EXCEPTION 'manual balance command identity is immutable' USING ERRCODE='23514';
+    END IF;
+    IF OLD.completed_at IS NOT NULL AND NEW IS DISTINCT FROM OLD THEN
+        RAISE EXCEPTION 'completed manual balance result is immutable' USING ERRCODE='23514';
+    END IF;
+    IF OLD.completed_at IS NULL AND NEW.completed_at IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM balance_transactions b WHERE b.id=NEW.balance_transaction_id
+          AND b.tenant_id=NEW.tenant_id AND b.user_id=NEW.user_id
+          AND b.transaction_type=NEW.operation_type AND b.currency='CNY'
+          AND abs(b.amount)=NEW.amount AND b.balance_before=NEW.balance_before
+          AND b.balance_after=NEW.balance_after
+    ) THEN
+        RAISE EXCEPTION 'manual balance result must match its original ledger' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS manual_balance_identity_guard ON admin_balance_operations;
+CREATE TRIGGER manual_balance_identity_guard BEFORE INSERT OR UPDATE ON admin_balance_operations
+    FOR EACH ROW EXECUTE FUNCTION guard_manual_balance_identity();
 
 CREATE INDEX IF NOT EXISTS idx_admin_balance_operations_user_created
     ON admin_balance_operations(user_id, created_at DESC, id DESC);

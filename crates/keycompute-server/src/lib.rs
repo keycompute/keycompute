@@ -9,6 +9,7 @@ pub mod console;
 pub mod display_cache;
 pub mod error;
 pub mod extractors;
+mod financial_auth;
 pub mod handlers;
 mod lifecycle_metrics;
 pub mod middleware;

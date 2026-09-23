@@ -32,6 +32,7 @@ pub mod responses_websocket;
 pub mod routing;
 pub mod tenant_distribution;
 pub mod tenant_tips;
+pub mod tenant_wallet;
 pub mod user;
 
 // 认证相关

@@ -170,6 +170,7 @@ fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
                             | "default_rpm_limit"
                             | "default_tpm_limit"
                             | "operation"
+                            | "operation_id"
                             | "amount"
                             | "currency"
                             | "model_name"
