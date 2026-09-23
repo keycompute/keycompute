@@ -52,5 +52,5 @@ same-origin HTTP. It covers the CRUD flow, error handling, literal search, an
 in-flight A command during a switch to member B, and foreign/global response
 guards. Existing tenant, operations and node browser runners remain in CI.
 Browser mocks are UI evidence, not a substitute for the real backend tests.
-The separate platform pricing modernization and other remaining tenant resource
-pages are not certified by this delivery. No production deployment is performed.
+Platform pricing is documented separately in `platform-pricing-console.md`;
+other remaining tenant resource pages are not certified by this delivery. No production deployment is performed.

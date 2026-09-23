@@ -1481,3 +1481,45 @@ not fixed by this tenant-only delivery. Provider/Key/finance/Responses pages,
 native account-pool management, remaining object review and final deployment
 gates also remain separate. No production DB, credentials, payment, SMTP or
 service deployment changed. See tenant-pricing-console.md for exact scope.
+
+
+## Current phase 7 — explicit platform pricing contracts and console accepted
+
+The root /admin/pricing page and SDK now use canonical /api/v1/platform/pricing
+requests with an explicit Platform or real Tenant target. Creation serializes the
+required scope_type; list and mutation targets never inherit the selected tenant.
+Global ownership uses explicit scope_type rather than a nil tenant. Missing scope
+or response versions, foreign rows and incorrect mutation resource IDs fail closed.
+Deletion and batch-default responses retain their actual resource identities.
+
+The platform capability and verified user/selected-membership revisions own the
+page identity. Keyed fragments reset target-local lists and forms; changing target
+while an old command is pending does not publish or replay its completion. Edits
+use observed versions and exact decimal strings, including scientific notation
+from PostgreSQL. Platform-owned rows are visibly shared, not labelled by a nil ID;
+their existing deletion prohibition remains. Writes are single-dispatch. Existing
+backend grants, transaction semantics and cost estimation are not changed here.
+
+Five new wire tests and three Web regressions cover exact scope/versions, fresh
+reads, invalid/malformed results, no automatic replay and verified UI identity.
+A real SDK/Axum/PostgreSQL test first reproduces the previous missing-scope HTTP422
+without creating a row, then verifies explicit global/tenant CRUD/default, stale
+versions, audit records and operator/tenant-admin/inference-key denial. A root
+selected in A can explicitly administer B without membership in B.
+
+Final independent default-parallel workspace: 2732 passed, 0 failed, 30 original
+ignored tests unchanged, including desktop/mobile. Web204 and the targeted SDK/
+HTTP checks are included subsets. All-target native, strict all-target/all-feature
+Clippy, Web/client WASM, formatting, whitespace and Python23 pass. All twelve
+frozen source/workflow/test hashes match the verified versions.
+
+Production-mode compiled WASM passed three new platform-pricing browser groups;
+all four existing core-tenant, operator, node and tenant-pricing runners passed
+on the same bundle with no page errors. The new runner is registered in CI.
+Synthetic browser HTTP is UI evidence, not a substitute for backend tests.
+
+No production database, credentials, payment, SMTP, service or deployment changed.
+Key SDK preparation remains separate and unintegrated; its UI preparation was
+not executed. Other tenant resource pages, native account-pool management and
+remaining endpoint/transaction/release gates are unfinished. See
+platform-pricing-console.md for the precise contract and remaining boundaries.

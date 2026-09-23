@@ -48,8 +48,9 @@ pub use passthrough_binding::{
 };
 pub use payment::{PaymentOrderInfo, PaymentOrderPage, PaymentProviderStatus};
 pub use pricing::{
-    CalculateCostRequest, CostCalculationResponse, CreatePricingRequest, CreatePricingResponse,
-    MakeDefaultPricingResponse, PricingInfo, PricingPage, PricingQueryParams,
+    BatchDefaultPricingResponse, CalculateCostRequest, CostCalculationResponse,
+    CreatePricingRequest, CreatePricingResponse, DeletePricingResponse, MakeDefaultPricingResponse,
+    PricingInfo, PricingPage, PricingQueryParams, PricingScopeType, PricingTarget,
     SetDefaultPricingRequest, UpdatePricingRequest, UpdatePricingResponse,
 };
 pub use user::{
@@ -565,92 +566,192 @@ impl AdminApi {
 
     // ==================== 定价管理 ====================
 
-    /// 获取定价列表
-    pub async fn list_pricing(&self, token: &str) -> Result<Vec<PricingInfo>> {
-        let mut pricing = Vec::new();
-        let mut page = 1u64;
-        loop {
-            let params = PricingQueryParams::default()
+    /// Explicit platform target; callers cannot inherit a selected tenant implicitly.
+    pub async fn list_pricing(
+        &self,
+        target: PricingTarget,
+        token: &str,
+    ) -> Result<Vec<PricingInfo>> {
+        let mut rows = Vec::new();
+        for page in 1..=100 {
+            let params = PricingQueryParams::new(target)
                 .with_page(page)
-                .with_page_size(COMPAT_LIST_PAGE_SIZE);
-            let response = self.list_pricing_page(&params, token).await?;
-            pricing.extend(response.pricing);
-            if response.total_pages == 0 || page >= response.total_pages {
-                break;
+                .with_page_size(100);
+            let r = self.list_pricing_page(&params, token).await?;
+            rows.extend(r.pricing);
+            if page >= r.total_pages {
+                return Ok(rows);
             }
-            page += 1;
         }
-        Ok(pricing)
+        Err(crate::ClientError::Config(
+            "Use paginated pricing reads beyond 10000 records".into(),
+        ))
     }
-
     pub async fn list_pricing_page(
         &self,
         params: &PricingQueryParams,
         token: &str,
     ) -> Result<PricingPage> {
-        let query = params.to_query_string();
-        let path = if query.is_empty() {
-            "/api/v1/pricing".to_string()
-        } else {
-            format!("/api/v1/pricing?{query}")
-        };
-        self.client.get_json(&path, Some(token)).await
+        let path = format!("/api/v1/platform/pricing?{}", params.to_query_string()?);
+        let r: PricingPage = self.client.get_json_fresh(&path, Some(token)).await?;
+        if r.page != params.page
+            || r.page_size != params.page_size
+            || r.pricing.len() > params.page_size as usize
+            || r.total_pages != r.total.div_ceil(params.page_size)
+        {
+            return Err(pricing::invalid_pricing());
+        }
+        for row in &r.pricing {
+            row.validate_for(params.target)?;
+        }
+        Ok(r)
     }
-
-    /// 创建定价
     pub async fn create_pricing(
         &self,
         req: &CreatePricingRequest,
         token: &str,
     ) -> Result<CreatePricingResponse> {
-        self.client
-            .post_json("/api/v1/pricing", req, Some(token))
-            .await
+        req.validate()?;
+        let r: CreatePricingResponse = self
+            .client
+            .post_json("/api/v1/platform/pricing", req, Some(token))
+            .await?;
+        if !r.success
+            || r.version <= 0
+            || pricing::pricing_id(&r.pricing_id).is_err()
+            || r.model_name != req.model_name.trim()
+            || r.billing_dimension != req.billing_dimension
+        {
+            return Err(pricing::invalid_pricing());
+        }
+        Ok(r)
     }
-
-    /// 更新定价
     pub async fn update_pricing(
         &self,
+        target: PricingTarget,
         id: &str,
         req: &UpdatePricingRequest,
         token: &str,
     ) -> Result<UpdatePricingResponse> {
-        self.client
-            .put_json(&format!("/api/v1/pricing/{}", id), req, Some(token))
-            .await
+        let id = pricing::pricing_id(id)?.to_string();
+        if req.expected_version <= 0
+            || req.input_price_per_1k.is_none()
+                && req.output_price_per_1k.is_none()
+                && req.effective_until.is_none()
+        {
+            return Err(crate::ClientError::Config(
+                "A positive displayed version and pricing patch are required".into(),
+            ));
+        }
+        for value in [&req.input_price_per_1k, &req.output_price_per_1k]
+            .into_iter()
+            .flatten()
+        {
+            crate::api::tenant_pricing::validate_decimal(value)?;
+        }
+        let r: UpdatePricingResponse = self
+            .client
+            .put_json(
+                &format!("/api/v1/platform/pricing/{id}?{}", target.query()?),
+                req,
+                Some(token),
+            )
+            .await?;
+        if !r.success || r.pricing_id != id || r.version <= 0 {
+            return Err(pricing::invalid_pricing());
+        }
+        Ok(r)
     }
-
-    /// 删除定价
-    pub async fn delete_pricing(&self, id: &str, token: &str) -> Result<MessageResponse> {
-        self.client
-            .delete_json(&format!("/api/v1/pricing/{}", id), Some(token))
-            .await
+    pub async fn delete_pricing(
+        &self,
+        target: PricingTarget,
+        id: &str,
+        token: &str,
+    ) -> Result<DeletePricingResponse> {
+        let id = pricing::pricing_id(id)?.to_string();
+        if target == PricingTarget::Platform {
+            return Err(crate::ClientError::Config(
+                "Platform pricing cannot be deleted".into(),
+            ));
+        }
+        let result: DeletePricingResponse = self
+            .client
+            .delete_json(
+                &format!("/api/v1/platform/pricing/{id}?{}", target.query()?),
+                Some(token),
+            )
+            .await?;
+        if !result.success || result.pricing_id != id {
+            return Err(pricing::invalid_pricing());
+        }
+        Ok(result)
     }
-
-    /// 将定价设为默认
     pub async fn make_pricing_default(
         &self,
+        target: PricingTarget,
         id: &str,
         token: &str,
     ) -> Result<MakeDefaultPricingResponse> {
-        self.client
+        let id = pricing::pricing_id(id)?.to_string();
+        let r: MakeDefaultPricingResponse = self
+            .client
             .post_json(
-                &format!("/api/v1/pricing/{}/make-default", id),
-                &(),
+                &format!(
+                    "/api/v1/platform/pricing/{id}/make-default?{}",
+                    target.query()?
+                ),
+                &serde_json::json!({}),
                 Some(token),
             )
-            .await
+            .await?;
+        if !r.success || r.pricing_id != id || r.version <= 0 {
+            return Err(pricing::invalid_pricing());
+        }
+        Ok(r)
     }
-
-    /// 设置默认定价
     pub async fn set_default_pricing(
         &self,
+        target: PricingTarget,
         req: &SetDefaultPricingRequest,
         token: &str,
-    ) -> Result<MessageResponse> {
-        self.client
-            .post_json("/api/v1/pricing/batch-defaults", req, Some(token))
-            .await
+    ) -> Result<BatchDefaultPricingResponse> {
+        if req.model_ids.is_empty() || req.model_ids.len() > 100 {
+            return Err(crate::ClientError::Config(
+                "Select between one and one hundred pricing records".into(),
+            ));
+        }
+        for id in &req.model_ids {
+            pricing::pricing_id(id)?;
+        }
+        let result: BatchDefaultPricingResponse = self
+            .client
+            .post_json(
+                &format!(
+                    "/api/v1/platform/pricing/batch-defaults?{}",
+                    target.query()?
+                ),
+                req,
+                Some(token),
+            )
+            .await?;
+        let mut expected = req
+            .model_ids
+            .iter()
+            .map(|s| pricing::pricing_id(s))
+            .collect::<Result<Vec<_>>>()?;
+        expected.sort_unstable();
+        expected.dedup();
+        let mut actual = result
+            .pricing_ids
+            .iter()
+            .map(|s| pricing::pricing_id(s))
+            .collect::<Result<Vec<_>>>()
+            .map_err(|_| pricing::invalid_pricing())?;
+        actual.sort_unstable();
+        if !result.success || actual != expected {
+            return Err(pricing::invalid_pricing());
+        }
+        Ok(result)
     }
 
     /// 计算费用

@@ -2107,5 +2107,28 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     }
     super::tenant_pricing::register(&mut m, true);
 
+    m.insert("platform_pricing.target", "管理目标");
+    m.insert("platform_pricing.tenant", "指定租户");
+    m.insert(
+        "platform_pricing.invalid_target",
+        "请输入真实租户 UUID；无效选择不会查询所有租户。",
+    );
+    m.insert("platform_pricing.apply", "应用目标");
+    m.insert(
+        "platform_pricing.explicit_scope",
+        "平台定价与租户定价分别管理；切换目标会清除未保存的表单。",
+    );
+    m.insert(
+        "platform_pricing.invalid_amount",
+        "请输入符合 DECIMAL(20,10) 的非负精确小数。",
+    );
+    m.insert("platform_pricing.current", "正在管理：");
+    m.insert(
+        "platform_pricing.command_hint",
+        "操作仅发送一次；网络结果不确定时，请先刷新列表核对。",
+    );
+
+    m.insert("platform_pricing.global", "平台共享定价");
+
     m
 });

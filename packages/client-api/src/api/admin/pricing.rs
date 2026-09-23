@@ -4,8 +4,49 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 
 use super::ModelAccessMode;
 
-const fn default_pricing_version() -> i64 {
-    1
+/// Explicit platform-management target. Global pricing is not a nil tenant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope_type", rename_all = "snake_case")]
+pub enum PricingTarget {
+    Platform,
+    Tenant { tenant_id: uuid::Uuid },
+}
+impl PricingTarget {
+    pub fn validate(self) -> crate::Result<()> {
+        if matches!(self, Self::Tenant { tenant_id } if tenant_id.is_nil()) {
+            return Err(crate::ClientError::Config(
+                "A nonzero pricing tenant is required".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub fn query(self) -> crate::Result<String> {
+        self.validate()?;
+        Ok(match self {
+            Self::Platform => "scope_type=platform".into(),
+            Self::Tenant { tenant_id } => format!("scope_type=tenant&tenant_id={tenant_id}"),
+        })
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PricingScopeType {
+    Platform,
+    Tenant,
+}
+
+pub(super) fn pricing_id(id: &str) -> crate::Result<uuid::Uuid> {
+    uuid::Uuid::parse_str(id)
+        .ok()
+        .filter(|id| !id.is_nil())
+        .ok_or_else(|| {
+            crate::ClientError::Config("A nonzero pricing resource ID is required".into())
+        })
+}
+pub(super) fn invalid_pricing() -> crate::ClientError {
+    crate::ClientError::InvalidResponse(
+        "Pricing response identity, scope or revision is invalid".into(),
+    )
 }
 
 fn deserialize_f64_or_string<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -37,6 +78,7 @@ where
 pub struct PricingInfo {
     pub id: String,
     pub tenant_id: Option<String>,
+    pub scope_type: PricingScopeType,
     pub model_name: String,
     pub billing_dimension: String,
     pub input_price_per_1k: String,
@@ -47,8 +89,25 @@ pub struct PricingInfo {
     pub effective_from: String,
     pub effective_until: Option<String>,
     pub created_at: String,
-    #[serde(default = "default_pricing_version")]
     pub version: i64,
+}
+
+impl PricingInfo {
+    pub fn target(&self) -> crate::Result<PricingTarget> {
+        match (self.scope_type, self.tenant_id.as_deref()) {
+            (PricingScopeType::Platform, None) => Ok(PricingTarget::Platform),
+            (PricingScopeType::Tenant, Some(id)) => Ok(PricingTarget::Tenant {
+                tenant_id: pricing_id(id).map_err(|_| invalid_pricing())?,
+            }),
+            _ => Err(invalid_pricing()),
+        }
+    }
+    pub fn validate_for(&self, target: PricingTarget) -> crate::Result<()> {
+        if self.target()? != target || self.version <= 0 || pricing_id(&self.id).is_err() {
+            return Err(invalid_pricing());
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -60,52 +119,52 @@ pub struct PricingPage {
     pub total_pages: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PricingQueryParams {
+    pub target: PricingTarget,
     pub search: Option<String>,
-    pub page: Option<u64>,
-    pub page_size: Option<u64>,
-    pub limit: Option<u64>,
-    pub offset: Option<u64>,
+    pub page: u64,
+    pub page_size: u64,
 }
-
 impl PricingQueryParams {
+    pub fn new(target: PricingTarget) -> Self {
+        Self {
+            target,
+            search: None,
+            page: 1,
+            page_size: 20,
+        }
+    }
     pub fn with_search(mut self, search: impl Into<String>) -> Self {
         self.search = Some(search.into());
         self
     }
-
     pub fn with_page(mut self, page: u64) -> Self {
-        self.page = Some(page);
+        self.page = page;
         self
     }
-
-    pub fn with_page_size(mut self, page_size: u64) -> Self {
-        self.page_size = Some(page_size);
+    pub fn with_page_size(mut self, size: u64) -> Self {
+        self.page_size = size;
         self
     }
-
-    pub fn to_query_string(&self) -> String {
-        let mut params = Vec::new();
-        if let Some(search) = self.search.as_deref().filter(|value| !value.is_empty()) {
-            params.push(format!(
-                "search={}",
-                crate::api::common::encode_query_value(search)
+    pub fn to_query_string(&self) -> crate::Result<String> {
+        if !(1..=1_000_000).contains(&self.page)
+            || !(1..=100).contains(&self.page_size)
+            || self.search.as_ref().is_some_and(|s| s.len() > 255)
+        {
+            return Err(crate::ClientError::Config(
+                "Invalid pricing pagination or search".into(),
             ));
         }
-        if let Some(page) = self.page {
-            params.push(format!("page={page}"));
+        let mut query = self.target.query()?;
+        if let Some(s) = self.search.as_deref().filter(|s| !s.is_empty()) {
+            query.push_str(&format!(
+                "&search={}",
+                crate::api::common::encode_query_value(s)
+            ));
         }
-        if let Some(page_size) = self.page_size {
-            params.push(format!("page_size={page_size}"));
-        }
-        if let Some(limit) = self.limit {
-            params.push(format!("limit={limit}"));
-        }
-        if let Some(offset) = self.offset {
-            params.push(format!("offset={offset}"));
-        }
-        params.join("&")
+        query.push_str(&format!("&page={}&page_size={}", self.page, self.page_size));
+        Ok(query)
     }
 }
 
@@ -115,8 +174,8 @@ pub struct CreatePricingRequest {
     pub model_name: String,
     #[serde(rename = "billing_dimension")]
     pub billing_dimension: String,
-    #[serde(rename = "tenant_id")]
-    pub tenant_id: Option<String>,
+    #[serde(flatten)]
+    pub target: PricingTarget,
     pub input_price_per_1k: String,
     pub output_price_per_1k: String,
     pub currency: String,
@@ -136,25 +195,21 @@ pub struct CreatePricingResponse {
     pub input_price_per_1k: String,
     pub output_price_per_1k: String,
     pub is_default: bool,
-    #[serde(default = "default_pricing_version")]
     pub version: i64,
 }
 
 /// 更新定价响应
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdatePricingResponse {
-    #[serde(default)]
     pub success: bool,
-    #[serde(default)]
     pub message: String,
-    #[serde(default)]
     pub pricing_id: String,
-    #[serde(default = "default_pricing_version")]
     pub version: i64,
 }
 
 impl CreatePricingRequest {
     pub fn new(
+        target: PricingTarget,
         model_name: impl Into<String>,
         billing_dimension: impl Into<String>,
         input_price_per_1k: impl Into<String>,
@@ -164,7 +219,7 @@ impl CreatePricingRequest {
         Self {
             model_name: model_name.into(),
             billing_dimension: billing_dimension.into(),
-            tenant_id: None,
+            target,
             input_price_per_1k: input_price_per_1k.into(),
             output_price_per_1k: output_price_per_1k.into(),
             currency: currency.into(),
@@ -174,21 +229,35 @@ impl CreatePricingRequest {
         }
     }
 
-    /// Set the tenant that owns this pricing model. Global pricing rows are
-    /// managed by the server and cannot be created through the admin API.
-    pub fn with_tenant_id(mut self, tenant_id: impl Into<String>) -> Self {
-        self.tenant_id = Some(tenant_id.into());
-        self
+    pub fn validate(&self) -> crate::Result<()> {
+        self.target.validate()?;
+        if self.model_name.trim().is_empty()
+            || self.model_name.chars().count() > 255
+            || self.model_name.chars().any(char::is_control)
+            || !matches!(self.billing_dimension.as_str(), "provideraccount" | "node")
+            || self.currency.len() != 3
+            || !self.currency.bytes().all(|c| c.is_ascii_uppercase())
+        {
+            return Err(crate::ClientError::Config(
+                "Invalid pricing model, dimension or currency".into(),
+            ));
+        }
+        crate::api::tenant_pricing::validate_decimal(&self.input_price_per_1k)?;
+        crate::api::tenant_pricing::validate_decimal(&self.output_price_per_1k)?;
+        Ok(())
     }
 }
 
 /// 更新定价请求
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct UpdatePricingRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub input_price_per_1k: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub output_price_per_1k: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_until: Option<String>,
-    pub expected_version: Option<i64>,
+    pub expected_version: i64,
 }
 
 impl UpdatePricingRequest {
@@ -207,7 +276,7 @@ impl UpdatePricingRequest {
     }
 
     pub fn with_expected_version(mut self, version: i64) -> Self {
-        self.expected_version = Some(version);
+        self.expected_version = version;
         self
     }
 }
@@ -224,8 +293,21 @@ pub struct MakeDefaultPricingResponse {
     pub success: bool,
     pub message: String,
     pub pricing_id: String,
-    #[serde(default = "default_pricing_version")]
     pub version: i64,
+}
+
+/// A deletion retains the exact resource identity; platform rows cannot be deleted.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeletePricingResponse {
+    pub success: bool,
+    pub message: String,
+    pub pricing_id: String,
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchDefaultPricingResponse {
+    pub success: bool,
+    pub message: String,
+    pub pricing_ids: Vec<String>,
 }
 
 /// 计算费用请求
@@ -278,106 +360,86 @@ pub struct CostCalculationResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CalculateCostRequest, CostCalculationResponse, ModelAccessMode, PricingInfo,
-        PricingQueryParams, UpdatePricingRequest,
-    };
-
+    use super::*;
+    use serde_json::json;
     #[test]
     fn pricing_query_serializes_server_side_search_and_pagination() {
-        let query = PricingQueryParams::default()
-            .with_search("gpt 4")
+        let query = PricingQueryParams::new(PricingTarget::Platform)
+            .with_search("gpt 4&tenant_id=other")
             .with_page(2)
             .with_page_size(50)
-            .to_query_string();
-        assert_eq!(query, "search=gpt%204&page=2&page_size=50");
+            .to_query_string()
+            .unwrap();
+        assert_eq!(
+            query,
+            "scope_type=platform&search=gpt%204%26tenant_id%3Dother&page=2&page_size=50"
+        );
+        assert!(
+            PricingQueryParams::new(PricingTarget::Platform)
+                .with_page_size(0)
+                .to_query_string()
+                .is_err()
+        );
     }
-
     #[test]
     fn pricing_mutations_carry_concurrency_and_tenant_context() {
+        let tenant_id = uuid::Uuid::new_v4();
+        let target = PricingTarget::Tenant { tenant_id };
         let create =
-            super::CreatePricingRequest::new("gpt-4o", "provideraccount", "0.01", "0.02", "CNY")
-                .with_tenant_id("11111111-1111-1111-1111-111111111111");
-        assert_eq!(
-            serde_json::to_value(create).unwrap()["tenant_id"],
-            "11111111-1111-1111-1111-111111111111"
-        );
-
-        let update = UpdatePricingRequest::new().with_expected_version(7);
-        assert_eq!(serde_json::to_value(update).unwrap()["expected_version"], 7);
-
-        let calculate = CalculateCostRequest {
-            model: "gpt-4o".to_string(),
-            input_tokens: 1,
-            output_tokens: 2,
-            tenant_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
-            mode: Some(ModelAccessMode::NodeDispatch),
-        };
-        let calculate = serde_json::to_value(calculate).unwrap();
-        assert_eq!(
-            calculate["tenant_id"],
-            "11111111-1111-1111-1111-111111111111"
-        );
-        assert_eq!(calculate["mode"], "node_dispatch");
-        assert_eq!(
-            serde_json::to_value(CalculateCostRequest::new("gemma3:270m", 1, 2))
+            CreatePricingRequest::new(target, "gpt-4o", "provideraccount", "0.01", "0.02", "CNY");
+        let value = serde_json::to_value(create).unwrap();
+        assert_eq!(value["scope_type"], "tenant");
+        assert_eq!(value["tenant_id"], json!(tenant_id));
+        let global = serde_json::to_value(CreatePricingRequest::new(
+            PricingTarget::Platform,
+            "gpt-4o",
+            "provideraccount",
+            "0.01",
+            "0.02",
+            "CNY",
+        ))
+        .unwrap();
+        assert_eq!(global["scope_type"], "platform");
+        assert!(global.get("tenant_id").is_none());
+        let patch = serde_json::to_value(
+            UpdatePricingRequest::new()
+                .with_input_price_per_1k("0.0000000001")
+                .with_expected_version(7),
+        )
+        .unwrap();
+        assert_eq!(patch["expected_version"], 7);
+        assert!(patch.get("effective_until").is_none());
+        let cost = CalculateCostRequest::new("model", 1, 2)
+            .with_tenant_id(tenant_id.to_string())
+            .with_mode(ModelAccessMode::NodeDispatch);
+        let cost = serde_json::to_value(cost).unwrap();
+        assert_eq!(cost["tenant_id"], tenant_id.to_string());
+        assert_eq!(cost["mode"], "node_dispatch");
+        assert!(
+            serde_json::to_value(CalculateCostRequest::new("model", 1, 2))
                 .unwrap()
-                .get("mode"),
-            None
+                .get("mode")
+                .is_none()
         );
     }
-
     #[test]
     fn cost_response_accepts_decimal_strings_and_numbers() {
-        let from_string: super::CostCalculationResponse =
-            serde_json::from_value(serde_json::json!({
-                "model": "gpt-4o",
-                "input_cost": "0.01",
-                "output_cost": "0.02",
-                "total_cost": "0.03",
-                "currency": "CNY"
-            }))
-            .unwrap();
-        assert!((from_string.total_cost - 0.03).abs() < f64::EPSILON);
-
-        let from_number: super::CostCalculationResponse =
-            serde_json::from_value(serde_json::json!({
-                "model": "gpt-4o",
-                "input_cost": 0.01,
-                "output_cost": 0.02,
-                "total_cost": 0.03,
-                "currency": "CNY"
-            }))
-            .unwrap();
-        assert!((from_number.total_cost - 0.03).abs() < f64::EPSILON);
+        for cost in [json!("0.03"), json!(0.03)] {
+            let response:CostCalculationResponse=serde_json::from_value(json!({"model":"m","input_cost":cost,"output_cost":cost,"total_cost":cost,"currency":"CNY"})).unwrap();
+            assert!((response.total_cost - 0.03).abs() < f64::EPSILON);
+        }
     }
-
     #[test]
-    fn cost_response_rejects_non_finite_values_and_defaults_missing_versions() {
-        let non_finite = serde_json::from_value::<CostCalculationResponse>(serde_json::json!({
-            "model": "gpt-4o",
-            "input_cost": "NaN",
-            "output_cost": "0.02",
-            "total_cost": "0.02",
-            "currency": "CNY"
-        }));
-        assert!(non_finite.is_err());
-
-        let pricing: PricingInfo = serde_json::from_value(serde_json::json!({
-            "id": "pricing-1",
-            "tenant_id": null,
-            "model_name": "gpt-4o",
-            "billing_dimension": "provideraccount",
-            "input_price_per_1k": "0.01",
-            "output_price_per_1k": "0.02",
-            "currency": "CNY",
-            "is_default": true,
-            "is_effective": true,
-            "effective_from": "2026-01-01T00:00:00Z",
-            "effective_until": null,
-            "created_at": "2026-01-01T00:00:00Z"
-        }))
-        .unwrap();
-        assert_eq!(pricing.version, 1);
+    fn cost_response_rejects_non_finite_values_and_pricing_requires_real_versions() {
+        assert!(serde_json::from_value::<CostCalculationResponse>(json!({"model":"m","input_cost":"NaN","output_cost":"0","total_cost":"0","currency":"CNY"})).is_err());
+        let base = json!({"id":uuid::Uuid::new_v4(),"scope_type":"platform","tenant_id":null,"model_name":"m","billing_dimension":"provideraccount","input_price_per_1k":"1","output_price_per_1k":"2","currency":"CNY","is_default":false,"is_effective":true,"effective_from":"2026-01-01T00:00:00Z","effective_until":null,"created_at":"2026-01-01T00:00:00Z"});
+        assert!(serde_json::from_value::<PricingInfo>(base.clone()).is_err());
+        let mut with_version = base;
+        with_version["version"] = json!(7);
+        let valid: PricingInfo = serde_json::from_value(with_version.clone()).unwrap();
+        valid.validate_for(PricingTarget::Platform).unwrap();
+        with_version["version"] = json!(0);
+        let invalid: PricingInfo = serde_json::from_value(with_version).unwrap();
+        assert!(invalid.validate_for(PricingTarget::Platform).is_err());
     }
 }

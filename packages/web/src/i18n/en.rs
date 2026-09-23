@@ -2387,5 +2387,28 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     }
     super::tenant_pricing::register(&mut m, false);
 
+    m.insert("platform_pricing.target", "Management target");
+    m.insert("platform_pricing.tenant", "Explicit tenant");
+    m.insert(
+        "platform_pricing.invalid_target",
+        "Enter a real tenant UUID. An invalid selector never means all tenants.",
+    );
+    m.insert("platform_pricing.apply", "Apply target");
+    m.insert(
+        "platform_pricing.explicit_scope",
+        "Platform and tenant prices are managed separately. Changing target clears unsaved forms.",
+    );
+    m.insert(
+        "platform_pricing.invalid_amount",
+        "Enter a nonnegative exact decimal fitting DECIMAL(20,10).",
+    );
+    m.insert("platform_pricing.current", "Managing:");
+    m.insert(
+        "platform_pricing.command_hint",
+        "Commands are sent once. Reload the list to check an uncertain network outcome.",
+    );
+
+    m.insert("platform_pricing.global", "Platform shared pricing");
+
     m
 });

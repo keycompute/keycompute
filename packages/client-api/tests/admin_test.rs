@@ -2,7 +2,7 @@
 
 use client_api::api::admin::{
     AccountQueryParams, AdminApi, CalculateCostRequest, CreateAccountRequest, CreatePricingRequest,
-    PendingTokenQueryParams, ReleaseBalanceReservationRequest, UpdateBalanceRequest,
+    PendingTokenQueryParams, PricingTarget, ReleaseBalanceReservationRequest, UpdateBalanceRequest,
     UpdateUserRequest,
 };
 use client_api::error::ClientError;
@@ -36,9 +36,9 @@ fn account_json(id: &str) -> serde_json::Value {
 fn pricing_json(id: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
-        "tenant_id": null,
+        "tenant_id": null, "scope_type":"platform", "version":3,
         "model_name": format!("model-{id}"),
-        "billing_dimension": "openai",
+        "billing_dimension": "provideraccount",
         "input_price_per_1k": "0.03",
         "output_price_per_1k": "0.06",
         "currency": "USD",
@@ -709,14 +709,14 @@ async fn test_list_pricing_success() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/pricing"))
+        .and(path("/api/v1/platform/pricing"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "pricing": [
             {
-                "id": "pricing_001",
-                "tenant_id": null,
+                "id": "11111111-1111-4111-8111-111111111111",
+                "tenant_id": null, "scope_type":"platform", "version":3,
                 "model_name": "gpt-4",
-                "billing_dimension": "openai",
+                "billing_dimension": "provideraccount",
                 "input_price_per_1k": "0.03",
                 "output_price_per_1k": "0.06",
                 "currency": "USD",
@@ -727,10 +727,10 @@ async fn test_list_pricing_success() {
                 "created_at": "2024-01-01T00:00:00Z"
             },
             {
-                "id": "pricing_002",
-                "tenant_id": null,
+                "id": "22222222-2222-4222-8222-222222222222",
+                "tenant_id": null, "scope_type":"platform", "version":3,
                 "model_name": "gpt-3.5-turbo",
-                "billing_dimension": "openai",
+                "billing_dimension": "provideraccount",
                 "input_price_per_1k": "0.0015",
                 "output_price_per_1k": "0.002",
                 "currency": "USD",
@@ -743,13 +743,15 @@ async fn test_list_pricing_success() {
             ],
             "total": 2,
             "page": 1,
-            "page_size": 20,
+            "page_size": 100,
             "total_pages": 1
         })))
         .mount(&mock_server)
         .await;
 
-    let result = admin_api.list_pricing(fixtures::TEST_ACCESS_TOKEN).await;
+    let result = admin_api
+        .list_pricing(PricingTarget::Platform, fixtures::TEST_ACCESS_TOKEN)
+        .await;
 
     assert!(result.is_ok(), "Expected Ok, got {:?}", result);
     let pricing = result.unwrap();
@@ -762,33 +764,31 @@ async fn test_list_pricing_collects_all_pages() {
     let (client, mock_server) = create_test_client().await;
     let admin_api = AdminApi::new(&client);
 
-    for (page, id) in [(1, "pricing_001"), (2, "pricing_002")] {
-        Mock::given(method("GET"))
-            .and(path("/api/v1/pricing"))
-            .and(query_param("page", page.to_string()))
-            .and(query_param("page_size", "100"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "pricing": [pricing_json(id)],
-                "total": 2,
-                "page": page,
-                "page_size": 100,
-                "total_pages": 2
-            })))
-            .mount(&mock_server)
-            .await;
+    for page in 1u64..=2 {
+        let count = if page == 1 { 100 } else { 1 };
+        let rows = (0..count)
+            .map(|i| {
+                pricing_json(
+                    &uuid::Uuid::from_u128(u128::from(1 + (page - 1) * 100 + i)).to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        Mock::given(method("GET")).and(path("/api/v1/platform/pricing"))
+            .and(query_param("scope_type","platform")).and(query_param("page",page.to_string())).and(query_param("page_size","100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"pricing":rows,"total":101,"page":page,"page_size":100,"total_pages":2}))).expect(1).mount(&mock_server).await;
     }
-
     let pricing = admin_api
-        .list_pricing(fixtures::TEST_ACCESS_TOKEN)
+        .list_pricing(PricingTarget::Platform, fixtures::TEST_ACCESS_TOKEN)
         .await
         .unwrap();
-
+    assert_eq!(pricing.len(), 101);
     assert_eq!(
-        pricing
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect::<Vec<_>>(),
-        ["pricing_001", "pricing_002"]
+        pricing.first().unwrap().id,
+        uuid::Uuid::from_u128(1).to_string()
+    );
+    assert_eq!(
+        pricing.last().unwrap().id,
+        uuid::Uuid::from_u128(101).to_string()
     );
 }
 
@@ -868,21 +868,28 @@ async fn test_create_pricing_success() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("POST"))
-        .and(path("/api/v1/pricing"))
+        .and(path("/api/v1/platform/pricing"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "success": true,
             "message": "Pricing created",
-            "pricing_id": "pricing_new_001",
+            "pricing_id": "33333333-3333-4333-8333-333333333333",
             "model_name": "claude-3-opus",
-            "billing_dimension": "anthropic",
+            "billing_dimension": "provideraccount",
             "input_price_per_1k": "0.015",
             "output_price_per_1k": "0.075",
-            "is_default": false
+            "is_default": false, "version":1
         })))
         .mount(&mock_server)
         .await;
 
-    let req = CreatePricingRequest::new("claude-3-opus", "anthropic", "0.015", "0.075", "USD");
+    let req = CreatePricingRequest::new(
+        PricingTarget::Platform,
+        "claude-3-opus",
+        "provideraccount",
+        "0.015",
+        "0.075",
+        "USD",
+    );
     let result = admin_api
         .create_pricing(&req, fixtures::TEST_ACCESS_TOKEN)
         .await;
@@ -897,15 +904,21 @@ async fn test_delete_pricing_success() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/pricing/pricing_001"))
+        .and(path("/api/v1/platform/pricing/11111111-1111-4111-8111-111111111111"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "message": "Pricing deleted successfully"
+            "message": "Pricing deleted successfully", "success":true,"pricing_id":"11111111-1111-4111-8111-111111111111"
         })))
         .mount(&mock_server)
         .await;
 
     let result = admin_api
-        .delete_pricing("pricing_001", fixtures::TEST_ACCESS_TOKEN)
+        .delete_pricing(
+            PricingTarget::Tenant {
+                tenant_id: uuid::Uuid::new_v4(),
+            },
+            "11111111-1111-4111-8111-111111111111",
+            fixtures::TEST_ACCESS_TOKEN,
+        )
         .await;
 
     assert!(result.is_ok());

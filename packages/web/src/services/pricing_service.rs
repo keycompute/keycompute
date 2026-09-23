@@ -4,27 +4,25 @@ use client_api::error::Result;
 use client_api::{
     AdminApi,
     api::admin::{
-        CreatePricingRequest, CreatePricingResponse, MakeDefaultPricingResponse, MessageResponse,
-        PricingInfo, PricingPage, PricingQueryParams, SetDefaultPricingRequest,
-        UpdatePricingRequest, UpdatePricingResponse,
+        BatchDefaultPricingResponse, CreatePricingRequest, CreatePricingResponse,
+        DeletePricingResponse, MakeDefaultPricingResponse, PricingInfo, PricingPage,
+        PricingQueryParams, PricingTarget, SetDefaultPricingRequest, UpdatePricingRequest,
+        UpdatePricingResponse,
     },
 };
 
 use super::api_client::get_client;
 
-/// 全局默认定价使用的 nil UUID。
-pub const GLOBAL_DEFAULT_TENANT_ID: &str = "00000000-0000-0000-0000-000000000000";
-
-/// 判断价格行是否属于所有租户共享的全局默认定价。
-pub fn is_global_default(tenant_id: &Option<String>) -> bool {
-    tenant_id
-        .as_deref()
-        .is_some_and(|id| id == GLOBAL_DEFAULT_TENANT_ID)
+/// Ownership is declared explicitly by the server, not inferred from an empty UUID.
+pub fn is_platform_price(row: &PricingInfo) -> bool {
+    row.target()
+        .is_ok_and(|target| target == PricingTarget::Platform)
 }
 
-pub async fn list(token: &str) -> Result<Vec<PricingInfo>> {
-    let client = get_client();
-    AdminApi::new(&client).list_pricing(token).await
+pub async fn list(target: PricingTarget, token: &str) -> Result<Vec<PricingInfo>> {
+    AdminApi::new(&get_client())
+        .list_pricing(target, token)
+        .await
 }
 
 pub async fn list_page(params: &PricingQueryParams, token: &str) -> Result<PricingPage> {
@@ -40,43 +38,63 @@ pub async fn create(req: CreatePricingRequest, token: &str) -> Result<CreatePric
 }
 
 pub async fn update(
+    target: PricingTarget,
     id: &str,
     req: UpdatePricingRequest,
     token: &str,
 ) -> Result<UpdatePricingResponse> {
     let client = get_client();
-    AdminApi::new(&client).update_pricing(id, &req, token).await
+    AdminApi::new(&client)
+        .update_pricing(target, id, &req, token)
+        .await
 }
 
-pub async fn delete(id: &str, token: &str) -> Result<MessageResponse> {
-    let client = get_client();
-    AdminApi::new(&client).delete_pricing(id, token).await
-}
-
-pub async fn make_default(id: &str, token: &str) -> Result<MakeDefaultPricingResponse> {
-    let client = get_client();
-    AdminApi::new(&client).make_pricing_default(id, token).await
-}
-
-pub async fn set_defaults(req: SetDefaultPricingRequest, token: &str) -> Result<MessageResponse> {
+pub async fn delete(target: PricingTarget, id: &str, token: &str) -> Result<DeletePricingResponse> {
     let client = get_client();
     AdminApi::new(&client)
-        .set_default_pricing(&req, token)
+        .delete_pricing(target, id, token)
+        .await
+}
+
+pub async fn make_default(
+    target: PricingTarget,
+    id: &str,
+    token: &str,
+) -> Result<MakeDefaultPricingResponse> {
+    let client = get_client();
+    AdminApi::new(&client)
+        .make_pricing_default(target, id, token)
+        .await
+}
+
+pub async fn set_defaults(
+    target: PricingTarget,
+    req: SetDefaultPricingRequest,
+    token: &str,
+) -> Result<BatchDefaultPricingResponse> {
+    let client = get_client();
+    AdminApi::new(&client)
+        .set_default_pricing(target, &req, token)
         .await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{GLOBAL_DEFAULT_TENANT_ID, is_global_default};
-
+    use super::*;
     #[test]
-    fn only_nil_tenant_is_the_global_default_scope() {
-        assert!(is_global_default(&Some(
-            GLOBAL_DEFAULT_TENANT_ID.to_string()
-        )));
-        assert!(!is_global_default(&None));
-        assert!(!is_global_default(&Some(
-            "11111111-1111-1111-1111-111111111111".to_string()
-        )));
+    fn only_explicit_platform_scope_is_global() {
+        let mut row: PricingInfo=serde_json::from_value(serde_json::json!({
+            "id":"11111111-1111-4111-8111-111111111111","scope_type":"platform","tenant_id":null,
+            "model_name":"fixture","billing_dimension":"node","input_price_per_1k":"0.1",
+            "output_price_per_1k":"0.2","currency":"CNY","is_default":true,"is_effective":true,
+            "effective_from":"2026-01-01T00:00:00Z","effective_until":null,"created_at":"2026-01-01T00:00:00Z","version":3
+        })).unwrap();
+        assert!(is_platform_price(&row));
+        row.tenant_id = Some(uuid::Uuid::nil().to_string());
+        assert!(!is_platform_price(&row));
+        row.scope_type = client_api::api::admin::PricingScopeType::Tenant;
+        assert!(!is_platform_price(&row));
+        row.tenant_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(!is_platform_price(&row));
     }
 }

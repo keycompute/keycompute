@@ -1,4 +1,41 @@
-use client_api::api::admin::{CreatePricingRequest, PricingQueryParams};
+mod authority;
+use authority::PricingIdentity;
+
+#[dioxus::prelude::component]
+pub fn Pricing() -> dioxus::prelude::Element {
+    let auth = use_context::<AuthStore>();
+    let users = use_context::<UserStore>();
+    let i18n = use_i18n();
+    let identity = PricingIdentity::from_stores(auth, users);
+    rsx! {if let Some(identity)=identity {for key in [format!("{identity:?}")]{PricingWorkspace{key:"{key}",identity}}}
+    else {p {role:"alert",{i18n.t("common.admin_only_page")}}}}
+}
+#[component]
+fn PricingWorkspace(identity: PricingIdentity) -> Element {
+    let i18n = use_i18n();
+    let mut target = use_signal(|| PricingTarget::Platform);
+    let mut mode = use_signal(|| "platform".to_string());
+    let mut tenant = use_signal(String::new);
+    let mut error = use_signal(String::new);
+    rsx! {div {class:"platform-pricing-workspace",
+        section {class:"page-container",aria_label:i18n.t("platform_pricing.target"),
+            label {class:"form-label",r#for:"platform-pricing-scope",{i18n.t("platform_pricing.target")}}
+            select {id:"platform-pricing-scope",class:"input-field",value:"{mode}",onchange:move|e|mode.set(e.value()),
+                option {value:"platform",{i18n.t("platform_pricing.global")}} option {value:"tenant",{i18n.t("platform_pricing.tenant")}}
+            }
+            if mode()=="tenant" {label {class:"form-label",r#for:"platform-pricing-tenant",{i18n.t("pricing.tenant_id")}}
+                input {id:"platform-pricing-tenant",class:"input-field",value:"{tenant}",maxlength:"36",oninput:move|e|tenant.set(e.value())}}
+            button {class:"btn btn-secondary",onclick:move |_|match authority::parse_target(&mode(),&tenant()) {
+                Ok(next)=>{target.set(next);error.set(String::new());},Err(_)=>error.set(i18n.t("platform_pricing.invalid_target").into())
+            },{i18n.t("platform_pricing.apply")}}
+            if !error().is_empty(){p {class:"alert alert-error",role:"alert","{error}"}}
+            p {class:"text-secondary",{i18n.t("platform_pricing.explicit_scope")}}
+        }
+        for key in [format!("{:?}",target())]{PricingRecords{key:"{key}",identity,target:target()}}
+    }}
+}
+
+use client_api::api::admin::{CreatePricingRequest, PricingQueryParams, PricingTarget};
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use ui::{Badge, BadgeVariant, ConfirmModal, PageHeader, Pagination, Table, TableHead};
@@ -43,8 +80,7 @@ use crate::hooks::use_i18n::use_i18n;
 use crate::i18n::I18n;
 use crate::services::{
     api_client::with_auto_refresh,
-    pricing_service::{self, is_global_default},
-    tenant_service,
+    pricing_service::{self, is_platform_price},
 };
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
@@ -72,12 +108,9 @@ fn pricing_col_count(can_manage_platform: bool) -> u32 {
     if can_manage_platform { 7 } else { 6 }
 }
 
-/// 定价管理页面
-///
-/// - 普通用户：只读查看定价策略列表
-/// - Admin：完整 CRUD（创建/删除/设置默认）
+/// Explicit root-managed pricing records for one chosen target.
 #[component]
-pub fn Pricing() -> Element {
+fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
@@ -90,6 +123,7 @@ pub fn Pricing() -> Element {
 
     // 控制创建弹窗
     let mut show_create = use_signal(|| false);
+    let mut mutating = use_signal(|| false);
     let mut editing_pricing = use_signal(|| None as Option<client_api::api::admin::PricingInfo>);
     let mut delete_candidate = use_signal(|| Option::<(String, String)>::None);
     let mut delete_modal_open = use_signal(|| false);
@@ -116,7 +150,7 @@ pub fn Pricing() -> Element {
         let current_query = query();
         async move {
             let request_key = (current_query.clone(), refresh_revision);
-            let mut params = PricingQueryParams::default()
+            let mut params = PricingQueryParams::new(target)
                 .with_page(current_query.page as u64)
                 .with_page_size(current_query.page_size as u64);
             if !current_query.search.is_empty() {
@@ -127,6 +161,13 @@ pub fn Pricing() -> Element {
                 async move { pricing_service::list_page(&params, &token).await }
             })
             .await;
+            let result = if identity.is_current(auth_store, user_store) {
+                result
+            } else {
+                Err(client_api::ClientError::Other(
+                    "Pricing workspace changed".into(),
+                ))
+            };
             KeyedResourceValue::new(request_key, result)
         }
     });
@@ -139,7 +180,9 @@ pub fn Pricing() -> Element {
     let col_count = pricing_col_count(can_manage_platform);
 
     rsx! {
-        div { class: "page-container",
+        div { class: "page-container platform-pricing-records",
+            p {class:"platform-pricing-current",{i18n.t("platform_pricing.current")} " " {authority::target_label(target,&i18n)}}
+            p {class:"text-secondary",{i18n.t("platform_pricing.command_hint")}}
             PageHeader {
                 title: i18n.t("page.pricing").to_string(),
                 description: page_description.to_string(),
@@ -184,6 +227,7 @@ pub fn Pricing() -> Element {
                     pricing_list.state().cloned(),
                     pricing_list(),
                 );
+                let load_error = result.as_ref().and_then(|r|r.as_ref().err()).map(crate::services::api_client::user_error_message);
                 let (is_empty, empty_text) = match &result {
                     None => (true, i18n.t("table.loading")),
                     Some(Err(_)) => (true, i18n.t("common.load_failed")),
@@ -206,6 +250,7 @@ pub fn Pricing() -> Element {
                     .map(|result| result.pricing.as_slice())
                     .unwrap_or_default();
                 rsx! {
+                    if let Some(error)=load_error {p {class:"alert alert-error",role:"alert","{error}"}}
                     div { class: "pricing-table-shell table-pagination-panel",
                         div { class: "pricing-table-intro",
                             div {
@@ -234,7 +279,7 @@ pub fn Pricing() -> Element {
                                     }
                                 }
                             }
-                            tbody { // 显示租户 ID：nil UUID 表示全局默认 // 显示租户 ID：nil UUID 表示全局默认
+                            tbody {
 
                                 for p in paged_list.iter() {
                                         tr { key: "{p.id}",
@@ -255,18 +300,12 @@ pub fn Pricing() -> Element {
                                                 }
                                             }
                                             td {
-                                                // 显示租户 ID：nil UUID 表示全局默认
-                                                if let Some(tenant_id) = &p.tenant_id {
-                                                    if is_global_default(&p.tenant_id) {
-                                                        span { class: "pricing-tenant-global", {i18n.t("pricing.global")} }
-                                                    } else {
-                                                        span { class: "pricing-tenant-code",
-                                                            "{tenant_id.chars().take(8).collect::<String>()}"
-                                                        }
-                                                    }
-                                                } else {
-                                                    span { class: "pricing-tenant-code", "-" }
+                                                if is_platform_price(p) {
+                                                    span {class:"pricing-tenant-global",{i18n.t("platform_pricing.global")}}
+                                                } else if let Some(tenant_id)=&p.tenant_id {
+                                                    span {class:"pricing-tenant-code",title:tenant_id.clone(),"{tenant_id}"}
                                                 }
+
                                             }
                                             td {
                                                 div { class: "pricing-amount-cell",
@@ -320,10 +359,15 @@ pub fn Pricing() -> Element {
                                                                     button {
                                                                         class: "btn btn-sm btn-secondary",
                                                                         onclick: move |_| {
+                                                                            if mutating() || !identity.is_current(auth_store,user_store){return;}
+                                                                            mutating.set(true);
                                                                             let id = pid.clone();
                                                                             let token = auth_store.token().unwrap_or_default();
                                                                             spawn(async move {
-                                                                                match pricing_service::make_default(&id, &token).await {
+                                                                                let result=pricing_service::make_default(target,&id,&token).await;
+                                                                                if !identity.is_current(auth_store,user_store){return;}
+                                                                                mutating.set(false);
+                                                                                match result {
                                                                                     Ok(_) => {
                                                                                         op_ok.set(i18n.t("pricing.set_default_ok").to_string());
                                                                                         op_err.set(String::new());
@@ -361,7 +405,7 @@ pub fn Pricing() -> Element {
                                                             }
                                                         }
                                                         // 全局默认定价不允许删除，仅保留编辑按钮
-                                                        if !is_global_default(&p.tenant_id) {
+                                                        if !is_platform_price(p) {
                                                             {
                                                                 let pid = p.id.clone();
                                                                 let model_name = p.model_name.clone();
@@ -411,7 +455,7 @@ pub fn Pricing() -> Element {
             // 创建定价弹窗
             if show_create() {
                 CreatePricingModal {
-                    auth_store,
+                    auth_store, target, identity,
                     on_close: move |_| show_create.set(false),
                     on_created: move |_| {
                         show_create.set(false);
@@ -428,8 +472,8 @@ pub fn Pricing() -> Element {
             }
 
             if let Some(pricing) = editing_pricing() {
-                EditPricingModal {
-                    auth_store,
+                for key in [format!("{}:{}",pricing.id,pricing.version)] { EditPricingModal {
+                    key:"{key}",auth_store, target, identity,
                     pricing_id: pricing.id.clone(),
                     pricing_model: pricing.model_name.clone(),
                     pricing_provider: pricing.billing_dimension.clone(),
@@ -450,7 +494,7 @@ pub fn Pricing() -> Element {
                         });
                     },
                 }
-            }
+            }}
 
             ConfirmModal {
                 open: delete_modal_open,
@@ -464,13 +508,18 @@ pub fn Pricing() -> Element {
                 close_label: i18n.t("common.close").to_string(),
                 danger: true,
                 onconfirm: move |_| {
+                    if mutating() || !identity.is_current(auth_store,user_store){return;}
                     let candidate = delete_candidate();
                     delete_candidate.set(None);
                     delete_modal_open.set(false);
                     if let Some((id, _)) = candidate {
+                        mutating.set(true);
                         let token = auth_store.token().unwrap_or_default();
                         spawn(async move {
-                            match pricing_service::delete(&id, &token).await {
+                            let result=pricing_service::delete(target,&id,&token).await;
+                            if !identity.is_current(auth_store,user_store){return;}
+                            mutating.set(false);
+                            match result {
                                 Ok(_) => {
                                     op_ok.set(i18n.t("pricing.deleted").to_string());
                                     op_err.set(String::new());
@@ -501,61 +550,40 @@ pub fn Pricing() -> Element {
 #[component]
 fn CreatePricingModal(
     auth_store: AuthStore,
+    target: PricingTarget,
+    identity: authority::PricingIdentity,
     on_close: EventHandler,
     on_created: EventHandler,
 ) -> Element {
     let i18n = use_i18n();
     let mut model = use_signal(String::new);
     let mut provider = use_signal(|| "provideraccount".to_string());
-    let mut tenant_id = use_signal(|| None::<String>);
+    let user_store = use_context::<UserStore>();
     let mut input_price = use_signal(String::new);
     let mut output_price = use_signal(String::new);
     let mut currency = use_signal(|| "CNY".to_string());
     let mut saving = use_signal(|| false);
     let mut form_err = use_signal(String::new);
 
-    // 获取租户列表
-    let tenant_list = use_resource(move || async move {
-        with_auto_refresh(auth_store, |token| async move {
-            tenant_service::list_active(&token).await
-        })
-        .await
-    });
-
     let on_submit = move |_| {
-        let m = model();
+        if saving() || !identity.is_current(auth_store, user_store) {
+            return;
+        }
+        let m = model().trim().to_owned();
         let p = provider();
-        let ip_str = input_price();
-        let op_str = output_price();
+        let ip_str = input_price().trim().to_owned();
+        let op_str = output_price().trim().to_owned();
         let cur = currency();
-        let tid = tenant_id();
         if m.is_empty() || p.is_empty() || ip_str.is_empty() || op_str.is_empty() {
             form_err.set(i18n.t("pricing.fill_all").to_string());
             return;
         }
         // Keep the exact model ID. The billing dimension, not a name prefix,
         // selects which execution mode this price belongs to.
-        // tenant_id 保持原样（None 表示未选择，Some(id) 表示选择了具体租户）
-        // 注意：由于已移除“全局默认”选项，用户无法创建全局默认定价
-        let tid = tid.filter(|id| !id.is_empty());
-        if tid.is_none() {
-            form_err.set(i18n.t("pricing.tenant_required").to_string());
-            return;
-        }
-        if ip_str.parse::<f64>().is_err() {
-            form_err.set(i18n.t("pricing.invalid_input_price").to_string());
-            return;
-        }
-        if op_str.parse::<f64>().is_err() {
-            form_err.set(i18n.t("pricing.invalid_output_price").to_string());
-            return;
-        }
-        if ip_str.parse::<f64>().ok().is_some_and(|v| v < 0.0) {
-            form_err.set(i18n.t("pricing.negative_input_price").to_string());
-            return;
-        }
-        if op_str.parse::<f64>().ok().is_some_and(|v| v < 0.0) {
-            form_err.set(i18n.t("pricing.negative_output_price").to_string());
+        if client_api::api::tenant_pricing::validate_decimal(&ip_str).is_err()
+            || client_api::api::tenant_pricing::validate_decimal(&op_str).is_err()
+        {
+            form_err.set(i18n.t("platform_pricing.invalid_amount").into());
             return;
         }
         saving.set(true);
@@ -565,7 +593,7 @@ fn CreatePricingModal(
             let req = CreatePricingRequest {
                 model_name: m,
                 billing_dimension: p,
-                tenant_id: tid,
+                target,
                 input_price_per_1k: ip_str,
                 output_price_per_1k: op_str,
                 currency: cur,
@@ -573,7 +601,11 @@ fn CreatePricingModal(
                 effective_from: None,
                 effective_until: None,
             };
-            match pricing_service::create(req, &token).await {
+            let result = pricing_service::create(req, &token).await;
+            if !identity.is_current(auth_store, user_store) {
+                return;
+            }
+            match result {
                 Ok(_) => {
                     saving.set(false);
                     on_created.call(());
@@ -609,6 +641,7 @@ fn CreatePricingModal(
                             class: "input-field",
                             r#type: "text",
                             placeholder: "{i18n.t(\"pricing.model_placeholder\")}",
+                            id: "platform-price-model",
                             value: "{model}",
                             oninput: move |e| model.set(e.value()),
                         }
@@ -627,39 +660,17 @@ fn CreatePricingModal(
                     }
                     div { class: "form-group",
                         label { class: "form-label", {i18n.t("pricing.tenant_id")} }
-                        select {
-                            class: "input-field",
-                            value: "{tenant_id().unwrap_or_default()}",
-                            onchange: move |e| {
-                                let val = e.value();
-                                if val.is_empty() {
-                                    tenant_id.set(None);
-                                } else {
-                                    tenant_id.set(Some(val));
-                                }
-                            },
-                            // 移除“全局默认”选项，全局默认定价由系统自动管理，不允许手动创建
-                            option { value: "", disabled: true, selected: tenant_id().is_none(),
-                                {i18n.t("pricing.tenant_required")}
-                            }
-                            for t in match tenant_list() {
-                                Some(Ok(list)) => list,
-                                _ => vec![],
-                            }
-                            {
-                                option { value: "{t.id}",
-                                    "{t.name} ({t.id.chars().take(8).collect::<String>()})"
-                                }
-                            }
-                        }
+                        p {class:"platform-pricing-target",{authority::target_label(target,&i18n)}}
                     }
                     div { class: "form-group",
                         label { class: "form-label", {i18n.t("pricing.input_price_label")} }
                         input {
                             class: "input-field",
-                            r#type: "number",
+                            r#type: "text",
+                            inputmode: "decimal",
                             placeholder: "{i18n.t(\"pricing.input_placeholder\")}",
-                            step: "0.000001",
+                            id: "platform-price-input",
+                            maxlength: "64",
                             value: "{input_price}",
                             oninput: move |e| input_price.set(e.value()),
                         }
@@ -668,9 +679,11 @@ fn CreatePricingModal(
                         label { class: "form-label", {i18n.t("pricing.output_price_label")} }
                         input {
                             class: "input-field",
-                            r#type: "number",
+                            r#type: "text",
+                            inputmode: "decimal",
                             placeholder: "{i18n.t(\"pricing.output_placeholder\")}",
-                            step: "0.000001",
+                            id: "platform-price-output",
+                            maxlength: "64",
                             value: "{output_price}",
                             oninput: move |e| output_price.set(e.value()),
                         }
@@ -713,6 +726,8 @@ fn CreatePricingModal(
 #[component]
 fn EditPricingModal(
     auth_store: AuthStore,
+    target: PricingTarget,
+    identity: authority::PricingIdentity,
     pricing_id: String,
     pricing_model: String,
     pricing_provider: String,
@@ -724,36 +739,29 @@ fn EditPricingModal(
     on_updated: EventHandler,
 ) -> Element {
     let i18n = use_i18n();
-    let mut input_price = use_signal(|| initial_input_price.clone());
-    let mut output_price = use_signal(|| initial_output_price.clone());
+    let user_store = use_context::<UserStore>();
+    let mut input_price = use_signal(|| authority::display_decimal(&initial_input_price));
+    let mut output_price = use_signal(|| authority::display_decimal(&initial_output_price));
     let mut saving = use_signal(|| false);
     let mut form_err = use_signal(String::new);
 
     let on_submit = move |_| {
-        let ip_str = input_price();
-        let op_str = output_price();
+        if saving() || !identity.is_current(auth_store, user_store) {
+            return;
+        }
+        let ip_str = input_price().trim().to_owned();
+        let op_str = output_price().trim().to_owned();
 
         if ip_str.is_empty() || op_str.is_empty() {
             form_err.set(i18n.t("pricing.fill_all").to_string());
             return;
         }
-        if ip_str.parse::<f64>().is_err() {
-            form_err.set(i18n.t("pricing.invalid_input_price").to_string());
+        if client_api::api::tenant_pricing::validate_decimal(&ip_str).is_err()
+            || client_api::api::tenant_pricing::validate_decimal(&op_str).is_err()
+        {
+            form_err.set(i18n.t("platform_pricing.invalid_amount").into());
             return;
         }
-        if op_str.parse::<f64>().is_err() {
-            form_err.set(i18n.t("pricing.invalid_output_price").to_string());
-            return;
-        }
-        if ip_str.parse::<f64>().ok().is_some_and(|v| v < 0.0) {
-            form_err.set(i18n.t("pricing.negative_input_price").to_string());
-            return;
-        }
-        if op_str.parse::<f64>().ok().is_some_and(|v| v < 0.0) {
-            form_err.set(i18n.t("pricing.negative_output_price").to_string());
-            return;
-        }
-
         saving.set(true);
         form_err.set(String::new());
         let token = auth_store.token().unwrap_or_default();
@@ -763,7 +771,11 @@ fn EditPricingModal(
                 .with_input_price_per_1k(ip_str)
                 .with_output_price_per_1k(op_str)
                 .with_expected_version(pricing_version);
-            match pricing_service::update(&id, req, &token).await {
+            let result = pricing_service::update(target, &id, req, &token).await;
+            if !identity.is_current(auth_store, user_store) {
+                return;
+            }
+            match result {
                 Ok(_) => {
                     saving.set(false);
                     on_updated.call(());
@@ -824,8 +836,10 @@ fn EditPricingModal(
                         label { class: "form-label", {i18n.t("pricing.input_price_label")} }
                         input {
                             class: "input-field",
-                            r#type: "number",
-                            step: "0.000001",
+                            r#type: "text",
+                            inputmode: "decimal",
+                            id: "platform-price-input",
+                            maxlength: "64",
                             value: "{input_price}",
                             oninput: move |e| input_price.set(e.value()),
                         }
@@ -834,8 +848,10 @@ fn EditPricingModal(
                         label { class: "form-label", {i18n.t("pricing.output_price_label")} }
                         input {
                             class: "input-field",
-                            r#type: "number",
-                            step: "0.000001",
+                            r#type: "text",
+                            inputmode: "decimal",
+                            id: "platform-price-output",
+                            maxlength: "64",
                             value: "{output_price}",
                             oninput: move |e| output_price.set(e.value()),
                         }
