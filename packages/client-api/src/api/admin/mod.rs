@@ -484,7 +484,7 @@ impl AdminApi {
 
     pub async fn monitoring_overview(&self, token: &str) -> Result<MonitoringOverviewResponse> {
         self.client
-            .get_json("/api/v1/admin/monitoring/overview", Some(token))
+            .get_json_fresh("/api/v1/platform/monitoring/overview", Some(token))
             .await
     }
 
@@ -495,11 +495,11 @@ impl AdminApi {
     ) -> Result<MonitoringRequestPage> {
         let query = params.to_query_string();
         let path = if query.is_empty() {
-            "/api/v1/admin/monitoring/requests".to_string()
+            "/api/v1/platform/monitoring/requests".to_string()
         } else {
-            format!("/api/v1/admin/monitoring/requests?{query}")
+            format!("/api/v1/platform/monitoring/requests?{query}")
         };
-        self.client.get_json(&path, Some(token)).await
+        self.client.get_json_fresh(&path, Some(token)).await
     }
 
     pub async fn monitoring_request(
@@ -507,9 +507,15 @@ impl AdminApi {
         request_id: &str,
         token: &str,
     ) -> Result<MonitoringRequestDetail> {
+        let request_id = uuid::Uuid::parse_str(request_id)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .ok_or_else(|| {
+                crate::ClientError::Config("A real monitoring request UUID is required".into())
+            })?;
         self.client
-            .get_json(
-                &format!("/api/v1/admin/monitoring/requests/{request_id}"),
+            .get_json_fresh(
+                &format!("/api/v1/platform/monitoring/requests/{request_id}"),
                 Some(token),
             )
             .await
@@ -522,11 +528,11 @@ impl AdminApi {
     ) -> Result<MonitoringSummaryResponse> {
         let query = params.to_query_string();
         let path = if query.is_empty() {
-            "/api/v1/admin/monitoring/summary".to_string()
+            "/api/v1/platform/monitoring/summary".to_string()
         } else {
-            format!("/api/v1/admin/monitoring/summary?{query}")
+            format!("/api/v1/platform/monitoring/summary?{query}")
         };
-        self.client.get_json(&path, Some(token)).await
+        self.client.get_json_fresh(&path, Some(token)).await
     }
 
     pub async fn monitoring_target_health(
@@ -536,11 +542,11 @@ impl AdminApi {
     ) -> Result<MonitoringTargetHealthResponse> {
         let query = params.to_query_string();
         let path = if query.is_empty() {
-            "/api/v1/admin/monitoring/targets/health".to_string()
+            "/api/v1/platform/monitoring/targets/health".to_string()
         } else {
-            format!("/api/v1/admin/monitoring/targets/health?{query}")
+            format!("/api/v1/platform/monitoring/targets/health?{query}")
         };
-        self.client.get_json(&path, Some(token)).await
+        self.client.get_json_fresh(&path, Some(token)).await
     }
 
     pub async fn probe_monitoring_targets(
@@ -550,7 +556,7 @@ impl AdminApi {
     ) -> Result<serde_json::Value> {
         self.client
             .post_json(
-                "/api/v1/admin/monitoring/targets/probe",
+                "/api/v1/platform/monitoring/targets/probe",
                 &MonitoringProbeRequest { account_ids },
                 Some(token),
             )

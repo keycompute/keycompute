@@ -425,8 +425,10 @@ pub async fn test_account(
         &state,
         path.id,
         AccountProbePolicy::Explicit,
-        Some(scope),
-        Some(authz),
+        admin_account::AccountProbeAuthority::Console(crate::financial_auth::tenant_scope(
+            &access,
+            path.tenant_id,
+        )?),
     )
     .await?
     .ok_or_else(|| ApiError::NotFound("Account not found".into()))?;

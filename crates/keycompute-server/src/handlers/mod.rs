@@ -101,7 +101,7 @@ pub use admin_node_gateway::{
 };
 
 // 监控追踪
-pub use admin_account::{probe_account_for_monitoring, probe_enabled_account_for_monitoring};
+pub use admin_account::probe_enabled_account_for_monitoring;
 pub use admin_model_catalog::model_catalog;
 pub use admin_monitoring::{
     get_monitoring_overview, get_monitoring_request, get_monitoring_summary,

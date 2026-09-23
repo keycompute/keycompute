@@ -2,6 +2,7 @@
 
 use crate::{
     error::{ApiError, Result},
+    extractors::{GlobalConsoleAuth, RequestId},
     state::AppState,
 };
 use axum::{
@@ -10,10 +11,43 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use futures::{StreamExt, stream};
+use keycompute_db::models::platform_monitoring::{MonitoringAction, MonitoringRead};
 use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, Value};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
+
+type PrivateJson<T> = ([(&'static str, &'static str); 1], Json<T>);
+fn private<T>(value: T) -> PrivateJson<T> {
+    ([("cache-control", "private, no-store")], Json(value))
+}
+fn monitor_error(error: keycompute_db::DbError) -> ApiError {
+    if matches!(&error,keycompute_db::DbError::Other(message) if message=="financial_authority_invalid")
+    {
+        ApiError::Forbidden("Current root diagnostic authority required".into())
+    } else {
+        tracing::error!(error=%error,"platform monitoring storage operation failed");
+        ApiError::ServiceUnavailable("Platform monitoring state unavailable".into())
+    }
+}
+async fn read_authorized(
+    state: &AppState,
+    auth: &GlobalConsoleAuth,
+    id: RequestId,
+) -> Result<MonitoringRead> {
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Monitoring storage unavailable".into()))?;
+    MonitoringRead::begin(
+        pool.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, id),
+    )
+    .await
+    .map_err(monitor_error)
+}
 
 #[derive(Debug, Serialize, FromQueryResult)]
 pub struct MonitoringSummary {
@@ -67,12 +101,12 @@ pub struct MonitoringOverviewResponse {
 }
 
 pub async fn get_monitoring_overview(
+    auth: GlobalConsoleAuth,
+    audit_id: RequestId,
     State(state): State<AppState>,
-) -> Result<Json<MonitoringOverviewResponse>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+) -> Result<PrivateJson<MonitoringOverviewResponse>> {
+    let access = read_authorized(&state, &auth, audit_id).await?;
+    let pool = access.connection();
 
     let stmt = Statement::from_sql_and_values(
         DbBackend::Postgres,
@@ -129,7 +163,7 @@ pub async fn get_monitoring_overview(
             sub.last_submission_action
         FROM node_tasks nt
         LEFT JOIN nodes n ON n.id = nt.assigned_node_id
-        LEFT JOIN usage_logs ul ON ul.request_id = nt.request_id
+        LEFT JOIN usage_logs ul ON ul.request_id = nt.request_id AND ul.tenant_id=nt.tenant_id AND ul.user_id=nt.user_id
         LEFT JOIN LATERAL (
             SELECT
                 COUNT(*)::BIGINT AS submissions_count,
@@ -168,7 +202,7 @@ pub async fn get_monitoring_overview(
         LEFT JOIN LATERAL (
             SELECT accepted_models_json
             FROM node_sessions ns
-            WHERE ns.node_id = n.id
+            WHERE ns.node_id = n.id AND ns.tenant_id=n.tenant_id AND ns.owner_user_id=n.owner_user_id
             ORDER BY ns.last_seen_at DESC
             LIMIT 1
         ) latest_session ON TRUE
@@ -183,7 +217,15 @@ pub async fn get_monitoring_overview(
         .all(pool)
         .await?;
 
-    Ok(Json(MonitoringOverviewResponse {
+    access
+        .finish(
+            MonitoringAction::Overview,
+            None,
+            serde_json::json!({"scope":"platform"}),
+        )
+        .await
+        .map_err(monitor_error)?;
+    Ok(private(MonitoringOverviewResponse {
         summary,
         traces,
         nodes,
@@ -371,13 +413,13 @@ fn request_filters(
 }
 
 pub async fn list_monitoring_requests(
+    auth: GlobalConsoleAuth,
+    audit_id: RequestId,
     State(state): State<AppState>,
     Query(query): Query<MonitoringRequestQuery>,
-) -> Result<Json<MonitoringRequestPage>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+) -> Result<PrivateJson<MonitoringRequestPage>> {
+    let access = read_authorized(&state, &auth, audit_id).await?;
+    let pool = access.connection();
     let (filters, _, mut values) =
         request_filters(&query, true, state.gateway_config.monitoring_raw_max_hours)?;
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
@@ -391,7 +433,7 @@ pub async fn list_monitoring_requests(
         ul.total_tokens,ul.user_amount::TEXT amount,ul.currency,
         EXISTS(SELECT 1 FROM gateway_request_attempts fa WHERE fa.request_id=gr.request_id AND fa.attempt_kind='fallback') has_fallback
       FROM gateway_requests gr
-      LEFT JOIN usage_logs ul ON ul.request_id=gr.request_id
+      LEFT JOIN usage_logs ul ON ul.request_id=gr.request_id AND ul.tenant_id=gr.tenant_id AND ul.user_id=gr.user_id
       LEFT JOIN LATERAL (SELECT provider_name,account_id,node_id,
           CASE WHEN first_content_at IS NULL THEN NULL ELSE (EXTRACT(EPOCH FROM (first_content_at-started_at))*1000)::BIGINT END provider_ttft_ms
         FROM gateway_request_attempts WHERE request_id=gr.request_id ORDER BY is_final DESC,attempt_no DESC LIMIT 1) final_attempt ON TRUE
@@ -418,7 +460,15 @@ pub async fn list_monitoring_requests(
     } else {
         None
     };
-    Ok(Json(MonitoringRequestPage { items, next_cursor }))
+    access
+        .finish(
+            MonitoringAction::Requests,
+            None,
+            serde_json::json!({"scope":"platform","target_tenant_id":query.tenant_id}),
+        )
+        .await
+        .map_err(monitor_error)?;
+    Ok(private(MonitoringRequestPage { items, next_cursor }))
 }
 
 #[derive(Debug, Clone, Serialize, FromQueryResult)]
@@ -462,19 +512,27 @@ pub struct MonitoringRequestDetail {
 }
 
 pub async fn get_monitoring_request(
+    auth: GlobalConsoleAuth,
+    audit_id: RequestId,
     State(state): State<AppState>,
     Path(request_id): Path<Uuid>,
-) -> Result<Json<MonitoringRequestDetail>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+) -> Result<PrivateJson<MonitoringRequestDetail>> {
+    let access = read_authorized(&state, &auth, audit_id).await?;
+    let pool = access.connection();
     // Detail lookup is exact and intentionally independent of the raw aggregation range.
-    let request = MonitoringRequestItem::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres, r#"SELECT gr.request_id,gr.client_request_id,gr.protocol,gr.tenant_id,gr.user_id,gr.produce_ai_key_id,gr.request_path,gr.requested_model,gr.is_stream,gr.route_type,gr.status,gr.billing_status,gr.error_origin,gr.error_category,gr.error_code,gr.trace_quality,gr.received_at,gr.client_first_content_at,gr.finished_at,CASE WHEN gr.finished_at IS NULL THEN NULL ELSE (EXTRACT(EPOCH FROM (gr.finished_at-gr.received_at))*1000)::BIGINT END duration_ms,fa.provider_ttft_ms,fa.provider_name,fa.account_id,fa.node_id,ul.total_tokens,ul.user_amount::TEXT amount,ul.currency,EXISTS(SELECT 1 FROM gateway_request_attempts x WHERE x.request_id=gr.request_id AND x.attempt_kind='fallback') has_fallback FROM gateway_requests gr LEFT JOIN usage_logs ul ON ul.request_id=gr.request_id LEFT JOIN LATERAL (SELECT provider_name,account_id,node_id,CASE WHEN first_content_at IS NULL THEN NULL ELSE (EXTRACT(EPOCH FROM (first_content_at-started_at))*1000)::BIGINT END provider_ttft_ms FROM gateway_request_attempts WHERE request_id=gr.request_id ORDER BY is_final DESC,attempt_no DESC LIMIT 1) fa ON TRUE WHERE gr.request_id=$1"#, [request_id.into()])).one(pool).await?.ok_or_else(|| ApiError::NotFound(format!("request {request_id}")))?;
-    let attempts = MonitoringAttemptDetail::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT ga.id,ga.attempt_no,ga.attempt_kind,ga.route_type,ga.model,ga.status,ga.is_final,ga.provider_name,ga.account_id,a.name account_name,ga.node_task_id,ga.node_id,n.display_name node_name,ga.session_id,ga.lease_id,ga.upstream_request_id,ga.http_status,ga.retryable,ga.error_origin,ga.error_category,ga.error_code,ga.error_summary,ga.started_at,ga.headers_received_at,ga.first_content_at,ga.stream_end_reason,ga.stream_error_count,ga.finished_at FROM gateway_request_attempts ga LEFT JOIN accounts a ON a.id=ga.account_id LEFT JOIN nodes n ON n.id=ga.node_id WHERE ga.request_id=$1 ORDER BY ga.attempt_no", [request_id.into()])).all(pool).await?;
-    let node_task = pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT jsonb_build_object('id',nt.id,'status',nt.status,'model',nt.model,'queued_at',nt.queued_at,'claimed_at',nt.claimed_at,'finished_at',nt.finished_at,'deadline_at',nt.deadline_at,'submissions',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',s.id,'lease_id',s.lease_id,'result_kind',s.result_kind,'action',s.action,'created_at',s.created_at) ORDER BY s.created_at),'[]'::jsonb) FROM node_task_submissions s WHERE s.task_id=nt.id)) AS value FROM node_tasks nt WHERE nt.request_id=$1", [request_id.into()])).await?.and_then(|row| row.try_get("", "value").ok());
-    let usage = pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT jsonb_build_object('id',id,'status',status,'input_tokens',input_tokens,'output_tokens',output_tokens,'total_tokens',total_tokens,'amount',user_amount::TEXT,'currency',currency,'usage_source',usage_source) AS value FROM usage_logs WHERE request_id=$1", [request_id.into()])).await?.and_then(|row| row.try_get("", "value").ok());
-    Ok(Json(MonitoringRequestDetail {
+    let request = MonitoringRequestItem::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres, r#"SELECT gr.request_id,gr.client_request_id,gr.protocol,gr.tenant_id,gr.user_id,gr.produce_ai_key_id,gr.request_path,gr.requested_model,gr.is_stream,gr.route_type,gr.status,gr.billing_status,gr.error_origin,gr.error_category,gr.error_code,gr.trace_quality,gr.received_at,gr.client_first_content_at,gr.finished_at,CASE WHEN gr.finished_at IS NULL THEN NULL ELSE (EXTRACT(EPOCH FROM (gr.finished_at-gr.received_at))*1000)::BIGINT END duration_ms,fa.provider_ttft_ms,fa.provider_name,fa.account_id,fa.node_id,ul.total_tokens,ul.user_amount::TEXT amount,ul.currency,EXISTS(SELECT 1 FROM gateway_request_attempts x WHERE x.request_id=gr.request_id AND x.attempt_kind='fallback') has_fallback FROM gateway_requests gr LEFT JOIN usage_logs ul ON ul.request_id=gr.request_id AND ul.tenant_id=gr.tenant_id AND ul.user_id=gr.user_id LEFT JOIN LATERAL (SELECT provider_name,account_id,node_id,CASE WHEN first_content_at IS NULL THEN NULL ELSE (EXTRACT(EPOCH FROM (first_content_at-started_at))*1000)::BIGINT END provider_ttft_ms FROM gateway_request_attempts WHERE request_id=gr.request_id ORDER BY is_final DESC,attempt_no DESC LIMIT 1) fa ON TRUE WHERE gr.request_id=$1"#, [request_id.into()])).one(pool).await?.ok_or_else(|| ApiError::NotFound(format!("request {request_id}")))?;
+    let attempts = MonitoringAttemptDetail::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT ga.id,ga.attempt_no,ga.attempt_kind,ga.route_type,ga.model,ga.status,ga.is_final,ga.provider_name,ga.account_id,a.name account_name,ga.node_task_id,ga.node_id,n.display_name node_name,ga.session_id,ga.lease_id,ga.upstream_request_id,ga.http_status,ga.retryable,ga.error_origin,ga.error_category,ga.error_code,ga.error_summary,ga.started_at,ga.headers_received_at,ga.first_content_at,ga.stream_end_reason,ga.stream_error_count,ga.finished_at FROM gateway_request_attempts ga LEFT JOIN accounts a ON a.id=ga.account_id LEFT JOIN nodes n ON n.id=ga.node_id JOIN gateway_requests owner ON owner.request_id=ga.request_id WHERE ga.request_id=$1 AND owner.tenant_id=$2 AND owner.user_id=$3 ORDER BY ga.attempt_no", [request_id.into(),request.tenant_id.into(),request.user_id.into()])).all(pool).await?;
+    let node_task = pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT jsonb_build_object('id',nt.id,'status',nt.status,'model',nt.model,'queued_at',nt.queued_at,'claimed_at',nt.claimed_at,'finished_at',nt.finished_at,'deadline_at',nt.deadline_at,'submissions',(SELECT COALESCE(jsonb_agg(jsonb_build_object('id',s.id,'lease_id',s.lease_id,'result_kind',s.result_kind,'action',s.action,'created_at',s.created_at) ORDER BY s.created_at),'[]'::jsonb) FROM node_task_submissions s WHERE s.task_id=nt.id)) AS value FROM node_tasks nt WHERE nt.request_id=$1 AND nt.tenant_id=$2 AND nt.user_id=$3", [request_id.into(),request.tenant_id.into(),request.user_id.into()])).await?.and_then(|row| row.try_get("", "value").ok());
+    let usage = pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT jsonb_build_object('id',id,'status',status,'input_tokens',input_tokens,'output_tokens',output_tokens,'total_tokens',total_tokens,'amount',user_amount::TEXT,'currency',currency,'usage_source',usage_source) AS value FROM usage_logs WHERE request_id=$1 AND tenant_id=$2 AND user_id=$3", [request_id.into(),request.tenant_id.into(),request.user_id.into()])).await?.and_then(|row| row.try_get("", "value").ok());
+    access
+        .finish(
+            MonitoringAction::Request,
+            Some(request_id),
+            serde_json::json!({"scope":"platform","target_tenant_id":request.tenant_id,"owner_user_id":request.user_id}),
+        )
+        .await
+        .map_err(monitor_error)?;
+    Ok(private(MonitoringRequestDetail {
         request,
         attempts,
         node_task,
@@ -521,17 +579,17 @@ fn optional_ratio(numerator: i64, denominator: i64) -> Option<f64> {
     (denominator != 0).then(|| numerator as f64 / denominator as f64)
 }
 
-const USAGE_AMOUNT_BY_CURRENCY_SQL: &str = "SELECT ul.currency,SUM(ul.user_amount)::TEXT amount FROM usage_logs ul JOIN filtered f ON f.request_id=ul.request_id GROUP BY ul.currency";
+const USAGE_AMOUNT_BY_CURRENCY_SQL: &str = "SELECT ul.currency,SUM(ul.user_amount)::TEXT amount FROM usage_logs ul JOIN filtered f ON f.request_id=ul.request_id AND f.tenant_id=ul.tenant_id AND f.user_id=ul.user_id GROUP BY ul.currency";
 const SERIES_AMOUNT_BY_CURRENCY_SQL: &str = "SELECT bucket,currency,SUM(user_amount)::TEXT amount FROM series_base WHERE currency IS NOT NULL GROUP BY bucket,currency";
 
 pub async fn get_monitoring_summary(
+    auth: GlobalConsoleAuth,
+    audit_id: RequestId,
     State(state): State<AppState>,
     Query(query): Query<MonitoringRequestQuery>,
-) -> Result<Json<MonitoringSummaryResponse>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+) -> Result<PrivateJson<MonitoringSummaryResponse>> {
+    let access = read_authorized(&state, &auth, audit_id).await?;
+    let pool = access.connection();
     let (filters, attempt_filters, values) =
         request_filters(&query, false, state.gateway_config.monitoring_raw_max_hours)?;
     // Request-level figures retain their documented "request has a matching
@@ -563,10 +621,10 @@ pub async fn get_monitoring_summary(
        (percentile_cont(0.95) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(nt.claimed_at-nt.queued_at))*1000) FILTER(WHERE nt.claimed_at IS NOT NULL))::DOUBLE PRECISION p95_node_queue_ms,
        (percentile_cont(0.5) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(nt.finished_at-nt.claimed_at))*1000) FILTER(WHERE nt.finished_at IS NOT NULL AND nt.claimed_at IS NOT NULL))::DOUBLE PRECISION p50_node_execution_ms,
        (percentile_cont(0.95) WITHIN GROUP(ORDER BY EXTRACT(EPOCH FROM(nt.finished_at-nt.claimed_at))*1000) FILTER(WHERE nt.finished_at IS NOT NULL AND nt.claimed_at IS NOT NULL))::DOUBLE PRECISION p95_node_execution_ms
-      FROM node_tasks nt JOIN filtered f ON f.request_id=nt.request_id), usage_by_currency AS (
+      FROM node_tasks nt JOIN filtered f ON f.request_id=nt.request_id AND f.tenant_id=nt.tenant_id AND f.user_id=nt.user_id), usage_by_currency AS (
        {USAGE_AMOUNT_BY_CURRENCY_SQL}
       ), usage_stats AS (SELECT
-       (SELECT SUM(ul.total_tokens)::BIGINT FROM usage_logs ul JOIN filtered f ON f.request_id=ul.request_id) total_tokens,
+       (SELECT SUM(ul.total_tokens)::BIGINT FROM usage_logs ul JOIN filtered f ON f.request_id=ul.request_id AND f.tenant_id=ul.tenant_id AND f.user_id=ul.user_id) total_tokens,
        COALESCE((SELECT jsonb_object_agg(currency,amount) FROM usage_by_currency),'{{}}'::jsonb) amounts_by_currency)
       SELECT * FROM request_stats CROSS JOIN attempt_stats CROSS JOIN node_stats CROSS JOIN usage_stats"#
     );
@@ -608,7 +666,7 @@ pub async fn get_monitoring_summary(
         r#"WITH series_base AS (
           SELECT to_timestamp(floor(EXTRACT(EPOCH FROM gr.received_at)/${bucket_parameter})*${bucket_parameter}) bucket,
                  gr.status,ul.total_tokens,ul.user_amount,ul.currency
-          FROM gateway_requests gr LEFT JOIN usage_logs ul ON ul.request_id=gr.request_id
+          FROM gateway_requests gr LEFT JOIN usage_logs ul ON ul.request_id=gr.request_id AND ul.tenant_id=gr.tenant_id AND ul.user_id=gr.user_id
           WHERE {filters}
         ), series_stats AS (
           SELECT bucket,COUNT(*)::BIGINT requests,
@@ -634,7 +692,15 @@ pub async fn get_monitoring_summary(
         ))
         .await?;
     let series=rows.into_iter().map(|row| serde_json::json!({"bucket":row.try_get::<chrono::DateTime<chrono::Utc>>("","bucket").ok(),"requests":row.try_get::<i64>("","requests").unwrap_or(0),"succeeded":row.try_get::<i64>("","succeeded").unwrap_or(0),"tokens":row.try_get::<i64>("","tokens").ok(),"amounts_by_currency":row.try_get::<serde_json::Value>("","amounts_by_currency").unwrap_or_else(|_|serde_json::json!({}))})).collect();
-    Ok(Json(MonitoringSummaryResponse {
+    access
+        .finish(
+            MonitoringAction::Summary,
+            None,
+            serde_json::json!({"scope":"platform","target_tenant_id":query.tenant_id}),
+        )
+        .await
+        .map_err(monitor_error)?;
+    Ok(private(MonitoringSummaryResponse {
         summary,
         success_rate,
         error_rate,
@@ -687,6 +753,7 @@ SELECT a.id,a.name,a.provider,a.enabled,
 FROM accounts a
 LEFT JOIN gateway_request_attempts ga
   ON ga.account_id=a.id AND ga.started_at >= $1 AND ga.started_at < $2
+WHERE ($3::uuid IS NULL OR a.tenant_id=$3)
 GROUP BY a.id
 ORDER BY a.name
 "#;
@@ -716,7 +783,7 @@ FROM nodes n
 LEFT JOIN LATERAL (
     SELECT expires_at, accepted_models_json
     FROM node_sessions
-    WHERE node_id = n.id
+    WHERE node_id = n.id AND tenant_id=n.tenant_id AND owner_user_id=n.owner_user_id
       AND revoked_at IS NULL
       AND expires_at > NOW()
     ORDER BY last_seen_at DESC
@@ -726,24 +793,30 @@ LEFT JOIN node_tasks nt
   ON nt.assigned_node_id = n.id
  AND nt.created_at >= $1
  AND nt.created_at < $2
+WHERE ($3::uuid IS NULL OR n.tenant_id=$3)
 GROUP BY n.id, active_session.expires_at, active_session.accepted_models_json
 ORDER BY n.display_name
 "#;
 
 pub async fn get_monitoring_target_health(
+    auth: GlobalConsoleAuth,
+    audit_id: RequestId,
     State(state): State<AppState>,
     Query(query): Query<MonitoringRequestQuery>,
-) -> Result<Json<MonitoringTargetHealthResponse>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+) -> Result<PrivateJson<MonitoringTargetHealthResponse>> {
+    if query.tenant_id.is_some_and(|id| id.is_nil()) {
+        return Err(ApiError::BadRequest(
+            "A real target tenant is required".into(),
+        ));
+    }
+    let access = read_authorized(&state, &auth, audit_id).await?;
+    let pool = access.connection();
     let (from, to) = monitoring_range(&query, state.gateway_config.monitoring_raw_max_hours)?;
     let provider_rows = pool
         .query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             PROVIDER_HEALTH_SQL,
-            [from.into(), to.into()],
+            [from.into(), to.into(), query.tenant_id.into()],
         ))
         .await?;
     let providers=provider_rows.into_iter().map(|r|serde_json::json!({"id":r.try_get::<Uuid>("","id").ok(),"name":r.try_get::<String>("","name").ok(),"provider":r.try_get::<String>("","provider").ok(),"enabled":r.try_get::<bool>("","enabled").ok(),"attempts":r.try_get::<i64>("","attempts").unwrap_or(0),"succeeded":r.try_get::<i64>("","succeeded").unwrap_or(0),"success_rate":r.try_get::<f64>("","success_rate").ok(),"attributable_failures":r.try_get::<i64>("","attributable_failures").unwrap_or(0),"avg_latency_ms":r.try_get::<f64>("","avg_latency_ms").ok(),"last_probe_at":r.try_get::<chrono::DateTime<chrono::Utc>>("","last_probe_at").ok(),"last_probe_latency_ms":r.try_get::<i64>("","last_probe_latency_ms").ok(),"last_probe_status":r.try_get::<String>("","last_probe_status").ok(),"last_probe_error_code":r.try_get::<String>("","last_probe_error_code").ok()})).collect();
@@ -751,18 +824,27 @@ pub async fn get_monitoring_target_health(
         .query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             NODE_HEALTH_SQL,
-            [from.into(), to.into()],
+            [from.into(), to.into(), query.tenant_id.into()],
         ))
         .await?;
     let mut nodes=node_rows.into_iter().map(|r|serde_json::json!({"id":r.try_get::<Uuid>("","id").ok(),"display_name":r.try_get::<String>("","display_name").ok(),"status":r.try_get::<String>("","status").ok(),"last_heartbeat_at":r.try_get::<chrono::DateTime<chrono::Utc>>("","last_heartbeat_at").ok(),"session_expires_at":r.try_get::<chrono::DateTime<chrono::Utc>>("","expires_at").ok(),"accepted_models":r.try_get::<serde_json::Value>("","accepted_models").unwrap_or_else(|_|serde_json::json!([])),"queued":r.try_get::<i64>("","queued").unwrap_or(0),"running":r.try_get::<i64>("","running").unwrap_or(0),"succeeded":r.try_get::<i64>("","succeeded").unwrap_or(0),"failed":r.try_get::<i64>("","failed").unwrap_or(0),"expired":r.try_get::<i64>("","expired").unwrap_or(0)})).collect::<Vec<_>>();
-    let unassigned_queued=pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT COUNT(*)::BIGINT count FROM node_tasks WHERE assigned_node_id IS NULL AND status='queued' AND created_at >= $1 AND created_at < $2",[from.into(),to.into()])).await?.and_then(|row|row.try_get::<i64>("","count").ok()).unwrap_or(0);
+    let unassigned_queued=pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT COUNT(*)::BIGINT count FROM node_tasks WHERE assigned_node_id IS NULL AND status='queued' AND created_at >= $1 AND created_at < $2 AND ($3::uuid IS NULL OR tenant_id=$3)",[from.into(),to.into(),query.tenant_id.into()])).await?.and_then(|row|row.try_get::<i64>("","count").ok()).unwrap_or(0);
     if unassigned_queued > 0 {
         nodes.insert(0, unassigned_queue_health(unassigned_queued));
     }
-    Ok(Json(MonitoringTargetHealthResponse { providers, nodes }))
+    access
+        .finish(
+            MonitoringAction::Targets,
+            None,
+            serde_json::json!({"scope":"platform","target_tenant_id":query.tenant_id}),
+        )
+        .await
+        .map_err(monitor_error)?;
+    Ok(private(MonitoringTargetHealthResponse { providers, nodes }))
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BatchProbeRequest {
     pub account_ids: Option<Vec<Uuid>>,
 }
@@ -773,6 +855,11 @@ fn normalize_probe_account_ids(
     account_ids: Vec<Uuid>,
     max_accounts: Option<usize>,
 ) -> Result<Vec<Uuid>> {
+    if account_ids.iter().any(Uuid::is_nil) {
+        return Err(ApiError::BadRequest(
+            "monitoring_probe_invalid_account".into(),
+        ));
+    }
     let mut seen = HashSet::with_capacity(
         max_accounts
             .map(|max| account_ids.len().min(max + 1))
@@ -791,71 +878,77 @@ fn normalize_probe_account_ids(
 }
 
 pub async fn probe_monitoring_targets(
+    auth: GlobalConsoleAuth,
+    audit_id: RequestId,
     State(state): State<AppState>,
     Json(request): Json<BatchProbeRequest>,
-) -> Result<Json<serde_json::Value>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+) -> Result<PrivateJson<serde_json::Value>> {
+    use super::admin_account::{
+        AccountProbeAuthority, AccountProbePolicy, probe_account_for_monitoring_with_policy,
+    };
+    use keycompute_db::models::account::{AccountManagementScope, ProviderAuthzSnapshot};
+    let signed = crate::financial_auth::global_scope(&auth.0)?;
+    let root = auth.require_platform(keycompute_auth::AuthorizationAction::ManagePlatform)?;
+    let actor = crate::financial_auth::audit(&auth.0, audit_id.clone());
+    let access = read_authorized(&state, &auth, audit_id.clone()).await?;
     let (account_ids, enabled_only) = match request.account_ids {
         Some(ids) => (
             normalize_probe_account_ids(ids, Some(MAX_BATCH_PROBE_ACCOUNTS))?,
             false,
         ),
-        None => (
-            normalize_probe_account_ids(
-                keycompute_db::Account::find_enabled_all(pool.write_conn())
-                    .await
-                    .map_err(|error| ApiError::Internal(error.to_string()))?
-                    .into_iter()
-                    .map(|account| account.id)
-                    .collect(),
-                None,
-            )?,
-            true,
-        ),
+        None => {
+            // Read IDs only. Do not materialize credentials for a candidate list.
+            let rows=access.connection().query_all(Statement::from_string(DbBackend::Postgres,
+                "SELECT a.id FROM accounts a JOIN tenants t ON t.id=a.tenant_id WHERE a.enabled AND t.status='active' ORDER BY a.id LIMIT 51")).await?;
+            let ids = rows
+                .into_iter()
+                .map(|row| row.try_get::<Uuid>("", "id"))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            (
+                normalize_probe_account_ids(ids, Some(MAX_BATCH_PROBE_ACCOUNTS))?,
+                true,
+            )
+        }
     };
-    let results = stream::iter(account_ids.into_iter().map(|account_id| {
-        let state = state.clone();
+    access
+        .finish(
+            MonitoringAction::ProbeRequest,
+            None,
+            serde_json::json!({"count":account_ids.len(),"enabled_only":enabled_only}),
+        )
+        .await
+        .map_err(monitor_error)?;
+    let token_version = auth.token_version;
+    let results=stream::iter(account_ids.into_iter().map(|account_id|{
+        let state=state.clone();
         async move {
-            let result = if enabled_only {
-                crate::handlers::admin_account::probe_enabled_account_for_monitoring(
-                    &state, account_id,
-                )
-                .await
-            } else {
-                crate::handlers::admin_account::probe_account_for_monitoring(&state, account_id)
-                    .await
-                    .map(Some)
-            };
+            let result=async {
+                let db=state.pool.as_deref().ok_or_else(||ApiError::ServiceUnavailable("Monitoring storage unavailable".into()))?;
+                keycompute_db::Account::prepare_probe(db,AccountManagementScope::Platform(root),account_id,&actor,ProviderAuthzSnapshot::platform(token_version)).await
+                    .map_err(super::admin_account::account_scope_error)?
+                    .ok_or_else(||ApiError::NotFound("Account not found".into()))?;
+                probe_account_for_monitoring_with_policy(&state,account_id,
+                    if enabled_only {AccountProbePolicy::EnabledOnly}else{AccountProbePolicy::Explicit},
+                    AccountProbeAuthority::Console(signed)).await
+            }.await;
             match result {
-                Ok(Some(value)) => serde_json::json!({
-                    "account_id": account_id,
-                    "success": value.get("success").and_then(|value| value.as_bool()).unwrap_or(false),
-                    "result": value,
-                }),
-                Ok(None) => serde_json::json!({
-                    "account_id": account_id,
-                    "success": false,
-                    "skipped": true,
-                    "reason": "account_disabled_or_deleted",
-                }),
-                Err(error) => {
-                    tracing::warn!(%account_id, %error, "manual account probe failed");
-                    serde_json::json!({
-                        "account_id": account_id,
-                        "success": false,
-                        "result": null,
-                    })
-                }
+                Ok(Some(value))=>serde_json::json!({"account_id":account_id,"success":value.get("success").and_then(|v|v.as_bool()).unwrap_or(false),"result":value}),
+                Ok(None)=>serde_json::json!({"account_id":account_id,"success":false,"skipped":true,"reason":"account_disabled_or_deleted"}),
+                Err(_)=>serde_json::json!({"account_id":account_id,"success":false,"result":null}),
             }
         }
-    }))
-    .buffer_unordered(4)
-    .collect::<Vec<_>>()
-    .await;
-    Ok(Json(serde_json::json!({"results":results})))
+    })).buffer_unordered(4).collect::<Vec<_>>().await;
+    // Accepted probes may finish health bookkeeping; revoked actors cannot read results.
+    let access = read_authorized(&state, &auth, audit_id).await?;
+    access
+        .finish(
+            MonitoringAction::ProbeResult,
+            None,
+            serde_json::json!({"count":results.len()}),
+        )
+        .await
+        .map_err(monitor_error)?;
+    Ok(private(serde_json::json!({"results":results})))
 }
 
 #[cfg(test)]

@@ -853,27 +853,11 @@ pub async fn test_account(
             &state,
             account_id,
             AccountProbePolicy::Explicit,
-            Some(scope),
-            Some(ProviderAuthzSnapshot::platform(auth.token_version)),
+            AccountProbeAuthority::Console(crate::financial_auth::global_scope(&auth.0)?),
         )
         .await?
         .ok_or_else(|| ApiError::NotFound(format!("Account not found: {account_id}")))?,
     ))
-}
-
-pub async fn probe_account_for_monitoring(
-    state: &AppState,
-    account_id: Uuid,
-) -> Result<serde_json::Value> {
-    probe_account_for_monitoring_with_policy(
-        state,
-        account_id,
-        AccountProbePolicy::Explicit,
-        None,
-        None,
-    )
-    .await?
-    .ok_or_else(|| ApiError::NotFound(format!("Account not found: {}", account_id)))
 }
 
 /// Probe an account only while its owning tenant is active and, for automatic
@@ -890,8 +874,7 @@ pub async fn probe_enabled_account_for_monitoring(
         state,
         account_id,
         AccountProbePolicy::EnabledOnly,
-        None,
-        None,
+        AccountProbeAuthority::Runtime,
     )
     .await
 }
@@ -906,12 +889,17 @@ fn account_matches_probe_policy(enabled: bool, policy: AccountProbePolicy) -> bo
     policy == AccountProbePolicy::Explicit || enabled
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum AccountProbeAuthority {
+    Runtime,
+    Console(keycompute_db::models::financial_scope::FinancialScope),
+}
+
 pub(crate) async fn probe_account_for_monitoring_with_policy(
     state: &AppState,
     account_id: Uuid,
     policy: AccountProbePolicy,
-    management_scope: Option<AccountManagementScope>,
-    management_token_version: Option<ProviderAuthzSnapshot>,
+    authority: AccountProbeAuthority,
 ) -> Result<Option<serde_json::Value>> {
     let pool = state
         .pool
@@ -925,25 +913,18 @@ pub(crate) async fn probe_account_for_monitoring_with_policy(
     // Require the owning tenant to remain active immediately before making
     // the upstream request; otherwise a stale monitoring candidate could
     // continue probing a closed tenant's channel account.
-    let account = match (management_scope, management_token_version) {
-        (Some(scope), Some(snapshot)) => Some(
-            Account::load_authorized_probe(writer, scope, account_id, snapshot)
+    let account = match authority {
+        AccountProbeAuthority::Console(scope) => Some(
+            Account::load_console_probe(writer, scope, account_id)
                 .await
                 .map_err(account_scope_error)?
                 .ok_or_else(|| {
-                    ApiError::Forbidden(
-                        "Account management authorization is no longer active".into(),
-                    )
+                    ApiError::Forbidden("Current console account authority required".into())
                 })?,
         ),
-        (None, None) => Account::find_by_id_for_key_share(writer, account_id)
+        AccountProbeAuthority::Runtime => Account::find_by_id_for_key_share(writer, account_id)
             .await
-            .map_err(|error| ApiError::Internal(format!("Failed to find account: {error}")))?,
-        _ => {
-            return Err(ApiError::Forbidden(
-                "Incomplete account management authorization".into(),
-            ));
-        }
+            .map_err(|_| ApiError::ServiceUnavailable("Account state unavailable".into()))?,
     }
     .and_then(|account| account_matches_probe_policy(account.enabled, policy).then_some(account));
     let Some(account) = account else {
@@ -1023,8 +1004,30 @@ pub(crate) async fn probe_account_for_monitoring_with_policy(
         &api_key,
         &account.models_supported,
         &account.api_capabilities,
+        || authorize_console_probe_step(writer, authority, &account, policy),
     )
     .await;
+    if let Err(code) = test_result.as_ref() {
+        if code == "probe_authority_invalid" {
+            return Err(ApiError::Forbidden(
+                "Current probe authority required".into(),
+            ));
+        }
+        if code == "probe_authority_unavailable" {
+            return Err(ApiError::ServiceUnavailable(
+                "Probe authority unavailable".into(),
+            ));
+        }
+    }
+    authorize_console_probe_step(writer, authority, &account, policy)
+        .await
+        .map_err(|code| {
+            if code == "probe_authority_invalid" {
+                ApiError::Forbidden("Current probe authority required".into())
+            } else {
+                ApiError::ServiceUnavailable("Probe authority unavailable".into())
+            }
+        })?;
 
     let latency_ms = start.elapsed().as_millis() as i64;
     let probe_error_code = if test_result.is_ok() {
@@ -1238,14 +1241,42 @@ pub(crate) async fn fetch_upstream_models(
         .map_err(|error| probe_error_code(&error))
 }
 
-async fn probe_upstream_account(
+async fn authorize_console_probe_step(
+    db: &impl ConnectionTrait,
+    authority: AccountProbeAuthority,
+    account: &Account,
+    policy: AccountProbePolicy,
+) -> std::result::Result<(), String> {
+    match authority {
+        AccountProbeAuthority::Runtime => Ok(()),
+        AccountProbeAuthority::Console(scope) => match Account::console_probe_is_current(
+            db,
+            scope,
+            account,
+            policy == AccountProbePolicy::EnabledOnly,
+        )
+        .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("probe_authority_invalid".into()),
+            Err(_) => Err("probe_authority_unavailable".into()),
+        },
+    }
+}
+
+async fn probe_upstream_account<Authorize, Fut>(
     protocol: ProtocolType,
     transport: &dyn HttpTransport,
     endpoint: &str,
     api_key: &str,
     configured_models: &[String],
     api_capabilities: &[String],
-) -> std::result::Result<Vec<String>, String> {
+    authorize: Authorize,
+) -> std::result::Result<Vec<String>, String>
+where
+    Authorize: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<(), String>>,
+{
     let adapter = crate::providers::get_provider_definition(protocol.as_str())
         .map(|definition| (definition.create_adapter)())
         .ok_or_else(|| "provider_not_registered".to_string())?;
@@ -1258,6 +1289,7 @@ async fn probe_upstream_account(
     let (model, reported_models) = if let Some(model) = configured_models.first() {
         (model.clone(), configured_models.to_vec())
     } else {
+        authorize().await?;
         let discovered = adapter
             .list_models(transport, endpoint, &key)
             .await
@@ -1269,6 +1301,7 @@ async fn probe_upstream_account(
         (model, discovered)
     };
     for capability in api_capabilities {
+        authorize().await?;
         let capability = AccountApiCapability::parse(capability)
             .ok_or_else(|| "account_capability_invalid".to_string())?;
         let request = UpstreamRequest {
@@ -1686,6 +1719,7 @@ mod tests {
             "test-key",
             &["configured-model".to_string()],
             &[AccountApiCapability::ChatCompletions.as_str().to_string()],
+            || async { Ok(()) },
         )
         .await
         .unwrap();
@@ -1706,6 +1740,7 @@ mod tests {
             "test-key",
             &["configured-model".to_string()],
             &[AccountApiCapability::Responses.as_str().to_string()],
+            || async { Ok(()) },
         )
         .await
         .unwrap();
@@ -1736,6 +1771,7 @@ mod tests {
             "bad-key",
             &["configured-model".to_string()],
             &[AccountApiCapability::Responses.as_str().to_string()],
+            || async { Ok(()) },
         )
         .await
         .unwrap_err();
@@ -1757,6 +1793,7 @@ mod tests {
             "test-key",
             &["configured-model".to_string()],
             &[AccountApiCapability::Responses.as_str().to_string()],
+            || async { Ok(()) },
         )
         .await
         .unwrap_err();
@@ -1778,6 +1815,7 @@ mod tests {
                 AccountApiCapability::ChatCompletions.as_str().to_string(),
                 AccountApiCapability::Responses.as_str().to_string(),
             ],
+            || async { Ok(()) },
         )
         .await
         .unwrap();

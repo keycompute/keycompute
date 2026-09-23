@@ -1110,3 +1110,62 @@ This fixes existing platform-page presentation, not the workspace/member/invitat
 UI delivery. Unintegrated new page sources were archived outside the repository;
 their route/session wiring did not execute and they are not compiled or accepted.
 No new UI route, backend permission, schema, production data or deployment changed.
+
+
+## Current phases 3/6 — root raw monitoring and console probes accepted
+
+Baseline 1164f9d (platform business-page capability separation) was committed
+before this slice. Six raw-monitoring handlers now require current global root
+console authority independently of outer middleware: overview, request list/detail,
+summary, target health and bounded manual probes. Canonical platform paths and
+retained admin URLs invoke the same handlers. Operator health/aggregate permissions
+remain on the separately accepted operations API; neither tenant membership nor
+an inference key grants access to these raw platform diagnostic resources.
+
+MonitoringRead holds one primary repeatable-read snapshot with shared current
+authorization locks in tenant/user/member order. It does not use the identity
+administrative write fence and permits concurrent diagnostic readers. Canonical
+server request auditing must commit before data is returned. Original signed
+expiry is checked before and after audit insertion; failures withhold the result.
+Successful responses are private, no-store. Queries join usage/node evidence with
+original tenant and user as well as request ID, and audits record explicit query
+or resource targets without prompt bodies or credentials.
+
+Review found target-health previously ignored its tenant selector. Provider/node
+health now filters resource owner tenant, and unassigned task counts and node
+sessions preserve corresponding tenant/owner predicates. This differs explicitly
+from consumer-tenant filtering in request/usage statistics. Monetary aggregation
+continues to separate currencies. Client monitoring calls use canonical fresh
+paths, validate exact request UUIDs and never retry an uncertain probe POST.
+
+Console probing is no longer the unscoped internal runtime path. Candidate
+selection reads IDs only and limits a manual batch to fifty unique real accounts;
+implicit all-enabled batches above that size must be explicitly narrowed. The
+existing four-way concurrency is preserved. Pre-effect request audit and target
+account audit precede network activity. Complete original console authority is
+checked when connection material is selected and before model discovery and every
+capability probe step. A reproduced internal endpoint update did not advance the
+application config version, so actual endpoint/provider/encrypted credential/model/
+capability equality is also checked. These checks return a boolean and do not
+expose secrets. Revocation or material changes stop later probe steps and do not
+penalize upstream health. The final result boundary is authorized again; trusted
+scheduled runtime probing remains a distinct non-client-selectable internal path.
+
+Twelve new isolated PostgreSQL/HTTP regressions cover bare mounts, root/operator/
+tenant/key separation, canonical request IDs, owner-qualified evidence, current
+and forged scopes, audit rollback, concurrent read compatibility, exact-backend
+role-change and expiry races, tenant health filtering, and real loopback upstream
+revocation between capability requests. The expiry test extends only its local
+timeouts and asserts actual post-audit authorization expiry, not a timeout false
+positive. Two new SDK tests cover fresh paths, input encoding, UUID rejection and
+single dispatch. Existing provider/operator/tenant tests and protocol probes remain.
+
+Final independent default-parallel full workspace: 2675 passed, 0 failed, 30
+original ignored tests unchanged, including desktop/mobile. All-target check,
+strict all-target/all-feature Clippy, Web/client WASM, formatting, whitespace and
+all eleven frozen source hashes passed. Twelve PG/HTTP and two SDK cases are
+included subsets, not additional totals. No production schema, identities,
+credentials, payments, service restart or deployment changed. Native account-pool
+resource administration, actual tenant workspace/resource UI, remaining endpoint
+review and final security/restore/release gates are still separate unfinished work.
+See platform-monitoring-authorization.md for exact scope and lifecycle semantics.

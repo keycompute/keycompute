@@ -210,6 +210,46 @@ impl FinancialScope {
     pub(crate) fn check_expiry(self) -> Result<(), DbError> {
         Self::validate_session(self.session)
     }
+    /// Read-side authority lock for root diagnostic snapshots. This neither
+    /// increments the administrative fence nor locks business resource rows.
+    pub(super) async fn lock_root_read(
+        self,
+        tx: &DatabaseTransaction,
+        audit: &AuditContext,
+    ) -> Result<AuditContext, DbError> {
+        self.require_root_global()?;
+        Self::validate_session(self.session)?;
+        if audit.actor_user_id != self.session.user_id
+            || audit.credential_kind != CredentialKind::Jwt
+            || audit.request_id.is_none_or(|id| id.is_nil())
+        {
+            return Err(denied());
+        }
+        self.current_actor(tx).await?;
+        if let Some(member) = self.session.selected {
+            tx.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT id FROM tenants WHERE id=$1 FOR SHARE",
+                [member.tenant_id.into()],
+            ))
+            .await?
+            .ok_or_else(denied)?;
+        }
+        tx.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM users WHERE id=$1 FOR SHARE",
+            [self.session.user_id.into()],
+        ))
+        .await?
+        .ok_or_else(denied)?;
+        if let Some(member) = self.session.selected {
+            tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT user_id FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 FOR SHARE",[member.tenant_id.into(),self.session.user_id.into()])).await?.ok_or_else(denied)?;
+        }
+        let mut actor = self.current_actor(tx).await?;
+        actor.request_id = audit.request_id;
+        Ok(actor)
+    }
+
     pub(super) async fn lock(
         self,
         tx: &DatabaseTransaction,

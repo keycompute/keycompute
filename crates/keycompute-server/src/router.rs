@@ -679,6 +679,30 @@ pub fn create_router(state: AppState) -> Router {
     // 监控追踪（仅 Admin）
     let admin_monitoring_routes = Router::new()
         .route(
+            "/api/v1/platform/monitoring/overview",
+            get(get_monitoring_overview),
+        )
+        .route(
+            "/api/v1/platform/monitoring/requests",
+            get(list_monitoring_requests),
+        )
+        .route(
+            "/api/v1/platform/monitoring/requests/{request_id}",
+            get(get_monitoring_request),
+        )
+        .route(
+            "/api/v1/platform/monitoring/summary",
+            get(get_monitoring_summary),
+        )
+        .route(
+            "/api/v1/platform/monitoring/targets/health",
+            get(get_monitoring_target_health),
+        )
+        .route(
+            "/api/v1/platform/monitoring/targets/probe",
+            post(probe_monitoring_targets),
+        )
+        .route(
             "/api/v1/admin/monitoring/capacity",
             get(crate::handlers::admin_capacity::capacity),
         )

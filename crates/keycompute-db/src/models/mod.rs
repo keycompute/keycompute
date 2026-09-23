@@ -127,3 +127,5 @@ pub mod node_tip_setting;
 pub mod platform_operations;
 
 pub mod platform_identity;
+
+pub mod platform_monitoring;
