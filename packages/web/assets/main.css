@@ -7185,3 +7185,13 @@ select.form-input:focus {
 .operations-console .operations-detail p { overflow-wrap: anywhere; margin: 10px 0; }
 .operations-console .toolbar { justify-content: flex-start; flex-wrap: wrap; gap: 10px; }
 .operations-console .operations-target-label { overflow-wrap: anywhere; }
+
+/* Tenant node administration keeps all layout selectors local to this page. */
+.tenant-node-admin { min-width: 0; }
+.tenant-node-admin .toolbar { justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
+.tenant-node-admin .tenant-node-filters { display: grid; gap: 10px; padding: 20px; margin: 20px 0; }
+.tenant-node-admin .tenant-node-filters .input-field { max-width: 640px; }
+.tenant-node-admin .tenant-node-table { overflow-x: auto; max-width: 100%; }
+.tenant-node-admin .tenant-node-table td:first-child { min-width: 220px; overflow-wrap: anywhere; }
+.tenant-node-admin .tenant-node-detail { padding: 20px; margin: 20px 0; overflow-wrap: anywhere; }
+.tenant-node-admin .modal-body { overflow-wrap: anywhere; display: grid; gap: 10px; }

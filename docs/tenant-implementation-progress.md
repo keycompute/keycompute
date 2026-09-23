@@ -1359,3 +1359,49 @@ No backend permissions, schema, production DB, credentials, payments or deployme
 changed. Tenant resource UI, operator node-control UI, native account-pool resource
 management, remaining endpoint review and final release gates are unfinished.
 See platform-operations-console.md for exact scope and limitations.
+
+
+## Current phase 7 — tenant node, task and registration console accepted
+
+The actual /tenant/nodes route now provides three tenant-admin panels using the
+existing NodeControlApi: nodes, tasks and registration metadata. Global roles
+do not bypass selected membership; ordinary members do not mount these controls.
+No backend permission, schema, worker or settlement behavior changed.
+
+Node configuration/exclusion/recovery/revocation/deletion carry the observed
+resource version and a required bounded reason. Deletion evidence conflicts are
+reported without removing history. Recovery displays the actual returned status.
+Registration approval/rejection/revocation exposes previews only; consumed tokens
+remain revocable, and notification status is separate from the approval result.
+No owner-secret lookup or claim operation is available in this admin page.
+
+Task cancellation is presented as a request, not proof a worker stopped. An
+uncancellable leased task remains a conflict. Only terminal unarchived tasks
+can be archived; default lists omit history and an explicit filter retrieves it.
+Original request, resource owner and billing identities remain backend-owned.
+Metadata details use the observed list snapshot and never fetch task bodies.
+
+Tenant/user/epoch/version and submitted query keys fence all page results.
+Commands are single-dispatch, including uncertain failures, and returned resource
+identities are checked. A real browser scenario switches from A during a pending
+task command to member workspace B: old success is not displayed or replayed.
+Queries are bounded and literal; empty owner means only all owners of this tenant.
+
+Final independent default-parallel workspace: 2712 passed, 0 failed, 30
+original ignored tests unchanged, including desktop/mobile. Web195 is an included
+subset with five added cases. Native all-target, strict all-target/all-feature
+Clippy, Web/client WASM, format, whitespace, Python23 and foundation checks pass.
+Sixteen source/workflow/browser hashes match final verification.
+
+Production-mode WASM passed four new browser scenario groups, and the existing
+six core-tenant plus three operations groups also passed against that bundle.
+All HTTP data was synthetic and browser page errors were zero. The node runner
+is registered in CI beside the other two. This is UI evidence, not a new live
+worker, payment or backend-security test. Existing backend regressions remain.
+
+Remaining: Provider/Key/pricing/finance/Responses resource UI, explicit-platform
+node control UI, native account-pool resource management and final endpoint/
+release gates. A further read-only node-authority audit was denied and not
+executed; post-wait credential/origin proof review remains a separate item.
+No production data, credentials, notifications or deployments were changed.
+See tenant-node-console.md for precise capabilities and limitations.

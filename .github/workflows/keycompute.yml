@@ -508,3 +508,5 @@ jobs:
           node scripts/tests/tenant_console_browser.mjs
           export KC_BROWSER_OUTPUT="$browser_root/operations-results"
           node scripts/tests/operations_console_browser.mjs
+          export KC_BROWSER_OUTPUT="$browser_root/tenant-node-results"
+          node scripts/tests/tenant_nodes_browser.mjs

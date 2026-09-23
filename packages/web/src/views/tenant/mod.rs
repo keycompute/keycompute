@@ -4,6 +4,8 @@ mod common;
 pub(crate) mod invitation_entry;
 mod invitations;
 mod members;
+mod node_admin;
+pub use node_admin::TenantNodes;
 mod workspace;
 use crate::{
     hooks::use_i18n::use_i18n,
