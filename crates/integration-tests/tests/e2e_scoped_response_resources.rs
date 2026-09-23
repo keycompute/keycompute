@@ -70,6 +70,7 @@ struct Upstream {
     calls: Mutex<Vec<Call>>,
     status: AtomicU16,
     stream_release: tokio::sync::Notify,
+    jwt_replay_probe: tokio::sync::Notify,
 }
 fn sample_response(op: Op, model: &str) -> Value {
     match op {
@@ -475,6 +476,19 @@ async fn streaming_upstream(s: Arc<Upstream>, op: Op, body: Value) -> Response {
     tokio::spawn(async move {
         if tx.send(Ok(bytes::Bytes::from(first))).await.is_err() {
             return;
+        }
+        if body["jwt_replay_probe"] == true {
+            tokio::select! {_ = s.jwt_replay_probe.notified()=>{},_ = tx.closed()=>return}
+            let probe = format!(
+                "event: response.output_text.delta\r\ndata: {}\r\n\r\n",
+                json!({"type":"response.output_text.delta","sequence_number":2,
+                    "output_index":0,"content_index":0,"item_id":"msg-stream",
+                    "delta":" live-jwt-boundary-probe"})
+            );
+            if tx.send(Ok(bytes::Bytes::from(probe))).await.is_err() {
+                return;
+            }
+            last = last.replace("\"sequence_number\":2", "\"sequence_number\":3");
         }
         tokio::select! {_ = s.stream_release.notified()=>{},_ = tx.closed()=>return}
         let _ = tx.send(Ok(bytes::Bytes::from(last))).await;
@@ -1622,6 +1636,7 @@ async fn replay_revocation_case(change: &str) {
     payload["stream"] = true.into();
     payload["store"] = true.into();
     payload["late_delta_after_revoke"] = (change == "user").into();
+    payload["jwt_replay_probe"] = (change == "jwt_expiry").into();
     let response = f
         .app
         .clone()
@@ -1697,6 +1712,14 @@ async fn replay_revocation_case(change: &str) {
                 5,
             )
             .unwrap();
+        let signed_expiry = f
+            .state
+            .auth
+            .get_jwt_validator()
+            .unwrap()
+            .validate_claims(&token)
+            .unwrap()
+            .exp;
         let replay = f
             .app
             .clone()
@@ -1720,6 +1743,42 @@ async fn replay_revocation_case(change: &str) {
             .unwrap()
             .unwrap()
             .unwrap();
+        // Make the previously scheduler-dependent pending event deterministic:
+        // it is produced only after the first authenticated replay batch.
+        f.upstream.jwt_replay_probe.notify_one();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let row=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+                    "SELECT 1 FROM scoped_response_events e JOIN scoped_responses r ON r.id=e.response_id WHERE r.tenant_id=$1 AND r.user_id=$2 AND r.id=$3 AND r.status IN ('queued','in_progress') AND e.frame LIKE '%live-jwt-boundary-probe%'",
+                    [f.user.tenant_id.into(),f.user.id.into(),id.clone().into()])).await.unwrap();
+                if row.is_some(){break;}
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("live JWT probe must be durably pending before expiry");
+        assert!(
+            Utc::now().timestamp() < signed_expiry,
+            "fixture setup must not consume JWT lifetime"
+        );
+        // A body poll is not an expiry clock: the next batch may legally
+        // contain a late upstream event while this five-second JWT is valid.
+        // Keep the durable probe unread and wait for the actual signed exp.
+        tokio::time::timeout(Duration::from_secs(7), async {
+            while Utc::now().timestamp() < signed_expiry {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("original signed JWT expiry must be reached");
+        assert!(Utc::now().timestamp() >= signed_expiry);
+        let active = f.db.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT 1 FROM scoped_responses WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND status IN ('queued','in_progress')",
+            [f.user.tenant_id.into(), f.user.id.into(), id.clone().into()],
+        )).await.unwrap();
+        assert!(
+            active.is_some(),
+            "expiry must stop a live replay, not an already-completed response"
+        );
     }
 
     let statement = match change {

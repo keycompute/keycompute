@@ -1405,3 +1405,37 @@ release gates. A further read-only node-authority audit was denied and not
 executed; post-wait credential/origin proof review remains a separate item.
 No production data, credentials, notifications or deployments were changed.
 See tenant-node-console.md for precise capabilities and limitations.
+
+
+## CI134 — signed JWT expiry boundary regression corrected
+
+CI134/run35865168005 failed the existing
+replay_connections_enforce_jwt_expiration_and_live_key_expiration integration
+test. The fixture read one batch from a new five-second JWT replay and treated
+any next data as evidence of post-expiry access, without waiting for signed exp.
+A late initial native event can legally arrive while the credential is valid.
+
+A test-only upstream gate now emits a distinct nonterminal delta after the first
+replay poll. The fixture verifies it is durably pending for the original tenant,
+user and response, with execution still active and the JWT not yet expired.
+The old assertion was reproduced deterministically with five seconds remaining
+on the JWT; the entire failing test took3.12 seconds. This is a fixture timing
+error, not evidence that an already-expired JWT was accepted by production code.
+
+The corrected test leaves that event unread, waits for the actual validated exp,
+asserts the original execution remains live, and only then checks that replay
+stops. JWT lifetime remains five seconds. Live-key expiry and the original stop,
+owner, single-charge and no-extra-inference assertions remain. No production
+stream, authorization, schema or accounting code changed.
+
+The focused case, all33 resource tests with eight threads, and all three replay
+connection tests passed. Final independent default-parallel workspace: 2712
+passed, 0 failed, 30 original ignored unchanged, including desktop/mobile.
+Native all-target, strict all-target/all-feature Clippy, Web/client WASM, format,
+whitespace and Python23 checks pass. The one changed integration source hash
+matched final verification. This repair does not represent another UI feature.
+
+CI135 for the node UI independently passed, including all three production-image
+browser runners. CI134's old failed attempt remains historical; a separate commit
+carries this deterministic correction and receives its own CI run. Full native
+resource management, remaining resource pages and final release remain unfinished.
