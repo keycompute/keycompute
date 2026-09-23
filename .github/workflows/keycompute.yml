@@ -20,12 +20,15 @@ on:
       - "**/Cargo.lock"
       - "Dockerfile*"
       - ".dockerignore"
+      - ".gitignore"
       - ".env.example"
       - "docker-compose*.yml"
       - "nginx/**"
       - "packages/**/assets/**"
       - "prod-build/**"
       - "scripts/**"
+      - "crates/keycompute-db/migrations/**"
+      - "docs/tenant-schema-inventory.tsv"
       - "README*.md"
       - "CONTRIBUTING.md"
       - ".github/workflows/keycompute.yml"
@@ -38,12 +41,15 @@ on:
       - "**/Cargo.lock"
       - "Dockerfile*"
       - ".dockerignore"
+      - ".gitignore"
       - ".env.example"
       - "docker-compose*.yml"
       - "nginx/**"
       - "packages/**/assets/**"
       - "prod-build/**"
       - "scripts/**"
+      - "crates/keycompute-db/migrations/**"
+      - "docs/tenant-schema-inventory.tsv"
       - "README*.md"
       - "CONTRIBUTING.md"
       - ".github/workflows/keycompute.yml"
@@ -292,6 +298,9 @@ jobs:
       # ── Step: Format Check (whole workspace, once) ────────────────────────
       - name: Format Check
         run: cargo fmt --check
+
+      - name: Tenant Foundation Contract
+        run: python3 scripts/ci/check_tenant_contract.py
 
       # ── Step: Lint (Clippy) ────────────────────────────────────────────────
       # Exclude WASM/mobile targets that need special toolchains.

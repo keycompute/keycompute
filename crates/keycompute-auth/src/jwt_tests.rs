@@ -198,3 +198,70 @@ async fn structurally_valid_jwt_cannot_authenticate_without_identity_storage() {
     let with_missing_pool = auth.with_user_service(crate::UserService::new());
     assert!(with_missing_pool.verify_token(&token).await.is_err());
 }
+
+#[test]
+fn independent_new_api_dashboard_claims_never_become_rust_platform_roles() {
+    let now = Utc::now().timestamp();
+    // The independent new/ service uses integer subjects, sid/uv/sv,
+    // new-api issuer/audience and a purpose-derived signing key. Even giving
+    // this foreign shape a valid local signature must not make it a Rust JWT.
+    let foreign = json!({
+        "iss":"new-api", "aud":["new-api-dashboard"], "sub":"1",
+        "exp":now+3600, "iat":now, "nbf":now-5, "jti":Uuid::new_v4(),
+        "sid":Uuid::new_v4(), "uv":1, "sv":1, "token_use":"access"
+    });
+    assert!(
+        validator()
+            .validate(&sign(&foreign, Algorithm::HS256))
+            .is_err()
+    );
+    let mut matching_issuer = foreign.clone();
+    matching_issuer["iss"] = json!(ISSUER);
+    matching_issuer["sub"] = json!(Uuid::new_v4());
+    matching_issuer["token_version"] = json!(1);
+    assert!(
+        validator()
+            .validate(&sign(&matching_issuer, Algorithm::HS256))
+            .is_err()
+    );
+    for role in [
+        json!(1),
+        json!(10),
+        json!(100),
+        json!("Common"),
+        json!("Admin"),
+        json!("Root"),
+    ] {
+        let mut with_role = claims();
+        with_role["role"] = role;
+        assert!(
+            validator()
+                .validate(&sign(&with_role, Algorithm::HS256))
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn foreign_dashboard_credentials_fail_before_identity_storage_or_key_fallback() {
+    let v = validator();
+    let auth = AuthService::new(ProduceAiKeyValidator::new()).with_jwt(v);
+    let mut foreign = claims();
+    foreign["iss"] = json!("new-api");
+    let token = sign(&foreign, Algorithm::HS256);
+    assert!(matches!(
+        auth.verify_token(&token).await,
+        Err(KeyComputeError::AuthError(_))
+    ));
+    // A purpose-bearing Go access/security-proof token remains foreign even
+    // when its subject and issuer collide with the local identity namespace.
+    for purpose in ["access", "security_proof"] {
+        let mut foreign = claims();
+        foreign["token_use"] = json!(purpose);
+        foreign["sid"] = json!(Uuid::new_v4());
+        assert!(matches!(
+            auth.verify_token(&sign(&foreign, Algorithm::HS256)).await,
+            Err(KeyComputeError::AuthError(_))
+        ));
+    }
+}

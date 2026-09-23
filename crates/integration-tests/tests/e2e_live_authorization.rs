@@ -584,3 +584,71 @@ async fn missing_authentication_storage_is_not_reported_as_a_bad_credential() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn independent_go_cookies_and_role_headers_never_authenticate_rust_routes() {
+    let mut f = Fixture::new().await;
+    let user = f.member("foreign-cookie", PlatformRole::None).await;
+    let app = create_router(f.state.clone());
+    let routes = [
+        "/api/v1/me".to_owned(),
+        "/api/v1/platform/users".to_owned(),
+        format!("/api/v1/tenants/{}/members", f.a.id),
+    ];
+    for path in &routes {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("cookie", "new_api_refresh=test-only; new_api_has_session=1")
+                    .header("new-api-user", "1")
+                    .header("x-user-id", user.id.to_string())
+                    .header("x-tenant-id", f.a.id.to_string())
+                    .header("x-role", "Root")
+                    .header("x-platform-role", "root")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
+    }
+    // A separately issued Rust inference key is the only permitted bridge;
+    // Go cookies/headers cannot turn that key into a console credential.
+    let key = f.key(user.id, f.a.id).await;
+    let response = probes(f.state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/identity")
+                .header("authorization", format!("Bearer {key}"))
+                .header("cookie", "new_api_refresh=test-only; new_api_has_session=1")
+                .header("x-platform-role", "root")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1 << 20).await.unwrap()).unwrap();
+    assert_eq!(body["tenant_id"], f.a.id.to_string());
+    assert_eq!(body["user_id"], user.id.to_string());
+    for path in &routes {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .header("authorization", format!("Bearer {key}"))
+                    .header("cookie", "new_api_refresh=test-only; new_api_has_session=1")
+                    .header("x-role", "Root")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    f.guard.cleanup().await.unwrap();
+}
