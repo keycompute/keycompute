@@ -10,7 +10,7 @@ pub struct AuthState {
     pub refresh_token: Option<String>,
     /// 是否已登录
     pub is_authenticated: bool,
-    /// Changes only at login/logout, not when the same session refreshes.
+    /// UI ownership epoch: changes at login/logout/workspace selection, never token refresh.
     pub session_id: Uuid,
     pub token_revision: u64,
     pub persistent: bool,
@@ -122,11 +122,39 @@ impl AuthStore {
             && current.token_revision == observed.token_revision
             && current.access_token == observed.access_token
             && current.is_authenticated == observed.is_authenticated
+            && current.selected_tenant_id == observed.selected_tenant_id
     }
 
     pub fn same_session(&self, observed: &AuthState) -> bool {
         let current = self.state.peek();
-        current.is_authenticated && current.session_id == observed.session_id
+        current.is_authenticated
+            && current.session_id == observed.session_id
+            && current.selected_tenant_id == observed.selected_tenant_id
+    }
+
+    /// Install an authenticated selection only in its initiating UI workspace.
+    /// A same-workspace token refresh may complete meanwhile; another selection
+    /// or login cannot be overwritten. The new epoch fences all old callbacks.
+    pub fn select_session_if_current(
+        &mut self,
+        observed: &AuthState,
+        expected_user_id: &str,
+        target: Option<&str>,
+        response: &client_api::api::auth::AuthResponse,
+    ) -> bool {
+        let valid_id = |value: &str| Uuid::parse_str(value).is_ok_and(|id| !id.is_nil());
+        if !self.same_session(observed)
+            || !observed.is_authenticated
+            || !valid_id(expected_user_id)
+            || response.user_id != expected_user_id
+            || response.access_token.trim().is_empty()
+            || target.is_some_and(|id| !valid_id(id))
+            || response.selected_tenant.as_ref().map(|t| t.id.as_str()) != target
+        {
+            return false;
+        }
+        self.login_with_session(response, observed.persistent);
+        true
     }
 
     /// Replace only credentials, retaining this login identity and remember-me.
@@ -315,3 +343,7 @@ fn clear_native_storage() {
     let path = native_storage_path();
     let _ = std::fs::remove_file(&path);
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "auth_store_workspace_tests.rs"]
+mod workspace_tests;

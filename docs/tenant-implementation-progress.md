@@ -1169,3 +1169,32 @@ credentials, payments, service restart or deployment changed. Native account-poo
 resource administration, actual tenant workspace/resource UI, remaining endpoint
 review and final security/restore/release gates are still separate unfinished work.
 See platform-monitoring-authorization.md for exact scope and lifecycle semantics.
+
+
+## Current phase 7 — existing profile workspace switch race accepted
+
+The shipped profile tenant selector now checks the initiating loaded global user,
+returned user identity and exact selected tenant before installing a session.
+The same workspace may refresh its token while selection is in flight; that
+refresh no longer silently discards a successful selection or leaves it busy.
+A different login or selected workspace cannot be overwritten by an old reply.
+Successful selection creates a new UI ownership epoch and invalidates cached
+reads while retaining remember-me. Old unauthorized requests do not replay as
+the newly selected tenant. Session comparisons include selected-tenant identity.
+
+Review caught a restored-browser no-op bug: an opaque stored token may not yet
+have a local selected_tenant_id even though the loaded server profile does.
+The profile is the source for the no-op comparison, so global selection remains
+possible. No default tenant is invented and no server authorization is inferred.
+
+Eight added regressions cover subject/tenant mismatch, nil identifiers, empty
+credentials, refresh/selection races, stale callbacks, global selection and
+restored profile context. All 171 Web tests and 2683 default-parallel workspace
+tests passed, with 0 failures and the original 30 ignored tests unchanged.
+Strict all-target/all-feature Clippy, native all-target and Web/client WASM
+checks passed; four source hashes match the final verified bytes.
+
+This is an existing profile-page repair, not the full workspace/member/invitation
+page delivery. New route/App/fragment integration was not applied; those page
+drafts remain archived outside main. No production DB, service, credentials,
+payment, deployment or backend permission changes were made.

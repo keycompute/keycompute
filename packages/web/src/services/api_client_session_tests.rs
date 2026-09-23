@@ -236,3 +236,49 @@ fn logout_also_fences_inflight_success() {
         })
     });
 }
+
+#[test]
+fn old_workspace_command_is_not_replayed_or_delivered_after_verified_selection() {
+    harness(|mut auth| {
+        block_on(async {
+            let observed = auth.state.peek().clone();
+            let user = uuid::Uuid::new_v4();
+            let tenant = uuid::Uuid::new_v4();
+            let response = serde_json::from_value(serde_json::json!({
+                "user_id": user, "email":"workspace@example.test", "name":null,
+                "platform_role":"none", "status":"active", "selected_tenant":{
+                    "id":tenant,"tenant_role":"member","authz_version":1,"membership_authz_version":1
+                }, "access_token":"tenant-B", "token_type":"Bearer", "expires_in":3600
+            })).unwrap();
+            let (tx, rx) = oneshot::channel();
+            let gate = RefCell::new(Some(rx));
+            let calls = std::cell::Cell::new(0);
+            let request = with_auto_refresh_using(
+                auth,
+                client(),
+                |_| {
+                    calls.set(calls.get() + 1);
+                    let rx = gate.borrow_mut().take().expect("no second dispatch");
+                    async move { rx.await.unwrap() }
+                },
+                |_| panic!("old workspace cannot refresh after selection"),
+            );
+            let selection = async {
+                assert!(auth.select_session_if_current(
+                    &observed,
+                    &user.to_string(),
+                    Some(&tenant.to_string()),
+                    &response
+                ));
+                tx.send(Err::<(), _>(ClientError::Unauthorized(
+                    "old workspace".into(),
+                )))
+                .unwrap();
+            };
+            let (result, _) = futures::join!(request, selection);
+            assert!(matches!(result, Err(ClientError::Other(_))));
+            assert_eq!(calls.get(), 1);
+            assert_eq!(auth.token().as_deref(), Some("tenant-B"));
+        });
+    });
+}

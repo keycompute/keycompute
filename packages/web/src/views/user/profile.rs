@@ -142,6 +142,14 @@ pub fn UserProfile() -> Element {
         }
         let target = event.value();
         let observed = (auth_store.state)();
+        let Some(current_user) = user_store.info.peek().clone().filter(|_| {
+            observed.is_authenticated && *user_store.loaded_session_id.peek() == observed.session_id
+        }) else {
+            return;
+        };
+        if selection_matches_profile(&current_user, &target) {
+            return;
+        }
         let known = target.is_empty()
             || user_store.info.read().as_ref().is_some_and(|u| {
                 u.memberships
@@ -166,26 +174,24 @@ pub fn UserProfile() -> Element {
                     observed.access_token.as_deref().unwrap_or_default(),
                 )
                 .await;
-            if !auth_store.matches(&observed) {
+            if !auth_store.same_session(&observed) {
                 return;
             }
             match result {
                 Ok(session) => {
-                    let returned = session
-                        .selected_tenant
-                        .as_ref()
-                        .map(|t| t.id.as_str())
-                        .unwrap_or_default();
-                    if returned != target {
-                        tenant_error.set(Some(
-                            "The server returned a different tenant selection".into(),
-                        ));
+                    let target = (!target.is_empty()).then_some(target.as_str());
+                    if !auth_store.select_session_if_current(
+                        &observed,
+                        &current_user.id,
+                        target,
+                        &session,
+                    ) {
+                        tenant_error.set(Some("The returned session does not match this identity and tenant selection".into()));
                         tenant_saving.set(false);
                         return;
                     }
-                    // A new UI session invalidates cached reads and remounts tenant views.
+                    // The new epoch invalidates old cached reads and remounts the profile.
                     user_store.clear();
-                    auth_store.login_with_session(&session, observed.persistent);
                 }
                 Err(error) => tenant_error.set(Some(
                     crate::services::api_client::user_error_message(&error),
@@ -339,5 +345,47 @@ pub fn UserProfile() -> Element {
                 }
             }
         }
+    }
+}
+
+/// A restored opaque credential may not have a locally selected tenant yet.
+/// The loaded server profile, not that local placeholder, describes the UI.
+fn selection_matches_profile(user: &crate::stores::user_store::UserInfo, target: &str) -> bool {
+    user.selected_tenant
+        .as_ref()
+        .map(|tenant| tenant.id.as_str())
+        .unwrap_or_default()
+        == target
+}
+
+#[cfg(test)]
+mod workspace_selection_tests {
+    use super::selection_matches_profile;
+    use crate::stores::{auth_store::AuthState, user_store::UserInfo};
+    use client_api::api::auth::SelectedTenant;
+
+    #[test]
+    fn restored_workspace_uses_the_loaded_profile_when_selecting_global() {
+        let restored = AuthState::logged_in("restored-opaque-token".into());
+        assert!(restored.selected_tenant_id.is_none());
+        let tenant = uuid::Uuid::new_v4();
+        let user = UserInfo {
+            selected_tenant: Some(SelectedTenant {
+                id: tenant.to_string(),
+                name: None,
+                slug: None,
+                tenant_role: client_api::TenantRole::Member,
+                authz_version: Some(1),
+                membership_authz_version: Some(1),
+            }),
+            ..Default::default()
+        };
+        assert!(!selection_matches_profile(&user, ""));
+        assert!(selection_matches_profile(&user, &tenant.to_string()));
+        assert!(!selection_matches_profile(
+            &user,
+            &uuid::Uuid::new_v4().to_string()
+        ));
+        assert!(selection_matches_profile(&UserInfo::default(), ""));
     }
 }
