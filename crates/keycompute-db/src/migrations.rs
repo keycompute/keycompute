@@ -172,6 +172,17 @@ fn schema_error(error: sea_orm::DbErr) -> DbError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn platform_settings_schema_keeps_identity_and_monotonic_versions() {
+        let sql = include_str!("../migrations/001_init.sql");
+        assert!(sql.contains("guard_platform_setting_version"));
+        assert!(!sql.contains("trigger_update_system_settings_updated_at"));
+        assert!(sql.contains("platform setting identity is immutable"));
+        assert!(sql.contains("is_sensitive BOOLEAN NOT NULL DEFAULT FALSE"));
+        assert!(sql.contains(
+            "NEW.updated_at:=GREATEST(clock_timestamp(),OLD.updated_at+interval '1 microsecond')"
+        ));
+    }
+    #[test]
     fn manual_balance_schema_binds_outcomes_to_original_owner_and_ledger() {
         let sql = include_str!("../migrations/001_init.sql");
         for rule in [

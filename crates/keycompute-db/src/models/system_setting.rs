@@ -4,9 +4,7 @@
 
 use crate::DbError;
 use chrono::{DateTime, Utc};
-use sea_orm::{
-    TransactionTrait, {ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement},
-};
+use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -112,7 +110,8 @@ pub mod setting_keys {
 }
 
 /// 更新系统设置请求
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateSystemSettingRequest {
     pub value: String,
 }
@@ -223,28 +222,15 @@ impl SystemSetting {
         Ok(setting)
     }
 
-    /// 获取所有设置
-    pub async fn find_all(db: &impl ConnectionTrait) -> Result<Vec<SystemSetting>, DbError> {
-        let stmt = Statement::from_string(
+    // Internal public-view construction only. No control-plane caller may use
+    // this as authorization; the resulting view still selects a fixed allowlist.
+    async fn find_non_sensitive(db: &impl ConnectionTrait) -> Result<Vec<Self>, DbError> {
+        Ok(Self::find_by_statement(Statement::from_string(
             DbBackend::Postgres,
-            "SELECT * FROM system_settings ORDER BY key ASC".to_string(),
-        );
-        let settings = SystemSetting::find_by_statement(stmt).all(db).await?;
-
-        Ok(settings)
-    }
-
-    /// 获取所有非敏感设置
-    pub async fn find_non_sensitive(
-        db: &impl ConnectionTrait,
-    ) -> Result<Vec<SystemSetting>, DbError> {
-        let stmt = Statement::from_string(
-            DbBackend::Postgres,
-            "SELECT * FROM system_settings WHERE is_sensitive = false ORDER BY key ASC".to_string(),
-        );
-        let settings = SystemSetting::find_by_statement(stmt).all(db).await?;
-
-        Ok(settings)
+            "SELECT * FROM system_settings WHERE is_sensitive IS FALSE ORDER BY key".to_owned(),
+        ))
+        .all(db)
+        .await?)
     }
 
     /// 更新设置值（如果不存在则创建）
@@ -273,52 +259,6 @@ impl SystemSetting {
         Ok(setting)
     }
 
-    /// 批量更新设置（使用事务）
-    ///
-    /// 所有更新在同一事务中执行，保证原子性
-    pub async fn batch_update(
-        db: &(impl ConnectionTrait + TransactionTrait),
-        settings: &std::collections::HashMap<String, String>,
-    ) -> Result<Vec<SystemSetting>, DbError> {
-        let txn = db.begin().await?;
-        let updated = Self::batch_update_tx(&txn, settings).await?;
-        txn.commit().await?;
-        Ok(updated)
-    }
-
-    /// 批量更新设置（在现有事务中执行）
-    ///
-    /// 用于在调用者已有事务中执行批量更新
-    pub async fn batch_update_tx(
-        txn: &DatabaseTransaction,
-        settings: &std::collections::HashMap<String, String>,
-    ) -> Result<Vec<SystemSetting>, DbError> {
-        let mut updated = Vec::with_capacity(settings.len());
-
-        for (key, value) in settings {
-            let stmt = Statement::from_sql_and_values(
-                DbBackend::Postgres,
-                r#"
-                INSERT INTO system_settings (key, value, value_type, description, created_at, updated_at)
-                VALUES ($1, $2, 'string', '', NOW(), NOW())
-                ON CONFLICT (key) DO UPDATE SET
-                    value = EXCLUDED.value,
-                    updated_at = NOW()
-                RETURNING *
-                "#,
-                [key.as_str().into(), value.as_str().into()],
-            );
-            let setting = SystemSetting::find_by_statement(stmt)
-                .one(txn)
-                .await?
-                .ok_or_else(|| DbError::Other("upsert failed to return row".to_string()))?;
-
-            updated.push(setting);
-        }
-
-        Ok(updated)
-    }
-
     /// 初始化默认设置
     ///
     /// 如果设置不存在，则使用默认值创建
@@ -327,7 +267,6 @@ impl SystemSetting {
             (setting_keys::SITE_NAME, "KeyCompute", "string"),
             (setting_keys::SITE_DESCRIPTION, "AI 模型聚合平台", "string"),
             (setting_keys::DEFAULT_USER_QUOTA, "10.00", "decimal"),
-            (setting_keys::DEFAULT_USER_ROLE, "user", "string"),
             (setting_keys::DEFAULT_RPM_LIMIT, "60", "int"),
             (setting_keys::DEFAULT_TPM_LIMIT, "10000", "int"),
             (setting_keys::MAINTENANCE_MODE, "false", "bool"),
@@ -364,7 +303,7 @@ impl SystemSetting {
             if Self::find_by_key(db, key).await?.is_none() {
                 let stmt = Statement::from_sql_and_values(
                     DbBackend::Postgres,
-                    r#"INSERT INTO system_settings (key, value, value_type, description, created_at, updated_at) VALUES ($1, $2, $3, '', NOW(), NOW())"#,
+                    r#"INSERT INTO system_settings (key, value, value_type, description, created_at, updated_at) VALUES ($1, $2, $3, '', NOW(), NOW()) ON CONFLICT(key) DO NOTHING"#,
                     [key.into(), value.into(), value_type.into()],
                 );
                 db.execute(stmt).await?;
@@ -520,3 +459,7 @@ mod tests {
         assert!(!PublicSettings::default().distribution_enabled);
     }
 }
+
+#[path = "system_setting_scope.rs"]
+mod scope;
+pub use scope::{SettingsPolicy, normalize_platform_setting, validate_platform_payment_range};

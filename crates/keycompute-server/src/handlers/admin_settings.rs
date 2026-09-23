@@ -4,7 +4,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::{GlobalConsoleAuth, RequestId},
     handlers::configured_public_base_url,
     state::AppState,
 };
@@ -12,10 +12,9 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use keycompute_auth::Permission;
 use keycompute_db::models::system_setting::setting_keys;
+#[cfg(test)]
 use rust_decimal::Decimal;
-use sea_orm::{ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait};
 use serde::{Deserialize, Serialize};
 
 // ==================== 系统设置 ====================
@@ -161,88 +160,8 @@ fn is_removed_setting(key: &str) -> bool {
 }
 
 fn normalize_setting_update(key: &str, value: impl Into<String>) -> Result<String> {
-    if is_hidden_setting(key) {
-        return Err(ApiError::BadRequest(format!(
-            "Setting {} is fixed and cannot be edited",
-            key
-        )));
-    }
-
-    if is_removed_setting(key) {
-        return Err(ApiError::BadRequest(format!(
-            "Setting {} has been removed and can no longer be edited",
-            key
-        )));
-    }
-
-    let value = value.into();
-
-    if matches!(
-        key,
-        setting_keys::ALIPAY_ENABLED | setting_keys::WECHATPAY_ENABLED
-    ) {
-        return match value.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" => Ok("true".to_string()),
-            "false" | "0" | "no" => Ok("false".to_string()),
-            _ => Err(ApiError::BadRequest(format!(
-                "Setting {key} must be a valid boolean"
-            ))),
-        };
-    }
-
-    if matches!(
-        key,
-        setting_keys::MIN_RECHARGE_AMOUNT | setting_keys::MAX_RECHARGE_AMOUNT
-    ) {
-        let amount = value.parse::<Decimal>().map_err(|_| {
-            ApiError::BadRequest(format!("Setting {key} must be a valid decimal amount"))
-        })?;
-        let amount = amount.normalize();
-        let database_max = Decimal::new(999_999_999_999, 2);
-        if amount <= Decimal::ZERO || amount > database_max || amount.scale() > 2 {
-            return Err(ApiError::BadRequest(format!(
-                "Setting {key} must be positive, use at most two decimal places, and not exceed {database_max}"
-            )));
-        }
-        return Ok(amount.to_string());
-    }
-
-    if key == setting_keys::DEFAULT_USER_QUOTA {
-        let quota = value.parse::<f64>().map_err(|_| {
-            ApiError::BadRequest("Setting default_user_quota must be a valid number".to_string())
-        })?;
-
-        if !quota.is_finite() {
-            return Err(ApiError::BadRequest(
-                "Setting default_user_quota must be a finite number".to_string(),
-            ));
-        }
-
-        return Ok(quota.to_string());
-    }
-
-    if key == setting_keys::JWT_EXPIRE_HOURS {
-        let hours = value.parse::<i64>().map_err(|_| {
-            ApiError::BadRequest("Setting jwt_expire_hours must be a valid integer".to_string())
-        })?;
-
-        if hours <= 0 {
-            return Err(ApiError::BadRequest(
-                "Setting jwt_expire_hours must be positive".to_string(),
-            ));
-        }
-
-        if hours > setting_keys::JWT_EXPIRE_HOURS_MAX {
-            return Err(ApiError::BadRequest(format!(
-                "Setting jwt_expire_hours must be less than or equal to {}",
-                setting_keys::JWT_EXPIRE_HOURS_MAX
-            )));
-        }
-
-        return Ok(hours.to_string());
-    }
-
-    Ok(value)
+    keycompute_db::models::system_setting::normalize_platform_setting(key, &value.into())
+        .map_err(settings_error)
 }
 
 fn normalize_settings_map(
@@ -254,70 +173,10 @@ fn normalize_settings_map(
         .collect()
 }
 
-async fn ensure_payment_amount_range(
-    db: &impl ConnectionTrait,
-    settings: &std::collections::HashMap<String, String>,
-) -> Result<()> {
-    if !settings.contains_key(setting_keys::MIN_RECHARGE_AMOUNT)
-        && !settings.contains_key(setting_keys::MAX_RECHARGE_AMOUNT)
-    {
-        return Ok(());
-    }
-
-    #[derive(FromQueryResult)]
-    struct AmountSettingRow {
-        key: String,
-        value: String,
-    }
-
-    // Lock both rows in the same transaction as the update. This prevents two
-    // concurrent partial updates from each validating against stale counterparts.
-    let rows = AmountSettingRow::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT key, value FROM system_settings WHERE key IN ($1, $2) ORDER BY key FOR UPDATE",
-        [
-            setting_keys::MIN_RECHARGE_AMOUNT.into(),
-            setting_keys::MAX_RECHARGE_AMOUNT.into(),
-        ],
-    ))
-    .all(db)
-    .await
-    .map_err(|error| {
-        tracing::error!(%error, "Failed to lock payment amount settings");
-        ApiError::Internal("Failed to validate payment settings".to_string())
-    })?;
-    let current = |key: &str, default: Decimal| -> Result<Decimal> {
-        match rows.iter().find(|row| row.key == key) {
-            Some(row) => row.value.parse::<Decimal>().map_err(|error| {
-                tracing::error!(%error, key, "Stored payment amount setting is invalid");
-                ApiError::Internal("Failed to validate payment settings".to_string())
-            }),
-            None => Ok(default),
-        }
-    };
-
-    let min = match settings.get(setting_keys::MIN_RECHARGE_AMOUNT) {
-        Some(value) => value
-            .parse::<Decimal>()
-            .map_err(|_| ApiError::BadRequest("Invalid minimum recharge amount".to_string()))?,
-        None => current(setting_keys::MIN_RECHARGE_AMOUNT, Decimal::ONE)?,
-    };
-    let max = match settings.get(setting_keys::MAX_RECHARGE_AMOUNT) {
-        Some(value) => value
-            .parse::<Decimal>()
-            .map_err(|_| ApiError::BadRequest("Invalid maximum recharge amount".to_string()))?,
-        None => current(setting_keys::MAX_RECHARGE_AMOUNT, Decimal::new(100_000, 0))?,
-    };
-    validate_payment_amount_range(min, max)
-}
-
+#[cfg(test)]
 fn validate_payment_amount_range(min: Decimal, max: Decimal) -> Result<()> {
-    if min > max {
-        return Err(ApiError::BadRequest(
-            "min_recharge_amount must not exceed max_recharge_amount".to_string(),
-        ));
-    }
-    Ok(())
+    keycompute_db::models::system_setting::validate_platform_payment_range(min, max)
+        .map_err(settings_error)
 }
 
 fn is_truthy_setting(value: &str) -> bool {
@@ -344,43 +203,35 @@ fn ensure_distribution_has_public_base_url(
     Ok(())
 }
 
-fn requires_protected_settings_permission(key: &str) -> bool {
-    key == setting_keys::DISTRIBUTION_ENABLED
-}
-
-fn ensure_admin_permission(auth: &AuthExtractor) -> Result<()> {
-    if !auth.has_permission(&Permission::ManageSystemSettings) {
-        return Err(ApiError::Forbidden("Admin permission required".to_string()));
+fn settings_error(error: keycompute_db::DbError) -> ApiError {
+    if let keycompute_db::DbError::Other(message) = &error {
+        if message == "financial_authority_invalid" {
+            return ApiError::Forbidden("Current root settings authority required".into());
+        }
+        if message.starts_with("Sensitive settings") {
+            return ApiError::Forbidden(
+                "Sensitive settings require a dedicated credential workflow".into(),
+            );
+        }
+        if [
+            "Setting ",
+            "Unknown ",
+            "Platform settings batch",
+            "APP_BASE_URL ",
+            "Minimum recharge",
+        ]
+        .iter()
+        .any(|prefix| message.starts_with(prefix))
+        {
+            return ApiError::BadRequest(message.clone());
+        }
     }
-    Ok(())
+    settings_internal_error("platform_settings", error)
 }
-
-fn ensure_setting_update_allowed(auth: &AuthExtractor, key: &str) -> Result<()> {
-    if requires_protected_settings_permission(key)
-        && !auth.has_permission(&Permission::ManageSystemSettings)
-    {
-        return Err(ApiError::Forbidden(
-            "Protected system setting permission required".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-fn ensure_settings_update_allowed(
-    auth: &AuthExtractor,
-    settings: &std::collections::HashMap<String, String>,
-) -> Result<()> {
-    for key in settings.keys() {
-        ensure_setting_update_allowed(auth, key)?;
-    }
-
-    Ok(())
-}
-
-fn settings_internal_error(operation: &'static str, error: impl std::fmt::Display) -> ApiError {
-    tracing::error!(operation, %error, "System settings operation failed");
-    ApiError::Internal("System settings operation failed".to_string())
+fn settings_internal_error(operation: &'static str, _error: impl std::fmt::Display) -> ApiError {
+    // A database error may contain supplied setting values, including private data.
+    tracing::error!(operation, "System settings operation failed");
+    ApiError::Internal("System settings operation failed".into())
 }
 
 fn payload_to_settings_map(
@@ -414,19 +265,19 @@ fn payload_to_settings_map(
 ///
 /// GET /api/v1/admin/settings
 pub async fn get_system_settings(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
 ) -> Result<Json<std::collections::HashMap<String, serde_json::Value>>> {
-    ensure_admin_permission(&auth)?;
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
 
     let pool = state
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    let settings = keycompute_db::SystemSetting::find_all(pool)
+    let settings = keycompute_db::SystemSetting::find_all_platform(pool.write_conn(), scope)
         .await
-        .map_err(|error| settings_internal_error("find_all", error))?;
+        .map_err(settings_error)?;
 
     // 将设置列表转换为 HashMap<key, value>
     // value 根据 value_type 转换为对应的 JSON 类型
@@ -434,19 +285,23 @@ pub async fn get_system_settings(
         .into_iter()
         .filter(|s| !is_hidden_setting(&s.key) && !is_removed_setting(&s.key))
         .map(|s| {
-            let val = match s.value_type.as_str() {
-                "bool" => match s.value.as_str() {
-                    "true" | "1" | "yes" => serde_json::Value::Bool(true),
-                    _ => serde_json::Value::Bool(false),
-                },
-                "int" | "decimal" => {
-                    if let Ok(n) = s.value.parse::<f64>() {
-                        serde_json::json!(n)
-                    } else {
-                        serde_json::Value::String(s.value)
+            let val = if s.is_sensitive {
+                serde_json::Value::String("[REDACTED]".into())
+            } else {
+                match s.value_type.as_str() {
+                    "bool" => match s.value.as_str() {
+                        "true" | "1" | "yes" => serde_json::Value::Bool(true),
+                        _ => serde_json::Value::Bool(false),
+                    },
+                    "int" | "decimal" => {
+                        if let Ok(n) = s.value.parse::<f64>() {
+                            serde_json::json!(n)
+                        } else {
+                            serde_json::Value::String(s.value)
+                        }
                     }
+                    _ => serde_json::Value::String(s.value),
                 }
-                _ => serde_json::Value::String(s.value),
             };
             (s.key, val)
         })
@@ -459,11 +314,12 @@ pub async fn get_system_settings(
 ///
 /// PUT /api/v1/admin/settings
 pub async fn update_system_settings(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
     State(state): State<AppState>,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>> {
-    ensure_admin_permission(&auth)?;
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
 
     let pool = state
         .pool
@@ -471,21 +327,20 @@ pub async fn update_system_settings(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     let settings_map = normalize_settings_map(payload_to_settings_map(payload)?)?;
-    ensure_settings_update_allowed(&auth, &settings_map)?;
     ensure_distribution_has_public_base_url(state.app_base_url.as_deref(), &settings_map)?;
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|error| settings_internal_error("begin_batch_update", error))?;
-    ensure_payment_amount_range(&txn, &settings_map).await?;
-
-    // Validation and updates share one transaction and the payment rows remain locked.
-    let updated = keycompute_db::SystemSetting::batch_update_tx(&txn, &settings_map)
-        .await
-        .map_err(|error| settings_internal_error("batch_update", error))?;
-    txn.commit()
-        .await
-        .map_err(|error| settings_internal_error("commit_batch_update", error))?;
+    let _fence = state.display_cache.mutation_guard();
+    let updated = keycompute_db::SystemSetting::update_platform_batch(
+        pool.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, request_id),
+        &settings_map,
+        keycompute_db::models::system_setting::SettingsPolicy {
+            public_base_url_configured: configured_public_base_url(state.app_base_url.as_deref())
+                .is_some(),
+        },
+    )
+    .await
+    .map_err(settings_error)?;
 
     tracing::info!(
         user_id = %auth.user_id,
@@ -504,11 +359,11 @@ pub async fn update_system_settings(
 ///
 /// GET /api/v1/admin/settings/:key
 pub async fn get_system_setting_by_key(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<keycompute_db::SystemSettingResponse>> {
-    ensure_admin_permission(&auth)?;
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
 
     let pool = state
         .pool
@@ -519,9 +374,9 @@ pub async fn get_system_setting_by_key(
         return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
     }
 
-    let setting = keycompute_db::SystemSetting::find_by_key(pool, &key)
+    let setting = keycompute_db::SystemSetting::find_platform(pool.write_conn(), scope, &key)
         .await
-        .map_err(|error| settings_internal_error("find_by_key", error))?
+        .map_err(settings_error)?
         .ok_or_else(|| ApiError::NotFound(format!("Setting not found: {}", key)))?;
 
     Ok(Json(setting.into()))
@@ -531,12 +386,13 @@ pub async fn get_system_setting_by_key(
 ///
 /// PUT /api/v1/admin/settings/:key
 pub async fn update_system_setting_by_key(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
+    request_id: RequestId,
     State(state): State<AppState>,
     Path(key): Path<String>,
     Json(payload): Json<keycompute_db::UpdateSystemSettingRequest>,
 ) -> Result<Json<keycompute_db::SystemSettingResponse>> {
-    ensure_admin_permission(&auth)?;
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
 
     let pool = state
         .pool
@@ -547,24 +403,26 @@ pub async fn update_system_setting_by_key(
         return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
     }
 
-    ensure_setting_update_allowed(&auth, &key)?;
-
     let normalized_value = normalize_setting_update(&key, payload.value)?;
     let mut settings_map = std::collections::HashMap::new();
     settings_map.insert(key.clone(), normalized_value.clone());
     ensure_distribution_has_public_base_url(state.app_base_url.as_deref(), &settings_map)?;
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|error| settings_internal_error("begin_single_update", error))?;
-    ensure_payment_amount_range(&txn, &settings_map).await?;
-
-    let setting = keycompute_db::SystemSetting::update_value(&txn, &key, &normalized_value)
-        .await
-        .map_err(|error| settings_internal_error("single_update", error))?;
-    txn.commit()
-        .await
-        .map_err(|error| settings_internal_error("commit_single_update", error))?;
+    let _fence = state.display_cache.mutation_guard();
+    let mut updated = keycompute_db::SystemSetting::update_platform_batch(
+        pool.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, request_id),
+        &settings_map,
+        keycompute_db::models::system_setting::SettingsPolicy {
+            public_base_url_configured: configured_public_base_url(state.app_base_url.as_deref())
+                .is_some(),
+        },
+    )
+    .await
+    .map_err(settings_error)?;
+    let setting = updated
+        .pop()
+        .ok_or_else(|| ApiError::Internal("Setting update returned no result".into()))?;
 
     tracing::info!(
         user_id = %auth.user_id,
@@ -593,6 +451,19 @@ pub async fn get_public_settings(
     };
 
     Ok(Json(settings))
+}
+
+pub(crate) async fn private_response(
+    mut response: axum::response::Response,
+) -> axum::response::Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "private, no-store".parse().unwrap(),
+    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
+    response
 }
 
 #[cfg(test)]
@@ -759,51 +630,68 @@ mod tests {
     }
 
     #[test]
-    fn test_distribution_toggle_requires_protected_settings_permission() {
-        let auth = AuthExtractor::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            CredentialKind::System,
-        )
-        .with_permissions(Vec::new());
-
-        let err =
-            ensure_setting_update_allowed(&auth, setting_keys::DISTRIBUTION_ENABLED).unwrap_err();
-        assert!(matches!(err, ApiError::Forbidden(msg) if msg.contains("permission required")));
-    }
-
-    #[test]
-    fn test_distribution_toggle_allows_protected_settings_permission() {
-        let auth = AuthExtractor::new(
+    fn platform_settings_ignore_a_permission_vector_without_a_platform_role() {
+        let auth = crate::extractors::AuthExtractor::new(
             Uuid::new_v4(),
             Uuid::new_v4(),
             Uuid::new_v4(),
             CredentialKind::Jwt,
         )
-        .with_permissions(vec![Permission::ManageSystemSettings]);
-
-        assert!(ensure_setting_update_allowed(&auth, setting_keys::DISTRIBUTION_ENABLED).is_ok());
-    }
-
-    #[test]
-    fn admin_settings_access_uses_permissions_instead_of_role() {
-        let role_only = AuthExtractor::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            CredentialKind::System,
+        .with_permissions(vec![keycompute_auth::Permission::ManageSystemSettings]);
+        assert!(
+            auth.require_platform(keycompute_auth::AuthorizationAction::ManagePlatform)
+                .is_err()
         );
-        assert!(ensure_admin_permission(&role_only).is_err());
-
-        let permission_only = AuthExtractor::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
+    }
+    #[test]
+    fn platform_settings_reject_operator_even_when_it_is_a_tenant_admin() {
+        use keycompute_types::{AuthorizationSubject, PlatformRole, TenantRole};
+        let decision = keycompute_auth::authorize(
             CredentialKind::Jwt,
-        )
-        .with_permissions(vec![Permission::ManageSystemSettings]);
-        assert!(ensure_admin_permission(&permission_only).is_ok());
+            AuthorizationSubject {
+                user_id: Uuid::new_v4(),
+                platform_role: PlatformRole::Operator,
+                tenant_id: Some(Uuid::new_v4()),
+                tenant_role: Some(TenantRole::Admin),
+            },
+            keycompute_auth::AuthorizationAction::ManagePlatform,
+            keycompute_auth::ResourceScope::Platform,
+        );
+        assert_eq!(decision, keycompute_auth::AuthorizationDecision::Deny);
+    }
+    #[test]
+    fn platform_settings_require_a_console_credential_even_for_root() {
+        use keycompute_types::{AuthorizationSubject, PlatformRole};
+        let subject = AuthorizationSubject {
+            user_id: Uuid::new_v4(),
+            platform_role: PlatformRole::Root,
+            tenant_id: None,
+            tenant_role: None,
+        };
+        for credential in [
+            CredentialKind::ApiKey,
+            CredentialKind::Node,
+            CredentialKind::System,
+        ] {
+            assert_eq!(
+                keycompute_auth::authorize(
+                    credential,
+                    subject,
+                    keycompute_auth::AuthorizationAction::ManagePlatform,
+                    keycompute_auth::ResourceScope::Platform
+                ),
+                keycompute_auth::AuthorizationDecision::Deny
+            );
+        }
+        assert_eq!(
+            keycompute_auth::authorize(
+                CredentialKind::Jwt,
+                subject,
+                keycompute_auth::AuthorizationAction::ManagePlatform,
+                keycompute_auth::ResourceScope::Platform
+            ),
+            keycompute_auth::AuthorizationDecision::Allow
+        );
     }
 
     #[tokio::test]

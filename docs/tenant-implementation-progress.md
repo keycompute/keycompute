@@ -9,9 +9,10 @@ Responses replay now revalidates credentials and authorization versions.
 Node/registration control and task cancellation/archival are accepted. Original-authority physical dispatch and node-queue claim checks are also accepted.
 Local passthrough/node Responses and Conversation administration is accepted.
 Explicit node-session ownership and tenant/currency-scoped node earnings and
-withdrawal management are accepted. Remaining native account-pool resource
-administration, manual wallet/reservation writes, global tip-ratio configuration,
-complete platform/operator routing, full frontend and final release are not accepted.
+withdrawal management, transaction-bound manual wallet/reservation control and
+root-only global settings/ratio management are accepted. Native account-pool resource
+administration, complete platform/operator routing, full frontend and final release
+remain open.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
@@ -905,3 +906,52 @@ reviewed snapshot. Focused32+12 and SDK3 are included subsets, not extra workspa
 No production database, credentials, service, payment or deployment was changed.
 The broader platform/settings, native resource adapter, UI and release gates
 remain open; this does not close the complete tenant subsystem.
+
+
+## Current phases 3/6 — global settings and earnings policy accepted
+
+The baseline was `b833c42` with a clean main checkout; prior CI123 was confirmed
+successful separately. Global configuration belongs to the platform, not the
+default tenant. A current root console identity without any selected membership
+can use canonical platform settings and earnings-ratio routes. Operator, ordinary
+member and tenant-admin roles cannot obtain platform settings authority, including
+when a handler is mounted without the outer platform middleware.
+
+Every console query uses a primary, authority-bearing safe projection. One explicit
+nonsecret-key registry drives both validation and SQL CASE masking: flagged secret
+and unclassified values/descriptions are not materialized. Generic endpoints cannot
+create arbitrary settings or update credential fields; dedicated workflows remain
+required. Public settings retain their separate fixed public projection. SDK reads
+use canonical platform paths and bypass client display caches; keys cannot inject
+extra URL components.
+
+General batch updates validate bounded inputs and exact decimal domains inside
+the scoped DAO. Current user/selected-membership versions, root role and expiry
+are rechecked under retained authority and sorted setting locks; paired recharge
+limits are validated in the same transaction. Each changed key and its platform
+audit commit atomically, including savepoint rollback after an outer catch/commit.
+No-op values keep their version and do not duplicate change events. Errors do not
+include raw setting values. Removing the old user-role startup seed does not add
+any replacement role fallback.
+
+Node earnings ratio updates require exact decimal strings, expected_updated_at
+and an audit reason. Generic single/batch URLs cannot bypass that dedicated CAS.
+Two different roots racing the same version have one winner. Before/after ratios
+are recorded without credentials or arbitrary settings values. Final credential
+checks cover row/audit waits. Existing already-credited earnings are not rewritten.
+
+A real PostgreSQL regression exposed the old settings timestamp trigger overriding
+the new monotonic revision. The conflicting legacy function/trigger was removed
+from greenfield001; the single remaining identity/version guard handles runtime
+writers and no-ops. Repeated startup seed inserts are safe and do not recreate
+`default_user_role`. No incremental schema/compatibility migration was added.
+
+Final default-parallel native workspace: **2,627 passed, 0 failed, 30 original
+default ignored**, including desktop/mobile. All-target check, strict all-target/
+all-feature Clippy, Web/client WASM, formatting, whitespace and 15 exact-source
+hashes passed. The 12 new and 6 existing PostgreSQL/HTTP cases, 2 new and 8 existing
+SDK cases, and exact-PID expiry repetition are included subsets, not extra totals.
+The expiry observer checks actual backend/relation locks rather than truncated
+SQL text. No production DB, credentials, payments, service or deployment changed.
+Native and operator/UI preparations are not included in this acceptance; broad
+platform routing, native resource adaptation and release gates remain separate.

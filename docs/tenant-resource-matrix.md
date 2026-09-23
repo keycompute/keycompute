@@ -83,3 +83,18 @@ Console reservation pages are one primary read-only snapshot. They show the exac
 persisted active-reservation total, including expired rows not yet reclaimed,
 and never reclaim money as a side effect of a GET. Internal reclamation helpers
 remain separate from these console queries.
+
+## Platform settings and shared payment configuration
+
+System settings and the node earnings ratio are platform-owned, not owned by a
+default tenant. All console settings reads/writes require a current root global
+scope, even when the root has no selected membership. A tenant admin or operator
+role does not grant settings management. Canonical and retained URLs share this
+same boundary. Sensitive and unclassified setting values never leave the safe
+SQL projection; secret changes belong to dedicated credential workflows.
+
+General updates validate the entire batch and paired payment limits inside the
+audited transaction. The earnings ratio uses its own exact-decimal, versioned,
+reason-audited command and cannot be updated through generic setting URLs.
+Platform-wide payment policy does not change existing order/wallet tenant or
+owner identity. Broader platform operation and final release gates remain separate.

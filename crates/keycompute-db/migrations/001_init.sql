@@ -1498,13 +1498,31 @@ CREATE TABLE IF NOT EXISTS system_settings (
     -- 设置描述
     description VARCHAR(255),
     -- 是否为敏感设置（敏感设置不在日志中显示）
-    is_sensitive BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW()
+    is_sensitive BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- 创建索引
 -- key 上有 UNIQUE 约束，PG 自动创建唯一索引，无需额外 B-tree 索引
+
+-- All writers, including startup reconciliation, share monotonic setting versions.
+CREATE OR REPLACE FUNCTION guard_platform_setting_version() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.id,NEW.key,NEW.created_at) IS DISTINCT FROM ROW(OLD.id,OLD.key,OLD.created_at) THEN
+        RAISE EXCEPTION 'platform setting identity is immutable' USING ERRCODE='23514';
+    END IF;
+    IF ROW(NEW.value,NEW.value_type,NEW.description,NEW.is_sensitive)
+       IS DISTINCT FROM ROW(OLD.value,OLD.value_type,OLD.description,OLD.is_sensitive) THEN
+        NEW.updated_at:=GREATEST(clock_timestamp(),OLD.updated_at+interval '1 microsecond');
+    ELSE
+        NEW.updated_at:=OLD.updated_at;
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS platform_setting_version ON system_settings;
+CREATE TRIGGER platform_setting_version BEFORE UPDATE ON system_settings
+    FOR EACH ROW EXECUTE FUNCTION guard_platform_setting_version();
 
 -- 插入默认系统设置
 INSERT INTO system_settings (key, value, value_type, description) VALUES
@@ -1562,19 +1580,6 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
 ON CONFLICT (key) DO NOTHING;
 
 -- 创建更新时间触发器
-CREATE OR REPLACE FUNCTION update_system_settings_updated_at()
-RETURNS TRIGGER AS $$
-BEGIN
-    NEW.updated_at = NOW();
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS trigger_update_system_settings_updated_at ON system_settings;
-CREATE TRIGGER trigger_update_system_settings_updated_at
-    BEFORE UPDATE ON system_settings
-    FOR EACH ROW
-    EXECUTE FUNCTION update_system_settings_updated_at();
 
 -- ============================================================================
 -- Node Gateway 节点相关表 (MVP)

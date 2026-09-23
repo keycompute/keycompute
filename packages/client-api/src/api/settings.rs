@@ -3,8 +3,8 @@
 //! 处理系统设置的查询和更新（Admin）以及公开设置查询
 
 use crate::client::ApiClient;
-use crate::error::Result;
-use serde::Deserialize;
+use crate::error::{ClientError, Result};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 pub use super::common::MessageResponse;
@@ -27,7 +27,9 @@ impl SettingsApi {
 
     /// 获取所有系统设置（Admin）
     pub async fn get_system_settings(&self, token: &str) -> Result<HashMap<String, SettingValue>> {
-        self.client.get_json("/api/v1/settings", Some(token)).await
+        self.client
+            .get_json_fresh("/api/v1/platform/settings", Some(token))
+            .await
     }
 
     /// 批量更新系统设置（Admin）
@@ -37,7 +39,7 @@ impl SettingsApi {
         token: &str,
     ) -> Result<MessageResponse> {
         self.client
-            .put_json("/api/v1/settings", settings, Some(token))
+            .put_json("/api/v1/platform/settings", settings, Some(token))
             .await
     }
 
@@ -48,7 +50,7 @@ impl SettingsApi {
         token: &str,
     ) -> Result<SystemSettingRecord> {
         self.client
-            .get_json(&format!("/api/v1/settings/{}", key), Some(token))
+            .get_json_fresh(&setting_path(key)?, Some(token))
             .await
     }
 
@@ -66,7 +68,23 @@ impl SettingsApi {
             "value": value.as_str().unwrap_or(&value.to_string())
         });
         self.client
-            .put_json(&format!("/api/v1/settings/{}", key), &payload, Some(token))
+            .put_json(&setting_path(key)?, &payload, Some(token))
+            .await
+    }
+
+    /// The ratio is a versioned global policy, not a tenant or generic setting.
+    pub async fn get_node_tip_ratio(&self, token: &str) -> Result<NodeTipRatio> {
+        self.client
+            .get_json_fresh("/api/v1/platform/tips/settings/ratio", Some(token))
+            .await
+    }
+    pub async fn update_node_tip_ratio(
+        &self,
+        request: &UpdateNodeTipRatio,
+        token: &str,
+    ) -> Result<NodeTipRatio> {
+        self.client
+            .put_json("/api/v1/platform/tips/settings/ratio", request, Some(token))
             .await
     }
 
@@ -195,4 +213,27 @@ impl SettingValue {
             _ => None,
         }
     }
+}
+
+fn setting_path(key: &str) -> Result<String> {
+    if key.is_empty()
+        || key.len() > 100
+        || !key
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_')
+    {
+        return Err(ClientError::Config("Invalid platform setting key".into()));
+    }
+    Ok(format!("/api/v1/platform/settings/{key}"))
+}
+#[derive(Debug, Clone, Deserialize)]
+pub struct NodeTipRatio {
+    pub ratio: String,
+    pub updated_at: String,
+}
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateNodeTipRatio {
+    pub ratio: String,
+    pub expected_updated_at: String,
+    pub reason: String,
 }

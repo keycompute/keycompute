@@ -38,6 +38,13 @@ fn session(ctx: &AuthContext) -> Result<FinancialSession> {
         selected,
     })
 }
+pub(crate) fn global_scope(ctx: &AuthContext) -> Result<FinancialScope> {
+    FinancialScope::platform_global(
+        ctx.require_platform(AuthorizationAction::ManagePlatform)?,
+        session(ctx)?,
+    )
+    .map_err(|_| ApiError::Forbidden("Current root authority required".into()))
+}
 pub(crate) fn root_scope(ctx: &AuthContext, tenant_id: Uuid) -> Result<FinancialScope> {
     FinancialScope::platform_tenant(
         ctx.require_platform(AuthorizationAction::ManagePlatform)?,

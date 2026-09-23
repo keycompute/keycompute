@@ -545,13 +545,25 @@ pub fn create_router(state: AppState) -> Router {
     // 系统设置（仅 Admin）
     let admin_settings_routes = Router::new()
         .route(
+            "/api/v1/platform/settings",
+            get(get_system_settings).put(update_system_settings),
+        )
+        .route(
+            "/api/v1/platform/settings/{key}",
+            get(get_system_setting_by_key).put(update_system_setting_by_key),
+        )
+        .route(
             "/api/v1/settings",
             get(get_system_settings).put(update_system_settings),
         )
         .route(
             "/api/v1/settings/{key}",
             get(get_system_setting_by_key).put(update_system_setting_by_key),
-        );
+        )
+        .layer(axum::middleware::map_response(
+            crate::handlers::admin_settings::private_response,
+        ))
+        .layer(axum::extract::DefaultBodyLimit::max(80 * 1024));
 
     // 公开设置（无需认证）
     let public_settings_routes =
@@ -635,10 +647,15 @@ pub fn create_router(state: AppState) -> Router {
         );
 
     // 小费管理（仅 Admin）
-    let admin_tips_routes = Router::new().route(
-        "/api/v1/admin/tips/settings/ratio",
-        get(admin_get_tip_ratio).put(admin_update_tip_ratio),
-    );
+    let admin_tips_routes = Router::new()
+        .route(
+            "/api/v1/admin/tips/settings/ratio",
+            get(admin_get_tip_ratio).put(admin_update_tip_ratio),
+        )
+        .layer(axum::middleware::map_response(
+            crate::handlers::admin_settings::private_response,
+        ))
+        .layer(axum::extract::DefaultBodyLimit::max(4096));
 
     // 监控追踪（仅 Admin）
     let admin_monitoring_routes = Router::new()
@@ -810,6 +827,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(crate::handlers::tenant_reporting::router())
         .merge(crate::handlers::tenant_tips::router())
         .merge(crate::handlers::tenant_wallet::router())
+        .merge(crate::handlers::node_tips::router())
         .merge(crate::handlers::tenant_responses::router())
         .merge(crate::handlers::tenant_keys::router())
         .merge(admin_routes)

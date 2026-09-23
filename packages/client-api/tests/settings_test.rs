@@ -17,7 +17,7 @@ async fn test_get_system_settings_success() {
     let settings_api = SettingsApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/settings"))
+        .and(path("/api/v1/platform/settings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "site_name": "KeyCompute",
             "maintenance_mode": false,
@@ -43,7 +43,7 @@ async fn test_update_system_settings_success() {
     let settings_api = SettingsApi::new(&client);
 
     Mock::given(method("PUT"))
-        .and(path("/api/v1/settings"))
+        .and(path("/api/v1/platform/settings"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "message": "Settings updated successfully"
         })))
@@ -69,7 +69,7 @@ async fn test_get_system_setting_by_key_success() {
     let settings_api = SettingsApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/settings/site_name"))
+        .and(path("/api/v1/platform/settings/site_name"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "key": "site_name",
             "value": "KeyCompute",
@@ -95,7 +95,7 @@ async fn test_update_system_setting_by_key_success() {
     let settings_api = SettingsApi::new(&client);
 
     Mock::given(method("PUT"))
-        .and(path("/api/v1/settings/site_name"))
+        .and(path("/api/v1/platform/settings/site_name"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "key": "site_name",
             "value": "New Site Name",
@@ -125,7 +125,7 @@ async fn test_get_system_settings_unauthorized() {
     let settings_api = SettingsApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/settings"))
+        .and(path("/api/v1/platform/settings"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "Unauthorized"
         })))
@@ -143,7 +143,7 @@ async fn test_get_system_settings_forbidden() {
     let settings_api = SettingsApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/settings"))
+        .and(path("/api/v1/platform/settings"))
         .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
             "error": "Admin access required"
         })))

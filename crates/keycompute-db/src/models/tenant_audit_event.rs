@@ -176,6 +176,7 @@ fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
                             | "model_name"
                             | "billing_dimension"
                             | "commission_rate"
+                            | "ratio"
                             | "priority"
                             | "beneficiary_scope"
                             | "beneficiary_id"

@@ -121,3 +121,5 @@ pub mod console_display;
 pub mod tenant_control;
 
 pub mod key_issuance;
+
+pub mod node_tip_setting;

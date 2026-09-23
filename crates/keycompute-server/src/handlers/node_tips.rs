@@ -1,79 +1,92 @@
-//! Existing platform ratio endpoints. Withdrawal routes live in tenant_tips.
+//! Dedicated root policy management, independent of selected tenant membership.
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::{GlobalConsoleAuth, RequestId},
     state::AppState,
 };
-use axum::{Json, extract::State};
-use keycompute_db::{
-    DbRouter,
-    models::system_setting::{SystemSetting, setting_keys},
-};
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
+use axum::{Json, Router, extract::State, response::Response, routing::get};
+use chrono::{DateTime, Utc};
+use keycompute_db::models::node_tip_setting::{TipRatioSetting, UpdateTipRatio};
+use serde::Deserialize;
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateTipRatioRequest {
     pub ratio: String,
+    pub expected_updated_at: DateTime<Utc>,
+    pub reason: String,
 }
-#[derive(Debug, Serialize)]
-pub struct TipRatioResponse {
-    pub ratio: String,
-}
-
-/// 更新小费比例
-///
-/// PUT /api/v1/admin/tips/settings/ratio
-pub async fn admin_update_tip_ratio(
-    _auth: AuthExtractor,
-    State(state): State<AppState>,
-    Json(req): Json<UpdateTipRatioRequest>,
-) -> Result<Json<TipRatioResponse>> {
-    let pool = get_pool(&state)?;
-
-    // 解析为 Decimal 以避免 f64 精度问题
-    let ratio: Decimal = req.ratio.parse().map_err(|_| {
-        ApiError::BadRequest(
-            "Invalid ratio value, expected a decimal string like '0.90'".to_string(),
-        )
-    })?;
-
-    if ratio <= Decimal::ZERO || ratio > Decimal::ONE {
-        return Err(ApiError::BadRequest(
-            "ratio must be between 0 and 1 (exclusive of 0)".to_string(),
-        ));
+fn map_error(error: keycompute_db::DbError) -> ApiError {
+    match error {
+        keycompute_db::DbError::Other(code) if code == "financial_authority_invalid" => {
+            ApiError::Forbidden("Current root policy authority required".into())
+        }
+        keycompute_db::DbError::Other(code) if code == "tip_ratio_revision_conflict" => {
+            ApiError::Conflict(code)
+        }
+        keycompute_db::DbError::Other(code)
+            if matches!(
+                code.as_str(),
+                "tip_ratio_invalid" | "financial_reason_invalid"
+            ) =>
+        {
+            ApiError::BadRequest(code)
+        }
+        _ => ApiError::ServiceUnavailable("Node earnings policy unavailable".into()),
     }
-
-    SystemSetting::update_value(pool, setting_keys::NODE_TIP_RATIO, &ratio.to_string())
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to update tip ratio: {}", e)))?;
-
-    Ok(Json(TipRatioResponse {
-        ratio: ratio.to_string(),
-    }))
 }
-
-/// 获取当前小费比例
-///
-/// GET /api/v1/admin/tips/settings/ratio
-pub async fn admin_get_tip_ratio(
-    _auth: AuthExtractor,
-    State(state): State<AppState>,
-) -> Result<Json<TipRatioResponse>> {
-    let pool = get_pool(&state)?;
-
-    // 使用 get_string + Decimal 解析，保持与写入端一致的精度路径
-    let ratio_str = SystemSetting::get_string(pool, setting_keys::NODE_TIP_RATIO, "0.90").await;
-
-    Ok(Json(TipRatioResponse { ratio: ratio_str }))
-}
-
-// ============================================================================
-// 工具函数
-// ============================================================================
-
-fn get_pool(state: &AppState) -> Result<&DbRouter> {
+fn pool(state: &AppState) -> Result<&keycompute_db::DbRouter> {
     state
         .pool
         .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))
+        .ok_or_else(|| ApiError::ServiceUnavailable("Policy storage unavailable".into()))
+}
+pub async fn admin_get_tip_ratio(
+    auth: GlobalConsoleAuth,
+    State(state): State<AppState>,
+) -> Result<Json<TipRatioSetting>> {
+    TipRatioSetting::read(
+        pool(&state)?.write_conn(),
+        crate::financial_auth::global_scope(&auth.0)?,
+    )
+    .await
+    .map(Json)
+    .map_err(map_error)
+}
+pub async fn admin_update_tip_ratio(
+    auth: GlobalConsoleAuth,
+    id: RequestId,
+    State(state): State<AppState>,
+    Json(body): Json<UpdateTipRatioRequest>,
+) -> Result<Json<TipRatioSetting>> {
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
+    let _fence = state.display_cache.mutation_guard();
+    TipRatioSetting::update(
+        pool(&state)?.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, id),
+        &UpdateTipRatio {
+            ratio: body.ratio,
+            expected_updated_at: body.expected_updated_at,
+            reason: body.reason,
+        },
+    )
+    .await
+    .map(Json)
+    .map_err(map_error)
+}
+async fn private_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        "private, no-store".parse().unwrap(),
+    );
+    response
+}
+pub fn router() -> Router<AppState> {
+    Router::new()
+        .route(
+            "/api/v1/platform/tips/settings/ratio",
+            get(admin_get_tip_ratio).put(admin_update_tip_ratio),
+        )
+        .layer(axum::middleware::map_response(private_response))
+        .layer(axum::extract::DefaultBodyLimit::max(4096))
 }
