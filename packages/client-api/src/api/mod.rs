@@ -42,3 +42,5 @@ pub mod platform_operations;
 pub mod tenant_control;
 
 pub mod tenant_pricing;
+
+pub mod key_control;

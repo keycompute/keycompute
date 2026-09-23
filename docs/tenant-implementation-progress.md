@@ -1523,3 +1523,39 @@ Key SDK preparation remains separate and unintegrated; its UI preparation was
 not executed. Other tenant resource pages, native account-pool management and
 remaining endpoint/transaction/release gates are unfinished. See
 platform-pricing-console.md for the precise contract and remaining boundaries.
+
+
+## Current phase 7 — tenant key metadata and owner issuance client accepted
+
+The typed key_control SDK now binds tenant administration to an explicit real
+tenant and uses separate personal /me/key-issuance methods for the key owner.
+It covers metadata list/detail/versioned patch/revoke/delete, new and rotating
+issuance requests, pending lists/cancel, and owner claim/decline. Personal request
+URLs never contain owner or tenant overrides, and expected client identity does
+not grant authority: real wrong-actor JWTs are still denied by the backend.
+
+Expired/revoked history is not misrepresented as a physical deletion. Expiration
+patches keep omission, null and explicit-value semantics. Fresh list responses
+validate page, tenant, resource and owner scope. Commands never auto-replay.
+Claim results and secret wrappers redact Debug, do not implement Serialize and
+require explicit exposure of a returned one-time value. Malformed claim identity,
+rotation returning the old key, changed expiration and unsafe secret characters
+are rejected. Returned claim errors cannot reflect the raw server secret.
+
+Seven wire regressions and a no-Serialize compile-fail doc test were added.
+The real SDK/Axum/PostgreSQL contract covers administrator request versus owner
+claim, wrong-credential denial, one-time delivery, metadata CAS, inert rotation
+then activation, revocation/history, decline/cancel and original ownership/audits.
+Existing key audit rollback, concurrency and display-cache tests were retained.
+
+Final independent default-parallel workspace: 2741 passed, 0 failed, 30 original
+ignored tests unchanged, including desktop/mobile. Targeted wire/HTTP and the
+19 scoped/issuance regressions are included subsets. All-target native, strict
+all-target/all-feature Clippy, Web/client WASM, formatting, whitespace, Python23
+and the foundation gate passed. All four frozen source/test files match.
+
+This is a verified client slice, not the Key administration/owner-claim Web page.
+The denied UI preparation was not executed or substituted. Backend key deadline
+review is a separate in-progress gate; other resource UI, native account-pool
+management and final release remain unfinished. No production DB, credentials,
+payment, SMTP, service or deployment was changed. See key-control-client.md.
