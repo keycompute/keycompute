@@ -207,7 +207,9 @@ impl Fixture {
         Self::with_sse(false).await
     }
     async fn with_sse(sse: bool) -> Self {
-        let db = create_test_pool().await;
+        Self::with_pool(create_test_pool().await, sse).await
+    }
+    async fn with_pool(db: DatabaseConnection, sse: bool) -> Self {
         let run = Uuid::new_v4().to_string();
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "resource-state", &run).await;

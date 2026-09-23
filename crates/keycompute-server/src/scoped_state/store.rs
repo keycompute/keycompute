@@ -1437,6 +1437,10 @@ pub(crate) async fn append_control_audit(
     )
     .await
     .map_err(ApiError::from)?;
+    // Audit insertion can wait after the original authorization check. Keep
+    // private reads behind the same final expiry fence as resource mutations;
+    // returning an error leaves the caller's transaction uncommitted.
+    control.check_expiry()?;
     Ok(())
 }
 

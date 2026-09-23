@@ -932,3 +932,125 @@ async fn local_resource_request_and_execution_family_cannot_be_reassigned() {
     }
     f.finish().await;
 }
+
+/// Every case uses its own database: an intentional audit delay must not hold
+/// the shared identity fence and interfere with unrelated parallel tests.
+#[tokio::test]
+async fn control_reads_reject_post_audit_expiry_without_releasing_private_content() {
+    post_audit_expiry_case(false).await;
+}
+
+#[tokio::test]
+async fn root_control_reads_reject_post_audit_expiry_without_releasing_private_content() {
+    post_audit_expiry_case(true).await;
+}
+
+async fn post_audit_expiry_case(platform: bool) {
+    assert!(
+        std::env::var("KC_TENANT_TEST_ACK_ISOLATED").as_deref() == Ok("1")
+            || std::env::var_os("CI").is_some()
+    );
+    let url = integration_tests::common::resolve_database_url();
+    let endpoint = url::Url::parse(&url).expect("valid isolated database URL");
+    assert!(matches!(
+        endpoint.host_str(),
+        Some("127.0.0.1" | "localhost" | "[::1]" | "::1")
+    ));
+    let parent = create_test_pool().await;
+    let name = format!("kc_response_expiry_{}", Uuid::new_v4().simple());
+    parent
+        .execute_unprepared(&format!("CREATE DATABASE {name}"))
+        .await
+        .unwrap();
+    let db = Database::connect(format!("{}/{}", url.rsplit_once('/').unwrap().0, name))
+        .await
+        .unwrap();
+    let owned = db.clone();
+    let outcome = tokio::spawn(async move {
+        keycompute_db::initialize_schema(&owned).await.unwrap();
+        let bootstrap = owned.begin().await.unwrap();
+        let root = keycompute_db::User::bootstrap_root(&bootstrap, "response-expiry-root@fixture.invalid", None)
+            .await.unwrap();
+        bootstrap.commit().await.unwrap();
+        let mut f = Fixture::with_pool(owned, false).await;
+        let response = stored_response(&f, "passthrough").await;
+        let conversation = expect(f.request(Method::POST, "/pt/v1/conversations",
+            Some(json!({"metadata":{"private":"post-audit-expiry-marker"},"items":[{"role":"user","content":"private conversation"}]}))).await, StatusCode::OK);
+        let cid = conversation["id"].as_str().unwrap().to_owned();
+        let tenant = keycompute_db::Tenant::find_by_id(&f.db, f.user.tenant_id).await.unwrap().unwrap();
+        let actor = keycompute_db::User::find_by_id(&f.db, tenant.owner_user_id).await.unwrap().unwrap();
+        let member = keycompute_db::TenantMembership::find(&f.db,tenant.id,actor.id).await.unwrap().unwrap();
+        // nextval is intentionally nontransactional: it proves the audit trigger
+        // was actually reached even when the audit INSERT is later rolled back.
+        f.db.execute_unprepared(&format!(r#"
+            CREATE SEQUENCE response_expiry_marker;
+            CREATE TABLE response_expiry_deadline (expires_at BIGINT NOT NULL, action TEXT NOT NULL);
+            INSERT INTO response_expiry_deadline VALUES(0,'none');
+            CREATE FUNCTION response_expiry_delay() RETURNS trigger LANGUAGE plpgsql AS $$
+            DECLARE deadline BIGINT; target_action TEXT;
+            BEGIN
+              SELECT expires_at,action INTO deadline,target_action FROM response_expiry_deadline;
+              IF (NEW.tenant_id='{0}'::uuid OR NEW.metadata->>'tenant_id'='{0}') AND NEW.action=target_action THEN
+                PERFORM nextval('response_expiry_marker');
+                PERFORM pg_sleep(GREATEST(0::double precision,deadline::double precision-EXTRACT(EPOCH FROM clock_timestamp())::double precision)+0.05);
+              END IF;
+              RETURN NEW;
+            END $$;
+            CREATE TRIGGER response_expiry_delay BEFORE INSERT ON tenant_audit_events
+                FOR EACH ROW EXECUTE FUNCTION response_expiry_delay();
+        "#, tenant.id)).await.unwrap();
+        let before_calls = f.upstream.calls.lock().unwrap().len();
+        let response_revision = revision(&f,"response",&response).await;
+        let conversation_revision = revision(&f,"conversation",&cid).await;
+        let base = format!("/api/v1/tenants/{}", tenant.id);
+        let paths = [
+            (control_path(&f,"responses","passthrough",&response), "response.detail"),
+            (format!("{base}/responses/count?mode=passthrough"), "response.count"),
+            (control_path(&f,"conversations","passthrough",&cid), "conversation.detail"),
+            (format!("{base}/conversations/count?mode=passthrough"), "conversation.count"),
+            (format!("{base}/responses?mode=passthrough"), "response.count"),
+            (format!("{base}/conversations?mode=passthrough"), "conversation.count"),
+        ];
+        for (path, action) in paths {
+            let path = if platform {
+                let separator = if path.contains('?') { '&' } else { '?' };
+                format!("{}{separator}reason=post-audit-expiry-regression",
+                    path.replacen("/api/v1/tenants/", "/api/v1/platform/tenants/", 1))
+            } else { path };
+            f.db.execute_unprepared("SELECT setval('response_expiry_marker',1,FALSE)").await.unwrap();
+            let validator=f.state.auth.get_jwt_validator().unwrap();
+            let token=validator.generate_identity_token(
+                if platform { root.id } else { actor.id },
+                if platform { None } else { Some(tenant.id) },
+                if platform { root.token_version } else { actor.token_version },
+                if platform { None } else { Some(tenant.authz_version) },
+                if platform { None } else { Some(member.authz_version) },2).unwrap();
+            let expiry=validator.validate_claims(&token).unwrap().exp;
+            f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                "UPDATE response_expiry_deadline SET expires_at=$1,action=$2",[expiry.into(),action.into()])).await.unwrap();
+            let denied=http(f.app.clone(),Method::GET,&path,Some(&token),None).await;
+            let marker=f.db.query_one(Statement::from_string(DbBackend::Postgres,
+                "SELECT is_called,last_value FROM response_expiry_marker")).await.unwrap().unwrap();
+            assert!(marker.try_get::<bool>("","is_called").unwrap(),"request must reach delayed audit, not fail before authentication: {path}");
+            assert_eq!(marker.try_get::<i64>("","last_value").unwrap(),1,"one delayed audit only");
+            assert_eq!(denied.status,StatusCode::UNAUTHORIZED,"{path}: {}",denied.body);
+            assert!(!denied.body.to_string().contains("post-audit-expiry-marker"));
+            let request_id:Uuid=denied.headers["x-request-id"].to_str().unwrap().parse().unwrap();
+            let audit=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+                "SELECT COUNT(*)::BIGINT n FROM tenant_audit_events WHERE request_id=$1 AND action=$2",
+                [request_id.into(),action.into()])).await.unwrap().unwrap();
+            assert_eq!(audit.try_get::<i64>("","n").unwrap(),0,"delayed audit must roll back");
+        }
+        assert_eq!(f.upstream.calls.lock().unwrap().len(),before_calls,"reads do not start more inference");
+        assert_eq!(revision(&f,"response",&response).await,response_revision);
+        assert_eq!(revision(&f,"conversation",&cid).await,conversation_revision);
+        f.db.execute_unprepared("DROP TRIGGER response_expiry_delay ON tenant_audit_events; DROP FUNCTION response_expiry_delay(); DROP TABLE response_expiry_deadline; DROP SEQUENCE response_expiry_marker;").await.unwrap();
+        f.finish().await;
+    }).await;
+    db.close().await.unwrap();
+    parent
+        .execute_unprepared(&format!("DROP DATABASE {name} WITH (FORCE)"))
+        .await
+        .unwrap();
+    outcome.unwrap();
+}

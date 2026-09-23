@@ -1235,3 +1235,42 @@ focused tests are included subsets. All-target native, Web/client WASM and stric
 all-target/all-feature Clippy pass. Eight frozen source/workflow/contract hashes
 match verification. Full native resource management, actual tenant UI, remaining
 endpoint/ownership review and final production cutover are still unfinished.
+
+
+## Current phases 3/5 — Responses control post-audit read expiry
+
+Review reproduced a private read returning HTTP 200 after its original JWT
+expired while the control audit INSERT was delayed. This was distinct from the
+already-protected mutation paths and the existing queue-time authority checks.
+The shared audit helper now checks the original credential expiry after INSERT
+as well as before it. A failed check leaves the caller's transaction uncommitted
+and prevents returning the private body/count. No extra database query is added.
+
+Two regressions use independent disposable PostgreSQL databases and actual HTTP
+requests for tenant-admin and global-root control scopes. A nontransactional
+sequence proves each delayed audit was reached exactly once; an early auth
+rejection or timeout cannot masquerade as the expected post-audit expiry.
+Each scope exercises Response/Conversation detail, count and list paths. The
+failed delayed audit is absent, private content is withheld, resource revisions
+are unchanged and no additional inference occurs. Earlier completed list audits
+are not incorrectly assumed to be part of the later count transaction.
+
+Original tenant, resource owner, billing identity and accepted execution/worker
+completion paths are untouched. This closes a control-read timing gap, not the
+native account-pool resource adapter or complete tenant resource UI. The new
+route/App/fragment integration remains unapplied and archived outside main.
+No production schema, credentials, payment, service restart or deployment changed.
+
+Final independent default-parallel workspace: 2688 passed, 0 failed, 30
+original ignored tests unchanged, including desktop/mobile. Both new root/tenant
+HTTP regressions also passed twice with eight test threads. Strict all-target/
+all-feature Clippy, native all-target and Web/client WASM checks passed. Three
+frozen source hashes matched at acceptance; the extra later read-only inspection
+was denied and not executed or substituted. The existing independent validation
+completed successfully. This subgate is accepted; the full subsystem is not.
+
+Operational preparation for these deliveries removed seven verified unused Rust
+target/cache directories, freeing approximately 13.85 GiB. Filesystem usage
+fell from 96% to 81% immediately after cleanup. Current validation cache, source,
+unaccepted drafts, Git history, business containers and database volumes were
+retained. No production data, credentials or service deployments were changed.
