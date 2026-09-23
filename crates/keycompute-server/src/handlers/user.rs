@@ -9,11 +9,14 @@ use crate::handlers::pagination::{
 use crate::{
     error::{ApiError, Result},
     extractors::{ConsoleAuth, GlobalConsoleAuth, RequestId},
+    key_control_auth::{self, KeyChange},
     state::AppState,
 };
 use axum::{
     Json,
     extract::{Extension, Path, Query, State},
+    http::header,
+    response::{IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
 use keycompute_auth::{PasswordHasher, PasswordValidator, ProduceAiKeyValidator};
@@ -339,6 +342,7 @@ pub async fn list_my_api_keys(
         let total = ProduceAiKey::count_owned(pool.write_conn(), scope, params.include_revoked)
             .await
             .map_err(|e| ApiError::Internal(format!("Failed to count API keys: {}", e)))?;
+        key_control_auth::finish_read(pool.write_conn(), &auth).await?;
         Ok(Json(
             serde_json::to_value(ApiKeyPageResponse {
                 keys: api_keys,
@@ -350,6 +354,7 @@ pub async fn list_my_api_keys(
             .map_err(|e| ApiError::Internal(format!("Failed to serialize API keys: {}", e)))?,
         ))
     } else {
+        key_control_auth::finish_read(pool.write_conn(), &auth).await?;
         Ok(Json(serde_json::to_value(api_keys).map_err(|e| {
             ApiError::Internal(format!("Failed to serialize API keys: {}", e))
         })?))
@@ -381,7 +386,7 @@ pub async fn create_api_key(
     request_id: Option<Extension<RequestId>>,
     State(state): State<AppState>,
     Json(req): Json<CreateApiKeyRequest>,
-) -> Result<Json<serde_json::Value>> {
+) -> Result<Response> {
     let scope = auth.require_owner(
         auth.user_id,
         keycompute_auth::AuthorizationAction::ManagePersonalResource,
@@ -392,10 +397,7 @@ pub async fn create_api_key(
     {
         return Err(ApiError::BadRequest("invalid key name".into()));
     }
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
+    let tx = key_control_auth::begin(&state, &auth).await?;
 
     // 使用统一的 API Key 生成方法（格式：sk- + 48字符 = 51字符）
     let new_key = ProduceAiKeyValidator::generate_key();
@@ -419,24 +421,32 @@ pub async fn create_api_key(
     };
 
     let saved_key = ProduceAiKey::create_owned(
-        pool.write_conn(),
+        &tx,
         scope,
         &create_req,
         &key_audit(&auth, request_id.map(|Extension(id)| id.0)),
     )
     .await
     .map_err(key_mutation_error)?;
+    key_control_auth::commit(&state, tx, &auth, KeyChange::Credential).await?;
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "message": "API Key created",
-        "key": new_key, // 注意：这是唯一一次返回完整 key
-        "key_id": saved_key.id,
-        "name": saved_key.name,
-        "created_at": saved_key.created_at.to_rfc3339(),
-        "expires_at": saved_key.expires_at.map(|t| t.to_rfc3339()),
-        "never_expires": req.never_expires,
-    })))
+    Ok((
+        [
+            (header::CACHE_CONTROL, "private, no-store"),
+            (header::PRAGMA, "no-cache"),
+        ],
+        Json(serde_json::json!({
+            "success": true,
+            "message": "API Key created",
+            "key": new_key, // 注意：这是唯一一次返回完整 key
+            "key_id": saved_key.id,
+            "name": saved_key.name,
+            "created_at": saved_key.created_at.to_rfc3339(),
+            "expires_at": saved_key.expires_at.map(|t| t.to_rfc3339()),
+            "never_expires": req.never_expires,
+        })),
+    )
+        .into_response())
 }
 
 /// 删除 API Key
@@ -448,24 +458,21 @@ pub async fn delete_api_key(
     Path(key_id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
     // 查找 API Key 并验证所有权
     let scope = auth.require_owner(
         auth.user_id,
         keycompute_auth::AuthorizationAction::ManagePersonalResource,
     )?;
+    let tx = key_control_auth::begin(&state, &auth).await?;
     let outcome = ProduceAiKey::remove_owned(
-        pool.write_conn(),
+        &tx,
         scope,
         key_id,
         &key_audit(&auth, request_id.map(|Extension(id)| id.0)),
     )
     .await
     .map_err(key_mutation_error)?;
+    key_control_auth::commit(&state, tx, &auth, KeyChange::Credential).await?;
     match outcome {
         keycompute_db::models::api_key::KeyRemoval::Deleted(id) => Ok(Json(serde_json::json!({
             "success": true, "message": "API Key deleted", "key_id": id, "deleted": true,

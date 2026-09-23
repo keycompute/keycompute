@@ -5,6 +5,9 @@
 //! creation or rotation is an inert issuance intent until the key owner claims
 //! it through the `/me/key-issuance` routes.
 
+use crate::key_control_auth::{
+    KeyChange, begin as key_mutation_transaction, commit as commit_key_mutation, finish_read,
+};
 use crate::{
     error::{ApiError, Result},
     extractors::{ConsoleAuth, RequestId},
@@ -32,7 +35,6 @@ use keycompute_db::{
     },
 };
 use keycompute_types::TenantScope;
-use sea_orm::{DatabaseTransaction, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -180,24 +182,6 @@ fn pool(state: &AppState) -> Result<&keycompute_db::DbRouter> {
         .ok_or_else(|| ApiError::ServiceUnavailable("Tenant key storage unavailable".into()))
 }
 
-// Actual key mutations retain their validated locks until the display cache
-// is fenced and the outer transaction commits. Denied operations never flush
-// cached snapshots; uncertain commit results remain conservatively fenced.
-async fn key_mutation_transaction(state: &AppState) -> Result<DatabaseTransaction> {
-    pool(state)?
-        .begin()
-        .await
-        .map_err(keycompute_db::DbError::from)
-        .map_err(map_db_error)
-}
-async fn commit_key_mutation(state: &AppState, tx: DatabaseTransaction) -> Result<()> {
-    let _fence = state.display_cache.mutation_guard();
-    tx.commit()
-        .await
-        .map_err(keycompute_db::DbError::from)
-        .map_err(map_db_error)
-}
-
 fn snapshot(auth: &ConsoleAuth) -> TenantAuthzSnapshot {
     TenantAuthzSnapshot {
         token_version: auth.token_version,
@@ -326,6 +310,7 @@ pub async fn list_tenant_keys(
     let total = ProduceAiKey::count_in_tenant(db.write_conn(), scope, owner, query.include_revoked)
         .await
         .map_err(map_db_error)?;
+    finish_read(pool(&state)?.write_conn(), access.auth()).await?;
     Ok(Json(TenantKeyPage {
         keys: keys.into_iter().map(key_metadata).collect(),
         total,
@@ -346,6 +331,7 @@ pub async fn get_tenant_key(
         .await
         .map_err(map_db_error)?
         .ok_or_else(|| ApiError::NotFound("tenant key resource not found".into()))?;
+    finish_read(pool(&state)?.write_conn(), access.auth()).await?;
     Ok(Json(key_metadata(key)))
 }
 
@@ -368,7 +354,7 @@ pub async fn patch_tenant_key(
         name: request.name,
         expires_at: request.expires_at,
     };
-    let tx = key_mutation_transaction(&state).await?;
+    let tx = key_mutation_transaction(&state, access.auth()).await?;
     let updated = key_issuance::update_key(
         &tx,
         access.scope(),
@@ -379,7 +365,7 @@ pub async fn patch_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx).await?;
+    commit_key_mutation(&state, tx, access.auth(), KeyChange::Credential).await?;
     Ok(Json(key_metadata(updated)))
 }
 
@@ -391,7 +377,7 @@ pub async fn revoke_tenant_key(
 ) -> Result<Json<KeyMutationResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = key_mutation_transaction(&state).await?;
+    let tx = key_mutation_transaction(&state, access.auth()).await?;
     let result = key_issuance::remove_key(
         &tx,
         access.scope(),
@@ -402,7 +388,7 @@ pub async fn revoke_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx).await?;
+    commit_key_mutation(&state, tx, access.auth(), KeyChange::Credential).await?;
     Ok(Json(KeyMutationResponse {
         success: true,
         key: key_metadata_from_removal(&result),
@@ -426,7 +412,7 @@ pub async fn delete_tenant_key(
 ) -> Result<Json<KeyMutationResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
-    let tx = key_mutation_transaction(&state).await?;
+    let tx = key_mutation_transaction(&state, access.auth()).await?;
     let result = key_issuance::remove_key(
         &tx,
         access.scope(),
@@ -437,7 +423,7 @@ pub async fn delete_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx).await?;
+    commit_key_mutation(&state, tx, access.auth(), KeyChange::Credential).await?;
     Ok(Json(KeyMutationResponse {
         success: true,
         key: key_metadata_from_removal(&result),
@@ -474,8 +460,9 @@ pub async fn request_tenant_key(
 ) -> Result<(StatusCode, Json<IssuanceResponse>)> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
+    let tx = key_mutation_transaction(&state, access.auth()).await?;
     let (intent, already_pending) = key_issuance::request_new(
-        pool(&state)?.write_conn(),
+        &tx,
         access.scope(),
         snapshot(access.auth()),
         request.owner_user_id,
@@ -485,6 +472,7 @@ pub async fn request_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx, access.auth(), KeyChange::Intent).await?;
     Ok((
         if already_pending {
             StatusCode::OK
@@ -504,8 +492,9 @@ pub async fn rotate_tenant_key(
 ) -> Result<(StatusCode, Json<IssuanceResponse>)> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
+    let tx = key_mutation_transaction(&state, access.auth()).await?;
     let (intent, already_pending) = key_issuance::request_rotation(
-        pool(&state)?.write_conn(),
+        &tx,
         access.scope(),
         snapshot(access.auth()),
         path.id,
@@ -515,6 +504,7 @@ pub async fn rotate_tenant_key(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx, access.auth(), KeyChange::Intent).await?;
     Ok((
         if already_pending {
             StatusCode::OK
@@ -542,6 +532,7 @@ pub async fn list_tenant_key_issuances(
     let total = key_issuance::count_in_tenant(db.write_conn(), access.scope(), owner)
         .await
         .map_err(map_db_error)?;
+    finish_read(pool(&state)?.write_conn(), access.auth()).await?;
     Ok(Json(IssuancePage {
         intents,
         total,
@@ -559,8 +550,9 @@ pub async fn cancel_tenant_key_issuance(
 ) -> Result<Json<IssuanceResponse>> {
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
+    let tx = key_mutation_transaction(&state, access.auth()).await?;
     let intent = key_issuance::cancel_in_tenant(
-        pool(&state)?.write_conn(),
+        &tx,
         access.scope(),
         snapshot(access.auth()),
         path.id,
@@ -568,6 +560,7 @@ pub async fn cancel_tenant_key_issuance(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx, access.auth(), KeyChange::Intent).await?;
     Ok(Json(IssuanceResponse {
         intent,
         outcome: "cancelled",
@@ -589,6 +582,7 @@ pub async fn list_my_key_issuances(
     let total = key_issuance::count_for_owner(db.write_conn(), scope)
         .await
         .map_err(map_db_error)?;
+    finish_read(pool(&state)?.write_conn(), &auth).await?;
     Ok(Json(IssuancePage {
         intents,
         total,
@@ -619,7 +613,7 @@ pub async fn claim_my_key_issuance(
     State(state): State<AppState>,
 ) -> Result<Response> {
     let scope = self_mutation_scope(&auth)?;
-    let tx = key_mutation_transaction(&state).await?;
+    let tx = key_mutation_transaction(&state, &auth).await?;
     let claimed = key_issuance::claim(
         &tx,
         scope,
@@ -635,7 +629,7 @@ pub async fn claim_my_key_issuance(
     )
     .await
     .map_err(map_db_error)?;
-    commit_key_mutation(&state, tx).await?;
+    commit_key_mutation(&state, tx, &auth, KeyChange::Credential).await?;
     Ok((
         [
             (header::CACHE_CONTROL, "private, no-store"),
@@ -653,8 +647,9 @@ pub async fn decline_my_key_issuance(
     State(state): State<AppState>,
 ) -> Result<Json<IssuanceResponse>> {
     let scope = self_mutation_scope(&auth)?;
+    let tx = key_mutation_transaction(&state, &auth).await?;
     let intent = key_issuance::decline_for_owner(
-        pool(&state)?.write_conn(),
+        &tx,
         scope,
         snapshot(&auth),
         path.id,
@@ -668,6 +663,7 @@ pub async fn decline_my_key_issuance(
     )
     .await
     .map_err(map_db_error)?;
+    commit_key_mutation(&state, tx, &auth, KeyChange::Intent).await?;
     Ok(Json(IssuanceResponse {
         intent,
         outcome: "declined",

@@ -11,6 +11,7 @@ pub mod error;
 pub mod extractors;
 mod financial_auth;
 pub mod handlers;
+pub(crate) mod key_control_auth;
 mod lifecycle_metrics;
 pub mod middleware;
 pub(crate) mod passthrough_binding;

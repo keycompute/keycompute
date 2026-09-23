@@ -1559,3 +1559,48 @@ The denied UI preparation was not executed or substituted. Backend key deadline
 review is a separate in-progress gate; other resource UI, native account-pool
 management and final release remain unfinished. No production DB, credentials,
 payment, SMTP, service or deployment was changed. See key-control-client.md.
+
+
+## Current phases 2/3/5 — all key-control effects bound to the original session
+
+Actual isolated HTTP regressions reproduced owner rotation claims and direct
+personal key creation returning200 after their signed JWT expired during audit
+INSERT. A separate exact-backend tenant-lock wait reproduced personal creation
+accepting a revoked original token version. These were runtime authorization
+gaps, not just SDK or fixture improvements.
+
+The shared key_control_auth helper now encloses all eight tenant/owner issuance
+commands and both direct personal key mutations in an outer transaction. DAO
+transactions remain savepoints. After scoped DAO/audit waits, a writer lookup
+compares the original user/tenant/member version tuple, active states and roles
+before commit. Original signed expiry is checked before/after that lookup and
+again after commit acknowledgement. Denied pre-commit changes roll back key,
+intent and audit together. A late acknowledgement after a successful commit is
+explicitly an uncertain outcome; committed data is not claimed rolled back.
+
+Personal key operations retain their shared parent/identity/member locks rather
+than acquiring a new global exclusive fence. Inert issuance requests/cancellations
+do not evict inference credentials. Metadata reads check original authority after
+the final query. Direct personal key creation explicitly returns private/no-store
+and no-cache headers without changing its JSON shape. Inference authentication
+and previously accepted work/settlement are untouched.
+
+Four isolated HTTP groups cover ten mutation paths and token, tenant, role and
+suspend/regrant races. Nontransactional audit markers prove requests reached the
+delayed write, and full tenant key/intent/audit fingerprints verify rollback.
+Version fixtures use real trigger-owned membership transitions and preserve the
+legitimate revocations caused by those transitions; production constraints were
+not weakened. Fresh credentials succeed after each denied old request.
+
+Final independent default-parallel workspace: 2745 passed, 0 failed, 30 original
+ignored tests unchanged, including desktop/mobile. Twelve final expiry/concurrent
+read cases passed with eight threads, and 27 existing key/SDK/read regressions
+passed; both are included subsets. All-target native, strict all-target/all-feature
+Clippy, Web/client WASM, formatting, whitespace, Python23 and foundation checks
+passed. Five frozen source hashes match their tested bytes.
+
+No production database, credentials, payment, SMTP, service or deployment changed.
+This closes the key-control original-session boundary, not every resource's
+transaction timing gap. Key/Provider/finance/resource UI, native account-pool
+management and final endpoint/release gates remain. Next resource UI preparation
+is outside main and has not been accepted. See key-control-session-boundary.md.
