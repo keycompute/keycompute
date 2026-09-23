@@ -824,6 +824,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(crate::handlers::tenant_providers::router())
         .merge(crate::handlers::tenant_bindings::router())
         .merge(crate::handlers::tenant_reporting::router())
+        .merge(crate::handlers::tenant_responses::router())
         .merge(crate::handlers::tenant_keys::router())
         .merge(admin_routes)
         .merge(billing_routes)

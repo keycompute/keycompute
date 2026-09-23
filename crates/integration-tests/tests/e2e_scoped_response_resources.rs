@@ -195,6 +195,7 @@ struct Fixture {
     accounts: Vec<Account>,
     upstream: Arc<Upstream>,
     server: JoinHandle<()>,
+    run: String,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -373,6 +374,7 @@ impl Fixture {
             accounts,
             upstream,
             server,
+            run,
         }
     }
     fn body(&self, op: Op) -> Value {
@@ -455,7 +457,17 @@ impl Fixture {
 }
 
 async fn streaming_upstream(s: Arc<Upstream>, op: Op, body: Value) -> Response {
-    let (first, last) = stream_fixture(op, body["model"].as_str().unwrap());
+    let (first, mut last) = stream_fixture(op, body["model"].as_str().unwrap());
+    if op == Op::Responses && body["late_delta_after_revoke"] == true {
+        // Force a nonterminal event after revocation, rather than relying on
+        // the scheduler to race the initial response.created/delta batch.
+        last = format!(
+            "event: response.output_text.delta\r\ndata: {}\r\n\r\n",
+            json!({"type":"response.output_text.delta","sequence_number":2,
+                "output_index":0,"content_index":0,"item_id":"msg-stream",
+                "delta":" accepted late event"})
+        ) + &last.replace("\"sequence_number\":2", "\"sequence_number\":3");
+    }
     let (tx, rx) =
         tokio::sync::mpsc::channel::<std::result::Result<bytes::Bytes, std::io::Error>>(1);
     tokio::spawn(async move {
@@ -749,6 +761,9 @@ async fn resource_scope_is_user_tenant_family_and_current_passthrough_grant() {
     assert_eq!(f.upstream.calls.lock().unwrap().len(), 1);
     f.finish().await;
 }
+
+#[path = "support/tenant_response_control.rs"]
+mod tenant_control;
 
 #[tokio::test]
 async fn explicit_stateless_response_does_not_create_a_retrievable_resource() {
@@ -1604,6 +1619,7 @@ async fn replay_revocation_case(change: &str) {
     payload["background"] = true.into();
     payload["stream"] = true.into();
     payload["store"] = true.into();
+    payload["late_delta_after_revoke"] = (change == "user").into();
     let response = f
         .app
         .clone()

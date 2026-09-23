@@ -7,7 +7,8 @@ Scoped pricing, providers/bindings, financial/distribution reports, owner-only
 key issuance and distribution policy mutations are also accepted. Live scoped
 Responses replay now revalidates credentials and authorization versions.
 Node/registration control and task cancellation/archival are accepted. Original-authority physical dispatch and node-queue claim checks are also accepted.
-Remaining Responses/Conversation administration, financial mutations, complete
+Local passthrough/node Responses and Conversation administration is accepted.
+Remaining native account-pool resource administration, financial mutations, complete
 platform/operator routing, frontend delivery and final release are not accepted.
 
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
@@ -485,6 +486,50 @@ not an extra workspace count. All 31 source hashes match the tested snapshot.
 CI is checked separately after push. No production data, schema, credentials,
 service restart or deployment changed. Responses/Conversation management and the
 remaining financial, platform/operator, frontend and release gates remain open.
+
+## Current phases 3/5 — local Responses and Conversation administration accepted
+
+Tenant-admin and explicit-root control routes now manage retained local resources
+in passthrough and node_dispatch modes. Account-pool native resources still require
+a separate adapter; unsupported modes are rejected rather than mapped to node work.
+Lists, counts, details, input items, cancellation, deletion, conversation metadata
+and item changes use current primary console authority, selected membership and
+exact user/member/tenant versions and JWT expiry. Root support requires a bounded
+reason, including a selected-origin version check when its JWT has one. Ordinary
+members and inference keys do not acquire console management permissions.
+
+All object reads/writes retain tenant + original user + execution mode + resource
+ID. Administrative writes hold the same original-owner advisory lock as personal
+operations, check exact revisions, then atomically append secret-free audit events.
+The administrator is never substituted for user, request, execution lease or billing
+ownership. Read audit failures withhold content; mutation audit failures roll back
+content and revisions. Lists/counts use matching predicates and bounded pagination;
+control responses are private/no-store. SDK methods preserve explicit target and
+encode opaque resource/item IDs without interpreting them as route fragments.
+
+Independent real PostgreSQL/HTTP review added both-family role/ownership matrices,
+queued member/root/origin revocation and JWT expiry, audit-failure rollback and
+immutable request/execution-family checks. A short-JWT test had accepted issuance
+at 999ms of a second; it now uses an early bounded window, preserving production
+lock timeouts and exact backend-PID wait observation instead of weakening assertions.
+
+The full gate exposed a separate accepted-work bug: a late nonterminal SSE event
+after user suspension reauthorized persistence as a public resource read and marked
+an otherwise billed result interrupted. A deterministic held-upstream regression
+first failed, then passed after internal append_event switched to the original
+execution-lease and owner tuple under the existing advisory/row lock. It still
+rejects deleted/cancelled rows and superseded leases. External replay remains live-
+authorized; this internal persistence capability never starts a new inference.
+New database guards preserve request/user/tenant/mode identity while retaining the
+legitimate internal owner_id rotation used for recovery leases.
+
+Final native default-parallel workspace: **2,577 passed, 0 failed, 30 original
+default ignored**, including desktop/mobile. The 31-test resource/control repeat
+and separate expiry rerun are subsets/repeats. Strict all-target/all-feature Clippy,
+all-target check, Web/client WASM, formatting and frozen-source checks pass.
+No production database, secrets, services or deployment changed. CI is verified
+separately after push. Native resource networking, remaining finance/platform/UI,
+explicit session-table scope and final release acceptance remain open.
 
 # Tenant subsystem implementation status
 

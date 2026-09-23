@@ -17,6 +17,7 @@ pub mod node_gateway_token;
 pub mod node_tips;
 pub mod openai;
 pub mod payment;
+pub mod response_control;
 pub mod routes;
 pub mod settings;
 pub mod tenant;

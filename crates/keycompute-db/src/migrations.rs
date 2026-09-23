@@ -597,4 +597,21 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn managed_resource_administration_indexes_keep_tenant_scope() {
+        let sql = include_str!("../migrations/001_init.sql");
+        assert!(sql.contains("guard_scoped_response_request_identity"));
+        assert!(sql.contains("guard_scoped_conversation_identity"));
+        for index in [
+            "idx_scoped_responses_tenant_admin",
+            "idx_scoped_responses_owner_admin",
+            "idx_scoped_conversations_tenant_admin",
+            "idx_scoped_conversations_owner_admin",
+        ] {
+            assert!(sql.contains(index), "missing management index {index}");
+        }
+        assert!(sql.contains(
+            "ON scoped_responses(tenant_id,user_id,access_mode,created_at DESC,id DESC)"
+        ));
+    }
 }

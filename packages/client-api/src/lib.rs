@@ -42,6 +42,7 @@ pub use api::distribution::DistributionApi;
 pub use api::health::HealthApi;
 pub use api::openai::OpenAiApi;
 pub use api::payment::PaymentApi;
+pub use api::response_control::ResponseControlApi;
 pub use api::settings::SettingsApi;
 pub use api::tenant::TenantApi;
 pub use api::usage::UsageApi;

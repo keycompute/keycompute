@@ -1913,6 +1913,11 @@ CREATE TABLE IF NOT EXISTS scoped_conversations (
 CREATE INDEX IF NOT EXISTS idx_scoped_conversations_scope
     ON scoped_conversations(tenant_id,user_id,access_mode,created_at);
 CREATE INDEX IF NOT EXISTS idx_scoped_conversations_expiry ON scoped_conversations(expires_at);
+CREATE INDEX IF NOT EXISTS idx_scoped_conversations_tenant_admin
+    ON scoped_conversations(tenant_id,access_mode,created_at DESC,id DESC) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_scoped_conversations_owner_admin
+    ON scoped_conversations(tenant_id,user_id,access_mode,created_at DESC,id DESC) WHERE deleted_at IS NULL;
+
 CREATE TABLE IF NOT EXISTS scoped_responses (
     id TEXT PRIMARY KEY,
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
@@ -1955,6 +1960,13 @@ CREATE INDEX IF NOT EXISTS idx_scoped_responses_scope
 CREATE INDEX IF NOT EXISTS idx_scoped_responses_pending
     ON scoped_responses(status,deadline_at) WHERE status IN ('queued','in_progress');
 CREATE INDEX IF NOT EXISTS idx_scoped_responses_expiry ON scoped_responses(expires_at);
+CREATE INDEX IF NOT EXISTS idx_scoped_responses_tenant_admin
+    ON scoped_responses(tenant_id,access_mode,created_at DESC,id DESC)
+    WHERE deleted_at IS NULL AND (background OR store_response);
+CREATE INDEX IF NOT EXISTS idx_scoped_responses_owner_admin
+    ON scoped_responses(tenant_id,user_id,access_mode,created_at DESC,id DESC)
+    WHERE deleted_at IS NULL AND (background OR store_response);
+
 CREATE TABLE IF NOT EXISTS scoped_response_events (
     response_id TEXT NOT NULL REFERENCES scoped_responses(id) ON DELETE CASCADE,
     seq BIGINT NOT NULL CHECK (seq >= 0),
@@ -2424,3 +2436,28 @@ END; $$;
 DROP TRIGGER IF EXISTS node_task_dispatch_identity_guard ON node_tasks;
 CREATE TRIGGER node_task_dispatch_identity_guard BEFORE INSERT OR UPDATE OF model,payload_json ON node_tasks
     FOR EACH ROW EXECUTE FUNCTION guard_node_task_dispatch_identity();
+
+-- Resource billing identity is immutable. owner_id is an internal execution
+-- lease and may rotate only through existing recovery fencing, not a user ID.
+CREATE OR REPLACE FUNCTION guard_scoped_response_request_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.id,NEW.tenant_id,NEW.user_id,NEW.access_mode,NEW.request_id)
+       IS DISTINCT FROM ROW(OLD.id,OLD.tenant_id,OLD.user_id,OLD.access_mode,OLD.request_id) THEN
+        RAISE EXCEPTION 'scoped response request identity is immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS scoped_response_request_identity ON scoped_responses;
+CREATE TRIGGER scoped_response_request_identity BEFORE UPDATE OF id,tenant_id,user_id,access_mode,request_id ON scoped_responses
+    FOR EACH ROW EXECUTE FUNCTION guard_scoped_response_request_identity();
+CREATE OR REPLACE FUNCTION guard_scoped_conversation_identity() RETURNS TRIGGER AS $$
+BEGIN
+    IF ROW(NEW.id,NEW.tenant_id,NEW.user_id,NEW.access_mode)
+       IS DISTINCT FROM ROW(OLD.id,OLD.tenant_id,OLD.user_id,OLD.access_mode) THEN
+        RAISE EXCEPTION 'scoped conversation identity is immutable' USING ERRCODE='23514';
+    END IF;
+    RETURN NEW;
+END; $$ LANGUAGE plpgsql;
+DROP TRIGGER IF EXISTS scoped_conversation_identity ON scoped_conversations;
+CREATE TRIGGER scoped_conversation_identity BEFORE UPDATE OF id,tenant_id,user_id,access_mode ON scoped_conversations
+    FOR EACH ROW EXECUTE FUNCTION guard_scoped_conversation_identity();

@@ -2914,6 +2914,8 @@ pub mod tenant_bindings;
 
 pub mod tenant_reporting;
 
+pub mod tenant_responses;
+
 pub mod tenant_keys;
 
 pub mod distribution_policy;

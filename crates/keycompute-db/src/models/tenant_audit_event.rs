@@ -164,6 +164,7 @@ fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
                             | "previous_expires_at"
                             | "reason"
                             | "scope_type"
+                            | "access_mode"
                             | "changed"
                             | "enabled"
                             | "default_rpm_limit"

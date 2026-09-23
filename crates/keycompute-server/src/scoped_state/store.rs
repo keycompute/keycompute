@@ -4,8 +4,11 @@ use crate::{
     extractors::AuthExtractor,
 };
 use chrono::{DateTime, Utc};
-use keycompute_db::DbRouter;
-use keycompute_types::ModelAccessMode;
+use keycompute_db::{AuditContext, DbRouter, TenantAuditEvent};
+use keycompute_types::{
+    AuditResult, AuditScopeType, CredentialKind, ModelAccessMode, PlatformRole, PlatformScope,
+    TenantRole, TenantScope,
+};
 use sea_orm::{
     ConnectionTrait, DatabaseTransaction, DbBackend, DbErr, FromQueryResult, Statement,
     TransactionTrait,
@@ -21,6 +24,7 @@ pub const STORED_TTL: i64 = 30 * 24 * 60 * 60;
 pub const TEMP_TTL: i64 = 600;
 pub const MAX_RETAINED_RESPONSES: i64 = 1024;
 pub const MAX_CONVERSATIONS: i64 = 256;
+const ROOT_REASON_MAX: usize = 500;
 #[derive(Debug, Clone, Copy)]
 pub struct Scope {
     pub tenant: Uuid,
@@ -156,6 +160,270 @@ pub async fn transaction(pool: &DbRouter, scope: Scope) -> Result<DatabaseTransa
     let tx = owner_transaction(pool, scope).await?;
     check_scope(&tx, scope).await?;
     Ok(tx)
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseControlMembership {
+    pub tenant_id: Uuid,
+    pub tenant_role: TenantRole,
+    pub tenant_authz_version: i64,
+    pub membership_authz_version: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResponseControlSession {
+    pub token_version: i32,
+    pub jwt_expires_at: i64,
+    pub selected: Option<ResponseControlMembership>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ResponseControlAuthority {
+    TenantAdmin {
+        scope: TenantScope,
+        token_version: i32,
+        tenant_authz_version: i64,
+        membership_authz_version: i64,
+        jwt_expires_at: i64,
+    },
+    Root {
+        scope: PlatformScope,
+        token_version: i32,
+        jwt_expires_at: i64,
+        selected: Option<ResponseControlMembership>,
+    },
+}
+
+/// Typed, non-deserializable scope. Every use verifies current database authority.
+#[derive(Debug, Clone)]
+pub struct ResponseControlScope {
+    tenant_id: Uuid,
+    audit: AuditContext,
+    authority: ResponseControlAuthority,
+    root_reason: Option<String>,
+}
+
+impl ResponseControlScope {
+    pub fn tenant_admin(
+        scope: TenantScope,
+        audit: AuditContext,
+        token_version: i32,
+        tenant_authz_version: i64,
+        membership_authz_version: i64,
+        jwt_expires_at: i64,
+    ) -> Result<Self> {
+        if scope.tenant_id().is_nil()
+            || scope.user_id().is_nil()
+            || scope.tenant_role() != TenantRole::Admin
+            || audit.actor_user_id != scope.user_id()
+            || audit.credential_kind != CredentialKind::Jwt
+            || audit.request_id.is_none_or(|id| id.is_nil())
+            || token_version < 0
+            || tenant_authz_version <= 0
+            || membership_authz_version <= 0
+            || jwt_expires_at <= 0
+        {
+            return Err(ApiError::Forbidden(
+                "tenant administrator console authority required".into(),
+            ));
+        }
+        Ok(Self {
+            tenant_id: scope.tenant_id(),
+            audit,
+            authority: ResponseControlAuthority::TenantAdmin {
+                scope,
+                token_version,
+                tenant_authz_version,
+                membership_authz_version,
+                jwt_expires_at,
+            },
+            root_reason: None,
+        })
+    }
+
+    pub fn root(
+        scope: PlatformScope,
+        target_tenant_id: Uuid,
+        audit: AuditContext,
+        session: ResponseControlSession,
+        reason: impl Into<String>,
+    ) -> Result<Self> {
+        let reason = validate_root_reason(reason.into())?;
+        let ResponseControlSession {
+            token_version,
+            jwt_expires_at,
+            selected,
+        } = session;
+        if scope.platform_role() != PlatformRole::Root
+            || scope.user_id().is_nil()
+            || audit.actor_user_id != scope.user_id()
+            || audit.credential_kind != CredentialKind::Jwt
+            || audit.request_id.is_none_or(|id| id.is_nil())
+            || token_version < 0
+            || jwt_expires_at <= 0
+            || target_tenant_id.is_nil()
+        {
+            return Err(ApiError::Forbidden(
+                "root console authority required".into(),
+            ));
+        }
+        if selected.is_some_and(|snapshot| {
+            snapshot.tenant_id.is_nil()
+                || snapshot.tenant_authz_version <= 0
+                || snapshot.membership_authz_version <= 0
+        }) {
+            return Err(ApiError::Forbidden(
+                "selected tenant membership snapshot required".into(),
+            ));
+        }
+        Ok(Self {
+            tenant_id: target_tenant_id,
+            audit,
+            authority: ResponseControlAuthority::Root {
+                scope,
+                token_version,
+                jwt_expires_at,
+                selected,
+            },
+            root_reason: Some(reason),
+        })
+    }
+
+    pub const fn tenant_id(&self) -> Uuid {
+        self.tenant_id
+    }
+
+    fn root_reason(&self) -> Option<&str> {
+        self.root_reason.as_deref()
+    }
+
+    pub(crate) fn check_expiry(&self) -> Result<()> {
+        let expires = match self.authority {
+            ResponseControlAuthority::TenantAdmin { jwt_expires_at, .. }
+            | ResponseControlAuthority::Root { jwt_expires_at, .. } => jwt_expires_at,
+        };
+        if expires <= Utc::now().timestamp() {
+            return Err(ApiError::Auth("console session expired".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn revalidate_for_admin(
+        &self,
+        tx: &DatabaseTransaction,
+    ) -> Result<AuditContext> {
+        let denied = || ApiError::Forbidden("Responses control authority changed".into());
+        if self.audit.request_id.is_none_or(|id| id.is_nil())
+            || self.audit.credential_kind != CredentialKind::Jwt
+        {
+            return Err(denied());
+        }
+        self.check_expiry()?;
+        // Called only after the original-resource owner's advisory lock, when
+        // one is needed. All parent rows precede users and memberships.
+        timed(
+            tx.execute_unprepared(
+                "UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE",
+            ),
+        )
+        .await?;
+        let (actor, token_version, selected, require_root) = match self.authority {
+            ResponseControlAuthority::TenantAdmin {
+                scope,
+                token_version,
+                tenant_authz_version,
+                membership_authz_version,
+                ..
+            } => (
+                scope.user_id(),
+                token_version,
+                Some(ResponseControlMembership {
+                    tenant_id: scope.tenant_id(),
+                    tenant_role: TenantRole::Admin,
+                    tenant_authz_version,
+                    membership_authz_version,
+                }),
+                false,
+            ),
+            ResponseControlAuthority::Root {
+                scope,
+                token_version,
+                selected,
+                ..
+            } => (scope.user_id(), token_version, selected, true),
+        };
+        let mut parents = vec![self.tenant_id];
+        if let Some(origin) = selected {
+            parents.push(origin.tenant_id);
+        }
+        parents.sort_unstable();
+        parents.dedup();
+        for tenant in parents {
+            let row = timed(tx.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT status,authz_version FROM tenants WHERE id=$1 FOR UPDATE",
+                [tenant.into()],
+            )))
+            .await?
+            .ok_or_else(denied)?;
+            if let Some(origin) = selected.filter(|s| s.tenant_id == tenant)
+                && (row.try_get::<String>("", "status").map_err(storage)? != "active"
+                    || row.try_get::<i64>("", "authz_version").map_err(storage)?
+                        != origin.tenant_authz_version)
+            {
+                return Err(denied());
+            }
+        }
+        let row = timed(tx.query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT platform_role FROM users WHERE id=$1 AND status='active' AND token_version=$2 FOR UPDATE",
+            [actor.into(), token_version.into()],
+        ))).await?.ok_or_else(denied)?;
+        let platform_role: PlatformRole = row
+            .try_get::<String>("", "platform_role")
+            .map_err(storage)?
+            .parse()
+            .map_err(|_| denied())?;
+        if require_root && platform_role != PlatformRole::Root {
+            return Err(denied());
+        }
+        if let Some(origin) = selected {
+            let row = timed(tx.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT tenant_role FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 AND status='active' AND authz_version=$3 FOR UPDATE",
+                [origin.tenant_id.into(), actor.into(), origin.membership_authz_version.into()],
+            ))).await?.ok_or_else(denied)?;
+            if row.try_get::<String>("", "tenant_role").map_err(storage)?
+                != origin.tenant_role.as_str()
+            {
+                return Err(denied());
+            }
+        }
+        // A credential may expire while any parent/user/member lock is held
+        // elsewhere. The check before waiting is not sufficient.
+        self.check_expiry()?;
+        Ok(AuditContext {
+            actor_platform_role: platform_role,
+            actor_tenant_role: if require_root {
+                None
+            } else {
+                Some(TenantRole::Admin)
+            },
+            ..self.audit
+        })
+    }
+}
+
+fn validate_root_reason(reason: String) -> Result<String> {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() || reason.len() > ROOT_REASON_MAX || reason.chars().any(char::is_control)
+    {
+        return Err(ApiError::BadRequest(
+            "root reason must be nonempty, at most 500 bytes and contain no control characters"
+                .into(),
+        ));
+    }
+    Ok(trimmed.to_owned())
 }
 pub async fn check_scope(db: &impl ConnectionTrait, scope: Scope) -> Result<()> {
     let row=timed(db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
@@ -310,66 +578,18 @@ pub async fn mutate_conversation(
     change: ConversationMutation,
 ) -> Result<ConversationRecord> {
     let tx = transaction(pool, scope).await?;
-    let mut row = conversation(
+    let row = conversation(
         &tx,
         scope,
         id,
         matches!(change, ConversationMutation::Delete),
     )
     .await?;
-    if row.deleted_at.is_some() {
-        timed(tx.commit()).await?;
-        return Ok(row);
-    }
-    if row.active_response_id.is_some() && !matches!(change, ConversationMutation::Delete) {
-        return Err(conflict(
-            "Conversation has an active response; retry after it finishes",
-        ));
-    }
-    let deleting = matches!(change, ConversationMutation::Delete);
-    match change {
-        ConversationMutation::Metadata(value) => row.metadata_json = value,
-        ConversationMutation::Append(items) => {
-            if items.len() > 20 {
-                return Err(ApiError::BadRequest("Add at most 20 items".into()));
-            }
-            row.items_json
-                .as_array_mut()
-                .ok_or_else(missing)?
-                .extend(wrap_items(items));
-            check_history(&item_bodies(&row.items_json))?;
-        }
-        ConversationMutation::RemoveItem(id) => row
-            .items_json
-            .as_array_mut()
-            .ok_or_else(missing)?
-            .retain(|item| item["id"] != id),
-        ConversationMutation::Delete => {
-            if let Some(active) = &row.active_response_id {
-                let active_row=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-                    "SELECT * FROM scoped_responses WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 AND status IN ('queued','in_progress') FOR UPDATE",
-                    [active.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()])).one(&tx)).await?;
-                if let Some(mut active_row) = active_row {
-                    let public =
-                        final_response(&active_row, public_response(&active_row), "cancelled");
-                    active_row=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-                        "UPDATE scoped_responses SET status='cancelled',response_json=$5,updated_at=NOW(),revision=revision+1 WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 RETURNING *",
-                        [active.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into(),public.into()])).one(&tx)).await?.ok_or_else(missing)?;
-                    // A replay sees cancellation and its protocol event in the
-                    // same committed transaction, including conversation deletion.
-                    let _ = terminal_event(&tx, &mut active_row, None).await?;
-                }
-            }
-            row.items_json = json!([]);
-            row.metadata_json = json!({});
-        }
-    }
-    let updated=timed(ConversationRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE scoped_conversations SET metadata_json=$5,items_json=$6,deleted_at=CASE WHEN $7 THEN NOW() ELSE deleted_at END,active_response_id=CASE WHEN $7 THEN NULL ELSE active_response_id END,revision=revision+1,updated_at=NOW(),expires_at=NOW()+($8::BIGINT*INTERVAL '1 second') WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 RETURNING *",
-        [id.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into(),row.metadata_json.into(),row.items_json.into(),deleting.into(),STORED_TTL.into()])).one(&tx)).await?.ok_or_else(missing)?;
+    let (updated, _) = mutate_conversation_record(&tx, row, change).await?;
     timed(tx.commit()).await?;
     Ok(updated)
 }
+
 pub struct NewResponse {
     pub request_id: Uuid,
     pub body: Value,
@@ -931,50 +1151,12 @@ pub async fn cancel_or_delete(
     delete: bool,
 ) -> Result<ResponseRecord> {
     let tx = transaction(pool, scope).await?;
-    let mut row = response(&tx, scope, id, delete).await?;
-    if row.deleted_at.is_some() {
-        timed(tx.commit()).await?;
-        return Ok(row);
-    }
-    if !row.retained() {
-        return Err(missing());
-    }
-    if !delete && !row.background {
-        return Err(ApiError::BadRequest(
-            "Only background Responses can be cancelled through this endpoint".into(),
-        ));
-    }
-    let transitioned = row.active();
-    if transitioned {
-        row.status = "cancelled".into();
-        row.response_json = Some(final_response(&row, public_response(&row), "cancelled"));
-    }
-    release_conversation(&tx, &row).await?;
-    row=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
-        "UPDATE scoped_responses SET status=$2,response_json=CASE WHEN $3 THEN NULL ELSE $4 END,
-         deleted_at=CASE WHEN $3 THEN NOW() ELSE deleted_at END,
-         request_json=CASE WHEN $3 THEN '{}'::jsonb ELSE request_json END,
-         input_json=CASE WHEN $3 THEN '[]'::jsonb ELSE input_json END,
-         new_input_json=CASE WHEN $3 THEN '[]'::jsonb ELSE new_input_json END,
-         output_json=CASE WHEN $3 THEN '[]'::jsonb ELSE output_json END,
-         execution_json=CASE WHEN $3 THEN execution_json-'native_result' ELSE execution_json END,
-         updated_at=NOW(),revision=revision+1 WHERE id=$1 AND tenant_id=$5 AND user_id=$6 AND access_mode=$7 RETURNING *",
-        [id.into(),row.status.into(),delete.into(),row.response_json.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()])).one(&tx)).await?.ok_or_else(missing)?;
-    if delete {
-        timed(tx.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "DELETE FROM scoped_response_events e USING scoped_responses r
-             WHERE e.response_id=$1 AND r.id=e.response_id AND r.tenant_id=$2 AND r.user_id=$3 AND r.access_mode=$4",
-            [id.into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
-        )))
-        .await?;
-    }
-    if !delete && transitioned {
-        let _ = terminal_event(&tx, &mut row, None).await?;
-    }
+    let row = response(&tx, scope, id, delete).await?;
+    let (updated, _) = cancel_or_delete_record(&tx, row, delete).await?;
     timed(tx.commit()).await?;
-    Ok(row)
+    Ok(updated)
 }
+
 /// Internal runner metadata lookup; not a public authorization path.
 pub async fn owned(pool: &DbRouter, record: &ResponseRecord) -> Result<ResponseRecord> {
     let scope = record.scope();
@@ -996,9 +1178,17 @@ pub async fn append_event(
     make: impl FnOnce(i64) -> Result<String>,
 ) -> Result<String> {
     let scope = record.scope();
-    let tx = transaction(pool, scope).await?;
-    let current = response(&tx, scope, &record.id, false).await?;
-    if current.owner_id != record.owner_id || !current.active() {
+    // This is an internal execution write, not a public read or a new
+    // dispatch. The original durable execution lease may finish after a user,
+    // membership or account grant is disabled; replay still authorizes each
+    // batch separately. A superseded lease or deleted/cancelled row cannot write.
+    let tx = owner_transaction(pool, scope).await?;
+    let current = timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM scoped_responses WHERE tenant_id=$1 AND user_id=$2 AND access_mode=$3 AND id=$4 AND owner_id=$5 AND deleted_at IS NULL FOR UPDATE",
+        [scope.tenant.into(), scope.user.into(), scope.mode.as_str().into(), record.id.as_str().into(), record.owner_id.into()],
+    )).one(&tx)).await?.ok_or_else(missing)?;
+    if !current.active() {
         return Err(conflict("Response event stream is closed"));
     }
     let frame = make(current.next_seq)?;
@@ -1148,6 +1338,571 @@ pub fn response_input_items(record: &ResponseRecord) -> Vec<Value> {
 pub fn conversation_view(row: &ConversationRecord) -> Value {
     json!({"id":row.id,"object":"conversation","created_at":row.created_at.timestamp(),"metadata":row.metadata_json})
 }
+
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct ResponseAdminSummary {
+    pub id: String,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub access_mode: String,
+    pub account_id: Option<Uuid>,
+    pub model: String,
+    pub status: String,
+    pub background: bool,
+    pub store_response: bool,
+    pub stream: bool,
+    pub previous_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub revision: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct ConversationAdminSummary {
+    pub id: String,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub access_mode: String,
+    pub account_id: Option<Uuid>,
+    pub model: Option<String>,
+    pub metadata_json: Value,
+    pub active_response_id: Option<String>,
+    pub revision: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+fn admin_values(
+    tenant: Uuid,
+    owner: Option<Uuid>,
+    mode: ModelAccessMode,
+    limit: i64,
+    offset: i64,
+) -> Vec<sea_orm::Value> {
+    vec![
+        tenant.into(),
+        owner.into(),
+        mode.as_str().into(),
+        limit.into(),
+        offset.into(),
+    ]
+}
+
+async fn admin_read_transaction(pool: &DbRouter) -> Result<DatabaseTransaction> {
+    let tx = timed(pool.begin()).await?;
+    timed(tx.execute_unprepared(
+        "SET LOCAL statement_timeout='2500ms'; SET LOCAL lock_timeout='1000ms'",
+    ))
+    .await?;
+    Ok(tx)
+}
+
+pub(crate) async fn append_control_audit(
+    tx: &DatabaseTransaction,
+    control: &ResponseControlScope,
+    audit: &AuditContext,
+    action: &str,
+    resource_type: &str,
+    resource_id: Option<&str>,
+    mut metadata: Value,
+) -> Result<()> {
+    control.check_expiry()?;
+    let (scope, tenant) = if let Some(reason) = control.root_reason() {
+        if let Some(object) = metadata.as_object_mut() {
+            object.insert("reason".into(), Value::String(reason.to_owned()));
+            object.insert(
+                "tenant_id".into(),
+                Value::String(control.tenant_id().to_string()),
+            );
+        }
+        (AuditScopeType::Platform, None)
+    } else {
+        (AuditScopeType::Tenant, Some(control.tenant_id()))
+    };
+    TenantAuditEvent::append(
+        tx,
+        scope,
+        tenant,
+        audit,
+        action,
+        resource_type,
+        resource_id,
+        AuditResult::Success,
+        metadata,
+    )
+    .await
+    .map_err(ApiError::from)?;
+    Ok(())
+}
+
+pub async fn admin_list_responses(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Option<Uuid>,
+    mode: ModelAccessMode,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ResponseAdminSummary>> {
+    if !(1..=100).contains(&limit)
+        || !(0..=100_000_000).contains(&offset)
+        || owner.is_some_and(|id| id.is_nil())
+        || mode == ModelAccessMode::AccountPool
+    {
+        return Err(ApiError::BadRequest("Invalid local resource page".into()));
+    }
+    let tx = admin_read_transaction(pool).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let rows = timed(ResponseAdminSummary::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT id,tenant_id,user_id,access_mode,account_id,model,status,background,store_response,stream,previous_id,conversation_id,revision,created_at,updated_at,expires_at,deleted_at \
+         FROM scoped_responses \
+         WHERE tenant_id=$1 AND ($2::uuid IS NULL OR user_id=$2) AND access_mode=$3 AND (background OR store_response) AND deleted_at IS NULL AND expires_at>NOW() \
+         ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5",
+        admin_values(control.tenant_id(), owner, mode, limit, offset),
+    ))
+    .all(&tx))
+    .await?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "response.list",
+        "response",
+        None,
+        json!({"owner_user_id":owner,"access_mode":mode.as_str(),"count":rows.len()}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(rows)
+}
+
+pub async fn admin_count_responses(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Option<Uuid>,
+    mode: ModelAccessMode,
+) -> Result<i64> {
+    if owner.is_some_and(|id| id.is_nil()) || mode == ModelAccessMode::AccountPool {
+        return Err(ApiError::BadRequest(
+            "Invalid local resource selector".into(),
+        ));
+    }
+    let tx = admin_read_transaction(pool).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let row = timed(tx.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT COUNT(*)::BIGINT AS n FROM scoped_responses WHERE tenant_id=$1 AND ($2::uuid IS NULL OR user_id=$2) AND access_mode=$3 AND (background OR store_response) AND deleted_at IS NULL AND expires_at>NOW()",
+        [control.tenant_id().into(), owner.into(), mode.as_str().into()],
+    )))
+    .await?
+    .ok_or_else(missing)?;
+    let total = row.try_get::<i64>("", "n").map_err(storage)?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "response.count",
+        "response",
+        None,
+        json!({"owner_user_id":owner,"access_mode":mode.as_str(),"count":total}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(total)
+}
+
+fn validate_local_resource(owner: Uuid, mode: ModelAccessMode, id: &str) -> Result<()> {
+    if owner.is_nil()
+        || mode == ModelAccessMode::AccountPool
+        || id.is_empty()
+        || id.len() > 200
+        || id.chars().any(char::is_control)
+    {
+        return Err(ApiError::BadRequest(
+            "Invalid local response resource selector".into(),
+        ));
+    }
+    Ok(())
+}
+
+async fn admin_response_record(
+    db: &impl ConnectionTrait,
+    tenant: Uuid,
+    owner: Uuid,
+    mode: ModelAccessMode,
+    id: &str,
+    deleted: bool,
+) -> Result<ResponseRecord> {
+    timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM scoped_responses WHERE tenant_id=$1 AND user_id=$2 AND access_mode=$3 AND id=$4 AND (background OR store_response) AND expires_at>NOW() AND ($5 OR deleted_at IS NULL) FOR UPDATE",
+        [tenant.into(), owner.into(), mode.as_str().into(), id.into(), deleted.into()],
+    ))
+    .one(db))
+    .await?
+    .ok_or_else(missing)
+}
+
+pub async fn admin_response(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Uuid,
+    mode: ModelAccessMode,
+    id: &str,
+    deleted: bool,
+) -> Result<ResponseRecord> {
+    validate_local_resource(owner, mode, id)?;
+    let owner_scope = Scope {
+        tenant: control.tenant_id(),
+        user: owner,
+        mode,
+    };
+    let tx = owner_transaction(pool, owner_scope).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let row = admin_response_record(&tx, control.tenant_id(), owner, mode, id, deleted).await?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "response.detail",
+        "response",
+        Some(id),
+        json!({"owner_user_id":owner,"access_mode":mode.as_str(),"revision":row.revision}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(row)
+}
+
+pub async fn admin_list_conversations(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Option<Uuid>,
+    mode: ModelAccessMode,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<ConversationAdminSummary>> {
+    if !(1..=100).contains(&limit)
+        || !(0..=100_000_000).contains(&offset)
+        || owner.is_some_and(|id| id.is_nil())
+        || mode == ModelAccessMode::AccountPool
+    {
+        return Err(ApiError::BadRequest("Invalid local resource page".into()));
+    }
+    let tx = admin_read_transaction(pool).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let rows = timed(ConversationAdminSummary::find_by_statement(
+        Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT id,tenant_id,user_id,access_mode,account_id,model,metadata_json,active_response_id,revision,created_at,updated_at,expires_at,deleted_at \
+         FROM scoped_conversations \
+         WHERE tenant_id=$1 AND ($2::uuid IS NULL OR user_id=$2) AND access_mode=$3 AND deleted_at IS NULL AND expires_at>NOW() \
+         ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5",
+        admin_values(control.tenant_id(), owner, mode, limit, offset),
+    ))
+    .all(&tx))
+    .await?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "conversation.list",
+        "conversation",
+        None,
+        json!({"owner_user_id":owner,"access_mode":mode.as_str(),"count":rows.len()}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(rows)
+}
+
+pub async fn admin_count_conversations(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Option<Uuid>,
+    mode: ModelAccessMode,
+) -> Result<i64> {
+    if owner.is_some_and(|id| id.is_nil()) || mode == ModelAccessMode::AccountPool {
+        return Err(ApiError::BadRequest(
+            "Invalid local resource selector".into(),
+        ));
+    }
+    let tx = admin_read_transaction(pool).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let row = timed(tx.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT COUNT(*)::BIGINT AS n FROM scoped_conversations WHERE tenant_id=$1 AND ($2::uuid IS NULL OR user_id=$2) AND access_mode=$3 AND deleted_at IS NULL AND expires_at>NOW()",
+        [control.tenant_id().into(), owner.into(), mode.as_str().into()],
+    )))
+    .await?
+    .ok_or_else(missing)?;
+    let total = row.try_get::<i64>("", "n").map_err(storage)?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "conversation.count",
+        "conversation",
+        None,
+        json!({"owner_user_id":owner,"access_mode":mode.as_str(),"count":total}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(total)
+}
+
+async fn admin_conversation_record(
+    db: &impl ConnectionTrait,
+    tenant: Uuid,
+    owner: Uuid,
+    mode: ModelAccessMode,
+    id: &str,
+    deleted: bool,
+) -> Result<ConversationRecord> {
+    timed(ConversationRecord::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT * FROM scoped_conversations WHERE tenant_id=$1 AND user_id=$2 AND access_mode=$3 AND id=$4 AND expires_at>NOW() AND ($5 OR deleted_at IS NULL) FOR UPDATE",
+        [tenant.into(), owner.into(), mode.as_str().into(), id.into(), deleted.into()],
+    ))
+    .one(db))
+    .await?
+    .ok_or_else(missing)
+}
+
+pub async fn admin_conversation(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Uuid,
+    mode: ModelAccessMode,
+    id: &str,
+    deleted: bool,
+) -> Result<ConversationRecord> {
+    validate_local_resource(owner, mode, id)?;
+    let owner_scope = Scope {
+        tenant: control.tenant_id(),
+        user: owner,
+        mode,
+    };
+    let tx = owner_transaction(pool, owner_scope).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let row = admin_conversation_record(&tx, control.tenant_id(), owner, mode, id, deleted).await?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "conversation.detail",
+        "conversation",
+        Some(id),
+        json!({"owner_user_id":owner,"access_mode":mode.as_str(),"revision":row.revision}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(row)
+}
+
+async fn cancel_or_delete_record(
+    tx: &DatabaseTransaction,
+    mut row: ResponseRecord,
+    delete: bool,
+) -> Result<(ResponseRecord, bool)> {
+    let scope = row.scope();
+    let id = row.id.clone();
+    let expected_revision = row.revision;
+    let was_active = row.active();
+    if row.deleted_at.is_some() {
+        return Ok((row, false));
+    }
+    if !row.retained() {
+        return Err(missing());
+    }
+    if !delete && !row.background {
+        return Err(ApiError::BadRequest(
+            "Only background Responses can be cancelled through this endpoint".into(),
+        ));
+    }
+    let transitioned = row.active();
+    if !delete && !transitioned {
+        return Ok((row, false));
+    }
+    if transitioned {
+        row.status = "cancelled".into();
+        row.response_json = Some(final_response(&row, public_response(&row), "cancelled"));
+    }
+    release_conversation(tx, &row).await?;
+    row=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE scoped_responses SET status=$2,response_json=CASE WHEN $3 THEN NULL ELSE $4 END,
+         deleted_at=CASE WHEN $3 THEN NOW() ELSE deleted_at END,
+         request_json=CASE WHEN $3 THEN '{}'::jsonb ELSE request_json END,
+         input_json=CASE WHEN $3 THEN '[]'::jsonb ELSE input_json END,
+         new_input_json=CASE WHEN $3 THEN '[]'::jsonb ELSE new_input_json END,
+         output_json=CASE WHEN $3 THEN '[]'::jsonb ELSE output_json END,
+         execution_json=CASE WHEN $3 THEN execution_json-'native_result' ELSE execution_json END,
+         updated_at=NOW(),revision=revision+1 WHERE id=$1 AND tenant_id=$5 AND user_id=$6 AND access_mode=$7 AND revision=$8 RETURNING *",
+        [id.as_str().into(),row.status.into(),delete.into(),row.response_json.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into(),expected_revision.into()])).one(tx)).await?.ok_or_else(||conflict("Response revision changed; reload before retrying"))?;
+    if delete {
+        timed(tx.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM scoped_response_events e USING scoped_responses r
+             WHERE e.response_id=$1 AND r.id=e.response_id AND r.tenant_id=$2 AND r.user_id=$3 AND r.access_mode=$4",
+            [id.as_str().into(), scope.tenant.into(), scope.user.into(), scope.mode.as_str().into()],
+        )))
+        .await?;
+    }
+    if !delete && transitioned {
+        let _ = terminal_event(tx, &mut row, None).await?;
+    }
+    Ok((row, was_active))
+}
+
+pub async fn admin_cancel_or_delete_response(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Uuid,
+    mode: ModelAccessMode,
+    id: &str,
+    expected_revision: i64,
+    delete: bool,
+) -> Result<(ResponseRecord, bool)> {
+    validate_local_resource(owner, mode, id)?;
+    let scope = Scope {
+        tenant: control.tenant_id(),
+        user: owner,
+        mode,
+    };
+    let tx = owner_transaction(pool, scope).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let row = admin_response_record(&tx, scope.tenant, owner, mode, id, delete).await?;
+    if expected_revision != row.revision {
+        return Err(conflict(
+            "Response revision changed; reload before retrying",
+        ));
+    }
+    let (updated, was_active) = cancel_or_delete_record(&tx, row, delete).await?;
+    append_control_audit(&tx,control,&audit,if delete {"response.delete"} else {"response.cancel"},"response",Some(id),
+        json!({"owner_user_id":owner,"revision":updated.revision,"status":updated.status,"operation":if delete {"delete"} else {"cancel"},"changed":updated.revision!=expected_revision})).await?;
+    control.check_expiry()?;
+    timed(tx.commit()).await?;
+    Ok((updated, was_active))
+}
+
+async fn mutate_conversation_record(
+    tx: &DatabaseTransaction,
+    mut row: ConversationRecord,
+    change: ConversationMutation,
+) -> Result<(ConversationRecord, Option<ResponseRecord>)> {
+    let scope = Scope {
+        tenant: row.tenant_id,
+        user: row.user_id,
+        mode: match row.access_mode.as_str() {
+            "passthrough" => ModelAccessMode::Passthrough,
+            "node_dispatch" => ModelAccessMode::NodeDispatch,
+            _ => return Err(missing()),
+        },
+    };
+    let id = row.id.clone();
+    let expected_revision = row.revision;
+    if row.deleted_at.is_some() {
+        return Ok((row, None));
+    }
+    if row.active_response_id.is_some() && !matches!(change, ConversationMutation::Delete) {
+        return Err(conflict(
+            "Conversation has an active response; retry after it finishes",
+        ));
+    }
+    let deleting = matches!(change, ConversationMutation::Delete);
+    let mut active_cancelled = None;
+    match change {
+        ConversationMutation::Metadata(value) => row.metadata_json = metadata(Some(&value))?,
+        ConversationMutation::Append(items) => {
+            if items.len() > 20 {
+                return Err(ApiError::BadRequest("Add at most 20 items".into()));
+            }
+            row.items_json
+                .as_array_mut()
+                .ok_or_else(missing)?
+                .extend(wrap_items(items));
+            check_history(&item_bodies(&row.items_json))?;
+        }
+        ConversationMutation::RemoveItem(item_id) => row
+            .items_json
+            .as_array_mut()
+            .ok_or_else(missing)?
+            .retain(|item| item["id"] != item_id),
+        ConversationMutation::Delete => {
+            if let Some(active) = &row.active_response_id {
+                let active_row=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+                    "SELECT * FROM scoped_responses WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 AND status IN ('queued','in_progress') FOR UPDATE",
+                    [active.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into()])).one(tx)).await?;
+                if let Some(mut active_row) = active_row {
+                    let public =
+                        final_response(&active_row, public_response(&active_row), "cancelled");
+                    active_row=timed(ResponseRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+                        "UPDATE scoped_responses SET status='cancelled',response_json=$5,updated_at=NOW(),revision=revision+1 WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 RETURNING *",
+                        [active.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into(),public.into()])).one(tx)).await?.ok_or_else(missing)?;
+                    let _ = terminal_event(tx, &mut active_row, None).await?;
+                    active_cancelled = Some(active_row);
+                }
+            }
+            row.items_json = json!([]);
+            row.metadata_json = json!({});
+        }
+    }
+    let updated=timed(ConversationRecord::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,
+        "UPDATE scoped_conversations SET metadata_json=$5,items_json=$6,deleted_at=CASE WHEN $7 THEN NOW() ELSE deleted_at END,active_response_id=CASE WHEN $7 THEN NULL ELSE active_response_id END,revision=revision+1,updated_at=NOW(),expires_at=NOW()+($8::BIGINT*INTERVAL '1 second') WHERE id=$1 AND tenant_id=$2 AND user_id=$3 AND access_mode=$4 AND revision=$9 RETURNING *",
+        [id.into(),scope.tenant.into(),scope.user.into(),scope.mode.as_str().into(),row.metadata_json.into(),row.items_json.into(),deleting.into(),STORED_TTL.into(),expected_revision.into()])).one(tx)).await?.ok_or_else(||conflict("Conversation revision changed; reload before retrying"))?;
+    Ok((updated, active_cancelled))
+}
+
+pub async fn admin_mutate_conversation(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Uuid,
+    mode: ModelAccessMode,
+    id: &str,
+    expected_revision: i64,
+    change: ConversationMutation,
+) -> Result<(ConversationRecord, Option<ResponseRecord>)> {
+    validate_local_resource(owner, mode, id)?;
+    let scope = Scope {
+        tenant: control.tenant_id(),
+        user: owner,
+        mode,
+    };
+    let tx = owner_transaction(pool, scope).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let row = admin_conversation_record(
+        &tx,
+        scope.tenant,
+        owner,
+        mode,
+        id,
+        matches!(change, ConversationMutation::Delete),
+    )
+    .await?;
+    if expected_revision != row.revision {
+        return Err(conflict(
+            "Conversation revision changed; reload before retrying",
+        ));
+    }
+    let operation = match &change {
+        ConversationMutation::Metadata(_) => "metadata",
+        ConversationMutation::Append(_) => "append",
+        ConversationMutation::RemoveItem(_) => "remove_item",
+        ConversationMutation::Delete => "delete",
+    };
+    let (updated, cancelled) = mutate_conversation_record(&tx, row, change).await?;
+    append_control_audit(&tx,control,&audit,"conversation.mutate","conversation",Some(id),
+        json!({"owner_user_id":owner,"revision":updated.revision,"operation":operation,"changed":updated.revision!=expected_revision})).await?;
+    control.check_expiry()?;
+    timed(tx.commit()).await?;
+    Ok((updated, cancelled))
+}
+
 pub async fn cleanup(pool: &DbRouter) -> Result<()> {
     timed(pool.write_conn().execute_unprepared(
         "DELETE FROM scoped_responses WHERE id IN
@@ -1300,4 +2055,96 @@ pub async fn claim_recovery(
         [record.id.as_str().into(),record.owner_id.into(),record.tenant_id.into(),record.user_id.into(),record.access_mode.as_str().into(),Uuid::new_v4().into()])).one(&tx)).await?;
     timed(tx.commit()).await?;
     Ok(next)
+}
+
+#[cfg(test)]
+mod response_control_scope_tests {
+    use super::*;
+    fn audit(actor: Uuid) -> AuditContext {
+        AuditContext {
+            actor_user_id: actor,
+            credential_kind: CredentialKind::Jwt,
+            actor_platform_role: PlatformRole::None,
+            actor_tenant_role: Some(TenantRole::Admin),
+            request_id: Some(Uuid::new_v4()),
+        }
+    }
+    #[test]
+    fn constructor_checks_credential_actor_and_request_identity() {
+        let tenant = Uuid::new_v4();
+        let actor = Uuid::new_v4();
+        let scope = TenantScope::checked(tenant, actor, TenantRole::Admin).unwrap();
+        let a = audit(actor);
+        let expiry = Utc::now().timestamp() + 60;
+        assert!(ResponseControlScope::tenant_admin(scope, a, 0, 1, 1, expiry).is_ok());
+        for kind in [
+            CredentialKind::ApiKey,
+            CredentialKind::Node,
+            CredentialKind::System,
+        ] {
+            assert!(
+                ResponseControlScope::tenant_admin(
+                    scope,
+                    AuditContext {
+                        credential_kind: kind,
+                        ..a
+                    },
+                    0,
+                    1,
+                    1,
+                    expiry
+                )
+                .is_err()
+            );
+        }
+        for changed in [
+            AuditContext {
+                actor_user_id: Uuid::new_v4(),
+                ..a
+            },
+            AuditContext {
+                request_id: None,
+                ..a
+            },
+            AuditContext {
+                request_id: Some(Uuid::nil()),
+                ..a
+            },
+        ] {
+            assert!(ResponseControlScope::tenant_admin(scope, changed, 0, 1, 1, expiry).is_err());
+        }
+        let member = TenantScope::checked(tenant, actor, TenantRole::Member).unwrap();
+        assert!(ResponseControlScope::tenant_admin(member, a, 0, 1, 1, expiry).is_err());
+        let old = ResponseControlScope::tenant_admin(scope, a, 0, 1, 1, 1).unwrap();
+        assert!(old.check_expiry().is_err());
+    }
+    #[test]
+    fn root_support_requires_explicit_target_reason_and_valid_origin_snapshot() {
+        let actor = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let root = PlatformScope::checked(actor, PlatformRole::Root).unwrap();
+        let audit = audit(actor);
+        let session = ResponseControlSession {
+            token_version: 0,
+            jwt_expires_at: Utc::now().timestamp() + 60,
+            selected: None,
+        };
+        assert!(ResponseControlScope::root(root, target, audit, session, "incident").is_ok());
+        for reason in ["", "\t", "incident\nprivate"] {
+            assert!(ResponseControlScope::root(root, target, audit, session, reason).is_err());
+        }
+        let operator = PlatformScope::checked(actor, PlatformRole::Operator).unwrap();
+        assert!(ResponseControlScope::root(operator, target, audit, session, "incident").is_err());
+        assert!(ResponseControlScope::root(root, Uuid::nil(), audit, session, "incident").is_err());
+        let invalid = ResponseControlSession {
+            selected: Some(ResponseControlMembership {
+                tenant_id: target,
+                tenant_role: TenantRole::Member,
+                tenant_authz_version: 0,
+                membership_authz_version: 1,
+            }),
+            ..session
+        };
+        assert!(ResponseControlScope::root(root, target, audit, invalid, "incident").is_err());
+    }
 }
