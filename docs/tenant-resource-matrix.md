@@ -98,3 +98,20 @@ audited transaction. The earnings ratio uses its own exact-decimal, versioned,
 reason-audited command and cannot be updated through generic setting URLs.
 Platform-wide payment policy does not change existing order/wallet tenant or
 owner identity. Broader platform operation and final release gates remain separate.
+
+## Operator operational reads
+
+`/api/v1/platform/operations/**` exposes only tenant health metadata, bounded
+per-currency usage aggregates, and an explicit process-capacity field allowlist.
+Both root and operator may use these platform-scoped views without joining each
+target tenant. They do not gain membership privileges on tenant URLs. Raw orders,
+wallets, credentials, individual request traces, conversation content and business
+mutations are not part of this grant. Existing broader platform lifecycle and
+raw monitoring endpoints remain independently protected.
+
+All operational queries revalidate current platform role, user/token state,
+selected membership/tenant versions and expiry. Explicit `Platform` and `Tenant`
+target variants distinguish aggregate domains; missing or nil tenant IDs never
+become a wildcard. List/count use the same snapshot and filters. Financial totals
+remain separate by currency with exact decimal strings. Aggregate routes use
+the existing bounded heavy-read admission class, not a higher inference quota.

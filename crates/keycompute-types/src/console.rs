@@ -32,6 +32,9 @@ pub fn classify(method: &str, path: &str) -> Option<ConsoleClass> {
     if !matches!(method, "GET" | "HEAD") {
         return Some(ConsoleClass::Write);
     }
+    if path.starts_with("/api/v1/platform/operations/") && path.ends_with("/usage") {
+        return Some(ConsoleClass::HeavyRead);
+    }
     if [
         "/stats",
         "/earnings",
@@ -46,5 +49,31 @@ pub fn classify(method: &str, path: &str) -> Option<ConsoleClass> {
         Some(ConsoleClass::HeavyRead)
     } else {
         Some(ConsoleClass::Read)
+    }
+}
+
+#[cfg(test)]
+mod operations_tests {
+    use super::*;
+    #[test]
+    fn platform_usage_aggregates_use_bounded_heavy_read_admission() {
+        for path in [
+            "/api/v1/platform/operations/usage",
+            "/api/v1/platform/operations/tenants/tenant-id/usage",
+        ] {
+            assert_eq!(classify("GET", path), Some(ConsoleClass::HeavyRead));
+        }
+        assert_eq!(
+            classify("GET", "/api/v1/platform/operations/tenants"),
+            Some(ConsoleClass::Read)
+        );
+        assert_eq!(
+            classify("GET", "/api/v1/tenants/tenant-id/usage"),
+            Some(ConsoleClass::Read)
+        );
+        assert_eq!(
+            classify("POST", "/api/v1/platform/operations/usage"),
+            Some(ConsoleClass::Write)
+        );
     }
 }

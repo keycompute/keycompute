@@ -36,3 +36,5 @@ pub trait ApiModule {
     where
         Self: Sized;
 }
+
+pub mod platform_operations;

@@ -2923,3 +2923,5 @@ pub mod distribution_policy;
 
 pub mod tenant_nodes;
 pub mod tenant_tasks;
+
+pub mod platform_operations;

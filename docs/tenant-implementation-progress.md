@@ -955,3 +955,41 @@ The expiry observer checks actual backend/relation locks rather than truncated
 SQL text. No production DB, credentials, payments, service or deployment changed.
 Native and operator/UI preparations are not included in this acceptance; broad
 platform routing, native resource adaptation and release gates remain separate.
+
+
+## Current phase 6 — operator operational read allowlist accepted
+
+Baseline `c6e095e` global settings was committed before integrating this slice.
+Five canonical GET-only platform operations routes expose tenant health metadata,
+platform/named-tenant usage aggregates, and safe process-capacity diagnostics.
+Root and operator can use a global console session without default-tenant or
+other-target membership. This does not authorize tenant membership routes, raw
+monitoring traces, individual orders/wallets, secrets, Responses bodies or any
+business write. It does not claim completion of all platform lifecycle endpoints.
+
+Typed PlatformOperationsScope carries the actual platform role, original JWT
+version/expiry and any selected membership's role and authorization versions.
+Every DAO query rechecks that current state on the primary. A selected-member
+revocation invalidates that selected context; an independently valid global
+operator session retains its platform capability. User revocation/demotion or
+expiry invalidates both. Read queries take no identity write fence or row locks.
+
+Tenant list and total are one authorized SQL snapshot with literal substring
+search, stable paging and fixed safe fields. No owner identifiers, emails,
+provider credentials or request payloads are materialized by this model. Exact
+named-tenant details and aggregate targets reject nil/nonexistent IDs. Aggregate
+queries are bounded to 31 days, separate currency totals and retain tokens/amounts
+as strings; no arbitrary per-user drilldown is exposed. Existing heavy-read
+admission bounds aggregate requests without changing inference limits. SDK reads
+use fresh canonical paths and encoded filters; it has no operational write API.
+
+Eight new PostgreSQL/HTTP regressions cover bare handlers, multi-tenant roles,
+current/revoked credentials, selected vs global context, exact paging/count,
+literal search, inactive target diagnostics, currency aggregation and secret-free
+capacity. Two SDK wire tests and one shared classification unit test are included.
+Final default-parallel workspace: **2,638 passed, 0 failed, 30 original default
+ignored**, including desktop/mobile. All-target native and Web/client WASM checks,
+strict all-target/all-feature Clippy, format/whitespace and frozen10-source hashes
+passed. Focused tests are subsets, not extra totals. No production state, secrets,
+services or deployment changed. Native resource and frontend preparations remain
+outside main and unaccepted; root lifecycle authority is the next separate slice.
