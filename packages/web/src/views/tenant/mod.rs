@@ -39,3 +39,6 @@ pub fn TenantAdminLayout() -> Element {
     }
     rsx! { Outlet::<Route> {} }
 }
+
+mod pricing_admin;
+pub use pricing_admin::TenantPricing;

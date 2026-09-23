@@ -2105,5 +2105,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     for &(key, zh, _) in super::tenant_nodes::TEXT {
         m.insert(key, zh);
     }
+    super::tenant_pricing::register(&mut m, true);
+
     m
 });

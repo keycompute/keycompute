@@ -136,9 +136,10 @@ pub fn WorkspaceLinks() -> Element {
         .read()
         .as_ref()
         .is_some_and(|u| u.can_manage_tenant());
-    rsx! {nav {class:"toolbar", aria_label:i18n.t("tenant.workspace"),
+    rsx! {nav {class:"toolbar tenant-workspace-links", aria_label:i18n.t("tenant.workspace"),
         Link {class:"btn btn-secondary",to:Route::TenantWorkspace {},{i18n.t("tenant.workspace")}}
         if admin {
+            Link {class:"btn btn-secondary",to:Route::TenantPricing {},{i18n.t("tenant_pricing.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantNodes {},{i18n.t("tenant_nodes.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantMembers {},{i18n.t("tenant.members")}}
             Link {class:"btn btn-secondary",to:Route::TenantInvitations {},{i18n.t("tenant.invitations")}}

@@ -418,6 +418,11 @@ pub fn AppLayout() -> Element {
     {
         tenant_items.extend([
             NavItem::new(
+                i18n.t("tenant_pricing.title"),
+                Route::TenantPricing {}.to_string(),
+                NavIcon::Wallet,
+            ),
+            NavItem::new(
                 i18n.t("tenant_nodes.title"),
                 Route::TenantNodes {}.to_string(),
                 NavIcon::Activity,
@@ -613,6 +618,7 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
     let key = match route {
         Route::PlatformOperations {} => "operations.title",
         Route::TenantNodes {} => "tenant_nodes.title",
+        Route::TenantPricing {} => "tenant_pricing.title",
         Route::TenantWorkspace {} => "tenant.workspace",
         Route::TenantMembers {} => "tenant.members",
         Route::TenantInvitations {} => "tenant.invitations",

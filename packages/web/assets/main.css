@@ -7195,3 +7195,12 @@ select.form-input:focus {
 .tenant-node-admin .tenant-node-table td:first-child { min-width: 220px; overflow-wrap: anywhere; }
 .tenant-node-admin .tenant-node-detail { padding: 20px; margin: 20px 0; overflow-wrap: anywhere; }
 .tenant-node-admin .modal-body { overflow-wrap: anywhere; display: grid; gap: 10px; }
+
+/* Tenant pricing uses bounded scrolling, leaving the shared pagination outside. */
+.tenant-pricing-table-scroll { overflow-x: auto; }
+.tenant-pricing-editor { max-height: calc(100dvh - 48px); overflow-y: auto; }
+.tenant-pricing-editor .form-label { display: block; margin-top: 10px; }
+.tenant-pricing-admin .toolbar { gap: 8px; flex-wrap: wrap; }
+
+.tenant-workspace-links { flex-wrap: wrap; gap: 8px; justify-content: flex-start; }
+.tenant-pricing-admin td .btn { margin: 2px; }

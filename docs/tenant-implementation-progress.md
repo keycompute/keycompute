@@ -1439,3 +1439,45 @@ CI135 for the node UI independently passed, including all three production-image
 browser runners. CI134's old failed attempt remains historical; a separate commit
 carries this deterministic correction and receives its own CI run. Full native
 resource management, remaining resource pages and final release remain unfinished.
+
+
+## Current phase 7 — tenant pricing console accepted
+
+The actual /tenant/pricing page now uses a dedicated tenant SDK and the current
+selected membership/capability boundary. It does not reuse the platform pricing
+URL or include tenant/platform selectors in write payloads. Explicit foreign,
+platform, nil-ID or missing-version responses are rejected, not silently filtered.
+
+The page provides list/search/pagination, create, versioned edit, make-default
+and delete with exact decimal strings and RFC3339 windows. Immutable model,
+dimension/currency/start fields remain unchanged on edit. An omitted expiration
+retains the previous value. Default/delete retain existing server current-row
+transaction semantics; this UI does not invent version-CAS for those endpoints.
+All writes are single-dispatch. Page-local keyed scope and query ownership prevent
+late A results or forms from being adopted after a switch to member workspace B.
+
+Four SDK wire tests, six Web tests and one real SDK/Axum/PostgreSQL test were
+added. The real contract test covers audited CRUD/default, precise amounts,
+version conflicts and member/key/foreign denial. The independent full default-
+parallel workspace, all-target native check, strict all-target/all-feature Clippy,
+Web/client WASM, formatting and 23 Python tests all passed. Existing ignored tests
+were unchanged. No backend authorization, schema or settlement code changed.
+
+Production-compiled WASM passed three new pricing browser scenario groups with
+zero page errors. All existing six tenant, three operator and four node browser
+groups also passed on the same bundle. The new runner is added to CI's existing
+production-image browser step. UI HTTP fixtures are synthetic; backend contract
+coverage is the separately executed actual PostgreSQL/Axum test.
+
+Nineteen non-document source/test/workflow files were frozen before the final
+pipeline. An additional aggregate inspection was denied and not executed; the
+independently launched complete validation finished with exit code zero. No claim
+is made that the denied additional inspection ran. The runtime sources were not
+edited during final validation.
+
+Platform pricing still has separate legacy client/presentation issues identified
+during review (explicit scope serialization and nil-UUID global labels). They are
+not fixed by this tenant-only delivery. Provider/Key/finance/Responses pages,
+native account-pool management, remaining object review and final deployment
+gates also remain separate. No production DB, credentials, payment, SMTP or
+service deployment changed. See tenant-pricing-console.md for exact scope.
