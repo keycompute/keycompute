@@ -10,6 +10,19 @@ const COMPONENTS_CSS: Asset = asset!("/assets/styling/components.css");
 const DARK_CSS: Asset = asset!("/assets/styling/dark.css");
 const RESPONSIVE_CSS: Asset = asset!("/assets/styling/responsive.css");
 
+/// Existing shared styles for shells and standalone control pages alike.
+/// Keeping one component avoids a page depending on another route's head nodes.
+#[component]
+pub fn ThemeStyles() -> Element {
+    rsx! {
+        document::Link { rel: "stylesheet", href: VARIABLES_CSS }
+        document::Link { rel: "stylesheet", href: LAYOUT_CSS }
+        document::Link { rel: "stylesheet", href: COMPONENTS_CSS }
+        document::Link { rel: "stylesheet", href: DARK_CSS }
+        document::Link { rel: "stylesheet", href: RESPONSIVE_CSS }
+    }
+}
+
 /// 主题 Signal 的 Context 包装，与 web 层共享，避免与 lang 的 Signal<String> 类型冲突
 #[derive(Clone, Copy)]
 pub struct ThemeCtx(pub Signal<String>);
@@ -137,11 +150,7 @@ pub fn AppShell(
     };
 
     rsx! {
-        document::Link { rel: "stylesheet", href: VARIABLES_CSS }
-        document::Link { rel: "stylesheet", href: LAYOUT_CSS }
-        document::Link { rel: "stylesheet", href: COMPONENTS_CSS }
-        document::Link { rel: "stylesheet", href: DARK_CSS }
-        document::Link { rel: "stylesheet", href: RESPONSIVE_CSS }
+        ThemeStyles {}
 
         div {
             class: "app-shell",

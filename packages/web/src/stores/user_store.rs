@@ -33,6 +33,16 @@ impl UserInfo {
         self.has_platform_permission("users:manage")
     }
 
+    /// Verified tenant capabilities never imply any platform grant.
+    pub fn can_manage_tenant(&self) -> bool {
+        self.selected_tenant.is_some()
+            && self
+                .capabilities
+                .tenant
+                .iter()
+                .any(|p| p == "tenant:manage")
+    }
+
     pub fn active_tenant_id(&self) -> Option<&str> {
         self.selected_tenant
             .as_ref()

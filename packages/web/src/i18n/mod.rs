@@ -1,4 +1,5 @@
 mod en;
+mod tenant;
 mod zh;
 
 pub use en::EN;

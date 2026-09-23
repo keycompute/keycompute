@@ -14,6 +14,10 @@ use crate::views::{
         Monitoring, MonitoringDiagnostics, NodeGateway, PaymentOrders, Pricing, Settings, System,
         Tenants, UpstreamAccounts, UpstreamNodes, UpstreamPassthrough, Users,
     },
+    tenant::{
+        TenantAdminLayout, TenantAudit, TenantInvitationAccept, TenantInvitations, TenantMembers,
+        TenantWorkspace,
+    },
     user::{UserProfile, UserSettings},
 };
 
@@ -34,6 +38,10 @@ pub enum Route {
     ForgotPassword {},
     #[route("/auth/reset-password/:token")]
     ResetPassword { token: String },
+
+    // Invitation token is captured and scrubbed before Router construction.
+    #[route("/invite")]
+    TenantInvitationAccept {},
 
     // 主应用（带 AppShell 布局）
     #[layout(AppLayout)]
@@ -59,6 +67,17 @@ pub enum Route {
         NodeToken {},
         #[route("/node/earnings")]
         NodeEarnings {},
+
+        #[route("/tenant")]
+        TenantWorkspace {},
+        #[layout(TenantAdminLayout)]
+            #[route("/tenant/members")]
+            TenantMembers {},
+            #[route("/tenant/invitations")]
+            TenantInvitations {},
+            #[route("/tenant/audit")]
+            TenantAudit {},
+        #[end_layout]
 
         // Admin 功能页面（额外加一层 AdminLayout 做角色验证）
         #[layout(AdminLayout)]
@@ -135,6 +154,21 @@ impl std::fmt::Display for RegisterQuery {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[test]
+    fn tenant_console_and_secret_free_invitation_routes_are_mounted() {
+        for (url, expected) in [
+            ("/tenant", Route::TenantWorkspace {}),
+            ("/tenant/members", Route::TenantMembers {}),
+            ("/tenant/invitations", Route::TenantInvitations {}),
+            ("/tenant/audit", Route::TenantAudit {}),
+            ("/invite", Route::TenantInvitationAccept {}),
+        ] {
+            let route = Route::from_str(url).unwrap();
+            assert_eq!(route, expected);
+            assert_eq!(route.to_string(), url);
+        }
+    }
 
     /// 邀请链接的 ?ref= 参数必须能被解析，且序列化回 URL 时不丢失
     /// （Router 初始化时会用 to_string 规范化地址栏，丢失即意味着推荐码被抹掉）

@@ -12,7 +12,7 @@ pub mod icons;
 pub mod layout;
 
 // Re-export 最常用的布局类型，方便外部直接 `use ui::AppShell`
-pub use layout::app_shell::{ThemeCtx, UiState};
+pub use layout::app_shell::{ThemeCtx, ThemeStyles, UiState};
 pub use layout::header::UserMenuAction;
 pub use layout::{
     AppShell, Footer, GITHUB_REPOSITORY_URL, Header, NavIcon, NavItem, NavSection, Sidebar,

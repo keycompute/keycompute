@@ -475,6 +475,34 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.web
-          outputs: type=cacheonly
+          load: true
+          tags: keycompute-web:ci
           cache-from: type=gha,scope=keycompute-web-image
           cache-to: type=gha,mode=max,scope=keycompute-web-image,ignore-error=true
+
+      # Exercise the actual production bundle with synthetic intercepted HTTP.
+      # No runner, browser or upstream request uses a production credential.
+      - name: Verify tenant console in Chromium
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          browser_root="$(mktemp -d "${RUNNER_TEMP}/keycompute-tenant-browser.XXXXXX")"
+          container=""
+          cleanup() {
+            if [ -n "$container" ]; then docker rm "$container" >/dev/null 2>&1 || true; fi
+            rm -rf "$browser_root"
+          }
+          trap cleanup EXIT
+          mkdir -p "$browser_root/public"
+          container="$(docker create keycompute-web:ci)"
+          docker cp "$container:/usr/share/nginx/html/." "$browser_root/public/"
+          docker rm "$container" >/dev/null
+          container=""
+          npm install --prefix "$browser_root/tools" --no-fund --no-audit playwright@1.55.1
+          export PLAYWRIGHT_BROWSERS_PATH="$browser_root/browsers"
+          node "$browser_root/tools/node_modules/playwright/cli.js" install --with-deps chromium --only-shell
+          export KC_PLAYWRIGHT_MODULE="$browser_root/tools/node_modules/playwright/index.mjs"
+          export KC_WEB_ROOT="$browser_root/public"
+          export KC_BROWSER_OUTPUT="$browser_root/results"
+          node scripts/tests/tenant_console_browser.mjs

@@ -8,6 +8,7 @@ pub mod home;
 pub mod node;
 pub mod payments;
 pub mod shared;
+pub mod tenant;
 pub mod usage;
 pub mod user;
 

@@ -2096,5 +2096,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "原生节点 Chat、Messages 和 Responses 保留完整协议数据；启用事件流时，只使用声明对应 SSE 能力的节点。",
     );
 
+    for &(key, zh, _) in super::tenant::TEXT {
+        m.insert(key, zh);
+    }
     m
 });

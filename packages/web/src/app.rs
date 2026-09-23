@@ -16,12 +16,17 @@ use ui::{AppShell, NavItem, NavSection, ThemeCtx, UserMenuAction};
 
 /// Explicit retry handle for the one cancellable profile bootstrap resource.
 #[derive(Clone, Copy)]
-struct UserBootstrap(Resource<()>);
+pub(crate) struct UserBootstrap(pub(crate) Resource<()>);
 
 /// 根组件：提供所有全局 context，挂载路由
 #[component]
 pub fn App() -> Element {
     // 所有 Signal 必须在组件顶层直接创建，不能在 hook 的闭包里调用 use_signal
+    let invitation_state =
+        use_signal(crate::views::tenant::invitation_entry::capture_before_router);
+    let mut pending_invitation = use_context_provider(|| {
+        crate::views::tenant::invitation_entry::PendingInvitation(invitation_state)
+    });
     let auth_state = use_signal(AuthStore::load_from_storage);
     let user_info = use_signal(|| None::<UserInfo>);
     let user_load_failed = use_signal(|| false);
@@ -61,6 +66,18 @@ pub fn App() -> Element {
     // 推荐码存储：分销链接 /auth/register?ref=xxx 中的推荐码在重定向到首页时通过此 store 传递
     let referral_code_signal = use_signal(|| None::<String>);
     let _referral_store = use_context_provider(|| ReferralStore::new(referral_code_signal));
+
+    use_effect(move || {
+        let auth = (auth_store.state)();
+        let before = pending_invitation.0.peek().clone();
+        let mut next = before.clone();
+        let verified =
+            (user_store.loaded_session_id)() == auth.session_id && (user_store.info)().is_some();
+        next.bind(&auth, verified);
+        if next != before {
+            pending_invitation.0.set(next);
+        }
+    });
 
     // 应用启动时同步主题到 HTML data-theme 属性
     use_effect(move || {
@@ -112,6 +129,14 @@ pub fn App() -> Element {
     });
     use_context_provider(|| UserBootstrap(user_bootstrap));
 
+    if pending_invitation.0.read().scrub_failed {
+        // Never let the router normalize or retain a capability URL if history
+        // redaction failed. No link/token is rendered or saved as a fallback.
+        let i18n = I18n::new(Lang::from_str(&lang_signal()));
+        return rsx! { main { class: "page-container", role: "alert",
+            {i18n.t("tenant.invitation_scrub_failed")}
+        }};
+    }
     rsx! {
         Router::<Route> {}
     }
@@ -380,6 +405,43 @@ pub fn AppLayout() -> Element {
         },
     ];
 
+    let mut tenant_items = vec![NavItem::new(
+        i18n.t("tenant.workspace"),
+        Route::TenantWorkspace {}.to_string(),
+        NavIcon::Home,
+    )];
+    if user_store
+        .info
+        .read()
+        .as_ref()
+        .is_some_and(UserInfo::can_manage_tenant)
+    {
+        tenant_items.extend([
+            NavItem::new(
+                i18n.t("tenant.members"),
+                Route::TenantMembers {}.to_string(),
+                NavIcon::User,
+            ),
+            NavItem::new(
+                i18n.t("tenant.invitations"),
+                Route::TenantInvitations {}.to_string(),
+                NavIcon::Share,
+            ),
+            NavItem::new(
+                i18n.t("tenant.audit"),
+                Route::TenantAudit {}.to_string(),
+                NavIcon::Activity,
+            ),
+        ]);
+    }
+    nav_sections.insert(
+        1,
+        NavSection {
+            title: Some(i18n.t("tenant.management").into()),
+            items: tenant_items,
+        },
+    );
+
     // Existing platform business pages require a platform capability, never a tenant role.
     if can_manage_platform {
         nav_sections.push(NavSection {
@@ -528,6 +590,11 @@ pub fn AdminLayout() -> Element {
 
 fn route_page_title(route: &Route, i18n: &I18n) -> String {
     let key = match route {
+        Route::TenantWorkspace {} => "tenant.workspace",
+        Route::TenantMembers {} => "tenant.members",
+        Route::TenantInvitations {} => "tenant.invitations",
+        Route::TenantAudit {} => "tenant.audit",
+        Route::TenantInvitationAccept {} => "tenant.accept_title",
         Route::Dashboard {} => "page.home",
         Route::ApiKeyList {} => "page.api_keys",
         Route::Usage {} => "page.usage",

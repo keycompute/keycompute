@@ -2376,5 +2376,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("models.node_stream_help", "Native node Chat, Messages and Responses preserve protocol data. Streaming requires a worker explicitly advertising SSE for that model and operation.");
 
+    for &(key, _, en) in super::tenant::TEXT {
+        m.insert(key, en);
+    }
     m
 });

@@ -901,7 +901,9 @@ fn LoginModal(
                         capabilities: resp.capabilities.clone(),
                     });
                     onclose.call(());
-                    nav.replace(Route::Dashboard {});
+                    nav.replace(crate::views::tenant::invitation_entry::post_login_route(
+                        auth_store,
+                    ));
                 }
                 Err(e) => {
                     let err_text = user_error_message(&e);
@@ -1224,7 +1226,7 @@ fn RegisterModal(
                                                 capabilities: resp.capabilities.clone(),
                                             });
                                             onclose.call(());
-                                            nav.replace(Route::Dashboard {});
+                                            nav.replace(crate::views::tenant::invitation_entry::post_login_route(auth_store));
                                         }
                                         Err(e) => {
                                             let err_text = user_error_message(&e);

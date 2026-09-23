@@ -1274,3 +1274,48 @@ target/cache directories, freeing approximately 13.85 GiB. Filesystem usage
 fell from 96% to 81% immediately after cleanup. Current validation cache, source,
 unaccepted drafts, Git history, business containers and database volumes were
 retained. No production data, credentials or service deployments were changed.
+
+
+## Current phase 7 — core tenant workspace and membership console accepted
+
+The actual Web routes /tenant, /tenant/members, /tenant/invitations, /tenant/audit
+and /invite are now wired into App/router/navigation. These are compiled pages,
+not archived drafts or SDK-only delivery. The server's tenant capability vector
+and selected membership gate tenant administration; platform labels/capabilities
+do not create tenant authority. The existing platform business guard is retained.
+
+Workspace configuration, member role/status/removal, ownership transfer, invitation
+create/list/revoke/accept and audit pagination use the already-verified SDK. Writes
+are single-dispatch with displayed revisions where required. Original selected
+user/tenant, UI epoch and authorization versions fence asynchronous results. Global
+selection never invents a default tenant; restored profiles remain authoritative.
+
+Browser review reproduced dirty A-form state under B. Page-local keyed fragments,
+not a key on a single static component, now remount all private form/dialog/link
+state. Another real browser failure showed expired restored credentials clearing
+an invitation before login and redirecting to Dashboard. Pending invitation binds
+only after a verified profile is loaded; existing verified sessions still clear
+it on logout or workspace change. Acceptance remains explicit, one-shot and
+memory-only, with the fragment removed before Router construction. Standalone
+invitation now mounts the existing shared theme styles rather than depending on
+another route's head nodes. No new CSS rules or backend permissions were introduced.
+
+Final default-parallel workspace: 2700 passed, 0 failed, 30 original ignored tests
+unchanged, including desktop/mobile. All 183 Web tests passed (12 added cases,
+included in the workspace total). Native all-target, Web/client WASM, strict
+all-target/all-feature Clippy, formatting and the 23 Python checks passed. The
+47-table foundation gate passed within its documented non-certification limits.
+
+A real production-mode WASM bundle passed six Chromium scenario groups with
+synthetic intercepted HTTP: member commands and revisions, literal filtering,
+invitations/audit, dirty workspace switching, global/member/root/operator guards,
+login and expired-restoration invitation resumption, single acceptance, config
+save and ownership-transfer session invalidation. Browser page errors: zero.
+The same checked-in runner now executes against CI's locally built production
+image assets. UI fixture tests are not represented as production/backend tests.
+Twenty-three source/workflow/test files were verified; no application source drift.
+
+This accepts the core tenant console only. Tenant resource pages, operator UI,
+native account-pool resource management, remaining object/endpoint review and
+production cutover are still unfinished. No production database, secrets, payment,
+SMTP, service restart or deployment changed. See tenant-console-core.md.
