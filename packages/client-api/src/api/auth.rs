@@ -224,8 +224,7 @@ pub struct SelectedTenant {
     pub name: Option<String>,
     #[serde(default)]
     pub slug: Option<String>,
-    #[serde(default)]
-    pub role: Option<TenantRole>,
+    pub tenant_role: TenantRole,
     #[serde(default)]
     pub authz_version: Option<i64>,
     #[serde(default)]

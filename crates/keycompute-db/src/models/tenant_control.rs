@@ -30,6 +30,7 @@ pub const MAX_TENANT_DESCRIPTION_BYTES: usize = 16 * 1024;
 #[derive(Debug, Clone, FromQueryResult, Serialize)]
 pub struct TenantContext {
     pub id: Uuid,
+    pub owner_user_id: Uuid,
     pub name: String,
     pub slug: String,
     pub description: Option<String>,
@@ -291,7 +292,7 @@ pub async fn get_tenant_context(
     scope: TenantScope,
 ) -> Result<Option<TenantContext>, DbError> {
     let sql = format!(
-        "SELECT t.id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.authz_version,m.tenant_role,m.authz_version AS membership_authz_version
+        "SELECT t.id,t.owner_user_id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.authz_version,m.tenant_role,m.authz_version AS membership_authz_version
          FROM tenants t
          JOIN tenant_memberships m ON m.tenant_id=t.id AND m.user_id=$2 AND m.status='active'
          JOIN users u ON u.id=m.user_id AND u.status='active'

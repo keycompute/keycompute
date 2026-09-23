@@ -3388,6 +3388,7 @@ dependencies = [
  "bigdecimal",
  "bytes",
  "chrono",
+ "client-api",
  "dashmap",
  "deadpool-redis",
  "dotenv",

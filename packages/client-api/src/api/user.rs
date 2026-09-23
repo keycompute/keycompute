@@ -27,7 +27,7 @@ impl UserApi {
 
     /// 获取当前用户信息
     pub async fn get_current_user(&self, token: &str) -> Result<CurrentUserResponse> {
-        self.client.get_json("/api/v1/me", Some(token)).await
+        self.client.get_json_fresh("/api/v1/me", Some(token)).await
     }
 
     /// 更新个人资料

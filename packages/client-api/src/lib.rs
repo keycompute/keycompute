@@ -54,3 +54,5 @@ pub use keycompute_types::{PlatformRole, TenantRole, UserStatus};
 
 mod query_cache;
 mod retry;
+
+pub use api::tenant_control::TenantControlApi;

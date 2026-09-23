@@ -14,6 +14,10 @@ root-only global settings/ratio management are accepted. Native account-pool res
 administration, complete platform/operator routing, full frontend and final release
 remain open.
 
+The tenant control SDK is now verified against actual server HTTP responses,
+including typed selected roles, explicit owner context, invitation secrets and
+member lifecycle versions. Full tenant pages and workspace switching remain open.
+
 Foundation baseline: `f427ae7`, CI #106 success. The current checkout
 was clean when this contract update began. Earlier `/tmp` provider/pricing
 drafts are no longer present and are not an implementation dependency.
@@ -1042,3 +1046,43 @@ all-feature Clippy, native all-target and Web/client WASM checks, formatting,
 whitespace and all 13 frozen source hashes passed. No production DB, credentials,
 services, payments or deployment changed. Native resource adaptation, remaining
 platform endpoint audit, complete UI and final security/release gates remain open.
+
+
+## Current phase 7 — tenant control SDK and live HTTP contract accepted
+
+This slice adds TenantControlApi for current-tenant context/configuration,
+member list/detail/update/removal, invitations, owner transfer and audit pages.
+The constructor requires a nonzero tenant UUID. IDs and pages are bounded;
+search remains one encoded parameter. Read methods and /me bypass the client
+showcase cache. Mutations use the single-dispatch HTTP path, including versioned
+DELETE bodies; a 503 or uncertain transport outcome is not silently replayed.
+
+SelectedTenant now consumes the server's required typed tenant_role field,
+not an optional role field. No old-role alias or default is retained.
+TenantContext exposes its existing owner_user_id under the same authorized
+membership SQL predicate; no schema or resource ownership changes are involved.
+Member DTOs keep membership_status distinct from global user_status.
+
+InvitationToken accepts only the server's exact 64-hex fragment format, has no
+serialization implementation and redacts Debug. Invitation creation Debug omits
+its one-time recovery link. Acceptance strips token-bearing transport/reflected
+errors before returning them to callers, while preserving authorization and
+availability error categories. A future UI must keep tokens in temporary memory,
+scrub fragments before navigation and fence callbacks by login/workspace.
+
+Five new SDK tests cover role parsing, secret/error redaction, no unsafe retries,
+version bodies, fresh reads, bounds and selector injection. Three additional
+integration cases run the actual Rust client against a loopback Axum router and
+isolated PostgreSQL. They validate real session/member/invitation/audit shapes,
+one-time and revoked acceptance, owner transfer, stale versions and cross-tenant
+rejection. Restoring a suspended member does not revive its old JWT; a removed
+member cannot be restored without a fresh invitation. Valid config/owner changes
+invalidate the old selected session without transferring resource ownership.
+
+Default-parallel full workspace tests (including desktop/mobile), all-target
+check, all-target/all-feature Clippy with -D warnings, Web/client WASM, formatting
+and diff checks passed. Original ignored-test settings were unchanged. All eleven
+source/manifest files match the frozen validation bytes. The full UI and native
+account-pool administration are not delivered by this SDK subgate. No production
+identity, database schema, credentials, payment, service restart or deployment
+was changed. See tenant-client-control.md for the client contract and limitations.

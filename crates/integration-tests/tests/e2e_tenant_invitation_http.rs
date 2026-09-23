@@ -494,3 +494,6 @@ async fn existing_members_and_empty_configuration_changes_are_business_rejection
     assert_eq!(current.authz_version, f.tenant.authz_version);
     f.guard.cleanup().await.unwrap();
 }
+
+#[path = "support/tenant_console_wire.rs"]
+mod console_wire;

@@ -38,3 +38,5 @@ pub trait ApiModule {
 }
 
 pub mod platform_operations;
+
+pub mod tenant_control;
