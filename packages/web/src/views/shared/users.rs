@@ -1175,9 +1175,9 @@ fn user_can_manage_platform_users(user: Option<&UserInfo>) -> bool {
 #[component]
 pub fn Users() -> Element {
     let user_store = use_context::<UserStore>();
-    let can_manage_console = user_can_manage_platform_users(user_store.info.read().as_ref());
+    let can_manage_platform = user_can_manage_platform_users(user_store.info.read().as_ref());
 
-    if can_manage_console {
+    if can_manage_platform {
         rsx! {
             AdminUsersView {}
         }

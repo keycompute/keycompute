@@ -68,8 +68,8 @@ fn pricing_provider_class(dimension: &str) -> &'static str {
     }
 }
 
-fn pricing_col_count(can_manage_console: bool) -> u32 {
-    if can_manage_console { 7 } else { 6 }
+fn pricing_col_count(can_manage_platform: bool) -> u32 {
+    if can_manage_platform { 7 } else { 6 }
 }
 
 /// 定价管理页面
@@ -81,11 +81,11 @@ pub fn Pricing() -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
-    let can_manage_console = user_store
+    let can_manage_platform = user_store
         .info
         .read()
         .as_ref()
-        .map(|u| u.can_manage_console())
+        .map(|u| u.can_manage_platform())
         .unwrap_or(false);
 
     // 控制创建弹窗
@@ -130,13 +130,13 @@ pub fn Pricing() -> Element {
             KeyedResourceValue::new(request_key, result)
         }
     });
-    let page_description = if can_manage_console {
+    let page_description = if can_manage_platform {
         i18n.t("pricing.admin_desc")
     } else {
         i18n.t("pricing.user_desc")
     };
 
-    let col_count = pricing_col_count(can_manage_console);
+    let col_count = pricing_col_count(can_manage_platform);
 
     rsx! {
         div { class: "page-container",
@@ -144,7 +144,7 @@ pub fn Pricing() -> Element {
                 title: i18n.t("page.pricing").to_string(),
                 description: page_description.to_string(),
                 actions: rsx! {
-                    if can_manage_console {
+                    if can_manage_platform {
                         button {
                             class: "btn btn-primary",
                             onclick: move |_| show_create.set(true),
@@ -229,7 +229,7 @@ pub fn Pricing() -> Element {
                                     TableHead { {i18n.t("pricing.output_price")} }
                                     TableHead { {i18n.t("pricing.billing_status")} }
                                     TableHead { {i18n.t("common.time")} }
-                                    if can_manage_console {
+                                    if can_manage_platform {
                                         TableHead { {i18n.t("table.actions")} }
                                     }
                                 }
@@ -310,7 +310,7 @@ pub fn Pricing() -> Element {
                                                     span { class: "pricing-time-value", {format_time(&p.created_at)} }
                                                 }
                                             }
-                                            if can_manage_console {
+                                            if can_manage_platform {
                                                 td {
                                                     div { class: "action-buttons pricing-actions",
                                                         if !p.is_default {

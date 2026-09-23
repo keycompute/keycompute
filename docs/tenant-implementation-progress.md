@@ -1086,3 +1086,27 @@ source/manifest files match the frozen validation bytes. The full UI and native
 account-pool administration are not delivered by this SDK subgate. No production
 identity, database schema, credentials, payment, service restart or deployment
 was changed. See tenant-client-control.md for the client contract and limitations.
+
+
+## Current phase 7 — platform business-page capability separation accepted
+
+The prior frontend helper treated tenant:manage as a grant to the existing
+root business-console pages. The shared navigation, route layout, dashboard
+platform queries and existing provider/pricing/payment/distribution/settings
+views now use can_manage_platform, which consumes only the server-returned
+platform users:manage capability. Role labels, console access and tenant vectors
+never imply that grant. The separate operator operational allowlist is not a
+root business-page capability. The backend remains the authorization boundary.
+
+Four regression tests cover tenant-admin capability vectors across role labels,
+operator/console-only denial, absent capabilities and live Dioxus store changes.
+All 163 Web tests passed. The full default-parallel workspace passed 2661 tests,
+with 0 failures and the original 30 ignored tests unchanged, including desktop
+and mobile. Strict all-target/all-feature Clippy, native all-target and Web/client
+WASM checks, formatting, whitespace and thirteen frozen source hashes passed.
+The focused/Web cases are included subsets, not extra test totals.
+
+This fixes existing platform-page presentation, not the workspace/member/invitation
+UI delivery. Unintegrated new page sources were archived outside the repository;
+their route/session wiring did not execute and they are not compiled or accepted.
+No new UI route, backend permission, schema, production data or deployment changed.

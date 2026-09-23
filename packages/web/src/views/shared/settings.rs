@@ -17,9 +17,9 @@ pub fn Settings() -> Element {
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
     let current_user = user_store.info.read().clone();
-    let can_manage_console = current_user
+    let can_manage_platform = current_user
         .as_ref()
-        .map(|u| u.can_manage_console())
+        .map(|u| u.can_manage_platform())
         .unwrap_or(false);
     let is_system = current_user
         .as_ref()
@@ -52,7 +52,7 @@ pub fn Settings() -> Element {
     let default_user_quota = get_val("default_user_quota");
     let jwt_expire = get_val("jwt_expire_hours");
     let distribution_enabled = get_val("distribution_enabled");
-    let page_description = if can_manage_console {
+    let page_description = if can_manage_platform {
         i18n.t("settings.admin_desc")
     } else {
         i18n.t("settings.user_desc")
@@ -65,7 +65,7 @@ pub fn Settings() -> Element {
                 description: page_description.to_string(),
             }
 
-            if !can_manage_console {
+            if !can_manage_platform {
                 div { class: "alert alert-info",
                     span { class: "alert-icon", "ℹ" }
                     div { class: "alert-content",
@@ -107,7 +107,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.site_name_desc").to_string(),
                                     setting_key: "site_name",
                                     value: platform_name.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error
@@ -117,7 +117,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.default_user_quota_desc").to_string(),
                                     setting_key: "default_user_quota",
                                     value: default_user_quota.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -128,7 +128,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.default_currency_desc").to_string(),
                                     setting_key: "default_currency",
                                     value: currency.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -142,7 +142,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.min_recharge_desc").to_string(),
                                     setting_key: "min_recharge_amount",
                                     value: min_recharge.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -153,7 +153,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.max_recharge_desc").to_string(),
                                     setting_key: "max_recharge_amount",
                                     value: max_recharge.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error,
@@ -175,7 +175,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.alipay_enabled_desc").to_string(),
                                     setting_key: "alipay_enabled",
                                     value: alipay_enabled.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error
@@ -185,7 +185,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.wechatpay_enabled_desc").to_string(),
                                     setting_key: "wechatpay_enabled",
                                     value: wechatpay_enabled.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error
@@ -208,7 +208,7 @@ pub fn Settings() -> Element {
                                     description: i18n.t("settings.jwt_expire_desc").to_string(),
                                     setting_key: "jwt_expire_hours",
                                     value: jwt_expire.clone(),
-                                    editable: can_manage_console,
+                                    editable: can_manage_platform,
                                     auth_store,
                                     save_ok,
                                     save_error,

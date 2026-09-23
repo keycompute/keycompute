@@ -27,11 +27,11 @@ pub fn PaymentOrders() -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
-    let can_manage_console = user_store
+    let can_manage_platform = user_store
         .info
         .read()
         .as_ref()
-        .map(|u| u.can_manage_console())
+        .map(|u| u.can_manage_platform())
         .unwrap_or(false);
 
     let mut status_filter = use_signal(|| "all".to_string());
@@ -41,7 +41,7 @@ pub fn PaymentOrders() -> Element {
     // 普通用户订单
     let my_orders = use_resource(move || async move {
         let request_key = (status_filter(), page(), page_size());
-        if can_manage_console {
+        if can_manage_platform {
             return KeyedResourceValue::new(
                 request_key,
                 Ok(client_api::api::payment::PaymentOrderPage::default()),
@@ -65,7 +65,7 @@ pub fn PaymentOrders() -> Element {
     // Admin 订单
     let admin_orders = use_resource(move || async move {
         let request_key = (status_filter(), page(), page_size());
-        if !can_manage_console {
+        if !can_manage_platform {
             return KeyedResourceValue::new(
                 request_key,
                 Ok(client_api::api::admin::PaymentOrderPage::default()),
@@ -101,7 +101,7 @@ pub fn PaymentOrders() -> Element {
     );
 
     let mut provider_statuses = use_resource(move || async move {
-        if !can_manage_console {
+        if !can_manage_platform {
             return Ok(vec![]);
         }
         with_auto_refresh(auth_store, |token| async move {
@@ -120,7 +120,7 @@ pub fn PaymentOrders() -> Element {
         ("failed", i18n.t("payment_orders.filter_failed")),
         ("closed", i18n.t("payment_orders.filter_closed")),
     ];
-    let page_description = if can_manage_console {
+    let page_description = if can_manage_platform {
         i18n.t("payment_orders.subtitle_admin")
     } else {
         i18n.t("payment_orders.subtitle_user")
@@ -133,7 +133,7 @@ pub fn PaymentOrders() -> Element {
                 description: page_description.to_string(),
             }
 
-            if can_manage_console {
+            if can_manage_platform {
                 if let Some(error) = provider_action_error() {
                     div { class: "alert alert-error", "{error}" }
                 }
@@ -265,7 +265,7 @@ pub fn PaymentOrders() -> Element {
 
             div { class: "table-pagination-panel table-pagination-frame payment-orders-pagination-panel",
                 div { class: "card",
-                    if can_manage_console {
+                    if can_manage_platform {
                         {
                             let (is_empty, empty_text) = match admin_orders_result
                                 .as_ref()
@@ -376,7 +376,7 @@ pub fn PaymentOrders() -> Element {
 
             // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
             {
-                let total = if can_manage_console {
+                let total = if can_manage_platform {
                     admin_orders_result
                         .as_ref()
                         .and_then(|r| r.as_ref().ok())
@@ -389,7 +389,7 @@ pub fn PaymentOrders() -> Element {
                         .map(|result| result.total as usize)
                         .unwrap_or(0)
                 };
-                let total_pages = if can_manage_console {
+                let total_pages = if can_manage_platform {
                     admin_orders_result
                         .as_ref()
                         .and_then(|result| result.as_ref().ok())

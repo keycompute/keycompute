@@ -46,14 +46,14 @@ pub fn NodeGateway() -> Element {
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();
-    let can_manage_console = user_store
+    let can_manage_platform = user_store
         .info
         .read()
         .as_ref()
-        .map(|u| u.can_manage_console())
+        .map(|u| u.can_manage_platform())
         .unwrap_or(false);
 
-    if !can_manage_console {
+    if !can_manage_platform {
         return rsx! {
             NoPermissionView { resource: i18n.t("page.node_gateway").to_string() }
         };

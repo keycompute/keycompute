@@ -26,12 +26,12 @@ pub fn Dashboard() -> Element {
     let public_settings_store = use_context::<PublicSettingsStore>();
 
     let user_info = user_store.info.read().clone();
-    let can_manage_console = user_info
+    let can_manage_platform = user_info
         .as_ref()
-        .map(|u| u.can_manage_console())
+        .map(|u| u.can_manage_platform())
         .unwrap_or(false);
     let distribution_settings_loaded = public_settings_store.loaded();
-    let show_distribution_metrics = !can_manage_console
+    let show_distribution_metrics = !can_manage_platform
         && distribution_settings_loaded
         && public_settings_store.distribution_is_enabled();
 
@@ -57,7 +57,7 @@ pub fn Dashboard() -> Element {
         let auth = auth_store.clone();
         let public_settings_store = public_settings_store;
         async move {
-            if can_manage_console {
+            if can_manage_platform {
                 return Some(Ok(None));
             }
             if !public_settings_store.loaded() {
@@ -79,7 +79,7 @@ pub fn Dashboard() -> Element {
     let gateway_status = use_resource(move || {
         let auth = auth_store.clone();
         async move {
-            if !can_manage_console {
+            if !can_manage_platform {
                 return Ok(None);
             }
             with_auto_refresh(auth, |token| async move {
@@ -92,7 +92,7 @@ pub fn Dashboard() -> Element {
     let gateway_stats = use_resource(move || {
         let auth = auth_store.clone();
         async move {
-            if !can_manage_console {
+            if !can_manage_platform {
                 return Ok(None);
             }
             with_auto_refresh(auth, |token| async move {
@@ -105,7 +105,7 @@ pub fn Dashboard() -> Element {
     let provider_health = use_resource(move || {
         let auth = auth_store.clone();
         async move {
-            if !can_manage_console {
+            if !can_manage_platform {
                 return Ok(None);
             }
             with_auto_refresh(auth, |token| async move {
@@ -478,17 +478,17 @@ pub fn Dashboard() -> Element {
                     div { class: "dashboard-panel-head",
                         div {
                             h2 { class: "dashboard-panel-title",
-                                if can_manage_console { {i18n.t("dashboard.system_status")} } else { {i18n.t("dashboard.account_status")} }
+                                if can_manage_platform { {i18n.t("dashboard.system_status")} } else { {i18n.t("dashboard.account_status")} }
                             }
                             p { class: "dashboard-panel-copy",
-                                if can_manage_console {
+                                if can_manage_platform {
                                     {i18n.t("dashboard.system_status_desc")}
                                 } else {
                                     {i18n.t("dashboard.account_status_desc")}
                                 }
                             }
                         }
-                        if can_manage_console {
+                        if can_manage_platform {
                             span {
                                 class: if admin_gateway.as_ref().map(|g| g.available).unwrap_or(false) {
                                     "dashboard-status-pill dashboard-status-pill-ok"
@@ -500,7 +500,7 @@ pub fn Dashboard() -> Element {
                         }
                     }
                     div { class: "dashboard-panel-body",
-                        if can_manage_console {
+                        if can_manage_platform {
                             DashboardStatusMetric {
                                 label: i18n.t("dashboard.gateway_providers").to_string(),
                                 value: admin_gateway.as_ref()

@@ -24,11 +24,11 @@ pub fn DistributionRecords() -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();
-    let can_manage_console = user_store
+    let can_manage_platform = user_store
         .info
         .read()
         .as_ref()
-        .map(|u| u.can_manage_console())
+        .map(|u| u.can_manage_platform())
         .unwrap_or(false);
 
     let mut page = use_signal(|| 1u32);
@@ -36,7 +36,7 @@ pub fn DistributionRecords() -> Element {
 
     // 收益数据（普通用户）
     let earnings = use_resource(move || async move {
-        if can_manage_console {
+        if can_manage_platform {
             return Ok(None);
         }
         with_auto_refresh(auth_store, |token| async move {
@@ -47,7 +47,7 @@ pub fn DistributionRecords() -> Element {
 
     // 普通用户：推荐明细列表
     let referrals = use_resource(move || async move {
-        if can_manage_console {
+        if can_manage_platform {
             return Ok(vec![]);
         }
         with_auto_refresh(auth_store, |token| async move {
@@ -59,7 +59,7 @@ pub fn DistributionRecords() -> Element {
     // Admin：全平台分销记录
     let admin_records = use_resource(move || async move {
         let request_key = (page(), page_size());
-        if !can_manage_console {
+        if !can_manage_platform {
             return KeyedResourceValue::new(
                 request_key,
                 Ok(client_api::api::distribution::DistributionRecordPage {
@@ -83,7 +83,7 @@ pub fn DistributionRecords() -> Element {
 
     // Admin：分销规则列表（只读展示，后端硬编码）
     let rules = use_resource(move || async move {
-        if !can_manage_console {
+        if !can_manage_platform {
             return Ok(vec![]);
         }
         with_auto_refresh(auth_store, |token| async move {
@@ -110,7 +110,7 @@ pub fn DistributionRecords() -> Element {
         _ => "¥0.00".to_string(),
     };
 
-    let page_desc = if can_manage_console {
+    let page_desc = if can_manage_platform {
         i18n.t("distribution_records.admin_desc")
     } else {
         i18n.t("distribution_records.user_desc")
@@ -124,7 +124,7 @@ pub fn DistributionRecords() -> Element {
             }
 
             // 收益统计只属于个人视图；管理员页不混入当前管理员的个人收益。
-            if !can_manage_console {
+            if !can_manage_platform {
                 div { class: "stats-grid",
                     div { class: "stat-card card",
                         div { class: "card-body",
@@ -148,7 +148,7 @@ pub fn DistributionRecords() -> Element {
             }
 
             // 分销规则只读展示（Admin 可见）
-            if can_manage_console {
+            if can_manage_platform {
                 div { class: "section",
                     h2 { class: "section-title", {i18n.t("distribution_records.rules_title")} }
                     div {
@@ -203,7 +203,7 @@ pub fn DistributionRecords() -> Element {
 
             // 表格：admin 视图 / 普通用户视图分别渲染
             div { class: "table-pagination-panel table-pagination-frame",
-                if can_manage_console {
+                if can_manage_platform {
                     {
                         let request_key = (page(), page_size());
                         let current_admin_records = current_keyed_value(
@@ -318,7 +318,7 @@ pub fn DistributionRecords() -> Element {
 
             // 分页页脚与面板平级渲染（对齐定价页的页脚结构），避免页脚嵌入面板内部。
             {
-                let (total, total_pages) = if can_manage_console {
+                let (total, total_pages) = if can_manage_platform {
                     let request_key = (page(), page_size());
                     current_keyed_value(
                             &request_key,

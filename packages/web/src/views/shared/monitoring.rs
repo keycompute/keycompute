@@ -99,7 +99,7 @@ pub fn MonitoringDiagnostics() -> Element {
         .info
         .read()
         .as_ref()
-        .map(|user| user.can_manage_console())
+        .map(|user| user.can_manage_platform())
         .unwrap_or(false)
     {
         return rsx! {
@@ -131,7 +131,7 @@ pub fn Monitoring() -> Element {
         .info
         .read()
         .as_ref()
-        .map(|user| user.can_manage_console())
+        .map(|user| user.can_manage_platform())
         .unwrap_or(false)
     {
         return rsx! {

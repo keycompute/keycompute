@@ -27,17 +27,10 @@ impl UserInfo {
             .any(|value| value == permission)
     }
 
-    pub fn has_tenant_permission(&self, permission: &str) -> bool {
-        self.capabilities
-            .tenant
-            .iter()
-            .any(|value| value == permission)
-    }
-
-    pub fn can_manage_console(&self) -> bool {
-        self.has_platform_permission("console:access")
-            || self.has_platform_permission("users:manage")
-            || self.has_tenant_permission("tenant:manage")
+    /// Gate the existing root business-console pages using the platform vector.
+    /// Tenant capabilities and role labels never imply this capability.
+    pub fn can_manage_platform(&self) -> bool {
+        self.has_platform_permission("users:manage")
     }
 
     pub fn active_tenant_id(&self) -> Option<&str> {
@@ -96,10 +89,89 @@ impl UserStore {
         (self.info)()
     }
 
-    pub fn can_manage_console(&self) -> bool {
+    pub fn can_manage_platform(&self) -> bool {
         (self.info)()
             .as_ref()
-            .map(UserInfo::can_manage_console)
+            .map(UserInfo::can_manage_platform)
             .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+    fn user(role: PlatformRole, platform: &[&str], tenant: &[&str]) -> UserInfo {
+        UserInfo {
+            platform_role: Some(role),
+            capabilities: SessionCapabilities {
+                platform: platform.iter().map(|v| (*v).into()).collect(),
+                tenant: tenant.iter().map(|v| (*v).into()).collect(),
+            },
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn tenant_admin_capabilities_never_enable_platform_business_pages() {
+        for role in [
+            PlatformRole::None,
+            PlatformRole::Operator,
+            PlatformRole::Root,
+        ] {
+            let tenant_admin = user(
+                role,
+                &[],
+                &[
+                    "tenant:manage",
+                    "users:manage",
+                    "providers:manage",
+                    "billing:manage",
+                    "pricing:manage",
+                ],
+            );
+            assert!(!tenant_admin.can_manage_platform());
+        }
+    }
+    #[test]
+    fn console_access_and_operator_allowlist_are_not_root_business_capabilities() {
+        for capabilities in [
+            vec!["console:access"],
+            vec![
+                "platform:tenant_health",
+                "platform:diagnostics",
+                "platform:aggregate_stats",
+                "platform:node_operations",
+            ],
+        ] {
+            assert!(!user(PlatformRole::Operator, &capabilities, &[]).can_manage_platform());
+        }
+    }
+    #[test]
+    fn current_platform_capability_is_required_without_role_text_fallback() {
+        let mut root = user(PlatformRole::Root, &["users:manage"], &[]);
+        assert!(root.can_manage_platform());
+        root.capabilities.platform.clear();
+        assert!(!root.can_manage_platform());
+        assert!(!UserInfo::default().can_manage_platform());
+        // UI consumes the verified capabilities, not an independently interpreted role.
+        assert!(user(PlatformRole::None, &["users:manage"], &[]).can_manage_platform());
+    }
+    #[test]
+    fn store_gate_reacts_to_the_current_profile_and_denies_missing_profiles() {
+        let mut dom = VirtualDom::new(|| rsx! {div{}});
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::ROOT, || {
+            let mut store = UserStore::new(
+                Signal::new(None),
+                Signal::new(false),
+                Signal::new(uuid::Uuid::nil()),
+            );
+            assert!(!store.can_manage_platform());
+            store.set(user(PlatformRole::Root, &["users:manage"], &[]));
+            assert!(store.can_manage_platform());
+            store.set(user(PlatformRole::None, &[], &["tenant:manage"]));
+            assert!(!store.can_manage_platform());
+            store.clear();
+            assert!(!store.can_manage_platform());
+        });
     }
 }
