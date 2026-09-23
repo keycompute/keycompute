@@ -85,17 +85,17 @@ impl AdminApi {
         token: &str,
     ) -> Result<UserListResponse> {
         let path = if let Some(p) = params {
-            format!("/api/v1/users?{}", p.to_query_string())
+            format!("/api/v1/platform/users?{}", p.to_query_string())
         } else {
-            "/api/v1/users".to_string()
+            "/api/v1/platform/users".to_string()
         };
-        self.client.get_json(&path, Some(token)).await
+        self.client.get_json_fresh(&path, Some(token)).await
     }
 
     /// 获取指定用户详情
     pub async fn get_user_by_id(&self, id: &str, token: &str) -> Result<UserDetail> {
         self.client
-            .get_json(&format!("/api/v1/users/{}", id), Some(token))
+            .get_json_fresh(&format!("/api/v1/platform/users/{}", id), Some(token))
             .await
     }
 
@@ -107,14 +107,14 @@ impl AdminApi {
         token: &str,
     ) -> Result<UpdateUserResponse> {
         self.client
-            .put_json(&format!("/api/v1/users/{}", id), req, Some(token))
+            .put_json(&format!("/api/v1/platform/users/{}", id), req, Some(token))
             .await
     }
 
     /// 删除用户
     pub async fn delete_user(&self, id: &str, token: &str) -> Result<MessageResponse> {
         self.client
-            .delete_json(&format!("/api/v1/users/{}", id), Some(token))
+            .delete_json(&format!("/api/v1/platform/users/{}", id), Some(token))
             .await
     }
 

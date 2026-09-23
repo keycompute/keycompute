@@ -1517,6 +1517,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "租户名称");
     m.insert("tenants.name_placeholder", "例如：研发中心");
     m.insert("tenants.name_required", "请输入租户名称");
+    m.insert("tenants.owner", "拥有者用户 ID");
+    m.insert(
+        "tenants.owner_hint",
+        "填写已存在的全局用户 ID；该用户将成为首位租户管理员。",
+    );
+    m.insert("tenants.owner_required", "请填写有效的拥有者用户 ID。");
     m.insert("tenants.slug", "Slug（可选）");
     m.insert("tenants.slug_placeholder", "例如：research-center");
     m.insert("tenants.slug_hint", "仅支持小写字母、数字和连字符");

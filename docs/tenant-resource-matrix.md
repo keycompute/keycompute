@@ -115,3 +115,19 @@ target variants distinguish aggregate domains; missing or nil tenant IDs never
 become a wildcard. List/count use the same snapshot and filters. Financial totals
 remain separate by currency with exact decimal strings. Aggregate routes use
 the existing bounded heavy-read admission class, not a higher inference quota.
+
+## Platform user and tenant lifecycle
+
+Canonical platform user CRUD and tenant create/update/delete/detail now use
+original signed root global authority inside retained database transactions.
+They do not require joining a default tenant and do not grant operator arbitrary
+identity or lifecycle writes. Safe user projection includes last-login time only,
+not credential rows. Lists/counts share a literal-filtered primary snapshot.
+
+Target-owned tenants and target/actor users are locked in deterministic order;
+last-root, active-owner and retained-resource constraints remain authoritative.
+An authorized self-role change or selected-tenant deactivation may invalidate the
+current token as its intended result. It commits under the existing locked grant
+and final wall-clock expiry check, then the old token fails subsequent requests.
+Mutation audit failure rolls back identity/profile/membership/lifecycle changes.
+The create-tenant client must supply a real global owner user ID explicitly.

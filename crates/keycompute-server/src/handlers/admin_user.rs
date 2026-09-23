@@ -18,17 +18,16 @@ use keycompute_auth::AuthorizationAction;
 use keycompute_billing::balance::{
     BalanceReservationPageCursor, MAX_BALANCE_RESERVATION_PAGE_SIZE,
 };
-use keycompute_db::models::account::Account;
 use keycompute_db::models::api_key::ProduceAiKey;
+use keycompute_db::models::platform_identity::{
+    PlatformIdentity, PlatformTenantInfo, PlatformUserInfo, PlatformUserPatch,
+};
 use keycompute_db::models::tenant::{
-    CreateTenantRequest as DbCreateTenantRequest, Tenant,
-    UpdateTenantRequest as DbUpdateTenantRequest,
+    CreateTenantRequest as DbCreateTenantRequest, UpdateTenantRequest as DbUpdateTenantRequest,
 };
 use keycompute_db::models::user::User;
-use keycompute_db::models::user_credential::UserCredential;
 use keycompute_types::PlatformRole;
 use rust_decimal::Decimal;
-use sea_orm::{ConnectionTrait, TransactionTrait};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -70,7 +69,7 @@ pub struct UserListResponse {
     pub page_size: i64,
     pub total_pages: i64,
 }
-fn global_user_info(user: User, last_login_at: Option<String>) -> AdminUserInfo {
+fn global_user_info(user: PlatformUserInfo) -> AdminUserInfo {
     AdminUserInfo {
         id: user.id,
         email: user.email,
@@ -79,95 +78,77 @@ fn global_user_info(user: User, last_login_at: Option<String>) -> AdminUserInfo 
         status: user.status,
         created_at: user.created_at.to_rfc3339(),
         updated_at: user.updated_at.to_rfc3339(),
-        last_login_at,
-    }
-}
-fn audit_actor(auth: &GlobalConsoleAuth) -> keycompute_db::AuditContext {
-    keycompute_db::AuditContext {
-        actor_user_id: auth.user_id,
-        credential_kind: auth.credential_kind,
-        actor_platform_role: auth.platform_role,
-        actor_tenant_role: auth.tenant_role,
-        request_id: None,
+        last_login_at: user.last_login_at.map(|v| v.to_rfc3339()),
     }
 }
 fn platform_manage(auth: &GlobalConsoleAuth) -> Result<keycompute_types::PlatformScope> {
     auth.require_platform(AuthorizationAction::ManagePlatform)
         .map_err(ApiError::from)
 }
-async fn platform_audit(
-    tx: &sea_orm::DatabaseTransaction,
-    auth: &GlobalConsoleAuth,
-    action: &str,
-    resource: &str,
-    id: Uuid,
-    details: serde_json::Value,
-) -> Result<()> {
-    keycompute_db::TenantAuditEvent::append(
-        tx,
-        keycompute_types::AuditScopeType::Platform,
-        None,
-        &audit_actor(auth),
-        action,
-        resource,
-        Some(&id.to_string()),
-        keycompute_types::AuditResult::Success,
-        details,
-    )
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(())
+fn identity_pool(state: &AppState) -> Result<&keycompute_db::DbRouter> {
+    state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Platform identity storage unavailable".into()))
+}
+fn identity_error(error: keycompute_db::DbError) -> ApiError {
+    if error.is_not_found() {
+        return ApiError::NotFound("Platform identity resource not found".into());
+    }
+    if let keycompute_db::DbError::Other(code) = &error {
+        if code == "financial_authority_invalid" {
+            return ApiError::Forbidden("Current root authority required".into());
+        }
+        if code == "platform_identity_request_invalid" {
+            return ApiError::BadRequest("Invalid platform identity request".into());
+        }
+        if code == "protected_default_tenant" {
+            return ApiError::Forbidden("The default tenant is protected".into());
+        }
+        if code == "tenant_retained_members_or_accounts" {
+            return ApiError::Conflict("Tenant retains members or accounts".into());
+        }
+    }
+    let text = error.to_string();
+    if [
+        "active root",
+        "active admin",
+        "violates foreign key",
+        "still referenced",
+    ]
+    .iter()
+    .any(|v| text.contains(v))
+    {
+        return ApiError::Conflict(
+            "Identity ownership or retained-history invariant prevents this change".into(),
+        );
+    }
+    ApiError::ServiceUnavailable("Platform identity operation unavailable".into())
 }
 pub async fn list_all_users(
     auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Query(query): Query<UserListQueryParams>,
 ) -> Result<Json<UserListResponse>> {
-    platform_manage(&auth)?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
     let (page, page_size, offset) =
         normalize_list_pagination(Some(query.page), Some(query.page_size), None, None);
-    let users = User::find_platform_filtered(
-        pool.write_conn(),
-        platform_manage(&auth)?,
+    let rows = PlatformIdentity::users(
+        identity_pool(&state)?.write_conn(),
+        scope,
         query.platform_role,
         query.search.as_deref(),
         page_size,
         offset,
     )
     .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let total = User::count_platform_filtered(
-        pool.write_conn(),
-        platform_manage(&auth)?,
-        query.platform_role,
-        query.search.as_deref(),
-    )
-    .await
-    .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let ids = users.iter().map(|u| u.id).collect::<Vec<_>>();
-    let credentials = UserCredential::find_by_user_ids(pool.write_conn(), &ids)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let users = users
-        .into_iter()
-        .map(|user| {
-            let last = credentials
-                .get(&user.id)
-                .and_then(|c| c.last_login_at)
-                .map(|time| time.to_rfc3339());
-            global_user_info(user, last)
-        })
-        .collect();
+    .map_err(identity_error)?;
     Ok(Json(UserListResponse {
-        users,
-        total,
+        users: rows.items.into_iter().map(global_user_info).collect(),
+        total: rows.total,
         page,
         page_size,
-        total_pages: total_pages(total, page_size),
+        total_pages: total_pages(rows.total, page_size),
     }))
 }
 pub async fn get_user_by_id(
@@ -175,24 +156,14 @@ pub async fn get_user_by_id(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<AdminUserInfo>> {
-    platform_manage(&auth)?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let user = User::find_platform(pool.write_conn(), platform_manage(&auth)?, id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
-    let credential = UserCredential::find_by_user_id(pool.write_conn(), id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(global_user_info(
-        user,
-        credential
-            .and_then(|c| c.last_login_at)
-            .map(|t| t.to_rfc3339()),
-    )))
+    let row = PlatformIdentity::user(
+        identity_pool(&state)?.write_conn(),
+        crate::financial_auth::global_scope(&auth.0)?,
+        id,
+    )
+    .await
+    .map_err(identity_error)?;
+    Ok(Json(global_user_info(row)))
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -204,103 +175,55 @@ pub struct UpdateUserRequest {
 }
 pub async fn update_user(
     auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<AdminUserInfo>> {
-    platform_manage(&auth)?;
-    let reason =
-        normalize_admin_balance_reason(req.reason.as_deref().unwrap_or("platform profile update"))?;
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
     if (req.platform_role.is_some() || req.status.is_some()) && req.reason.is_none() {
         return Err(ApiError::BadRequest(
             "a reason is required for security changes".into(),
         ));
     }
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let user = User::find_by_id(&tx, id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
-    let role = req.platform_role.unwrap_or(
-        user.platform_role()
-            .map_err(|e| ApiError::Internal(e.to_string()))?,
-    );
-    let status = req.status.unwrap_or(
-        user.user_status()
-            .map_err(|e| ApiError::Internal(e.to_string()))?,
-    );
-    let user = User::set_security(&tx, id, role, status, &audit_actor(&auth))
-        .await
-        .map_err(|e| ApiError::Conflict(e.to_string()))?;
-    let user = user
-        .update_in_tx(&tx, &keycompute_db::UpdateUserRequest { name: req.name })
-        .await
-        .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    platform_audit(
-        &tx,
-        &auth,
-        "user.update",
-        "user",
+    let reason =
+        normalize_admin_balance_reason(req.reason.as_deref().unwrap_or("platform profile update"))?;
+    let _fence = state.display_cache.mutation_guard();
+    let row = PlatformIdentity::update_user(
+        identity_pool(&state)?.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, request_id),
         id,
-        serde_json::json!({"reason":reason}),
+        &PlatformUserPatch {
+            name: req.name,
+            platform_role: req.platform_role,
+            status: req.status,
+        },
+        &reason,
     )
-    .await?;
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Conflict(e.to_string()))?;
-    Ok(Json(global_user_info(user, None)))
+    .await
+    .map_err(identity_error)?;
+    Ok(Json(global_user_info(row)))
 }
 pub async fn delete_user(
     auth: GlobalConsoleAuth,
+    request_id: RequestId,
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    platform_manage(&auth)?;
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
     if auth.user_id == id {
         return Err(ApiError::BadRequest("cannot delete yourself".into()));
     }
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let user = User::find_by_id(&tx, id)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
-    let user = User::set_security(
-        &tx,
+    let _fence = state.display_cache.mutation_guard();
+    PlatformIdentity::delete_user(
+        identity_pool(&state)?.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, request_id),
         id,
-        user.platform_role()
-            .map_err(|e| ApiError::Internal(e.to_string()))?,
-        keycompute_types::UserStatus::Suspended,
-        &audit_actor(&auth),
     )
     .await
-    .map_err(|e| ApiError::Conflict(e.to_string()))?;
-    user.delete(&tx)
-        .await
-        .map_err(|e| ApiError::Conflict(e.to_string()))?;
-    platform_audit(&tx, &auth, "user.delete", "user", id, serde_json::json!({})).await?;
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Conflict(e.to_string()))?;
+    .map_err(identity_error)?;
     Ok(Json(serde_json::json!({"success":true,"user_id":id})))
 }
 
@@ -959,6 +882,7 @@ pub struct TenantInfo {
 /// 创建租户请求（Admin）。新租户始终从 active 状态开始；Slug 可选，
 /// 未提供时由服务端根据名称生成。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTenantRequest {
     pub owner_user_id: Uuid,
     pub name: String,
@@ -968,12 +892,14 @@ pub struct CreateTenantRequest {
 
 /// 更新租户请求（Admin）。
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateTenantRequest {
     pub name: Option<String>,
     pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TenantListQueryParams {
     pub search: Option<String>,
     pub page: Option<i64>,
@@ -1060,7 +986,7 @@ fn map_tenant_db_error(error: keycompute_db::DbError, operation: &str) -> ApiErr
     if is_tenant_unique_error(&message) {
         ApiError::Conflict("A tenant with the same slug already exists".to_string())
     } else {
-        ApiError::Internal(format!("Failed to {operation} tenant: {message}"))
+        identity_error(error)
     }
 }
 
@@ -1069,26 +995,19 @@ fn is_tenant_unique_error(message: &str) -> bool {
     message.contains("duplicate") || message.contains("unique")
 }
 
-async fn build_tenant_info(db: &impl ConnectionTrait, tenant: Tenant) -> Result<TenantInfo> {
-    let user_count = Tenant::count_users(db, tenant.id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count tenant users: {e}")))?;
-    let account_count = Tenant::count_accounts(db, tenant.id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count tenant accounts: {e}")))?;
-    let is_active = tenant.is_active();
-    Ok(TenantInfo {
+fn build_tenant_info(tenant: PlatformTenantInfo) -> TenantInfo {
+    TenantInfo {
         id: tenant.id,
         name: tenant.name,
         slug: tenant.slug,
         description: tenant.description,
-        user_count,
-        account_count,
-        status: tenant.status.clone(),
-        is_active,
+        user_count: tenant.user_count,
+        account_count: tenant.account_count,
+        status: tenant.status,
+        is_active: tenant.is_active,
         created_at: tenant.created_at.to_rfc3339(),
         updated_at: tenant.updated_at.to_rfc3339(),
-    })
+    }
 }
 
 /// 创建租户。
@@ -1096,6 +1015,7 @@ async fn build_tenant_info(db: &impl ConnectionTrait, tenant: Tenant) -> Result<
 /// POST /api/v1/tenants
 pub async fn create_tenant(
     auth: GlobalConsoleAuth,
+    request_id: RequestId,
     State(state): State<AppState>,
     Json(req): Json<CreateTenantRequest>,
 ) -> Result<Json<TenantInfo>> {
@@ -1127,33 +1047,23 @@ pub async fn create_tenant(
             "Tenant slug must use lowercase letters, digits, and hyphens".to_string(),
         ));
     }
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-    let tx = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let tenant = Tenant::create_owned(
-        &tx,
+    let _fence = state.display_cache.mutation_guard();
+    let tenant = PlatformIdentity::create_tenant(
+        identity_pool(&state)?.write_conn(),
+        crate::financial_auth::global_scope(&auth.0)?,
+        &crate::financial_auth::audit(&auth.0, request_id),
         &DbCreateTenantRequest {
-            name: name.to_string(),
+            name: name.to_owned(),
             slug,
             description: None,
             default_rpm_limit: None,
             default_tpm_limit: None,
         },
         req.owner_user_id,
-        &audit_actor(&auth),
     )
     .await
     .map_err(|e| map_tenant_db_error(e, "create"))?;
-    let info = build_tenant_info(&tx, tenant).await?;
-    tx.commit()
-        .await
-        .map_err(|e| ApiError::Conflict(e.to_string()))?;
-    Ok(Json(info))
+    Ok(Json(build_tenant_info(tenant)))
 }
 
 /// 更新租户名称或状态。
@@ -1161,72 +1071,45 @@ pub async fn create_tenant(
 /// PUT /api/v1/tenants/{id}
 pub async fn update_tenant(
     auth: GlobalConsoleAuth,
-    Path(tenant_id): Path<Uuid>,
+    request_id: RequestId,
+    Path(id): Path<Uuid>,
     State(state): State<AppState>,
     Json(req): Json<UpdateTenantRequest>,
 ) -> Result<Json<TenantInfo>> {
-    platform_manage(&auth)?;
-    if let Some(name) = req.name.as_deref()
-        && (name.trim().is_empty() || name.chars().count() > 255)
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
+    if req
+        .name
+        .as_ref()
+        .is_some_and(|n| n.trim().is_empty() || n.len() > 255)
     {
-        return Err(ApiError::BadRequest("Invalid tenant name".to_string()));
+        return Err(ApiError::BadRequest("Invalid tenant name".into()));
     }
     let status = req
         .status
         .as_deref()
         .map(normalize_tenant_status)
-        .transpose()?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin tenant update: {e}")))?;
-    txn.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let tenant = Tenant::find_by_id_for_update(&txn, tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find tenant: {e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
-    if tenant.slug == "default" && status == Some("inactive") {
-        return Err(ApiError::Forbidden(
-            "The system tenant cannot be deactivated".to_string(),
-        ));
-    }
-    let tenant = tenant
-        .update(
-            &txn,
-            &DbUpdateTenantRequest {
-                name: req.name.map(|value| value.trim().to_string()),
-                description: None,
-                status: status.map(|value| {
-                    value
-                        .parse::<keycompute_types::TenantStatus>()
-                        .expect("normalized tenant status")
-                }),
-                default_rpm_limit: None,
-                default_tpm_limit: None,
-            },
-        )
-        .await
-        .map_err(|e| map_tenant_db_error(e, "update"))?;
-    platform_audit(
-        &txn,
-        &auth,
-        "tenant.update",
-        "tenant",
-        tenant_id,
-        serde_json::json!({"status":tenant.status}),
+        .transpose()?
+        .map(|s| {
+            s.parse::<keycompute_types::TenantStatus>()
+                .expect("normalized tenant status")
+        });
+    let _fence = state.display_cache.mutation_guard();
+    let tenant = PlatformIdentity::update_tenant(
+        identity_pool(&state)?.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, request_id),
+        id,
+        &DbUpdateTenantRequest {
+            name: req.name.map(|v| v.trim().to_owned()),
+            description: None,
+            status,
+            default_rpm_limit: None,
+            default_tpm_limit: None,
+        },
     )
-    .await?;
-    let info = build_tenant_info(&txn, tenant).await?;
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit tenant update: {e}")))?;
-    Ok(Json(info))
+    .await
+    .map_err(|e| map_tenant_db_error(e, "update"))?;
+    Ok(Json(build_tenant_info(tenant)))
 }
 
 /// 删除租户。只有没有用户、渠道账号和租户级定价的租户才允许删除。
@@ -1234,63 +1117,23 @@ pub async fn update_tenant(
 /// DELETE /api/v1/tenants/{id}
 pub async fn delete_tenant(
     auth: GlobalConsoleAuth,
-    Path(tenant_id): Path<Uuid>,
+    request_id: RequestId,
+    Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>> {
-    platform_manage(&auth)?;
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-    let txn = pool
-        .begin()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to begin tenant deletion: {e}")))?;
-    txn.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE")
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let tenant = Tenant::find_by_id_for_update(&txn, tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to find tenant: {e}")))?
-        .ok_or_else(|| ApiError::NotFound(format!("Tenant not found: {tenant_id}")))?;
-    if tenant.slug == "default" {
-        let _ = txn.rollback().await;
-        return Err(ApiError::Forbidden(
-            "The system tenant cannot be deleted".to_string(),
-        ));
-    }
-    let user_count = Tenant::count_users(&txn, tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count tenant users: {e}")))?;
-    let account_count = Tenant::count_accounts(&txn, tenant_id)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count tenant accounts: {e}")))?;
-    if user_count > 1 || account_count > 0 {
-        let _ = txn.rollback().await;
-        return Err(ApiError::Conflict(format!(
-            "Tenant cannot be deleted while it has {user_count} user(s) and {account_count} channel account(s)"
-        )));
-    }
-    tenant
-        .delete_in_tx(&txn)
-        .await
-        .map_err(|e| map_tenant_db_error(e, "delete"))?;
-    platform_audit(
-        &txn,
-        &auth,
-        "tenant.delete",
-        "tenant",
-        tenant_id,
-        serde_json::json!({}),
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
+    let _fence = state.display_cache.mutation_guard();
+    PlatformIdentity::delete_tenant(
+        identity_pool(&state)?.write_conn(),
+        scope,
+        &crate::financial_auth::audit(&auth.0, request_id),
+        id,
     )
-    .await?;
-    txn.commit()
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to commit tenant deletion: {e}")))?;
-    Ok(Json(serde_json::json!({
-        "message": "Tenant deleted successfully",
-        "tenant_id": tenant_id,
-    })))
+    .await
+    .map_err(|e| map_tenant_db_error(e, "delete"))?;
+    Ok(Json(
+        serde_json::json!({"message":"Tenant deleted successfully","tenant_id":id}),
+    ))
 }
 
 /// 列出所有租户
@@ -1301,64 +1144,39 @@ pub async fn list_tenants(
     State(state): State<AppState>,
     Query(params): Query<TenantListQueryParams>,
 ) -> Result<Json<TenantListResponse>> {
-    platform_manage(&auth)?;
-
-    let pool = state
-        .pool
-        .as_deref()
-        .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-    // Tenant lifecycle state and the management counters are read-after-write
-    // sensitive: use the writer so a just-created/closed tenant is reflected
-    // immediately instead of waiting for a replica to catch up.
-    let writer = pool.write_conn();
-
+    let scope = crate::financial_auth::global_scope(&auth.0)?;
     let (page, page_size, offset) =
         normalize_list_pagination(params.page, params.page_size, params.limit, params.offset);
-    let tenants = Tenant::find_all_filtered(writer, params.search.as_deref(), page_size, offset)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to query tenants: {}", e)))?;
-    let total = Tenant::count_all_filtered(writer, params.search.as_deref())
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count tenants: {}", e)))?;
-
-    // 批量统计各租户用户数量（避免 N+1 查询）
-    let tenant_ids: Vec<Uuid> = tenants.iter().map(|t| t.id).collect();
-    let user_counts =
-        User::count_memberships_platform(writer, platform_manage(&auth)?, &tenant_ids)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to count users: {}", e)))?;
-    let account_counts = Account::count_by_tenants(writer, &tenant_ids)
-        .await
-        .map_err(|e| ApiError::Internal(format!("Failed to count channel accounts: {}", e)))?;
-
-    let result: Vec<TenantInfo> = tenants
-        .into_iter()
-        .map(|tenant| {
-            let is_active = tenant.is_active();
-            let description = tenant.description.clone();
-
-            TenantInfo {
-                id: tenant.id,
-                name: tenant.name,
-                slug: tenant.slug,
-                description,
-                user_count: user_counts.get(&tenant.id).copied().unwrap_or(0),
-                account_count: account_counts.get(&tenant.id).copied().unwrap_or(0),
-                status: tenant.status.clone(),
-                is_active,
-                created_at: tenant.created_at.to_rfc3339(),
-                updated_at: tenant.updated_at.to_rfc3339(),
-            }
-        })
-        .collect();
-
+    let rows = PlatformIdentity::tenants(
+        identity_pool(&state)?.write_conn(),
+        scope,
+        params.search.as_deref(),
+        page_size,
+        offset,
+    )
+    .await
+    .map_err(identity_error)?;
     Ok(Json(TenantListResponse {
-        tenants: result,
-        total,
+        tenants: rows.items.into_iter().map(build_tenant_info).collect(),
+        total: rows.total,
         page,
         page_size,
-        total_pages: total_pages(total, page_size),
+        total_pages: total_pages(rows.total, page_size),
     }))
+}
+pub async fn get_platform_tenant(
+    auth: GlobalConsoleAuth,
+    Path(id): Path<Uuid>,
+    State(state): State<AppState>,
+) -> Result<Json<TenantInfo>> {
+    let row = PlatformIdentity::tenant(
+        identity_pool(&state)?.write_conn(),
+        crate::financial_auth::global_scope(&auth.0)?,
+        id,
+    )
+    .await
+    .map_err(identity_error)?;
+    Ok(Json(build_tenant_info(row)))
 }
 
 #[cfg(test)]

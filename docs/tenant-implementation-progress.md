@@ -993,3 +993,52 @@ strict all-target/all-feature Clippy, format/whitespace and frozen10-source hash
 passed. Focused tests are subsets, not extra totals. No production state, secrets,
 services or deployment changed. Native resource and frontend preparations remain
 outside main and unaccepted; root lifecycle authority is the next separate slice.
+
+
+## Current phases 3/6 — root identity and tenant lifecycle accepted
+
+Baseline `aed6844` operational reads was committed before this implementation.
+Platform user list/detail/profile/security/deletion and tenant lifecycle commands
+now go through PlatformIdentity with an explicit original signed root global
+scope. Global root does not need an arbitrary tenant membership. Operator and
+tenant-admin identity cannot enter these routes, including bare-handler tests.
+Canonical `/api/v1/platform/users` and detail/update/delete paths are wired; the
+platform tenant detail and PATCH routes are complete. Retained URLs use the same
+new model, not a second role or optional-tenant authorization branch.
+
+Safe user projections read only identity fields and scalar last-login time, never
+password or refresh-token rows. User/tenant list counts and paged rows share a
+primary snapshot with literal substring filtering. Full current user/token,
+selected membership/tenant and expiry state is checked inside the mutation
+transaction before acting. Related owned-tenant parents and target/actor users
+are locked in deterministic order. FinancialScope's existing wallet/withdrawal
+callers preserve their APIs and accepted-work behavior; all their focused tests
+were rerun after this shared locking change.
+
+Mutations retain active-owner/last-root/retained-financial-history constraints and
+commit canonical RequestId audits atomically. Failure rolls back both profile and
+security changes or tenant/membership deletion, even after an outer catch/commit.
+A valid self-demotion or selected-tenant state change intentionally invalidates its
+own old JWT: the authorized operation completes while rows are held, then later
+requests fail. Final wall-clock expiry after a target-row wait still rolls back.
+The existing default-tenant destructive-operation guard is preserved, not treated
+as payment/config ownership. No platform secret or resource owner is transferred.
+
+Review found the old create-tenant SDK omitted the required owner_user_id. It now
+requires a real UUID in constructor/request, rejects nil before HTTP, and keeps
+canonical fresh reads. The existing platform tenant modal defaults to the verified
+current global user with editable explicit owner input, uses platform capability
+rather than generic admin display, and fences late completion across logins.
+This is a targeted platform page repair, not a claim of the full phase-7 tenant UI.
+
+Ten new isolated PG/HTTP cases cover primary scopes, safe projections, real request
+IDs, exact-backend queued demotion and expiry, self-invalidating operations,
+forged roles and audit rollback including physical deletions. Existing financial,
+identity and tenant tests were retained. SDK owner-wire and nil-target tests were
+updated without weakening server constraints. Focused regression 74 and SDK 36 are included
+subsets of the final default-parallel workspace: **2,649 passed, 0 failed,
+30 original default ignored**, including desktop/mobile. Strict all-target/
+all-feature Clippy, native all-target and Web/client WASM checks, formatting,
+whitespace and all 13 frozen source hashes passed. No production DB, credentials,
+services, payments or deployment changed. Native resource adaptation, remaining
+platform endpoint audit, complete UI and final security/release gates remain open.

@@ -69,7 +69,7 @@ async fn test_list_all_users_success() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/users"))
+        .and(path("/api/v1/platform/users"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "users": [
                 {
@@ -122,7 +122,7 @@ async fn test_get_user_by_id_success() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/users/user_001"))
+        .and(path("/api/v1/platform/users/user_001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "id": "user_001",
             "email": "user@example.com",
@@ -153,7 +153,7 @@ async fn test_update_user_success() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("PUT"))
-        .and(path("/api/v1/users/user_001"))
+        .and(path("/api/v1/platform/users/user_001"))
         .and(body_json(serde_json::json!({
             "name": "Updated Name"
         })))
@@ -190,7 +190,7 @@ async fn test_delete_user_success() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("DELETE"))
-        .and(path("/api/v1/users/user_001"))
+        .and(path("/api/v1/platform/users/user_001"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "message": "User deleted successfully"
         })))
@@ -1004,7 +1004,7 @@ async fn test_admin_endpoints_unauthorized() {
     let admin_api = AdminApi::new(&client);
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/users"))
+        .and(path("/api/v1/platform/users"))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "Unauthorized"
         })))

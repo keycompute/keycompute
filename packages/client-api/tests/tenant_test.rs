@@ -214,6 +214,7 @@ async fn test_create_tenant_serializes_optional_slug_without_description() {
         .and(path("/api/v1/platform/tenants"))
         .and(body_json(serde_json::json!({
             "name": "Research Center",
+            "owner_user_id": "00000000-0000-0000-0000-000000000001",
             "slug": "research-center"
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -233,7 +234,8 @@ async fn test_create_tenant_serializes_optional_slug_without_description() {
 
     let tenant = tenant_api
         .create_tenant(
-            &CreateTenantRequest::new("Research Center").with_slug("research-center"),
+            &CreateTenantRequest::new("Research Center", uuid::Uuid::from_u128(1))
+                .with_slug("research-center"),
             fixtures::TEST_ACCESS_TOKEN,
         )
         .await
@@ -244,11 +246,17 @@ async fn test_create_tenant_serializes_optional_slug_without_description() {
 }
 
 #[test]
-fn test_create_tenant_without_slug_serializes_only_required_name() {
-    let body = serde_json::to_value(CreateTenantRequest::new("Research Center"))
-        .expect("create tenant request must serialize");
+fn test_create_tenant_without_slug_serializes_explicit_owner_and_name() {
+    let body = serde_json::to_value(CreateTenantRequest::new(
+        "Research Center",
+        uuid::Uuid::from_u128(1),
+    ))
+    .expect("create tenant request must serialize");
 
-    assert_eq!(body, serde_json::json!({"name": "Research Center"}));
+    assert_eq!(
+        body,
+        serde_json::json!({"name": "Research Center", "owner_user_id":"00000000-0000-0000-0000-000000000001"})
+    );
     assert!(body.get("description").is_none());
     assert!(body.get("status").is_none());
 }
@@ -296,4 +304,18 @@ async fn test_update_tenant_status_and_delete() {
         .await
         .unwrap();
     assert_eq!(response.message, "Tenant deleted successfully");
+}
+
+#[tokio::test]
+async fn tenant_creation_rejects_a_nil_owner_before_http() {
+    let (client, server) = create_test_client().await;
+    let error = TenantApi::new(&client)
+        .create_tenant(
+            &CreateTenantRequest::new("invalid owner", uuid::Uuid::nil()),
+            fixtures::TEST_ACCESS_TOKEN,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ClientError::Config(_)));
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

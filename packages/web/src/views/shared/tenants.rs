@@ -64,7 +64,7 @@ pub fn Tenants() -> Element {
         .info
         .read()
         .as_ref()
-        .map(|u| u.can_manage_console())
+        .map(|u| u.has_platform_permission("users:manage"))
         .unwrap_or(false);
 
     if !can_manage_console {
@@ -360,6 +360,20 @@ fn TenantCreateModal(
     on_created: EventHandler<()>,
 ) -> Element {
     let i18n = use_i18n();
+    let user_store = use_context::<UserStore>();
+    let opened_session = use_hook(|| auth_store.state.peek().session_id);
+    let mut owner_user_id = use_signal(|| {
+        if *user_store.loaded_session_id.peek() != auth_store.state.peek().session_id {
+            return String::new();
+        }
+        user_store
+            .info
+            .peek()
+            .as_ref()
+            .map(|u| u.id.clone())
+            .unwrap_or_default()
+    });
+
     let mut name = use_signal(String::new);
     let mut slug = use_signal(String::new);
     let mut saving = use_signal(|| false);
@@ -372,7 +386,18 @@ fn TenantCreateModal(
             error.set(i18n.t("tenants.name_required").to_string());
             return;
         }
-        let mut request = CreateTenantRequest::new(name_value);
+        if auth_store.state.peek().session_id != opened_session {
+            on_close.call(());
+            return;
+        }
+        let owner = match uuid::Uuid::parse_str(owner_user_id().trim()) {
+            Ok(value) if !value.is_nil() => value,
+            _ => {
+                error.set(i18n.t("tenants.owner_required").to_string());
+                return;
+            }
+        };
+        let mut request = CreateTenantRequest::new(name_value, owner);
         if !slug_value.is_empty() {
             request = request.with_slug(slug_value);
         }
@@ -386,6 +411,9 @@ fn TenantCreateModal(
                 async move { tenant_service::create(request, &token).await }
             })
             .await;
+            if auth_store.state.peek().session_id != opened_session {
+                return;
+            }
             match result {
                 Ok(_) => on_created.call(()),
                 Err(value) => error.set(user_error_message(&value)),
@@ -427,6 +455,15 @@ fn TenantCreateModal(
                             placeholder: "{i18n.t(\"tenants.name_placeholder\")}",
                             oninput: move |event| name.set(event.value()),
                         }
+                    }
+                    div { class: "form-group",
+                        label { class: "form-label", {i18n.t("tenants.owner")} }
+                        input {
+                            class: "input-field", r#type: "text", required: true, maxlength: "36",
+                            value: "{owner_user_id}",
+                            oninput: move |event| owner_user_id.set(event.value()),
+                        }
+                        small { class: "text-secondary", {i18n.t("tenants.owner_hint")} }
                     }
                     div { class: "form-group",
                         label { class: "form-label", {i18n.t("tenants.slug")} }

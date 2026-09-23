@@ -204,20 +204,40 @@ impl FinancialScope {
             request_id: None,
         })
     }
+    /// Final wall-clock check after an authorized command intentionally changes
+    /// its own selected tenant or security state. Call only while authority rows
+    /// remain locked by lock_related; this is not a substitute for DB validation.
+    pub(crate) fn check_expiry(self) -> Result<(), DbError> {
+        Self::validate_session(self.session)
+    }
     pub(super) async fn lock(
         self,
         tx: &DatabaseTransaction,
         audit: &AuditContext,
     ) -> Result<AuditContext, DbError> {
+        self.lock_related(tx, audit, &[], &[]).await
+    }
+
+    /// Deterministic parent/user locks for platform lifecycle operations whose
+    /// target may own other tenants. Normal finance callers pass no extra rows.
+    pub(crate) async fn lock_related(
+        self,
+        tx: &DatabaseTransaction,
+        audit: &AuditContext,
+        tenants: &[Uuid],
+        users: &[Uuid],
+    ) -> Result<AuditContext, DbError> {
         Self::validate_session(self.session)?;
         if audit.actor_user_id != self.session.user_id
             || audit.credential_kind != CredentialKind::Jwt
             || audit.request_id.is_none_or(|id| id.is_nil())
+            || tenants.iter().chain(users).any(Uuid::is_nil)
         {
             return Err(denied());
         }
         super::tenant_audit_event::lock_identity_admin(tx).await?;
-        let mut parents = Vec::new();
+        self.current_actor(tx).await?;
+        let mut parents = tenants.to_vec();
         if let Some(id) = self.tenant_id {
             parents.push(id);
         }
@@ -233,21 +253,27 @@ impl FinancialScope {
                 [id.into()],
             ))
             .await?
-            .ok_or_else(denied)?;
+            .ok_or_else(|| DbError::not_found("Tenant", id))?;
         }
-        tx.query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT id FROM users WHERE id=$1 FOR UPDATE",
-            [self.session.user_id.into()],
-        ))
-        .await?
-        .ok_or_else(denied)?;
+        let mut actors = users.to_vec();
+        actors.push(self.session.user_id);
+        actors.sort_unstable();
+        actors.dedup();
+        for id in actors {
+            tx.query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT id FROM users WHERE id=$1 FOR UPDATE",
+                [id.into()],
+            ))
+            .await?
+            .ok_or_else(|| DbError::not_found("User", id))?;
+        }
         if let Some(m) = self.session.selected {
             tx.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT user_id FROM tenant_memberships WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE",[m.tenant_id.into(),self.session.user_id.into()]))
                 .await?.ok_or_else(denied)?;
         }
-        let mut current = self.current_actor(tx).await?;
-        current.request_id = audit.request_id;
-        Ok(current)
+        let mut actor = self.current_actor(tx).await?;
+        actor.request_id = audit.request_id;
+        Ok(actor)
     }
 }

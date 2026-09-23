@@ -1773,6 +1773,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "Tenant name");
     m.insert("tenants.name_placeholder", "e.g. Research Center");
     m.insert("tenants.name_required", "Tenant name is required");
+    m.insert("tenants.owner", "Owner user ID");
+    m.insert(
+        "tenants.owner_hint",
+        "Enter an existing global user ID. The owner becomes the first tenant administrator.",
+    );
+    m.insert(
+        "tenants.owner_required",
+        "A valid owner user ID is required.",
+    );
     m.insert("tenants.slug", "Slug (optional)");
     m.insert("tenants.slug_placeholder", "e.g. research-center");
     m.insert(

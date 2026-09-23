@@ -435,6 +435,14 @@ pub fn create_router(state: AppState) -> Router {
     // ==================== 5. 管理功能 API（需要 Admin 权限） ====================
     // 用户管理（Admin 可以管理所有用户，普通用户只能看自己）
     let admin_user_routes = Router::new()
+        .route("/api/v1/platform/users", get(list_all_users))
+        .route(
+            "/api/v1/platform/users/{id}",
+            get(get_user_by_id)
+                .put(update_user)
+                .patch(update_user)
+                .delete(delete_user),
+        )
         .route("/api/v1/users", get(list_all_users))
         .route(
             "/api/v1/users/{id}",
@@ -457,7 +465,11 @@ pub fn create_router(state: AppState) -> Router {
             "/api/v1/users/{id}/balance/reservations/{request_id}/release",
             post(release_user_balance_reservation),
         )
-        .route("/api/v1/users/{id}/api-keys", get(list_all_api_keys));
+        .route("/api/v1/users/{id}/api-keys", get(list_all_api_keys))
+        .layer(axum::middleware::map_response(
+            crate::handlers::admin_settings::private_response,
+        ))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024));
 
     // 账号/渠道管理（仅 Admin）
     let admin_account_routes = Router::new()
@@ -539,8 +551,15 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/platform/tenants/{id}",
-            put(update_tenant).delete(delete_tenant),
-        );
+            get(crate::handlers::admin_user::get_platform_tenant)
+                .put(update_tenant)
+                .patch(update_tenant)
+                .delete(delete_tenant),
+        )
+        .layer(axum::middleware::map_response(
+            crate::handlers::admin_settings::private_response,
+        ))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024));
 
     // 系统设置（仅 Admin）
     let admin_settings_routes = Router::new()
