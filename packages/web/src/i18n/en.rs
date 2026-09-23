@@ -2379,5 +2379,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     for &(key, _, en) in super::tenant::TEXT {
         m.insert(key, en);
     }
+    for &(key, _, en) in super::operations::TEXT {
+        m.insert(key, en);
+    }
     m
 });

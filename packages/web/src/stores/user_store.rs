@@ -43,6 +43,17 @@ impl UserInfo {
                 .any(|p| p == "tenant:manage")
     }
 
+    /// Read-only platform operations are independent of root business management.
+    pub fn can_view_operations(&self) -> bool {
+        [
+            "platform:tenant_health",
+            "platform:aggregate_stats",
+            "platform:diagnostics",
+        ]
+        .iter()
+        .any(|permission| self.has_platform_permission(permission))
+    }
+
     pub fn active_tenant_id(&self) -> Option<&str> {
         self.selected_tenant
             .as_ref()

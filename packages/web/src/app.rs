@@ -442,6 +442,22 @@ pub fn AppLayout() -> Element {
         },
     );
 
+    if user_store
+        .info
+        .read()
+        .as_ref()
+        .is_some_and(UserInfo::can_view_operations)
+    {
+        nav_sections.push(NavSection {
+            title: Some(i18n.t("operations.group").into()),
+            items: vec![NavItem::new(
+                i18n.t("operations.title"),
+                Route::PlatformOperations {}.to_string(),
+                NavIcon::Activity,
+            )],
+        });
+    }
+
     // Existing platform business pages require a platform capability, never a tenant role.
     if can_manage_platform {
         nav_sections.push(NavSection {
@@ -590,6 +606,7 @@ pub fn AdminLayout() -> Element {
 
 fn route_page_title(route: &Route, i18n: &I18n) -> String {
     let key = match route {
+        Route::PlatformOperations {} => "operations.title",
         Route::TenantWorkspace {} => "tenant.workspace",
         Route::TenantMembers {} => "tenant.members",
         Route::TenantInvitations {} => "tenant.invitations",

@@ -6,6 +6,7 @@ pub mod distribution;
 pub mod error;
 pub mod home;
 pub mod node;
+pub mod operations;
 pub mod payments;
 pub mod shared;
 pub mod tenant;

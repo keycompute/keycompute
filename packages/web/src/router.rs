@@ -8,6 +8,7 @@ use crate::views::{
     dashboard::Dashboard,
     distribution::DistributionOverview,
     node::{node_earnings::NodeEarnings, node_token::NodeToken},
+    operations::PlatformOperations,
     payments::{PaymentsOverview, Recharge},
     shared::{
         Accounts, DistributionRecords, ModelBindings, ModelManagement, ModelManagementBase,
@@ -67,6 +68,9 @@ pub enum Route {
         NodeToken {},
         #[route("/node/earnings")]
         NodeEarnings {},
+
+        #[route("/platform/operations")]
+        PlatformOperations {},
 
         #[route("/tenant")]
         TenantWorkspace {},

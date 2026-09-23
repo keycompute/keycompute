@@ -506,3 +506,5 @@ jobs:
           export KC_WEB_ROOT="$browser_root/public"
           export KC_BROWSER_OUTPUT="$browser_root/results"
           node scripts/tests/tenant_console_browser.mjs
+          export KC_BROWSER_OUTPUT="$browser_root/operations-results"
+          node scripts/tests/operations_console_browser.mjs

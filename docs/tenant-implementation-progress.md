@@ -1319,3 +1319,43 @@ This accepts the core tenant console only. Tenant resource pages, operator UI,
 native account-pool resource management, remaining object/endpoint review and
 production cutover are still unfinished. No production database, secrets, payment,
 SMTP, service restart or deployment changed. See tenant-console-core.md.
+
+
+## Current phase 7 — read-only platform operations console accepted
+
+The actual /platform/operations Web route is independent from root business
+management. It consumes only verified platform health/aggregate/diagnostic
+capabilities, never role labels or tenant grants. Global operator/root sessions
+do not require membership in each target tenant. Partial grants only mount and
+fetch their corresponding section. Node-operation authority alone is not enough.
+
+Health lists and explicit-ID details use the existing fresh SDK with literal
+search, bounded pagination and active/inactive filtering. Usage uses an explicit
+UTC window of at most 31 days and a separate platform or real tenant selector;
+invalid tenant input never means all tenants. Amounts and large token totals
+remain exact strings and different currencies remain separate. Capacity only
+renders seventeen allowlisted numeric counters; unexpected fields and strings
+are not displayed, and missing counters are not replaced with zero.
+
+The page-local keyed fragment and query-tagged resources prevent old identity,
+capability or target results from being rendered. Pending/failed reads do not
+reuse a previous snapshot. Normal same-workspace refresh remains supported.
+No background polling, raw business resource reads or mutation controls exist.
+
+Final independent default-parallel workspace: 2707 passed, 0 failed, 30
+original ignored tests unchanged, including desktop/mobile. Web190 is an included
+subset with seven new cases. Native all-target, strict all-target/all-feature
+Clippy, Web/client WASM, format, whitespace and Python23 pass. Seventeen
+frozen source/workflow/browser files match the tested versions.
+
+Production compiled WASM passed three operations browser scenario groups with
+synthetic HTTP, including delayed A-to-B aggregates, partial grants, exact values,
+pagination, query encoding and error handling. The existing six-group tenant
+console browser also passed against the same release bundle; zero page errors.
+The operations runner is registered in CI alongside the tenant runner. These UI
+fixtures do not replace backend authorization tests.
+
+No backend permissions, schema, production DB, credentials, payments or deployment
+changed. Tenant resource UI, operator node-control UI, native account-pool resource
+management, remaining endpoint review and final release gates are unfinished.
+See platform-operations-console.md for exact scope and limitations.

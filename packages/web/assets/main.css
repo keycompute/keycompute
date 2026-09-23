@@ -7174,3 +7174,14 @@ select.form-input:focus {
 .picker-pagination { display:flex; align-items:center; justify-content:flex-end; gap:8px; margin-top:8px; }
 .passthrough-model-summary { margin-top:10px; overflow-wrap:anywhere; }
 .passthrough-model-summary p { max-height:100px; overflow:auto; }
+
+/* Read-only operations: scoped layout, existing design tokens and table components. */
+.operations-console > section { margin-top: 20px; }
+.operations-console .operations-filters { padding: 20px; display: grid; gap: 10px; margin-bottom: 20px; }
+.operations-console .operations-filters > .input-field { max-width: 640px; }
+.operations-console .operations-filters > button { justify-self: start; }
+.operations-console .operations-table { overflow-x: auto; }
+.operations-console .operations-detail { margin-top: 20px; padding: 20px; }
+.operations-console .operations-detail p { overflow-wrap: anywhere; margin: 10px 0; }
+.operations-console .toolbar { justify-content: flex-start; flex-wrap: wrap; gap: 10px; }
+.operations-console .operations-target-label { overflow-wrap: anywhere; }
