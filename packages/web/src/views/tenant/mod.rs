@@ -42,3 +42,6 @@ pub fn TenantAdminLayout() -> Element {
 
 mod pricing_admin;
 pub use pricing_admin::TenantPricing;
+
+mod response_admin;
+pub use response_admin::TenantResponses;

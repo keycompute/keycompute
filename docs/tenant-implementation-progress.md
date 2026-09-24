@@ -1712,3 +1712,30 @@ Independent full default-parallel workspace: 2766 passed, 0 failed,
 Clippy, WASM, formatting, Python/static gates and parallel root/tenant-admin repeat
 passed. The exact frozen test source matches. This fixes test orchestration, not
 a new permission grant or production deployment. See response-audit-expiry-test.md.
+
+
+## Current phase 7 — local Responses and Conversation console accepted
+
+Re-reviewed and completed the inherited /tenant/responses worktree on main.
+Tenant administrators can inspect local passthrough/node_dispatch responses and
+conversations, page input/items, cancel/delete responses, update conversation
+metadata, append/remove items and delete conversations with observed revisions.
+The active tenant, original owner, execution mode, object kind and opaque ID
+own list/inspector/editor state; operation, revision and item selectors distinguish
+mutation state. Commands are single dispatch, stale or foreign results are rejected,
+and private JSON stays escaped in page-local memory. No new backend grant or
+account-pool native management is introduced.
+
+Independent default-parallel workspace revalidation: 2773 passed, 0 failed,
+30 original ignored tests unchanged, including desktop/mobile. Native all-target
+check, strict all-target/all-feature Clippy, Web/client WASM, format/whitespace,
+Python CI tests and the limited foundation checker passed. All fifteen frozen
+source/test/workflow hashes match. The production-mode bundle passed four new
+resource browser scenario groups and all five existing browser runners. A fresh
+narrow-viewport screenshot was inspected. Browser HTTP is synthetic; real
+SDK/Axum/PostgreSQL resource regressions remain in the complete workspace.
+
+This accepts the actual resource page, not just the preceding SDK. Key/Provider/
+financial resource UI, account-pool native management and final endpoint/release
+gates remain separate. No production data, credential, payment, email, restart
+or deployment was changed. See tenant-response-console.md.

@@ -2130,5 +2130,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert("platform_pricing.global", "平台共享定价");
 
+    super::tenant_responses::register(&mut m, false);
+
     m
 });

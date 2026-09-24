@@ -139,6 +139,7 @@ pub fn WorkspaceLinks() -> Element {
     rsx! {nav {class:"toolbar tenant-workspace-links", aria_label:i18n.t("tenant.workspace"),
         Link {class:"btn btn-secondary",to:Route::TenantWorkspace {},{i18n.t("tenant.workspace")}}
         if admin {
+            Link {class:"btn btn-secondary",to:Route::TenantResponses {},{i18n.t("tenant_responses.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantPricing {},{i18n.t("tenant_pricing.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantNodes {},{i18n.t("tenant_nodes.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantMembers {},{i18n.t("tenant.members")}}

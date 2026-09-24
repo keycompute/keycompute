@@ -17,7 +17,7 @@ use crate::views::{
     },
     tenant::{
         TenantAdminLayout, TenantAudit, TenantInvitationAccept, TenantInvitations, TenantMembers,
-        TenantNodes, TenantPricing, TenantWorkspace,
+        TenantNodes, TenantPricing, TenantResponses, TenantWorkspace,
     },
     user::{UserProfile, UserSettings},
 };
@@ -75,6 +75,8 @@ pub enum Route {
         #[route("/tenant")]
         TenantWorkspace {},
         #[layout(TenantAdminLayout)]
+            #[route("/tenant/responses")]
+            TenantResponses {},
             #[route("/tenant/pricing")]
             TenantPricing {},
             #[route("/tenant/nodes")]
@@ -176,6 +178,13 @@ mod tests {
             assert_eq!(route, expected);
             assert_eq!(route.to_string(), url);
         }
+    }
+
+    #[test]
+    fn tenant_response_console_has_a_distinct_membership_scoped_route() {
+        let route = Route::from_str("/tenant/responses").unwrap();
+        assert_eq!(route, Route::TenantResponses {});
+        assert_eq!(route.to_string(), "/tenant/responses");
     }
 
     /// 邀请链接的 ?ref= 参数必须能被解析，且序列化回 URL 时不丢失

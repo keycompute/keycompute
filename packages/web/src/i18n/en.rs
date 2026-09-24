@@ -2410,5 +2410,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
 
     m.insert("platform_pricing.global", "Platform shared pricing");
 
+    super::tenant_responses::register(&mut m, true);
+
     m
 });
