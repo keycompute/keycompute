@@ -984,6 +984,7 @@ async fn post_audit_expiry_case(platform: bool) {
         // was actually reached even when the audit INSERT is later rolled back.
         f.db.execute_unprepared(&format!(r#"
             CREATE SEQUENCE response_expiry_marker;
+            CREATE SEQUENCE response_expiry_entered_ms;
             CREATE TABLE response_expiry_deadline (expires_at BIGINT NOT NULL, action TEXT NOT NULL);
             INSERT INTO response_expiry_deadline VALUES(0,'none');
             CREATE FUNCTION response_expiry_delay() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -992,6 +993,7 @@ async fn post_audit_expiry_case(platform: bool) {
               SELECT expires_at,action INTO deadline,target_action FROM response_expiry_deadline;
               IF (NEW.tenant_id='{0}'::uuid OR NEW.metadata->>'tenant_id'='{0}') AND NEW.action=target_action THEN
                 PERFORM nextval('response_expiry_marker');
+                PERFORM setval('response_expiry_entered_ms',floor(EXTRACT(EPOCH FROM clock_timestamp())*1000)::BIGINT,TRUE);
                 PERFORM pg_sleep(GREATEST(0::double precision,deadline::double precision-EXTRACT(EPOCH FROM clock_timestamp())::double precision)+0.05);
               END IF;
               RETURN NEW;
@@ -1011,28 +1013,62 @@ async fn post_audit_expiry_case(platform: bool) {
             (format!("{base}/responses?mode=passthrough"), "response.count"),
             (format!("{base}/conversations?mode=passthrough"), "conversation.count"),
         ];
-        for (path, action) in paths {
+        for (case_index, (path, action)) in paths.into_iter().enumerate() {
             let path = if platform {
                 let separator = if path.contains('?') { '&' } else { '?' };
                 format!("{}{separator}reason=post-audit-expiry-regression",
                     path.replacen("/api/v1/tenants/", "/api/v1/platform/tenants/", 1))
             } else { path };
             f.db.execute_unprepared("SELECT setval('response_expiry_marker',1,FALSE)").await.unwrap();
+            // Authenticate with a scheduling budget, then approach the signed
+            // deadline before beginning the bounded (2500ms) audit statement.
+            // The test uses the same verified context cache as console admission;
+            // it neither invents roles nor changes the signed expiration.
             let validator=f.state.auth.get_jwt_validator().unwrap();
             let token=validator.generate_identity_token(
                 if platform { root.id } else { actor.id },
                 if platform { None } else { Some(tenant.id) },
                 if platform { root.token_version } else { actor.token_version },
                 if platform { None } else { Some(tenant.authz_version) },
-                if platform { None } else { Some(member.authz_version) },2).unwrap();
+                if platform { None } else { Some(member.authz_version) },6).unwrap();
             let expiry=validator.validate_claims(&token).unwrap().exp;
             f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
                 "UPDATE response_expiry_deadline SET expires_at=$1,action=$2",[expiry.into(),action.into()])).await.unwrap();
-            let denied=http(f.app.clone(),Method::GET,&path,Some(&token),None).await;
+            // Separate actual authentication latency from the short audit wait.
+            // Only this isolated test router adds a scheduler barrier. The complete
+            // production router and its transaction/session checks remain in use.
+            let service=f.state.auth.clone();
+            let app=f.app.clone().layer(axum::middleware::from_fn(
+                move |mut request: Request<Body>, next: axum::middleware::Next| {
+                    let service=service.clone();
+                    async move {
+                        let raw=request.headers()["authorization"].to_str().unwrap()
+                            .strip_prefix("Bearer ").unwrap().to_owned();
+                        let verified=service.verify_token(&raw).await.expect("authenticate the actual signed test JWT");
+                        assert_eq!(verified.credential_expires_at,Some(expiry));
+                        request.extensions_mut().insert(verified);
+                        if case_index==0 {
+                            tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+                        }
+                        let remaining=expiry*1000-chrono::Utc::now().timestamp_millis();
+                        if remaining>1500 {
+                            tokio::time::sleep(std::time::Duration::from_millis((remaining-1500) as u64)).await;
+                        }
+                        assert!(chrono::Utc::now().timestamp()<expiry,"test scheduler exhausted the signed admission budget");
+                        next.run(request).await
+                    }
+                }
+            ));
+            let denied=http(app,Method::GET,&path,Some(&token),None).await;
             let marker=f.db.query_one(Statement::from_string(DbBackend::Postgres,
                 "SELECT is_called,last_value FROM response_expiry_marker")).await.unwrap().unwrap();
             assert!(marker.try_get::<bool>("","is_called").unwrap(),"request must reach delayed audit, not fail before authentication: {path}");
             assert_eq!(marker.try_get::<i64>("","last_value").unwrap(),1,"one delayed audit only");
+            let entered=f.db.query_one(Statement::from_string(DbBackend::Postgres,
+                "SELECT last_value FROM response_expiry_entered_ms")).await.unwrap().unwrap()
+                .try_get::<i64>("","last_value").unwrap();
+            assert!(entered < expiry*1000, "audit must begin while the signed JWT remains valid: {path}");
+            assert!(chrono::Utc::now().timestamp() >= expiry, "rejection must occur after the signed deadline");
             assert_eq!(denied.status,StatusCode::UNAUTHORIZED,"{path}: {}",denied.body);
             assert!(!denied.body.to_string().contains("post-audit-expiry-marker"));
             let request_id:Uuid=denied.headers["x-request-id"].to_str().unwrap().parse().unwrap();
@@ -1044,7 +1080,7 @@ async fn post_audit_expiry_case(platform: bool) {
         assert_eq!(f.upstream.calls.lock().unwrap().len(),before_calls,"reads do not start more inference");
         assert_eq!(revision(&f,"response",&response).await,response_revision);
         assert_eq!(revision(&f,"conversation",&cid).await,conversation_revision);
-        f.db.execute_unprepared("DROP TRIGGER response_expiry_delay ON tenant_audit_events; DROP FUNCTION response_expiry_delay(); DROP TABLE response_expiry_deadline; DROP SEQUENCE response_expiry_marker;").await.unwrap();
+        f.db.execute_unprepared("DROP TRIGGER response_expiry_delay ON tenant_audit_events; DROP FUNCTION response_expiry_delay(); DROP TABLE response_expiry_deadline; DROP SEQUENCE response_expiry_marker; DROP SEQUENCE response_expiry_entered_ms;").await.unwrap();
         f.finish().await;
     }).await;
     db.close().await.unwrap();

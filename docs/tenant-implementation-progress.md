@@ -1696,3 +1696,19 @@ Five runtime/test source hashes match the final validated bytes. Key Web pages
 are not included. CI's separate Responses audit-expiry fixture remains a distinct
 follow-up; local passing tests do not certify a failed remote run. No production
 database, credential, payment, notification, service or deployment changed.
+
+
+## Security verification — Responses audit-expiry CI fixture stabilized
+
+Reproduced a short test JWT expiring before audit entry under an explicit scheduler
+delay. The isolated HTTP fixture now authenticates the real signed token first,
+then schedules the production router near its unchanged deadline. Mandatory
+nontransactional entry/count/timestamp checks prove the JWT is valid at audit
+entry and expired when rejected. SQL/async production timeouts remain unchanged;
+rollback, private-content and no-extra-inference assertions remain intact.
+
+Independent full default-parallel workspace: 2766 passed, 0 failed,
+30 original ignored tests unchanged. All-target native, strict all-feature
+Clippy, WASM, formatting, Python/static gates and parallel root/tenant-admin repeat
+passed. The exact frozen test source matches. This fixes test orchestration, not
+a new permission grant or production deployment. See response-audit-expiry-test.md.
