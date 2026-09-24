@@ -1,11 +1,14 @@
 use super::usage_guide::ModelUsageGuide;
 use crate::hooks::use_i18n::use_i18n;
-use crate::services::{api_client::with_auto_refresh, api_key_service};
+use crate::router::Route;
+use crate::services::api_key_service;
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
+use crate::stores::user_store::UserStore;
 use crate::utils::on_copy;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
+use crate::views::tenant::common::{self, WorkspaceScope};
 use dioxus::prelude::*;
 use ui::{
     Badge, BadgeVariant, Button, ButtonSize, ButtonVariant, ConfirmModal, Pagination, Table,
@@ -17,6 +20,15 @@ const PAGE_SIZE: usize = 20;
 
 #[component]
 pub fn ApiKeyList() -> Element {
+    let auth = use_context::<AuthStore>();
+    let users = use_context::<UserStore>();
+    let i18n = use_i18n();
+    rsx! {if let Some(scope)=WorkspaceScope::from_stores(auth,users){for key in [format!("{scope:?}")]{ApiKeyWorkspace{key:"{key}",scope}}}
+    else {div{class:"page-container",p{role:"alert",{i18n.t("tenant_keys.select_workspace")}}Link{to:Route::TenantWorkspace{},{i18n.t("tenant.workspace")}}}}}
+}
+#[component]
+fn ApiKeyWorkspace(scope: WorkspaceScope) -> Element {
+    let user_store = use_context::<UserStore>();
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();
@@ -37,7 +49,7 @@ pub fn ApiKeyList() -> Element {
     // 拉取 key 列表
     let mut keys = use_resource(move || async move {
         let request_key = (include_revoked(), page(), page_size());
-        let result = with_auto_refresh(auth_store, |token| async move {
+        let result = common::read(auth_store, user_store, scope, |token| async move {
             api_key_service::list_page(request_key.0, request_key.1, request_key.2, &token).await
         })
         .await;
@@ -46,6 +58,9 @@ pub fn ApiKeyList() -> Element {
 
     let on_create = move |evt: Event<FormData>| {
         evt.prevent_default();
+        if creating() || !scope.is_current(auth_store, user_store) {
+            return;
+        }
         let name = new_key_name();
         if name.is_empty() {
             return;
@@ -53,8 +68,14 @@ pub fn ApiKeyList() -> Element {
         creating.set(true);
         create_error.set(None);
         spawn(async move {
-            let token = auth_store.token().unwrap_or_default();
-            match api_key_service::create(&name, &token).await {
+            let result = common::command(auth_store, user_store, scope, move |token| async move {
+                api_key_service::create(&name, &token).await
+            })
+            .await;
+            if !scope.is_current(auth_store, user_store) {
+                return;
+            }
+            match result {
                 Ok(resp) => {
                     new_key_value.set(Some(resp.api_key));
                     show_create.set(false);
@@ -74,8 +95,14 @@ pub fn ApiKeyList() -> Element {
 
     let on_delete = move |id: String| {
         spawn(async move {
-            let token = auth_store.token().unwrap_or_default();
-            if api_key_service::delete(&id, &token).await.is_ok() {
+            let result = common::command(auth_store, user_store, scope, move |token| async move {
+                api_key_service::delete(&id, &token).await
+            })
+            .await;
+            if !scope.is_current(auth_store, user_store) {
+                return;
+            }
+            if result.is_ok() {
                 keys.restart();
             }
         });
@@ -89,6 +116,7 @@ pub fn ApiKeyList() -> Element {
                     p { class: "page-subtitle", {i18n.t("api_keys.subtitle")} }
                 }
                 div { class: "kc-api-actions",
+                    Link {class:"btn btn-secondary",to:Route::OwnerKeyIssuance {},{i18n.t("tenant_keys.my_requests")}}
                     Button {
                         variant: ButtonVariant::Primary,
                         onclick: move |_| {

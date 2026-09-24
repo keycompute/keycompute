@@ -516,3 +516,5 @@ jobs:
           node scripts/tests/platform_pricing_browser.mjs
           export KC_BROWSER_OUTPUT="$browser_root/tenant-response-results"
           node scripts/tests/tenant_responses_browser.mjs
+          export KC_BROWSER_OUTPUT="$browser_root/tenant-keys-results"
+          node scripts/tests/tenant_keys_browser.mjs

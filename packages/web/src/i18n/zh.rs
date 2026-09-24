@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    super::tenant_keys::register(&mut m, false);
     m.insert(
         "common.rate_limited_hint",
         "请求过于频繁，已暂停自动重试，请稍后刷新。",

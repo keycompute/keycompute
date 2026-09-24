@@ -1,6 +1,6 @@
 //! Selected-workspace controls. Backend authorization remains authoritative.
 mod audit;
-mod common;
+pub(crate) mod common;
 pub(crate) mod invitation_entry;
 mod invitations;
 mod members;
@@ -45,3 +45,6 @@ pub use pricing_admin::TenantPricing;
 
 mod response_admin;
 pub use response_admin::TenantResponses;
+
+mod key_admin;
+pub use key_admin::{OwnerKeyIssuance, TenantKeys};

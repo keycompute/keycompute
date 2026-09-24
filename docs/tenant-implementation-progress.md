@@ -1739,3 +1739,41 @@ This accepts the actual resource page, not just the preceding SDK. Key/Provider/
 financial resource UI, account-pool native management and final endpoint/release
 gates remain separate. No production data, credential, payment, email, restart
 or deployment was changed. See tenant-response-console.md.
+
+
+## Current phase 7 — tenant Key administration and personal issuance console accepted
+
+Actual /tenant/keys and /api-keys/issuance pages are integrated into navigation,
+routes and current membership-based workspace guards. Tenant administrators
+manage safe metadata, observed-version name/expiration edits, revocation/removal,
+inert issuance/rotation and pending cancellation; only the owner can explicitly
+claim or decline a request. The existing personal key page now shares the verified
+workspace identity and single-dispatch result fences. No backend grant, schema,
+key format, direct-create lifetime or existing ownership rule is changed.
+
+One-time claim values use the nonserializable SDK result only in page-local memory.
+Hide/unmount/workspace changes remove that view; clipboard success is only reported
+after its Promise resolves. Rejected clipboard writes do not log the value. This
+is not a memory-zeroization or system-clipboard-erasure guarantee. Uncertain claims
+are not replayed. Metadata expiry preserves omission/null/explicit values, and
+retained revocation is not misrepresented as physical deletion.
+
+Five editor/route tests and five Chromium scenario groups cover current member
+selection, exact nullable expiration, metadata conflicts, one-time rotation/claim,
+secret error reflection and nonpersistence, private result isolation, personal Key
+creation, retained history, permission gates and mobile focused dialogs. All six
+existing browser runners also pass on the same production-mode bundle. Synthetic
+browser HTTP is distinct from the real SDK/Axum/PostgreSQL contracts.
+
+Independent default-parallel complete workspace: 2778 passed, 0 failed,
+30 original ignored tests unchanged, including desktop/mobile. Web216 and
+17 real key-client/owner/expiry regressions are included subsets. Native all-target
+check, strict all-target/all-feature Clippy, Web/client WASM, format, whitespace,
+Python23 and limited foundation checks pass. Seventeen frozen source/workflow/test
+hashes match the tested bytes. No lint suppression or permission relaxation used.
+
+The read-only financial page/client remains preparation outside this accepted
+slice. Provider/binding and financial controls, account-pool native resources and
+remaining endpoint/release gates are not completed by these Key pages. No production
+data, credentials, real payment, email, restart or deployment changed. See
+tenant-key-console.md.

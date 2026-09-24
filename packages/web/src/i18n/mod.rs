@@ -282,3 +282,5 @@ mod tests {
 }
 
 mod tenant_responses;
+
+mod tenant_keys;
