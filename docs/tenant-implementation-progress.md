@@ -1,26 +1,34 @@
 # Current contract and acceptance status
 
-The current acceptance contract is the latest phase **0–8** plan. Older
-phase-numbered entries below are historical delivery records. Final global
-identity/membership foundations and tenant control/invitation APIs are accepted.
-Scoped pricing, providers/bindings, financial/distribution reports, owner-only
-key issuance and distribution policy mutations are also accepted. Live scoped
-Responses replay now revalidates credentials and authorization versions.
-Node/registration control and task cancellation/archival are accepted. Original-authority physical dispatch and node-queue claim checks are also accepted.
-Local passthrough/node Responses and Conversation administration is accepted.
-Explicit node-session ownership and tenant/currency-scoped node earnings and
-withdrawal management, transaction-bound manual wallet/reservation control and
-root-only global settings/ratio management are accepted. Native account-pool resource
-administration, complete platform/operator routing, full frontend and final release
-remain open.
+The acceptance contract is the latest **phase0–8** plan. The table below is the
+current delivery summary; dated/phase-numbered entries below it are historical
+records, not statements that previously delivered features are still missing.
+No complete-subsystem or production-cutover acceptance is claimed.
 
-The tenant control SDK is now verified against actual server HTTP responses,
-including typed selected roles, explicit owner context, invitation secrets and
-member lifecycle versions. Full tenant pages and workspace switching remain open.
+| Phase | Accepted development scope | Still open |
+| --- | --- | --- |
+| 0 | Final roles, ownership rules and schema/route/cache-job inventories | Final exhaustive object/endpoint review |
+| 1 | Global identity, memberships, invitations/audits, explicit node sessions and resource ownership constraints | Production cutover is not this schema gate |
+| 2 | Credential separation, live original-session proof and queue/dispatch authority; Key/pricing/reporting timing regressions | Remaining provider/binding and other endpoint timing review |
+| 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks and local managed resources | Native account-pool Responses/Conversation administration and remaining control review |
+| 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
+| 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
+| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, local Responses/Conversation, Key/owner pages, read-only finance page | Provider/binding pages, distribution and financial-control pages, native resource UI |
+| 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
 
-Foundation baseline: `f427ae7`, CI #106 success. The current checkout
-was clean when this contract update began. Earlier `/tmp` provider/pricing
-drafts are no longer present and are not an implementation dependency.
+Payment channels remain platform-wide. Financial records are tenant-scoped and
+wallets remain per-member, not a shared tenant balance pool. The finance page is
+read-only; it does not expose all of the already-existing financial write APIs.
+
+Page hiding is presentation only; the server continues to enforce the credential,
+current role/membership, resource scope, ownership and state. Synthetic Chromium
+fixtures demonstrate UI behavior, not production/backend authorization. Exact
+per-slice native/server/database and browser receipts are recorded below.
+
+Foundation baseline `f427ae7`/CI106 is historical. Current accepted source is main;
+archived preparations are not implementation dependencies and must not be replayed
+as if verified. No production data, credentials, payments, SMTP or deployment is
+changed by these development deliveries.
 
 
 ## Current phase 1 — final contract alignment accepted locally
@@ -1777,3 +1785,48 @@ slice. Provider/binding and financial controls, account-pool native resources an
 remaining endpoint/release gates are not completed by these Key pages. No production
 data, credentials, real payment, email, restart or deployment changed. See
 tenant-key-console.md.
+
+
+## Current phases 3/7 — read-only financial console and reporting session proof accepted
+
+The actual /tenant/finance page now exposes current-tenant usage/billing records,
+per-currency summaries, payment metadata and explicitly selected individual wallets.
+TenantReportingApi is a separate read-only client with fresh requests, exact decimal
+strings, i64 counters and validated tenant/owner/resource/page fields. Payment URLs,
+callback bodies, subject/body and credentials are absent from rendered metadata.
+Different currencies are never combined; no currency is invented for the current
+wallet DTO. Uninitialized member wallets are distinguished from missing/forbidden
+owners, and viewing financial data never creates a wallet or moves money.
+
+The UI keeps applied filters separate from drafts. Usage windows require explicit
+timezones and at most31days in this page. Payment filters do not pretend to support
+usage dates. Memoized currency totals are not refetched on pagination. Workspace
+identity and original resource owners fence private inspector state and responses.
+The renderer escapes metadata in an opaque, focused mobile-bounded dialog.
+
+A real isolated table-lock regression first reproduced HTTP200 after revocation
+of the original user token version. All six reporting handler families now use the
+existing ConsoleSessionProof on the writer after their final DAO query. Original
+signed expiry, token, tenant, role and suspend/regrant transitions are checked,
+without adding an authority grant, global exclusive fence or financial write. The
+router explicitly sets private/no-store. Fresh valid sessions continue to work.
+Two disposable-DB regressions cover six expiry families and four version races.
+
+Four wire tests, four UI tests, one exact-number unit test and one actual SDK/
+Axum/PostgreSQL contract were added alongside the two original-session regressions.
+Independent final default-parallel workspace: 2790 passed, 0 failed,
+30 original ignored tests unchanged, including desktop/mobile. Targeted tests
+are included subsets. All-target native, strict all-target/all-feature Clippy,
+Web/client WASM, format, whitespace, Python23 and limited foundation checks passed.
+All20 frozen source/test/workflow hashes match. The production-mode WASM passed
+three new finance browser groups and all seven existing browser suites. A fresh
+mobile screenshot was inspected; synthetic browser HTTP is not backend or real
+payment evidence. Clippy's test initializer finding was fixed without suppression.
+
+The current summary at the top now replaces stale claims that core tenant pages
+and workspace switching remain unimplemented. This read-only finance page is not
+withdrawal/reservation/distribution administration. Provider/binding pages, native
+account-pool resources and remaining endpoint/release gates remain open. A later
+Provider preparation write was safety-denied and not executed or applied. No
+production data, credentials, payment, SMTP, restart or deployment changed. See
+tenant-finance-console.md for precise boundaries.

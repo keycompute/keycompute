@@ -16,7 +16,7 @@ use crate::views::{
         Tenants, UpstreamAccounts, UpstreamNodes, UpstreamPassthrough, Users,
     },
     tenant::{
-        OwnerKeyIssuance, TenantAdminLayout, TenantAudit, TenantInvitationAccept,
+        OwnerKeyIssuance, TenantAdminLayout, TenantAudit, TenantFinance, TenantInvitationAccept,
         TenantInvitations, TenantKeys, TenantMembers, TenantNodes, TenantPricing, TenantResponses,
         TenantWorkspace,
     },
@@ -78,6 +78,8 @@ pub enum Route {
         #[route("/tenant")]
         TenantWorkspace {},
         #[layout(TenantAdminLayout)]
+            #[route("/tenant/finance")]
+            TenantFinance {},
             #[route("/tenant/keys")]
             TenantKeys {},
             #[route("/tenant/responses")]

@@ -48,3 +48,6 @@ pub use response_admin::TenantResponses;
 
 mod key_admin;
 pub use key_admin::{OwnerKeyIssuance, TenantKeys};
+
+mod finance;
+pub use finance::TenantFinance;

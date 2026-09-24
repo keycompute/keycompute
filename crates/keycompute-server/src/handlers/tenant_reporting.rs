@@ -1,5 +1,6 @@
 //! Read-only tenant financial reporting with fixed scope and safe projections.
 use crate::{
+    console_session_proof::ConsoleSessionProof,
     error::{ApiError, Result},
     handlers::pagination::total_pages,
     state::AppState,
@@ -8,6 +9,8 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
+    http::{HeaderValue, header},
+    response::Response,
     routing::get,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -127,6 +130,23 @@ fn validate_window(
 fn scope(access: &TenantAdmin) -> Result<keycompute_types::TenantScope> {
     access.require(AuthorizationAction::View)
 }
+// A delayed report is not allowed to publish under a revoked or regranted
+// original session. DAO ownership predicates remain mandatory and unchanged.
+async fn finish_read(state: &AppState, access: &TenantAdmin) -> Result<()> {
+    ConsoleSessionProof::from_console(access.auth())?
+        .verify_current(pool(state)?.write_conn())
+        .await
+}
+async fn private_report(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    response
+}
 pub async fn list_usage(
     access: TenantAdmin,
     Path(path): Path<TenantPath>,
@@ -146,6 +166,7 @@ pub async fn list_usage(
         .count_report(db, q.from, q.to, q.owner_user_id)
         .await
         .map_err(db_error)?;
+    finish_read(&state, &access).await?;
     Ok(Json(page(rows, total, number, size)))
 }
 pub async fn get_usage(
@@ -155,13 +176,13 @@ pub async fn get_usage(
 ) -> Result<Json<UsageLogReportRow>> {
     access.require_path_tenant(path.tenant_id)?;
     let usage = TenantUsageScope::new(scope(&access)?).map_err(db_error)?;
-    Ok(Json(
-        usage
-            .find_report(pool(&state)?.write_conn(), path.id)
-            .await
-            .map_err(db_error)?
-            .ok_or_else(|| ApiError::NotFound("Usage record not found".into()))?,
-    ))
+    let row = usage
+        .find_report(pool(&state)?.write_conn(), path.id)
+        .await
+        .map_err(db_error)?
+        .ok_or_else(|| ApiError::NotFound("Usage record not found".into()))?;
+    finish_read(&state, &access).await?;
+    Ok(Json(row))
 }
 pub async fn usage_stats(
     access: TenantAdmin,
@@ -186,6 +207,7 @@ pub async fn usage_stats(
         )
         .await
         .map_err(db_error)?;
+    finish_read(&state, &access).await?;
     Ok(Json(ReportTotals {
         from,
         to,
@@ -222,6 +244,7 @@ pub async fn list_payments(
     let total = PaymentOrder::count_in_tenant(db, scope, q.status.as_deref(), q.owner_user_id)
         .await
         .map_err(db_error)?;
+    finish_read(&state, &access).await?;
     Ok(Json(page(rows, total, number, size)))
 }
 pub async fn get_payment(
@@ -230,12 +253,13 @@ pub async fn get_payment(
     State(state): State<AppState>,
 ) -> Result<Json<PaymentOrderReportRow>> {
     access.require_path_tenant(path.tenant_id)?;
-    Ok(Json(
+    let row =
         PaymentOrder::find_report_in_tenant(pool(&state)?.write_conn(), scope(&access)?, path.id)
             .await
             .map_err(db_error)?
-            .ok_or_else(|| ApiError::NotFound("Payment order not found".into()))?,
-    ))
+            .ok_or_else(|| ApiError::NotFound("Payment order not found".into()))?;
+    finish_read(&state, &access).await?;
+    Ok(Json(row))
 }
 pub async fn get_balance(
     access: TenantAdmin,
@@ -253,6 +277,7 @@ pub async fn get_balance(
     )
     .await
     .map_err(db_error)?;
+    finish_read(&state, &access).await?;
     Ok(Json(rows.remove(&path.user_id).ok_or_else(|| {
         ApiError::NotFound("Wallet owner not found".into())
     })?))
@@ -287,6 +312,7 @@ pub fn router() -> Router<AppState> {
             get(get_balance),
         )
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
+        .layer(axum::middleware::map_response(private_report))
 }
 #[cfg(test)]
 mod tests {

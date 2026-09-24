@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    super::tenant_finance::register(&mut m, false);
     super::tenant_keys::register(&mut m, false);
     m.insert(
         "common.rate_limited_hint",

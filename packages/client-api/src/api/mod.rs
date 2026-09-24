@@ -44,3 +44,5 @@ pub mod tenant_control;
 pub mod tenant_pricing;
 
 pub mod key_control;
+
+pub mod tenant_reporting;

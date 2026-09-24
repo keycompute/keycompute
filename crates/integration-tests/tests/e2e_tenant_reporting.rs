@@ -323,3 +323,154 @@ async fn ordinary_member_reports_are_denied_and_wallet_views_stay_read_only() {
     assert_eq!(before.available_balance, after.available_balance);
     f.guard.cleanup().await.unwrap();
 }
+
+/// The actual Rust SDK consumes the production tenant financial DTOs over HTTP.
+#[tokio::test]
+async fn real_reporting_client_preserves_tenant_member_decimal_and_metadata_contracts() {
+    use client_api::{
+        ApiClient, ClientConfig,
+        api::tenant_reporting::{PaymentState, ReportQuery, ReportWindow, TenantReportingApi},
+    };
+    use keycompute_auth::ProduceAiKeyValidator;
+    use keycompute_db::CreateProduceAiKeyRequest;
+    struct Server(tokio::task::JoinHandle<()>);
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let mut f = Fixture::new().await;
+    let cny = f.usage(f.a.id, f.member.id, "CNY", 7).await;
+    let usd = f.usage(f.a.id, f.a.owner_user_id, "USD", 11).await;
+    let foreign = f.usage(f.b.id, f.b.owner_user_id, "CNY", 999).await;
+    let order = f.order(f.a.id, f.member.id).await;
+    let foreign_order = f.order(f.b.id, f.b.owner_user_id).await;
+    let raw = ProduceAiKeyValidator::generate_key();
+    integration_tests::db::create_test_api_key(
+        &f.db,
+        &CreateProduceAiKeyRequest {
+            tenant_id: f.a.id,
+            user_id: f.a.owner_user_id,
+            name: "report-client".into(),
+            produce_ai_key_hash: ProduceAiKeyValidator::hash_key(&raw),
+            produce_ai_key_preview: "fixture****".into(),
+            expires_at: None,
+        },
+    )
+    .await
+    .unwrap();
+    let other_token = token(&f.state, &f.db, f.b.owner_user_id, Some(f.b.id)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = create_router(f.state.clone());
+    let _server = Server(tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    }));
+    let client = ApiClient::new(
+        ClientConfig::new(format!("http://{address}"))
+            .with_no_proxy(true)
+            .with_console_display_cache(true),
+    )
+    .unwrap();
+    let api = TenantReportingApi::new(&client, f.a.id).unwrap();
+    let w = ReportWindow {
+        from: (Utc::now() - Duration::hours(1)).to_rfc3339(),
+        to: (Utc::now() + Duration::hours(1)).to_rfc3339(),
+    };
+    let mut q = ReportQuery {
+        page_size: 1,
+        ..Default::default()
+    };
+    let first = api.usage(&q, &w, &f.admin_token).await.unwrap();
+    assert_eq!(first.total, 2);
+    assert_eq!(first.items.len(), 1);
+    q.page = 2;
+    let next = api.usage(&q, &w, &f.admin_token).await.unwrap();
+    assert_ne!(first.items[0].id, next.items[0].id);
+    q = ReportQuery {
+        owner_user_id: Some(f.member.id),
+        ..Default::default()
+    };
+    let filtered = api.usage(&q, &w, &f.admin_token).await.unwrap();
+    assert_eq!(filtered.total, 1);
+    assert_eq!(filtered.items[0].id, cny.id);
+    assert_eq!(
+        filtered.items[0].user_amount.parse::<BigDecimal>().unwrap(),
+        BigDecimal::from(7)
+    );
+    assert_eq!(
+        api.usage_detail(usd.id, f.a.owner_user_id, &f.admin_token)
+            .await
+            .unwrap()
+            .currency,
+        "USD"
+    );
+    let stats = api.totals(&w, None, &f.admin_token).await.unwrap();
+    assert_eq!(stats.currencies.len(), 2);
+    let filtered_stats = api
+        .totals(&w, Some(f.member.id), &f.admin_token)
+        .await
+        .unwrap();
+    assert_eq!(filtered_stats.currencies.len(), 1);
+    assert_eq!(
+        filtered_stats.currencies[0]
+            .total_amount
+            .parse::<BigDecimal>()
+            .unwrap(),
+        BigDecimal::from(7)
+    );
+    let orders = api
+        .payments(&q, Some(PaymentState::Pending), &f.admin_token)
+        .await
+        .unwrap();
+    assert_eq!(orders.items.len(), 1);
+    assert_eq!(orders.items[0].id, order.id);
+    let view = api
+        .payment(order.id, f.member.id, &f.admin_token)
+        .await
+        .unwrap();
+    let serialized = serde_json::to_string(&view).unwrap();
+    assert!(!serialized.contains("private-"));
+    assert!(!serialized.contains("secret-capability"));
+    assert!(!serialized.contains("pay_url"));
+    assert!(
+        !api.wallet(f.member.id, &f.admin_token)
+            .await
+            .unwrap()
+            .initialized
+    );
+    assert!(
+        UserBalance::find_by_user(&f.db, f.a.id, f.member.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    for denied in [&f.member_token, &other_token, &raw] {
+        assert!(api.usage(&q, &w, denied).await.is_err());
+        assert!(api.payments(&q, None, denied).await.is_err());
+        assert!(api.wallet(f.member.id, denied).await.is_err());
+    }
+    assert!(
+        api.usage_detail(foreign.id, f.b.owner_user_id, &f.admin_token)
+            .await
+            .is_err()
+    );
+    assert!(
+        api.payment(foreign_order.id, f.b.owner_user_id, &f.admin_token)
+            .await
+            .is_err()
+    );
+    assert!(api.wallet(f.b.owner_user_id, &f.admin_token).await.is_err());
+    let other_api = TenantReportingApi::new(&client, f.b.id).unwrap();
+    assert!(other_api.usage(&q, &w, &f.admin_token).await.is_err());
+    assert_eq!(
+        other_api
+            .usage(&ReportQuery::default(), &w, &other_token)
+            .await
+            .unwrap()
+            .items
+            .len(),
+        1
+    );
+    f.guard.cleanup().await.unwrap();
+}
