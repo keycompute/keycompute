@@ -540,7 +540,7 @@ impl OwnerKeyIssuanceApi {
                 Some(token),
             )
             .await
-            .map_err(safe_claim_error)?;
+            .map_err(super::common::one_time_key_error)?;
         if r.intent_id != intent.id
             || r.key_id.is_nil()
             || r.outcome != "claimed"
@@ -549,14 +549,9 @@ impl OwnerKeyIssuanceApi {
             || r.expires_at != intent.requested_expires_at
             || intent.replaces_key_id == Some(r.key_id)
             || timestamp(&r.created_at).is_err()
-            || r.key.expose().is_empty()
-            || r.key.expose().len() > 4096
-            || r.key
-                .expose()
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control())
+            || !super::common::valid_one_time_key(r.key.expose())
         {
-            return Err(safe_claim_error(invalid()));
+            return Err(super::common::one_time_key_error(invalid()));
         }
         Ok(r)
     }
@@ -575,22 +570,5 @@ impl OwnerKeyIssuanceApi {
             return Err(invalid());
         }
         Ok(r)
-    }
-}
-fn safe_claim_error(error: ClientError) -> ClientError {
-    let message="The one-time key claim could not be confirmed. Refresh issuance and key records before requesting another key.".to_owned();
-    match error {
-        ClientError::Unauthorized(_) => ClientError::Unauthorized(message),
-        ClientError::Forbidden(_) => ClientError::Forbidden(message),
-        ClientError::NotFound(_) => ClientError::NotFound(message),
-        ClientError::RateLimited(mut info) => {
-            info.message = message;
-            info.scope = None;
-            ClientError::RateLimited(info)
-        }
-        ClientError::ServiceUnavailable(_) => ClientError::ServiceUnavailable(message),
-        ClientError::ServerError(_) => ClientError::ServerError(message),
-        ClientError::Network(_) => ClientError::Network(message),
-        _ => ClientError::Other(message),
     }
 }

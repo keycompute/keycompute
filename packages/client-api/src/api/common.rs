@@ -31,3 +31,29 @@ pub fn encode_query_value(value: &str) -> String {
     }
     encoded
 }
+
+/// Never return reflected secret-bearing failures to a client application.
+pub(crate) fn one_time_key_error(error: crate::ClientError) -> crate::ClientError {
+    use crate::ClientError;
+    let message="The one-time key operation could not be confirmed. Refresh issuance and key records before requesting another key.".to_owned();
+    match error {
+        ClientError::Unauthorized(_) => ClientError::Unauthorized(message),
+        ClientError::Forbidden(_) => ClientError::Forbidden(message),
+        ClientError::NotFound(_) => ClientError::NotFound(message),
+        ClientError::RateLimited(mut info) => {
+            info.message = message;
+            info.scope = None;
+            ClientError::RateLimited(info)
+        }
+        ClientError::ServiceUnavailable(_) => ClientError::ServiceUnavailable(message),
+        ClientError::ServerError(_) => ClientError::ServerError(message),
+        ClientError::Network(_) => ClientError::Network(message),
+        _ => ClientError::Other(message),
+    }
+}
+
+pub(crate) fn valid_one_time_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4096
+        && !value.chars().any(|c| c.is_whitespace() || c.is_control())
+}

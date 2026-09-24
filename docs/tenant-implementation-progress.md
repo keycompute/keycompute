@@ -1671,3 +1671,28 @@ No schema, production DB, credentials, payment, notifications or deployment chan
 Other resource transaction boundaries and native account-pool administration remain.
 The separately prepared Key pages and personal-client correction are outside main,
 not part of this accepted slice. See pricing-session-boundary.md.
+
+
+## Current phase 7 — personal Key creation client contract accepted
+
+The personal SDK now sends name/never_expires rather than the unsupported
+expires_at field. Default creation retains the server's 180-day policy; permanent
+creation is explicit. The actual SDK/Axum/PostgreSQL test verifies original tenant
+and owner, hashed secret, scoped lists, wrong-owner/tenant denial, inference-key
+console rejection, revoke-before-delete behavior and private/no-store responses.
+No backend grant, resource ownership or lifetime policy changed.
+
+Fresh personal lists avoid stale display snapshots. Creation validates response
+identity/lifetime and redacts one-time error and Debug output using the same
+helper as owner issuance. Commands are single-dispatch; unsupported custom dates
+are rejected rather than silently reinterpreted. The successful raw string remains
+explicitly accessible; this is not an application storage or zeroization guarantee.
+
+Re-reviewed the inherited uncommitted slice and reran complete default-parallel
+workspace: 2766 passed, 0 failed, 30 original ignored tests, including
+desktop/mobile. Native all-target, strict all-feature/all-target Clippy, WASM,
+format/whitespace, Python/static gates and eight-thread real-key regression pass.
+Five runtime/test source hashes match the final validated bytes. Key Web pages
+are not included. CI's separate Responses audit-expiry fixture remains a distinct
+follow-up; local passing tests do not certify a failed remote run. No production
+database, credential, payment, notification, service or deployment changed.

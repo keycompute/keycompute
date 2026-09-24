@@ -36,7 +36,7 @@ impl ApiKeyApi {
         } else {
             "/api/v1/keys"
         };
-        self.client.get_json(path, Some(token)).await
+        self.client.get_json_fresh(path, Some(token)).await
     }
 
     /// 分页获取我的 API Keys。显式传入分页参数时服务端返回分页对象。
@@ -50,7 +50,7 @@ impl ApiKeyApi {
             query.insert(0, '?');
         }
         self.client
-            .get_json(&format!("/api/v1/keys{query}"), Some(token))
+            .get_json_fresh(&format!("/api/v1/keys{query}"), Some(token))
             .await
     }
 
@@ -60,9 +60,38 @@ impl ApiKeyApi {
         req: &CreateApiKeyRequest,
         token: &str,
     ) -> Result<CreateApiKeyResponse> {
-        self.client
+        if req.name.trim().is_empty()
+            || req.name.chars().count() > 255
+            || req.name.chars().any(char::is_control)
+        {
+            return Err(crate::ClientError::Config(
+                "Use a key name of 1–255 characters without control characters".into(),
+            ));
+        }
+        let response: CreateApiKeyResponse = self
+            .client
             .post_json("/api/v1/keys", req, Some(token))
             .await
+            .map_err(super::common::one_time_key_error)?;
+        if !response.success
+            || response.name != req.name
+            || response.never_expires != req.never_expires
+            || uuid::Uuid::parse_str(&response.id)
+                .ok()
+                .is_none_or(|id| id.is_nil())
+            || !super::common::valid_one_time_key(&response.api_key)
+            || (req.never_expires && response.expires_at.is_some())
+            || (!req.never_expires
+                && response
+                    .expires_at
+                    .as_ref()
+                    .is_none_or(|v| v.is_empty() || v.len() > 128))
+        {
+            return Err(super::common::one_time_key_error(
+                crate::ClientError::InvalidResponse("Key creation response is inconsistent".into()),
+            ));
+        }
+        Ok(response)
     }
 
     /// 删除 API Key
@@ -153,25 +182,27 @@ impl ApiKeyInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateApiKeyRequest {
     pub name: String,
-    pub expires_at: Option<String>,
+    /// False retains the server's fixed 180-day policy. Custom dates belong to
+    /// tenant issuance/metadata APIs, not this personal creation endpoint.
+    pub never_expires: bool,
 }
 
 impl CreateApiKeyRequest {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            expires_at: None,
+            never_expires: false,
         }
     }
 
-    pub fn with_expires_at(mut self, expires_at: impl Into<String>) -> Self {
-        self.expires_at = Some(expires_at.into());
+    pub fn with_never_expires(mut self, never_expires: bool) -> Self {
+        self.never_expires = never_expires;
         self
     }
 }
 
 /// 创建 API Key 响应（包含完整 key，仅创建时返回一次）
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CreateApiKeyResponse {
     /// 是否成功
     pub success: bool,
@@ -190,5 +221,16 @@ pub struct CreateApiKeyResponse {
     /// 创建时间
     pub created_at: String,
     /// 是否永不过期
-    pub never_expires: Option<bool>,
+    pub never_expires: bool,
+}
+
+impl std::fmt::Debug for CreateApiKeyResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateApiKeyResponse")
+            .field("id", &self.id)
+            .field("success", &self.success)
+            .field("api_key", &"[REDACTED]")
+            .field("message", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
