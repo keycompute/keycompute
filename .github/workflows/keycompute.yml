@@ -520,3 +520,5 @@ jobs:
           node scripts/tests/tenant_keys_browser.mjs
           export KC_BROWSER_OUTPUT="$browser_root/tenant-finance-results"
           node scripts/tests/tenant_finance_browser.mjs
+          export KC_BROWSER_OUTPUT="$browser_root/tenant-provider-results"
+          node scripts/tests/tenant_providers_browser.mjs

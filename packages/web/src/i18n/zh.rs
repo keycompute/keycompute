@@ -3,6 +3,35 @@ use std::sync::LazyLock;
 
 pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    m.insert("tenant_providers.title", "上游渠道");
+    m.insert(
+        "tenant_providers.hint",
+        "管理当前租户的账号池渠道与透传绑定。",
+    );
+    m.insert("tenant_providers.accounts", "账号管理");
+    m.insert("tenant_providers.bindings", "透传绑定");
+    m.insert("tenant_providers.apply", "应用");
+    m.insert("tenant_providers.add_account", "新增账号");
+    m.insert("tenant_providers.add_binding", "新增绑定");
+    m.insert("tenant_providers.empty_accounts", "暂无租户账号");
+    m.insert("tenant_providers.empty_bindings", "暂无透传绑定");
+    m.insert("tenant_providers.name", "名称");
+    m.insert("tenant_providers.provider", "协议");
+    m.insert("tenant_providers.models", "模型");
+    m.insert("tenant_providers.capabilities", "API 能力");
+    m.insert("tenant_providers.pool", "参与账号池");
+    m.insert("tenant_providers.health", "健康状态");
+    m.insert("tenant_providers.test", "测试");
+    m.insert("tenant_providers.account_editor", "上游账号");
+    m.insert("tenant_providers.binding_editor", "透传绑定");
+    m.insert("tenant_providers.account", "账号");
+    m.insert(
+        "tenant_providers.binding_hint",
+        "绑定仅属于当前租户；模型来自所选账号，此处不能创建全局绑定。",
+    );
+    m.insert("tenant_providers.select_account", "请选择账号");
+    m.insert("tenant_providers.saved", "已保存");
+    m.insert("tenant_providers.scope", "当前租户");
     super::tenant_finance::register(&mut m, false);
     super::tenant_keys::register(&mut m, false);
     m.insert(

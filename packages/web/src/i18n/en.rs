@@ -3,6 +3,32 @@ use std::sync::LazyLock;
 
 pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    m.insert("tenant_providers.title", "Provider channels");
+    m.insert(
+        "tenant_providers.hint",
+        "Manage this tenant’s provider accounts and passthrough grants.",
+    );
+    m.insert("tenant_providers.accounts", "Accounts");
+    m.insert("tenant_providers.bindings", "Passthrough bindings");
+    m.insert("tenant_providers.apply", "Apply");
+    m.insert("tenant_providers.add_account", "Add account");
+    m.insert("tenant_providers.add_binding", "Add binding");
+    m.insert("tenant_providers.empty_accounts", "No tenant accounts");
+    m.insert("tenant_providers.empty_bindings", "No passthrough bindings");
+    m.insert("tenant_providers.name", "Name");
+    m.insert("tenant_providers.provider", "Protocol");
+    m.insert("tenant_providers.models", "Models");
+    m.insert("tenant_providers.capabilities", "Capabilities");
+    m.insert("tenant_providers.pool", "Participates in account pool");
+    m.insert("tenant_providers.health", "Health");
+    m.insert("tenant_providers.test", "Test");
+    m.insert("tenant_providers.account_editor", "Provider account");
+    m.insert("tenant_providers.binding_editor", "Passthrough binding");
+    m.insert("tenant_providers.account", "Account");
+    m.insert("tenant_providers.binding_hint", "The binding is tenant-only. Models come from the selected account; global scope cannot be selected here.");
+    m.insert("tenant_providers.select_account", "Select an account");
+    m.insert("tenant_providers.saved", "Saved");
+    m.insert("tenant_providers.scope", "Current tenant");
     super::tenant_finance::register(&mut m, true);
     super::tenant_keys::register(&mut m, true);
     m.insert(

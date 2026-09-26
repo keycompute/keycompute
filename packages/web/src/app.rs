@@ -418,6 +418,11 @@ pub fn AppLayout() -> Element {
     {
         tenant_items.extend([
             NavItem::new(
+                i18n.t("tenant_providers.title"),
+                Route::TenantProviders {}.to_string(),
+                NavIcon::Server,
+            ),
+            NavItem::new(
                 i18n.t("tenant_finance.title"),
                 Route::TenantFinance {}.to_string(),
                 NavIcon::Wallet,
@@ -635,6 +640,7 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::TenantNodes {} => "tenant_nodes.title",
         Route::TenantResponses {} => "tenant_responses.title",
         Route::TenantKeys {} => "tenant_keys.title",
+        Route::TenantProviders {} => "tenant_providers.title",
         Route::TenantFinance {} => "tenant_finance.title",
         Route::OwnerKeyIssuance {} => "tenant_keys.my_requests",
         Route::TenantPricing {} => "tenant_pricing.title",

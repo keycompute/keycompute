@@ -51,3 +51,6 @@ pub use key_admin::{OwnerKeyIssuance, TenantKeys};
 
 mod finance;
 pub use finance::TenantFinance;
+
+mod provider_admin;
+pub use provider_admin::TenantProviders;
