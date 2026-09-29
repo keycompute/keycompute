@@ -15,7 +15,7 @@ use uuid::Uuid;
 #[component]
 pub(super) fn NativeDirect(
     scope: WorkspaceScope,
-    generation: u64,
+    generation: Signal<u64>,
     on_inspect: EventHandler<Inspection>,
     on_mutation: EventHandler<Mutation>,
 ) -> Element {
@@ -26,10 +26,10 @@ pub(super) fn NativeDirect(
     let mut id_text = use_signal(String::new);
     let mut target = use_signal(|| None::<(Uuid, String)>);
     let mut error = use_signal(String::new);
-    let key = (scope, target(), generation);
+    let key = (scope, target(), generation());
     let mut data = use_resource(move || {
         let target = target();
-        let key = (scope, target.clone(), generation);
+        let key = (scope, target.clone(), generation());
         async move {
             let result = if let Some((owner, id)) = target {
                 common::read(auth, users, scope, move |token| {

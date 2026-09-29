@@ -111,7 +111,7 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
         if query().mode!=client_api::api::response_control::ResponseMode::AccountPool{p {class:"text-secondary",{i18n.t("tenant_responses.active_owner")} " " {query().owner.map(|v|v.to_string()).unwrap_or_else(||i18n.t("tenant_responses.all_owners").into())}}}
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
         if query().mode==client_api::api::response_control::ResponseMode::AccountPool{
-            native::NativeDirect{scope,generation:generation(),on_inspect:inspect,on_mutation:mutate}
+            native::NativeDirect{scope,generation,on_inspect:inspect,on_mutation:mutate}
         }else{match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
             Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
