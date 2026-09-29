@@ -249,6 +249,15 @@ pub(super) enum ResponsesResourceKind {
     Conversation,
 }
 
+impl ResponsesResourceKind {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Response => "response",
+            Self::Conversation => "conversation",
+        }
+    }
+}
+
 pub(super) struct ResponsesAffinityRoute {
     pub(super) tenant_id: uuid::Uuid,
     pub(super) user_id: uuid::Uuid,
@@ -858,6 +867,17 @@ pub(super) async fn save_response_affinity(
                     "persist the Responses route and billing settlement",
                 )
             })?;
+            ResponseAffinity::bind_resource_kind_for_user(
+                &txn,
+                affinity.tenant_id,
+                affinity.user_id,
+                response_id,
+                resource_kind.as_str(),
+            )
+            .await
+            .map_err(|error| {
+                map_response_affinity_write_error(error, "bind the Responses resource kind")
+            })?;
             txn.commit().await.map_err(|error| {
                 map_response_affinity_write_error(
                     error.into(),
@@ -899,6 +919,17 @@ pub(super) async fn save_response_affinity(
             .await
             .map_err(|error| {
                 map_response_affinity_write_error(error, "persist Responses resource routing")
+            })?;
+            ResponseAffinity::bind_resource_kind_for_user(
+                &txn,
+                affinity.tenant_id,
+                affinity.user_id,
+                response_id,
+                resource_kind.as_str(),
+            )
+            .await
+            .map_err(|error| {
+                map_response_affinity_write_error(error, "bind the Responses resource kind")
             })?;
             txn.commit().await.map_err(|error| {
                 map_response_affinity_write_error(error.into(), "commit Responses resource routing")

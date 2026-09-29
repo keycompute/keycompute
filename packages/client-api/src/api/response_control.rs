@@ -153,6 +153,12 @@ pub struct RevisionCommand {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NativeResponseCommand {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MetadataCommand {
     pub expected_revision: i64,
@@ -306,7 +312,15 @@ impl ResponseControlApi {
             || owner.is_some_and(|v| v != row.owner_user_id)
             || id.is_some_and(|v| v != row.id)
             || resource_segment(&row.id).is_err()
-            || (mode != ResponseMode::AccountPool && row.revision.is_none_or(|v| v <= 0))
+            || if mode == ResponseMode::AccountPool {
+                row.revision.is_some()
+                    || row.account_id.is_none_or(|id| id.is_nil())
+                    || row.provider.as_deref().is_none_or(str::is_empty)
+                    || row.local_content_available
+                    || !row.native_content_available
+            } else {
+                row.revision.is_none_or(|v| v <= 0)
+            }
         {
             return Err(scope_error());
         }
@@ -372,6 +386,11 @@ impl ResponseControlApi {
     }
 
     fn conversation_resource(&self, mode: ResponseMode, owner: Uuid, id: &str) -> Result<String> {
+        if mode == ResponseMode::AccountPool {
+            return Err(ClientError::Config(
+                "account_pool Conversations administration is not implemented".into(),
+            ));
+        }
         if owner.is_nil() {
             return Err(ClientError::Config(
                 "A real owner and resource ID are required".into(),
@@ -395,6 +414,11 @@ impl ResponseControlApi {
         let mode = q
             .mode
             .ok_or_else(|| ClientError::Config("Mode required".into()))?;
+        if mode == ResponseMode::AccountPool {
+            return Err(ClientError::Config(
+                "account_pool Responses are direct-ID resources and cannot be listed".into(),
+            ));
+        }
         let result: Page<ResponseSummary> = self
             .client
             .get_json_fresh(&format!("{}/responses?{query}", self.base), Some(token))
@@ -412,6 +436,11 @@ impl ResponseControlApi {
 
     pub async fn response_count(&self, q: &ResourceListQuery, token: &str) -> Result<Count> {
         self.reason(q.reason.as_deref())?;
+        if q.mode == Some(ResponseMode::AccountPool) {
+            return Err(ClientError::Config(
+                "account_pool Responses are direct-ID resources and cannot be counted".into(),
+            ));
+        }
         let result: Count = self
             .client
             .get_json_fresh(
@@ -443,12 +472,17 @@ impl ResponseControlApi {
         }
         let result: ResponseDetail = self.client.get_json_fresh(&path, Some(token)).await?;
         self.check_response(&result.summary, mode, Some(owner), Some(id))?;
-        if mode != ResponseMode::AccountPool
-            && (result.response.is_none()
+        if if mode == ResponseMode::AccountPool {
+            result.response.is_some()
+                || result.native_body.is_none()
+                || result.summary.local_content_available
+                || !result.summary.native_content_available
+        } else {
+            result.response.is_none()
                 || result.native_body.is_some()
                 || !result.summary.local_content_available
-                || result.summary.native_content_available)
-        {
+                || result.summary.native_content_available
+        } {
             return Err(scope_error());
         }
         for body in [&result.response, &result.native_body]
@@ -468,6 +502,11 @@ impl ResponseControlApi {
         body: &RevisionCommand,
         token: &str,
     ) -> Result<Value> {
+        if mode == ResponseMode::AccountPool {
+            return Err(ClientError::Config(
+                "Use cancel_native_response for account_pool resources".into(),
+            ));
+        }
         checked_revision(body.expected_revision)?;
         self.reason(body.reason.as_deref())?;
         let result: Value = self
@@ -490,6 +529,11 @@ impl ResponseControlApi {
         body: &RevisionCommand,
         token: &str,
     ) -> Result<Deleted> {
+        if mode == ResponseMode::AccountPool {
+            return Err(ClientError::Config(
+                "Use delete_native_response for account_pool resources".into(),
+            ));
+        }
         checked_revision(body.expected_revision)?;
         self.reason(body.reason.as_deref())?;
         let request = self
@@ -497,6 +541,50 @@ impl ResponseControlApi {
             .request_with_auth(
                 reqwest::Method::DELETE,
                 &self.response_resource(mode, owner, id)?,
+                Some(token),
+            )
+            .await?;
+        let result: Deleted = self.client.send_and_parse(request.json(body)).await?;
+        self.check_deleted(&result, id, "response")?;
+        Ok(result)
+    }
+
+    pub async fn cancel_native_response(
+        &self,
+        owner: Uuid,
+        id: &str,
+        body: &NativeResponseCommand,
+        token: &str,
+    ) -> Result<Value> {
+        self.reason(body.reason.as_deref())?;
+        let result: Value = self
+            .client
+            .post_json(
+                &format!(
+                    "{}/cancel",
+                    self.response_resource(ResponseMode::AccountPool, owner, id)?
+                ),
+                body,
+                Some(token),
+            )
+            .await?;
+        self.check_body(&result, id, "response")?;
+        Ok(result)
+    }
+
+    pub async fn delete_native_response(
+        &self,
+        owner: Uuid,
+        id: &str,
+        body: &NativeResponseCommand,
+        token: &str,
+    ) -> Result<Deleted> {
+        self.reason(body.reason.as_deref())?;
+        let request = self
+            .client
+            .request_with_auth(
+                reqwest::Method::DELETE,
+                &self.response_resource(ResponseMode::AccountPool, owner, id)?,
                 Some(token),
             )
             .await?;
@@ -539,6 +627,11 @@ impl ResponseControlApi {
         let mode = q
             .mode
             .ok_or_else(|| ClientError::Config("Mode required".into()))?;
+        if mode == ResponseMode::AccountPool {
+            return Err(ClientError::Config(
+                "account_pool Conversations administration is not implemented".into(),
+            ));
+        }
         let result: Page<ConversationSummary> = self
             .client
             .get_json_fresh(&format!("{}/conversations?{query}", self.base), Some(token))
@@ -556,6 +649,11 @@ impl ResponseControlApi {
 
     pub async fn conversation_count(&self, q: &ResourceListQuery, token: &str) -> Result<Count> {
         self.reason(q.reason.as_deref())?;
+        if q.mode == Some(ResponseMode::AccountPool) {
+            return Err(ClientError::Config(
+                "account_pool Conversations administration is not implemented".into(),
+            ));
+        }
         let result: Count = self
             .client
             .get_json_fresh(

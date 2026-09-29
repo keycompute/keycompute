@@ -6,7 +6,8 @@ use uuid::Uuid;
 fn resource_mode_and_owner_selectors_never_invent_a_global_or_native_scope() {
     assert_eq!(mode("passthrough"), Some(ResponseMode::Passthrough));
     assert_eq!(mode("node_dispatch"), Some(ResponseMode::NodeDispatch));
-    for value in ["account_pool", "all", "", "node:"] {
+    assert_eq!(mode("account_pool"), Some(ResponseMode::AccountPool));
+    for value in ["all", "", "node:"] {
         assert!(mode(value).is_none());
     }
     assert_eq!(owner(" ").unwrap(), None);
@@ -158,4 +159,23 @@ fn revisions_and_item_selectors_recreate_only_their_own_editor_state() {
     );
     let first = Mutation::Metadata(original).key();
     assert_ne!(first, Mutation::Metadata(newer).key());
+}
+
+#[test]
+fn native_rows_are_direct_id_and_revisionless_without_becoming_conversations() {
+    let owner = Uuid::new_v4();
+    let tenant = Uuid::new_v4();
+    let account = Uuid::new_v4();
+    let row:ResponseSummary=serde_json::from_value(json!({
+        "id":"future.response/id:1","tenant_id":tenant,"owner_user_id":owner,"mode":"account_pool",
+        "provider":"openai","account_id":account,"model":"fixture","status":"in_progress",
+        "background":true,"store_response":true,"stream":false,"previous_response_id":null,
+        "conversation_id":null,"revision":null,"created_at":"now","updated_at":"now","expires_at":"later",
+        "deleted":false,"local_content_available":false,"native_content_available":true})).unwrap();
+    let row = Row::Response(row);
+    assert_eq!(row.mode().unwrap(), ResponseMode::AccountPool);
+    assert!(row.revision().is_err());
+    assert!(!row.is_conversation());
+    assert!(row.can_cancel());
+    assert_eq!(row.address().unwrap().id, "future.response/id:1");
 }

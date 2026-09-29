@@ -195,17 +195,40 @@ pub(in crate::handlers) async fn responses_inner(
         .and_then(Value::as_str)
         .map(str::to_string);
     let conversation_id = conversation_resource_id(&body).map(str::to_string);
-    let mut resolved_affinity_account = if let Some(previous_response_id) =
-        previous_response_id.as_deref()
-    {
-        if root_local_warmup {
-            None
-        } else {
+    let mut resolved_affinity_account =
+        if let Some(previous_response_id) = previous_response_id.as_deref() {
+            if root_local_warmup {
+                None
+            } else {
+                match resolve_response_account(
+                    &state,
+                    previous_response_id,
+                    auth.tenant_id,
+                    auth.user_id,
+                    ResponsesResourceKind::Response,
+                )
+                .await
+                {
+                    Ok(account) => Some(account),
+                    Err(error) => {
+                        pre_execution_guard
+                            .finish_failed(
+                                ErrorOrigin::Client,
+                                TraceErrorCategory::InvalidRequest,
+                                "previous_response_not_found",
+                            )
+                            .await;
+                        return Err(error);
+                    }
+                }
+            }
+        } else if let Some(conversation_id) = conversation_id.as_deref() {
             match resolve_response_account(
                 &state,
-                previous_response_id,
+                conversation_id,
                 auth.tenant_id,
                 auth.user_id,
+                ResponsesResourceKind::Conversation,
             )
             .await
             {
@@ -215,31 +238,15 @@ pub(in crate::handlers) async fn responses_inner(
                         .finish_failed(
                             ErrorOrigin::Client,
                             TraceErrorCategory::InvalidRequest,
-                            "previous_response_not_found",
+                            "conversation_lookup_failed",
                         )
                         .await;
                     return Err(error);
                 }
             }
-        }
-    } else if let Some(conversation_id) = conversation_id.as_deref() {
-        match resolve_response_account(&state, conversation_id, auth.tenant_id, auth.user_id).await
-        {
-            Ok(account) => Some(account),
-            Err(error) => {
-                pre_execution_guard
-                    .finish_failed(
-                        ErrorOrigin::Client,
-                        TraceErrorCategory::InvalidRequest,
-                        "conversation_lookup_failed",
-                    )
-                    .await;
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     if let Err(error) = validate_idempotent_project_resource_owner(
         &body,
         idempotency.is_some(),

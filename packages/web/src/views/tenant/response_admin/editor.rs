@@ -8,7 +8,8 @@ use crate::{
     stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
 };
 use client_api::api::response_control::{
-    AppendItemsCommand, MetadataCommand, ResponseControlApi, RevisionCommand,
+    AppendItemsCommand, MetadataCommand, NativeResponseCommand, ResponseControlApi, ResponseMode,
+    RevisionCommand,
 };
 use dioxus::prelude::*;
 #[component]
@@ -31,6 +32,7 @@ pub(super) fn MutationEditor(
     let id = op.row().id().to_owned();
     let owner = op.row().owner();
     let revision = op.row().revision().ok();
+    let native_op = op.row().mode().ok() == Some(ResponseMode::AccountPool);
     let family = op.row().identity().mode;
     let item_id = match &op {
         Mutation::RemoveItem(_, id) => Some(id.clone()),
@@ -42,12 +44,24 @@ pub(super) fn MutationEditor(
         }
         let command = op.clone();
         let text = text();
+        let native = command.row().mode().ok() == Some(ResponseMode::AccountPool);
         let validation = match &command {
             Mutation::Metadata(_) => types::metadata(&text).map(|_| ()),
             Mutation::Append(_) => types::items(&text).map(|_| ()),
             _ => Ok(()),
         }
-        .and_then(|_| command.row().revision().map(|_| ()));
+        .and_then(|_| {
+            if native {
+                match command {
+                    Mutation::Cancel(_) | Mutation::Delete(_) => Ok(()),
+                    _ => Err(client_api::ClientError::Config(
+                        "Native account-pool Conversations editing is not implemented".into(),
+                    )),
+                }
+            } else {
+                command.row().revision().map(|_| ())
+            }
+        });
         if let Err(e) = validation {
             error.set(user_error_message(&e));
             return;
@@ -59,22 +73,69 @@ pub(super) fn MutationEditor(
                 let api = ResponseControlApi::tenant(&get_client(), scope.tenant_id)?;
                 let row = command.row();
                 let addr = row.address()?;
-                let body = RevisionCommand {
-                    expected_revision: row.revision()?,
-                    reason: None,
+                let revision = if addr.mode == ResponseMode::AccountPool {
+                    None
+                } else {
+                    Some(row.revision()?)
                 };
+                let body = revision.map(|expected_revision| RevisionCommand {
+                    expected_revision,
+                    reason: None,
+                });
                 match command {
+                    Mutation::Cancel(_) if addr.mode == ResponseMode::AccountPool => {
+                        api.cancel_native_response(
+                            addr.owner,
+                            &addr.id,
+                            &NativeResponseCommand::default(),
+                            &token,
+                        )
+                        .await?;
+                    }
                     Mutation::Cancel(_) => {
-                        api.cancel_response(addr.mode, addr.owner, &addr.id, &body, &token)
-                            .await?;
+                        api.cancel_response(
+                            addr.mode,
+                            addr.owner,
+                            &addr.id,
+                            body.as_ref().unwrap(),
+                            &token,
+                        )
+                        .await?;
+                    }
+                    Mutation::Delete(row) if addr.mode == ResponseMode::AccountPool => {
+                        if row.is_conversation() {
+                            return Err(client_api::ClientError::Config(
+                                "Native account-pool Conversations editing is not implemented"
+                                    .into(),
+                            ));
+                        }
+                        api.delete_native_response(
+                            addr.owner,
+                            &addr.id,
+                            &NativeResponseCommand::default(),
+                            &token,
+                        )
+                        .await?;
                     }
                     Mutation::Delete(row) => {
                         if row.is_conversation() {
-                            api.delete_conversation(addr.mode, addr.owner, &addr.id, &body, &token)
-                                .await?;
+                            api.delete_conversation(
+                                addr.mode,
+                                addr.owner,
+                                &addr.id,
+                                body.as_ref().unwrap(),
+                                &token,
+                            )
+                            .await?;
                         } else {
-                            api.delete_response(addr.mode, addr.owner, &addr.id, &body, &token)
-                                .await?;
+                            api.delete_response(
+                                addr.mode,
+                                addr.owner,
+                                &addr.id,
+                                body.as_ref().unwrap(),
+                                &token,
+                            )
+                            .await?;
                         }
                     }
                     Mutation::Metadata(_) => {
@@ -83,7 +144,7 @@ pub(super) fn MutationEditor(
                             addr.owner,
                             &addr.id,
                             &MetadataCommand {
-                                expected_revision: body.expected_revision,
+                                expected_revision: body.as_ref().unwrap().expected_revision,
                                 metadata: types::metadata(&text)?,
                                 reason: None,
                             },
@@ -97,7 +158,7 @@ pub(super) fn MutationEditor(
                             addr.owner,
                             &addr.id,
                             &AppendItemsCommand {
-                                expected_revision: body.expected_revision,
+                                expected_revision: body.as_ref().unwrap().expected_revision,
                                 items: types::items(&text)?,
                                 reason: None,
                             },
@@ -107,7 +168,12 @@ pub(super) fn MutationEditor(
                     }
                     Mutation::RemoveItem(_, item) => {
                         api.remove_conversation_item(
-                            addr.mode, addr.owner, &addr.id, &item, &body, &token,
+                            addr.mode,
+                            addr.owner,
+                            &addr.id,
+                            &item,
+                            body.as_ref().unwrap(),
+                            &token,
                         )
                         .await?;
                     }
@@ -136,6 +202,6 @@ pub(super) fn MutationEditor(
         if editing{label{class:"form-label",r#for:"resource-content-json",{i18n.t("tenant_responses.json")}}textarea{id:"resource-content-json",class:"input-field",rows:"10",value:"{text}",maxlength:"2097152",disabled:busy(),oninput:move|e|text.set(e.value())}p{class:"text-secondary",{i18n.t(if label=="tenant_responses.metadata"{"tenant_responses.metadata_hint"}else{"tenant_responses.items_hint"})}}}
         p{class:"alert alert-info",{i18n.t("tenant_responses.owner_preserved")}}
         p{class:"text-secondary",{i18n.t("tenant.command_hint")}}
-        div{class:"modal-actions",button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}button{class:"btn btn-primary",disabled:busy()||revision.is_none(),onclick:submit,{i18n.t("tenant.confirm")}}}
+        div{class:"modal-actions",button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}button{class:"btn btn-primary",disabled:busy()||(revision.is_none()&&!native_op),onclick:submit,{i18n.t("tenant.confirm")}}}
     }}}
 }

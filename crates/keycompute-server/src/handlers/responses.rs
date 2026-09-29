@@ -649,18 +649,32 @@ async fn select_responses_post_account(
     _openai_beta: Option<&str>,
 ) -> Result<SelectedResponsesAccount> {
     if let Some(previous_response_id) = body.get("previous_response_id").and_then(Value::as_str) {
-        return resolve_response_account(state, previous_response_id, auth.tenant_id, auth.user_id)
-            .await
-            .map(|account| SelectedResponsesAccount {
-                account,
-                constraint: Some(ResponsesReservationConstraint::Affinity {
-                    resource_id: previous_response_id.to_string(),
-                }),
-            });
+        return resolve_response_account(
+            state,
+            previous_response_id,
+            auth.tenant_id,
+            auth.user_id,
+            ResponsesResourceKind::Response,
+        )
+        .await
+        .map(|account| SelectedResponsesAccount {
+            account,
+            constraint: Some(ResponsesReservationConstraint::Affinity {
+                resource_id: previous_response_id.to_string(),
+            }),
+        });
     }
     let conversation_id = conversation_resource_id(body);
     if let Some(conversation_id) = conversation_id {
-        match resolve_response_account(state, conversation_id, auth.tenant_id, auth.user_id).await {
+        match resolve_response_account(
+            state,
+            conversation_id,
+            auth.tenant_id,
+            auth.user_id,
+            ResponsesResourceKind::Conversation,
+        )
+        .await
+        {
             Ok(account) => {
                 return Ok(SelectedResponsesAccount {
                     account,
@@ -1161,6 +1175,7 @@ async fn resolve_response_account(
     response_id: &str,
     tenant_id: uuid::Uuid,
     user_id: uuid::Uuid,
+    resource_kind: ResponsesResourceKind,
 ) -> Result<ResolvedResponsesAccount> {
     if !valid_affinity_resource_id(response_id) {
         return Err(ApiError::NotFound(format!(
@@ -1241,6 +1256,15 @@ async fn resolve_response_account(
             "The account owning this response is disabled".to_string(),
         ));
     }
+    if affinity
+        .resource_kind
+        .as_deref()
+        .is_some_and(|kind| kind != resource_kind.as_str())
+    {
+        return Err(ApiError::NotFound(format!(
+            "Responses resource not found: {response_id}"
+        )));
+    }
     let protocol = ProtocolType::parse(&account.provider).ok_or_else(|| {
         ApiError::Conflict("The account owning this response has an invalid protocol".to_string())
     })?;
@@ -1307,8 +1331,14 @@ async fn proxy_response_resource(
     }
     let forwarded_headers =
         forwarded_responses_headers(client_headers, auth.tenant_id, auth.user_id)?;
-    let account =
-        resolve_response_account(state, response_id, auth.tenant_id, auth.user_id).await?;
+    let account = resolve_response_account(
+        state,
+        response_id,
+        auth.tenant_id,
+        auth.user_id,
+        ResponsesResourceKind::Response,
+    )
+    .await?;
     let selected = SelectedResponsesAccount {
         account,
         constraint: Some(ResponsesReservationConstraint::Affinity {
@@ -1354,6 +1384,9 @@ async fn proxy_response_resource(
         )
         .await
         .map_err(crate::error::map_execution_error)?;
+    if !operation.removes_affinity_on_success() && (200..300).contains(&response.meta.status) {
+        prove_response_resource_kind(state, auth.tenant_id, auth.user_id, response_id).await?;
+    }
     if operation.removes_affinity_on_success() && delete_response_is_confirmed(response.meta.status)
     {
         delete_response_affinity(state, response_id, auth.tenant_id, auth.user_id).await?;
@@ -1376,8 +1409,40 @@ fn deleted_response(response_id: &str) -> Response {
     .into_response()
 }
 
-fn delete_response_is_confirmed(status: u16) -> bool {
+pub(super) fn delete_response_is_confirmed(status: u16) -> bool {
     (200..300).contains(&status) || status == 404
+}
+
+pub(super) fn native_resource_url(endpoint: &str, resource_id: &str, suffix: &str) -> String {
+    upstream_resource_url(endpoint, "responses", resource_id, suffix)
+}
+
+async fn prove_response_resource_kind(
+    state: &AppState,
+    tenant_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    response_id: &str,
+) -> Result<()> {
+    let Some(pool) = state.pool.as_deref() else {
+        return Ok(());
+    };
+    let tx = pool
+        .begin()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to begin Responses kind proof: {e}")))?;
+    ResponseAffinity::bind_resource_kind_for_user(&tx, tenant_id, user_id, response_id, "response")
+        .await
+        .map_err(|_| ApiError::NotFound(format!("Responses resource not found: {response_id}")))?;
+    tx.commit()
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to commit Responses kind proof: {e}")))?;
+    Ok(())
+}
+
+pub(super) fn admin_passthrough_response(
+    response: llm_protocol_provider::UpstreamResponse<PassthroughBody>,
+) -> Result<Response> {
+    passthrough_response(response, None, false)
 }
 
 #[derive(Clone, Copy)]
@@ -1517,6 +1582,22 @@ fn admit_responses_json_parse_with_limit(
 
 fn admit_responses_json_parse(body: &str, admission: &mut Option<LargeBodyPermit>) -> Result<()> {
     admit_responses_json_parse_with_limit(body, MAX_JSON_PASSTHROUGH_WORKING_SET_BYTES, admission)
+}
+
+pub(super) fn prepare_admin_responses_json(
+    body: llm_protocol_provider::AdmittedResponseText,
+) -> Result<(String, Option<LargeBodyPermit>)> {
+    let (mut body, mut admission) = body.into_parts();
+    admit_responses_json_parse(&body, &mut admission)?;
+    body = sanitize_successful_responses_body(body)?;
+    Ok((body, admission))
+}
+
+pub(super) fn retain_admin_response_body_guard(
+    response: &mut Response,
+    admission: LargeBodyPermit,
+) {
+    retain_response_body_guard(response, admission);
 }
 
 fn passthrough_response(
@@ -2547,7 +2628,7 @@ fn upstream_responses_idempotency_key(
     format!("kc_upstream_{:x}", hasher.finalize())
 }
 
-fn forwarded_responses_headers(
+pub(super) fn forwarded_responses_headers(
     headers: &HeaderMap,
     tenant_id: uuid::Uuid,
     user_id: uuid::Uuid,

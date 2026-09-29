@@ -3656,6 +3656,61 @@ mod tests {
         drop_isolated_schema(&admin, &schema).await;
     }
 
+    /// The one accepted historical V0001 checksum upgrades in-place to the
+    /// current consolidated baseline metadata. Unknown checksum drift remains rejected.
+    #[tokio::test]
+    async fn legacy_v0001_response_kind_compatibility_is_exact_and_idempotent() {
+        let (admin, schema, _schema_permit) = create_isolated_schema().await;
+        let pool = connect_to_schema(&schema).await;
+        pool.execute_unprepared(
+            "CREATE TABLE schema_migrations (version BIGINT PRIMARY KEY,name TEXT NOT NULL,checksum TEXT NOT NULL,applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+             INSERT INTO schema_migrations(version,name,checksum) VALUES (1,'baseline','11529d90c1318c35660a5e90848b927d90bf02c2a3d743b45d62688cc78ce00a');
+             CREATE TABLE response_affinities (
+               tenant_id UUID NOT NULL,user_id UUID,response_id VARCHAR(2048) NOT NULL,
+               provider VARCHAR(50) NOT NULL,account_id UUID,is_reservation BOOLEAN NOT NULL DEFAULT FALSE,
+               deleted_at TIMESTAMPTZ,created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+               PRIMARY KEY(tenant_id,response_id)
+             );"
+        ).await.expect("legacy V0001 fixture should be created");
+
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("the exact supported V0001 baseline should upgrade");
+        keycompute_db::migrations::run_migrations(&pool)
+            .await
+            .expect("the compatibility upgrade should be idempotent");
+
+        let column = pool.query_one(Statement::from_string(DbBackend::Postgres,
+            "SELECT 1 AS present FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='response_affinities' AND column_name='resource_kind'".to_string()
+        )).await.unwrap();
+        let constraint = pool.query_one(Statement::from_string(DbBackend::Postgres,
+            "SELECT 1 AS present FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() AND t.relname='response_affinities' AND c.conname='ck_response_affinities_resource_kind'".to_string()
+        )).await.unwrap();
+        let index = pool.query_one(Statement::from_string(DbBackend::Postgres,
+            "SELECT 1 AS present FROM pg_indexes WHERE schemaname=current_schema() AND tablename='response_affinities' AND indexname='idx_response_affinities_admin_kind'".to_string()
+        )).await.unwrap();
+        let history = pool
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT checksum FROM schema_migrations WHERE version=1".to_string(),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        let checksum = history.try_get::<String>("", "checksum").unwrap();
+
+        drop(pool);
+        drop_isolated_schema(&admin, &schema).await;
+        assert!(column.is_some());
+        assert!(constraint.is_some());
+        assert!(index.is_some());
+        assert_eq!(checksum.len(), 64);
+        assert_ne!(
+            checksum,
+            "11529d90c1318c35660a5e90848b927d90bf02c2a3d743b45d62688cc78ce00a"
+        );
+    }
+
     /// Migration history is an integrity boundary: editing an already-applied
     /// migration must fail closed instead of silently accepting schema drift.
     #[tokio::test]

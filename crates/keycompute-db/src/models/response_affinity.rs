@@ -19,6 +19,8 @@ pub struct ResponseAffinity {
     /// None denotes internal/unowned state that public resource APIs cannot use.
     pub user_id: Option<Uuid>,
     pub response_id: String,
+    /// Explicit upstream kind; NULL is legacy/internal and must never be inferred from the opaque ID.
+    pub resource_kind: Option<String>,
     pub provider: String,
     pub model: Option<String>,
     /// Owning upstream account. Root local warmups and accountless terminal
@@ -189,6 +191,23 @@ impl ResponseAffinity {
         Ok(Self::find_by_statement(stmt).one(db).await?)
     }
 
+    /// Strong read lock for one native administrative upstream operation. It
+    /// blocks settlement/tombstone updates while account -> affinity state is
+    /// held stable, without taking an exclusive row lock.
+    pub async fn find_active_for_share_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+    ) -> Result<Option<Self>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND deleted_at IS NULL AND expires_at>NOW() FOR SHARE",
+            [tenant_id.into(), user_id.into(), response_id.into()],
+        );
+        Ok(Self::find_by_statement(stmt).one(db).await?)
+    }
+
     /// Read an active route without retaining a row lock.
     ///
     /// Callers that must coordinate the route with its owning account should
@@ -354,6 +373,32 @@ impl ResponseAffinity {
                 let _ = txn.rollback().await;
                 Err(error)
             }
+        }
+    }
+
+    /// Bind a proven upstream kind inside the caller's transaction.
+    /// A conflicting explicit kind is an ownership collision, never a prefix-based rewrite.
+    pub async fn bind_resource_kind_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+        resource_kind: &str,
+    ) -> Result<(), DbError> {
+        if !matches!(resource_kind, "response" | "conversation") {
+            return Err(DbError::Other("invalid Responses resource kind".into()));
+        }
+        let result = db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE response_affinities SET resource_kind=$4 WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND NOT is_reservation AND deleted_at IS NULL AND (resource_kind IS NULL OR resource_kind=$4)",
+                [tenant_id.into(), user_id.into(), response_id.into(), resource_kind.into()],
+            ))
+            .await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(Self::ownership_collision(response_id))
         }
     }
 
@@ -1204,6 +1249,25 @@ impl ResponseAffinity {
         let affected: i64 = result.try_get_by_index(0).map_err(DbError::DatabaseError)?;
         u64::try_from(affected)
             .map_err(|_| DbError::Other("response deletion returned an invalid count".to_string()))
+    }
+
+    /// Tombstone a confirmed native Response delete inside the account-locked caller transaction.
+    /// Pending settlement and non-Response/legacy rows deliberately do not match.
+    pub async fn tombstone_native_response_for_user(
+        db: &impl ConnectionTrait,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        response_id: &str,
+        account_id: Uuid,
+    ) -> Result<u64, DbError> {
+        let result = db
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE response_affinities SET deleted_at=COALESCE(deleted_at,clock_timestamp()),local_response=NULL,local_context=NULL,local_context_bytes=NULL,updated_at=GREATEST(updated_at,clock_timestamp()) WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND account_id=$4 AND resource_kind='response' AND NOT is_reservation AND deleted_at IS NULL AND settlement IS NULL",
+                [tenant_id.into(), user_id.into(), response_id.into(), account_id.into()],
+            ))
+            .await?;
+        Ok(result.rows_affected())
     }
 
     pub async fn delete_route_preserving_settlement_for_user(

@@ -2,11 +2,11 @@
 //! Every account and worker is local to the fixture. No real inference is used.
 use axum::{
     Json, Router,
-    body::{Body, to_bytes},
+    body::{Body, Bytes, to_bytes},
     extract::{Path, State},
     http::{HeaderMap, Method, Request, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::any,
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use integration_tests::db::{
@@ -36,7 +36,7 @@ use serde_json::{Value, json};
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU16, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     time::Duration,
 };
@@ -71,6 +71,8 @@ struct Upstream {
     status: AtomicU16,
     stream_release: tokio::sync::Notify,
     jwt_replay_probe: tokio::sync::Notify,
+    native_hold: AtomicBool,
+    native_release: tokio::sync::Notify,
 }
 fn sample_response(op: Op, model: &str) -> Value {
     match op {
@@ -88,29 +90,60 @@ fn sample_response(op: Op, model: &str) -> Value {
 async fn upstream(
     State(s): State<Arc<Upstream>>,
     Path(path): Path<String>,
+    method: Method,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    bytes: Bytes,
 ) -> Response {
+    let body: Value = if bytes.is_empty() {
+        json!({})
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
     s.calls.lock().unwrap().push(Call {
         path: path.clone(),
         body: body.clone(),
         headers,
     });
-    let op = if path.ends_with("messages") {
+    // Hold only native resource operations, never creation. The call is recorded
+    // first so the test can deterministically release it after session expiry.
+    if s.native_hold.load(Ordering::Relaxed)
+        && path.contains("/responses/")
+        && !path.ends_with("responses")
+    {
+        s.native_release.notified().await;
+    }
+    let op = if path.contains("messages") {
         Op::Messages
-    } else if path.ends_with("responses") {
+    } else if path.contains("responses") {
         Op::Responses
     } else {
         Op::Chat
     };
     let status = s.status.load(Ordering::Relaxed);
-    if status == 200 && body["stream"] == true {
+    if method == Method::POST
+        && path.ends_with("responses")
+        && status == 200
+        && body["stream"] == true
+    {
         return streaming_upstream(s, op, body).await;
     }
     if body.get("hold_test").and_then(Value::as_bool) == Some(true) {
         s.stream_release.notified().await;
     }
-    let response = if status == 200 {
+    let resource_id = path
+        .split("/responses/")
+        .nth(1)
+        .and_then(|tail| tail.split('/').next())
+        .unwrap_or("resp-native");
+    let response = if status == 200 && method == Method::GET && path.ends_with("/input_items") {
+        json!({"object":"list","data":[],"first_id":null,"last_id":null,"has_more":false})
+    } else if status == 200 && method == Method::DELETE && path.contains("/responses/") {
+        json!({"id":resource_id,"object":"response.deleted","deleted":true})
+    } else if status == 200 && method == Method::POST && path.ends_with("/cancel") {
+        json!({"id":resource_id,"object":"response","status":"cancelled","model":"native-admin"})
+    } else if status == 200 && method == Method::GET && path.contains("/responses/") {
+        json!({"id":resource_id,"object":"response","status":"completed","model":"native-admin","store":true,"background":false})
+    } else if status == 200 {
         sample_response(op, body["model"].as_str().unwrap())
     } else {
         json!({"type":"error","error":{"type":"invalid_request_error","code":"isolated_rejection","message":"Fixture rejected the request","detail":[null,1]}})
@@ -125,6 +158,7 @@ async fn upstream(
     )
         .into_response()
 }
+
 #[derive(Debug)]
 struct HttpResult {
     status: StatusCode,
@@ -234,7 +268,7 @@ impl Fixture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let mock = Router::new()
-            .route("/{*path}", post(crate::upstream))
+            .route("/{*path}", any(crate::upstream))
             .with_state(upstream.clone());
         let server = tokio::spawn(async move {
             axum::serve(listener, mock).await.unwrap();

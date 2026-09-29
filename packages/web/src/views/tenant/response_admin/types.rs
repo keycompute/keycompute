@@ -43,6 +43,7 @@ pub fn mode(value: &str) -> Option<ResponseMode> {
     match value {
         "passthrough" => Some(ResponseMode::Passthrough),
         "node_dispatch" => Some(ResponseMode::NodeDispatch),
+        "account_pool" => Some(ResponseMode::AccountPool),
         _ => None,
     }
 }

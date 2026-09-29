@@ -10,13 +10,22 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, Query, RawQuery, State},
-    http::header::{CACHE_CONTROL, PRAGMA},
+    http::{
+        HeaderMap,
+        header::{CACHE_CONTROL, PRAGMA},
+    },
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use keycompute_auth::AuthorizationAction;
-use keycompute_db::AuditContext;
+use keycompute_db::{
+    AuditContext,
+    models::{account::Account, response_affinity::ResponseAffinity},
+};
 use keycompute_types::ModelAccessMode;
+use llm_gateway::{JsonRequestMethod, PassthroughBody};
+use llm_protocol_provider::ProtocolType;
+use sea_orm::TransactionTrait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -62,7 +71,7 @@ pub struct RootReason {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RevisionBody {
-    expected_revision: i64,
+    expected_revision: Option<i64>,
     reason: Option<String>,
 }
 
@@ -147,6 +156,7 @@ fn parse_mode(value: &str) -> Result<ModelAccessMode> {
     match value {
         "passthrough" => Ok(ModelAccessMode::Passthrough),
         "node_dispatch" => Ok(ModelAccessMode::NodeDispatch),
+        "account_pool" => Ok(ModelAccessMode::AccountPool),
         _ => Err(ApiError::BadRequest("unknown Responses mode".into())),
     }
 }
@@ -281,12 +291,385 @@ fn local_conversation_summary(row: store::ConversationAdminSummary) -> Conversat
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum NativeResponseOperation {
+    Detail,
+    Cancel,
+    Delete,
+    InputItems,
+}
+impl NativeResponseOperation {
+    const fn method(self) -> JsonRequestMethod {
+        match self {
+            Self::Detail | Self::InputItems => JsonRequestMethod::Get,
+            Self::Cancel => JsonRequestMethod::Post,
+            Self::Delete => JsonRequestMethod::Delete,
+        }
+    }
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Detail | Self::Delete => "",
+            Self::Cancel => "/cancel",
+            Self::InputItems => "/input_items",
+        }
+    }
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Detail => "detail",
+            Self::Cancel => "cancel",
+            Self::Delete => "delete",
+            Self::InputItems => "input_items",
+        }
+    }
+}
+
+fn validate_native_selector(owner: Uuid, id: &str) -> Result<()> {
+    if owner.is_nil() || !llm_protocol_openai::responses_stream::valid_openai_resource_id(id) {
+        Err(ApiError::BadRequest(
+            "A real owner and bounded opaque Responses resource ID are required".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn native_audit_event(
+    tx: &sea_orm::DatabaseTransaction,
+    control: &store::ResponseControlScope,
+    audit: &AuditContext,
+    owner: Uuid,
+    id: &str,
+    action: &str,
+    metadata: Value,
+) -> Result<()> {
+    store::append_control_audit(
+        tx,
+        control,
+        audit,
+        action,
+        "response",
+        Some(id),
+        json!({
+            "owner_user_id": owner,
+            "access_mode": "account_pool",
+            "native": metadata,
+        }),
+    )
+    .await
+}
+
+async fn native_control_event(
+    state: &AppState,
+    control: &store::ResponseControlScope,
+    owner: Uuid,
+    id: &str,
+    account_id: Option<Uuid>,
+    action: &str,
+    metadata: Value,
+) -> Result<()> {
+    let tx = pool(state)?.begin().await.map_err(|error| {
+        ApiError::Internal(format!(
+            "Failed to begin native Responses control validation: {error}"
+        ))
+    })?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    if let Some(account_id) = account_id {
+        crate::handlers::responses::authorize_non_pt_account(&tx, control.tenant_id(), account_id)
+            .await?;
+    }
+    native_audit_event(&tx, control, &audit, owner, id, action, metadata).await?;
+    tx.commit().await.map_err(|error| {
+        ApiError::Internal(format!(
+            "Failed to commit native Responses control audit: {error}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn native_item_query(raw: Option<&str>) -> Result<Option<String>> {
+    parse_item_query(raw)?;
+    let mut ser = url::form_urlencoded::Serializer::new(String::new());
+    for (k, v) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
+        if k != "reason" {
+            ser.append_pair(&k, &v);
+        }
+    }
+    let q = ser.finish();
+    Ok((!q.is_empty()).then_some(q))
+}
+
+fn native_conversation_id(body: &Value) -> Option<String> {
+    body.get("conversation").and_then(|v| {
+        v.as_str()
+            .map(str::to_owned)
+            .or_else(|| v.get("id").and_then(Value::as_str).map(str::to_owned))
+    })
+}
+
+fn native_summary(affinity: &ResponseAffinity, body: &Value) -> Result<ResponseSummary> {
+    let owner = affinity.user_id.ok_or_else(|| {
+        ApiError::NotFound("Native Responses resource has no caller owner".into())
+    })?;
+    let account_id = affinity.account_id.ok_or_else(|| {
+        ApiError::NotFound("Native Responses resource has no upstream account".into())
+    })?;
+    if affinity.resource_kind.as_deref() != Some("response") {
+        return Err(ApiError::NotFound(
+            "Native Responses resource not found".into(),
+        ));
+    }
+    Ok(ResponseSummary {
+        id: affinity.response_id.clone(),
+        tenant_id: affinity.tenant_id,
+        owner_user_id: owner,
+        mode: ModelAccessMode::AccountPool.as_str().to_string(),
+        provider: Some(affinity.provider.clone()),
+        account_id: Some(account_id),
+        model: body
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| affinity.model.clone()),
+        status: body
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        background: body
+            .get("background")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        store_response: body.get("store").and_then(Value::as_bool).unwrap_or(false),
+        stream: false,
+        previous_response_id: body
+            .get("previous_response_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        conversation_id: native_conversation_id(body),
+        revision: None,
+        created_at: affinity.created_at,
+        updated_at: affinity.updated_at,
+        expires_at: affinity.expires_at,
+        deleted: false,
+        local_content_available: false,
+        native_content_available: true,
+    })
+}
+
+async fn native_response_operation(
+    state: AppState,
+    control: store::ResponseControlScope,
+    path: ResourcePath,
+    operation: NativeResponseOperation,
+    query: Option<String>,
+    client_headers: HeaderMap,
+) -> Result<Response> {
+    validate_native_selector(path.owner_user_id, &path.id)?;
+    let db = pool(&state)?;
+
+    // Authorization and its global identity fence are deliberately short-lived.
+    // Never hold the identity fence or tenant/user locks across an upstream network call.
+    native_control_event(
+        &state,
+        &control,
+        path.owner_user_id,
+        &path.id,
+        None,
+        "response.native.request",
+        json!({"operation":operation.name()}),
+    )
+    .await?;
+
+    // Account connection changes/deletion take account -> affinity locks. Keep the
+    // same order here and retain only these resource locks while one upstream call
+    // is in flight, so the exact encrypted credential snapshot cannot rotate under it.
+    let tx = db.begin().await.map_err(|e| {
+        ApiError::Internal(format!(
+            "Failed to begin native Responses resource lock: {e}"
+        ))
+    })?;
+    let snapshot = ResponseAffinity::find_active_snapshot_for_user(
+        &tx,
+        path.tenant_id,
+        path.owner_user_id,
+        &path.id,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Native Responses lookup failed: {e}")))?
+    .filter(|r| r.resource_kind.as_deref() == Some("response"))
+    .ok_or_else(|| ApiError::NotFound("Native Responses resource not found".into()))?;
+    let account_id = snapshot.account_id.ok_or_else(|| {
+        ApiError::NotFound("Native Responses resource has no upstream account".into())
+    })?;
+    let account = Account::find_by_id_for_share(&tx, account_id)
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to load Responses account: {e}")))?
+        .ok_or_else(|| ApiError::NotFound("Responses account not found".into()))?;
+    let affinity = ResponseAffinity::find_active_for_share_for_user(
+        &tx,
+        path.tenant_id,
+        path.owner_user_id,
+        &path.id,
+    )
+    .await
+    .map_err(|e| ApiError::Internal(format!("Native Responses lookup failed: {e}")))?
+    .filter(|r| r.resource_kind.as_deref() == Some("response") && r.account_id == Some(account_id))
+    .ok_or_else(|| ApiError::Conflict("Native Responses ownership changed".into()))?;
+    crate::handlers::responses::authorize_non_pt_account(&tx, path.tenant_id, account_id).await?;
+    // The account SHARE lock may have waited behind a credential/configuration change.
+    // Re-prove the original signed console session immediately before dispatch
+    // without retaining identity locks across the upstream network call.
+    control.verify_current(&tx).await?;
+    if !account.enabled
+        || !account.provider.eq_ignore_ascii_case("openai")
+        || !affinity.provider.eq_ignore_ascii_case("openai")
+    {
+        return Err(ApiError::Conflict(
+            "The account owning this Response is no longer OpenAI-compatible".into(),
+        ));
+    }
+    if matches!(operation, NativeResponseOperation::Delete) && affinity.settlement.is_some() {
+        return Err(ApiError::Conflict(
+            "This background response cannot be deleted until billing settlement completes".into(),
+        ));
+    }
+    let protocol = ProtocolType::parse(&account.provider).ok_or_else(|| {
+        ApiError::Conflict("The account owning this Response has an invalid protocol".into())
+    })?;
+    let endpoint = if account.endpoint.is_empty() {
+        protocol.default_endpoint().to_string()
+    } else {
+        account.endpoint.clone()
+    };
+    let api_key = crate::handlers::admin_account::decrypt_account_api_key(
+        &account.upstream_api_key_encrypted,
+    )?;
+    let mut headers = vec![
+        ("Authorization".to_string(), format!("Bearer {api_key}")),
+        ("Content-Type".to_string(), "application/json".to_string()),
+    ];
+    headers.extend(crate::handlers::responses::forwarded_responses_headers(
+        &client_headers,
+        path.tenant_id,
+        path.owner_user_id,
+    )?);
+    let mut url =
+        crate::handlers::responses::native_resource_url(&endpoint, &path.id, operation.suffix());
+    if let Some(q) = query.as_deref().filter(|q| !q.is_empty()) {
+        url.push('?');
+        url.push_str(q);
+    }
+    let client = state
+        .http_proxy
+        .client_for_provider_and_account(&account.provider, Some(account_id));
+    let upstream = match client
+        .request_json_passthrough(operation.method(), &url, headers, None, false)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.rollback().await;
+            native_control_event(
+                &state,
+                &control,
+                path.owner_user_id,
+                &path.id,
+                Some(account_id),
+                "response.native.result",
+                json!({"operation":operation.name(),"outcome":"transport_error","account_id":account_id}),
+            )
+            .await?;
+            return Err(crate::error::map_execution_error(e));
+        }
+    };
+    let status = upstream.meta.status;
+    let confirmed_delete = matches!(operation, NativeResponseOperation::Delete)
+        && crate::handlers::responses::delete_response_is_confirmed(status);
+    if confirmed_delete {
+        let n = ResponseAffinity::tombstone_native_response_for_user(
+            &tx,
+            path.tenant_id,
+            path.owner_user_id,
+            &path.id,
+            account_id,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("Failed to tombstone native Response: {e}")))?;
+        if n != 1 {
+            return Err(ApiError::Conflict(
+                "Native Responses ownership changed before delete acknowledgement".into(),
+            ));
+        }
+    }
+    tx.commit().await.map_err(|e| {
+        ApiError::Internal(format!(
+            "Failed to commit native Responses resource state: {e}"
+        ))
+    })?;
+
+    // The upstream operation may have taken arbitrarily long. Revalidate the
+    // original console session after releasing account/affinity locks; a revoked
+    // or expired session never receives the private response. Writes remain one-shot.
+    native_control_event(
+        &state,
+        &control,
+        path.owner_user_id,
+        &path.id,
+        Some(account_id),
+        "response.native.result",
+        json!({"operation":operation.name(),"upstream_status":status,"account_id":account_id}),
+    )
+    .await?;
+
+    if confirmed_delete {
+        return Ok(no_store(
+            Json(json!({"id":path.id,"object":"response","deleted":true})).into_response(),
+        ));
+    }
+    if !(200..300).contains(&status) {
+        return crate::handlers::responses::admin_passthrough_response(upstream).map(no_store);
+    }
+    if matches!(operation, NativeResponseOperation::Detail) {
+        let PassthroughBody::Full(body) = upstream.body else {
+            return Err(ApiError::Provider(
+                "Native Responses detail unexpectedly returned a stream".into(),
+            ));
+        };
+        let (body, admission) = crate::handlers::responses::prepare_admin_responses_json(body)?;
+        let body: Value = serde_json::from_str(&body).map_err(|_| {
+            ApiError::Provider("Native Responses detail returned invalid JSON".into())
+        })?;
+        if body.get("id").and_then(Value::as_str) != Some(path.id.as_str())
+            || body.get("object").and_then(Value::as_str) != Some("response")
+        {
+            return Err(ApiError::Provider(
+                "Native Responses detail returned a mismatched resource".into(),
+            ));
+        }
+        let summary = native_summary(&affinity, &body)?;
+        let mut response = no_store(
+            Json(json!({"summary":summary,"response":Value::Null,"native_body":body}))
+                .into_response(),
+        );
+        if let Some(admission) = admission {
+            crate::handlers::responses::retain_admin_response_body_guard(&mut response, admission);
+        }
+        return Ok(response);
+    }
+    crate::handlers::responses::admin_passthrough_response(upstream).map(no_store)
+}
+
 async fn list_response_page(
     state: AppState,
     control: store::ResponseControlScope,
     q: ListQuery,
 ) -> Result<Json<Page<ResponseSummary>>> {
     let mode = parse_mode(&q.mode)?;
+    if mode == ModelAccessMode::AccountPool {
+        return Err(ApiError::BadRequest(
+            "account_pool Responses listing is unsupported; use an exact owner/resource ID".into(),
+        ));
+    }
     let (p, size, offset) = page(q.page, q.page_size)?;
     let items =
         store::admin_list_responses(pool(&state)?, &control, q.owner_user_id, mode, size, offset)
@@ -337,6 +720,11 @@ async fn response_count(
     q: ListQuery,
 ) -> Result<Json<Count>> {
     let mode = parse_mode(&q.mode)?;
+    if mode == ModelAccessMode::AccountPool {
+        return Err(ApiError::BadRequest(
+            "account_pool Responses count is unsupported; use an exact owner/resource ID".into(),
+        ));
+    }
     let total =
         store::admin_count_responses(pool(&state)?, &control, q.owner_user_id, mode).await?;
     Ok(Json(Count { total }))
@@ -373,10 +761,11 @@ pub async fn tenant_response_detail(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    response_detail(state, control, path).await
+    response_detail(state, control, path, headers).await
 }
 
 pub async fn platform_response_detail(
@@ -385,17 +774,30 @@ pub async fn platform_response_detail(
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
     Query(reason): Query<RootReason>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason.reason)?;
-    response_detail(state, control, path).await
+    response_detail(state, control, path, headers).await
 }
 
 async fn response_detail(
     state: AppState,
     control: store::ResponseControlScope,
     path: ResourcePath,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let mode = parse_mode(&path.mode)?;
+    if mode == ModelAccessMode::AccountPool {
+        return native_response_operation(
+            state,
+            control,
+            path,
+            NativeResponseOperation::Detail,
+            None,
+            headers,
+        )
+        .await;
+    }
 
     let row = store::admin_response(
         pool(&state)?,
@@ -439,8 +841,25 @@ async fn mutate_response(
     path: ResourcePath,
     body: RevisionBody,
     delete: bool,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let mode = parse_mode(&path.mode)?;
+    if mode == ModelAccessMode::AccountPool {
+        if body.expected_revision.is_some() {
+            return Err(ApiError::BadRequest(
+                "account_pool Responses mutations do not use local revisions".into(),
+            ));
+        }
+        let operation = if delete {
+            NativeResponseOperation::Delete
+        } else {
+            NativeResponseOperation::Cancel
+        };
+        return native_response_operation(state, control, path, operation, None, headers).await;
+    }
+    let expected_revision = body.expected_revision.ok_or_else(|| {
+        ApiError::BadRequest("expected_revision is required for local Responses mutations".into())
+    })?;
 
     let (row, active) = store::admin_cancel_or_delete_response(
         pool(&state)?,
@@ -448,7 +867,7 @@ async fn mutate_response(
         path.owner_user_id,
         mode,
         &path.id,
-        body.expected_revision,
+        expected_revision,
         delete,
     )
     .await?;
@@ -466,11 +885,12 @@ pub async fn tenant_response_cancel(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    mutate_response(state, control, path, body, false).await
+    mutate_response(state, control, path, body, false, headers).await
 }
 
 pub async fn tenant_response_delete(
@@ -478,11 +898,12 @@ pub async fn tenant_response_delete(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    mutate_response(state, control, path, body, true).await
+    mutate_response(state, control, path, body, true, headers).await
 }
 
 pub async fn platform_response_cancel(
@@ -490,13 +911,14 @@ pub async fn platform_response_cancel(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
         ApiError::BadRequest("root reason is required for platform Responses mutation".into())
     })?;
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
-    mutate_response(state, control, path, body, false).await
+    mutate_response(state, control, path, body, false, headers).await
 }
 
 pub async fn platform_response_delete(
@@ -504,13 +926,14 @@ pub async fn platform_response_delete(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
         ApiError::BadRequest("root reason is required for platform Responses mutation".into())
     })?;
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
-    mutate_response(state, control, path, body, true).await
+    mutate_response(state, control, path, body, true, headers).await
 }
 
 pub async fn tenant_response_input_items(
@@ -519,10 +942,11 @@ pub async fn tenant_response_input_items(
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    response_input_items(state, control, path, query).await
+    response_input_items(state, control, path, query, headers).await
 }
 
 pub async fn platform_response_input_items(
@@ -531,10 +955,11 @@ pub async fn platform_response_input_items(
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let reason = reason_from_raw(query.as_deref())?;
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
-    response_input_items(state, control, path, query).await
+    response_input_items(state, control, path, query, headers).await
 }
 
 async fn response_input_items(
@@ -542,8 +967,21 @@ async fn response_input_items(
     control: store::ResponseControlScope,
     path: ResourcePath,
     query: Option<String>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let mode = parse_mode(&path.mode)?;
+    if mode == ModelAccessMode::AccountPool {
+        let query = native_item_query(query.as_deref())?;
+        return native_response_operation(
+            state,
+            control,
+            path,
+            NativeResponseOperation::InputItems,
+            query,
+            headers,
+        )
+        .await;
+    }
     let q = parse_item_query(query.as_deref())?;
     let row = store::admin_response(
         pool(&state)?,
@@ -610,6 +1048,11 @@ async fn list_conversation_page(
     q: ListQuery,
 ) -> Result<Json<Page<ConversationSummary>>> {
     let mode = parse_mode(&q.mode)?;
+    if mode == ModelAccessMode::AccountPool {
+        return Err(ApiError::BadRequest(
+            "account_pool Conversations administration is not implemented".into(),
+        ));
+    }
 
     let (p, size, offset) = page(q.page, q.page_size)?;
     let items = store::admin_list_conversations(
@@ -822,7 +1265,9 @@ pub async fn tenant_conversation_delete(
         state,
         control,
         path,
-        body.expected_revision,
+        body.expected_revision.ok_or_else(|| {
+            ApiError::BadRequest("expected_revision is required for Conversation mutations".into())
+        })?,
         ConversationMutation::Delete,
     )
     .await?;
@@ -867,7 +1312,9 @@ pub async fn platform_conversation_delete(
         state,
         control,
         path,
-        body.expected_revision,
+        body.expected_revision.ok_or_else(|| {
+            ApiError::BadRequest("expected_revision is required for Conversation mutations".into())
+        })?,
         ConversationMutation::Delete,
     )
     .await?;
@@ -1010,7 +1457,9 @@ async fn remove_item(
             owner_user_id: path.owner_user_id,
             id: path.id,
         },
-        body.expected_revision,
+        body.expected_revision.ok_or_else(|| {
+            ApiError::BadRequest("expected_revision is required for Conversation mutations".into())
+        })?,
         ConversationMutation::RemoveItem(item_id.clone()),
     )
     .await?;
@@ -1124,7 +1573,10 @@ mod tests {
         );
         // Native account-pool management is a separate adapter, not local
         // storage. Do not silently route it through node_dispatch.
-        assert!(parse_mode("account_pool").is_err());
+        assert_eq!(
+            parse_mode("account_pool").unwrap(),
+            ModelAccessMode::AccountPool
+        );
         assert!(parse_mode("pt").is_err());
     }
 

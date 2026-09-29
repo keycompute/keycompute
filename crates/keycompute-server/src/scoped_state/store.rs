@@ -308,6 +308,72 @@ impl ResponseControlScope {
         Ok(())
     }
 
+    /// Bounded read-only provenance check for operations that may wait on a resource lock
+    /// before dispatching an upstream network request. Unlike `revalidate_for_admin`,
+    /// this deliberately acquires no identity fence/row locks, so no global identity
+    /// lock is retained across the network call. The resource DAO still owns action
+    /// authorization; this only proves that the original signed console session is
+    /// current immediately before dispatch.
+    pub(crate) async fn verify_current(&self, db: &impl ConnectionTrait) -> Result<()> {
+        let denied = || ApiError::Forbidden("Responses control authority changed".into());
+        self.check_expiry()?;
+        let authorized = match self.authority {
+            ResponseControlAuthority::TenantAdmin {
+                scope,
+                token_version,
+                tenant_authz_version,
+                membership_authz_version,
+                ..
+            } => {
+                let row = timed(db.query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT EXISTS(SELECT 1 FROM users u JOIN tenants t ON t.id=$3 JOIN tenant_memberships m ON m.tenant_id=t.id AND m.user_id=u.id WHERE u.id=$1 AND u.status='active' AND u.token_version=$2 AND t.status='active' AND t.authz_version=$4 AND m.status='active' AND m.authz_version=$5 AND m.tenant_role='admin') AS authorized",
+                    [
+                        scope.user_id().into(),
+                        token_version.into(),
+                        scope.tenant_id().into(),
+                        tenant_authz_version.into(),
+                        membership_authz_version.into(),
+                    ],
+                )))
+                .await?
+                .ok_or_else(denied)?;
+                row.try_get::<bool>("", "authorized").map_err(storage)?
+            }
+            ResponseControlAuthority::Root {
+                scope,
+                token_version,
+                selected,
+                ..
+            } => {
+                let selected_tenant = selected.map(|m| m.tenant_id);
+                let selected_tenant_version = selected.map(|m| m.tenant_authz_version);
+                let selected_member_version = selected.map(|m| m.membership_authz_version);
+                let selected_role = selected.map(|m| m.tenant_role.as_str());
+                let row = timed(db.query_one(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "SELECT EXISTS(SELECT 1 FROM users u WHERE u.id=$1 AND u.status='active' AND u.token_version=$2 AND u.platform_role='root' AND EXISTS(SELECT 1 FROM tenants target WHERE target.id=$3) AND ($4::uuid IS NULL OR EXISTS(SELECT 1 FROM tenants t JOIN tenant_memberships m ON m.tenant_id=t.id WHERE t.id=$4 AND t.status='active' AND t.authz_version=$5 AND m.user_id=u.id AND m.status='active' AND m.authz_version=$6 AND m.tenant_role=$7))) AS authorized",
+                    [
+                        scope.user_id().into(),
+                        token_version.into(),
+                        self.tenant_id.into(),
+                        selected_tenant.into(),
+                        selected_tenant_version.into(),
+                        selected_member_version.into(),
+                        selected_role.into(),
+                    ],
+                )))
+                .await?
+                .ok_or_else(denied)?;
+                row.try_get::<bool>("", "authorized").map_err(storage)?
+            }
+        };
+        if !authorized {
+            return Err(denied());
+        }
+        self.check_expiry()
+    }
+
     pub(crate) async fn revalidate_for_admin(
         &self,
         tx: &DatabaseTransaction,

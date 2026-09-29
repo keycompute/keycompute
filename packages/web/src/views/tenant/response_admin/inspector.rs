@@ -44,7 +44,15 @@ pub(super) fn Inspector(
                             let detail = api
                                 .response(address.mode, address.owner, &address.id, None, &token)
                                 .await?;
-                            Ok(Content::Detail(detail.response.unwrap_or(Value::Null)))
+                            Ok(Content::Detail(
+                                if address.mode
+                                    == client_api::api::response_control::ResponseMode::AccountPool
+                                {
+                                    detail.native_body.unwrap_or(Value::Null)
+                                } else {
+                                    detail.response.unwrap_or(Value::Null)
+                                },
+                            ))
                         }
                         (true, ReadKind::Detail) => {
                             let detail = api

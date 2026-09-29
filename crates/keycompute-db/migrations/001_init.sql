@@ -473,18 +473,21 @@ CREATE INDEX IF NOT EXISTS idx_responses_idempotency_claims_tenant_replay
     ON responses_idempotency_claims(tenant_id, completed_at DESC, binding_id DESC)
     WHERE execution_state = 'completed';
 
--- response_affinities: OpenAI resp_*/conv_* 资源到创建账号的租户+用户绑定。
--- 后续资源操作及 conversation 请求必须继续命中同一上游账号和调用者。
+-- response_affinities: OpenAI Responses/Conversation opaque resource IDs to their owning account.
+-- Subsequent operations must retain the exact tenant, original user, resource kind and upstream account.
 CREATE TABLE IF NOT EXISTS response_affinities (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     -- Immutable caller identity snapshot, intentionally not a cascading user FK:
     -- accepted requests must still persist settlement after a user is removed.
     -- NULL is for internal/unowned rows; public paths require an exact user ID.
     user_id UUID,
-    -- Also stores official conv_* IDs; the namespaces are disjoint.
-    -- OpenAI resource IDs are opaque. The 2048-byte application limit keeps
+    -- Stores both Response and Conversation resource IDs. IDs are opaque;
+    -- resource_kind is the only durable semantic discriminator. The 2048-byte limit keeps
     -- this primary-key component below PostgreSQL's B-tree entry limit.
     response_id VARCHAR(2048) NOT NULL,
+    -- Explicit upstream resource kind. IDs are opaque, so administration must never infer this from a prefix.
+    -- NULL is reserved for internal/legacy rows that are not eligible for native administration.
+    resource_kind VARCHAR(20) CONSTRAINT ck_response_affinities_resource_kind CHECK (resource_kind IS NULL OR resource_kind IN ('response','conversation')),
     provider VARCHAR(50) NOT NULL,
     -- Actual upstream model, used when a continuation omits `model` as the
     -- official Responses contract permits.
@@ -551,6 +554,9 @@ CREATE INDEX IF NOT EXISTS idx_response_affinities_account
     ON response_affinities(account_id);
 CREATE INDEX IF NOT EXISTS idx_response_affinities_user
     ON response_affinities(tenant_id,user_id,response_id);
+CREATE INDEX IF NOT EXISTS idx_response_affinities_admin_kind
+    ON response_affinities(tenant_id,resource_kind,user_id,created_at DESC,response_id DESC)
+    WHERE NOT is_reservation AND deleted_at IS NULL AND account_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_response_affinities_expires
     ON response_affinities(expires_at);
 CREATE INDEX IF NOT EXISTS idx_response_affinities_local_warmups

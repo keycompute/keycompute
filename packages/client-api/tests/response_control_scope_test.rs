@@ -392,3 +392,163 @@ async fn conversation_details_reject_other_scopes_and_legacy_item_helpers_share_
     );
     s.verify().await;
 }
+
+fn native_summary(tenant: Uuid, owner: Uuid, account: Uuid, id: &str) -> Value {
+    json!({
+        "id":id,"tenant_id":tenant,"owner_user_id":owner,"mode":"account_pool",
+        "provider":"openai","account_id":account,"model":"gpt-native","status":"completed",
+        "background":false,"store_response":true,"stream":false,"previous_response_id":null,
+        "conversation_id":null,"revision":null,"created_at":"2026-01-01T00:00:00Z",
+        "updated_at":"2026-01-01T00:00:00Z","expires_at":"2030-01-01T00:00:00Z",
+        "deleted":false,"local_content_available":false,"native_content_available":true
+    })
+}
+
+#[tokio::test]
+async fn native_account_pool_detail_requires_the_exact_native_envelope() {
+    let s = MockServer::start().await;
+    let tenant = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let account = Uuid::new_v4();
+    let id = "opaque-native-resource";
+    let api = ResponseControlApi::tenant(&client(&s), tenant).unwrap();
+    let good = native_summary(tenant, owner, account, id);
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/tenants/{tenant}/responses/account_pool/{owner}/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "summary":good,"response":null,"native_body":{"id":id,"object":"response","status":"completed"}
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    let detail = api
+        .response(ResponseMode::AccountPool, owner, id, None, "console")
+        .await
+        .unwrap();
+    assert!(detail.response.is_none());
+    assert_eq!(detail.native_body.unwrap()["id"], id);
+    s.verify().await;
+
+    for (field, value) in [
+        ("tenant_id", json!(Uuid::new_v4())),
+        ("owner_user_id", json!(Uuid::new_v4())),
+        ("account_id", Value::Null),
+        ("provider", json!("")),
+        ("revision", json!(1)),
+        ("local_content_available", json!(true)),
+        ("native_content_available", json!(false)),
+    ] {
+        s.reset().await;
+        let mut row = native_summary(tenant, owner, account, id);
+        row[field] = value;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "summary":row,"response":null,"native_body":{"id":id,"object":"response"}
+            })))
+            .expect(1)
+            .mount(&s)
+            .await;
+        assert!(
+            api.response(ResponseMode::AccountPool, owner, id, None, "console")
+                .await
+                .is_err()
+        );
+        s.verify().await;
+    }
+}
+
+#[tokio::test]
+async fn native_commands_have_no_fake_revision_and_are_single_dispatch() {
+    let s = MockServer::start().await;
+    let tenant = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let id = "opaque-native-resource";
+    let api = ResponseControlApi::tenant(&client(&s), tenant).unwrap();
+    let command = NativeResponseCommand::default();
+
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/api/v1/tenants/{tenant}/responses/account_pool/{owner}/{id}/cancel"
+        )))
+        .and(body_json(json!({})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":id,"object":"response","status":"cancelled"})),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    api.cancel_native_response(owner, id, &command, "console")
+        .await
+        .unwrap();
+    s.verify().await;
+
+    s.reset().await;
+    Mock::given(method("DELETE"))
+        .and(path(format!(
+            "/api/v1/tenants/{tenant}/responses/account_pool/{owner}/{id}"
+        )))
+        .and(body_json(json!({})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":id,"object":"response","deleted":true})),
+        )
+        .expect(1)
+        .mount(&s)
+        .await;
+    assert!(
+        api.delete_native_response(owner, id, &command, "console")
+            .await
+            .unwrap()
+            .deleted
+    );
+    s.verify().await;
+
+    let fake = RevisionCommand {
+        expected_revision: 1,
+        reason: None,
+    };
+    assert!(
+        api.cancel_response(ResponseMode::AccountPool, owner, id, &fake, "console")
+            .await
+            .is_err()
+    );
+    assert!(
+        api.delete_response(ResponseMode::AccountPool, owner, id, &fake, "console")
+            .await
+            .is_err()
+    );
+    assert_eq!(s.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn native_lists_conversations_and_root_without_reason_fail_before_http() {
+    let s = MockServer::start().await;
+    let tenant = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let api = ResponseControlApi::tenant(&client(&s), tenant).unwrap();
+    let q = ResourceListQuery {
+        mode: Some(ResponseMode::AccountPool),
+        owner_user_id: Some(owner),
+        page: Some(1),
+        page_size: Some(20),
+        reason: None,
+    };
+    assert!(api.responses(&q, "console").await.is_err());
+    assert!(api.response_count(&q, "console").await.is_err());
+    assert!(api.conversations(&q, "console").await.is_err());
+    assert!(api.conversation_count(&q, "console").await.is_err());
+    assert!(
+        api.conversation(ResponseMode::AccountPool, owner, "opaque", None, "console")
+            .await
+            .is_err()
+    );
+
+    let root = ResponseControlApi::platform_tenant(&client(&s), tenant).unwrap();
+    assert!(
+        root.cancel_native_response(owner, "opaque", &NativeResponseCommand::default(), "root")
+            .await
+            .is_err()
+    );
+    assert!(s.received_requests().await.unwrap().is_empty());
+}

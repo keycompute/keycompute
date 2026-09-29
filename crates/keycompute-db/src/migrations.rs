@@ -8,6 +8,16 @@ use sha2::{Digest, Sha256};
 
 const V0001: &str = include_str!("../migrations/001_init.sql");
 const MIGRATION_LOCK_KEY: i64 = 0x4b_43_4d_49_47_52; // "KCMIGR"
+const LEGACY_V0001_CHECKSUM: &str =
+    "11529d90c1318c35660a5e90848b927d90bf02c2a3d743b45d62688cc78ce00a";
+const RESOURCE_KIND_V0001_CHECKSUM: &str =
+    "80aaa6a93f458ed3849fe584a6c1bd465d1a4ad334361cf49dc71e4f68e555d3";
+const LEGACY_V0001_COMPAT_SQL: &str = r#"
+ALTER TABLE response_affinities ADD COLUMN IF NOT EXISTS resource_kind VARCHAR(20);
+ALTER TABLE response_affinities DROP CONSTRAINT IF EXISTS ck_response_affinities_resource_kind;
+ALTER TABLE response_affinities ADD CONSTRAINT ck_response_affinities_resource_kind CHECK (resource_kind IS NULL OR resource_kind IN ('response','conversation'));
+CREATE INDEX IF NOT EXISTS idx_response_affinities_admin_kind ON response_affinities(tenant_id,resource_kind,user_id,created_at DESC,response_id DESC) WHERE NOT is_reservation AND deleted_at IS NULL AND account_id IS NOT NULL;
+"#;
 
 struct Migration {
     version: i64,
@@ -82,7 +92,7 @@ async fn run_migration_step(db: &impl ConnectionTrait) -> Result<MigrationStep, 
     .await
     .map_err(schema_error)?;
 
-    let applied = AppliedMigration::find_by_statement(Statement::from_string(
+    let mut applied = AppliedMigration::find_by_statement(Statement::from_string(
         DbBackend::Postgres,
         "SELECT version, checksum FROM schema_migrations ORDER BY version".to_string(),
     ))
@@ -107,7 +117,7 @@ async fn run_migration_step(db: &impl ConnectionTrait) -> Result<MigrationStep, 
         }
     }
 
-    for row in &applied {
+    for row in &mut applied {
         let known = MIGRATIONS
             .iter()
             .find(|migration| migration.version == row.version)
@@ -119,6 +129,23 @@ async fn run_migration_step(db: &impl ConnectionTrait) -> Result<MigrationStep, 
             })?;
         let expected = checksum(known.sql);
         if row.checksum != expected {
+            if row.version == 1
+                && row.checksum == LEGACY_V0001_CHECKSUM
+                && expected == RESOURCE_KIND_V0001_CHECKSUM
+            {
+                db.execute_unprepared(LEGACY_V0001_COMPAT_SQL)
+                    .await
+                    .map_err(schema_error)?;
+                db.execute(Statement::from_sql_and_values(
+                    DbBackend::Postgres,
+                    "UPDATE schema_migrations SET checksum=$1 WHERE version=1 AND checksum=$2",
+                    [expected.clone().into(), row.checksum.clone().into()],
+                ))
+                .await
+                .map_err(schema_error)?;
+                row.checksum = expected;
+                continue;
+            }
             return Err(DbError::SchemaInitializationError(format!(
                 "migration V{:04} checksum mismatch: database={}, binary={expected}",
                 row.version, row.checksum
@@ -343,6 +370,15 @@ mod tests {
                 .iter()
                 .all(|migration| checksum(migration.sql).len() == 64)
         );
+    }
+
+    #[test]
+    fn legacy_baseline_compatibility_is_exact_and_bounded() {
+        assert_eq!(LEGACY_V0001_CHECKSUM.len(), 64);
+        assert_eq!(checksum(V0001), RESOURCE_KIND_V0001_CHECKSUM);
+        assert!(LEGACY_V0001_COMPAT_SQL.contains("ADD COLUMN IF NOT EXISTS resource_kind"));
+        assert!(LEGACY_V0001_COMPAT_SQL.contains("resource_kind IN ('response','conversation')"));
+        assert!(!V0001.contains("ALTER TABLE"));
     }
 
     #[test]

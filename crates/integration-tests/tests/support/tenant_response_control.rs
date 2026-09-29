@@ -1353,3 +1353,764 @@ async fn real_resource_control_client_preserves_owner_and_item_cursor_contracts(
     drop(server);
     f.finish().await;
 }
+
+#[tokio::test]
+async fn native_account_pool_response_control_is_exact_owner_account_and_kind_scoped() {
+    let mut f = Fixture::new().await;
+    let admin = tenant_owner_console_token(&f).await;
+    let member = scoped_jwt(&f.state, &f.user).await;
+    let tenant = f.user.tenant_id;
+    let owner = f.user.id;
+
+    let mut body = f.body(Op::Responses);
+    body["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(body)).await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    let base = format!("/api/v1/tenants/{tenant}/responses/account_pool/{owner}/{id}");
+
+    let affinity = f
+        .db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT resource_kind,account_id FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3",
+            [tenant.into(), owner.into(), id.clone().into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        affinity.try_get::<String>("", "resource_kind").unwrap(),
+        "response"
+    );
+    let account_id = affinity.try_get::<Uuid>("", "account_id").unwrap();
+    assert!(!account_id.is_nil());
+
+    // A legacy row with no proven kind is not guessed from its opaque ID.
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE response_affinities SET resource_kind=NULL WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3",
+        [tenant.into(), owner.into(), id.clone().into()],
+    ))
+    .await
+    .unwrap();
+    let before = f.upstream.calls.lock().unwrap().len();
+    expect(
+        http(f.app.clone(), Method::GET, &base, Some(&admin), None).await,
+        StatusCode::NOT_FOUND,
+    );
+    assert_eq!(f.upstream.calls.lock().unwrap().len(), before);
+
+    // A personal /v1 Responses lookup proves the semantic kind without any ID-prefix inference.
+    expect(
+        f.request(Method::GET, &format!("/v1/responses/{id}"), None)
+            .await,
+        StatusCode::OK,
+    );
+    let kind = f
+        .db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT resource_kind FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3",
+            [tenant.into(), owner.into(), id.clone().into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "resource_kind")
+        .unwrap();
+    assert_eq!(kind, "response");
+
+    // Native account-pool resources are direct-ID only, never mixed into local lists/counts.
+    for path in [
+        format!("/api/v1/tenants/{tenant}/responses?mode=account_pool&owner_user_id={owner}"),
+        format!("/api/v1/tenants/{tenant}/responses/count?mode=account_pool&owner_user_id={owner}"),
+    ] {
+        expect(
+            http(f.app.clone(), Method::GET, &path, Some(&admin), None).await,
+            StatusCode::BAD_REQUEST,
+        );
+    }
+
+    expect(
+        http(f.app.clone(), Method::GET, &base, Some(&member), None).await,
+        StatusCode::FORBIDDEN,
+    );
+    let detail = http(f.app.clone(), Method::GET, &base, Some(&admin), None).await;
+    assert_eq!(detail.status, StatusCode::OK, "{}", detail.body);
+    assert_eq!(detail.body["summary"]["mode"], "account_pool");
+    assert_eq!(detail.body["summary"]["account_id"], account_id.to_string());
+    assert!(detail.body["summary"]["revision"].is_null());
+    assert!(detail.body["response"].is_null());
+    assert_eq!(detail.body["native_body"]["id"], id);
+    assert_eq!(detail.headers["cache-control"], "private, no-store");
+
+    let items = expect(
+        http(
+            f.app.clone(),
+            Method::GET,
+            &format!("{base}/input_items?order=asc&limit=5"),
+            Some(&admin),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(items["object"], "list");
+
+    // Native commands never accept a synthetic local revision.
+    expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            &format!("{base}/cancel"),
+            Some(&admin),
+            Some(json!({"expected_revision":1})),
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+    );
+    let wrong_owner = create_test_user(&f.db, tenant, "native-control-other", &f.run).await;
+    expect(
+        http(
+            f.app.clone(),
+            Method::GET,
+            &base.replace(&owner.to_string(), &wrong_owner.id.to_string()),
+            Some(&admin),
+            None,
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+    );
+
+    let cancelled = expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            &format!("{base}/cancel"),
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(cancelled["id"], id);
+
+    // Current account-pool authorization remains authoritative for an old opaque resource.
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE passthrough_bindings SET pool_enabled=FALSE,revision=revision+1 WHERE account_id=$1 AND tenant_id=$2",
+        [account_id.into(), tenant.into()],
+    ))
+    .await
+    .unwrap();
+    let calls = f.upstream.calls.lock().unwrap().len();
+    expect(
+        http(f.app.clone(), Method::GET, &base, Some(&admin), None).await,
+        StatusCode::NOT_FOUND,
+    );
+    assert_eq!(f.upstream.calls.lock().unwrap().len(), calls);
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE passthrough_bindings SET pool_enabled=TRUE,revision=revision+1 WHERE account_id=$1 AND tenant_id=$2",
+        [account_id.into(), tenant.into()],
+    ))
+    .await
+    .unwrap();
+
+    let root = create_test_user(&f.db, tenant, "native-control-root", &f.run).await;
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET platform_role='root' WHERE id=$1",
+        [root.id.into()],
+    ))
+    .await
+    .unwrap();
+    let root_token = token_for(&f, &f.state, root.id, None, 3600).await;
+    let root_path = base.replacen("/api/v1/tenants/", "/api/v1/platform/tenants/", 1);
+    expect(
+        http(
+            f.app.clone(),
+            Method::GET,
+            &root_path,
+            Some(&root_token),
+            None,
+        )
+        .await,
+        StatusCode::BAD_REQUEST,
+    );
+    expect(
+        http(
+            f.app.clone(),
+            Method::GET,
+            &format!("{root_path}?reason=incident"),
+            Some(&root_token),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+    );
+
+    let deleted = expect(
+        http(
+            f.app.clone(),
+            Method::DELETE,
+            &base,
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(deleted, json!({"id":id,"object":"response","deleted":true}));
+    let tombstone = f
+        .db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT deleted_at IS NOT NULL AS deleted FROM response_affinities WHERE tenant_id=$1 AND response_id=$2",
+            [tenant.into(), id.clone().into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<bool>("", "deleted")
+        .unwrap();
+    assert!(tombstone);
+    expect(
+        http(f.app.clone(), Method::GET, &base, Some(&admin), None).await,
+        StatusCode::NOT_FOUND,
+    );
+
+    for call in f.upstream.calls.lock().unwrap().iter() {
+        let auth = call
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_ne!(auth, format!("Bearer {admin}"));
+        assert_ne!(auth, format!("Bearer {root_token}"));
+    }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_response_never_dispatches_after_console_expiry_while_waiting_for_account_lock() {
+    let mut f = Fixture::new().await;
+    let tenant_id = f.user.tenant_id;
+    let owner_id = f.user.id;
+    let tenant = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut payload = f.body(Op::Responses);
+    payload["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(payload))
+            .await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    let account_id = f
+        .db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT account_id FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND resource_kind='response'",
+            [tenant_id.into(), owner_id.into(), id.clone().into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<Uuid>("", "account_id")
+        .unwrap();
+
+    let blocker = f.db.begin().await.unwrap();
+    blocker
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM accounts WHERE id=$1 FOR UPDATE",
+            [account_id.into()],
+        ))
+        .await
+        .unwrap();
+
+    let ttl = 3;
+    let admin = token_for(&f, &f.state, tenant.owner_user_id, Some(tenant_id), ttl).await;
+    let signed_deadline = Utc::now().timestamp() + ttl;
+    let path = format!("/api/v1/tenants/{tenant_id}/responses/account_pool/{owner_id}/{id}");
+    let before = f
+        .upstream
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.path.contains(&format!("responses/{id}")))
+        .count();
+    let app = f.app.clone();
+    let request_path = path.clone();
+    let request =
+        tokio::spawn(
+            async move { http(app, Method::GET, &request_path, Some(&admin), None).await },
+        );
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        !request.is_finished(),
+        "native request must wait on the owning account lock"
+    );
+    assert_eq!(
+        f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.path.contains(&format!("responses/{id}")))
+            .count(),
+        before,
+        "an account-locked request must not dispatch early"
+    );
+    while Utc::now().timestamp() <= signed_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    blocker.commit().await.unwrap();
+    let result = request.await.unwrap();
+    assert!(
+        matches!(
+            result.status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ),
+        "{}",
+        result.body
+    );
+    assert_eq!(
+        f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.path.contains(&format!("responses/{id}")))
+            .count(),
+        before,
+        "an expired console session must be rejected before upstream dispatch"
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_response_never_dispatches_after_membership_revocation_while_waiting_for_account_lock()
+ {
+    let mut f = Fixture::new().await;
+    let tenant_id = f.user.tenant_id;
+    let owner_id = f.user.id;
+    let controller = create_test_user(&f.db, tenant_id, "native-control-admin", &f.run).await;
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE tenant_memberships SET tenant_role='admin',authz_version=authz_version+1 WHERE tenant_id=$1 AND user_id=$2",
+        [tenant_id.into(), controller.id.into()],
+    )).await.unwrap();
+    let admin = token_for(&f, &f.state, controller.id, Some(tenant_id), 3600).await;
+
+    let mut payload = f.body(Op::Responses);
+    payload["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(payload))
+            .await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    let account_id = f.db.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT account_id FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND resource_kind='response'",
+        [tenant_id.into(), owner_id.into(), id.clone().into()],
+    )).await.unwrap().unwrap().try_get::<Uuid>("", "account_id").unwrap();
+
+    let blocker = f.db.begin().await.unwrap();
+    blocker
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT id FROM accounts WHERE id=$1 FOR UPDATE",
+            [account_id.into()],
+        ))
+        .await
+        .unwrap();
+    let path = format!("/api/v1/tenants/{tenant_id}/responses/account_pool/{owner_id}/{id}");
+    let before = f
+        .upstream
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.path.contains(&format!("responses/{id}")))
+        .count();
+    let app = f.app.clone();
+    let request_path = path.clone();
+    let request =
+        tokio::spawn(
+            async move { http(app, Method::GET, &request_path, Some(&admin), None).await },
+        );
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    assert!(
+        !request.is_finished(),
+        "native request must wait on the owning account lock"
+    );
+
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE tenant_memberships SET tenant_role='member',authz_version=authz_version+1 WHERE tenant_id=$1 AND user_id=$2",
+        [tenant_id.into(), controller.id.into()],
+    )).await.unwrap();
+    blocker.commit().await.unwrap();
+    let result = request.await.unwrap();
+    assert_eq!(result.status, StatusCode::FORBIDDEN, "{}", result.body);
+    assert_eq!(
+        f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|call| call.path.contains(&format!("responses/{id}")))
+            .count(),
+        before,
+        "revoked tenant administration must be rejected before upstream dispatch",
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_response_private_result_is_withheld_after_console_expiry() {
+    let mut f = Fixture::new().await;
+    let tenant_id = f.user.tenant_id;
+    let owner_id = f.user.id;
+    let tenant = keycompute_db::Tenant::find_by_id(&f.db, tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let ttl = 3;
+    let admin = token_for(&f, &f.state, tenant.owner_user_id, Some(tenant_id), ttl).await;
+    let signed_deadline = Utc::now().timestamp() + ttl;
+
+    let mut payload = f.body(Op::Responses);
+    payload["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(payload))
+            .await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/v1/tenants/{tenant_id}/responses/account_pool/{owner_id}/{id}");
+    f.upstream.native_hold.store(true, Ordering::Relaxed);
+
+    let app = f.app.clone();
+    let token = admin.clone();
+    let request_path = path.clone();
+    let request =
+        tokio::spawn(
+            async move { http(app, Method::GET, &request_path, Some(&token), None).await },
+        );
+    let mut dispatched = false;
+    for _ in 0..500 {
+        dispatched = f
+            .upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.path.contains(&format!("responses/{id}")));
+        if dispatched {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        dispatched,
+        "native admin request never reached the isolated upstream"
+    );
+
+    while Utc::now().timestamp() <= signed_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    f.upstream.native_release.notify_waiters();
+
+    let result = request.await.unwrap();
+    assert!(
+        matches!(
+            result.status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+        ),
+        "{}",
+        result.body
+    );
+    assert!(!result.body.to_string().contains("native-admin"));
+    {
+        let calls = f.upstream.calls.lock().unwrap();
+        let native_gets = calls
+            .iter()
+            .filter(|call| call.path.contains(&format!("responses/{id}")))
+            .count();
+        assert_eq!(native_gets, 1, "expiry must never replay the upstream read");
+    }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_response_holds_one_account_credential_snapshot_until_dispatch_finishes() {
+    let mut f = Fixture::new().await;
+    let admin = tenant_owner_console_token(&f).await;
+    let tenant = f.user.tenant_id;
+    let owner = f.user.id;
+    let mut payload = f.body(Op::Responses);
+    payload["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(payload))
+            .await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    let row = f.db.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT account_id FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND resource_kind='response'",
+        [tenant.into(), owner.into(), id.clone().into()],
+    )).await.unwrap().unwrap();
+    let account_id = row.try_get::<Uuid>("", "account_id").unwrap();
+    let path = format!("/api/v1/tenants/{tenant}/responses/account_pool/{owner}/{id}");
+
+    f.upstream.native_hold.store(true, Ordering::Relaxed);
+    let app = f.app.clone();
+    let token = admin.clone();
+    let request_path = path.clone();
+    let pending =
+        tokio::spawn(
+            async move { http(app, Method::GET, &request_path, Some(&token), None).await },
+        );
+    for _ in 0..500 {
+        if f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.path.contains(&format!("responses/{id}")))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.path.contains(&format!("responses/{id}")))
+    );
+
+    let db = f.db.clone();
+    let rotated = keycompute_runtime::encrypt_api_key("rotated-native-secret")
+        .unwrap()
+        .into_inner();
+    let update = tokio::spawn(async move {
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE accounts SET upstream_api_key_encrypted=$2,upstream_api_key_preview='rotated***',upstream_config_version=GREATEST(upstream_config_version,clock_timestamp())+INTERVAL '1 microsecond' WHERE id=$1",
+            [account_id.into(), rotated.into()],
+        )).await.unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !update.is_finished(),
+        "credential rotation must wait for the in-flight account snapshot"
+    );
+
+    f.upstream.native_release.notify_waiters();
+    let result = pending.await.unwrap();
+    assert_eq!(result.status, StatusCode::OK, "{}", result.body);
+    update.await.unwrap();
+    f.upstream.native_hold.store(false, Ordering::Relaxed);
+
+    let fresh = http(f.app.clone(), Method::GET, &path, Some(&admin), None).await;
+    assert_eq!(fresh.status, StatusCode::OK, "{}", fresh.body);
+    {
+        let calls = f.upstream.calls.lock().unwrap();
+        let auth = calls
+            .iter()
+            .rev()
+            .find(|call| call.path.contains(&format!("responses/{id}")))
+            .and_then(|call| call.headers.get("authorization"))
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+        assert_eq!(auth, "Bearer rotated-native-secret");
+    }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_response_delete_serializes_against_new_settlement_state() {
+    let mut f = Fixture::new().await;
+    let admin = tenant_owner_console_token(&f).await;
+    let tenant = f.user.tenant_id;
+    let owner = f.user.id;
+    let mut payload = f.body(Op::Responses);
+    payload["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(payload))
+            .await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    let row = f.db.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT account_id FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND resource_kind='response'",
+        [tenant.into(), owner.into(), id.clone().into()],
+    )).await.unwrap().unwrap();
+    let account_id = row.try_get::<Uuid>("", "account_id").unwrap();
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE response_affinities SET settlement=NULL,settlement_next_poll_at=NULL,settlement_lease_until=NULL WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3",
+        [tenant.into(), owner.into(), id.clone().into()],
+    )).await.unwrap();
+
+    f.upstream.native_hold.store(true, Ordering::Relaxed);
+    let path = format!("/api/v1/tenants/{tenant}/responses/account_pool/{owner}/{id}");
+    let app = f.app.clone();
+    let token = admin.clone();
+    let request_path = path.clone();
+    let pending_delete = tokio::spawn(async move {
+        http(
+            app,
+            Method::DELETE,
+            &request_path,
+            Some(&token),
+            Some(json!({})),
+        )
+        .await
+    });
+    for _ in 0..500 {
+        if f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.path.contains(&format!("responses/{id}")))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.path.contains(&format!("responses/{id}")))
+    );
+
+    let db = f.db.clone();
+    let update_id = id.clone();
+    let settlement = tokio::spawn(async move {
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE response_affinities SET settlement=$4,settlement_next_poll_at=NOW() WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND account_id=$5 AND deleted_at IS NULL",
+            [tenant.into(), owner.into(), update_id.into(), json!({"pending":true}).into(), account_id.into()],
+        )).await.unwrap().rows_affected()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !settlement.is_finished(),
+        "settlement update must wait for the in-flight native delete affinity snapshot"
+    );
+
+    f.upstream.native_release.notify_waiters();
+    let deleted = pending_delete.await.unwrap();
+    assert_eq!(deleted.status, StatusCode::OK, "{}", deleted.body);
+    assert_eq!(
+        settlement.await.unwrap(),
+        0,
+        "a settlement update that waited behind a confirmed tombstone must not attach new work"
+    );
+    f.upstream.native_hold.store(false, Ordering::Relaxed);
+    let state = f.db.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT deleted_at IS NOT NULL AS deleted,settlement IS NULL AS clear FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3",
+        [tenant.into(), owner.into(), id.into()],
+    )).await.unwrap().unwrap();
+    assert!(state.try_get::<bool>("", "deleted").unwrap());
+    assert!(state.try_get::<bool>("", "clear").unwrap());
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_response_private_result_is_withheld_after_pool_grant_revocation() {
+    let mut f = Fixture::new().await;
+    let admin = tenant_owner_console_token(&f).await;
+    let tenant = f.user.tenant_id;
+    let owner = f.user.id;
+    let mut payload = f.body(Op::Responses);
+    payload["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(payload))
+            .await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    let row = f.db.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT account_id FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND resource_kind='response'",
+        [tenant.into(), owner.into(), id.clone().into()],
+    )).await.unwrap().unwrap();
+    let account_id = row.try_get::<Uuid>("", "account_id").unwrap();
+    let path = format!("/api/v1/tenants/{tenant}/responses/account_pool/{owner}/{id}");
+
+    f.upstream.native_hold.store(true, Ordering::Relaxed);
+    let app = f.app.clone();
+    let token = admin.clone();
+    let request_path = path.clone();
+    let pending =
+        tokio::spawn(
+            async move { http(app, Method::GET, &request_path, Some(&token), None).await },
+        );
+    for _ in 0..500 {
+        if f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.path.contains(&format!("responses/{id}")))
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        f.upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.path.contains(&format!("responses/{id}")))
+    );
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE passthrough_bindings SET pool_enabled=FALSE WHERE account_id=$1",
+        [account_id.into()],
+    ))
+    .await
+    .unwrap();
+    f.upstream.native_release.notify_waiters();
+    let result = pending.await.unwrap();
+    assert_eq!(result.status, StatusCode::NOT_FOUND, "{}", result.body);
+    assert!(!result.body.to_string().contains("native-admin"));
+    let count = f
+        .upstream
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.path.contains(&format!("responses/{id}")))
+        .count();
+    assert_eq!(
+        count, 1,
+        "grant revocation must withhold the result without replaying upstream"
+    );
+    f.upstream.native_hold.store(false, Ordering::Relaxed);
+    f.finish().await;
+}

@@ -10,10 +10,10 @@ No complete-subsystem or production-cutover acceptance is claimed.
 | 0 | Final roles, ownership rules and schema/route/cache-job inventories | Final exhaustive object/endpoint review |
 | 1 | Global identity, memberships, invitations/audits, explicit node sessions and resource ownership constraints | Production cutover is not this schema gate |
 | 2 | Credential separation, live original-session proof and queue/dispatch authority; Key/pricing/reporting timing regressions | Remaining provider/binding and other endpoint timing review |
-| 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks and local managed resources | Native account-pool Responses/Conversation administration and remaining control review |
+| 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks, local managed resources and direct-ID native account-pool Responses control | Native account-pool enumeration/Conversations and remaining control review |
 | 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
 | 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
-| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, local Responses/Conversation, Key/owner pages, read-only finance page | Provider/binding pages, distribution and financial-control pages, native resource UI |
+| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, direct-ID native account-pool Responses, Key/owner pages and read-only finance | Distribution/financial-control pages, native account-pool enumeration/Conversations and final resource UI |
 | 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
 
 Payment channels remain platform-wide. Financial records are tenant-scoped and
@@ -1830,3 +1830,34 @@ account-pool resources and remaining endpoint/release gates remain open. A later
 Provider preparation write was safety-denied and not executed or applied. No
 production data, credentials, payment, SMTP, restart or deployment changed. See
 tenant-finance-console.md for precise boundaries.
+
+
+## Current phases 3/7 — direct-ID native account-pool Responses administration accepted
+
+Account-pool Responses are now an explicit native resource family rather than a
+local-resource alias. The durable affinity schema stores `resource_kind`; IDs stay
+opaque and are never classified by prefix. Newly proven visible routes persist the
+kind transactionally. Exact legacy V0001 installations receive a bounded compatibility
+upgrade under the migration lock; unknown checksums still fail closed.
+
+Tenant and root control routes support native Response detail, input items, cancel
+and delete only when the caller supplies the original owner plus opaque resource ID.
+The server resolves the exact owning account from the affinity, uses account ->
+affinity lock order, reapplies current account-pool authorization, keeps one stable
+credential snapshot for one upstream call and never performs account reselection or
+cross-user probing. Native commands have no fake local revision. Pending settlement
+blocks deletion, and confirmed deletion tombstones only the exact native Response.
+
+Original console authority is checked before resource work, again without identity
+locks immediately before dispatch after any account-lock wait, and again after the
+upstream result. Real regressions prove expired/revoked requests cannot dispatch
+late or receive private data, credential rotation waits for the in-flight snapshot,
+and pool-grant revocation withholds a completed private result. Native detail uses
+the bounded Responses JSON admission/sanitization path and private/no-store output.
+
+The tenant Web console exposes account-pool only for Responses and only through an
+explicit owner+ID form. It does not issue account-pool list/count requests; switching
+to Conversations removes the mode. Native account-pool enumeration and native
+Conversation administration remain intentionally unsupported. See
+`tenant-response-console.md` for the exact contract. No production database,
+credential, real upstream resource, restart or deployment changed.

@@ -1,6 +1,7 @@
 //! Current-tenant administration of local passthrough and node Responses/Conversations.
 mod editor;
 mod inspector;
+mod native;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -50,27 +51,37 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
         let q = query();
         let key = (scope, q.clone(), generation());
         async move {
-            let result = common::read(auth, users, scope, move |token| {
-                let q = q.clone();
-                async move {
-                    let api = ResponseControlApi::tenant(&get_client(), scope.tenant_id)?;
-                    match q.kind {
-                        Kind::Responses => api.responses(&q.api(), &token).await.map(|p| Rows {
-                            rows: p.items.into_iter().map(Row::Response).collect(),
-                            total: p.total,
-                            total_pages: p.total_pages,
-                        }),
-                        Kind::Conversations => {
-                            api.conversations(&q.api(), &token).await.map(|p| Rows {
-                                rows: p.items.into_iter().map(Row::Conversation).collect(),
-                                total: p.total,
-                                total_pages: p.total_pages,
-                            })
+            let result = if q.mode == client_api::api::response_control::ResponseMode::AccountPool {
+                Ok(Rows {
+                    rows: Vec::new(),
+                    total: 0,
+                    total_pages: 1,
+                })
+            } else {
+                common::read(auth, users, scope, move |token| {
+                    let q = q.clone();
+                    async move {
+                        let api = ResponseControlApi::tenant(&get_client(), scope.tenant_id)?;
+                        match q.kind {
+                            Kind::Responses => {
+                                api.responses(&q.api(), &token).await.map(|p| Rows {
+                                    rows: p.items.into_iter().map(Row::Response).collect(),
+                                    total: p.total,
+                                    total_pages: p.total_pages,
+                                })
+                            }
+                            Kind::Conversations => {
+                                api.conversations(&q.api(), &token).await.map(|p| Rows {
+                                    rows: p.items.into_iter().map(Row::Conversation).collect(),
+                                    total: p.total,
+                                    total_pages: p.total_pages,
+                                })
+                            }
                         }
                     }
-                }
-            })
-            .await;
+                })
+                .await
+            };
             KeyedResourceValue::new(key, result)
         }
     });
@@ -87,17 +98,21 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
         p{class:"alert alert-info",{i18n.t("tenant_responses.local_only")} " · {scope.tenant_id}"}
         div{class:"toolbar",
             button{class:"btn btn-secondary",onclick:move |_|{query.write().kind=Kind::Responses;query.write().page=1;inspection.set(None);mutation.set(None);},{i18n.t("tenant_responses.responses")}}
-            button{class:"btn btn-secondary",onclick:move |_|{query.write().kind=Kind::Conversations;query.write().page=1;inspection.set(None);mutation.set(None);},{i18n.t("tenant_responses.conversations")}}
+            button{class:"btn btn-secondary",onclick:move |_|{query.write().kind=Kind::Conversations;if query().mode==client_api::api::response_control::ResponseMode::AccountPool{query.write().mode=client_api::api::response_control::ResponseMode::Passthrough;}query.write().page=1;inspection.set(None);mutation.set(None);},{i18n.t("tenant_responses.conversations")}}
             label{r#for:"managed-resource-mode",{i18n.t("tenant_responses.mode")}}
-            select{id:"managed-resource-mode",class:"input-field",value:query().mode.as_str(),onchange:move |e|{if let Some(value)=types::mode(&e.value()){query.write().mode=value;query.write().page=1;inspection.set(None);mutation.set(None);}},option{value:"passthrough","Passthrough"}option{value:"node_dispatch","Node dispatch"}}
-            label{r#for:"managed-resource-owner",{i18n.t("tenant_responses.owner")}}
-            input{id:"managed-resource-owner",class:"input-field",value:"{owner}",maxlength:"36",oninput:move|e|owner.set(e.value())}
-            button{class:"btn btn-secondary",onclick:move |_|match types::owner(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;error.set(String::new());inspection.set(None);mutation.set(None);},Err(e)=>error.set(user_error_message(&e))},{i18n.t("tenant_responses.filter")}}
-            button{class:"btn btn-secondary",onclick:move |_|{inspection.set(None);mutation.set(None);data.restart();},{i18n.t("tenant.reload")}}
+            select{id:"managed-resource-mode",class:"input-field",value:query().mode.as_str(),onchange:move |e|{if let Some(value)=types::mode(&e.value()){query.write().mode=value;query.write().page=1;inspection.set(None);mutation.set(None);}},option{value:"passthrough","Passthrough"}option{value:"node_dispatch","Node dispatch"}if query().kind==Kind::Responses{option{value:"account_pool","Account pool"}}}
+            if query().mode!=client_api::api::response_control::ResponseMode::AccountPool{
+                label{r#for:"managed-resource-owner",{i18n.t("tenant_responses.owner")}}
+                input{id:"managed-resource-owner",class:"input-field",value:"{owner}",maxlength:"36",oninput:move|e|owner.set(e.value())}
+                button{class:"btn btn-secondary",onclick:move |_|match types::owner(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;error.set(String::new());inspection.set(None);mutation.set(None);},Err(e)=>error.set(user_error_message(&e))},{i18n.t("tenant_responses.filter")}}
+                button{class:"btn btn-secondary",onclick:move |_|{inspection.set(None);mutation.set(None);data.restart();},{i18n.t("tenant.reload")}}
+            }
         }
-        p {class:"text-secondary",{i18n.t("tenant_responses.active_owner")} " " {query().owner.map(|v|v.to_string()).unwrap_or_else(||i18n.t("tenant_responses.all_owners").into())}}
+        if query().mode!=client_api::api::response_control::ResponseMode::AccountPool{p {class:"text-secondary",{i18n.t("tenant_responses.active_owner")} " " {query().owner.map(|v|v.to_string()).unwrap_or_else(||i18n.t("tenant_responses.all_owners").into())}}}
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
-        match loaded{
+        if query().mode==client_api::api::response_control::ResponseMode::AccountPool{
+            native::NativeDirect{scope,generation:generation(),on_inspect:inspect,on_mutation:mutate}
+        }else{match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
             Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
             Some(Ok(page))=>rsx!{
@@ -118,7 +133,7 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
                 }}if page.rows.is_empty(){p{{i18n.t("tenant.empty")}}}}
                 Pager{page:query().page as u32,total_pages:page.total_pages,total:page.total,on_page:move |p|{query.write().page=i64::from(p);inspection.set(None);mutation.set(None);}}
             }
-        }
+        }}
         if let Some(view)=inspection(){if mutation().is_none(){for key in [view.key()]{inspector::Inspector{key:"{key}",scope,view:view.clone(),on_close:move |_|inspection.set(None),on_mutation:mutate}}}}
         if let Some(op)=mutation(){for key in [op.key()]{editor::MutationEditor{key:"{key}",scope,op:op.clone(),on_close:move |_|mutation.set(None),on_changed:move |_|{mutation.set(None);inspection.set(None);generation+=1;}}}}
     }}

@@ -16,6 +16,7 @@ pub const ACCOUNT_PRIORITY_MAX: i32 = 10;
 pub const ACCOUNT_RATE_LIMIT_MIN: i32 = 1;
 
 const ACTIVE_ACCOUNT_KEY_SHARE_SQL: &str = "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND tenants.status = 'active' FOR KEY SHARE OF accounts";
+const ACTIVE_ACCOUNT_SHARE_SQL: &str = "SELECT accounts.* FROM accounts JOIN tenants ON tenants.id = accounts.tenant_id WHERE accounts.id = $1 AND tenants.status = 'active' FOR SHARE OF accounts";
 const ACCOUNT_KEY_SHARE_SQL: &str = "SELECT * FROM accounts WHERE id = $1 FOR KEY SHARE";
 
 fn validate_priority(priority: Option<i32>) -> Result<(), DbError> {
@@ -210,6 +211,21 @@ impl Account {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
             ACTIVE_ACCOUNT_KEY_SHARE_SQL,
+            [id.into()],
+        );
+        Ok(Account::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// Load an active account under a SHARE lock. Native administrative resource
+    /// proxying uses this stronger read lock so endpoint/credential UPDATE and
+    /// DELETE cannot change the selected connection material during one upstream call.
+    pub async fn find_by_id_for_share(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+    ) -> Result<Option<Account>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            ACTIVE_ACCOUNT_SHARE_SQL,
             [id.into()],
         );
         Ok(Account::find_by_statement(stmt).one(db).await?)

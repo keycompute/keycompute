@@ -3,6 +3,15 @@ use std::sync::LazyLock;
 
 pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    m.insert(
+        "tenant_responses.native_direct_hint",
+        "账号池原生 Responses 不支持枚举。请输入准确的原始拥有者 UUID 与不透明资源 ID。",
+    );
+    m.insert(
+        "tenant_responses.native_selector_error",
+        "请输入真实拥有者 UUID 与有效资源 ID。",
+    );
+    m.insert("tenant_responses.open_native", "打开原生 Response");
     m.insert("tenant_providers.title", "上游渠道");
     m.insert(
         "tenant_providers.hint",
