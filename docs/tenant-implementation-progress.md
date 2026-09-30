@@ -1861,3 +1861,26 @@ to Conversations removes the mode. Native account-pool enumeration and native
 Conversation administration remain intentionally unsupported. See
 `tenant-response-console.md` for the exact contract. No production database,
 credential, real upstream resource, restart or deployment changed.
+
+## Current phase 7 — tenant distribution policy console accepted locally
+
+The `/tenant/distribution` page manages only the selected tenant's future allocation
+policies through the existing tenant distribution-policy handlers. It supports exact
+commission-rate strings, immutable beneficiary identity, active-member targeting,
+explicit default-policy creation, optimistic `updated_at` patch/delete operations,
+and bounded human reasons. Reads are fresh and validate tenant/resource identity,
+beneficiary shape, unique IDs and pagination before rendering. Global role labels do
+not synthesize tenant membership; the platform-targeted SDK route remains explicit
+and separate.
+
+This console does not mutate historical distribution records, settle earnings,
+release reservations, withdraw money or call payment channels. Commands are
+single-dispatch and late results are fenced by the verified workspace. Focused SDK
+and Web tests pass 4/4 each. Real isolated PostgreSQL/Axum suites pass distribution
+policy 8/8, distribution rules 16/16 and scoped distribution reads 4/4. Strict
+client/Web Clippy and Web/client WASM checks pass. A full workspace build was started
+with incremental output disabled, then deliberately stopped when free disk reached
+the 15 GiB safety threshold; no failing test had been reported before the stop.
+The checked-in production-bundle Chromium scenario is therefore enforced by CI for
+this slice. No production data, balance, payment, SMTP, credential, restart or
+deployment is changed. See `tenant-distribution-console.md`.

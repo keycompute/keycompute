@@ -54,3 +54,6 @@ pub use finance::TenantFinance;
 
 mod provider_admin;
 pub use provider_admin::TenantProviders;
+
+mod distribution_admin;
+pub use distribution_admin::TenantDistribution;

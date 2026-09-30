@@ -428,6 +428,11 @@ pub fn AppLayout() -> Element {
                 NavIcon::Wallet,
             ),
             NavItem::new(
+                i18n.t("tenant_distribution.title"),
+                Route::TenantDistribution {}.to_string(),
+                NavIcon::Wallet,
+            ),
+            NavItem::new(
                 i18n.t("tenant_keys.title"),
                 Route::TenantKeys {}.to_string(),
                 NavIcon::Key,
@@ -642,6 +647,7 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::TenantKeys {} => "tenant_keys.title",
         Route::TenantProviders {} => "tenant_providers.title",
         Route::TenantFinance {} => "tenant_finance.title",
+        Route::TenantDistribution {} => "tenant_distribution.title",
         Route::OwnerKeyIssuance {} => "tenant_keys.my_requests",
         Route::TenantPricing {} => "tenant_pricing.title",
         Route::TenantWorkspace {} => "tenant.workspace",

@@ -42,6 +42,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenant_providers.saved", "已保存");
     m.insert("tenant_providers.scope", "当前租户");
     super::tenant_finance::register(&mut m, false);
+    super::tenant_distribution::register(&mut m, false);
     super::tenant_keys::register(&mut m, false);
     m.insert(
         "common.rate_limited_hint",
