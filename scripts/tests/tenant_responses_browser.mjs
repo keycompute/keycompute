@@ -27,7 +27,7 @@ const conversation=(owner,mode)=>({id,tenant_id:A,owner_user_id:owner,mode,accou
 async function fixture({selected=A,role='none',admin=true}={}){
     const state={selected,role,admin,calls:[],unknown:[],foreign:false,unavailable:false,conflict:false,hold:false,release:null,reverse:false,
         responses:['passthrough','node_dispatch'].flatMap(mode=>[response(U,mode),response(V,mode)]),
-        native:{id:nativeId,tenant_id:A,owner_user_id:U,mode:'account_pool',provider:'openai',account_id:nativeAccount,model:'native-pool-model',status:'in_progress',background:true,store_response:true,stream:false,previous_response_id:null,conversation_id:null,revision:null,created_at:stamp,updated_at:stamp,expires_at:'2030-01-01T00:00:00Z',deleted:false,local_content_available:false,native_content_available:true},
+        native:{id:nativeId,tenant_id:A,owner_user_id:U,mode:'account_pool',provider:'openai',account_id:nativeAccount,model:'native-pool-model',status:'indexed',background:true,store_response:true,stream:false,previous_response_id:null,conversation_id:null,revision:null,created_at:stamp,updated_at:stamp,expires_at:'2030-01-01T00:00:00Z',deleted:false,local_content_available:false,native_content_available:true},
         conversations:['passthrough','node_dispatch'].flatMap(mode=>[conversation(U,mode),conversation(V,mode)]),items:new Map()};
     state.responses.push(state.native);
     state.nativeConversation={id:'future.conversation/id:1',tenant_id:A,owner_user_id:U,mode:'account_pool',account_id:nativeAccount,model:'native-pool-model',metadata:{case:'native'},active_response_id:null,revision:null,created_at:stamp,updated_at:stamp,expires_at:'2030-01-01T00:00:00Z',deleted:false};
@@ -75,6 +75,7 @@ async function fixture({selected=A,role='none',admin=true}={}){
                 const row=state[kind].find(r=>r.mode===mode&&r.owner_user_id===owner&&r.id===rid&&!r.deleted);
                 if(!row)return answer({error:{message:'fixture resource missing'}},404);
                 const nativeResource=mode==='account_pool';
+                if(!collection&&kind==='conversations'&&m==='POST')assert.fail('conversation metadata management must use PATCH');
                 if(m!=='GET'){
                     if(state.unavailable)return answer({error:{message:'uncertain mutation; refresh records'}},503);
                     if(!nativeResource&&(state.conflict||body?.expected_revision!==row.revision))return answer({error:{message:'resource changed; refresh records'}},409);
@@ -128,7 +129,7 @@ try{
     const nativeListRequests=state.calls.filter(c=>c.path.endsWith('/responses')&&new URLSearchParams(c.query).get('mode')==='account_pool');
     assert.equal(nativeListRequests.length,1);
     d=await open(page,U,'Inspect resource content');await d.getByText(/native-private/).waitFor();assert.equal(await page.evaluate(()=>window.__nativeXss),undefined);assert.doesNotMatch(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage})),/native-private/);await d.getByRole('button',{name:'Close',exact:true}).click();
-    assert.equal(await rowFor(page,U).getByRole('button',{name:'Inspect items',exact:true}).count(),0);
+    d=await open(page,U,'Inspect items');await d.getByText(/native-private-input/).waitFor();await d.getByRole('button',{name:'Close',exact:true}).click();
     d=await open(page,U,'Request response cancellation');await confirm(d);await rowFor(page,U).getByText('cancelled',{exact:true}).waitFor();
     const nativeCancel=state.calls.filter(c=>c.method==='POST'&&decodeURIComponent(c.path).endsWith(nativeId+'/cancel')).at(-1);assert.ok(nativeCancel);assert.equal(nativeCancel.body.expected_revision,undefined);
     d=await open(page,U,'Delete resource');await confirm(d);await rowFor(page,U).waitFor({state:'detached'});
@@ -144,7 +145,7 @@ try{
     await page.locator('#managed-resource-mode').selectOption('passthrough');await rowFor(page,V).waitFor();
     d=await open(page,U,'Edit conversation metadata');await d.locator('#resource-content-json').fill('{"secret":"unsaved-U-draft"}');await d.getByRole('button',{name:'Cancel',exact:true}).click();
     d=await open(page,V,'Edit conversation metadata');assert.match(await d.locator('#resource-content-json').inputValue(),/owner-V/);assert.doesNotMatch(await d.innerText(),/unsaved-U/);
-    await d.locator('#resource-content-json').fill('{"case":5}');await d.getByRole('button',{name:'Confirm',exact:true}).click();await d.locator('[role="alert"]').waitFor();assert.equal(state.calls.filter(c=>c.method==='PATCH').length,0);
+    const invalidPatchCount=state.calls.filter(c=>c.method==='PATCH').length;await d.locator('#resource-content-json').fill('{"case":5}');await d.getByRole('button',{name:'Confirm',exact:true}).click();await d.locator('[role="alert"]').waitFor();assert.equal(state.calls.filter(c=>c.method==='PATCH').length,invalidPatchCount);
     await d.locator('#resource-content-json').fill('{"case":"changed-V"}');await confirm(d);assert.equal(state.conversations.find(r=>r.mode==='passthrough'&&r.owner_user_id===U).metadata.case,'passthrough-owner-U');
     d=await open(page,V,'Inspect items');await d.getByText(/owner-V-item-21/).waitFor();await d.getByRole('button',{name:'Next',exact:true}).click();await d.getByText(/owner-V-item-1"/).waitFor();assert.equal(await d.getByRole('button',{name:'Next',exact:true}).isDisabled(),true);
     await d.getByRole('button',{name:'Previous',exact:true}).click();await d.getByText(/owner-V-item-21/).waitFor();await d.getByRole('button',{name:'Remove conversation item',exact:true}).first().click();d=page.getByRole('dialog');await d.getByText('item-21',{exact:true}).waitFor();await confirm(d);

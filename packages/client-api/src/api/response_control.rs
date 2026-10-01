@@ -353,7 +353,11 @@ impl ResponseControlApi {
             || owner.is_some_and(|v| v != row.owner_user_id)
             || id.is_some_and(|v| v != row.id)
             || resource_segment(&row.id).is_err()
-            || (mode != ResponseMode::AccountPool && row.revision.is_none_or(|v| v <= 0))
+            || if mode == ResponseMode::AccountPool {
+                row.revision.is_some() || row.account_id.is_none_or(|id| id.is_nil())
+            } else {
+                row.revision.is_none_or(|v| v <= 0)
+            }
         {
             return Err(scope_error());
         }
@@ -687,14 +691,15 @@ impl ResponseControlApi {
     ) -> Result<Value> {
         self.reason(body.reason.as_deref())?;
         content_limit(&body.metadata)?;
-        let result: Value = self
+        let request = self
             .client
-            .post_json(
+            .request_with_auth(
+                reqwest::Method::PATCH,
                 &self.conversation_resource(ResponseMode::AccountPool, owner, id)?,
-                body,
                 Some(token),
             )
             .await?;
+        let result: Value = self.client.send_and_parse(request.json(body)).await?;
         self.check_body(&result, id, "conversation")?;
         Ok(result)
     }

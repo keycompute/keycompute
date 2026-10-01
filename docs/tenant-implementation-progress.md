@@ -51,9 +51,12 @@ metadata/items. The stale direct-only native panel was removed.
 
 Focused validation for this follow-up: client-api wire tests **12/12**, native
 PostgreSQL/Axum control tests **8/8**, full scoped resource integration tests
-**42/42**, strict targeted Clippy, formatting and diff checks. Production Web
-bundle/Chromium acceptance remains the next release gate. No production data,
-credentials, upstream resources, restart or deployment changed.
+**42/42**, strict targeted Clippy, formatting and diff checks. The production Web
+bundle and Chromium acceptance now pass, including indexed native Response input
+items/cancellation and native Conversation PATCH/item commands. CI run
+`36848698538` is green for client-api, Web and server. The client rejects native
+Conversation envelopes with a local revision or missing owning account. No
+production data, credentials, upstream resources, restart or deployment changed.
 
 
 ## Current phase 1 — final contract alignment accepted locally

@@ -111,7 +111,7 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
                         td{p{{format_time(row.created())}}details{summary{{i18n.t("tenant_responses.expires")}}{format_time(row.expires())}}}
                         td{
                             button{class:"btn btn-secondary btn-sm",onclick:move |_|inspect(Inspection{row:detail.clone(),read:ReadKind::Detail}),{i18n.t("tenant_responses.inspect")}}
-                            if row.is_conversation() || row.mode().ok() != Some(client_api::api::response_control::ResponseMode::AccountPool){button{class:"btn btn-secondary btn-sm",onclick:move |_|inspect(Inspection{row:items.clone(),read:ReadKind::Items}),{i18n.t("tenant_responses.items")}}}
+                            button{class:"btn btn-secondary btn-sm",onclick:move |_|inspect(Inspection{row:items.clone(),read:ReadKind::Items}),{i18n.t("tenant_responses.items")}}
                             if row.can_cancel(){button{class:"btn btn-secondary btn-sm",onclick:move |_|mutate(Mutation::Cancel(cancel.clone())),{i18n.t("tenant_responses.cancel")}}}
                             if row.is_conversation(){button{class:"btn btn-secondary btn-sm",onclick:move |_|mutate(Mutation::Metadata(meta.clone())),{i18n.t("tenant_responses.metadata")}}button{class:"btn btn-secondary btn-sm",onclick:move |_|mutate(Mutation::Append(append.clone())),{i18n.t("tenant_responses.append")}}}
                             button{class:"btn btn-danger btn-sm",onclick:move |_|mutate(Mutation::Delete(delete.clone())),{i18n.t("tenant_responses.delete")}}

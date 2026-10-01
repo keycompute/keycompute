@@ -168,7 +168,7 @@ fn native_rows_are_direct_id_and_revisionless_without_becoming_conversations() {
     let account = Uuid::new_v4();
     let row:ResponseSummary=serde_json::from_value(json!({
         "id":"future.response/id:1","tenant_id":tenant,"owner_user_id":owner,"mode":"account_pool",
-        "provider":"openai","account_id":account,"model":"fixture","status":"in_progress",
+        "provider":"openai","account_id":account,"model":"fixture","status":"indexed",
         "background":true,"store_response":true,"stream":false,"previous_response_id":null,
         "conversation_id":null,"revision":null,"created_at":"now","updated_at":"now","expires_at":"later",
         "deleted":false,"local_content_available":false,"native_content_available":true})).unwrap();
@@ -177,5 +177,10 @@ fn native_rows_are_direct_id_and_revisionless_without_becoming_conversations() {
     assert!(row.revision().is_err());
     assert!(!row.is_conversation());
     assert!(row.can_cancel());
+    let Row::Response(mut completed) = row.clone() else {
+        unreachable!();
+    };
+    completed.status = "completed".into();
+    assert!(!Row::Response(completed).can_cancel());
     assert_eq!(row.address().unwrap().id, "future.response/id:1");
 }

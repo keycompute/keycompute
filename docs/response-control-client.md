@@ -22,10 +22,12 @@ separate; duplicated logical owner/ID rows are rejected, not collapsed or filter
 
 Native account-pool summaries and Conversations are now supported through
 proven affinity rows. Native list/count responses require the account-pool mode and
-validate tenant, owner, account, kind and duplicate logical identity. Native detail
-and mutation calls use the opaque owner/resource address; native mutations carry
-no local revision and are single-dispatch. The client never substitutes native
-resources with node dispatch.
+validate tenant, owner, account, kind and duplicate logical identity. Native
+Conversation envelopes also reject a local revision or a missing owning account.
+Native detail and mutation calls use the opaque owner/resource address; native
+mutations carry no local revision and are single-dispatch. Metadata updates use the
+management route's PATCH contract while their upstream native operation remains
+POST. The client never substitutes native resources with node dispatch.
 
 ## Items and commands
 
@@ -59,8 +61,9 @@ families, original-owner lists/details, member and inference-Key denial, metadat
 CAS, item pagination/append/removal, conversation/Response deletion and retained
 ownership. Deletion does not initiate extra upstream inference.
 
-The `/tenant/responses` UI now exposes local and indexed native modes; its
-production Chromium checks remain a release gate, and synthetic browser fixtures
-are not backend authorization evidence. Provider/Key/financial pages and final
-release gates remain separate. No production database, credentials, payment,
-notification, service or deployment is changed.
+The `/tenant/responses` UI now exposes local and indexed native modes, including
+native Response input-item inspection and indexed cancellation. Its production
+Chromium checks pass; synthetic browser fixtures are still not backend
+authorization evidence. Provider/Key/financial pages and final release gates
+remain separate. No production database, credentials, payment, notification,
+service or deployment is changed.

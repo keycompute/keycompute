@@ -181,7 +181,12 @@ impl Row {
         }
     }
     pub fn can_cancel(&self) -> bool {
-        matches!(self,Self::Response(r) if !r.deleted && matches!(r.status.as_str(),"queued"|"in_progress"))
+        matches!(self,Self::Response(r) if !r.deleted && (
+            matches!(r.status.as_str(),"queued"|"in_progress")
+                || (r.mode == ResponseMode::AccountPool.as_str()
+                    && r.native_content_available
+                    && !matches!(r.status.as_str(),"completed"|"failed"|"cancelled"|"incomplete"|"expired"))
+        ))
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

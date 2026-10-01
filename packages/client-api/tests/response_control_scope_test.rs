@@ -370,6 +370,33 @@ async fn conversation_details_reject_other_scopes_and_legacy_item_helpers_share_
         );
         s.verify().await;
     }
+    let native = json!({"id":"native-conversation","tenant_id":tenant,"owner_user_id":owner,"mode":"account_pool",
+        "account_id":Uuid::new_v4(),"model":null,"metadata":null,"active_response_id":null,"revision":null,
+        "created_at":"now","updated_at":"now","expires_at":"later","deleted":false});
+    for (field, value) in [("revision", json!(1)), ("account_id", Value::Null)] {
+        s.reset().await;
+        let mut row = native.clone();
+        row[field] = value;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "summary":row,"conversation":{"id":"native-conversation","object":"conversation"}
+            })))
+            .expect(1)
+            .mount(&s)
+            .await;
+        assert!(
+            api.conversation(
+                ResponseMode::AccountPool,
+                owner,
+                "native-conversation",
+                None,
+                "fixture"
+            )
+            .await
+            .is_err()
+        );
+        s.verify().await;
+    }
     s.reset().await;
     Mock::given(method("GET"))
         .and(query_param("limit", "20"))
@@ -529,7 +556,7 @@ async fn native_conversation_mutations_use_native_payloads_without_revisions() {
     let id = "opaque-conversation";
     let api = ResponseControlApi::tenant(&client(&s), tenant).unwrap();
 
-    Mock::given(method("POST"))
+    Mock::given(method("PATCH"))
         .and(path(format!(
             "/api/v1/tenants/{tenant}/conversations/account_pool/{owner}/{id}"
         )))
