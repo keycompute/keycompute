@@ -13,12 +13,13 @@ No complete-subsystem or production-cutover acceptance is claimed.
 | 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks, local managed resources and direct-ID native account-pool Responses control | Native account-pool enumeration/Conversations and remaining control review |
 | 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
 | 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
-| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, direct-ID native account-pool Responses, Key/owner pages and read-only finance | Distribution/financial-control pages, native account-pool enumeration/Conversations and final resource UI |
+| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, direct-ID native account-pool Responses, Key/owner pages, distribution and tenant financial-control pages | Native account-pool enumeration/Conversations and final resource UI |
 | 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
 
 Payment channels remain platform-wide. Financial records are tenant-scoped and
-wallets remain per-member, not a shared tenant balance pool. The finance page is
-read-only; it does not expose all of the already-existing financial write APIs.
+wallets remain per-member, not a shared tenant balance pool. Finance pages stay
+narrow: the control page exposes only expired-reservation recovery and metadata-only
+pending-withdrawal review, and does not expose the broader financial write APIs.
 
 Page hiding is presentation only; the server continues to enforce the credential,
 current role/membership, resource scope, ownership and state. Synthetic Chromium
@@ -1884,3 +1885,29 @@ the 15 GiB safety threshold; no failing test had been reported before the stop.
 The checked-in production-bundle Chromium scenario is therefore enforced by CI for
 this slice. No production data, balance, payment, SMTP, credential, restart or
 deployment is changed. See `tenant-distribution-console.md`.
+
+
+## Current phase 7 — tenant financial-control console accepted locally
+
+The `/tenant/finance/controls` page is tenant-admin-only and recovers only expired
+wallet reservations after exact owner, request, version and expiry validation.
+It can review pending Alipay withdrawals as metadata-only approve/reject commands,
+with the observed revision and bounded reason; it never calls a payout provider or
+claims that money moved. Active reservations remain visible and cannot be recovered.
+
+The server adds a current `ConsoleSessionProof` after the final tenant-scoped read
+for wallet and withdrawal projections, emits private/no-store/no-cache responses,
+and keeps the existing membership, role, ownership and state checks. The client
+DTOs deny unknown fields, validate exact decimal strings and fail closed on foreign,
+duplicate, over-limit or version-drift rows. Review dispatch is single-shot with no
+automatic retry, and the Web command path fences late results by workspace/session.
+
+The production-compiled WASM browser scenario passed five cases covering exact
+expired recovery, revision-bound metadata approval/rejection, uncertain single
+dispatch, late cross-workspace results and global-role/foreign-row rejection.
+The focused client wire suite passed 6/6; the Web suite passed 231/231; isolated
+wallet and tenant-tip suites passed 12/12 and 11/11 on a fresh disposable database;
+server checks, format, strict client/Web Clippy and the release WASM build passed.
+These fixtures use synthetic HTTP and do not establish backend authorization or
+payment settlement. No production database, credential, payment, SMTP, restart or
+deployment changed. See `tenant-financial-controls-console.md` for the boundary.

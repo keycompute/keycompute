@@ -1,5 +1,6 @@
 //! Tenant financial commands; personal earnings never become global balances.
 use crate::{
+    console_session_proof::ConsoleSessionProof,
     error::{ApiError, Result},
     extractors::{ConsoleAuth, GlobalConsoleAuth, RequestId},
     state::AppState,
@@ -307,7 +308,11 @@ pub async fn tenant_withdrawals(
     State(state): State<AppState>,
     Query(q): Query<ReportQuery>,
 ) -> Result<Json<Page<WithdrawalView>>> {
-    withdrawals(&state, tenant(&access, path.tenant_id)?, q).await
+    let page = withdrawals(&state, tenant(&access, path.tenant_id)?, q).await?;
+    ConsoleSessionProof::from_console(access.auth())?
+        .verify_current(pool(&state)?.write_conn())
+        .await?;
+    Ok(page)
 }
 pub async fn platform_withdrawals(
     auth: GlobalConsoleAuth,

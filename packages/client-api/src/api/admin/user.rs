@@ -201,7 +201,7 @@ pub struct UpdateBalanceResponse {
 ///
 /// `version` 是不透明的并发控制值。释放操作必须回传刚从列表读取的
 /// version，避免相同 `request_id` 已被新重试接管后误释放新预留。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct BalanceReservationInfo {
     pub request_id: String,
     pub version: String,
@@ -213,7 +213,7 @@ pub struct BalanceReservationInfo {
 }
 
 /// 用户余额拆分及一页当前活跃的请求预留。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct UserBalanceReservationsResponse {
     pub user_id: String,
     pub available_balance: String,

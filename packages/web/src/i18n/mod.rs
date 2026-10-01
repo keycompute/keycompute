@@ -288,3 +288,5 @@ mod tenant_keys;
 mod tenant_finance;
 
 mod tenant_distribution;
+
+mod tenant_financial_controls;

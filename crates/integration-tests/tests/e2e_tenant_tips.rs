@@ -446,6 +446,7 @@ async fn tenant_review_is_metadata_only_and_root_payout_requires_explicit_audite
             .unwrap()
             .contains("no-store")
     );
+    assert_eq!(listed.2["pragma"], "no-cache");
     let raw = listed.1.to_string();
     assert!(
         !raw.contains("secret-payee")

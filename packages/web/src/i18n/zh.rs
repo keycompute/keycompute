@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 
 pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
+    super::tenant_financial_controls::register(&mut m, false);
     m.insert(
         "tenant_responses.native_direct_hint",
         "账号池原生 Responses 不支持枚举。请输入准确的原始拥有者 UUID 与不透明资源 ID。",

@@ -1,6 +1,7 @@
 //! Canonical wallet control: root money adjustments, tenant expired-work recovery.
 use super::admin_user as admin;
 use crate::{
+    console_session_proof::ConsoleSessionProof,
     error::{ApiError, Result},
     extractors::{GlobalConsoleAuth, RequestId},
     state::AppState,
@@ -45,6 +46,17 @@ struct MoneyBody {
 struct RecoveryBody {
     expected_version: Uuid,
     reason: String,
+}
+fn pool(state: &AppState) -> Result<&keycompute_db::DbRouter> {
+    state
+        .pool
+        .as_deref()
+        .ok_or_else(|| ApiError::ServiceUnavailable("Financial storage unavailable".into()))
+}
+async fn finish_tenant_read(state: &AppState, access: &TenantAdmin) -> Result<()> {
+    ConsoleSessionProof::from_console(access.auth())?
+        .verify_current(pool(state)?.write_conn())
+        .await
 }
 
 macro_rules! money_handler {
@@ -155,6 +167,7 @@ async fn tenant_reservations(
         )
         .await
         .map_err(wallet_error)?;
+    finish_tenant_read(&state, &access).await?;
     admin::reservation_page_response(path.user_id, page)
 }
 async fn tenant_release(
@@ -186,6 +199,9 @@ async fn private_response(mut response: Response) -> Response {
         axum::http::header::CACHE_CONTROL,
         "private, no-store".parse().unwrap(),
     );
+    response
+        .headers_mut()
+        .insert(axum::http::header::PRAGMA, "no-cache".parse().unwrap());
     response
 }
 pub fn router() -> Router<AppState> {

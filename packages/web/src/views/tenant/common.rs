@@ -142,6 +142,7 @@ pub fn WorkspaceLinks() -> Element {
         if admin {
             Link {class:"btn btn-secondary",to:Route::TenantProviders {},{i18n.t("tenant_providers.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantFinance {},{i18n.t("tenant_finance.title")}}
+            Link {class:"btn btn-secondary",to:Route::TenantFinancialControls {},{i18n.t("tenant_financial_controls.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantDistribution {},{i18n.t("tenant_distribution.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantKeys {},{i18n.t("tenant_keys.title")}}
             Link {class:"btn btn-secondary",to:Route::TenantResponses {},{i18n.t("tenant_responses.title")}}

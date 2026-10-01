@@ -897,6 +897,8 @@ async fn canonical_wallet_routes_separate_root_money_commands_from_tenant_expire
     )
     .await;
     assert_eq!(get.0, StatusCode::OK, "{}", get.1);
+    assert_eq!(get.2["cache-control"], "private, no-store");
+    assert_eq!(get.2["pragma"], "no-cache");
     assert_eq!(
         get.1["request_reserved_balance"]
             .as_str()
