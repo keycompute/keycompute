@@ -1443,6 +1443,19 @@ pub struct ConversationAdminSummary {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct NativeAdminSummary {
+    pub id: String,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub account_id: Uuid,
+    pub provider: String,
+    pub model: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 fn admin_values(
     tenant: Uuid,
     owner: Option<Uuid>,
@@ -1466,6 +1479,94 @@ async fn admin_read_transaction(pool: &DbRouter) -> Result<DatabaseTransaction> 
     ))
     .await?;
     Ok(tx)
+}
+
+fn validate_native_kind(kind: &str) -> Result<()> {
+    if matches!(kind, "response" | "conversation") {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest("Invalid native resource kind".into()))
+    }
+}
+
+pub async fn admin_list_native_resources(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Option<Uuid>,
+    kind: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<NativeAdminSummary>> {
+    validate_native_kind(kind)?;
+    if !(1..=100).contains(&limit)
+        || !(0..=100_000_000).contains(&offset)
+        || owner.is_some_and(|id| id.is_nil())
+    {
+        return Err(ApiError::BadRequest("Invalid native resource page".into()));
+    }
+    let tx = admin_read_transaction(pool).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let rows = timed(NativeAdminSummary::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT response_id AS id,tenant_id,user_id,account_id,provider,model,created_at,updated_at,expires_at
+         FROM response_affinities
+         WHERE tenant_id=$1 AND ($2::uuid IS NULL OR user_id=$2)
+           AND resource_kind=$3 AND NOT is_reservation AND deleted_at IS NULL
+           AND expires_at>NOW() AND user_id IS NOT NULL AND account_id IS NOT NULL
+         ORDER BY created_at DESC,response_id COLLATE \"C\" DESC LIMIT $4 OFFSET $5",
+        [control.tenant_id().into(), owner.into(), kind.into(), limit.into(), offset.into()],
+    )).all(&tx)).await?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "native_resource.list",
+        kind,
+        None,
+        json!({"owner_user_id":owner,"resource_kind":kind,"count":rows.len()}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(rows)
+}
+
+pub async fn admin_count_native_resources(
+    pool: &DbRouter,
+    control: &ResponseControlScope,
+    owner: Option<Uuid>,
+    kind: &str,
+) -> Result<i64> {
+    validate_native_kind(kind)?;
+    if owner.is_some_and(|id| id.is_nil()) {
+        return Err(ApiError::BadRequest(
+            "Invalid native resource selector".into(),
+        ));
+    }
+    let tx = admin_read_transaction(pool).await?;
+    let audit = control.revalidate_for_admin(&tx).await?;
+    let row = timed(tx.query_one(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT COUNT(*)::BIGINT AS n FROM response_affinities
+         WHERE tenant_id=$1 AND ($2::uuid IS NULL OR user_id=$2)
+           AND resource_kind=$3 AND NOT is_reservation AND deleted_at IS NULL
+           AND expires_at>NOW() AND user_id IS NOT NULL AND account_id IS NOT NULL",
+        [control.tenant_id().into(), owner.into(), kind.into()],
+    )))
+    .await?
+    .ok_or_else(missing)?;
+    let total = row.try_get::<i64>("", "n").map_err(storage)?;
+    append_control_audit(
+        &tx,
+        control,
+        &audit,
+        "native_resource.count",
+        kind,
+        None,
+        json!({"owner_user_id":owner,"resource_kind":kind,"count":total}),
+    )
+    .await?;
+    timed(tx.commit()).await?;
+    Ok(total)
 }
 
 pub(crate) async fn append_control_audit(

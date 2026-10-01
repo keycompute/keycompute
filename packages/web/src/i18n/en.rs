@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
     super::tenant_financial_controls::register(&mut m, true);
-    m.insert("tenant_responses.native_direct_hint", "Account-pool Responses are not enumerable. Enter the exact original owner UUID and opaque resource ID.");
+    m.insert("tenant_responses.native_direct_hint", "Account-pool Responses and Conversations list resources recorded by KeyCompute; inspect uses the exact owner UUID and opaque resource ID.");
     m.insert(
         "tenant_responses.native_selector_error",
         "Enter a real owner UUID and a bounded resource ID.",

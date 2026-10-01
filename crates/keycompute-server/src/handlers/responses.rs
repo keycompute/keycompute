@@ -1413,8 +1413,22 @@ pub(super) fn delete_response_is_confirmed(status: u16) -> bool {
     (200..300).contains(&status) || status == 404
 }
 
-pub(super) fn native_resource_url(endpoint: &str, resource_id: &str, suffix: &str) -> String {
-    upstream_resource_url(endpoint, "responses", resource_id, suffix)
+pub(super) fn native_admin_resource_url(
+    endpoint: &str,
+    kind: &str,
+    resource_id: &str,
+    suffix: &str,
+) -> String {
+    upstream_resource_url(
+        endpoint,
+        if kind == "conversation" {
+            "conversations"
+        } else {
+            "responses"
+        },
+        resource_id,
+        suffix,
+    )
 }
 
 async fn prove_response_resource_kind(

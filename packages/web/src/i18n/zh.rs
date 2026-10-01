@@ -6,7 +6,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     super::tenant_financial_controls::register(&mut m, false);
     m.insert(
         "tenant_responses.native_direct_hint",
-        "账号池原生 Responses 不支持枚举。请输入准确的原始拥有者 UUID 与不透明资源 ID。",
+        "账号池原生 Responses 与 Conversations 会列出已记录资源；详情操作仍需准确的原始拥有者 UUID 与不透明资源 ID。",
     );
     m.insert(
         "tenant_responses.native_selector_error",

@@ -20,9 +20,12 @@ body. Returned rows with foreign tenants, owners, modes or object IDs fail close
 Two owners may legitimately have equal opaque resource IDs. Their rows are kept
 separate; duplicated logical owner/ID rows are rejected, not collapsed or filtered.
 
-The native account-pool backend is not implemented by this change. The existing
-client mode enum retains its account-pool selector, but the current managed server
-routes reject that unsupported mode. It is never substituted with node dispatch.
+Native account-pool summaries and Conversations are now supported through
+proven affinity rows. Native list/count responses require the account-pool mode and
+validate tenant, owner, account, kind and duplicate logical identity. Native detail
+and mutation calls use the opaque owner/resource address; native mutations carry
+no local revision and are single-dispatch. The client never substitutes native
+resources with node dispatch.
 
 ## Items and commands
 
@@ -33,12 +36,14 @@ first/last IDs, item IDs, length and has-more consistency. Duplicate items or a
 returned input cursor fail instead of producing a pagination loop. Default-page
 convenience methods now call this same validated path.
 
-Content commands require a positive observed revision. Mutations are sent once,
-including authentication or uncertain network failures. Results are checked for
-the matching object identity and actual deleted flag before success is reported.
-Append requests contain 1-512 objects and are bounded to 2 MiB; the server retains
-its metadata and total-history validation. Existing backend cancellation and
-archive/settlement semantics are not replaced by a client success message.
+Local content commands require a positive observed revision; native
+Conversation commands carry only their upstream metadata/items payload. All
+mutations are sent once, including authentication or uncertain network failures.
+Results are checked for the matching object identity and actual deleted flag before
+success is reported. Append requests contain 1-512 objects and are bounded to
+2 MiB; the server retains its metadata and total-history validation. Existing
+backend cancellation and archive/settlement semantics are not replaced by a client
+success message.
 
 Private content response types retain redacted Debug formatting. Item pages also
 redact their content. This is not a promise that an application cannot explicitly
@@ -54,8 +59,8 @@ families, original-owner lists/details, member and inference-Key denial, metadat
 CAS, item pagination/append/removal, conversation/Response deletion and retained
 ownership. Deletion does not initiate extra upstream inference.
 
-The unaccepted `/tenant/responses` UI draft is not included. Its browser checks
-are intermediate evidence only; remaining page review and strict lint acceptance
-must be completed independently. Provider/Key/financial pages, native resources
-and final release gates remain separate. No production database, credentials,
-payment, notification, service or deployment is changed.
+The `/tenant/responses` UI now exposes local and indexed native modes; its
+production Chromium checks remain a release gate, and synthetic browser fixtures
+are not backend authorization evidence. Provider/Key/financial pages and final
+release gates remain separate. No production database, credentials, payment,
+notification, service or deployment is changed.

@@ -8,7 +8,8 @@ use crate::{
     stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
 };
 use client_api::api::response_control::{
-    AppendItemsCommand, MetadataCommand, NativeResponseCommand, ResponseControlApi, ResponseMode,
+    AppendItemsCommand, MetadataCommand, NativeConversationItemsCommand,
+    NativeConversationMetadataCommand, NativeResponseCommand, ResponseControlApi, ResponseMode,
     RevisionCommand,
 };
 use dioxus::prelude::*;
@@ -52,10 +53,12 @@ pub(super) fn MutationEditor(
         }
         .and_then(|_| {
             if native {
-                match command {
-                    Mutation::Cancel(_) | Mutation::Delete(_) => Ok(()),
-                    _ => Err(client_api::ClientError::Config(
-                        "Native account-pool Conversations editing is not implemented".into(),
+                match &command {
+                    Mutation::Cancel(row) if !row.is_conversation() => Ok(()),
+                    Mutation::Delete(_) | Mutation::Metadata(_) | Mutation::Append(_) => Ok(()),
+                    Mutation::RemoveItem(_, _) => Ok(()),
+                    Mutation::Cancel(_) => Err(client_api::ClientError::Config(
+                        "Native Conversations do not support cancellation".into(),
                     )),
                 }
             } else {
@@ -104,18 +107,22 @@ pub(super) fn MutationEditor(
                     }
                     Mutation::Delete(row) if addr.mode == ResponseMode::AccountPool => {
                         if row.is_conversation() {
-                            return Err(client_api::ClientError::Config(
-                                "Native account-pool Conversations editing is not implemented"
-                                    .into(),
-                            ));
+                            api.delete_native_conversation(
+                                addr.owner,
+                                &addr.id,
+                                &NativeResponseCommand::default(),
+                                &token,
+                            )
+                            .await?;
+                        } else {
+                            api.delete_native_response(
+                                addr.owner,
+                                &addr.id,
+                                &NativeResponseCommand::default(),
+                                &token,
+                            )
+                            .await?;
                         }
-                        api.delete_native_response(
-                            addr.owner,
-                            &addr.id,
-                            &NativeResponseCommand::default(),
-                            &token,
-                        )
-                        .await?;
                     }
                     Mutation::Delete(row) => {
                         if row.is_conversation() {
@@ -138,6 +145,18 @@ pub(super) fn MutationEditor(
                             .await?;
                         }
                     }
+                    Mutation::Metadata(_) if addr.mode == ResponseMode::AccountPool => {
+                        api.update_native_conversation(
+                            addr.owner,
+                            &addr.id,
+                            &NativeConversationMetadataCommand {
+                                metadata: types::metadata(&text)?,
+                                reason: None,
+                            },
+                            &token,
+                        )
+                        .await?;
+                    }
                     Mutation::Metadata(_) => {
                         api.update_conversation(
                             addr.mode,
@@ -146,6 +165,18 @@ pub(super) fn MutationEditor(
                             &MetadataCommand {
                                 expected_revision: body.as_ref().unwrap().expected_revision,
                                 metadata: types::metadata(&text)?,
+                                reason: None,
+                            },
+                            &token,
+                        )
+                        .await?;
+                    }
+                    Mutation::Append(_) if addr.mode == ResponseMode::AccountPool => {
+                        api.append_native_conversation_items(
+                            addr.owner,
+                            &addr.id,
+                            &NativeConversationItemsCommand {
+                                items: types::items(&text)?,
                                 reason: None,
                             },
                             &token,
@@ -162,6 +193,16 @@ pub(super) fn MutationEditor(
                                 items: types::items(&text)?,
                                 reason: None,
                             },
+                            &token,
+                        )
+                        .await?;
+                    }
+                    Mutation::RemoveItem(_, item) if addr.mode == ResponseMode::AccountPool => {
+                        api.remove_native_conversation_item(
+                            addr.owner,
+                            &addr.id,
+                            &item,
+                            &NativeResponseCommand::default(),
                             &token,
                         )
                         .await?;

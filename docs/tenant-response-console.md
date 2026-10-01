@@ -2,10 +2,11 @@
 
 `/tenant/responses` manages two distinct resource families. Passthrough and
 `node_dispatch` resources remain KeyCompute-local and enumerable. Account-pool
-Responses are native upstream resources and are deliberately **direct-ID only**:
-an administrator must provide the original owner UUID and opaque Response ID.
-Account-pool Conversations and account-pool list/count are not exposed by this
-delivery. Root/operator platform labels alone never mount the tenant page.
+Responses and Conversations are native upstream resources; their tenant-scoped
+indexes enumerate only rows with a proven `resource_kind`, original owner and
+owning account affinity. Detail and mutation routes still require the original
+owner UUID and opaque resource ID. Root/operator platform labels alone never
+mount the tenant page.
 
 ## Durable native identity
 
@@ -17,13 +18,11 @@ legacy NULL kind can become addressable only after an operation whose semantic
 route proves the kind; a conflicting explicit kind fails closed. Internal,
 reservation and otherwise unproven legacy rows are not native-admin resources.
 
-Fresh databases use the final `001_init.sql` schema directly. Databases carrying
-the exact previously accepted V0001 checksum receive one bounded compatibility
-upgrade under the existing migration advisory transaction: add `resource_kind`,
-its check constraint and admin index, then advance the recorded V0001 checksum to
-the current final baseline. Unknown or modified checksums still fail rather than
-being silently rewritten. This is schema compatibility, not a production migration
-run performed by this development change.
+Fresh databases use the final `001_init.sql` schema directly. An exact
+historical V0001 checksum receives the bounded `resource_kind` compatibility
+upgrade under the migration lock; unknown checksum drift and non-empty databases
+without migration history fail closed. The `resource_kind` column, constraint and
+admin index are part of the final baseline.
 
 ## Account-pool Responses
 
@@ -57,6 +56,15 @@ set admission and sanitization used by the public endpoint; its memory permit is
 retained for the response-body lifetime. All reads are private/no-store. Raw API
 keys and private bodies are excluded from control audit metadata and error text.
 
+## Account-pool Conversations
+
+Native Conversations use the same tenant, owner, account and `resource_kind`
+proof as Responses. The console supports detail, item paging, metadata updates,
+item append/removal and deletion. These calls carry the native upstream payload
+without a local optimistic revision; the server validates item count/content,
+keeps one dispatch for each mutation, and tombstones only the exact conversation
+when deletion is confirmed.
+
 ## Local resources and UI lifecycle
 
 Passthrough/node Responses still support list/filter/page, detail, input items,
@@ -67,11 +75,12 @@ identity added to mutation state. Late async results cannot publish into another
 verified workspace. Private JSON is escaped text and is not stored in URLs or
 browser persistent storage.
 
-The account-pool UI exposes only a direct Response form (owner UUID + opaque ID).
-It does not issue a hidden account-pool list/count call. Switching to Conversations
-removes account-pool mode. Detail/items/cancel/delete use the native SDK contract,
-and private synthetic browser payloads remain escaped and absent from browser
-storage.
+The account-pool UI exposes tenant-scoped Response and Conversation indexes
+backed by proven affinity rows, plus direct owner UUID + opaque ID detail access.
+Switching between resource families preserves the selected mode and scope.
+Detail/items/cancel/delete and Conversation metadata/item mutations use the native
+SDK contract without synthetic revisions; private synthetic browser payloads remain
+escaped and absent from browser storage.
 
 ## Verification boundary
 
@@ -79,11 +88,13 @@ Real isolated PostgreSQL/Axum tests cover exact owner/account/kind scope, immuta
 ownership, credential snapshot rotation, settlement-vs-delete serialization,
 pre-dispatch membership/expiry revocation, post-upstream expiry/grant revocation,
 and stable-user continuation ownership. SDK tests cover native envelopes, no fake
-revision, single dispatch and direct-ID/list rejection. Migration tests cover fresh
-baseline and exact legacy-V0001 compatibility. Compiled-browser tests remain UI
+revision, single dispatch, indexed enumeration and exact scope rejection.
+Migration tests cover fresh baseline and exact legacy-V0001 compatibility.
+Compiled-browser tests remain UI
 evidence with synthetic HTTP and are not a substitute for those server/database
 checks.
 
-Native account-pool enumeration and native Conversation administration remain
-separate work. No production database, credential, upstream resource, service
-restart or deployment is changed by this development delivery.
+Native account-pool enumeration and Conversation administration are covered
+by the indexed and direct-resource contracts above. No production database,
+credential, upstream resource, service restart or deployment is changed by this
+development delivery.

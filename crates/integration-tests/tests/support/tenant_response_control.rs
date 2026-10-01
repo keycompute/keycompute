@@ -1423,16 +1423,34 @@ async fn native_account_pool_response_control_is_exact_owner_account_and_kind_sc
         .unwrap();
     assert_eq!(kind, "response");
 
-    // Native account-pool resources are direct-ID only, never mixed into local lists/counts.
-    for path in [
-        format!("/api/v1/tenants/{tenant}/responses?mode=account_pool&owner_user_id={owner}"),
-        format!("/api/v1/tenants/{tenant}/responses/count?mode=account_pool&owner_user_id={owner}"),
-    ] {
-        expect(
-            http(f.app.clone(), Method::GET, &path, Some(&admin), None).await,
-            StatusCode::BAD_REQUEST,
-        );
-    }
+    // Native account-pool resources are enumerable only through the proven kind index.
+    let listed = expect(
+        http(
+            f.app.clone(),
+            Method::GET,
+            &format!("/api/v1/tenants/{tenant}/responses?mode=account_pool&owner_user_id={owner}"),
+            Some(&admin),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["items"][0]["id"], id);
+    let counted = expect(
+        http(
+            f.app.clone(),
+            Method::GET,
+            &format!(
+                "/api/v1/tenants/{tenant}/responses/count?mode=account_pool&owner_user_id={owner}"
+            ),
+            Some(&admin),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(counted["total"], 1);
 
     expect(
         http(f.app.clone(), Method::GET, &base, Some(&member), None).await,
@@ -1592,6 +1610,126 @@ async fn native_account_pool_response_control_is_exact_owner_account_and_kind_sc
         assert_ne!(auth, format!("Bearer {admin}"));
         assert_ne!(auth, format!("Bearer {root_token}"));
     }
+    f.finish().await;
+}
+
+#[tokio::test]
+async fn native_account_pool_conversation_is_indexed_scoped_and_tombstoned() {
+    let mut f = Fixture::new().await;
+    let tenant = f.user.tenant_id;
+    let owner = f.user.id;
+    let admin = tenant_owner_console_token(&f).await;
+    let mut body = f.body(Op::Responses);
+    body["store"] = true.into();
+    let created = expect(
+        f.request(Method::POST, "/v1/responses", Some(body)).await,
+        StatusCode::OK,
+    );
+    let id = created["id"].as_str().unwrap().to_owned();
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE response_affinities SET resource_kind='conversation' WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3",
+        [tenant.into(), owner.into(), id.clone().into()],
+    )).await.unwrap();
+    let base = format!("/api/v1/tenants/{tenant}/conversations/account_pool/{owner}/{id}");
+
+    let listed = expect(http(f.app.clone(), Method::GET, &format!("/api/v1/tenants/{tenant}/conversations?mode=account_pool&owner_user_id={owner}&page=1&page_size=20"), Some(&admin), None).await, StatusCode::OK);
+    assert_eq!(listed["total"], 1);
+    assert_eq!(listed["items"][0]["id"], id);
+    assert_eq!(listed["items"][0]["revision"], Value::Null);
+    assert_eq!(listed["items"][0]["mode"], "account_pool");
+    let count = expect(http(f.app.clone(), Method::GET, &format!("/api/v1/tenants/{tenant}/conversations/count?mode=account_pool&owner_user_id={owner}"), Some(&admin), None).await, StatusCode::OK);
+    assert_eq!(count["total"], 1);
+
+    let detail = expect(
+        http(f.app.clone(), Method::GET, &base, Some(&admin), None).await,
+        StatusCode::OK,
+    );
+    assert_eq!(detail["summary"]["id"], id);
+    assert_eq!(detail["summary"]["mode"], "account_pool");
+    assert_eq!(detail["conversation"]["object"], "conversation");
+    let items = expect(
+        http(
+            f.app.clone(),
+            Method::GET,
+            &format!("{base}/items?order=asc&limit=20"),
+            Some(&admin),
+            None,
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(items["object"], "list");
+
+    let updated = expect(
+        http(
+            f.app.clone(),
+            Method::PATCH,
+            &base,
+            Some(&admin),
+            Some(json!({"metadata":{"topic":"updated"}})),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(updated["object"], "conversation");
+
+    let appended = expect(
+        http(
+            f.app.clone(),
+            Method::POST,
+            &format!("{base}/items"),
+            Some(&admin),
+            Some(json!({"items":[{"role":"user","content":"native item"}]})),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(appended["object"], "conversation");
+
+    let removed = expect(
+        http(
+            f.app.clone(),
+            Method::DELETE,
+            &format!("{base}/items/item-1"),
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        removed,
+        json!({"id":"item-1","object":"conversation.item","deleted":true})
+    );
+
+    let deleted = expect(
+        http(
+            f.app.clone(),
+            Method::DELETE,
+            &base,
+            Some(&admin),
+            Some(json!({})),
+        )
+        .await,
+        StatusCode::OK,
+    );
+    assert_eq!(
+        deleted,
+        json!({"id":id,"object":"conversation","deleted":true})
+    );
+    let row = f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
+        "SELECT deleted_at IS NOT NULL AS deleted, resource_kind FROM response_affinities WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3",
+        [tenant.into(), owner.into(), id.clone().into()])).await.unwrap().unwrap();
+    assert!(row.try_get::<bool>("", "deleted").unwrap());
+    assert_eq!(
+        row.try_get::<String>("", "resource_kind").unwrap(),
+        "conversation"
+    );
+    expect(
+        http(f.app.clone(), Method::GET, &base, Some(&admin), None).await,
+        StatusCode::NOT_FOUND,
+    );
     f.finish().await;
 }
 

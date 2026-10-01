@@ -160,6 +160,20 @@ pub struct NativeResponseCommand {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct NativeConversationMetadataCommand {
+    pub metadata: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NativeConversationItemsCommand {
+    pub items: Vec<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MetadataCommand {
     pub expected_revision: i64,
     pub metadata: Value,
@@ -386,11 +400,6 @@ impl ResponseControlApi {
     }
 
     fn conversation_resource(&self, mode: ResponseMode, owner: Uuid, id: &str) -> Result<String> {
-        if mode == ResponseMode::AccountPool {
-            return Err(ClientError::Config(
-                "account_pool Conversations administration is not implemented".into(),
-            ));
-        }
         if owner.is_nil() {
             return Err(ClientError::Config(
                 "A real owner and resource ID are required".into(),
@@ -414,11 +423,6 @@ impl ResponseControlApi {
         let mode = q
             .mode
             .ok_or_else(|| ClientError::Config("Mode required".into()))?;
-        if mode == ResponseMode::AccountPool {
-            return Err(ClientError::Config(
-                "account_pool Responses are direct-ID resources and cannot be listed".into(),
-            ));
-        }
         let result: Page<ResponseSummary> = self
             .client
             .get_json_fresh(&format!("{}/responses?{query}", self.base), Some(token))
@@ -436,11 +440,6 @@ impl ResponseControlApi {
 
     pub async fn response_count(&self, q: &ResourceListQuery, token: &str) -> Result<Count> {
         self.reason(q.reason.as_deref())?;
-        if q.mode == Some(ResponseMode::AccountPool) {
-            return Err(ClientError::Config(
-                "account_pool Responses are direct-ID resources and cannot be counted".into(),
-            ));
-        }
         let result: Count = self
             .client
             .get_json_fresh(
@@ -627,11 +626,6 @@ impl ResponseControlApi {
         let mode = q
             .mode
             .ok_or_else(|| ClientError::Config("Mode required".into()))?;
-        if mode == ResponseMode::AccountPool {
-            return Err(ClientError::Config(
-                "account_pool Conversations administration is not implemented".into(),
-            ));
-        }
         let result: Page<ConversationSummary> = self
             .client
             .get_json_fresh(&format!("{}/conversations?{query}", self.base), Some(token))
@@ -649,11 +643,6 @@ impl ResponseControlApi {
 
     pub async fn conversation_count(&self, q: &ResourceListQuery, token: &str) -> Result<Count> {
         self.reason(q.reason.as_deref())?;
-        if q.mode == Some(ResponseMode::AccountPool) {
-            return Err(ClientError::Config(
-                "account_pool Conversations administration is not implemented".into(),
-            ));
-        }
         let result: Count = self
             .client
             .get_json_fresh(
@@ -686,6 +675,107 @@ impl ResponseControlApi {
         let result: ConversationDetail = self.client.get_json_fresh(&path, Some(token)).await?;
         self.check_conversation(&result.summary, mode, Some(owner), Some(id))?;
         self.check_body(&result.conversation, id, "conversation")?;
+        Ok(result)
+    }
+
+    pub async fn update_native_conversation(
+        &self,
+        owner: Uuid,
+        id: &str,
+        body: &NativeConversationMetadataCommand,
+        token: &str,
+    ) -> Result<Value> {
+        self.reason(body.reason.as_deref())?;
+        content_limit(&body.metadata)?;
+        let result: Value = self
+            .client
+            .post_json(
+                &self.conversation_resource(ResponseMode::AccountPool, owner, id)?,
+                body,
+                Some(token),
+            )
+            .await?;
+        self.check_body(&result, id, "conversation")?;
+        Ok(result)
+    }
+
+    pub async fn delete_native_conversation(
+        &self,
+        owner: Uuid,
+        id: &str,
+        body: &NativeResponseCommand,
+        token: &str,
+    ) -> Result<Deleted> {
+        self.reason(body.reason.as_deref())?;
+        let request = self
+            .client
+            .request_with_auth(
+                reqwest::Method::DELETE,
+                &self.conversation_resource(ResponseMode::AccountPool, owner, id)?,
+                Some(token),
+            )
+            .await?;
+        let result: Deleted = self.client.send_and_parse(request.json(body)).await?;
+        self.check_deleted(&result, id, "conversation")?;
+        Ok(result)
+    }
+
+    pub async fn append_native_conversation_items(
+        &self,
+        owner: Uuid,
+        id: &str,
+        body: &NativeConversationItemsCommand,
+        token: &str,
+    ) -> Result<Value> {
+        self.reason(body.reason.as_deref())?;
+        if body.items.is_empty()
+            || body.items.len() > 512
+            || body.items.iter().any(|item| !item.is_object())
+        {
+            return Err(ClientError::Config(
+                "Use between one and 512 conversation items".into(),
+            ));
+        }
+        content_limit(&body.items)?;
+        let result: Value = self
+            .client
+            .post_json(
+                &format!(
+                    "{}/items",
+                    self.conversation_resource(ResponseMode::AccountPool, owner, id)?
+                ),
+                body,
+                Some(token),
+            )
+            .await?;
+        self.check_body(&result, id, "conversation")?;
+        Ok(result)
+    }
+
+    pub async fn remove_native_conversation_item(
+        &self,
+        owner: Uuid,
+        id: &str,
+        item_id: &str,
+        body: &NativeResponseCommand,
+        token: &str,
+    ) -> Result<Deleted> {
+        self.reason(body.reason.as_deref())?;
+        let item_id_raw = item_id;
+        let item_id = resource_segment(item_id)?;
+        let request = self
+            .client
+            .request_with_auth(
+                reqwest::Method::DELETE,
+                &format!(
+                    "{}/items/{item_id}",
+                    self.conversation_resource(ResponseMode::AccountPool, owner, id)?
+                ),
+                Some(token),
+            )
+            .await?;
+        let result: Deleted = self.client.send_and_parse(request.json(body)).await?;
+        self.check_deleted(&result, item_id_raw, "conversation.item")?;
         Ok(result)
     }
 
@@ -920,6 +1010,8 @@ redact_content_debug!(
     ResponseDetail,
     ConversationDetail,
     ConversationSummary,
+    NativeConversationMetadataCommand,
+    NativeConversationItemsCommand,
     MetadataCommand,
     AppendItemsCommand
 );

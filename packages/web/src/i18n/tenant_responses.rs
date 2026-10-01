@@ -20,7 +20,14 @@ pub(super) fn register(zh: &mut HashMap<&'static str, &'static str>, en: bool) {
             "按当前租户、原拥有者和执行模式管理托管资源。"
         },
     );
-    zh.insert("tenant_responses.local_only", if en {"This page manages local Passthrough/Node resources only. Native account-pool management is not available here."} else {"本页只管理透传与节点模式的本地托管资源；账号池原生资源尚未接入。"});
+    zh.insert(
+        "tenant_responses.local_only",
+        if en {
+            "This page manages tenant-scoped Passthrough, Node and native account-pool resources."
+        } else {
+            "本页管理当前租户的透传、节点和账号池原生资源。"
+        },
+    );
     zh.insert(
         "tenant_responses.responses",
         if en {

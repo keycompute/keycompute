@@ -10,10 +10,10 @@ No complete-subsystem or production-cutover acceptance is claimed.
 | 0 | Final roles, ownership rules and schema/route/cache-job inventories | Final exhaustive object/endpoint review |
 | 1 | Global identity, memberships, invitations/audits, explicit node sessions and resource ownership constraints | Production cutover is not this schema gate |
 | 2 | Credential separation, live original-session proof and queue/dispatch authority; Key/pricing/reporting timing regressions | Remaining provider/binding and other endpoint timing review |
-| 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks, local managed resources and direct-ID native account-pool Responses control | Native account-pool enumeration/Conversations and remaining control review |
+| 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks, local managed resources, native account-pool Responses and indexed Conversations/Responses control | Final resource UI and remaining control review |
 | 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
 | 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
-| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, direct-ID native account-pool Responses, Key/owner pages, distribution and tenant financial-control pages | Native account-pool enumeration/Conversations and final resource UI |
+| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, indexed native account-pool Responses/Conversations, Key/owner pages, distribution and tenant financial-control pages | Final resource UI and release acceptance |
 | 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
 
 Payment channels remain platform-wide. Financial records are tenant-scoped and
@@ -30,6 +30,30 @@ Foundation baseline `f427ae7`/CI106 is historical. Current accepted source is ma
 archived preparations are not implementation dependencies and must not be replayed
 as if verified. No production data, credentials, payments, SMTP or deployment is
 changed by these development deliveries.
+
+
+## Current follow-up — native account-pool enumeration and Conversations
+
+Native account-pool Response and Conversation indexes now use only affinity rows
+with a proven `resource_kind`, tenant, original owner and owning account. List and
+count routes are tenant/root scoped and preserve the existing audit and session
+revalidation fences. Native Response detail/items/cancel/delete remain exact-ID
+operations. Native Conversation detail/items, metadata update, item append/removal
+and deletion now use the same account and affinity lock order, carry no local
+revision, and tombstone only the exact proven resource after a confirmed delete.
+Unknown or legacy NULL kinds remain unlisted until a semantic route proves the
+kind; IDs are never classified by prefix.
+
+The typed client validates native envelopes, scope, duplicate rows/cursors and
+native mutation payloads. The Web page can switch between local and native modes,
+loads native indexes, inspects content, pages items and edits native Conversation
+metadata/items. The stale direct-only native panel was removed.
+
+Focused validation for this follow-up: client-api wire tests **12/12**, native
+PostgreSQL/Axum control tests **8/8**, full scoped resource integration tests
+**42/42**, strict targeted Clippy, formatting and diff checks. Production Web
+bundle/Chromium acceptance remains the next release gate. No production data,
+credentials, upstream resources, restart or deployment changed.
 
 
 ## Current phase 1 — final contract alignment accepted locally

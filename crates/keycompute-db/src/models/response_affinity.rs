@@ -1253,18 +1253,22 @@ impl ResponseAffinity {
 
     /// Tombstone a confirmed native Response delete inside the account-locked caller transaction.
     /// Pending settlement and non-Response/legacy rows deliberately do not match.
-    pub async fn tombstone_native_response_for_user(
+    pub async fn tombstone_native_resource_for_user(
         db: &impl ConnectionTrait,
         tenant_id: Uuid,
         user_id: Uuid,
         response_id: &str,
         account_id: Uuid,
+        resource_kind: &str,
     ) -> Result<u64, DbError> {
+        if !matches!(resource_kind, "response" | "conversation") {
+            return Err(DbError::Other("invalid native resource kind".into()));
+        }
         let result = db
             .execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "UPDATE response_affinities SET deleted_at=COALESCE(deleted_at,clock_timestamp()),local_response=NULL,local_context=NULL,local_context_bytes=NULL,updated_at=GREATEST(updated_at,clock_timestamp()) WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND account_id=$4 AND resource_kind='response' AND NOT is_reservation AND deleted_at IS NULL AND settlement IS NULL",
-                [tenant_id.into(), user_id.into(), response_id.into(), account_id.into()],
+                "UPDATE response_affinities SET deleted_at=COALESCE(deleted_at,clock_timestamp()),local_response=NULL,local_context=NULL,local_context_bytes=NULL,updated_at=GREATEST(updated_at,clock_timestamp()) WHERE tenant_id=$1 AND user_id=$2 AND response_id=$3 AND account_id=$4 AND resource_kind=$5 AND NOT is_reservation AND deleted_at IS NULL AND settlement IS NULL",
+                [tenant_id.into(), user_id.into(), response_id.into(), account_id.into(), resource_kind.into()],
             ))
             .await?;
         Ok(result.rows_affected())

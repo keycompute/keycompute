@@ -3,7 +3,8 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
-const { chromium } = await import(process.env.KC_PLAYWRIGHT_MODULE || 'playwright');
+const playwrightModule=await import(process.env.KC_PLAYWRIGHT_MODULE || 'playwright');
+const { chromium }=playwrightModule.default||playwrightModule;
 const root=path.resolve(process.env.KC_WEB_ROOT || 'target/dx/web/release/web/public');
 const output=path.resolve(process.env.KC_BROWSER_OUTPUT || 'tenant-responses-browser-results');
 await fs.mkdir(output,{recursive:true});
@@ -11,7 +12,7 @@ const A='11111111-1111-4111-8111-111111111111', B='22222222-2222-4222-8222-22222
 const U='33333333-3333-4333-8333-333333333333', V='44444444-4444-4444-8444-444444444444';
 const stamp='2026-09-23T00:00:00Z', id='same-resource-id', nativeId='future.response/id:1', nativeAccount='55555555-5555-4555-8555-555555555555';
 const server=http.createServer(async(req,res)=>{try{
-    const pathname=decodeURIComponent(new URL(req.url,'http://localhost').pathname);
+    const pathname=new URL(req.url,'http://localhost').pathname;
     let file=path.resolve(root,'.'+pathname);if(file!==root&&!file.startsWith(root+path.sep))throw Error('invalid asset path');
     let data;try{data=await fs.readFile(file);}catch{file=path.join(root,'index.html');data=await fs.readFile(file);}
     const mime={'.html':'text/html','.js':'text/javascript','.wasm':'application/wasm','.css':'text/css','.woff2':'font/woff2','.png':'image/png','.jpg':'image/jpeg','.svg':'image/svg+xml','.ico':'image/x-icon'};
@@ -28,6 +29,9 @@ async function fixture({selected=A,role='none',admin=true}={}){
         responses:['passthrough','node_dispatch'].flatMap(mode=>[response(U,mode),response(V,mode)]),
         native:{id:nativeId,tenant_id:A,owner_user_id:U,mode:'account_pool',provider:'openai',account_id:nativeAccount,model:'native-pool-model',status:'in_progress',background:true,store_response:true,stream:false,previous_response_id:null,conversation_id:null,revision:null,created_at:stamp,updated_at:stamp,expires_at:'2030-01-01T00:00:00Z',deleted:false,local_content_available:false,native_content_available:true},
         conversations:['passthrough','node_dispatch'].flatMap(mode=>[conversation(U,mode),conversation(V,mode)]),items:new Map()};
+    state.responses.push(state.native);
+    state.nativeConversation={id:'future.conversation/id:1',tenant_id:A,owner_user_id:U,mode:'account_pool',account_id:nativeAccount,model:'native-pool-model',metadata:{case:'native'},active_response_id:null,revision:null,created_at:stamp,updated_at:stamp,expires_at:'2030-01-01T00:00:00Z',deleted:false};
+    state.conversations.push(state.nativeConversation);
     for(const row of state.conversations)state.items.set(`${row.mode}:${row.owner_user_id}`,Array.from({length:21},(_,n)=>({id:`item-${n+1}`,role:'user',content:`${row.mode}-${row.owner_user_id===U?'owner-U':'owner-V'}-item-${n+1}`})));
     const context=await browser.newContext({viewport:{width:1440,height:1000}});
     await context.addInitScript(()=>{localStorage.setItem('keyc_access_token','fixture-token');localStorage.setItem('keyc_lang','en');});
@@ -70,10 +74,13 @@ async function fixture({selected=A,role='none',admin=true}={}){
                 const [_,mode,owner,rid,collection,itemId]=parts;
                 const row=state[kind].find(r=>r.mode===mode&&r.owner_user_id===owner&&r.id===rid&&!r.deleted);
                 if(!row)return answer({error:{message:'fixture resource missing'}},404);
+                const nativeResource=mode==='account_pool';
                 if(m!=='GET'){
                     if(state.unavailable)return answer({error:{message:'uncertain mutation; refresh records'}},503);
-                    if(state.conflict||body?.expected_revision!==row.revision)return answer({error:{message:'resource changed; refresh records'}},409);
+                    if(!nativeResource&&(state.conflict||body?.expected_revision!==row.revision))return answer({error:{message:'resource changed; refresh records'}},409);
                     if(state.hold)await new Promise(resolve=>{state.release=resolve;});
+                    if(nativeResource)assert.equal(body?.expected_revision,undefined,'native commands must not invent a local revision');
+                    else assert.equal(body?.expected_revision,row.revision);
                     assert.equal(body.tenant_id,undefined);assert.equal(body.owner_user_id,undefined);
                 }
                 if(!collection&&m==='GET'){
@@ -87,11 +94,11 @@ async function fixture({selected=A,role='none',admin=true}={}){
                     const limit=Number(url.searchParams.get('limit')||20),data=items.slice(start,start+limit);
                     return answer({object:'list',data,first_id:data[0]?.id??null,last_id:data.at(-1)?.id??null,has_more:start+limit<items.length});
                 }
-                if(!collection&&m==='PATCH'&&kind==='conversations'){row.metadata=body.metadata;row.revision++;return answer({id:rid,object:'conversation',metadata:row.metadata,created_at:1});}
-                if(!collection&&m==='DELETE'){row.deleted=true;row.revision++;return answer({id:rid,object:kind==='responses'?'response':'conversation',deleted:true});}
-                if(collection==='cancel'&&m==='POST'){row.status='cancelled';row.revision++;return answer({id:rid,object:'response',status:row.status});}
+                if(!collection&&(m==='PATCH'||m==='POST')&&kind==='conversations'){row.metadata=body.metadata;if(!nativeResource)row.revision++;return answer({id:rid,object:'conversation',metadata:row.metadata,created_at:1});}
+                if(!collection&&m==='DELETE'){row.deleted=true;if(!nativeResource)row.revision++;return answer({id:rid,object:kind==='responses'?'response':'conversation',deleted:true});}
+                if(collection==='cancel'&&m==='POST'){row.status='cancelled';if(!nativeResource)row.revision++;return answer({id:rid,object:'response',status:row.status});}
                 if(collection==='items'&&kind==='conversations'){
-                    const key=`${mode}:${owner}`;row.revision++;
+                    const key=`${mode}:${owner}`;if(!nativeResource)row.revision++;
                     if(m==='POST'){state.items.get(key).push(...body.items.map((item,i)=>({...item,id:`added-${row.revision}-${i}`})));return answer({id:rid,object:'conversation',metadata:row.metadata,created_at:1});}
                     if(m==='DELETE'&&itemId){state.items.set(key,state.items.get(key).filter(i=>i.id!==itemId));return answer({id:itemId,object:'conversation.item',deleted:true});}
                 }
@@ -114,19 +121,27 @@ try{
     d=await open(page,U,'Inspect resource content');await d.getByText(/passthrough-owner-U-private/).waitFor();await d.getByRole('button',{name:'Close',exact:true}).click();
     d=await open(page,V,'Request response cancellation');await confirm(d);await rowFor(page,V).getByText('cancelled',{exact:true}).waitFor();
     assert.equal(state.responses.find(r=>r.mode==='passthrough'&&r.owner_user_id===U).status,'in_progress');
-    // Native account-pool resources are explicit owner+opaque-ID lookups, never an enumerable local list.
+    // Account-pool resources are indexed in the tenant list and keep native mutations revision-free.
     await page.locator('#managed-resource-mode').selectOption('account_pool');
-    await page.locator('#native-response-owner').fill(U);await page.locator('#native-response-id').fill(nativeId);
-    const nativeListBefore=state.calls.filter(c=>c.path.endsWith('/responses')&&new URLSearchParams(c.query).get('mode')==='account_pool').length;
-    await page.getByRole('button',{name:'Open native Response',exact:true}).click();await page.getByText('native-pool-model',{exact:true}).waitFor();
-    assert.equal(state.calls.filter(c=>c.path.endsWith('/responses')&&new URLSearchParams(c.query).get('mode')==='account_pool').length,nativeListBefore,'native direct mode must not issue a list request');
-    d=await page.getByRole('button',{name:'Inspect resource content',exact:true}).click().then(()=>page.getByRole('dialog'));await d.getByText(/native-private/).waitFor();assert.equal(await page.evaluate(()=>window.__nativeXss),undefined);assert.doesNotMatch(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage})),/native-private/);await d.getByRole('button',{name:'Close',exact:true}).click();
-    await page.getByRole('button',{name:'Inspect items',exact:true}).click();d=page.getByRole('dialog');await d.getByText(/native-private-input/).waitFor();await d.getByRole('button',{name:'Close',exact:true}).click();
-    await page.getByRole('button',{name:'Request response cancellation',exact:true}).click();d=page.getByRole('dialog');await confirm(d);await page.locator('.native-response-direct .card').filter({hasText:'Resource state cancelled'}).waitFor();
-    const nativeCancel=state.calls.filter(c=>c.method==='POST'&&decodeURIComponent(c.path).endsWith(`${nativeId}/cancel`)).at(-1);assert.ok(nativeCancel);assert.equal(nativeCancel.body.expected_revision,undefined);
-    await page.getByRole('button',{name:'Delete resource',exact:true}).click();d=page.getByRole('dialog');await confirm(d);await page.locator('.native-response-direct [role="alert"]').waitFor();
+    await rowFor(page,U).waitFor();
+    assert.equal(await rowFor(page,U).count(),1);
+    const nativeListRequests=state.calls.filter(c=>c.path.endsWith('/responses')&&new URLSearchParams(c.query).get('mode')==='account_pool');
+    assert.equal(nativeListRequests.length,1);
+    d=await open(page,U,'Inspect resource content');await d.getByText(/native-private/).waitFor();assert.equal(await page.evaluate(()=>window.__nativeXss),undefined);assert.doesNotMatch(await page.evaluate(()=>JSON.stringify({...localStorage,...sessionStorage})),/native-private/);await d.getByRole('button',{name:'Close',exact:true}).click();
+    assert.equal(await rowFor(page,U).getByRole('button',{name:'Inspect items',exact:true}).count(),0);
+    d=await open(page,U,'Request response cancellation');await confirm(d);await rowFor(page,U).getByText('cancelled',{exact:true}).waitFor();
+    const nativeCancel=state.calls.filter(c=>c.method==='POST'&&decodeURIComponent(c.path).endsWith(nativeId+'/cancel')).at(-1);assert.ok(nativeCancel);assert.equal(nativeCancel.body.expected_revision,undefined);
+    d=await open(page,U,'Delete resource');await confirm(d);await rowFor(page,U).waitFor({state:'detached'});
     const nativeDelete=state.calls.filter(c=>c.method==='DELETE'&&decodeURIComponent(c.path).endsWith(nativeId)).at(-1);assert.ok(nativeDelete);assert.equal(nativeDelete.body.expected_revision,undefined);assert.equal(state.native.deleted,true);
-    await page.getByRole('button',{name:'Conversations',exact:true}).click();await rowFor(page,V).waitFor();assert.equal(await page.locator('#managed-resource-mode').inputValue(),'passthrough');assert.equal(await page.locator('#managed-resource-mode option').count(),2);
+    await page.getByRole('button',{name:'Conversations',exact:true}).click();await rowFor(page,U).waitFor();assert.equal(await page.locator('#managed-resource-mode').inputValue(),'account_pool');assert.equal(await page.locator('#managed-resource-mode option').count(),3);
+    d=await open(page,U,'Inspect resource content');await d.getByText(/native/).waitFor();await d.getByRole('button',{name:'Close',exact:true}).click();
+    d=await open(page,U,'Inspect items');await d.getByText(/account_pool-owner-U-item-21/).waitFor();await d.getByRole('button',{name:'Close',exact:true}).click();
+    d=await open(page,U,'Edit conversation metadata');await d.locator('#resource-content-json').fill('{"case":"native-changed"}');await confirm(d);assert.equal(state.nativeConversation.metadata.case,'native-changed');
+    d=await open(page,U,'Append conversation items');await d.locator('#resource-content-json').fill('[{"role":"assistant","content":"native-added"}]');await confirm(d);assert.equal(state.items.get('account_pool:'+U).length,22);
+    d=await open(page,U,'Inspect items');await d.getByRole('button',{name:'Remove conversation item',exact:true}).first().click();d=page.getByRole('dialog');await d.getByText('added-null-0',{exact:true}).waitFor();await confirm(d);assert.equal(state.items.get('account_pool:'+U).length,21);
+    d=await open(page,U,'Delete resource');await confirm(d);await rowFor(page,U).waitFor({state:'detached'});assert.equal(state.nativeConversation.deleted,true);
+    const nativeConversationMutations=state.calls.filter(c=>c.path.includes('/conversations/account_pool/')&&c.method!=='GET');assert.ok(nativeConversationMutations.length>=4);assert.ok(nativeConversationMutations.every(c=>c.body?.expected_revision===undefined));
+    await page.locator('#managed-resource-mode').selectOption('passthrough');await rowFor(page,V).waitFor();
     d=await open(page,U,'Edit conversation metadata');await d.locator('#resource-content-json').fill('{"secret":"unsaved-U-draft"}');await d.getByRole('button',{name:'Cancel',exact:true}).click();
     d=await open(page,V,'Edit conversation metadata');assert.match(await d.locator('#resource-content-json').inputValue(),/owner-V/);assert.doesNotMatch(await d.innerText(),/unsaved-U/);
     await d.locator('#resource-content-json').fill('{"case":5}');await d.getByRole('button',{name:'Confirm',exact:true}).click();await d.locator('[role="alert"]').waitFor();assert.equal(state.calls.filter(c=>c.method==='PATCH').length,0);
@@ -143,7 +158,7 @@ try{
     await page.locator('#managed-resource-owner').fill(U);await page.getByRole('button',{name:'Apply owner filter',exact:true}).click();await rowFor(page,U).waitFor();
     assert.equal(new URLSearchParams(state.calls.filter(c=>c.method==='GET'&&c.path.endsWith('/conversations')).at(-1).query).get('owner_user_id'),U);
     await page.screenshot({path:path.join(output,'resources.png'),fullPage:true});assert.deepEqual(state.unknown,[]);
-    cases.push('local identity collisions plus direct-ID native account-pool detail/items/cancel/delete without list or fake revision');await context.close();
+    cases.push('local identity collisions plus indexed native account-pool Responses and Conversations with revision-free mutations');await context.close();
     ({state,page,context}=await fixture());await page.goto(base+'/tenant/responses');await rowFor(page,V).waitFor();
     d=await open(page,V,'Inspect resource content');await d.getByText(/passthrough-owner-V-private/).waitFor();
     await page.setViewportSize({width:390,height:844});

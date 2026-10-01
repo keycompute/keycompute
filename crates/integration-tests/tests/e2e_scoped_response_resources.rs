@@ -112,6 +112,7 @@ async fn upstream(
     {
         s.native_release.notified().await;
     }
+    let is_conversation = path.contains("/conversations/");
     let op = if path.contains("messages") {
         Op::Messages
     } else if path.contains("responses") {
@@ -130,12 +131,39 @@ async fn upstream(
     if body.get("hold_test").and_then(Value::as_bool) == Some(true) {
         s.stream_release.notified().await;
     }
+    let segment = if is_conversation {
+        "/conversations/"
+    } else {
+        "/responses/"
+    };
     let resource_id = path
-        .split("/responses/")
+        .split(segment)
         .nth(1)
         .and_then(|tail| tail.split('/').next())
-        .unwrap_or("resp-native");
-    let response = if status == 200 && method == Method::GET && path.ends_with("/input_items") {
+        .unwrap_or(if is_conversation {
+            "conv-native"
+        } else {
+            "resp-native"
+        });
+    let response = if is_conversation
+        && status == 200
+        && method == Method::GET
+        && path.ends_with("/items")
+    {
+        json!({"object":"list","data":[],"first_id":null,"last_id":null,"has_more":false})
+    } else if is_conversation
+        && status == 200
+        && method == Method::DELETE
+        && path.contains("/items/")
+    {
+        json!({"id":resource_id,"object":"conversation","metadata":null})
+    } else if is_conversation && status == 200 && method == Method::DELETE {
+        json!({"id":resource_id,"object":"conversation.deleted","deleted":true})
+    } else if is_conversation && status == 200 && method == Method::POST {
+        json!({"id":resource_id,"object":"conversation","metadata":body["metadata"]})
+    } else if is_conversation && status == 200 && method == Method::GET {
+        json!({"id":resource_id,"object":"conversation","metadata":{"fixture":"native"}})
+    } else if status == 200 && method == Method::GET && path.ends_with("/input_items") {
         json!({"object":"list","data":[],"first_id":null,"last_id":null,"has_more":false})
     } else if status == 200 && method == Method::DELETE && path.contains("/responses/") {
         json!({"id":resource_id,"object":"response.deleted","deleted":true})

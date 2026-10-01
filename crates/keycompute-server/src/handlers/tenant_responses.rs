@@ -78,7 +78,7 @@ pub struct RevisionBody {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MetadataBody {
-    expected_revision: i64,
+    expected_revision: Option<i64>,
     metadata: Value,
     reason: Option<String>,
 }
@@ -86,7 +86,7 @@ pub struct MetadataBody {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppendItemsBody {
-    expected_revision: i64,
+    expected_revision: Option<i64>,
     items: Vec<Value>,
     reason: Option<String>,
 }
@@ -291,6 +291,73 @@ fn local_conversation_summary(row: store::ConversationAdminSummary) -> Conversat
     }
 }
 
+fn native_response_index(row: store::NativeAdminSummary) -> ResponseSummary {
+    ResponseSummary {
+        id: row.id,
+        tenant_id: row.tenant_id,
+        owner_user_id: row.user_id,
+        mode: ModelAccessMode::AccountPool.as_str().into(),
+        provider: Some(row.provider),
+        account_id: Some(row.account_id),
+        model: row.model,
+        status: "indexed".into(),
+        background: false,
+        store_response: true,
+        stream: false,
+        previous_response_id: None,
+        conversation_id: None,
+        revision: None,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        expires_at: row.expires_at,
+        deleted: false,
+        local_content_available: false,
+        native_content_available: true,
+    }
+}
+
+fn native_conversation_index(row: store::NativeAdminSummary) -> ConversationSummary {
+    ConversationSummary {
+        id: row.id,
+        tenant_id: row.tenant_id,
+        owner_user_id: row.user_id,
+        mode: ModelAccessMode::AccountPool.as_str().into(),
+        account_id: Some(row.account_id),
+        model: row.model,
+        metadata: Value::Null,
+        active_response_id: None,
+        revision: None,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        expires_at: row.expires_at,
+        deleted: false,
+    }
+}
+
+fn native_conversation_summary(
+    affinity: &ResponseAffinity,
+    body: &Value,
+) -> Result<ConversationSummary> {
+    if affinity.resource_kind.as_deref() != Some("conversation") {
+        return Err(ApiError::NotFound("Native Conversation not found".into()));
+    }
+    Ok(ConversationSummary {
+        id: affinity.response_id.clone(),
+        tenant_id: affinity.tenant_id,
+        owner_user_id: affinity.user_id.ok_or_else(store::missing)?,
+        mode: ModelAccessMode::AccountPool.as_str().into(),
+        account_id: Some(affinity.account_id.ok_or_else(store::missing)?),
+        model: affinity.model.clone(),
+        metadata: body.get("metadata").cloned().unwrap_or(Value::Null),
+        active_response_id: None,
+        revision: None,
+        created_at: affinity.created_at,
+        updated_at: affinity.updated_at,
+        expires_at: affinity.expires_at,
+        deleted: false,
+    })
+}
+
 #[derive(Clone, Copy, Debug)]
 enum NativeResponseOperation {
     Detail,
@@ -323,6 +390,74 @@ impl NativeResponseOperation {
     }
 }
 
+#[derive(Debug)]
+enum NativeOperation {
+    Response(NativeResponseOperation),
+    ConversationDetail,
+    ConversationDelete,
+    ConversationItems,
+    ConversationMetadata,
+    ConversationAppend,
+    ConversationRemoveItem(String),
+}
+impl NativeOperation {
+    fn kind(&self) -> &'static str {
+        if matches!(self, Self::Response(_)) {
+            "response"
+        } else {
+            "conversation"
+        }
+    }
+    fn method(&self) -> JsonRequestMethod {
+        match self {
+            Self::Response(op) => op.method(),
+            Self::ConversationDetail | Self::ConversationItems => JsonRequestMethod::Get,
+            Self::ConversationDelete | Self::ConversationRemoveItem(_) => JsonRequestMethod::Delete,
+            Self::ConversationMetadata | Self::ConversationAppend => JsonRequestMethod::Post,
+        }
+    }
+    fn suffix(&self) -> String {
+        match self {
+            Self::Response(op) => op.suffix().into(),
+            Self::ConversationItems | Self::ConversationAppend => "/items".into(),
+            Self::ConversationRemoveItem(id) => format!(
+                "/items/{}",
+                url::form_urlencoded::byte_serialize(id.as_bytes()).collect::<String>()
+            ),
+            _ => String::new(),
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Response(op) => op.name(),
+            Self::ConversationDetail => "detail",
+            Self::ConversationDelete => "delete",
+            Self::ConversationItems => "items",
+            Self::ConversationMetadata => "metadata",
+            Self::ConversationAppend => "append_items",
+            Self::ConversationRemoveItem(_) => "remove_item",
+        }
+    }
+    fn deletes_resource(&self) -> bool {
+        matches!(
+            self,
+            Self::Response(NativeResponseOperation::Delete) | Self::ConversationDelete
+        )
+    }
+    fn detail(&self) -> bool {
+        matches!(
+            self,
+            Self::Response(NativeResponseOperation::Detail) | Self::ConversationDetail
+        )
+    }
+}
+struct NativeRequest {
+    operation: NativeOperation,
+    query: Option<String>,
+    body: Option<Value>,
+    headers: HeaderMap,
+}
+
 fn validate_native_selector(owner: Uuid, id: &str) -> Result<()> {
     if owner.is_nil() || !llm_protocol_openai::responses_stream::valid_openai_resource_id(id) {
         Err(ApiError::BadRequest(
@@ -347,7 +482,11 @@ async fn native_audit_event(
         control,
         audit,
         action,
-        "response",
+        if action.starts_with("conversation.") {
+            "conversation"
+        } else {
+            "response"
+        },
         Some(id),
         json!({
             "owner_user_id": owner,
@@ -464,7 +603,36 @@ async fn native_response_operation(
     query: Option<String>,
     client_headers: HeaderMap,
 ) -> Result<Response> {
+    native_resource_operation(
+        state,
+        control,
+        path,
+        NativeRequest {
+            operation: NativeOperation::Response(operation),
+            query,
+            body: None,
+            headers: client_headers,
+        },
+    )
+    .await
+}
+
+async fn native_resource_operation(
+    state: AppState,
+    control: store::ResponseControlScope,
+    path: ResourcePath,
+    request: NativeRequest,
+) -> Result<Response> {
     validate_native_selector(path.owner_user_id, &path.id)?;
+    let NativeRequest {
+        operation,
+        query,
+        body,
+        headers: client_headers,
+    } = request;
+    let kind = operation.kind();
+    let request_action = format!("{kind}.native.request");
+    let result_action = format!("{kind}.native.result");
     let db = pool(&state)?;
 
     // Authorization and its global identity fence are deliberately short-lived.
@@ -475,7 +643,7 @@ async fn native_response_operation(
         path.owner_user_id,
         &path.id,
         None,
-        "response.native.request",
+        &request_action,
         json!({"operation":operation.name()}),
     )
     .await?;
@@ -496,7 +664,7 @@ async fn native_response_operation(
     )
     .await
     .map_err(|e| ApiError::Internal(format!("Native Responses lookup failed: {e}")))?
-    .filter(|r| r.resource_kind.as_deref() == Some("response"))
+    .filter(|r| r.resource_kind.as_deref() == Some(kind))
     .ok_or_else(|| ApiError::NotFound("Native Responses resource not found".into()))?;
     let account_id = snapshot.account_id.ok_or_else(|| {
         ApiError::NotFound("Native Responses resource has no upstream account".into())
@@ -513,7 +681,7 @@ async fn native_response_operation(
     )
     .await
     .map_err(|e| ApiError::Internal(format!("Native Responses lookup failed: {e}")))?
-    .filter(|r| r.resource_kind.as_deref() == Some("response") && r.account_id == Some(account_id))
+    .filter(|r| r.resource_kind.as_deref() == Some(kind) && r.account_id == Some(account_id))
     .ok_or_else(|| ApiError::Conflict("Native Responses ownership changed".into()))?;
     crate::handlers::responses::authorize_non_pt_account(&tx, path.tenant_id, account_id).await?;
     // The account SHARE lock may have waited behind a credential/configuration change.
@@ -528,7 +696,7 @@ async fn native_response_operation(
             "The account owning this Response is no longer OpenAI-compatible".into(),
         ));
     }
-    if matches!(operation, NativeResponseOperation::Delete) && affinity.settlement.is_some() {
+    if operation.deletes_resource() && affinity.settlement.is_some() {
         return Err(ApiError::Conflict(
             "This background response cannot be deleted until billing settlement completes".into(),
         ));
@@ -553,8 +721,12 @@ async fn native_response_operation(
         path.tenant_id,
         path.owner_user_id,
     )?);
-    let mut url =
-        crate::handlers::responses::native_resource_url(&endpoint, &path.id, operation.suffix());
+    let mut url = crate::handlers::responses::native_admin_resource_url(
+        &endpoint,
+        kind,
+        &path.id,
+        &operation.suffix(),
+    );
     if let Some(q) = query.as_deref().filter(|q| !q.is_empty()) {
         url.push('?');
         url.push_str(q);
@@ -563,7 +735,13 @@ async fn native_response_operation(
         .http_proxy
         .client_for_provider_and_account(&account.provider, Some(account_id));
     let upstream = match client
-        .request_json_passthrough(operation.method(), &url, headers, None, false)
+        .request_json_passthrough(
+            operation.method(),
+            &url,
+            headers,
+            body.map(|value| value.to_string()),
+            false,
+        )
         .await
     {
         Ok(r) => r,
@@ -575,7 +753,7 @@ async fn native_response_operation(
                 path.owner_user_id,
                 &path.id,
                 Some(account_id),
-                "response.native.result",
+                &result_action,
                 json!({"operation":operation.name(),"outcome":"transport_error","account_id":account_id}),
             )
             .await?;
@@ -583,15 +761,16 @@ async fn native_response_operation(
         }
     };
     let status = upstream.meta.status;
-    let confirmed_delete = matches!(operation, NativeResponseOperation::Delete)
+    let confirmed_delete = operation.deletes_resource()
         && crate::handlers::responses::delete_response_is_confirmed(status);
     if confirmed_delete {
-        let n = ResponseAffinity::tombstone_native_response_for_user(
+        let n = ResponseAffinity::tombstone_native_resource_for_user(
             &tx,
             path.tenant_id,
             path.owner_user_id,
             &path.id,
             account_id,
+            kind,
         )
         .await
         .map_err(|e| ApiError::Internal(format!("Failed to tombstone native Response: {e}")))?;
@@ -616,20 +795,25 @@ async fn native_response_operation(
         path.owner_user_id,
         &path.id,
         Some(account_id),
-        "response.native.result",
+        &result_action,
         json!({"operation":operation.name(),"upstream_status":status,"account_id":account_id}),
     )
     .await?;
 
     if confirmed_delete {
         return Ok(no_store(
-            Json(json!({"id":path.id,"object":"response","deleted":true})).into_response(),
+            Json(json!({"id":path.id,"object":kind,"deleted":true})).into_response(),
         ));
     }
     if !(200..300).contains(&status) {
         return crate::handlers::responses::admin_passthrough_response(upstream).map(no_store);
     }
-    if matches!(operation, NativeResponseOperation::Detail) {
+    if let NativeOperation::ConversationRemoveItem(item_id) = &operation {
+        return Ok(no_store(
+            Json(json!({"id":item_id,"object":"conversation.item","deleted":true})).into_response(),
+        ));
+    }
+    if operation.detail() {
         let PassthroughBody::Full(body) = upstream.body else {
             return Err(ApiError::Provider(
                 "Native Responses detail unexpectedly returned a stream".into(),
@@ -640,17 +824,18 @@ async fn native_response_operation(
             ApiError::Provider("Native Responses detail returned invalid JSON".into())
         })?;
         if body.get("id").and_then(Value::as_str) != Some(path.id.as_str())
-            || body.get("object").and_then(Value::as_str) != Some("response")
+            || body.get("object").and_then(Value::as_str) != Some(kind)
         {
             return Err(ApiError::Provider(
                 "Native Responses detail returned a mismatched resource".into(),
             ));
         }
-        let summary = native_summary(&affinity, &body)?;
-        let mut response = no_store(
-            Json(json!({"summary":summary,"response":Value::Null,"native_body":body}))
-                .into_response(),
-        );
+        let payload = if kind == "conversation" {
+            json!({"summary":native_conversation_summary(&affinity, &body)?,"conversation":body})
+        } else {
+            json!({"summary":native_summary(&affinity, &body)?,"response":Value::Null,"native_body":body})
+        };
+        let mut response = no_store(Json(payload).into_response());
         if let Some(admission) = admission {
             crate::handlers::responses::retain_admin_response_body_guard(&mut response, admission);
         }
@@ -665,20 +850,45 @@ async fn list_response_page(
     q: ListQuery,
 ) -> Result<Json<Page<ResponseSummary>>> {
     let mode = parse_mode(&q.mode)?;
-    if mode == ModelAccessMode::AccountPool {
-        return Err(ApiError::BadRequest(
-            "account_pool Responses listing is unsupported; use an exact owner/resource ID".into(),
-        ));
-    }
     let (p, size, offset) = page(q.page, q.page_size)?;
-    let items =
-        store::admin_list_responses(pool(&state)?, &control, q.owner_user_id, mode, size, offset)
-            .await?
-            .into_iter()
-            .map(local_response_summary)
-            .collect();
-    let total =
-        store::admin_count_responses(pool(&state)?, &control, q.owner_user_id, mode).await?;
+    let (items, total) = if mode == ModelAccessMode::AccountPool {
+        let items = store::admin_list_native_resources(
+            pool(&state)?,
+            &control,
+            q.owner_user_id,
+            "response",
+            size,
+            offset,
+        )
+        .await?
+        .into_iter()
+        .map(native_response_index)
+        .collect();
+        let total = store::admin_count_native_resources(
+            pool(&state)?,
+            &control,
+            q.owner_user_id,
+            "response",
+        )
+        .await?;
+        (items, total)
+    } else {
+        let items = store::admin_list_responses(
+            pool(&state)?,
+            &control,
+            q.owner_user_id,
+            mode,
+            size,
+            offset,
+        )
+        .await?
+        .into_iter()
+        .map(local_response_summary)
+        .collect();
+        let total =
+            store::admin_count_responses(pool(&state)?, &control, q.owner_user_id, mode).await?;
+        (items, total)
+    };
     Ok(Json(Page {
         items,
         total,
@@ -720,13 +930,12 @@ async fn response_count(
     q: ListQuery,
 ) -> Result<Json<Count>> {
     let mode = parse_mode(&q.mode)?;
-    if mode == ModelAccessMode::AccountPool {
-        return Err(ApiError::BadRequest(
-            "account_pool Responses count is unsupported; use an exact owner/resource ID".into(),
-        ));
-    }
-    let total =
-        store::admin_count_responses(pool(&state)?, &control, q.owner_user_id, mode).await?;
+    let total = if mode == ModelAccessMode::AccountPool {
+        store::admin_count_native_resources(pool(&state)?, &control, q.owner_user_id, "response")
+            .await?
+    } else {
+        store::admin_count_responses(pool(&state)?, &control, q.owner_user_id, mode).await?
+    };
     Ok(Json(Count { total }))
 }
 
@@ -1048,27 +1257,46 @@ async fn list_conversation_page(
     q: ListQuery,
 ) -> Result<Json<Page<ConversationSummary>>> {
     let mode = parse_mode(&q.mode)?;
-    if mode == ModelAccessMode::AccountPool {
-        return Err(ApiError::BadRequest(
-            "account_pool Conversations administration is not implemented".into(),
-        ));
-    }
-
     let (p, size, offset) = page(q.page, q.page_size)?;
-    let items = store::admin_list_conversations(
-        pool(&state)?,
-        &control,
-        q.owner_user_id,
-        mode,
-        size,
-        offset,
-    )
-    .await?
-    .into_iter()
-    .map(local_conversation_summary)
-    .collect();
-    let total =
-        store::admin_count_conversations(pool(&state)?, &control, q.owner_user_id, mode).await?;
+    let (items, total) = if mode == ModelAccessMode::AccountPool {
+        let items = store::admin_list_native_resources(
+            pool(&state)?,
+            &control,
+            q.owner_user_id,
+            "conversation",
+            size,
+            offset,
+        )
+        .await?
+        .into_iter()
+        .map(native_conversation_index)
+        .collect();
+        let total = store::admin_count_native_resources(
+            pool(&state)?,
+            &control,
+            q.owner_user_id,
+            "conversation",
+        )
+        .await?;
+        (items, total)
+    } else {
+        let items = store::admin_list_conversations(
+            pool(&state)?,
+            &control,
+            q.owner_user_id,
+            mode,
+            size,
+            offset,
+        )
+        .await?
+        .into_iter()
+        .map(local_conversation_summary)
+        .collect();
+        let total =
+            store::admin_count_conversations(pool(&state)?, &control, q.owner_user_id, mode)
+                .await?;
+        (items, total)
+    };
     Ok(Json(Page {
         items,
         total,
@@ -1112,8 +1340,17 @@ async fn conversation_count(
     let mode = parse_mode(&q.mode)?;
 
     Ok(Json(Count {
-        total: store::admin_count_conversations(pool(&state)?, &control, q.owner_user_id, mode)
-            .await?,
+        total: if mode == ModelAccessMode::AccountPool {
+            store::admin_count_native_resources(
+                pool(&state)?,
+                &control,
+                q.owner_user_id,
+                "conversation",
+            )
+            .await?
+        } else {
+            store::admin_count_conversations(pool(&state)?, &control, q.owner_user_id, mode).await?
+        },
     }))
 }
 
@@ -1147,9 +1384,23 @@ async fn conversation_detail(
     state: AppState,
     control: store::ResponseControlScope,
     path: ResourcePath,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let mode = parse_mode(&path.mode)?;
-
+    if mode == ModelAccessMode::AccountPool {
+        return native_resource_operation(
+            state,
+            control,
+            path,
+            NativeRequest {
+                operation: NativeOperation::ConversationDetail,
+                query: None,
+                body: None,
+                headers,
+            },
+        )
+        .await;
+    }
     let row = store::admin_conversation(
         pool(&state)?,
         &control,
@@ -1187,10 +1438,11 @@ pub async fn tenant_conversation_detail(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    conversation_detail(state, control, path).await
+    conversation_detail(state, control, path, headers).await
 }
 
 pub async fn platform_conversation_detail(
@@ -1199,20 +1451,69 @@ pub async fn platform_conversation_detail(
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
     Query(reason): Query<RootReason>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason.reason)?;
-    conversation_detail(state, control, path).await
+    conversation_detail(state, control, path, headers).await
 }
 
 async fn mutate_conversation(
     state: AppState,
     control: store::ResponseControlScope,
     path: ResourcePath,
-    expected_revision: i64,
+    expected_revision: Option<i64>,
     change: ConversationMutation,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let mode = parse_mode(&path.mode)?;
+    if mode == ModelAccessMode::AccountPool {
+        if expected_revision.is_some() {
+            return Err(ApiError::BadRequest(
+                "Native Conversations do not use local revisions".into(),
+            ));
+        }
+        let (operation, body) = match change {
+            ConversationMutation::Metadata(metadata) => (
+                NativeOperation::ConversationMetadata,
+                Some(json!({"metadata":metadata})),
+            ),
+            ConversationMutation::Append(items) => {
+                if items.is_empty() || items.len() > 20 || items.iter().any(|v| !v.is_object()) {
+                    return Err(ApiError::BadRequest(
+                        "Use one to 20 native conversation item objects".into(),
+                    ));
+                }
+                (
+                    NativeOperation::ConversationAppend,
+                    Some(json!({"items":items})),
+                )
+            }
+            ConversationMutation::RemoveItem(id) => {
+                validate_native_selector(path.owner_user_id, &id)?;
+                (NativeOperation::ConversationRemoveItem(id), None)
+            }
+            ConversationMutation::Delete => (NativeOperation::ConversationDelete, None),
+        };
+        return native_resource_operation(
+            state,
+            control,
+            path,
+            NativeRequest {
+                operation,
+                query: None,
+                body,
+                headers,
+            },
+        )
+        .await;
+    }
+    let expected_revision = expected_revision.ok_or_else(|| {
+        ApiError::BadRequest(
+            "expected_revision is required for local Conversation mutations".into(),
+        )
+    })?;
 
+    let delete = matches!(change, ConversationMutation::Delete);
     let (row, active) = store::admin_mutate_conversation(
         pool(&state)?,
         &control,
@@ -1226,9 +1527,15 @@ async fn mutate_conversation(
     if let Some(active) = active {
         crate::scoped_state::cancel_execution(&state, &active).await?;
     }
-    Ok(no_store(
-        Json(store::conversation_view(&row)).into_response(),
-    ))
+    if delete {
+        Ok(no_store(
+            Json(json!({"id":row.id,"object":"conversation","deleted":true})).into_response(),
+        ))
+    } else {
+        Ok(no_store(
+            Json(store::conversation_view(&row)).into_response(),
+        ))
+    }
 }
 
 pub async fn tenant_conversation_update(
@@ -1236,6 +1543,7 @@ pub async fn tenant_conversation_update(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<MetadataBody>,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
@@ -1247,6 +1555,7 @@ pub async fn tenant_conversation_update(
         path,
         body.expected_revision,
         ConversationMutation::Metadata(metadata),
+        headers,
     )
     .await
 }
@@ -1256,22 +1565,20 @@ pub async fn tenant_conversation_delete(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    let id = path.id.clone();
     mutate_conversation(
         state,
         control,
         path,
-        body.expected_revision.ok_or_else(|| {
-            ApiError::BadRequest("expected_revision is required for Conversation mutations".into())
-        })?,
+        body.expected_revision,
         ConversationMutation::Delete,
+        headers,
     )
-    .await?;
-    Ok(Json(json!({"id":id,"object":"conversation","deleted":true})).into_response())
+    .await
 }
 
 pub async fn platform_conversation_update(
@@ -1279,6 +1586,7 @@ pub async fn platform_conversation_update(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<MetadataBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
@@ -1292,6 +1600,7 @@ pub async fn platform_conversation_update(
         path,
         body.expected_revision,
         ConversationMutation::Metadata(metadata),
+        headers,
     )
     .await
 }
@@ -1301,24 +1610,22 @@ pub async fn platform_conversation_delete(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
         ApiError::BadRequest("root reason is required for platform Conversations mutation".into())
     })?;
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
-    let id = path.id.clone();
     mutate_conversation(
         state,
         control,
         path,
-        body.expected_revision.ok_or_else(|| {
-            ApiError::BadRequest("expected_revision is required for Conversation mutations".into())
-        })?,
+        body.expected_revision,
         ConversationMutation::Delete,
+        headers,
     )
-    .await?;
-    Ok(Json(json!({"id":id,"object":"conversation","deleted":true})).into_response())
+    .await
 }
 
 pub async fn tenant_conversation_items(
@@ -1327,10 +1634,11 @@ pub async fn tenant_conversation_items(
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    conversation_items(state, control, path, query).await
+    conversation_items(state, control, path, query, headers).await
 }
 
 pub async fn platform_conversation_items(
@@ -1339,10 +1647,11 @@ pub async fn platform_conversation_items(
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
     RawQuery(query): RawQuery,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let reason = reason_from_raw(query.as_deref())?;
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
-    conversation_items(state, control, path, query).await
+    conversation_items(state, control, path, query, headers).await
 }
 
 async fn conversation_items(
@@ -1350,12 +1659,23 @@ async fn conversation_items(
     control: store::ResponseControlScope,
     path: ResourcePath,
     query: Option<String>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let mode = parse_mode(&path.mode)?;
     if mode == ModelAccessMode::AccountPool {
-        return Err(ApiError::Conflict(
-            "account_pool Conversations administration is unsupported until native conversation affinity is persisted".into(),
-        ));
+        let query = native_item_query(query.as_deref())?;
+        return native_resource_operation(
+            state,
+            control,
+            path,
+            NativeRequest {
+                operation: NativeOperation::ConversationItems,
+                query,
+                body: None,
+                headers,
+            },
+        )
+        .await;
     }
     let row = store::admin_conversation(
         pool(&state)?,
@@ -1380,6 +1700,7 @@ pub async fn tenant_conversation_append(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<AppendItemsBody>,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
@@ -1390,6 +1711,7 @@ pub async fn tenant_conversation_append(
         path,
         body.expected_revision,
         ConversationMutation::Append(body.items),
+        headers,
     )
     .await
 }
@@ -1399,6 +1721,7 @@ pub async fn platform_conversation_append(
     request_id: RequestId,
     Path(path): Path<ResourcePath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<AppendItemsBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
@@ -1411,6 +1734,7 @@ pub async fn platform_conversation_append(
         path,
         body.expected_revision,
         ConversationMutation::Append(body.items),
+        headers,
     )
     .await
 }
@@ -1420,11 +1744,12 @@ pub async fn tenant_conversation_remove_item(
     request_id: RequestId,
     Path(path): Path<ItemPath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     access.require_path_tenant(path.tenant_id)?;
     let control = tenant_control_scope(&access, request_id)?;
-    remove_item(state, control, path, body).await
+    remove_item(state, control, path, body, headers).await
 }
 
 pub async fn platform_conversation_remove_item(
@@ -1432,13 +1757,14 @@ pub async fn platform_conversation_remove_item(
     request_id: RequestId,
     Path(path): Path<ItemPath>,
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<RevisionBody>,
 ) -> Result<Response> {
     let reason = body.reason.clone().ok_or_else(|| {
         ApiError::BadRequest("root reason is required for platform Conversations mutation".into())
     })?;
     let control = root_control_scope(&auth, request_id, path.tenant_id, reason)?;
-    remove_item(state, control, path, body).await
+    remove_item(state, control, path, body, headers).await
 }
 
 async fn remove_item(
@@ -1446,9 +1772,11 @@ async fn remove_item(
     control: store::ResponseControlScope,
     path: ItemPath,
     body: RevisionBody,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let item_id = path.item_id.clone();
-    mutate_conversation(
+    let native = parse_mode(&path.mode)? == ModelAccessMode::AccountPool;
+    let response = mutate_conversation(
         state,
         control,
         ResourcePath {
@@ -1457,13 +1785,17 @@ async fn remove_item(
             owner_user_id: path.owner_user_id,
             id: path.id,
         },
-        body.expected_revision.ok_or_else(|| {
-            ApiError::BadRequest("expected_revision is required for Conversation mutations".into())
-        })?,
+        body.expected_revision,
         ConversationMutation::RemoveItem(item_id.clone()),
+        headers,
     )
     .await?;
-    Ok(Json(json!({"id":item_id,"object":"conversation.item","deleted":true})).into_response())
+    if native {
+        return Ok(response);
+    }
+    Ok(no_store(
+        Json(json!({"id":item_id,"object":"conversation.item","deleted":true})).into_response(),
+    ))
 }
 
 async fn private_control_response(response: Response) -> Response {
