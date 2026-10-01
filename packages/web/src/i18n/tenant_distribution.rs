@@ -12,6 +12,7 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "配置租户未来的分配规则；本页不会结算或支付既有收益。",
         ),
         ("tenant_distribution.scope", "Current tenant", "当前租户"),
+        ("tenant_distribution.policy_id", "Policy ID", "规则 ID"),
         ("tenant_distribution.create", "Create policy", "新增规则"),
         ("tenant_distribution.edit", "Edit policy", "编辑规则"),
         ("tenant_distribution.delete", "Delete policy", "删除规则"),

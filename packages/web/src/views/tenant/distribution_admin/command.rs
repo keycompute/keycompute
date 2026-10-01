@@ -30,6 +30,7 @@ pub(super) fn Editor(
     let editing = creating || matches!(op, Operation::Edit(_));
     let defaulting = matches!(op, Operation::Default);
     let deleting = matches!(op, Operation::Delete(_));
+    let policy_id = op.row().map(|row| row.id.to_string());
     let label = op.label();
     let submit_op = op.clone();
     let members = use_resource(move || async move {
@@ -126,6 +127,7 @@ pub(super) fn Editor(
         });
     };
     rsx! {div{class:"modal-overlay",div{class:"modal tenant-distribution-editor",style:"width:min(820px,95vw);max-height:85vh;overflow:auto",role:"dialog",aria_modal:"true",aria_label:i.t(label),tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(())}},h2{{i.t(label)}}p{class:"text-secondary",{i.t("tenant_distribution.scope")} " {scope.tenant_id}"}
+     if let Some(policy_id)=policy_id.as_ref(){p{class:"text-secondary",{i.t("tenant_distribution.policy_id")} " {policy_id}"}}
      if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
      if editing||defaulting{label{class:"form-label",r#for:"distribution-name",{i.t("tenant_distribution.name")}}input{id:"distribution-name",class:"input-field",maxlength:"255",value:"{draft().name}",disabled:busy(),oninput:move|e|draft.write().name=e.value()}
       label{class:"form-label",r#for:"distribution-rate",{i.t("tenant_distribution.rate")}}input{id:"distribution-rate",class:"input-field",inputmode:"decimal",maxlength:"16",value:"{draft().rate}",disabled:busy(),oninput:move|e|draft.write().rate=e.value()}p{class:"text-secondary",{i.t("tenant_distribution.rate_hint")}}
