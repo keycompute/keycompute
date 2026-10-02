@@ -343,6 +343,28 @@ CACHE_JOB_CLASSIFICATIONS = {
     'user-owned resource',
     'user-owned tenant resource',
 }
+CACHE_JOB_SCOPE_HINTS = {
+    'platform configuration': ('platform', 'root', 'global', 'configuration', 'secret', 'scope'),
+    'platform identities and tenant lifecycle': ('platform', 'root', 'tenant', 'user', 'owner', 'scope', 'snapshot'),
+    'platform identity or tenant credential resource': ('identity', 'credential', 'tenant', 'actor', 'owner', 'authorization', 'platform', 'scope'),
+    'platform infrastructure / caller-scoped primitive': ('caller', 'immutable', 'work', 'scope', 'not authorization'),
+    'platform infrastructure / request-bound transport': ('request', 'caller', 'scope', 'stream'),
+    'platform infrastructure with scoped work items': ('tenant', 'owner', 'work', 'scope', 'scheduler', 'item'),
+    'platform operational metadata': ('platform', 'root', 'operator', 'tenant', 'target', 'canonical', 'fresh', 'read-only'),
+    'platform protected configuration': ('platform', 'root', 'global', 'configuration', 'secret', 'scope'),
+    'platform resource': ('platform', 'root', 'operator', 'owner', 'scope', 'host', 'resource', 'configuration'),
+    'platform resource or explicitly scoped tenant administration': ('platform', 'tenant', 'operator', 'owner', 'scope', 'resource'),
+    'platform tenant lifecycle': ('platform', 'tenant', 'user', 'owner', 'scope', 'snapshot'),
+    'tenant resource': ('tenant', 'owner', 'consumer', 'platform', 'shared', 'price', 'scope', 'account', 'node'),
+    'tenant resource / platform shared price': ('tenant', 'owner', 'consumer', 'platform', 'shared', 'price', 'scope', 'account', 'node'),
+    'tenant resource or explicit global shared resource': ('tenant', 'owner', 'consumer', 'platform', 'shared', 'scope', 'account', 'node'),
+    'tenant/user resource': ('tenant', 'user', 'actor', 'owner', 'grant', 'credential', 'authorization', 'platform', 'scope'),
+    'tenant/user resource or explicit platform view': ('tenant', 'user', 'actor', 'owner', 'grant', 'credential', 'authorization', 'platform', 'scope'),
+    'user-owned financial resource': ('tenant', 'user', 'owner', 'usage', 'billing', 'currency', 'request', 'scope', 'snapshot'),
+    'user-owned payment resource': ('tenant', 'user', 'owner', 'credential', 'order', 'billing', 'request', 'scope'),
+    'user-owned resource': ('tenant', 'user', 'owner', 'credential', 'request', 'scope', 'task', 'node'),
+    'user-owned tenant resource': ('tenant', 'user', 'owner', 'scope', 'snapshot', 'authority'),
+}
 
 
 def production_route_sources(root: Path) -> list[Path]:
@@ -471,7 +493,7 @@ def route_inventory_issues(root: Path) -> tuple[list[str], int]:
 
 
 def cache_job_inventory_issues(root: Path, tracked_files: set[str] | None = None) -> tuple[list[str], int]:
-    """Validate the phase-0 cache/job source inventory without enforcing runtime adoption yet."""
+    """Validate cache/job inventory shape and its declared scope semantics."""
     inventory_path = root / 'docs/tenant-cache-job-inventory.tsv'
     if not inventory_path.is_file():
         return ['cache/job inventory: missing docs/tenant-cache-job-inventory.tsv'], 0
@@ -511,6 +533,13 @@ def cache_job_inventory_issues(root: Path, tracked_files: set[str] | None = None
             failures.append(f'cache/job inventory: invalid kind at row {row_number}: {row["kind"]!r}')
         if row['classification'] not in CACHE_JOB_CLASSIFICATIONS:
             failures.append(f'cache/job inventory: invalid classification at row {row_number}: {row["classification"]!r}')
+        else:
+            required_scope = row['required_scope'].lower()
+            if not any(hint in required_scope for hint in CACHE_JOB_SCOPE_HINTS[row['classification']]):
+                failures.append(
+                    f'cache/job inventory: required scope does not describe '
+                    f"{row['classification']} authority at row {row_number}"
+                )
 
         key = (path, row['line_at_audit'], row['symbol'], row['kind'])
         if key in seen:
@@ -577,7 +606,7 @@ def check_repository(root: Path) -> dict:
     return {'passed': not failures, 'schema_tables': count, 'route_literals_scanned': route_count,
             'cache_job_inventory_rows': cache_job_count,
             'rust_files_scanned': len(rust_files), 'findings': failures,
-            'scope': 'foundation/schema-inventory/route-inventory/cache-job-inventory/retired-symbols/source-boundary',
+            'scope': 'foundation/schema-inventory/route-inventory/cache-job-scope-contract/retired-symbols/source-boundary',
             'not_covered': ['macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
                             'all object-level DAO predicates',
                             'frontend/browser acceptance', 'full release and snapshot restore']}

@@ -196,6 +196,11 @@ let quote = '\\''; let lifetime: &'a str = text; }
             self.assertTrue(any('invalid classification' in issue for issue in issues))
             self.assertTrue(any('duplicate row' in issue for issue in issues))
 
+            missing_scope = CACHE_JOB_INVENTORY.replace('validated tenant + user', 'generic cache key')
+            inventory.write_text(missing_scope)
+            issues, _ = check.cache_job_inventory_issues(root)
+            self.assertTrue(any('required scope does not describe' in issue for issue in issues))
+
     def test_cache_job_inventory_rejects_invalid_header_and_escaping_path(self):
         with tempfile.TemporaryDirectory(prefix='kc-cache-job-fixture-') as temp:
             root = Path(temp)

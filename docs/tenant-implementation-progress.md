@@ -80,10 +80,13 @@ deployment changed.
 
 The same gate now validates `docs/tenant-cache-job-inventory.tsv`: its exact
 header, non-empty contract fields, safe repository-relative source paths, source
-file presence, supported cache/job kinds and classifications, and duplicate
-reference keys. CI is triggered when this inventory changes. The current source
-inventory contains 153 rows; runtime call-site adoption remains the next phase
-and is intentionally not implied by this provenance check.
+file presence, supported cache/job kinds and classifications, duplicate reference
+keys, and a classification-specific scope hint in `required_scope`. This catches
+entries that merely say “cache” or “job” without naming the caller, tenant, owner,
+credential, platform, or immutable work boundary that governs them. CI is
+triggered when this inventory changes. The current source inventory contains 153
+rows; runtime call-site adoption and the route-to-DAO-to-test matrix remain
+separate implementation work and are not implied by this static contract lint.
 
 The route gate also performs a first semantic consistency check: each route
 category must have an authority contract that names a matching platform, tenant,
