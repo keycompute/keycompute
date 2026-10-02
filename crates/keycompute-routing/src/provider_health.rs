@@ -664,7 +664,15 @@ impl ProviderHealthStore {
                                 }
                                 PendingAccountHealthEvent::Success { .. }
                                 | PendingAccountHealthEvent::Failure { .. } => {
-                                    match Account::find_by_id(pool.write_conn(), account_id).await {
+                                    // Reconcile against the writer snapshot while retaining
+                                    // health for inactive tenants; the key-share lock also
+                                    // prevents account deletion from racing this rebase.
+                                    match Account::find_by_id_for_key_share_any_tenant(
+                                        pool.write_conn(),
+                                        account_id,
+                                    )
+                                    .await
+                                    {
                                         Ok(Some(account)) => {
                                             let current = AccountHealth::from_account(&account);
                                             if runtime_event_configuration_is_stale(
