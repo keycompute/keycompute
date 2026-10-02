@@ -177,6 +177,42 @@ struct Fixture {
     upstream: Arc<Upstream>,
     server: JoinHandle<()>,
 }
+
+async fn poll_native_task_until(
+    gateway: &node_gateway::NodeGatewayService,
+    node: Uuid,
+    session: Uuid,
+    model: &str,
+    timeout: Duration,
+) -> NodeTaskEnvelope {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut last_error = None;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!(
+                "node task was not claimed before the test deadline; last poll error: {}",
+                last_error.as_deref().unwrap_or("none")
+            );
+        }
+        match tokio::time::timeout(
+            remaining,
+            gateway.poll_task(node, session, vec![model.to_owned()]),
+        )
+        .await
+        {
+            Ok(Ok(response)) => {
+                if let Some(task) = response.task {
+                    return task;
+                }
+            }
+            Ok(Err(error)) => last_error = Some(error.to_string()),
+            Err(_) => continue,
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.server.abort();
@@ -377,20 +413,9 @@ impl Fixture {
         let session = self.session.id;
         let model = self.model.clone();
         tokio::spawn(async move {
-            let task = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if let Some(task) = service
-                        .poll_task(node, session, vec![model.clone()])
-                        .await
-                        .unwrap()
-                        .task
-                    {
-                        break task;
-                    }
-                }
-            })
-            .await
-            .unwrap();
+            let task =
+                poll_native_task_until(&service, node, session, &model, Duration::from_secs(10))
+                    .await;
             let native = task.payload.native.as_ref().expect("native task required");
             let body = if status == 200 {
                 sample_response(native.operation, &model)
@@ -912,20 +937,8 @@ async fn node_stream_generic_failure_after_head_closes_before_deadline() {
     let release = Arc::new(tokio::sync::Notify::new());
     let worker_release = release.clone();
     let worker = tokio::spawn(async move {
-        let task = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(task) = gateway
-                    .poll_task(node, session, vec![model.clone()])
-                    .await
-                    .unwrap()
-                    .task
-                {
-                    break task;
-                }
-            }
-        })
-        .await
-        .unwrap();
+        let task =
+            poll_native_task_until(&gateway, node, session, &model, Duration::from_secs(5)).await;
         let first = format!(
             "data: {}\n\n",
             json!({"id":"failure-stream","object":"chat.completion.chunk","model":model,"choices":[{"index":0,"delta":{"content":"observed partial output"},"finish_reason":null}]})
