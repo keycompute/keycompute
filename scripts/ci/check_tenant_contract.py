@@ -263,6 +263,104 @@ RETIRED = [
     ['enum', 'UserRole'], ['fn', 'is_admin'], ['.', 'is_admin', '('],
 ]
 
+ROUTE_INVENTORY_FIELDS = [
+    'existing_path',
+    'source_file',
+    'line_at_audit',
+    'resource_category',
+    'authority_contract',
+    'canonical_target',
+]
+ROUTE_CATEGORIES = {
+    'global_shared_resource',
+    'platform_resource',
+    'platform_resource_or_explicit_tenant_target',
+    'tenant resource',
+    'tenant_resource',
+    'user-owned resource',
+    'user_owned_resource',
+}
+IGNORED_ROUTE_FILES = {'console_tests.rs', 'drain_tests.rs', 'tests.rs'}
+# These literals belong only to inline unit-test routers, not production endpoints.
+IGNORED_ROUTE_LITERALS = {
+    '/',
+    '/other',
+    '/rate-limited',
+    '/standalone-self-service',
+    '/work',
+    '/api/v1/admin/users',
+}
+ROUTE_LITERAL = re.compile(r'\.route\(\s*"([^"\\]+)"')
+
+
+def production_routes(root: Path) -> dict[str, tuple[str, int]]:
+    source_root = root / 'crates/keycompute-server/src'
+    routes: dict[str, tuple[str, int]] = {}
+    if not source_root.is_dir():
+        return routes
+    for source in sorted(source_root.rglob('*.rs')):
+        if source.name.endswith('_tests.rs') or source.name in IGNORED_ROUTE_FILES:
+            continue
+        text = source.read_text()
+        relative = source.relative_to(root).as_posix()
+        for match in ROUTE_LITERAL.finditer(text):
+            route = match.group(1)
+            if route in IGNORED_ROUTE_LITERALS or route.startswith('/api/v1/test/'):
+                continue
+            if not (
+                route.startswith(('/api/v1/', '/v1/', '/pt/', '/nt/', '/node/'))
+                or route in {'/health', '/ready'}
+            ):
+                continue
+            routes.setdefault(route, (relative, text[:match.start()].count('\n') + 1))
+    return routes
+
+
+def route_inventory_issues(root: Path) -> tuple[list[str], int]:
+    inventory_path = root / 'docs/tenant-route-inventory.tsv'
+    if not inventory_path.is_file():
+        return ['route inventory: missing docs/tenant-route-inventory.tsv'], 0
+    with inventory_path.open(newline='') as handle:
+        rows = list(csv.DictReader(handle, delimiter='\t'))
+    failures: list[str] = []
+    if not rows:
+        header = inventory_path.read_text().splitlines()[0].split('\t') if inventory_path.read_text().splitlines() else []
+        if header != ROUTE_INVENTORY_FIELDS:
+            failures.append('route inventory: invalid header')
+    elif list(rows[0].keys()) != ROUTE_INVENTORY_FIELDS:
+        failures.append('route inventory: invalid header')
+    seen: set[str] = set()
+    for row in rows:
+        path = row.get('existing_path', '')
+        if not path or path in seen:
+            failures.append(f'route inventory: duplicate or empty path {path!r}')
+            continue
+        seen.add(path)
+        if any(not row.get(field) for field in ROUTE_INVENTORY_FIELDS):
+            failures.append(f'route inventory: incomplete row {path!r}')
+        if row.get('resource_category') not in ROUTE_CATEGORIES:
+            failures.append(f'route inventory: invalid resource category for {path!r}')
+        try:
+            if int(row.get('line_at_audit', '')) < 0:
+                raise ValueError
+        except ValueError:
+            failures.append(f'route inventory: invalid line for {path!r}')
+        source_file = row.get('source_file', '')
+        source = root / source_file
+        if not source_file.startswith('crates/keycompute-server/src/'):
+            failures.append(f'route inventory: source outside server tree for {path!r}: {source_file}')
+        elif not source.is_file():
+            failures.append(f'route inventory: missing source file for {path!r}: {source_file}')
+        elif path not in source.read_text():
+            failures.append(f'route inventory: route literal not found for {path!r}: {source_file}')
+    actual = production_routes(root)
+    for path in sorted(actual.keys() - seen):
+        source, line = actual[path]
+        failures.append(f'route inventory: unclassified route {path!r} at {source}:{line}')
+    for path in sorted(seen - actual.keys()):
+        failures.append(f'route inventory: stale route {path!r}')
+    return failures, len(actual)
+
 
 def rust_issues(source: str) -> list[str]:
     tokens = tokenize(source, 'rust')
@@ -286,6 +384,8 @@ def check_repository(root: Path) -> dict:
         (root/'crates/keycompute-db/migrations/001_init.sql').read_text(),
         (root/'docs/tenant-schema-inventory.tsv').read_text(),
     )
+    route_failures, route_count = route_inventory_issues(root)
+    failures.extend(route_failures)
     migrations = {p.name for p in (root/'crates/keycompute-db/migrations').glob('*.sql')}
     if migrations != {'001_init.sql'}:
         failures.append('only the complete greenfield 001_init.sql may exist')
@@ -307,9 +407,11 @@ def check_repository(root: Path) -> dict:
     members = re.search(r'(?ms)^members\s*=\s*\[(.*?)\]', workspace.group(1)) if workspace else None
     if members and re.search(r'"(?:\./)?new(?:/[^"\n]*)?"', members.group(1)):
         failures.append('independent Go service must not be a Cargo workspace member')
-    return {'passed': not failures, 'schema_tables': count, 'rust_files_scanned': len(rust_files),
-            'findings': failures, 'scope': 'foundation/schema-inventory/retired-symbols/source-boundary',
-            'not_covered': ['arbitrary SQL aliases or dynamically generated SQL', 'all object-level DAO predicates', 'live Go deployments',
+    return {'passed': not failures, 'schema_tables': count, 'route_literals_scanned': route_count,
+            'rust_files_scanned': len(rust_files), 'findings': failures,
+            'scope': 'foundation/schema-inventory/route-inventory/retired-symbols/source-boundary',
+            'not_covered': ['dynamic, nested or macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
+                            'all object-level DAO predicates', 'live Go deployments',
                             'frontend/browser acceptance', 'full release and snapshot restore']}
 
 

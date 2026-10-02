@@ -59,6 +59,25 @@ Conversation envelopes with a local revision or missing owning account. No
 production data, credentials, upstream resources, restart or deployment changed.
 
 
+## Current phase 8 — route inventory hard gate
+
+The foundation contract checker now derives production route literals from the Rust
+server sources and requires every one to have a classified row in
+`docs/tenant-route-inventory.tsv`; stale rows, missing source literals, duplicate
+paths and invalid authority categories fail closed. It covers literal `.route`
+builders and deliberately reports the remaining nested/macro route gap
+separately. The inventory was corrected for platform tenant lifecycle routes,
+tenant membership/invitation/audit routes, ownership transfer and invitation
+acceptance. The CI workflow now reruns when the route inventory changes.
+The gate currently scans 296 production route literals, 47 schema tables
+and 634 Rust files with no findings.
+
+This is a provenance and classification gate, not a replacement for object-level
+DAO predicates, live authorization matrices, browser acceptance or deployment /
+restore rehearsal. No production data, credentials, upstream resources, restart or
+deployment changed.
+
+
 ## Current phase 1 — final contract alignment accepted locally
 
 Memberships now use `tenant_role`, `authz_version`, `active/suspended/removed`,

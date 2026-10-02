@@ -40,6 +40,8 @@ tenant_memberships\ttenant_control
 tenant_invitations\ttenant_control
 tenant_audit_events\tscoped_audit
 """
+ROUTE_INVENTORY = """existing_path\tsource_file\tline_at_audit\tresource_category\tauthority_contract\tcanonical_target
+"""
 
 
 class ContractTests(unittest.TestCase):
@@ -133,10 +135,35 @@ let quote = '\\''; let lifetime: &'a str = text; }
         self.assertTrue(check.rust_issues(r'let q = "SELECT \u{75}sers.\x72ole FROM users";'))
         self.assertEqual(check.rust_issues("let q = r#\"SELECT 'users.role' FROM users\"#;"), [])
 
+    def test_route_inventory_tracks_production_route_literals(self):
+        with tempfile.TemporaryDirectory(prefix='kc-route-fixture-') as temp:
+            root = Path(temp)
+            source = root / 'crates/keycompute-server/src/router.rs'
+            source.parent.mkdir(parents=True)
+            source.write_text(
+                'Router::new().route("/api/v1/known", get(handler))\n'
+                'Router::new().route("/api/v1/test/fixture", get(handler))\n'
+            )
+            (root / 'docs').mkdir()
+            row = (
+                '/api/v1/known\tcrates/keycompute-server/src/router.rs\t1\t'
+                'platform_resource\tfixture\tunchanged\n'
+            )
+            (root / 'docs/tenant-route-inventory.tsv').write_text(ROUTE_INVENTORY + row)
+            self.assertEqual(check.route_inventory_issues(root), ([], 1))
+            (root / 'docs/tenant-route-inventory.tsv').write_text(
+                ROUTE_INVENTORY + row.replace('/api/v1/known', '/api/v1/stale')
+            )
+            issues, count = check.route_inventory_issues(root)
+            self.assertEqual(count, 1)
+            self.assertTrue(any('unclassified route' in issue for issue in issues))
+            self.assertTrue(any('stale route' in issue for issue in issues))
+
     def test_workflow_runs_the_guard_and_triggers_for_schema_inventory_and_exclusions(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (root/'.github/workflows/keycompute.yml').read_text()
-        for path in ('crates/keycompute-db/migrations/**', 'docs/tenant-schema-inventory.tsv', '.gitignore'):
+        for path in ('crates/keycompute-db/migrations/**', 'docs/tenant-schema-inventory.tsv',
+                     'docs/tenant-route-inventory.tsv', '.gitignore'):
             self.assertEqual(workflow.count('      - "' + path + '"'), 2)
         self.assertIn('run: python3 scripts/ci/check_tenant_contract.py', workflow)
         self.assertIn("python3 -m unittest discover -s scripts/ci -p 'test_*.py'", workflow)
@@ -148,6 +175,7 @@ let quote = '\\''; let lifetime: &'a str = text; }
             (root/'docs').mkdir()
             (root/'crates/keycompute-db/migrations/001_init.sql').write_text(SCHEMA)
             (root/'docs/tenant-schema-inventory.tsv').write_text(INVENTORY)
+            (root/'docs/tenant-route-inventory.tsv').write_text(ROUTE_INVENTORY)
             (root/'Cargo.toml').write_text('[workspace]\nmembers = ["crates/example"]\n')
             (root/'.gitignore').write_text('new/\n')
             with patch.object(check.subprocess, 'check_output', return_value=b''):
