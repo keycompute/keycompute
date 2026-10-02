@@ -420,6 +420,8 @@ def release_gate_issues(root: Path) -> list[str]:
         'kc_tenant_test_ack_isolated=1': 'isolated restore acknowledgement is missing',
         'not a production backup': 'production backup disclaimer is missing',
         'real backend browser': 'real backend browser gate is missing',
+        'kc_backend_browser_foreign_tenant_id': 'foreign tenant browser input is missing',
+        'cross-tenant reads': 'bidirectional cross-tenant browser assertion is missing',
         'rollback': 'rollback procedure is missing',
     }
     for phrase, message in required_phrases.items():

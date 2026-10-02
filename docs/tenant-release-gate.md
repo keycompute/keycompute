@@ -27,14 +27,15 @@ explicitly:
 ```sh
 KC_BACKEND_BROWSER_APP_URL=http://127.0.0.1:8080 \
 KC_BACKEND_BROWSER_TENANT_ID=TENANT_A_UUID \
+KC_BACKEND_BROWSER_FOREIGN_TENANT_ID=TENANT_B_UUID \
 KC_BACKEND_BROWSER_ADMIN_TOKEN=ADMIN_TEST_TOKEN \
 KC_BACKEND_BROWSER_FOREIGN_TOKEN=FOREIGN_TEST_TOKEN \
 node scripts/tests/tenant_backend_browser.mjs
 ```
 
-The script requires all four variables, opens the actual app in Chromium,
-verifies the administrator can read the selected tenant, and verifies the
-foreign identity receives 401/403/404. It exits without making a request when
+The script requires all five variables, opens the actual app in Chromium,
+verifies each identity can read only its own tenant, and verifies both
+cross-tenant reads receive 401/403/404. It exits without making a request when
 any variable is absent.
 
 ## Isolated restore rehearsal
