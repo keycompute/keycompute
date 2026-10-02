@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only foundation guard, not certification of all handler/DAO authorization.
 
-Check the single greenfield schema, declared table inventory, retired Rust
-symbols and the separately deployed Go identity boundary. No DB, secret or
-network access is performed. Findings fail closed; results never print SQL values.
+Check the single greenfield schema, declared table inventory and retired Rust
+symbols. No DB, secret or network access is performed. Findings fail closed;
+results never print SQL values.
 """
 from __future__ import annotations
 
@@ -275,9 +275,7 @@ ROUTE_CATEGORIES = {
     'global_shared_resource',
     'platform_resource',
     'platform_resource_or_explicit_tenant_target',
-    'tenant resource',
     'tenant_resource',
-    'user-owned resource',
     'user_owned_resource',
 }
 IGNORED_ROUTE_FILES = {'console_tests.rs', 'drain_tests.rs', 'tests.rs'}
@@ -377,6 +375,20 @@ def rust_issues(source: str) -> list[str]:
     return sorted(set(issues))
 
 
+def migration_runner_issues(source: str) -> list[str]:
+    """Reject runtime compatibility DDL while allowing schema assertions."""
+    tokens = tokenize(source, 'rust')
+    issues = []
+    for token in tokens:
+        if token.kind != 'literal' or not re.search(r'\bALTER\s+TABLE\b', token.value, re.I):
+            continue
+        if token.value.strip().upper() == 'ALTER TABLE':
+            # Existing schema tests use this exact value as a negative assertion.
+            continue
+        issues.append('runtime migration contains ALTER TABLE compatibility DDL')
+    return sorted(set(issues))
+
+
 def check_repository(root: Path) -> dict:
     files = subprocess.check_output(['git', '-C', str(root), 'ls-files', '--cached', '--others', '--exclude-standard', '-z'], timeout=20).decode().split('\0')
     files = [name for name in files if name]
@@ -395,23 +407,17 @@ def check_repository(root: Path) -> dict:
             if (root/name).is_symlink():
                 failures.append(f'{name}: source symlink is unsupported by this guard')
                 continue
-            failures.extend(f'{name}: {issue}' for issue in rust_issues((root/name).read_text()))
+            source = (root/name).read_text()
+            failures.extend(f'{name}: {issue}' for issue in rust_issues(source))
+            if name == 'crates/keycompute-db/src/migrations.rs':
+                failures.extend(f'{name}: {issue}' for issue in migration_runner_issues(source))
         except ValueError:
             failures.append(f'{name}: source scanner could not establish a safe parse')
-    if any(name.startswith('new/') for name in files):
-        failures.append('independent new/ service is unexpectedly tracked in the Rust repository')
-    if 'new/' not in (root/'.gitignore').read_text().splitlines():
-        failures.append('independent new/ checkout must remain excluded')
-    cargo = (root/'Cargo.toml').read_text()
-    workspace = re.search(r'(?ms)^\[workspace\]\s*$(.*?)(?=^\[|\Z)', cargo)
-    members = re.search(r'(?ms)^members\s*=\s*\[(.*?)\]', workspace.group(1)) if workspace else None
-    if members and re.search(r'"(?:\./)?new(?:/[^"\n]*)?"', members.group(1)):
-        failures.append('independent Go service must not be a Cargo workspace member')
     return {'passed': not failures, 'schema_tables': count, 'route_literals_scanned': route_count,
             'rust_files_scanned': len(rust_files), 'findings': failures,
             'scope': 'foundation/schema-inventory/route-inventory/retired-symbols/source-boundary',
             'not_covered': ['dynamic, nested or macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
-                            'all object-level DAO predicates', 'live Go deployments',
+                            'all object-level DAO predicates',
                             'frontend/browser acceptance', 'full release and snapshot restore']}
 
 

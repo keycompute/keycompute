@@ -146,6 +146,26 @@ impl NodeTask {
         Ok(task)
     }
 
+    /// Read a task through its immutable request tenant and owner.
+    ///
+    /// Detached HTTP stream workers must not turn a task UUID into an
+    /// authority to read another request's result. Internal node workers may
+    /// still use `find_by_id` after they have already established task
+    /// ownership through their lease/session state.
+    pub async fn find_by_id_in_scope(
+        db: &impl ConnectionTrait,
+        id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<NodeTask>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM node_tasks WHERE id = $1 AND tenant_id = $2 AND user_id = $3",
+            [id.into(), tenant_id.into(), user_id.into()],
+        );
+        Ok(NodeTask::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 根据 request_id 查询任务
     pub async fn find_by_request_id(
         db: &impl ConnectionTrait,

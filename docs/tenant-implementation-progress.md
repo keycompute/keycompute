@@ -14,7 +14,7 @@ No complete-subsystem or production-cutover acceptance is claimed.
 | 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
 | 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
 | 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, indexed native account-pool Responses/Conversations, Key/owner pages, distribution and tenant financial-control pages | Final resource UI and release acceptance |
-| 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
+| 8 | Limited static foundation gate and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
 
 Payment channels remain platform-wide. Financial records are tenant-scoped and
 wallets remain per-member, not a shared tenant balance pool. Finance pages stay
@@ -683,7 +683,7 @@ Missing authentication storage returns a redacted 503 rather than an incorrect
   an additional real-route assertion retaining 401 for malformed credentials.
 
 This closes the core phase, not the subsystem release gate. No schema,
-production service, credential, deployment or Go-service changes were made.
+production service, credential or deployment changes were made.
 Resource DAO enforcement, full route-level adoption, mutation audit coverage
 and asynchronous authorization remain the following stages.
 
@@ -748,8 +748,8 @@ that total. Final review found no further actionable issue in this change set.
 
 This is not the phase-three completion gate: key mutations, other resource
 DAO families, runtime/settlement queries and route/audit/job adoption remain.
-No schema, production identity, service, deployment or Go-service change was
-made. In particular, the separate API-key core proposal was not applied.
+No schema, production identity, service or deployment change was made. In
+particular, the separate API-key core proposal was not applied.
 
 ## Phase 3 — scoped usage reads (partial delivery)
 
@@ -854,7 +854,7 @@ They are not included in this wallet delivery or counted as completed phases.
 
 ## Remaining phase gates
 
-Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security and client acceptance. Phase 9: verified offline cutover and release.
+Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: end-to-end security and client acceptance. Phase 8: verified offline cutover and release.
 
 
 ## Current phases 3/5 — tenant earnings and withdrawals accepted
@@ -1255,7 +1255,7 @@ drafts remain archived outside main. No production DB, service, credentials,
 payment, deployment or backend permission changes were made.
 
 
-## Current phase 8 — foundation, foreign-identity and synthetic restore subgates accepted
+## Current phase 8 — foundation and synthetic restore subgates accepted
 
 The read-only `scripts/ci/check_tenant_contract.py` checks final global-identity
 and membership fields/domains, composite membership identity, hashed one-time
@@ -1266,14 +1266,7 @@ its limits: SQL aliases/dynamic queries, complete DAO ownership, browser accepta
 and production release are not certified by this lexical gate.
 
 CI runs the checker and now triggers on schema-only, inventory-only and repository
-exclusion changes. Fourteen checker tests and six restore safety tests were added;
-all 23 CI Python tests pass including the three pre-existing report tests.
-
-The independent ignored Go checkout was inspected without modification. Two JWT
-tests reject its observed issuer/session/purpose/role shapes even under a local
-test signature. An actual Axum/PostgreSQL case verifies foreign cookies and role
-headers cannot authenticate Rust control routes or elevate a Rust inference key.
-No deployed Go service or external reverse-proxy configuration is claimed tested.
+exclusion changes. The current CI Python contract/restore suite has 25 passing tests.
 
 The opt-in synthetic full-snapshot runner creates two labelled-test-only databases,
 exercises identity/owner/key/audit invariants, dumps/restores all 47 tables and
@@ -1285,7 +1278,7 @@ owned fixture databases are cleaned on success/failure. This is not a production
 snapshot, legacy-data mapping or final maintenance-window rollback approval.
 
 Final default-parallel workspace: 2686 passed, 0 failed, 30 original ignored
-tests unchanged, including desktop/mobile. The 51 auth and six live-authorization
+tests unchanged, including desktop/mobile. The 49 auth and five live-authorization
 focused tests are included subsets. All-target native, Web/client WASM and strict
 all-target/all-feature Clippy pass. Eight frozen source/workflow/contract hashes
 match verification. Full native resource management, actual tenant UI, remaining

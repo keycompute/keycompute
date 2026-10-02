@@ -86,8 +86,8 @@ async fn recover(state: &AppState, record: &ResponseRecord) -> Result<()> {
             Duration::from_secs(3),
             pool.write_conn().query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
-                "SELECT id,result_json FROM node_tasks WHERE request_id=$1 AND user_id=$2 LIMIT 1",
-                [record.request_id.into(), record.user_id.into()],
+                "SELECT id,result_json FROM node_tasks WHERE request_id=$1 AND tenant_id=$2 AND user_id=$3 LIMIT 1",
+                [record.request_id.into(), record.tenant_id.into(), record.user_id.into()],
             )),
         )
         .await

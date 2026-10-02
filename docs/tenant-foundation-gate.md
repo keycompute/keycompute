@@ -1,4 +1,4 @@
-# Tenant foundation and independent identity gates
+# Tenant foundation gates
 
 These are executable regression gates, not a claim that every tenant resource,
 frontend page or deployment step has been delivered. They supplement the real
@@ -28,25 +28,6 @@ The JSON report lists these limitations rather than certifying complete isolatio
 CI invokes the gate and its negative-fixture tests. Schema-only, inventory-only and repository-exclusion
 changes are included in workflow path triggers; those changes must not silently
 avoid authorization validation.
-
-## Independent Go identity boundary
-
-The local ignored `new/` checkout was inspected at commit
-`043ff99a51ecad8229389ddd04f45f4b25a23ac6`. It is its own Git repository/module,
-`github.com/QuantumNous/new-api`, with integer user IDs, independent sessions,
-`new-api` issuer, `new-api-dashboard` audience and `sid/uv/sv/token_use` claims.
-Its refresh cookies and purpose-derived signing keys are not Rust credentials.
-Its compose configuration uses its own database and signing-secret variables.
-No Go code is copied into or changed by this Rust delivery.
-
-The Rust tests reject these foreign claim shapes even when signed deliberately
-with the local test key and when issuer/subject labels are made to collide. Go
-role numbers/names do not become platform or tenant roles. Actual HTTP tests
-verify that foreign cookies, user/role headers and tenant selectors cannot
-authenticate console routes or elevate a separately issued Rust inference key.
-Such a key retains its fixed Rust tenant/user and inference-only capability.
-These tests validate the Rust boundary; they do not claim to have run a deployed
-Go service or validated every possible reverse-proxy configuration.
 
 ## Synthetic full-snapshot restore rehearsal
 

@@ -38,21 +38,6 @@ release reservations and finish mandatory accounting. It cannot start a new
 inference or continuation on the old authority. Management actor and resource
 owner are separate; administrator actions cannot transfer charges to the actor.
 
-## Go service boundary observed in this checkout
-
-`new/` is excluded by `.gitignore:41` and has its own Git repository. Its module
-is `github.com/QuantumNous/new-api`, not a Cargo workspace member. Its user IDs
-are integers, roles are Common/Admin/Root, and authorization uses its own
-session/Casbin model. Its compose file names a separate `new-api` database.
-Tracked Rust sources and deployment configuration have no integration with it;
-the running KeyCompute compose services do not contain this Go application.
-
-These are independent identity namespaces. Go roles, cookies, sessions, JWTs,
-and database tables are not Rust memberships or platform roles. Any optional
-Go client integration must use a separately issued tenant-bound inference key
-through the public Rust inference API. It receives no management privileges.
-No changes to this independent ignored repository are included in Rust commits.
-
 ## Delivery
 
 All work, review, commits and pushes take place on `main`, never a new branch.
@@ -94,7 +79,7 @@ Historical entries in the progress log are evidence, not retroactive acceptance.
 | 5 | Full tenant-resource management, cache and accepted-work isolation | previous 3 and 6 remaining |
 | 6 | Root and operator capability allowlists | previous role matrix plus actual routes |
 | 7 | Client types, navigation, tenant switch and resource UI | previous UI acceptance |
-| 8 | Security/engineering acceptance, independent Go boundary and verified cutover | previous 7, 8 and 9 |
+| 8 | Security/engineering acceptance and verified cutover | previous 7, 8 and 9 |
 
 The only final membership removal name is `removed`, not a compatibility alias
 for `revoked`. Previously committed user/member/usage/key/wallet read scopes

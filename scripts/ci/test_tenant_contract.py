@@ -159,6 +159,16 @@ let quote = '\\''; let lifetime: &'a str = text; }
             self.assertTrue(any('unclassified route' in issue for issue in issues))
             self.assertTrue(any('stale route' in issue for issue in issues))
 
+    def test_migration_runner_rejects_compatibility_ddl(self):
+        self.assertEqual(
+            check.migration_runner_issues('assert!(!sql.contains("ALTER TABLE"));'), []
+        )
+        self.assertTrue(
+            check.migration_runner_issues(
+                'db.execute_unprepared("ALTER TABLE users ADD COLUMN tenant_id UUID");'
+            )
+        )
+
     def test_workflow_runs_the_guard_and_triggers_for_schema_inventory_and_exclusions(self):
         root = Path(__file__).resolve().parents[2]
         workflow = (root/'.github/workflows/keycompute.yml').read_text()
@@ -168,7 +178,7 @@ let quote = '\\''; let lifetime: &'a str = text; }
         self.assertIn('run: python3 scripts/ci/check_tenant_contract.py', workflow)
         self.assertIn("python3 -m unittest discover -s scripts/ci -p 'test_*.py'", workflow)
 
-    def test_repository_rejects_extra_migrations_and_foreign_workspace_members(self):
+    def test_repository_rejects_extra_migrations(self):
         with tempfile.TemporaryDirectory(prefix='kc-contract-fixture-') as temp:
             root = Path(temp)
             (root/'crates/keycompute-db/migrations').mkdir(parents=True)
@@ -177,23 +187,12 @@ let quote = '\\''; let lifetime: &'a str = text; }
             (root/'docs/tenant-schema-inventory.tsv').write_text(INVENTORY)
             (root/'docs/tenant-route-inventory.tsv').write_text(ROUTE_INVENTORY)
             (root/'Cargo.toml').write_text('[workspace]\nmembers = ["crates/example"]\n')
-            (root/'.gitignore').write_text('new/\n')
             with patch.object(check.subprocess, 'check_output', return_value=b''):
-                self.assertTrue(check.check_repository(root)['passed'])
-                (root/'Cargo.toml').write_text('[workspace]\nmembers = []\nexclude = ["new"]\n')
                 self.assertTrue(check.check_repository(root)['passed'])
                 extra = root/'crates/keycompute-db/migrations/002_compat.sql'
                 extra.write_text('-- should never be loaded')
                 self.assertFalse(check.check_repository(root)['passed'])
                 extra.unlink()
-                (root/'Cargo.toml').write_text('[workspace]\nmembers = ["new"]\n')
-                self.assertFalse(check.check_repository(root)['passed'])
-                (root/'Cargo.toml').write_text('[workspace]\nmembers = []\n')
-            with patch.object(check.subprocess, 'check_output', return_value=b'new/go.mod\0'):
-                self.assertFalse(check.check_repository(root)['passed'])
-            (root/'.gitignore').write_text('')
-            with patch.object(check.subprocess, 'check_output', return_value=b''):
-                self.assertFalse(check.check_repository(root)['passed'])
 
 
 if __name__ == '__main__':

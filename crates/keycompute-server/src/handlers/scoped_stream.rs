@@ -1002,7 +1002,12 @@ impl Owner {
     ) -> Option<std::result::Result<NodeNativeHttpResult, String>> {
         let task = tokio::time::timeout(
             Duration::from_secs(2),
-            NodeTask::find_by_id(gateway.store.pool().write_conn(), task_id),
+            NodeTask::find_by_id_in_scope(
+                gateway.store.pool().write_conn(),
+                task_id,
+                self.input.ctx.tenant_id,
+                self.input.ctx.user_id,
+            ),
         )
         .await
         .ok()?
@@ -1040,7 +1045,12 @@ impl Owner {
         while tokio::time::Instant::now() < deadline {
             if let Ok(Ok(Some(task))) = tokio::time::timeout_at(
                 deadline,
-                NodeTask::find_by_id(gateway.store.pool().write_conn(), task_id),
+                NodeTask::find_by_id_in_scope(
+                    gateway.store.pool().write_conn(),
+                    task_id,
+                    self.input.ctx.tenant_id,
+                    self.input.ctx.user_id,
+                ),
             )
             .await
                 && task.is_terminal()

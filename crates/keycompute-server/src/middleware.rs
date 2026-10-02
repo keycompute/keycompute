@@ -933,10 +933,16 @@ pub(crate) async fn authenticated_rate_limit_config(
         return Ok(RateLimitConfig::default());
     };
     match keycompute_db::Tenant::find_by_id(pool.write_conn(), tenant_id).await {
-        Ok(Some(tenant)) => Ok(RateLimitConfig::from_tenant(
+        Ok(Some(tenant)) if tenant.is_active() => Ok(RateLimitConfig::from_tenant(
             tenant.default_rpm_limit,
             tenant.default_tpm_limit,
         )),
+        Ok(Some(_)) => {
+            error!(%tenant_id, "Authenticated tenant is inactive for rate limiting, denying request");
+            Err(ApiError::ServiceUnavailable(
+                "Rate limit configuration is unavailable. Please try again later.".to_string(),
+            ))
+        }
         Ok(None) => {
             error!(
                 %tenant_id,
