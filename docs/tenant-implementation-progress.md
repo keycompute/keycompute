@@ -59,7 +59,7 @@ Conversation envelopes with a local revision or missing owning account. No
 production data, credentials, upstream resources, restart or deployment changed.
 
 
-## Current phase 8 — route inventory hard gate
+## Current phase 8 — route and cache/job inventory hard gate
 
 The foundation contract checker now derives production route literals from the Rust
 server sources and requires every one to have a classified row in
@@ -76,6 +76,13 @@ This is a provenance and classification gate, not a replacement for object-level
 DAO predicates, live authorization matrices, browser acceptance or deployment /
 restore rehearsal. No production data, credentials, upstream resources, restart or
 deployment changed.
+
+The same gate now validates `docs/tenant-cache-job-inventory.tsv`: its exact
+header, non-empty contract fields, safe repository-relative source paths, source
+file presence, supported cache/job kinds and classifications, and duplicate
+reference keys. CI is triggered when this inventory changes. The current source
+inventory contains 153 rows; runtime call-site adoption remains the next phase
+and is intentionally not implied by this provenance check.
 
 
 ## Current phase 1 — final contract alignment accepted locally

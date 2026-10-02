@@ -42,6 +42,9 @@ tenant_audit_events\tscoped_audit
 """
 ROUTE_INVENTORY = """existing_path\tsource_file\tline_at_audit\tresource_category\tauthority_contract\tcanonical_target
 """
+CACHE_JOB_INVENTORY = """path\tline_at_audit\tsymbol\tkind\tclassification\trequired_scope\tacceptance
+src/example.rs\t0\twork\tjob\tuser-owned resource\tvalidated tenant + user\tfixture
+"""
 
 
 class ContractTests(unittest.TestCase):
@@ -159,6 +162,41 @@ let quote = '\\''; let lifetime: &'a str = text; }
             self.assertTrue(any('unclassified route' in issue for issue in issues))
             self.assertTrue(any('stale route' in issue for issue in issues))
 
+    def test_cache_job_inventory_validates_sources_and_contract_fields(self):
+        with tempfile.TemporaryDirectory(prefix='kc-cache-job-fixture-') as temp:
+            root = Path(temp)
+            source = root / 'src/example.rs'
+            source.parent.mkdir(parents=True)
+            source.write_text('fn work() {}\n')
+            inventory = root / 'docs/tenant-cache-job-inventory.tsv'
+            inventory.parent.mkdir()
+            inventory.write_text(CACHE_JOB_INVENTORY)
+            self.assertEqual(check.cache_job_inventory_issues(root), ([], 1))
+
+            inventory.write_text(CACHE_JOB_INVENTORY.replace('src/example.rs', 'src/missing.rs'))
+            issues, count = check.cache_job_inventory_issues(root)
+            self.assertEqual(count, 1)
+            self.assertTrue(any('missing source file' in issue for issue in issues))
+
+            malformed = CACHE_JOB_INVENTORY.replace('job\tuser-owned resource', 'unknown\tunknown')
+            inventory.write_text(malformed + malformed.splitlines()[1] + '\n')
+            issues, _ = check.cache_job_inventory_issues(root)
+            self.assertTrue(any('invalid kind' in issue for issue in issues))
+            self.assertTrue(any('invalid classification' in issue for issue in issues))
+            self.assertTrue(any('duplicate row' in issue for issue in issues))
+
+    def test_cache_job_inventory_rejects_invalid_header_and_escaping_path(self):
+        with tempfile.TemporaryDirectory(prefix='kc-cache-job-fixture-') as temp:
+            root = Path(temp)
+            inventory = root / 'docs/tenant-cache-job-inventory.tsv'
+            inventory.parent.mkdir()
+            inventory.write_text('wrong\theader\n')
+            self.assertTrue(any('invalid header' in issue for issue in check.cache_job_inventory_issues(root)[0]))
+
+            inventory.write_text(CACHE_JOB_INVENTORY.replace('src/example.rs', '../outside.rs'))
+            issues, _ = check.cache_job_inventory_issues(root)
+            self.assertTrue(any('escapes repository' in issue for issue in issues))
+
     def test_migration_runner_rejects_compatibility_ddl(self):
         self.assertEqual(
             check.migration_runner_issues('assert!(!sql.contains("ALTER TABLE"));'), []
@@ -173,7 +211,7 @@ let quote = '\\''; let lifetime: &'a str = text; }
         root = Path(__file__).resolve().parents[2]
         workflow = (root/'.github/workflows/keycompute.yml').read_text()
         for path in ('crates/keycompute-db/migrations/**', 'docs/tenant-schema-inventory.tsv',
-                     'docs/tenant-route-inventory.tsv', '.gitignore'):
+                     'docs/tenant-route-inventory.tsv', 'docs/tenant-cache-job-inventory.tsv', '.gitignore'):
             self.assertEqual(workflow.count('      - "' + path + '"'), 2)
         self.assertIn('run: python3 scripts/ci/check_tenant_contract.py', workflow)
         self.assertIn("python3 -m unittest discover -s scripts/ci -p 'test_*.py'", workflow)
@@ -186,8 +224,18 @@ let quote = '\\''; let lifetime: &'a str = text; }
             (root/'crates/keycompute-db/migrations/001_init.sql').write_text(SCHEMA)
             (root/'docs/tenant-schema-inventory.tsv').write_text(INVENTORY)
             (root/'docs/tenant-route-inventory.tsv').write_text(ROUTE_INVENTORY)
+            (root/'src').mkdir()
+            (root/'src/example.rs').write_text('fn work() {}\n')
+            (root/'docs/tenant-cache-job-inventory.tsv').write_text(CACHE_JOB_INVENTORY)
             (root/'Cargo.toml').write_text('[workspace]\nmembers = ["crates/example"]\n')
-            with patch.object(check.subprocess, 'check_output', return_value=b''):
+            tracked = '\0'.join([
+                'crates/keycompute-db/migrations/001_init.sql',
+                'docs/tenant-schema-inventory.tsv',
+                'docs/tenant-route-inventory.tsv',
+                'docs/tenant-cache-job-inventory.tsv',
+                'src/example.rs',
+            ]).encode() + b'\0'
+            with patch.object(check.subprocess, 'check_output', return_value=tracked):
                 self.assertTrue(check.check_repository(root)['passed'])
                 extra = root/'crates/keycompute-db/migrations/002_compat.sql'
                 extra.write_text('-- should never be loaded')

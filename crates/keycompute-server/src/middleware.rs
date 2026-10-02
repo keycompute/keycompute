@@ -1012,28 +1012,32 @@ async fn authenticated_rate_limit_config_for_selection(
         return Ok(tenant_config);
     };
 
-    let account = match keycompute_db::Account::find_by_id(pool.write_conn(), account_id).await {
-        Ok(Some(account)) => account,
-        Ok(None) => {
-            error!(
-                %account_id,
-                "Selected account not found for rate limiting, denying request"
-            );
-            return Err(ApiError::ServiceUnavailable(
-                "Rate limit configuration is unavailable. Please try again later.".to_string(),
-            ));
-        }
-        Err(error) => {
-            error!(
-                %account_id,
-                %error,
-                "Failed to load selected account for rate limiting, denying request"
-            );
-            return Err(ApiError::ServiceUnavailable(
-                "Rate limit configuration is unavailable. Please try again later.".to_string(),
-            ));
-        }
-    };
+    // Load the selected account through the active-tenant/key-share boundary;
+    // the generic ID lookup is intentionally not used for request admission.
+    let account =
+        match keycompute_db::Account::find_by_id_for_key_share(pool.write_conn(), account_id).await
+        {
+            Ok(Some(account)) => account,
+            Ok(None) => {
+                error!(
+                    %account_id,
+                    "Selected account not found for rate limiting, denying request"
+                );
+                return Err(ApiError::ServiceUnavailable(
+                    "Rate limit configuration is unavailable. Please try again later.".to_string(),
+                ));
+            }
+            Err(error) => {
+                error!(
+                    %account_id,
+                    %error,
+                    "Failed to load selected account for rate limiting, denying request"
+                );
+                return Err(ApiError::ServiceUnavailable(
+                    "Rate limit configuration is unavailable. Please try again later.".to_string(),
+                ));
+            }
+        };
 
     let authorized = if let Some(keycompute_types::AccountSelection::PassthroughBinding {
         binding_id,

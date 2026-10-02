@@ -290,6 +290,53 @@ IGNORED_ROUTE_LITERALS = {
 }
 ROUTE_LITERAL = re.compile(r'\.route\(\s*"([^"\\]+)"')
 
+CACHE_JOB_INVENTORY_FIELDS = [
+    'path',
+    'line_at_audit',
+    'symbol',
+    'kind',
+    'classification',
+    'required_scope',
+    'acceptance',
+]
+CACHE_JOB_KINDS = {
+    'cache-boundary',
+    'cache-key',
+    'cache-operation',
+    'command',
+    'configuration-command',
+    'control-plane',
+    'deferred-intent',
+    'idempotent-command',
+    'job',
+    'live-stream-authority',
+    'query',
+    'read-model',
+    'request-identity',
+}
+CACHE_JOB_CLASSIFICATIONS = {
+    'platform configuration',
+    'platform identities and tenant lifecycle',
+    'platform identity or tenant credential resource',
+    'platform infrastructure / caller-scoped primitive',
+    'platform infrastructure / request-bound transport',
+    'platform infrastructure with scoped work items',
+    'platform operational metadata',
+    'platform protected configuration',
+    'platform resource',
+    'platform resource or explicitly scoped tenant administration',
+    'platform tenant lifecycle',
+    'tenant resource',
+    'tenant resource / platform shared price',
+    'tenant resource or explicit global shared resource',
+    'tenant/user resource',
+    'tenant/user resource or explicit platform view',
+    'user-owned financial resource',
+    'user-owned payment resource',
+    'user-owned resource',
+    'user-owned tenant resource',
+}
+
 
 def production_routes(root: Path) -> dict[str, tuple[str, int]]:
     source_root = root / 'crates/keycompute-server/src'
@@ -360,6 +407,55 @@ def route_inventory_issues(root: Path) -> tuple[list[str], int]:
     return failures, len(actual)
 
 
+def cache_job_inventory_issues(root: Path, tracked_files: set[str] | None = None) -> tuple[list[str], int]:
+    """Validate the phase-0 cache/job source inventory without enforcing runtime adoption yet."""
+    inventory_path = root / 'docs/tenant-cache-job-inventory.tsv'
+    if not inventory_path.is_file():
+        return ['cache/job inventory: missing docs/tenant-cache-job-inventory.tsv'], 0
+    with inventory_path.open(newline='') as handle:
+        reader = csv.DictReader(handle, delimiter='\t')
+        failures: list[str] = []
+        if reader.fieldnames != CACHE_JOB_INVENTORY_FIELDS:
+            return ['cache/job inventory: invalid header'], 0
+        rows = list(reader)
+
+    seen: set[tuple[str, str, str, str]] = set()
+    for row_number, row in enumerate(rows, start=2):
+        if None in row:
+            failures.append(f'cache/job inventory: malformed row {row_number}')
+            continue
+        if any(not row.get(field, '').strip() for field in CACHE_JOB_INVENTORY_FIELDS):
+            failures.append(f'cache/job inventory: incomplete row {row_number}')
+            continue
+
+        path = row['path'].strip()
+        source = root / path
+        path_obj = Path(path)
+        if path_obj.is_absolute() or '..' in path_obj.parts:
+            failures.append(f'cache/job inventory: path escapes repository at row {row_number}: {path!r}')
+            continue
+        if not source.is_file():
+            failures.append(f'cache/job inventory: missing source file at row {row_number}: {path!r}')
+        elif tracked_files is not None and path not in tracked_files:
+            failures.append(f'cache/job inventory: source is untracked or ignored at row {row_number}: {path!r}')
+
+        try:
+            if int(row['line_at_audit']) < 0:
+                raise ValueError
+        except ValueError:
+            failures.append(f'cache/job inventory: invalid line at row {row_number}')
+        if row['kind'] not in CACHE_JOB_KINDS:
+            failures.append(f'cache/job inventory: invalid kind at row {row_number}: {row["kind"]!r}')
+        if row['classification'] not in CACHE_JOB_CLASSIFICATIONS:
+            failures.append(f'cache/job inventory: invalid classification at row {row_number}: {row["classification"]!r}')
+
+        key = (path, row['line_at_audit'], row['symbol'], row['kind'])
+        if key in seen:
+            failures.append(f'cache/job inventory: duplicate row {row_number}: {path!r}')
+        seen.add(key)
+    return failures, len(rows)
+
+
 def rust_issues(source: str) -> list[str]:
     tokens = tokenize(source, 'rust')
     executable = [token.value if token.kind == 'identifier' else '<literal>' for token in tokens]
@@ -398,6 +494,8 @@ def check_repository(root: Path) -> dict:
     )
     route_failures, route_count = route_inventory_issues(root)
     failures.extend(route_failures)
+    cache_job_failures, cache_job_count = cache_job_inventory_issues(root, set(files))
+    failures.extend(cache_job_failures)
     migrations = {p.name for p in (root/'crates/keycompute-db/migrations').glob('*.sql')}
     if migrations != {'001_init.sql'}:
         failures.append('only the complete greenfield 001_init.sql may exist')
@@ -414,8 +512,9 @@ def check_repository(root: Path) -> dict:
         except ValueError:
             failures.append(f'{name}: source scanner could not establish a safe parse')
     return {'passed': not failures, 'schema_tables': count, 'route_literals_scanned': route_count,
+            'cache_job_inventory_rows': cache_job_count,
             'rust_files_scanned': len(rust_files), 'findings': failures,
-            'scope': 'foundation/schema-inventory/route-inventory/retired-symbols/source-boundary',
+            'scope': 'foundation/schema-inventory/route-inventory/cache-job-inventory/retired-symbols/source-boundary',
             'not_covered': ['dynamic, nested or macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
                             'all object-level DAO predicates',
                             'frontend/browser acceptance', 'full release and snapshot restore']}
