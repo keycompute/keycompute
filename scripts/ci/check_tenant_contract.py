@@ -278,6 +278,13 @@ ROUTE_CATEGORIES = {
     'tenant_resource',
     'user_owned_resource',
 }
+ROUTE_AUTHORITY_HINTS = {
+    'global_shared_resource': ('tenant', 'owner', 'shared', 'grant', 'credential'),
+    'platform_resource': ('platform', 'root', 'operator', 'identity', 'public'),
+    'platform_resource_or_explicit_tenant_target': ('platform', 'root', 'tenant', 'target'),
+    'tenant_resource': ('tenant', 'membership', 'admin', 'selected'),
+    'user_owned_resource': ('owner', 'self', 'tenant', 'credential', 'node'),
+}
 IGNORED_ROUTE_FILES = {'console_tests.rs', 'drain_tests.rs', 'tests.rs'}
 # These literals belong only to inline unit-test routers, not production endpoints.
 IGNORED_ROUTE_LITERALS = {
@@ -434,6 +441,13 @@ def route_inventory_issues(root: Path) -> tuple[list[str], int]:
             failures.append(f'route inventory: incomplete row {path!r}')
         if row.get('resource_category') not in ROUTE_CATEGORIES:
             failures.append(f'route inventory: invalid resource category for {path!r}')
+        else:
+            contract = row.get('authority_contract', '').lower()
+            if not any(hint in contract for hint in ROUTE_AUTHORITY_HINTS[row['resource_category']]):
+                failures.append(
+                    f'route inventory: authority contract does not describe '
+                    f"{row['resource_category']} scope for {path!r}"
+                )
         try:
             if int(row.get('line_at_audit', '')) < 0:
                 raise ValueError

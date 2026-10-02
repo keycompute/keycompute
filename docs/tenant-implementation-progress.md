@@ -85,6 +85,12 @@ reference keys. CI is triggered when this inventory changes. The current source
 inventory contains 153 rows; runtime call-site adoption remains the next phase
 and is intentionally not implied by this provenance check.
 
+The route gate also performs a first semantic consistency check: each route
+category must have an authority contract that names a matching platform, tenant,
+owner, credential, or shared-resource scope. This is a contract lint rather than
+an object-level DAO proof; the remaining route-to-DAO-to-test matrix is still
+the next security review slice.
+
 ## Current follow-up — runtime DAO scope closure
 
 Runtime paths now use scope-preserving reads for selected account admission,

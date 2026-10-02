@@ -150,7 +150,7 @@ let quote = '\\''; let lifetime: &'a str = text; }
             (root / 'docs').mkdir()
             row = (
                 '/api/v1/known\tcrates/keycompute-server/src/router.rs\t1\t'
-                'platform_resource\tfixture\tunchanged\n'
+                'platform_resource\tplatform fixture\tunchanged\n'
             )
             (root / 'docs/tenant-route-inventory.tsv').write_text(ROUTE_INVENTORY + row)
             self.assertEqual(check.route_inventory_issues(root), ([], 1))
@@ -163,12 +163,15 @@ let quote = '\\''; let lifetime: &'a str = text; }
             self.assertTrue(any('nested route builder' in issue for issue in issues))
             source.write_text('Router::new().route("/api/v1/known", get(handler))\n')
             (root / 'docs/tenant-route-inventory.tsv').write_text(
-                ROUTE_INVENTORY + row.replace('/api/v1/known', '/api/v1/stale')
+                ROUTE_INVENTORY + row.replace('/api/v1/known', '/api/v1/stale').replace(
+                    'platform fixture', 'fixture'
+                )
             )
             issues, count = check.route_inventory_issues(root)
             self.assertEqual(count, 1)
             self.assertTrue(any('unclassified route' in issue for issue in issues))
             self.assertTrue(any('stale route' in issue for issue in issues))
+            self.assertTrue(any('authority contract' in issue for issue in issues))
 
     def test_cache_job_inventory_validates_sources_and_contract_fields(self):
         with tempfile.TemporaryDirectory(prefix='kc-cache-job-fixture-') as temp:
