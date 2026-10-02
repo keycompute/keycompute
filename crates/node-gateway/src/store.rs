@@ -524,7 +524,7 @@ impl NodeGatewayStore {
                     return Err(DbError::Other("Session expired or revoked".to_string()));
                 }
 
-                let node = Node::find_by_id(self.pool.write_conn(), s.node_id)
+                let node = Node::find_for_session(self.pool.write_conn(), s.node_id, s.id)
                     .await?
                     .ok_or_else(|| DbError::not_found("Node", s.node_id.to_string()))?;
 

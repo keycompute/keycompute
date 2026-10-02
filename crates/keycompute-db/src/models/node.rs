@@ -107,6 +107,22 @@ impl Node {
         Ok(node)
     }
 
+    /// Resolve a node only through a session that proves the same tenant and
+    /// owner relationship. Runtime gateway admission must not turn a node ID
+    /// into authority before this relationship has been checked.
+    pub async fn find_for_session(
+        db: &impl ConnectionTrait,
+        node_id: Uuid,
+        session_id: Uuid,
+    ) -> Result<Option<Node>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT n.* FROM nodes n JOIN node_sessions s ON s.node_id=n.id AND s.tenant_id=n.tenant_id AND s.owner_user_id=n.owner_user_id WHERE n.id=$1 AND s.id=$2",
+            [node_id.into(), session_id.into()],
+        );
+        Ok(Node::find_by_statement(stmt).one(db).await?)
+    }
+
     /// 更新节点状态
     pub async fn update_status(
         db: &impl ConnectionTrait,

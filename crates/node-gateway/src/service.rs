@@ -573,10 +573,13 @@ impl NodeGatewayService {
         // 1. 检查节点状态
         // Poll admission is an authorization decision: writer-fresh state
         // prevents a recently excluded node from claiming more work.
-        let node =
-            keycompute_db::models::node::Node::find_by_id(self.store.pool().write_conn(), node_id)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Node not found"))?;
+        let node = keycompute_db::models::node::Node::find_for_session(
+            self.store.pool().write_conn(),
+            node_id,
+            session_id,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Node/session ownership mismatch"))?;
 
         // 如果节点状态不是 online,直接返回空 task (不参与 poll)
         if node.status != "online" {
