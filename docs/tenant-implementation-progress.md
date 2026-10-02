@@ -1877,8 +1877,10 @@ tenant-finance-console.md for precise boundaries.
 Account-pool Responses are now an explicit native resource family rather than a
 local-resource alias. The durable affinity schema stores `resource_kind`; IDs stay
 opaque and are never classified by prefix. Newly proven visible routes persist the
-kind transactionally. Exact legacy V0001 installations receive a bounded compatibility
-upgrade under the migration lock; unknown checksums still fail closed.
+kind transactionally. Fresh deployments receive the complete consolidated
+baseline; historical V0001 checksums, including the previously supported
+response-kind checksum, fail closed because runtime compatibility migrations are
+not supported. Databases without migration history still fail closed.
 
 Tenant and root control routes support native Response detail, input items, cancel
 and delete only when the caller supplies the original owner plus opaque resource ID.

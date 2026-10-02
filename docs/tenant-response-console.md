@@ -18,11 +18,12 @@ legacy NULL kind can become addressable only after an operation whose semantic
 route proves the kind; a conflicting explicit kind fails closed. Internal,
 reservation and otherwise unproven legacy rows are not native-admin resources.
 
-Fresh databases use the final `001_init.sql` schema directly. An exact
-historical V0001 checksum receives the bounded `resource_kind` compatibility
-upgrade under the migration lock; unknown checksum drift and non-empty databases
-without migration history fail closed. The `resource_kind` column, constraint and
-admin index are part of the final baseline.
+Fresh databases use the final `001_init.sql` schema directly. Historical V0001
+checksums, including the previously supported response-kind checksum, now fail
+closed because runtime compatibility migrations are not supported. Unknown
+checksum drift and non-empty databases without migration history also fail
+closed. The `resource_kind` column, constraint and admin index are part of the
+final baseline.
 
 ## Account-pool Responses
 
