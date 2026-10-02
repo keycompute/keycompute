@@ -386,6 +386,33 @@ CACHE_JOB_COVERAGE_FIELDS = ['path', 'symbol', 'test_file', 'test_symbol']
 DYNAMIC_SQL_REVIEW_FIELDS = ['path', 'symbol', 'required_tokens', 'test_file', 'test_symbol']
 
 
+def release_gate_issues(root: Path) -> list[str]:
+    """Require an explicit, non-destructive release/restore readiness record."""
+    failures: list[str] = []
+    rehearsal = root / 'scripts/tests/tenant_restore_rehearsal.py'
+    browser_smoke = root / 'scripts/tests/tenant_backend_browser.mjs'
+    gate_doc = root / 'docs/tenant-release-gate.md'
+    if not rehearsal.is_file():
+        failures.append('release gate: tenant restore rehearsal script is missing')
+    if not browser_smoke.is_file():
+        failures.append('release gate: real backend browser smoke script is missing')
+    if not gate_doc.is_file():
+        failures.append('release gate: tenant release gate document is missing')
+        return failures
+    text = gate_doc.read_text()
+    normalized = re.sub(r'\s+', ' ', text).lower()
+    required_phrases = {
+        'kc_tenant_test_ack_isolated=1': 'isolated restore acknowledgement is missing',
+        'not a production backup': 'production backup disclaimer is missing',
+        'real backend browser': 'real backend browser gate is missing',
+        'rollback': 'rollback procedure is missing',
+    }
+    for phrase, message in required_phrases.items():
+        if phrase not in normalized:
+            failures.append(f'release gate: {message}')
+    return failures
+
+
 def production_route_sources(root: Path) -> list[Path]:
     source_root = root / 'crates/keycompute-server/src'
     if not source_root.is_dir():
@@ -401,7 +428,34 @@ def route_builder_issues(root: Path) -> list[str]:
     """Reject route composition that the literal inventory cannot prove."""
     failures: list[str] = []
     for source in production_route_sources(root):
-        tokens = tokenize(source.read_text(), 'rust')
+        text = source.read_text()
+        tokens = tokenize(text, 'rust')
+        # A macro can emit routes without leaving a literal declaration at the
+        # call site. Reject route-building macros until they are represented by
+        # an explicit generated-route inventory rather than silently treating
+        # their template as a production endpoint.
+        macro_route = False
+        for start in range(len(tokens) - 3):
+            if tokens[start].value != 'macro_rules' or tokens[start + 1].value != '!':
+                continue
+            if tokens[start + 2].kind != 'identifier' or tokens[start + 3].value != '{':
+                continue
+            depth = 1
+            cursor = start + 4
+            while cursor < len(tokens) and depth:
+                value = tokens[cursor].value
+                if value == '{':
+                    depth += 1
+                elif value == '}':
+                    depth -= 1
+                elif value == '.' and cursor + 2 < len(tokens) and tokens[cursor + 1].value in {'route', 'route_service'} and tokens[cursor + 2].value == '(':
+                    macro_route = True
+                cursor += 1
+            if macro_route:
+                break
+        if macro_route:
+            relative = source.relative_to(root).as_posix()
+            failures.append(f'route inventory: macro-generated route builder is unsupported in {relative}')
         values = words(tokens)
         relative = source.relative_to(root).as_posix()
         for index in range(len(tokens) - 2):
@@ -716,6 +770,27 @@ def rust_issues(source: str) -> list[str]:
             code = [t.value if t.kind == 'identifier' else '<literal>' for t in sql]
             if any(contains(code, ['users', '.', field]) for field in ('tenant_id', 'role')):
                 issues.append('retired users ownership reference in SQL literal')
+            # Also reject retired ownership columns through arbitrary SQL aliases,
+            # e.g. `FROM users u ... u.tenant_id`. The alias is extracted only
+            # from a literal SQL relation, so prose and Rust identifiers do not
+            # trigger this check.
+            for index in range(len(sql) - 2):
+                if sql[index].kind != 'identifier' or sql[index].value not in {'from', 'join'}:
+                    continue
+                if sql[index + 1].kind != 'identifier' or sql[index + 1].value != 'users':
+                    continue
+                alias_index = index + 2
+                if alias_index >= len(sql):
+                    continue
+                if sql[alias_index].value == 'as':
+                    alias_index += 1
+                    if alias_index >= len(sql):
+                        continue
+                if sql[alias_index].value in {'where', 'join', 'left', 'right', 'inner', 'outer', 'on', 'cross'}:
+                    continue
+                alias = sql[alias_index].value
+                if any(contains(code, [alias, '.', field]) for field in ('tenant_id', 'role')):
+                    issues.append('retired users ownership reference through SQL alias')
     return sorted(set(issues))
 
 
@@ -750,6 +825,8 @@ def check_repository(root: Path) -> dict:
     failures.extend(cache_job_coverage_failures)
     dynamic_sql_failures, dynamic_sql_count = dynamic_sql_review_issues(root)
     failures.extend(dynamic_sql_failures)
+    release_gate_failures = release_gate_issues(root)
+    failures.extend(release_gate_failures)
     migrations = {p.name for p in (root/'crates/keycompute-db/migrations').glob('*.sql')}
     if migrations != {'001_init.sql'}:
         failures.append('only the complete greenfield 001_init.sql may exist')
@@ -770,11 +847,13 @@ def check_repository(root: Path) -> dict:
             'object_coverage_rows': object_coverage_count,
             'cache_job_coverage_rows': cache_job_coverage_count,
             'dynamic_sql_review_rows': dynamic_sql_count,
+            'release_gate': not release_gate_failures,
             'rust_files_scanned': len(rust_files), 'findings': failures,
-            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/dynamic-sql-review/cache-job-scope-contract/retired-symbols/source-boundary',
-            'not_covered': ['macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
+            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/dynamic-sql-review/release-gate/cache-job-scope-contract/retired-symbols/source-boundary',
+            'not_covered': ['arbitrary dynamically generated SQL',
                             'all object-level DAO predicates',
-                            'frontend/browser acceptance', 'full release and snapshot restore']}
+                            'frontend/browser acceptance', 'real backend browser acceptance',
+                            'full production release and snapshot restore']}
 
 
 def main() -> int:

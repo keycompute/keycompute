@@ -20,10 +20,14 @@ is permitted. No compatibility migration is introduced.
 
 A lexical scanner ignores comments, raw/escaped string lookalikes and character
 literals when checking retired authorization symbols. Actual SQL literals using
-explicit `users.role` or `users.tenant_id` are rejected. This is not a Rust/SQL
-semantic analyzer: renamed aliases, dynamically assembled queries and arbitrary
-resource-ID predicates still require code review and executable security tests.
+explicit `users.role` or `users.tenant_id` are rejected, including simple SQL
+aliases such as `users u` followed by `u.role`. This is not a Rust/SQL semantic
+analyzer: dynamically assembled aliases and arbitrary resource-ID predicates
+still require code review and executable security tests.
 The JSON report lists these limitations rather than certifying complete isolation.
+Route-building macros are rejected by the inventory gate until their generated
+paths are represented by an explicit route inventory; they are not silently
+treated as covered literals.
 
 CI invokes the gate and its negative-fixture tests. Schema-only, inventory-only and repository-exclusion
 changes are included in workflow path triggers; those changes must not silently

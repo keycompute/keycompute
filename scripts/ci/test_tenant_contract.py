@@ -139,6 +139,10 @@ let quote = '\\''; let lifetime: &'a str = text; }
     def test_retired_users_fields_in_sql_not_translation_keys(self):
         self.assertTrue(check.rust_issues('let query = "SELECT users.role FROM users";'))
         self.assertTrue(check.rust_issues('let query = r#"SELECT users . tenant_id FROM users"#;'))
+        self.assertTrue(check.rust_issues('let query = "SELECT u.tenant_id FROM users u";'))
+        self.assertTrue(check.rust_issues('let query = "SELECT actor.role FROM users actor";'))
+        self.assertTrue(check.rust_issues('let query = "SELECT actor.role FROM users AS actor";'))
+        self.assertEqual(check.rust_issues('let query = "SELECT id FROM users";'), [])
         self.assertEqual(check.rust_issues('let query = "SELECT \'users.role\' FROM users";'), [])
         self.assertEqual(check.rust_issues('let key = "users.role_root";'), [])
 
@@ -175,6 +179,11 @@ let quote = '\\''; let lifetime: &'a str = text; }
             issues, _ = check.route_inventory_issues(root)
             self.assertTrue(any('dynamic route path' in issue for issue in issues))
             self.assertTrue(any('nested route builder' in issue for issue in issues))
+            source.write_text(
+                'macro_rules! generated_routes { ($router:expr) => { $router.route("/api/v1/generated", get(handler)) }; }\n'
+            )
+            issues, _ = check.route_inventory_issues(root)
+            self.assertTrue(any('macro-generated route builder' in issue for issue in issues))
             source.write_text('Router::new().route("/api/v1/known", get(handler))\n')
             (root / 'docs/tenant-route-inventory.tsv').write_text(
                 ROUTE_INVENTORY + row.replace('/api/v1/known', '/api/v1/stale').replace(
@@ -330,6 +339,13 @@ let quote = '\\''; let lifetime: &'a str = text; }
             )
             (root/'docs/tenant-dynamic-sql-review.tsv').write_text(
                 'path\tsymbol\trequired_tokens\ttest_file\ttest_symbol\n'
+            )
+            (root/'scripts/tests').mkdir(parents=True)
+            (root/'scripts/tests/tenant_restore_rehearsal.py').write_text('# isolated fixture\n')
+            (root/'scripts/tests/tenant_backend_browser.mjs').write_text('// isolated fixture\n')
+            (root/'docs/tenant-release-gate.md').write_text(
+                'KC_TENANT_TEST_ACK_ISOLATED=1\nNOT a production backup\n'
+                'real backend browser\nrollback\n'
             )
             (root/'Cargo.toml').write_text('[workspace]\nmembers = ["crates/example"]\n')
             tracked = '\0'.join([
