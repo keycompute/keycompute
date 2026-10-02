@@ -375,12 +375,15 @@ CACHE_JOB_SCOPE_HINTS = {
 OBJECT_COVERAGE_INVENTORY_FIELDS = [
     'route',
     'resource_category',
+    'handler_source',
+    'handler_symbol',
     'dao_source',
     'dao_symbol',
     'test_file',
     'test_symbol',
 ]
 CACHE_JOB_COVERAGE_FIELDS = ['path', 'symbol', 'test_file', 'test_symbol']
+DYNAMIC_SQL_REVIEW_FIELDS = ['path', 'symbol', 'required_tokens', 'test_file', 'test_symbol']
 
 
 def production_route_sources(root: Path) -> list[Path]:
@@ -605,6 +608,7 @@ def object_coverage_inventory_issues(root: Path) -> tuple[list[str], int]:
         elif row['resource_category'] != route_rows[route]:
             failures.append(f'object coverage: resource category mismatch at row {row_number}: {route!r}')
         for field, prefix, missing in (
+            ('handler_source', 'crates/keycompute-server/src/handlers/', 'handler source'),
             ('dao_source', 'crates/', 'DAO source'),
             ('test_file', 'crates/integration-tests/tests/', 'test source'),
         ):
@@ -613,6 +617,9 @@ def object_coverage_inventory_issues(root: Path) -> tuple[list[str], int]:
             if not path.startswith(prefix) or not source.is_file():
                 failures.append(f'object coverage: missing {missing} at row {row_number}: {path!r}')
         dao_source = root / row['dao_source'].strip()
+        handler_source = root / row['handler_source'].strip()
+        if handler_source.is_file() and row['handler_symbol'].strip() not in handler_source.read_text():
+            failures.append(f'object coverage: handler symbol is not present at row {row_number}: {row["handler_symbol"]!r}')
         if dao_source.is_file() and row['dao_symbol'].strip() not in dao_source.read_text():
             failures.append(f'object coverage: DAO symbol is not present at row {row_number}: {row["dao_symbol"]!r}')
         test_source = root / row['test_file'].strip()
@@ -662,6 +669,41 @@ def cache_job_coverage_issues(root: Path) -> tuple[list[str], int]:
     return failures, len(rows)
 
 
+def dynamic_sql_review_issues(root: Path) -> tuple[list[str], int]:
+    """Track high-risk dynamic SQL builders with explicit predicate evidence."""
+    inventory_path = root / 'docs/tenant-dynamic-sql-review.tsv'
+    if not inventory_path.is_file():
+        return ['dynamic SQL review: missing docs/tenant-dynamic-sql-review.tsv'], 0
+    with inventory_path.open(newline='') as handle:
+        reader = csv.DictReader(handle, delimiter='\t')
+        if reader.fieldnames != DYNAMIC_SQL_REVIEW_FIELDS:
+            return ['dynamic SQL review: invalid header'], 0
+        rows = list(reader)
+    failures: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for row_number, row in enumerate(rows, start=2):
+        if None in row or any(not row.get(field, '').strip() for field in DYNAMIC_SQL_REVIEW_FIELDS):
+            failures.append(f'dynamic SQL review: incomplete row {row_number}')
+            continue
+        key = (row['path'].strip(), row['symbol'].strip())
+        if key in seen:
+            failures.append(f'dynamic SQL review: duplicate site at row {row_number}: {key!r}')
+        seen.add(key)
+        source = root / key[0]
+        test_source = root / row['test_file'].strip()
+        if not source.is_file() or not key[0].startswith('crates/'):
+            failures.append(f'dynamic SQL review: missing source at row {row_number}: {key[0]!r}')
+        elif key[1] not in source.read_text():
+            failures.append(f'dynamic SQL review: symbol is not present at row {row_number}: {key[1]!r}')
+        elif any(token.strip() not in source.read_text() for token in row['required_tokens'].split('|')):
+            failures.append(f'dynamic SQL review: required predicate token is missing at row {row_number}: {key!r}')
+        if not test_source.is_file() or not row['test_file'].strip().startswith('crates/'):
+            failures.append(f'dynamic SQL review: missing test source at row {row_number}: {row["test_file"]!r}')
+        elif row['test_symbol'].strip() not in test_source.read_text():
+            failures.append(f'dynamic SQL review: test symbol is not present at row {row_number}: {row["test_symbol"]!r}')
+    return failures, len(rows)
+
+
 def rust_issues(source: str) -> list[str]:
     tokens = tokenize(source, 'rust')
     executable = [token.value if token.kind == 'identifier' else '<literal>' for token in tokens]
@@ -706,6 +748,8 @@ def check_repository(root: Path) -> dict:
     failures.extend(object_coverage_failures)
     cache_job_coverage_failures, cache_job_coverage_count = cache_job_coverage_issues(root)
     failures.extend(cache_job_coverage_failures)
+    dynamic_sql_failures, dynamic_sql_count = dynamic_sql_review_issues(root)
+    failures.extend(dynamic_sql_failures)
     migrations = {p.name for p in (root/'crates/keycompute-db/migrations').glob('*.sql')}
     if migrations != {'001_init.sql'}:
         failures.append('only the complete greenfield 001_init.sql may exist')
@@ -725,8 +769,9 @@ def check_repository(root: Path) -> dict:
             'cache_job_inventory_rows': cache_job_count,
             'object_coverage_rows': object_coverage_count,
             'cache_job_coverage_rows': cache_job_coverage_count,
+            'dynamic_sql_review_rows': dynamic_sql_count,
             'rust_files_scanned': len(rust_files), 'findings': failures,
-            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/cache-job-scope-contract/retired-symbols/source-boundary',
+            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/dynamic-sql-review/cache-job-scope-contract/retired-symbols/source-boundary',
             'not_covered': ['macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
                             'all object-level DAO predicates',
                             'frontend/browser acceptance', 'full release and snapshot restore']}

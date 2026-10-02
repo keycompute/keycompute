@@ -1,0 +1,4 @@
+path	symbol	required_tokens	test_file	test_symbol
+crates/keycompute-db/src/models/payment_order_scope.rs	predicate	tenant_id|user_id|current_tenant_actor	crates/integration-tests/tests/e2e_scoped_payment.rs	payment_dao_lists_counts_and_details_share_the_same_explicit_scope
+crates/keycompute-db/src/models/user_scope.rs	member_query	tenant_id|user_id|tenant_role	crates/integration-tests/tests/e2e_scoped_members.rs	member_query_pagination_and_literal_search_do_not_expand_scope
+crates/keycompute-db/src/models/node_tip_withdrawal.rs	review	tenant_id|scope.predicate	crates/integration-tests/tests/e2e_tenant_tips.rs	tenant_review_is_metadata_only_and_root_payout_requires_explicit_audited_access

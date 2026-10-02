@@ -45,11 +45,14 @@ ROUTE_INVENTORY = """existing_path\tsource_file\tline_at_audit\tresource_categor
 CACHE_JOB_INVENTORY = """path\tline_at_audit\tsymbol\tkind\tclassification\trequired_scope\tacceptance
 src/example.rs\t0\twork\tjob\tuser-owned resource\tvalidated tenant + user\tfixture
 """
-OBJECT_COVERAGE_INVENTORY = """route\tresource_category\tdao_source\tdao_symbol\ttest_file\ttest_symbol
-/api/v1/known\ttenant_resource\tcrates/keycompute-db/src/dao.rs\tScopeDao::find_in_tenant\tcrates/integration-tests/tests/e2e.rs\tcross_tenant_isolation
+OBJECT_COVERAGE_INVENTORY = """route\tresource_category\thandler_source\thandler_symbol\tdao_source\tdao_symbol\ttest_file\ttest_symbol
+/api/v1/known\ttenant_resource\tcrates/keycompute-server/src/handlers/example.rs\tknown_handler\tcrates/keycompute-db/src/dao.rs\tScopeDao::find_in_tenant\tcrates/integration-tests/tests/e2e.rs\tcross_tenant_isolation
 """
 CACHE_JOB_COVERAGE = """path\tsymbol\ttest_file\ttest_symbol
 crates/example/src/lib.rs\twork\tcrates/example/tests/e2e.rs\truntime_scope_test
+"""
+DYNAMIC_SQL_REVIEW = """path\tsymbol\trequired_tokens\ttest_file\ttest_symbol
+crates/example/src/lib.rs\twork\ttenant_id|scope\tcrates/example/tests/e2e.rs\truntime_scope_test
 """
 
 
@@ -229,7 +232,9 @@ let quote = '\\''; let lifetime: &'a str = text; }
             root = Path(temp)
             (root / 'docs').mkdir()
             (root / 'crates/keycompute-db/src').mkdir(parents=True)
+            (root / 'crates/keycompute-server/src/handlers').mkdir(parents=True)
             (root / 'crates/integration-tests/tests').mkdir(parents=True)
+            (root / 'crates/keycompute-server/src/handlers/example.rs').write_text('fn known_handler() {}\n')
             (root / 'crates/keycompute-db/src/dao.rs').write_text('ScopeDao::find_in_tenant;\n')
             (root / 'crates/integration-tests/tests/e2e.rs').write_text('fn cross_tenant_isolation() {}\n')
             (root / 'docs/tenant-route-inventory.tsv').write_text(
@@ -267,6 +272,24 @@ let quote = '\\''; let lifetime: &'a str = text; }
             self.assertEqual(count, 1)
             self.assertTrue(any('test symbol is not present' in issue for issue in issues))
 
+    def test_dynamic_sql_review_requires_predicate_and_test_evidence(self):
+        with tempfile.TemporaryDirectory(prefix='kc-dynamic-sql-fixture-') as temp:
+            root = Path(temp)
+            (root / 'docs').mkdir()
+            (root / 'crates/example/src').mkdir(parents=True)
+            (root / 'crates/example/tests').mkdir(parents=True)
+            (root / 'crates/example/src/lib.rs').write_text('fn work() { let _ = "tenant_id scope"; }\n')
+            (root / 'crates/example/tests/e2e.rs').write_text('fn runtime_scope_test() {}\n')
+            (root / 'docs/tenant-dynamic-sql-review.tsv').write_text(DYNAMIC_SQL_REVIEW)
+            self.assertEqual(check.dynamic_sql_review_issues(root), ([], 1))
+
+            (root / 'docs/tenant-dynamic-sql-review.tsv').write_text(
+                DYNAMIC_SQL_REVIEW.replace('tenant_id|scope', 'missing_predicate')
+            )
+            issues, count = check.dynamic_sql_review_issues(root)
+            self.assertEqual(count, 1)
+            self.assertTrue(any('required predicate token is missing' in issue for issue in issues))
+
     def test_migration_runner_rejects_compatibility_ddl(self):
         self.assertEqual(
             check.migration_runner_issues('assert!(!sql.contains("ALTER TABLE"));'), []
@@ -282,7 +305,8 @@ let quote = '\\''; let lifetime: &'a str = text; }
         workflow = (root/'.github/workflows/keycompute.yml').read_text()
         for path in ('crates/keycompute-db/migrations/**', 'docs/tenant-schema-inventory.tsv',
                      'docs/tenant-route-inventory.tsv', 'docs/tenant-cache-job-inventory.tsv',
-                     'docs/tenant-object-coverage.tsv', 'docs/tenant-cache-job-coverage.tsv', '.gitignore'):
+                     'docs/tenant-object-coverage.tsv', 'docs/tenant-cache-job-coverage.tsv',
+                     'docs/tenant-dynamic-sql-review.tsv', '.gitignore'):
             self.assertEqual(workflow.count('      - "' + path + '"'), 2)
         self.assertIn('run: python3 scripts/ci/check_tenant_contract.py', workflow)
         self.assertIn("python3 -m unittest discover -s scripts/ci -p 'test_*.py'", workflow)
@@ -299,10 +323,13 @@ let quote = '\\''; let lifetime: &'a str = text; }
             (root/'src/example.rs').write_text('fn work() {}\n')
             (root/'docs/tenant-cache-job-inventory.tsv').write_text(CACHE_JOB_INVENTORY)
             (root/'docs/tenant-object-coverage.tsv').write_text(
-                'route\tresource_category\tdao_source\tdao_symbol\ttest_file\ttest_symbol\n'
+                'route\tresource_category\thandler_source\thandler_symbol\tdao_source\tdao_symbol\ttest_file\ttest_symbol\n'
             )
             (root/'docs/tenant-cache-job-coverage.tsv').write_text(
                 'path\tsymbol\ttest_file\ttest_symbol\n'
+            )
+            (root/'docs/tenant-dynamic-sql-review.tsv').write_text(
+                'path\tsymbol\trequired_tokens\ttest_file\ttest_symbol\n'
             )
             (root/'Cargo.toml').write_text('[workspace]\nmembers = ["crates/example"]\n')
             tracked = '\0'.join([

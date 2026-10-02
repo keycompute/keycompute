@@ -29,6 +29,11 @@ CI invokes the gate and its negative-fixture tests. Schema-only, inventory-only 
 changes are included in workflow path triggers; those changes must not silently
 avoid authorization validation.
 
+The same read-only gate also checks the staged object coverage, cache/job runtime
+coverage and dynamic-SQL review inventories. These inventories validate source,
+handler/DAO/test symbols and selected predicate tokens; they intentionally do
+not replace real PostgreSQL authorization tests.
+
 ## Synthetic full-snapshot restore rehearsal
 
 Run only against the labelled task-owned test PostgreSQL container:
