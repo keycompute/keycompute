@@ -104,11 +104,12 @@ DAO symbol and test symbol still exist; this is representative evidence, not a
 claim that all 296 routes are covered.
 
 The cache/job follow-up now has the same executable shape in
-`docs/tenant-cache-job-coverage.tsv`: four high-risk pricing, node-queue,
-NodeTask and Responses-affinity sites are tied to existing runtime integration
-tests. The gate verifies that each site is present in the 153-row source
-inventory and that its named test symbol remains present. This is staged runtime
-evidence; it does not yet certify every cache or background worker.
+`docs/tenant-cache-job-coverage.tsv`: eight high-risk pricing, node-queue,
+NodeTask, Responses-affinity, rate-limit, distribution, API-key and settlement
+sites are tied to existing runtime integration tests. The gate verifies that
+each site is present in the 153-row source inventory and that its named test
+symbol remains present. This is staged runtime evidence; it does not yet certify
+every cache or background worker.
 
 ## Current follow-up — runtime DAO scope closure
 
