@@ -139,9 +139,23 @@ impl UsageLog {
             Some(log) => log,
             None => match idempotency_id {
                 Some(idempotency_id) => {
-                    UsageLog::find_by_idempotency_id(db, idempotency_id).await?
+                    UsageLog::find_by_idempotency_id_in_scope(
+                        db,
+                        idempotency_id,
+                        req.tenant_id,
+                        req.user_id,
+                    )
+                    .await?
                 }
-                None => UsageLog::find_by_request_id(db, req.request_id).await?,
+                None => {
+                    UsageLog::find_by_request_id_in_scope(
+                        db,
+                        req.request_id,
+                        req.tenant_id,
+                        req.user_id,
+                    )
+                    .await?
+                }
             }
             .ok_or_else(|| {
                 DbError::Other(
@@ -183,6 +197,20 @@ impl UsageLog {
         Ok(log)
     }
 
+    pub async fn find_by_request_id_in_scope(
+        db: &impl ConnectionTrait,
+        request_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<UsageLog>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM usage_logs WHERE request_id = $1 AND tenant_id = $2 AND user_id = $3",
+            [request_id.into(), tenant_id.into(), user_id.into()],
+        );
+        Ok(UsageLog::find_by_statement(stmt).one(db).await?)
+    }
+
     /// Find the ledger row for either an ordinary request ID or the stable
     /// identity assigned to an idempotent Responses request.
     pub async fn find_by_billing_request_id(
@@ -208,6 +236,35 @@ impl UsageLog {
         Self::find_by_billing_request_id(db.write_conn(), billing_request_id).await
     }
 
+    pub async fn find_by_billing_request_id_on_writer_in_scope(
+        db: &DbRouter,
+        billing_request_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<UsageLog>, DbError> {
+        Self::find_by_billing_request_id_in_scope(
+            db.write_conn(),
+            billing_request_id,
+            tenant_id,
+            user_id,
+        )
+        .await
+    }
+
+    pub async fn find_by_billing_request_id_in_scope(
+        db: &impl ConnectionTrait,
+        billing_request_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<UsageLog>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM usage_logs WHERE (request_id = $1 OR idempotency_id = $1) AND tenant_id = $2 AND user_id = $3 LIMIT 1",
+            [billing_request_id.into(), tenant_id.into(), user_id.into()],
+        );
+        Ok(UsageLog::find_by_statement(stmt).one(db).await?)
+    }
+
     /// Check the writer for a completed logical billing identity.
     ///
     /// This is a correctness boundary for idempotent upstream dispatch: a
@@ -218,6 +275,21 @@ impl UsageLog {
         billing_request_id: Uuid,
     ) -> Result<bool, DbError> {
         Self::exists_by_billing_request_id(db.write_conn(), billing_request_id).await
+    }
+
+    pub async fn exists_by_billing_request_id_on_writer_in_scope(
+        db: &DbRouter,
+        billing_request_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, DbError> {
+        Self::exists_by_billing_request_id_in_scope(
+            db.write_conn(),
+            billing_request_id,
+            tenant_id,
+            user_id,
+        )
+        .await
     }
 
     /// Check one concrete connection or transaction for a completed logical
@@ -243,6 +315,28 @@ impl UsageLog {
         result.try_get_by_index(0).map_err(DbError::DatabaseError)
     }
 
+    pub async fn exists_by_billing_request_id_in_scope(
+        db: &impl ConnectionTrait,
+        billing_request_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"SELECT EXISTS (
+                SELECT 1 FROM usage_logs
+                WHERE (request_id = $1 OR idempotency_id = $1)
+                  AND tenant_id = $2 AND user_id = $3
+            ) AS exists"#,
+            [billing_request_id.into(), tenant_id.into(), user_id.into()],
+        );
+        let result = db
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| DbError::Other("usage ledger existence query returned no row".into()))?;
+        result.try_get_by_index(0).map_err(DbError::DatabaseError)
+    }
+
     pub async fn find_by_idempotency_id(
         db: &impl ConnectionTrait,
         idempotency_id: Uuid,
@@ -251,6 +345,20 @@ impl UsageLog {
             DbBackend::Postgres,
             "SELECT * FROM usage_logs WHERE idempotency_id = $1",
             [idempotency_id.into()],
+        );
+        Ok(UsageLog::find_by_statement(stmt).one(db).await?)
+    }
+
+    pub async fn find_by_idempotency_id_in_scope(
+        db: &impl ConnectionTrait,
+        idempotency_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<UsageLog>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT * FROM usage_logs WHERE idempotency_id = $1 AND tenant_id = $2 AND user_id = $3",
+            [idempotency_id.into(), tenant_id.into(), user_id.into()],
         );
         Ok(UsageLog::find_by_statement(stmt).one(db).await?)
     }

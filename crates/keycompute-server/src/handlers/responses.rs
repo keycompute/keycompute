@@ -2427,12 +2427,14 @@ async fn bind_responses_idempotency(
         ));
     }
 
-    let ledger_exists =
-        keycompute_db::UsageLog::exists_by_billing_request_id(&txn, idempotency.billing_request_id)
-            .await
-            .map_err(|error| {
-                responses_state_unavailable("inspect Responses idempotent billing", error)
-            })?;
+    let ledger_exists = keycompute_db::UsageLog::exists_by_billing_request_id_in_scope(
+        &txn,
+        idempotency.billing_request_id,
+        tenant_id,
+        user_id,
+    )
+    .await
+    .map_err(|error| responses_state_unavailable("inspect Responses idempotent billing", error))?;
     // A recreated claim must never execute after the immutable billing ledger
     // proves that the same logical request reached settlement without leaving
     // a replayable terminal HTTP response.

@@ -1307,9 +1307,11 @@ async fn settle_background_job_under_lease(
         return;
     }
 
-    match keycompute_db::UsageLog::find_by_billing_request_id_on_writer(
+    match keycompute_db::UsageLog::find_by_billing_request_id_on_writer_in_scope(
         pool,
         settlement_billing_request_id(&settlement),
+        settlement.tenant_id,
+        settlement.user_id,
     )
     .await
     {
