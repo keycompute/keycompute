@@ -97,10 +97,11 @@ remaining route-to-DAO-to-test matrix is still the next security review slice.
 
 The first executable slice of that matrix is now recorded in
 `docs/tenant-object-coverage.tsv`. It binds five high-risk tenant routes for
-accounts, keys, pricing, payments and nodes to a scope DAO source and a named
-cross-tenant integration test. The checker verifies that each route exists in
-the route inventory and that both the DAO symbol and test symbol still exist;
-this is representative evidence, not a claim that all 296 routes are covered.
+accounts, keys, pricing, payments and nodes, followed by usage and distribution
+records, to a scope DAO source and a named cross-tenant integration test. The
+checker verifies that each route exists in the route inventory and that both the
+DAO symbol and test symbol still exist; this is representative evidence, not a
+claim that all 296 routes are covered.
 
 The cache/job follow-up now has the same executable shape in
 `docs/tenant-cache-job-coverage.tsv`: four high-risk pricing, node-queue,
