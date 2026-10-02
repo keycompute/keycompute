@@ -154,6 +154,11 @@ let quote = '\\''; let lifetime: &'a str = text; }
             )
             (root / 'docs/tenant-route-inventory.tsv').write_text(ROUTE_INVENTORY + row)
             self.assertEqual(check.route_inventory_issues(root), ([], 1))
+            (root / 'docs/tenant-route-inventory.tsv').write_text(
+                ROUTE_INVENTORY + row.replace('unchanged', '/api/v1/me/known')
+            )
+            issues, _ = check.route_inventory_issues(root)
+            self.assertTrue(any('canonical target namespace' in issue for issue in issues))
             source.write_text(
                 'Router::new().route(dynamic_path, get(handler))\n'
                 '.nest("/api/v1", Router::new())\n'

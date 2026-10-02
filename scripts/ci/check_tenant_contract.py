@@ -285,6 +285,13 @@ ROUTE_AUTHORITY_HINTS = {
     'tenant_resource': ('tenant', 'membership', 'admin', 'selected'),
     'user_owned_resource': ('owner', 'self', 'tenant', 'credential', 'node'),
 }
+ROUTE_CANONICAL_PREFIXES = {
+    'global_shared_resource': ('/api/v1/platform/', '/api/v1/tenants/', '/api/v1/me/'),
+    'platform_resource': ('/api/v1/platform/',),
+    'platform_resource_or_explicit_tenant_target': ('/api/v1/platform/', '/api/v1/tenants/', '/api/v1/me/'),
+    'tenant_resource': ('/api/v1/tenants/', '/api/v1/platform/'),
+    'user_owned_resource': ('/api/v1/me/', '/api/v1/tenants/', '/api/v1/platform/'),
+}
 IGNORED_ROUTE_FILES = {'console_tests.rs', 'drain_tests.rs', 'tests.rs'}
 # These literals belong only to inline unit-test routers, not production endpoints.
 IGNORED_ROUTE_LITERALS = {
@@ -469,6 +476,12 @@ def route_inventory_issues(root: Path) -> tuple[list[str], int]:
                 failures.append(
                     f'route inventory: authority contract does not describe '
                     f"{row['resource_category']} scope for {path!r}"
+                )
+            target = row.get('canonical_target', '')
+            if target != 'unchanged' and not target.startswith(ROUTE_CANONICAL_PREFIXES[row['resource_category']]):
+                failures.append(
+                    f'route inventory: canonical target namespace does not match '
+                    f"{row['resource_category']} for {path!r}"
                 )
         try:
             if int(row.get('line_at_audit', '')) < 0:

@@ -88,11 +88,12 @@ triggered when this inventory changes. The current source inventory contains 153
 rows; runtime call-site adoption and the route-to-DAO-to-test matrix remain
 separate implementation work and are not implied by this static contract lint.
 
-The route gate also performs a first semantic consistency check: each route
-category must have an authority contract that names a matching platform, tenant,
-owner, credential, or shared-resource scope. This is a contract lint rather than
-an object-level DAO proof; the remaining route-to-DAO-to-test matrix is still
-the next security review slice.
+The route gate also performs semantic consistency checks: each route category
+must have an authority contract that names a matching platform, tenant, owner,
+credential, or shared-resource scope, and a non-`unchanged` canonical target must
+use the namespace permitted for that category (`/platform`, `/tenants`, or
+`/me`). This is a contract lint rather than an object-level DAO proof; the
+remaining route-to-DAO-to-test matrix is still the next security review slice.
 
 ## Current follow-up — runtime DAO scope closure
 
