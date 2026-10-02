@@ -253,6 +253,13 @@ let quote = '\\''; let lifetime: &'a str = text; }
             (root / 'docs/tenant-object-coverage.tsv').write_text(OBJECT_COVERAGE_INVENTORY)
             self.assertEqual(check.object_coverage_inventory_issues(root), ([], 1))
 
+            (root / 'docs/tenant-route-inventory.tsv').write_text(
+                'existing_path\tsource_file\tline_at_audit\tresource_category\tauthority_contract\tcanonical_target\n'
+                '/api/v1/tenants/{tenant_id}/members\tsrc/router.rs\t1\ttenant_resource\ttenant scope\tunchanged\n'
+            )
+            issues, _ = check.object_coverage_inventory_issues(root)
+            self.assertTrue(any('family has no representative evidence: tenant-control' in issue for issue in issues))
+
             (root / 'docs/tenant-object-coverage.tsv').write_text(
                 OBJECT_COVERAGE_INVENTORY.replace('cross_tenant_isolation', 'missing_test')
             )

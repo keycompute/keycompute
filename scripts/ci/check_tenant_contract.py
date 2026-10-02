@@ -384,6 +384,21 @@ OBJECT_COVERAGE_INVENTORY_FIELDS = [
 ]
 CACHE_JOB_COVERAGE_FIELDS = ['path', 'symbol', 'test_file', 'test_symbol']
 DYNAMIC_SQL_REVIEW_FIELDS = ['path', 'symbol', 'required_tokens', 'test_file', 'test_symbol']
+OBJECT_COVERAGE_FAMILIES = {
+    'tenant-control': re.compile(r'^/api/v1/tenants/\{tenant_id\}/(?:members|invitations|audit-events)'),
+    'providers': re.compile(r'^/api/v1/tenants/\{tenant_id\}/accounts'),
+    'keys': re.compile(r'^/api/v1/tenants/\{tenant_id\}/keys'),
+    'pricing': re.compile(r'^/api/v1/tenants/\{tenant_id\}/pricing'),
+    'payments': re.compile(r'^/api/v1/tenants/\{tenant_id\}/payments/'),
+    'nodes': re.compile(r'^/api/v1/tenants/\{tenant_id\}/nodes'),
+    'tasks': re.compile(r'^/api/v1/tenants/\{tenant_id\}/tasks'),
+    'usage': re.compile(r'^/api/v1/tenants/\{tenant_id\}/usage'),
+    'distribution': re.compile(r'^/api/v1/tenants/\{tenant_id\}/distribution'),
+    'responses': re.compile(r'^/api/v1/tenants/\{tenant_id\}/responses'),
+    'tips': re.compile(r'^/api/v1/tenants/\{tenant_id\}/tips'),
+    'wallets': re.compile(r'^/api/v1/tenants/\{tenant_id\}/balances/'),
+    'platform-identity': re.compile(r'^/api/v1/platform/(?:users|tenants)'),
+}
 
 
 def release_gate_issues(root: Path) -> list[str]:
@@ -679,6 +694,11 @@ def object_coverage_inventory_issues(root: Path) -> tuple[list[str], int]:
         test_source = root / row['test_file'].strip()
         if test_source.is_file() and row['test_symbol'].strip() not in test_source.read_text():
             failures.append(f'object coverage: test symbol is not present at row {row_number}: {row["test_symbol"]!r}')
+    covered_routes = set(seen)
+    for family, matcher in OBJECT_COVERAGE_FAMILIES.items():
+        inventory_routes = [route for route in route_rows if matcher.search(route)]
+        if inventory_routes and not any(matcher.search(route) for route in covered_routes):
+            failures.append(f'object coverage: family has no representative evidence: {family}')
     return failures, len(rows)
 
 

@@ -96,13 +96,14 @@ use the namespace permitted for that category (`/platform`, `/tenants`, or
 remaining route-to-DAO-to-test matrix is still the next security review slice.
 
 The first executable slice of that matrix is now recorded in
-`docs/tenant-object-coverage.tsv`. It binds eleven high-risk tenant, personal
-and platform routes for accounts, keys, pricing, payments, nodes, usage,
-distribution and platform identity to a handler symbol, scope DAO source and a
-named cross-tenant or platform-authority integration test. The checker verifies
-that each route exists in the route inventory and that the handler, DAO and test
-symbols still exist; this is representative evidence, not a claim that all 296
-routes are covered.
+`docs/tenant-object-coverage.tsv`. It binds eighteen high-risk tenant, personal
+and platform routes for tenant control, accounts, keys, pricing, payments,
+nodes, tasks, usage, distribution, Responses, tips, wallets and platform
+identity to a handler symbol, scope DAO source and a named cross-tenant or
+platform-authority integration test. The checker verifies that each route
+exists in the route inventory, that every present high-risk family has a
+representative row, and that the handler, DAO and test symbols still exist;
+this is representative evidence, not a claim that all 296 routes are covered.
 
 The cache/job follow-up now has the same executable shape in
 `docs/tenant-cache-job-coverage.tsv`: twelve high-risk pricing, node-queue,
@@ -113,11 +114,12 @@ its named test symbol remains present. This is staged runtime evidence; it does
 not yet certify every cache or background worker.
 
 High-risk dynamic SQL now has a separate review inventory in
-`docs/tenant-dynamic-sql-review.tsv`. The first slice covers payment predicates,
-tenant membership queries and withdrawal review updates, requiring the source
-builder, explicit tenant/owner predicate tokens and a matching PostgreSQL
-integration test. This is a targeted review gate, not a claim that arbitrary
-SQL aliases or every dynamically assembled query are statically proven.
+`docs/tenant-dynamic-sql-review.tsv`. Sixteen builders now cover payment,
+membership, invitations, audit, platform identity, native task claims,
+account exposure, key scope, capability and withdrawal predicates, requiring
+the source builder, explicit tenant/owner predicate tokens and a matching
+PostgreSQL or focused predicate test. This is a targeted review gate, not a
+claim that arbitrary dynamically assembled queries are statically proven.
 
 ## Current follow-up — runtime DAO scope closure
 
@@ -1318,7 +1320,7 @@ its limits: SQL aliases/dynamic queries, complete DAO ownership, browser accepta
 and production release are not certified by this lexical gate.
 
 CI runs the checker and now triggers on schema-only, inventory-only and repository
-exclusion changes. The current CI Python contract/restore suite has 25 passing tests.
+exclusion changes. The current CI Python contract/restore suite has 30 passing tests.
 
 The opt-in synthetic full-snapshot runner creates two labelled-test-only databases,
 exercises identity/owner/key/audit invariants, dumps/restores all 47 tables and

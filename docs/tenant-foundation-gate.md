@@ -34,9 +34,11 @@ changes are included in workflow path triggers; those changes must not silently
 avoid authorization validation.
 
 The same read-only gate also checks the staged object coverage, cache/job runtime
-coverage and dynamic-SQL review inventories. These inventories validate source,
-handler/DAO/test symbols and selected predicate tokens; they intentionally do
-not replace real PostgreSQL authorization tests.
+coverage and dynamic-SQL review inventories. Object coverage requires at least
+one route-to-handler-to-DAO-to-test row for every high-risk family present in
+the route inventory; the other inventories validate source/test symbols and
+selected predicate tokens. These inventories intentionally do not replace real
+PostgreSQL authorization tests.
 
 ## Synthetic full-snapshot restore rehearsal
 
