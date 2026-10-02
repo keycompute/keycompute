@@ -288,7 +288,7 @@ IGNORED_ROUTE_LITERALS = {
     '/work',
     '/api/v1/admin/users',
 }
-ROUTE_LITERAL = re.compile(r'\.route\(\s*"([^"\\]+)"')
+ROUTE_LITERAL = re.compile(r'\.(?:route|route_service)\(\s*"([^"\\]+)"')
 
 CACHE_JOB_INVENTORY_FIELDS = [
     'path',
@@ -338,14 +338,63 @@ CACHE_JOB_CLASSIFICATIONS = {
 }
 
 
-def production_routes(root: Path) -> dict[str, tuple[str, int]]:
+def production_route_sources(root: Path) -> list[Path]:
     source_root = root / 'crates/keycompute-server/src'
-    routes: dict[str, tuple[str, int]] = {}
     if not source_root.is_dir():
-        return routes
-    for source in sorted(source_root.rglob('*.rs')):
-        if source.name.endswith('_tests.rs') or source.name in IGNORED_ROUTE_FILES:
-            continue
+        return []
+    return [
+        source
+        for source in sorted(source_root.rglob('*.rs'))
+        if not source.name.endswith('_tests.rs') and source.name not in IGNORED_ROUTE_FILES
+    ]
+
+
+def route_builder_issues(root: Path) -> list[str]:
+    """Reject route composition that the literal inventory cannot prove."""
+    failures: list[str] = []
+    for source in production_route_sources(root):
+        tokens = tokenize(source.read_text(), 'rust')
+        values = words(tokens)
+        relative = source.relative_to(root).as_posix()
+        for index in range(len(tokens) - 2):
+            if values[index] != '.' or values[index + 2] != '(':
+                continue
+            method = values[index + 1]
+            if method in {'nest', 'nest_service'}:
+                failures.append(f'route inventory: unsupported nested route builder in {relative}')
+                continue
+            if method not in {'route', 'route_service'}:
+                continue
+            depth = 1
+            comma = None
+            cursor = index + 3
+            while cursor < len(tokens) and depth:
+                value = values[cursor]
+                if value == '(':
+                    depth += 1
+                elif value == ')':
+                    depth -= 1
+                elif value == ',' and depth == 1:
+                    comma = cursor
+                    break
+                cursor += 1
+            # One-argument methods such as the runtime provider router are not
+            # Axum route declarations.
+            if comma is None:
+                continue
+            first_argument = tokens[index + 3:comma]
+            if not (
+                len(first_argument) == 1
+                and first_argument[0].kind == 'literal'
+                and first_argument[0].value.startswith('/')
+            ):
+                failures.append(f'route inventory: dynamic route path is unsupported in {relative}')
+    return sorted(set(failures))
+
+
+def production_routes(root: Path) -> dict[str, tuple[str, int]]:
+    routes: dict[str, tuple[str, int]] = {}
+    for source in production_route_sources(root):
         text = source.read_text()
         relative = source.relative_to(root).as_posix()
         for match in ROUTE_LITERAL.finditer(text):
@@ -367,7 +416,7 @@ def route_inventory_issues(root: Path) -> tuple[list[str], int]:
         return ['route inventory: missing docs/tenant-route-inventory.tsv'], 0
     with inventory_path.open(newline='') as handle:
         rows = list(csv.DictReader(handle, delimiter='\t'))
-    failures: list[str] = []
+    failures: list[str] = route_builder_issues(root)
     if not rows:
         header = inventory_path.read_text().splitlines()[0].split('\t') if inventory_path.read_text().splitlines() else []
         if header != ROUTE_INVENTORY_FIELDS:
@@ -515,7 +564,7 @@ def check_repository(root: Path) -> dict:
             'cache_job_inventory_rows': cache_job_count,
             'rust_files_scanned': len(rust_files), 'findings': failures,
             'scope': 'foundation/schema-inventory/route-inventory/cache-job-inventory/retired-symbols/source-boundary',
-            'not_covered': ['dynamic, nested or macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
+            'not_covered': ['macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
                             'all object-level DAO predicates',
                             'frontend/browser acceptance', 'full release and snapshot restore']}
 

@@ -65,8 +65,9 @@ The foundation contract checker now derives production route literals from the R
 server sources and requires every one to have a classified row in
 `docs/tenant-route-inventory.tsv`; stale rows, missing source literals, duplicate
 paths and invalid authority categories fail closed. It covers literal `.route`
-builders and deliberately reports the remaining nested/macro route gap
-separately. The inventory was corrected for platform tenant lifecycle routes,
+and `.route_service` builders and rejects dynamic or nested route builders that
+cannot be represented safely by the inventory; macro-generated route declarations
+remain a separately documented gap. The inventory was corrected for platform tenant lifecycle routes,
 tenant membership/invitation/audit routes, ownership transfer and invitation
 acceptance. The CI workflow now reruns when the route inventory changes.
 The gate currently scans 296 production route literals, 47 schema tables

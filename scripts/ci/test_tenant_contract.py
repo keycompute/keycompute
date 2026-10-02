@@ -154,6 +154,14 @@ let quote = '\\''; let lifetime: &'a str = text; }
             )
             (root / 'docs/tenant-route-inventory.tsv').write_text(ROUTE_INVENTORY + row)
             self.assertEqual(check.route_inventory_issues(root), ([], 1))
+            source.write_text(
+                'Router::new().route(dynamic_path, get(handler))\n'
+                '.nest("/api/v1", Router::new())\n'
+            )
+            issues, _ = check.route_inventory_issues(root)
+            self.assertTrue(any('dynamic route path' in issue for issue in issues))
+            self.assertTrue(any('nested route builder' in issue for issue in issues))
+            source.write_text('Router::new().route("/api/v1/known", get(handler))\n')
             (root / 'docs/tenant-route-inventory.tsv').write_text(
                 ROUTE_INVENTORY + row.replace('/api/v1/known', '/api/v1/stale')
             )
