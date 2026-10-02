@@ -84,6 +84,16 @@ reference keys. CI is triggered when this inventory changes. The current source
 inventory contains 153 rows; runtime call-site adoption remains the next phase
 and is intentionally not implied by this provenance check.
 
+## Current follow-up — runtime DAO scope closure
+
+Runtime paths now use scope-preserving reads for selected account admission,
+provider-health rebases, node/session authentication, native stream cancellation,
+NodeTask result polling, and Responses usage-ledger recovery. These paths carry
+the immutable tenant and original user into the SQL predicate (or use the
+writer/key-share boundary where a platform callback or inactive-tenant recovery
+must remain valid). Generic helpers retained for platform callbacks and test
+fixtures are not used by tenant request handlers.
+
 
 ## Current phase 1 — final contract alignment accepted locally
 
