@@ -302,6 +302,33 @@ impl NodeGatewayService {
         Ok(())
     }
 
+    pub async fn cancel_native_stream_in_scope(
+        &self,
+        task_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        reason: &str,
+    ) -> Result<(), DbError> {
+        self.store
+            .cancel_native_stream_in_scope(task_id, tenant_id, user_id, reason)
+            .await?;
+        if let Some(task) = NodeTask::find_by_id_in_scope(
+            self.store.pool().write_conn(),
+            task_id,
+            tenant_id,
+            user_id,
+        )
+        .await?
+        {
+            let _ = self
+                .redis
+                .remove_from_model_queue(&task.model, task.id)
+                .await;
+            let _ = self.synchronize_terminal_trace(&task).await;
+        }
+        Ok(())
+    }
+
     /// Wait without abandoning settlement ownership on a transient read failure.
     pub async fn enqueue_native_and_wait(
         &self,
@@ -1347,7 +1374,10 @@ impl NodeGatewayService {
         } else {
             "managed_response_deadline"
         };
-        if let Err(error) = self.cancel_native_stream(task.id, reason).await {
+        if let Err(error) = self
+            .cancel_native_stream_in_scope(task.id, tenant_id, user_id, reason)
+            .await
+        {
             tracing::warn!(task_id=%task.id,%error,"managed native cancellation could not be persisted");
         }
         // Completion may have committed immediately before cancellation. Its

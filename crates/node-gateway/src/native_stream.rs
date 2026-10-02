@@ -481,15 +481,46 @@ impl NodeGatewayStore {
         .transpose()
     }
     pub async fn cancel_native_stream(&self, task_id: Uuid, reason: &str) -> Result<(), DbError> {
+        self.cancel_native_stream_with_scope(task_id, None, reason)
+            .await
+    }
+
+    pub async fn cancel_native_stream_in_scope(
+        &self,
+        task_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        reason: &str,
+    ) -> Result<(), DbError> {
+        self.cancel_native_stream_with_scope(task_id, Some((tenant_id, user_id)), reason)
+            .await
+    }
+
+    async fn cancel_native_stream_with_scope(
+        &self,
+        task_id: Uuid,
+        scope: Option<(Uuid, Uuid)>,
+        reason: &str,
+    ) -> Result<(), DbError> {
         let tx = self.pool().begin().await?;
         tx.execute_unprepared(
             "SET LOCAL statement_timeout='1500ms'; SET LOCAL lock_timeout='500ms'",
         )
         .await?;
+        let (task_sql, task_values) = match scope {
+            Some((tenant_id, user_id)) => (
+                "SELECT * FROM node_tasks WHERE id=$1 AND tenant_id=$2 AND user_id=$3 FOR UPDATE",
+                vec![task_id.into(), tenant_id.into(), user_id.into()],
+            ),
+            None => (
+                "SELECT * FROM node_tasks WHERE id=$1 FOR UPDATE",
+                vec![task_id.into()],
+            ),
+        };
         let task = NodeTask::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM node_tasks WHERE id=$1 FOR UPDATE",
-            [task_id.into()],
+            task_sql,
+            task_values,
         ))
         .one(&tx)
         .await?

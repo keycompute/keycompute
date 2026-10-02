@@ -345,7 +345,12 @@ async fn cancel_node(state: &AppState, record: &ResponseRecord) {
         {
             let _ = tokio::time::timeout(
                 Duration::from_secs(3),
-                gateway.cancel_native_stream(id, "managed_response_cancelled"),
+                gateway.cancel_native_stream_in_scope(
+                    id,
+                    record.tenant_id,
+                    record.user_id,
+                    "managed_response_cancelled",
+                ),
             )
             .await;
         }

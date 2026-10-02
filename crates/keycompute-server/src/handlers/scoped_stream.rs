@@ -1071,7 +1071,12 @@ impl Owner {
     ) {
         if !tokio::time::timeout(
             Duration::from_secs(3),
-            gateway.cancel_native_stream(task_id, reason),
+            gateway.cancel_native_stream_in_scope(
+                task_id,
+                self.input.ctx.tenant_id,
+                self.input.ctx.user_id,
+                reason,
+            ),
         )
         .await
         .is_ok_and(|r| r.is_ok())
