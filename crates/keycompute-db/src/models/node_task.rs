@@ -166,19 +166,20 @@ impl NodeTask {
         Ok(NodeTask::find_by_statement(stmt).one(db).await?)
     }
 
-    /// 根据 request_id 查询任务
-    pub async fn find_by_request_id(
+    /// Read a task by request identity only after the caller has supplied the
+    /// immutable tenant and original user that were stored with the request.
+    pub async fn find_by_request_id_in_scope(
         db: &impl ConnectionTrait,
         request_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
     ) -> Result<Option<NodeTask>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM node_tasks WHERE request_id = $1",
-            [request_id.into()],
+            "SELECT * FROM node_tasks WHERE request_id = $1 AND tenant_id = $2 AND user_id = $3",
+            [request_id.into(), tenant_id.into(), user_id.into()],
         );
-        let task = NodeTask::find_by_statement(stmt).one(db).await?;
-
-        Ok(task)
+        Ok(NodeTask::find_by_statement(stmt).one(db).await?)
     }
 
     /// 原子领取任务（claim）
