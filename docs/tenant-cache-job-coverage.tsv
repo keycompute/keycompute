@@ -1,0 +1,5 @@
+path	symbol	test_file	test_symbol
+crates/keycompute-pricing/src/lib.rs	cache_key	crates/integration-tests/tests/e2e_cache_pricing.rs	test_pricing_cache_tenant_isolation
+crates/node-gateway/src/redis.rs	model_queue_key	crates/node-gateway/src/redis/tests.rs	redis_isolation_both_blocking_pools_leave_rate_limits_and_producers_live
+crates/keycompute-db/src/models/node_task.rs	claim	crates/integration-tests/tests/e2e_tenant_node_control.rs	queued_task_commands_preserve_scope_and_archive_instead_of_erasing_evidence
+crates/keycompute-server/src/handlers/responses/state.rs	affinity_cache_key_for_user	crates/integration-tests/tests/e2e_scoped_response_resources.rs	replay_connections_compare_live_user_tenant_and_membership_versions

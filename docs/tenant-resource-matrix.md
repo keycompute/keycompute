@@ -64,6 +64,8 @@ new trust domains; final routes are implemented in the route phase.
 evidence for high-risk tenant resources; it is intentionally a staged coverage
 matrix rather than a replacement for the complete route inventory.
 `tenant-cache-job-inventory.tsv` records cache and spawned-work reference sites.
+`tenant-cache-job-coverage.tsv` records staged runtime-test evidence for selected
+high-risk cache/job sites; it is expanded as each subsystem is adopted.
 `tenant-legacy-paths.tsv` is the removal inventory, not a permitted legacy API.
 The line numbers are phase-0 navigation aids, not final source positions.
 

@@ -380,6 +380,7 @@ OBJECT_COVERAGE_INVENTORY_FIELDS = [
     'test_file',
     'test_symbol',
 ]
+CACHE_JOB_COVERAGE_FIELDS = ['path', 'symbol', 'test_file', 'test_symbol']
 
 
 def production_route_sources(root: Path) -> list[Path]:
@@ -620,6 +621,47 @@ def object_coverage_inventory_issues(root: Path) -> tuple[list[str], int]:
     return failures, len(rows)
 
 
+def cache_job_coverage_issues(root: Path) -> tuple[list[str], int]:
+    """Require runtime test evidence for representative high-risk cache/job sites."""
+    inventory_path = root / 'docs/tenant-cache-job-coverage.tsv'
+    if not inventory_path.is_file():
+        return ['cache/job coverage: missing docs/tenant-cache-job-coverage.tsv'], 0
+    with inventory_path.open(newline='') as handle:
+        reader = csv.DictReader(handle, delimiter='\t')
+        if reader.fieldnames != CACHE_JOB_COVERAGE_FIELDS:
+            return ['cache/job coverage: invalid header'], 0
+        rows = list(reader)
+    source_inventory = root / 'docs/tenant-cache-job-inventory.tsv'
+    if not source_inventory.is_file():
+        return ['cache/job coverage: source inventory is missing'], 0
+    with source_inventory.open(newline='') as handle:
+        inventory_keys = {(row.get('path', ''), row.get('symbol', '')) for row in csv.DictReader(handle, delimiter='\t')}
+
+    failures: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for row_number, row in enumerate(rows, start=2):
+        if None in row or any(not row.get(field, '').strip() for field in CACHE_JOB_COVERAGE_FIELDS):
+            failures.append(f'cache/job coverage: incomplete row {row_number}')
+            continue
+        key = (row['path'].strip(), row['symbol'].strip())
+        if key in seen:
+            failures.append(f'cache/job coverage: duplicate site at row {row_number}: {key!r}')
+        seen.add(key)
+        if key not in inventory_keys:
+            failures.append(f'cache/job coverage: site is not in source inventory at row {row_number}: {key!r}')
+        source = root / key[0]
+        test_source = root / row['test_file'].strip()
+        if not source.is_file() or not key[0].startswith('crates/'):
+            failures.append(f'cache/job coverage: missing source at row {row_number}: {key[0]!r}')
+        elif key[1] not in source.read_text():
+            failures.append(f'cache/job coverage: symbol is not present at row {row_number}: {key[1]!r}')
+        if not test_source.is_file() or not row['test_file'].strip().startswith('crates/'):
+            failures.append(f'cache/job coverage: missing test source at row {row_number}: {row["test_file"]!r}')
+        elif row['test_symbol'].strip() not in test_source.read_text():
+            failures.append(f'cache/job coverage: test symbol is not present at row {row_number}: {row["test_symbol"]!r}')
+    return failures, len(rows)
+
+
 def rust_issues(source: str) -> list[str]:
     tokens = tokenize(source, 'rust')
     executable = [token.value if token.kind == 'identifier' else '<literal>' for token in tokens]
@@ -662,6 +704,8 @@ def check_repository(root: Path) -> dict:
     failures.extend(cache_job_failures)
     object_coverage_failures, object_coverage_count = object_coverage_inventory_issues(root)
     failures.extend(object_coverage_failures)
+    cache_job_coverage_failures, cache_job_coverage_count = cache_job_coverage_issues(root)
+    failures.extend(cache_job_coverage_failures)
     migrations = {p.name for p in (root/'crates/keycompute-db/migrations').glob('*.sql')}
     if migrations != {'001_init.sql'}:
         failures.append('only the complete greenfield 001_init.sql may exist')
@@ -680,8 +724,9 @@ def check_repository(root: Path) -> dict:
     return {'passed': not failures, 'schema_tables': count, 'route_literals_scanned': route_count,
             'cache_job_inventory_rows': cache_job_count,
             'object_coverage_rows': object_coverage_count,
+            'cache_job_coverage_rows': cache_job_coverage_count,
             'rust_files_scanned': len(rust_files), 'findings': failures,
-            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-scope-contract/retired-symbols/source-boundary',
+            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/cache-job-scope-contract/retired-symbols/source-boundary',
             'not_covered': ['macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
                             'all object-level DAO predicates',
                             'frontend/browser acceptance', 'full release and snapshot restore']}
