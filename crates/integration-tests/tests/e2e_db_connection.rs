@@ -3656,10 +3656,10 @@ mod tests {
         drop_isolated_schema(&admin, &schema).await;
     }
 
-    /// The one accepted historical V0001 checksum upgrades in-place to the
-    /// current consolidated baseline metadata. Unknown checksum drift remains rejected.
+    /// Historical V0001 checksums are rejected because only fresh deployments
+    /// are supported. The migration history must remain unchanged on failure.
     #[tokio::test]
-    async fn legacy_v0001_response_kind_compatibility_is_exact_and_idempotent() {
+    async fn legacy_v0001_checksum_is_rejected_without_mutation() {
         let (admin, schema, _schema_permit) = create_isolated_schema().await;
         let pool = connect_to_schema(&schema).await;
         pool.execute_unprepared(
@@ -3673,22 +3673,14 @@ mod tests {
              );"
         ).await.expect("legacy V0001 fixture should be created");
 
-        keycompute_db::migrations::run_migrations(&pool)
+        let result = keycompute_db::migrations::run_migrations(&pool).await;
+        let column = pool
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                "SELECT 1 AS present FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='response_affinities' AND column_name='resource_kind'".to_string(),
+            ))
             .await
-            .expect("the exact supported V0001 baseline should upgrade");
-        keycompute_db::migrations::run_migrations(&pool)
-            .await
-            .expect("the compatibility upgrade should be idempotent");
-
-        let column = pool.query_one(Statement::from_string(DbBackend::Postgres,
-            "SELECT 1 AS present FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='response_affinities' AND column_name='resource_kind'".to_string()
-        )).await.unwrap();
-        let constraint = pool.query_one(Statement::from_string(DbBackend::Postgres,
-            "SELECT 1 AS present FROM pg_constraint c JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace WHERE n.nspname=current_schema() AND t.relname='response_affinities' AND c.conname='ck_response_affinities_resource_kind'".to_string()
-        )).await.unwrap();
-        let index = pool.query_one(Statement::from_string(DbBackend::Postgres,
-            "SELECT 1 AS present FROM pg_indexes WHERE schemaname=current_schema() AND tablename='response_affinities' AND indexname='idx_response_affinities_admin_kind'".to_string()
-        )).await.unwrap();
+            .unwrap();
         let history = pool
             .query_one(Statement::from_string(
                 DbBackend::Postgres,
@@ -3701,11 +3693,13 @@ mod tests {
 
         drop(pool);
         drop_isolated_schema(&admin, &schema).await;
-        assert!(column.is_some());
-        assert!(constraint.is_some());
-        assert!(index.is_some());
-        assert_eq!(checksum.len(), 64);
-        assert_ne!(
+        let error = result.expect_err("historical V0001 checksum must be rejected");
+        assert!(
+            error.to_string().contains("checksum mismatch"),
+            "unexpected migration error: {error}"
+        );
+        assert!(column.is_none(), "legacy schema must not be altered");
+        assert_eq!(
             checksum,
             "11529d90c1318c35660a5e90848b927d90bf02c2a3d743b45d62688cc78ce00a"
         );
