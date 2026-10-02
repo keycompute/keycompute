@@ -238,15 +238,20 @@ impl NodeGatewayService {
                 if let Ok(Some(_status)) = self.redis.wait_for_result(task.id, 1).await {
                     // Redis notification is only a wake-up hint. Reload the
                     // authoritative terminal row from the writer below.
-                    return self.query_task_result(task.id).await;
+                    return self.query_task_result(task.id, tenant_id, user_id).await;
                 }
 
                 // 3.3 直接查询 Postgres（兜底）
-                if let Ok(Some(task)) =
-                    NodeTask::find_by_id(self.store.pool().write_conn(), task.id).await
+                if let Ok(Some(task)) = NodeTask::find_by_id_in_scope(
+                    self.store.pool().write_conn(),
+                    task.id,
+                    tenant_id,
+                    user_id,
+                )
+                .await
                     && task.is_terminal()
                 {
-                    return self.query_task_result(task.id).await;
+                    return self.query_task_result(task.id, tenant_id, user_id).await;
                 }
 
                 tokio::time::sleep_until(retry_at).await;
@@ -357,7 +362,7 @@ impl NodeGatewayService {
         let _ = self.redis.push_to_native_model_queue(&model, task.id).await;
         if let Some(result) = wait_native_result(
             self.config.task_deadline(),
-            || self.query_native_outcome(task.id, &model),
+            || self.query_native_outcome(task.id, tenant_id, user_id, &model),
             || self.redis.wait_for_result(task.id, 1),
         )
         .await
@@ -374,11 +379,18 @@ impl NodeGatewayService {
     async fn query_native_outcome(
         &self,
         task_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
         model: &str,
     ) -> Result<NativeOutcome, DbError> {
-        let task = NodeTask::find_by_id(self.store.pool().write_conn(), task_id)
-            .await?
-            .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
+        let task = NodeTask::find_by_id_in_scope(
+            self.store.pool().write_conn(),
+            task_id,
+            tenant_id,
+            user_id,
+        )
+        .await?
+        .ok_or_else(|| DbError::not_found("NodeTask", task_id.to_string()))?;
         if !task.is_terminal() {
             return Ok(NativeOutcome::Pending);
         }
@@ -506,24 +518,31 @@ impl NodeGatewayService {
     async fn query_task_result(
         &self,
         task_id: Uuid,
+        tenant_id: Uuid,
+        user_id: Uuid,
     ) -> Result<ChatCompletionResponse, NodeExecutionError> {
         // A terminal Redis notification is published after the writer commits,
         // but a configured read replica may still expose the leased row. Use a
         // writer-fresh task for result decoding and local lifecycle cleanup.
-        let task = NodeTask::find_by_id(self.store.pool().write_conn(), task_id)
-            .await
-            .map_err(|error| {
-                NodeExecutionError::gateway_internal(
-                    anyhow::Error::from(error),
-                    "node_task_result_query_failed",
-                )
-            })?
-            .ok_or_else(|| {
-                NodeExecutionError::gateway_internal(
-                    anyhow::anyhow!("Task not found"),
-                    "node_task_result_missing",
-                )
-            })?;
+        let task = NodeTask::find_by_id_in_scope(
+            self.store.pool().write_conn(),
+            task_id,
+            tenant_id,
+            user_id,
+        )
+        .await
+        .map_err(|error| {
+            NodeExecutionError::gateway_internal(
+                anyhow::Error::from(error),
+                "node_task_result_query_failed",
+            )
+        })?
+        .ok_or_else(|| {
+            NodeExecutionError::gateway_internal(
+                anyhow::anyhow!("Task not found"),
+                "node_task_result_missing",
+            )
+        })?;
 
         let result = decode_chat_task_result(&task);
         self.synchronize_terminal_trace(&task).await;
@@ -1362,7 +1381,7 @@ impl NodeGatewayService {
             biased;
             _=ctx.wait_for_client_disconnect()=>None,
             result=wait_native_result(self.config.task_deadline(),
-                ||self.query_native_outcome(task.id,&model),
+                || self.query_native_outcome(task.id, tenant_id, user_id, &model),
                 ||self.redis.wait_for_result(task.id,1))=>result,
         };
         if let Some(result) = result {
@@ -1385,7 +1404,7 @@ impl NodeGatewayService {
         // decides whether the user sees a cancelled or completed resource.
         if let Ok(Ok(NativeOutcome::Complete(response))) = tokio::time::timeout(
             Duration::from_secs(2),
-            self.query_native_outcome(task.id, &model),
+            self.query_native_outcome(task.id, tenant_id, user_id, &model),
         )
         .await
         {
