@@ -932,7 +932,7 @@ pub(crate) async fn authenticated_rate_limit_config(
     let Some(pool) = state.pool.as_deref() else {
         return Ok(RateLimitConfig::default());
     };
-    match keycompute_db::Tenant::find_by_id(pool.write_conn(), tenant_id).await {
+    match keycompute_db::Tenant::find_by_id_for_key_share(pool.write_conn(), tenant_id).await {
         Ok(Some(tenant)) if tenant.is_active() => Ok(RateLimitConfig::from_tenant(
             tenant.default_rpm_limit,
             tenant.default_tpm_limit,
