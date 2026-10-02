@@ -45,6 +45,9 @@ ROUTE_INVENTORY = """existing_path\tsource_file\tline_at_audit\tresource_categor
 CACHE_JOB_INVENTORY = """path\tline_at_audit\tsymbol\tkind\tclassification\trequired_scope\tacceptance
 src/example.rs\t0\twork\tjob\tuser-owned resource\tvalidated tenant + user\tfixture
 """
+OBJECT_COVERAGE_INVENTORY = """route\tresource_category\tdao_source\tdao_symbol\ttest_file\ttest_symbol
+/api/v1/known\ttenant_resource\tcrates/keycompute-db/src/dao.rs\tScopeDao::find_in_tenant\tcrates/integration-tests/tests/e2e.rs\tcross_tenant_isolation
+"""
 
 
 class ContractTests(unittest.TestCase):
@@ -218,6 +221,28 @@ let quote = '\\''; let lifetime: &'a str = text; }
             issues, _ = check.cache_job_inventory_issues(root)
             self.assertTrue(any('escapes repository' in issue for issue in issues))
 
+    def test_object_coverage_requires_route_dao_and_test_evidence(self):
+        with tempfile.TemporaryDirectory(prefix='kc-object-coverage-fixture-') as temp:
+            root = Path(temp)
+            (root / 'docs').mkdir()
+            (root / 'crates/keycompute-db/src').mkdir(parents=True)
+            (root / 'crates/integration-tests/tests').mkdir(parents=True)
+            (root / 'crates/keycompute-db/src/dao.rs').write_text('ScopeDao::find_in_tenant;\n')
+            (root / 'crates/integration-tests/tests/e2e.rs').write_text('fn cross_tenant_isolation() {}\n')
+            (root / 'docs/tenant-route-inventory.tsv').write_text(
+                'existing_path\tsource_file\tline_at_audit\tresource_category\tauthority_contract\tcanonical_target\n'
+                '/api/v1/known\tsrc/router.rs\t1\ttenant_resource\ttenant scope\tunchanged\n'
+            )
+            (root / 'docs/tenant-object-coverage.tsv').write_text(OBJECT_COVERAGE_INVENTORY)
+            self.assertEqual(check.object_coverage_inventory_issues(root), ([], 1))
+
+            (root / 'docs/tenant-object-coverage.tsv').write_text(
+                OBJECT_COVERAGE_INVENTORY.replace('cross_tenant_isolation', 'missing_test')
+            )
+            issues, count = check.object_coverage_inventory_issues(root)
+            self.assertEqual(count, 1)
+            self.assertTrue(any('test symbol is not present' in issue for issue in issues))
+
     def test_migration_runner_rejects_compatibility_ddl(self):
         self.assertEqual(
             check.migration_runner_issues('assert!(!sql.contains("ALTER TABLE"));'), []
@@ -232,7 +257,8 @@ let quote = '\\''; let lifetime: &'a str = text; }
         root = Path(__file__).resolve().parents[2]
         workflow = (root/'.github/workflows/keycompute.yml').read_text()
         for path in ('crates/keycompute-db/migrations/**', 'docs/tenant-schema-inventory.tsv',
-                     'docs/tenant-route-inventory.tsv', 'docs/tenant-cache-job-inventory.tsv', '.gitignore'):
+                     'docs/tenant-route-inventory.tsv', 'docs/tenant-cache-job-inventory.tsv',
+                     'docs/tenant-object-coverage.tsv', '.gitignore'):
             self.assertEqual(workflow.count('      - "' + path + '"'), 2)
         self.assertIn('run: python3 scripts/ci/check_tenant_contract.py', workflow)
         self.assertIn("python3 -m unittest discover -s scripts/ci -p 'test_*.py'", workflow)
@@ -248,6 +274,9 @@ let quote = '\\''; let lifetime: &'a str = text; }
             (root/'src').mkdir()
             (root/'src/example.rs').write_text('fn work() {}\n')
             (root/'docs/tenant-cache-job-inventory.tsv').write_text(CACHE_JOB_INVENTORY)
+            (root/'docs/tenant-object-coverage.tsv').write_text(
+                'route\tresource_category\tdao_source\tdao_symbol\ttest_file\ttest_symbol\n'
+            )
             (root/'Cargo.toml').write_text('[workspace]\nmembers = ["crates/example"]\n')
             tracked = '\0'.join([
                 'crates/keycompute-db/migrations/001_init.sql',

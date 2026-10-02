@@ -1,0 +1,6 @@
+route	resource_category	dao_source	dao_symbol	test_file	test_symbol
+/api/v1/tenants/{tenant_id}/accounts/{id}	tenant_resource	crates/keycompute-db/src/models/account_scope.rs	find_in_tenant	crates/integration-tests/tests/e2e_scoped_provider_management.rs	account_reads_are_scoped_and_list_count_filters_match
+/api/v1/tenants/{tenant_id}/keys/{id}	user_owned_resource	crates/keycompute-db/src/models/api_key_scope.rs	find_in_tenant	crates/integration-tests/tests/e2e_scoped_keys.rs	key_queries_bind_tenant_owner_and_current_actor_without_secret_projection
+/api/v1/tenants/{tenant_id}/pricing/{id}	tenant_resource	crates/keycompute-db/src/models/pricing_model.rs	find_in_tenant_by_id	crates/integration-tests/tests/e2e_scoped_pricing_management.rs	tenant_pricing_reads_bind_current_admin_and_tenant
+/api/v1/tenants/{tenant_id}/payments/orders/{id}	tenant_resource	crates/keycompute-db/src/models/payment_order_scope.rs	find_in_tenant	crates/integration-tests/tests/e2e_scoped_payment.rs	tenant_admin_cannot_read_other_members_or_foreign_payment_orders_through_personal_urls
+/api/v1/tenants/{tenant_id}/nodes/{id}	tenant_resource	crates/keycompute-db/src/models/node_control.rs	NodeControlScope	crates/integration-tests/tests/e2e_tenant_node_control.rs	metadata_lists_details_counts_and_personal_views_are_tenant_bound

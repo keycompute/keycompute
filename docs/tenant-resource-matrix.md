@@ -60,6 +60,9 @@ Membership invitation records must include tenant, target email, requested tenan
 `tenant-schema-inventory.tsv` classifies every table observed at phase 0.
 `tenant-route-inventory.tsv` records all current route declarations and their
 new trust domains; final routes are implemented in the route phase.
+`tenant-object-coverage.tsv` records representative route-to-scope-DAO-to-test
+evidence for high-risk tenant resources; it is intentionally a staged coverage
+matrix rather than a replacement for the complete route inventory.
 `tenant-cache-job-inventory.tsv` records cache and spawned-work reference sites.
 `tenant-legacy-paths.tsv` is the removal inventory, not a permitted legacy API.
 The line numbers are phase-0 navigation aids, not final source positions.

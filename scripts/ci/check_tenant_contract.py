@@ -372,6 +372,14 @@ CACHE_JOB_SCOPE_HINTS = {
     'user-owned resource': ('tenant', 'user', 'owner', 'credential', 'request', 'scope', 'task', 'node'),
     'user-owned tenant resource': ('tenant', 'user', 'owner', 'scope', 'snapshot', 'authority'),
 }
+OBJECT_COVERAGE_INVENTORY_FIELDS = [
+    'route',
+    'resource_category',
+    'dao_source',
+    'dao_symbol',
+    'test_file',
+    'test_symbol',
+]
 
 
 def production_route_sources(root: Path) -> list[Path]:
@@ -561,6 +569,57 @@ def cache_job_inventory_issues(root: Path, tracked_files: set[str] | None = None
     return failures, len(rows)
 
 
+def object_coverage_inventory_issues(root: Path) -> tuple[list[str], int]:
+    """Require representative route-to-DAO-to-test evidence for sensitive objects."""
+    inventory_path = root / 'docs/tenant-object-coverage.tsv'
+    if not inventory_path.is_file():
+        return ['object coverage: missing docs/tenant-object-coverage.tsv'], 0
+    with inventory_path.open(newline='') as handle:
+        reader = csv.DictReader(handle, delimiter='\t')
+        if reader.fieldnames != OBJECT_COVERAGE_INVENTORY_FIELDS:
+            return ['object coverage: invalid header'], 0
+        rows = list(reader)
+
+    route_path = root / 'docs/tenant-route-inventory.tsv'
+    if not route_path.is_file():
+        return ['object coverage: route inventory is missing'], 0
+    with route_path.open(newline='') as handle:
+        route_rows = {
+            row.get('existing_path', ''): row.get('resource_category', '')
+            for row in csv.DictReader(handle, delimiter='\t')
+        }
+
+    failures: list[str] = []
+    seen: set[str] = set()
+    for row_number, row in enumerate(rows, start=2):
+        if None in row or any(not row.get(field, '').strip() for field in OBJECT_COVERAGE_INVENTORY_FIELDS):
+            failures.append(f'object coverage: incomplete row {row_number}')
+            continue
+        route = row['route'].strip()
+        if route in seen:
+            failures.append(f'object coverage: duplicate route at row {row_number}: {route!r}')
+        seen.add(route)
+        if route not in route_rows:
+            failures.append(f'object coverage: route is not in route inventory at row {row_number}: {route!r}')
+        elif row['resource_category'] != route_rows[route]:
+            failures.append(f'object coverage: resource category mismatch at row {row_number}: {route!r}')
+        for field, prefix, missing in (
+            ('dao_source', 'crates/', 'DAO source'),
+            ('test_file', 'crates/integration-tests/tests/', 'test source'),
+        ):
+            path = row[field].strip()
+            source = root / path
+            if not path.startswith(prefix) or not source.is_file():
+                failures.append(f'object coverage: missing {missing} at row {row_number}: {path!r}')
+        dao_source = root / row['dao_source'].strip()
+        if dao_source.is_file() and row['dao_symbol'].strip() not in dao_source.read_text():
+            failures.append(f'object coverage: DAO symbol is not present at row {row_number}: {row["dao_symbol"]!r}')
+        test_source = root / row['test_file'].strip()
+        if test_source.is_file() and row['test_symbol'].strip() not in test_source.read_text():
+            failures.append(f'object coverage: test symbol is not present at row {row_number}: {row["test_symbol"]!r}')
+    return failures, len(rows)
+
+
 def rust_issues(source: str) -> list[str]:
     tokens = tokenize(source, 'rust')
     executable = [token.value if token.kind == 'identifier' else '<literal>' for token in tokens]
@@ -601,6 +660,8 @@ def check_repository(root: Path) -> dict:
     failures.extend(route_failures)
     cache_job_failures, cache_job_count = cache_job_inventory_issues(root, set(files))
     failures.extend(cache_job_failures)
+    object_coverage_failures, object_coverage_count = object_coverage_inventory_issues(root)
+    failures.extend(object_coverage_failures)
     migrations = {p.name for p in (root/'crates/keycompute-db/migrations').glob('*.sql')}
     if migrations != {'001_init.sql'}:
         failures.append('only the complete greenfield 001_init.sql may exist')
@@ -618,8 +679,9 @@ def check_repository(root: Path) -> dict:
             failures.append(f'{name}: source scanner could not establish a safe parse')
     return {'passed': not failures, 'schema_tables': count, 'route_literals_scanned': route_count,
             'cache_job_inventory_rows': cache_job_count,
+            'object_coverage_rows': object_coverage_count,
             'rust_files_scanned': len(rust_files), 'findings': failures,
-            'scope': 'foundation/schema-inventory/route-inventory/cache-job-scope-contract/retired-symbols/source-boundary',
+            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-scope-contract/retired-symbols/source-boundary',
             'not_covered': ['macro-generated route builders', 'arbitrary SQL aliases or dynamically generated SQL',
                             'all object-level DAO predicates',
                             'frontend/browser acceptance', 'full release and snapshot restore']}
