@@ -65,9 +65,9 @@ The foundation contract checker now derives production route literals from the R
 server sources and requires every one to have a classified row in
 `docs/tenant-route-inventory.tsv`; stale rows, missing source literals, duplicate
 paths and invalid authority categories fail closed. It covers literal `.route`
-and `.route_service` builders and rejects dynamic or nested route builders that
-cannot be represented safely by the inventory; macro-generated route declarations
-remain a separately documented gap. The inventory was corrected for platform tenant lifecycle routes,
+and `.route_service` builders and rejects dynamic, nested and macro-generated
+route builders that cannot be represented safely by the inventory. The inventory
+was corrected for platform tenant lifecycle routes,
 tenant membership/invitation/audit routes, ownership transfer and invitation
 acceptance. The CI workflow now reruns when the route inventory changes.
 The gate currently scans 296 production route literals, 47 schema tables
@@ -96,7 +96,7 @@ use the namespace permitted for that category (`/platform`, `/tenants`, or
 remaining route-to-DAO-to-test matrix is still the next security review slice.
 
 The first executable slice of that matrix is now recorded in
-`docs/tenant-object-coverage.tsv`. It binds eighteen high-risk tenant, personal
+`docs/tenant-object-coverage.tsv`. It binds twenty-three high-risk tenant, personal
 and platform routes for tenant control, accounts, keys, pricing, payments,
 nodes, tasks, usage, distribution, Responses, tips, wallets and platform
 identity to a handler symbol, scope DAO source and a named cross-tenant or
@@ -106,7 +106,7 @@ representative row, and that the handler, DAO and test symbols still exist;
 this is representative evidence, not a claim that all 296 routes are covered.
 
 The cache/job follow-up now has the same executable shape in
-`docs/tenant-cache-job-coverage.tsv`: twelve high-risk pricing, node-queue,
+`docs/tenant-cache-job-coverage.tsv`: twenty-two high-risk pricing, node-queue,
 NodeTask, Responses-affinity, rate-limit, distribution, API-key, settlement,
 wallet and sweeper sites are tied to existing runtime integration tests. The
 gate verifies that each site is present in the 153-row source inventory and that
@@ -114,7 +114,7 @@ its named test symbol remains present. This is staged runtime evidence; it does
 not yet certify every cache or background worker.
 
 High-risk dynamic SQL now has a separate review inventory in
-`docs/tenant-dynamic-sql-review.tsv`. Sixteen builders now cover payment,
+`docs/tenant-dynamic-sql-review.tsv`. Twenty-three builders now cover payment,
 membership, invitations, audit, platform identity, native task claims,
 account exposure, key scope, capability and withdrawal predicates, requiring
 the source builder, explicit tenant/owner predicate tokens and a matching
