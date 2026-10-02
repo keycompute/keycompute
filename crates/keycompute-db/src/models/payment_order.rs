@@ -420,17 +420,23 @@ impl PaymentOrder {
         Ok(true)
     }
 
-    /// 查找用户的订单列表
-    pub async fn find_by_user(
+    /// 查找指定租户中用户的订单列表。
+    pub async fn find_by_user_in_tenant(
         db: &impl ConnectionTrait,
+        tenant_id: Uuid,
         user_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<PaymentOrder>, DbError> {
         let stmt = Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT * FROM payment_orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-            [user_id.into(), limit.into(), offset.into()],
+            "SELECT * FROM payment_orders WHERE tenant_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT $3 OFFSET $4",
+            [
+                tenant_id.into(),
+                user_id.into(),
+                limit.into(),
+                offset.into(),
+            ],
         );
         let orders = PaymentOrder::find_by_statement(stmt).all(db).await?;
         Ok(orders)
