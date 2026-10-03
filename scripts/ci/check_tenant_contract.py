@@ -864,6 +864,16 @@ def check_repository(root: Path) -> dict:
                 failures.extend(f'{name}: {issue}' for issue in migration_runner_issues(source))
         except ValueError:
             failures.append(f'{name}: source scanner could not establish a safe parse')
+    if any(name.startswith('new/') for name in files):
+        failures.append('independent new/ service is unexpectedly tracked in the Rust repository')
+    gitignore = root / '.gitignore'
+    if gitignore.is_file() and 'new/' not in gitignore.read_text().splitlines():
+        failures.append('independent new/ checkout must remain excluded')
+    cargo = (root / 'Cargo.toml').read_text()
+    workspace = re.search(r'(?ms)^\[workspace\]\s*$(.*?)(?=^\[|\Z)', cargo)
+    members = re.search(r'(?ms)^members\s*=\s*\[(.*?)\]', workspace.group(1)) if workspace else None
+    if members and re.search(r'"(?:\./)?new(?:/[^"\n]*)?"', members.group(1)):
+        failures.append('independent Go service must not be a Cargo workspace member')
     return {'passed': not failures, 'schema_tables': count, 'route_literals_scanned': route_count,
             'cache_job_inventory_rows': cache_job_count,
             'object_coverage_rows': object_coverage_count,
@@ -871,7 +881,7 @@ def check_repository(root: Path) -> dict:
             'dynamic_sql_review_rows': dynamic_sql_count,
             'release_gate': not release_gate_failures,
             'rust_files_scanned': len(rust_files), 'findings': failures,
-            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/dynamic-sql-review/release-gate/cache-job-scope-contract/retired-symbols/source-boundary',
+            'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/dynamic-sql-review/release-gate/cache-job-scope-contract/retired-symbols/foreign-identity-boundary/source-boundary',
             'not_covered': ['arbitrary dynamically generated SQL',
                             'all object-level DAO predicates',
                             'frontend/browser acceptance', 'real backend browser acceptance',

@@ -74,7 +74,7 @@ The line numbers are phase-0 navigation aids, not final source positions.
 
 `tenant-implementation-decisions.md` resolves earlier draft differences in favor
 of the latest request, including main-only delivery, membership status names,
-and explicit tenant selection.
+explicit tenant selection and the independently deployed Go-service boundary.
 
 ## Wallet control state policy
 

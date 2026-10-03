@@ -14,7 +14,7 @@ No complete-subsystem or production-cutover acceptance is claimed.
 | 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
 | 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
 | 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, indexed native account-pool Responses/Conversations, Key/owner pages, distribution and tenant financial-control pages | Final resource UI and release acceptance |
-| 8 | Limited static foundation gate and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
+| 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
 
 Payment channels remain platform-wide. Financial records are tenant-scoped and
 wallets remain per-member, not a shared tenant balance pool. Finance pages stay
@@ -59,15 +59,14 @@ Conversation envelopes with a local revision or missing owning account. No
 production data, credentials, upstream resources, restart or deployment changed.
 
 
-## Current phase 8 — route and cache/job inventory hard gate
+## Current phase 8 — route inventory hard gate
 
 The foundation contract checker now derives production route literals from the Rust
 server sources and requires every one to have a classified row in
 `docs/tenant-route-inventory.tsv`; stale rows, missing source literals, duplicate
-paths and invalid authority categories fail closed. It covers literal `.route`
-and `.route_service` builders and rejects dynamic, nested and macro-generated
-route builders that cannot be represented safely by the inventory. The inventory
-was corrected for platform tenant lifecycle routes,
+paths and invalid authority categories fail closed. It covers literal `.route` and
+`.route_service` builders and rejects non-literal, nested or macro-generated route
+builders so they cannot silently bypass inventory review. The inventory was corrected for platform tenant lifecycle routes,
 tenant membership/invitation/audit routes, ownership transfer and invitation
 acceptance. The CI workflow now reruns when the route inventory changes.
 The gate currently scans 296 production route literals, 47 schema tables
@@ -78,58 +77,32 @@ DAO predicates, live authorization matrices, browser acceptance or deployment /
 restore rehearsal. No production data, credentials, upstream resources, restart or
 deployment changed.
 
-The same gate now validates `docs/tenant-cache-job-inventory.tsv`: its exact
-header, non-empty contract fields, safe repository-relative source paths, source
-file presence, supported cache/job kinds and classifications, duplicate reference
-keys, and a classification-specific scope hint in `required_scope`. This catches
-entries that merely say “cache” or “job” without naming the caller, tenant, owner,
-credential, platform, or immutable work boundary that governs them. CI is
-triggered when this inventory changes. The current source inventory contains 153
-rows; runtime call-site adoption and the route-to-DAO-to-test matrix remain
-separate implementation work and are not implied by this static contract lint.
+The same gate validates `docs/tenant-cache-job-inventory.tsv`: its exact header,
+non-empty contract fields, repository-relative source paths, source presence,
+supported cache/job kinds and classifications, duplicate reference keys, and
+classification-specific scope hints. The current source inventory contains 153
+rows; runtime call-site adoption remains separate implementation work.
 
 The route gate also performs semantic consistency checks: each route category
 must have an authority contract that names a matching platform, tenant, owner,
 credential, or shared-resource scope, and a non-`unchanged` canonical target must
-use the namespace permitted for that category (`/platform`, `/tenants`, or
-`/me`). This is a contract lint rather than an object-level DAO proof; the
-remaining route-to-DAO-to-test matrix is still the next security review slice.
+use the namespace permitted for that category. This is contract lint rather than
+an object-level DAO proof.
 
-The first executable slice of that matrix is now recorded in
-`docs/tenant-object-coverage.tsv`. It binds twenty-three high-risk tenant, personal
-and platform routes for tenant control, accounts, keys, pricing, payments,
-nodes, tasks, usage, distribution, Responses, tips, wallets and platform
-identity to a handler symbol, scope DAO source and a named cross-tenant or
-platform-authority integration test. The checker verifies that each route
-exists in the route inventory, that every present high-risk family has a
-representative row, and that the handler, DAO and test symbols still exist;
-this is representative evidence, not a claim that all 296 routes are covered.
+`docs/tenant-object-coverage.tsv` records twenty-three representative route-to-
+handler-to-scope-DAO-to-test bindings for high-risk tenant, personal and platform
+resources. `docs/tenant-cache-job-coverage.tsv` records twenty-two cache/job sites
+and their named runtime tests. `docs/tenant-dynamic-sql-review.tsv` records
+twenty-three dynamic SQL builders with required predicate tokens and focused
+tests. These are targeted evidence matrices, not a claim that all 296 routes or
+all dynamically assembled SQL are statically proven.
 
-The cache/job follow-up now has the same executable shape in
-`docs/tenant-cache-job-coverage.tsv`: twenty-two high-risk pricing, node-queue,
-NodeTask, Responses-affinity, rate-limit, distribution, API-key, settlement,
-wallet and sweeper sites are tied to existing runtime integration tests. The
-gate verifies that each site is present in the 153-row source inventory and that
-its named test symbol remains present. This is staged runtime evidence; it does
-not yet certify every cache or background worker.
-
-High-risk dynamic SQL now has a separate review inventory in
-`docs/tenant-dynamic-sql-review.tsv`. Twenty-three builders now cover payment,
-membership, invitations, audit, platform identity, native task claims,
-account exposure, key scope, capability and withdrawal predicates, requiring
-the source builder, explicit tenant/owner predicate tokens and a matching
-PostgreSQL or focused predicate test. This is a targeted review gate, not a
-claim that arbitrary dynamically assembled queries are statically proven.
-
-## Current follow-up — runtime DAO scope closure
-
-Runtime paths now use scope-preserving reads for selected account admission,
-provider-health rebases, node/session authentication, native stream cancellation,
-NodeTask result polling, and Responses usage-ledger recovery. These paths carry
-the immutable tenant and original user into the SQL predicate (or use the
-writer/key-share boundary where a platform callback or inactive-tenant recovery
-must remain valid). Generic helpers retained for platform callbacks and test
-fixtures are not used by tenant request handlers.
+Runtime request paths retain scope-preserving reads for selected account
+admission, provider-health rebases, node/session authentication, native stream
+cancellation, NodeTask result polling and Responses usage-ledger recovery.
+Generic helpers remain only for platform callbacks, proven internal workers and
+test fixtures; tenant request handlers carry immutable tenant and original-user
+predicates into their SQL.
 
 
 ## Current phase 1 — final contract alignment accepted locally
@@ -737,7 +710,7 @@ Missing authentication storage returns a redacted 503 rather than an incorrect
   an additional real-route assertion retaining 401 for malformed credentials.
 
 This closes the core phase, not the subsystem release gate. No schema,
-production service, credential or deployment changes were made.
+production service, credential, deployment or Go-service changes were made.
 Resource DAO enforcement, full route-level adoption, mutation audit coverage
 and asynchronous authorization remain the following stages.
 
@@ -802,8 +775,8 @@ that total. Final review found no further actionable issue in this change set.
 
 This is not the phase-three completion gate: key mutations, other resource
 DAO families, runtime/settlement queries and route/audit/job adoption remain.
-No schema, production identity, service or deployment change was made. In
-particular, the separate API-key core proposal was not applied.
+No schema, production identity, service, deployment or Go-service change was
+made. In particular, the separate API-key core proposal was not applied.
 
 ## Phase 3 — scoped usage reads (partial delivery)
 
@@ -908,7 +881,7 @@ They are not included in this wallet delivery or counted as completed phases.
 
 ## Remaining phase gates
 
-Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: end-to-end security and client acceptance. Phase 8: verified offline cutover and release.
+Phase 3: scoped resource DAOs. Phase 4: platform/tenant route separation. Phase 5: invitations, member administration and audit API/UI closure. Phase 6: cache and job authorization propagation. Phase 7: independent Go-service boundary verification. Phase 8: end-to-end security, client acceptance and verified offline cutover/release.
 
 
 ## Current phases 3/5 — tenant earnings and withdrawals accepted
@@ -1309,7 +1282,7 @@ drafts remain archived outside main. No production DB, service, credentials,
 payment, deployment or backend permission changes were made.
 
 
-## Current phase 8 — foundation and synthetic restore subgates accepted
+## Current phase 8 — foundation, foreign-identity and synthetic restore subgates accepted
 
 The read-only `scripts/ci/check_tenant_contract.py` checks final global-identity
 and membership fields/domains, composite membership identity, hashed one-time
@@ -1320,7 +1293,14 @@ its limits: SQL aliases/dynamic queries, complete DAO ownership, browser accepta
 and production release are not certified by this lexical gate.
 
 CI runs the checker and now triggers on schema-only, inventory-only and repository
-exclusion changes. The current CI Python contract/restore suite has 30 passing tests.
+exclusion changes. The checker, inventory and restore safety suite has 30 passing
+Python tests, including the pre-existing report tests.
+
+The independent ignored Go checkout was inspected without modification. Two JWT
+tests reject its observed issuer/session/purpose/role shapes even under a local
+test signature. An actual Axum/PostgreSQL case verifies foreign cookies and role
+headers cannot authenticate Rust control routes or elevate a Rust inference key.
+No deployed Go service or external reverse-proxy configuration is claimed tested.
 
 The opt-in synthetic full-snapshot runner creates two labelled-test-only databases,
 exercises identity/owner/key/audit invariants, dumps/restores all 47 tables and
@@ -1332,7 +1312,7 @@ owned fixture databases are cleaned on success/failure. This is not a production
 snapshot, legacy-data mapping or final maintenance-window rollback approval.
 
 Final default-parallel workspace: 2686 passed, 0 failed, 30 original ignored
-tests unchanged, including desktop/mobile. The 49 auth and five live-authorization
+tests unchanged, including desktop/mobile. The 51 auth and six live-authorization
 focused tests are included subsets. All-target native, Web/client WASM and strict
 all-target/all-feature Clippy pass. Eight frozen source/workflow/contract hashes
 match verification. Full native resource management, actual tenant UI, remaining
@@ -1931,10 +1911,8 @@ tenant-finance-console.md for precise boundaries.
 Account-pool Responses are now an explicit native resource family rather than a
 local-resource alias. The durable affinity schema stores `resource_kind`; IDs stay
 opaque and are never classified by prefix. Newly proven visible routes persist the
-kind transactionally. Fresh deployments receive the complete consolidated
-baseline; historical V0001 checksums, including the previously supported
-response-kind checksum, fail closed because runtime compatibility migrations are
-not supported. Databases without migration history still fail closed.
+kind transactionally. Historical V0001 installations fail closed because runtime
+compatibility migrations are not supported; unknown checksums still fail closed.
 
 Tenant and root control routes support native Response detail, input items, cancel
 and delete only when the caller supplies the original owner plus opaque resource ID.

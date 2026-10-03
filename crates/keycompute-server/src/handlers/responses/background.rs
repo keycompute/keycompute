@@ -1316,6 +1316,19 @@ async fn settle_background_job_under_lease(
     .await
     {
         Ok(Some(usage_log)) => {
+            if usage_log.tenant_id != settlement.tenant_id
+                || usage_log.user_id != settlement.user_id
+                || usage_log.produce_ai_key_id != settlement.produce_ai_key_id
+                || usage_log.account_id != settlement.account_id
+            {
+                tracing::error!(
+                    request_id = %settlement.request_id,
+                    ledger_id = %usage_log.id,
+                    "background settlement ledger identity does not match its durable scope"
+                );
+                reschedule_background_job(pool, affinity, lease, settlement).await;
+                return;
+            }
             let ctx = active_tpm_context.take().unwrap_or_else(|| {
                 Arc::new(background_billing_context(
                     &settlement,

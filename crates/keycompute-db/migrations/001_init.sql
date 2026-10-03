@@ -1796,6 +1796,8 @@ CREATE TABLE IF NOT EXISTS user_node_gateway_tokens (
     token_preview TEXT NOT NULL,
     -- 状态：pending(待审批) / approved(已审批) / rejected(已拒绝) / consumed(已使用)
     status TEXT NOT NULL DEFAULT 'pending',
+    CONSTRAINT ck_user_node_gateway_tokens_status
+        CHECK (status IN ('pending', 'approved', 'rejected', 'consumed')),
     -- token 是否已被用户查看过明文（标记已查看，用于安全提醒）
     is_revealed BOOLEAN NOT NULL DEFAULT FALSE,
     -- 审批人 ID

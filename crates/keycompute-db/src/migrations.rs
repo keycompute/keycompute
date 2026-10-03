@@ -82,7 +82,7 @@ async fn run_migration_step(db: &impl ConnectionTrait) -> Result<MigrationStep, 
     .await
     .map_err(schema_error)?;
 
-    let mut applied = AppliedMigration::find_by_statement(Statement::from_string(
+    let applied = AppliedMigration::find_by_statement(Statement::from_string(
         DbBackend::Postgres,
         "SELECT version, checksum FROM schema_migrations ORDER BY version".to_string(),
     ))
@@ -107,7 +107,7 @@ async fn run_migration_step(db: &impl ConnectionTrait) -> Result<MigrationStep, 
         }
     }
 
-    for row in &mut applied {
+    for row in &applied {
         let known = MIGRATIONS
             .iter()
             .find(|migration| migration.version == row.version)
@@ -343,6 +343,12 @@ mod tests {
                 .iter()
                 .all(|migration| checksum(migration.sql).len() == 64)
         );
+    }
+
+    #[test]
+    fn baseline_is_the_only_supported_schema_contract() {
+        assert_eq!(checksum(V0001).len(), 64);
+        assert!(!V0001.contains("ALTER TABLE"));
     }
 
     #[test]
@@ -614,6 +620,7 @@ mod tests {
             "CREATE OR REPLACE FUNCTION guard_node_identity()",
             "CREATE OR REPLACE FUNCTION revoke_suspended_user_credentials()",
             "ON user_node_gateway_tokens(tenant_id,user_id)",
+            "CONSTRAINT ck_user_node_gateway_tokens_status",
             "CREATE TABLE IF NOT EXISTS scoped_conversations",
             "CREATE TABLE IF NOT EXISTS scoped_response_events",
             "uk_scoped_responses_idempotency",

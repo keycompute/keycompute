@@ -78,6 +78,7 @@ The legacy `users.tenant_id`, `users.role`, `UserRole::System/Admin/User`, `Perm
 
 A tenant membership is the only source of tenant role truth. JWT claims may select an active tenant but never authorize a role without server-side membership validation.
 
+The `new/` Go service must consume this model if it shares identity or authorization data; otherwise the isolation boundary must be explicit and tested before schema cutover.
 
 ## Delivery gates
 

@@ -19,11 +19,10 @@ route proves the kind; a conflicting explicit kind fails closed. Internal,
 reservation and otherwise unproven legacy rows are not native-admin resources.
 
 Fresh databases use the final `001_init.sql` schema directly. Historical V0001
-checksums, including the previously supported response-kind checksum, now fail
-closed because runtime compatibility migrations are not supported. Unknown
-checksum drift and non-empty databases without migration history also fail
-closed. The `resource_kind` column, constraint and admin index are part of the
-final baseline.
+checksums, including any earlier response-kind layout, fail closed because this
+project does not support runtime compatibility migrations. Unknown checksum drift
+and non-empty databases without migration history also fail closed. The
+`resource_kind` column, constraint and admin index are part of the final baseline.
 
 ## Account-pool Responses
 
@@ -90,7 +89,8 @@ ownership, credential snapshot rotation, settlement-vs-delete serialization,
 pre-dispatch membership/expiry revocation, post-upstream expiry/grant revocation,
 and stable-user continuation ownership. SDK tests cover native envelopes, no fake
 revision, single dispatch, indexed enumeration and exact scope rejection.
-Migration tests cover fresh baseline and exact legacy-V0001 compatibility.
+Migration tests cover fresh baseline and rejection of historical or tampered
+checksums without mutating the database.
 Compiled-browser tests remain UI
 evidence with synthetic HTTP and are not a substitute for those server/database
 checks.
