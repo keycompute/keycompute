@@ -214,6 +214,14 @@ fn extract_error_details(raw: String) -> (String, Option<String>) {
     (message, reason)
 }
 
+fn strip_http_prefix(msg: &str) -> String {
+    if let Some((_, rest)) = msg.split_once(": ") {
+        rest.to_string()
+    } else {
+        msg.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ClientError;
@@ -234,13 +242,5 @@ mod tests {
         let error = ClientError::from_status(401, r#"{"error":{"message":"token expired"}}"#);
         assert!(error.is_auth_error());
         assert!(!error.is_tenant_selection_required());
-    }
-}
-
-fn strip_http_prefix(msg: &str) -> String {
-    if let Some((_, rest)) = msg.split_once(": ") {
-        rest.to_string()
-    } else {
-        msg.to_string()
     }
 }
