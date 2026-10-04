@@ -185,7 +185,7 @@ try{
 
   for(const identity of ['mock-root','mock-op']){
     const f=await fixture(identity);await f.page.goto(base+'/tenant/members');
-    await f.page.getByText('Current tenant administrator capability is required.',{exact:true}).waitFor();
+    await f.page.getByText('This session has no tenant workspace selected. Choose a workspace before viewing tenant data.',{exact:true}).waitFor();
     assert.equal(f.state.calls.filter(c=>c.path.includes('/tenants/')).length,0);
     await f.context.close();
   }
