@@ -38,6 +38,7 @@ pub(crate) fn one_time_key_error(error: crate::ClientError) -> crate::ClientErro
     let message="The one-time key operation could not be confirmed. Refresh issuance and key records before requesting another key.".to_owned();
     match error {
         ClientError::Unauthorized(_) => ClientError::Unauthorized(message),
+        ClientError::TenantSelectionRequired(_) => ClientError::Other(message),
         ClientError::Forbidden(_) => ClientError::Forbidden(message),
         ClientError::NotFound(_) => ClientError::NotFound(message),
         ClientError::RateLimited(mut info) => {

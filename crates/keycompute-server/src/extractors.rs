@@ -175,7 +175,7 @@ impl AuthExtractor {
         Ok(Self {
             user_id: ctx.user_id,
             tenant_id: ctx.selected_tenant_id.ok_or_else(|| {
-                ApiError::Auth("tenant selection required for inference".to_string())
+                ApiError::Auth(crate::error::TENANT_SELECTION_REQUIRED_MESSAGE.to_string())
             })?,
             platform_role: ctx.platform_role,
             tenant_role: ctx.tenant_role,

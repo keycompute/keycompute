@@ -179,6 +179,46 @@ fn transient_refresh_failure_preserves_session_without_replay() {
 }
 
 #[test]
+fn tenant_scope_failure_is_returned_without_refresh_or_replay() {
+    harness(|auth| {
+        block_on(async {
+            let calls = Rc::new(RefCell::new(0));
+            let refreshes = Rc::new(RefCell::new(0));
+            let result = with_auto_refresh_using(
+                auth,
+                client(),
+                {
+                    let calls = calls.clone();
+                    move |_| {
+                        *calls.borrow_mut() += 1;
+                        async {
+                            Err::<(), _>(ClientError::TenantSelectionRequired(
+                                "tenant selection required for inference".into(),
+                            ))
+                        }
+                    }
+                },
+                {
+                    let refreshes = refreshes.clone();
+                    move |_| {
+                        *refreshes.borrow_mut() += 1;
+                        box_refresh_future(async { Ok("should-not-refresh".into()) })
+                    }
+                },
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(ClientError::TenantSelectionRequired(_))
+            ));
+            assert_eq!(*calls.borrow(), 1);
+            assert_eq!(*refreshes.borrow(), 0);
+            assert_eq!(auth.token().as_deref(), Some("A"));
+        })
+    });
+}
+
+#[test]
 fn late_refresh_success_and_failure_cannot_replace_or_logout_new_login() {
     for success in [true, false] {
         harness(|mut auth| {

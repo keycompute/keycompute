@@ -49,6 +49,11 @@ pub enum ClientError {
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
+    /// 已验证身份，但当前会话尚未选择租户工作区。
+    /// 这是一个范围前置条件，不应触发 Token 刷新或自动登出。
+    #[error("Tenant selection required: {0}")]
+    TenantSelectionRequired(String),
+
     /// 禁止访问 (403)
     #[error("Forbidden: {0}")]
     Forbidden(String),
@@ -92,8 +97,11 @@ pub type Result<T> = std::result::Result<T, ClientError>;
 impl ClientError {
     /// 根据 HTTP 状态码创建对应的错误
     pub fn from_status(status: u16, message: impl Into<String>) -> Self {
-        let msg = extract_error_message(message.into());
+        let (msg, reason) = extract_error_details(message.into());
         match status {
+            401 if reason.as_deref() == Some("tenant_selection_required") => {
+                ClientError::TenantSelectionRequired(msg)
+            }
             401 => ClientError::Unauthorized(msg),
             403 => ClientError::Forbidden(msg),
             404 => ClientError::NotFound(msg),
@@ -108,6 +116,11 @@ impl ClientError {
     /// 判断是否为认证相关错误
     pub fn is_auth_error(&self) -> bool {
         matches!(self, ClientError::Unauthorized(_))
+    }
+
+    /// 判断是否为已认证身份缺少租户工作区。
+    pub fn is_tenant_selection_required(&self) -> bool {
+        matches!(self, ClientError::TenantSelectionRequired(_))
     }
 
     /// 判断是否为限流错误
@@ -135,6 +148,7 @@ impl ClientError {
             ClientError::Serialization(msg)
             | ClientError::Network(msg)
             | ClientError::Unauthorized(msg)
+            | ClientError::TenantSelectionRequired(msg)
             | ClientError::Forbidden(msg)
             | ClientError::NotFound(msg)
             | ClientError::Verification(msg)
@@ -177,13 +191,13 @@ impl From<std::io::Error> for ClientError {
     }
 }
 
-fn extract_error_message(raw: String) -> String {
+fn extract_error_details(raw: String) -> (String, Option<String>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return raw;
+        return (raw, None);
     };
 
-    value
-        .get("error")
+    let error = value.get("error");
+    let message = error
         .and_then(|error| match error {
             serde_json::Value::String(msg) => Some(msg.as_str()),
             serde_json::Value::Object(map) => map.get("message").and_then(|msg| msg.as_str()),
@@ -191,7 +205,36 @@ fn extract_error_message(raw: String) -> String {
         })
         .or_else(|| value.get("message").and_then(|msg| msg.as_str()))
         .map(ToString::to_string)
-        .unwrap_or(raw)
+        .unwrap_or_else(|| raw.clone());
+    let reason = error
+        .and_then(|error| error.as_object())
+        .and_then(|map| map.get("reason"))
+        .and_then(|reason| reason.as_str())
+        .map(ToString::to_string);
+    (message, reason)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ClientError;
+
+    #[test]
+    fn tenant_scope_errors_are_not_classified_as_expired_credentials() {
+        let error = ClientError::from_status(
+            401,
+            r#"{"error":{"message":"tenant selection required for inference","reason":"tenant_selection_required"}}"#,
+        );
+        assert!(error.is_tenant_selection_required());
+        assert!(!error.is_auth_error());
+        assert_eq!(error.message(), "tenant selection required for inference");
+    }
+
+    #[test]
+    fn ordinary_401_remains_refreshable_authentication_error() {
+        let error = ClientError::from_status(401, r#"{"error":{"message":"token expired"}}"#);
+        assert!(error.is_auth_error());
+        assert!(!error.is_tenant_selection_required());
+    }
 }
 
 fn strip_http_prefix(msg: &str) -> String {

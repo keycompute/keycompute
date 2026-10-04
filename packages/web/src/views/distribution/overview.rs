@@ -14,6 +14,7 @@ use crate::stores::{
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 use crate::utils::{format_precise_cny_str, on_copy};
+use crate::views::tenant::common::TenantRequiredPage;
 use ui::{PageHeader, Pagination, icons::IconCopy};
 
 fn total_earnings_display(
@@ -68,7 +69,7 @@ pub fn DistributionOverview() -> Element {
     }
 
     rsx! {
-        DistributionOverviewContent {}
+        TenantRequiredPage { DistributionOverviewContent {} }
 
     }
 }

@@ -11,6 +11,7 @@ use crate::services::node_gateway_token_service;
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore};
 use crate::utils::on_copy;
 use crate::utils::time::format_time;
+use crate::views::tenant::common::TenantRequiredPage;
 
 type TokenDetail = client_api::api::node_gateway_token::NodeGatewayTokenDetail;
 
@@ -63,6 +64,11 @@ fn StatusDot(color: String, #[props(default = 10u32)] size: u32) -> Element {
 
 #[component]
 pub fn NodeToken() -> Element {
+    rsx! { TenantRequiredPage { NodeTokenContent {} } }
+}
+
+#[component]
+fn NodeTokenContent() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let ui_store = use_context::<UiStore>();

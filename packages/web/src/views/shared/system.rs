@@ -14,6 +14,7 @@ use crate::services::{account_service, api_client::with_auto_refresh, debug_serv
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
 use crate::views::shared::accounts::NoPermissionView;
+use crate::views::tenant::common::WorkspaceScope;
 
 const FALLBACK_ROUTING_PROBE_MODEL: &str = "gpt-4o";
 /// 将候选诊断限制在较小常数内，避免异常账号较多时一次页面加载放大调试请求。
@@ -282,12 +283,8 @@ pub fn SystemDiagnostics() -> Element {
         };
     }
 
-    let tenant_id = user_store
-        .info
-        .read()
-        .as_ref()
-        .and_then(|user| user.active_tenant_id().map(str::to_owned))
-        .unwrap_or_default();
+    let routing_tenant_id = WorkspaceScope::from_stores(auth_store, user_store)
+        .map(|scope| scope.tenant_id.to_string());
 
     // 这两项来自网关进程内状态，不依赖监控聚合表。保持为独立资源，确保数据库
     // 查询异常时仍可查看当前 Provider 和网关运行状态。
@@ -305,9 +302,15 @@ pub fn SystemDiagnostics() -> Element {
         .await
     });
 
+    let routing_request_tenant_id = routing_tenant_id.clone();
     let routing_info = use_resource(move || {
-        let tenant_id = tenant_id.clone();
+        let tenant_id = routing_request_tenant_id.clone();
         async move {
+            let Some(tenant_id) = tenant_id else {
+                // Platform diagnostics are valid without a tenant, but routing
+                // probes require a verified tenant-scoped AuthExtractor.
+                return Ok(None);
+            };
             with_auto_refresh(auth_store, |token| {
                 let tenant_id = tenant_id.clone();
                 async move {
@@ -380,7 +383,10 @@ pub fn SystemDiagnostics() -> Element {
             },
             routing_info: rsx! {
                 h3 { class: "subsection-title section-body-title", {i18n.t("system.provider_status_diagnosis")} }
-                match routing_info() {
+                if routing_tenant_id.is_none() {
+                    p { class: "text-secondary", {i18n.t("tenant.selection_required")} }
+                } else {
+                    match routing_info() {
                         None => rsx! {
                             p { class: "text-secondary", {i18n.t("table.loading")} }
                         },
@@ -472,9 +478,10 @@ pub fn SystemDiagnostics() -> Element {
                                         span { class: "info-label", {i18n.t("pricing.output_price")} }
                                         span { class: "info-value", "{info.pricing.output_price_per_1k} / 1K tokens" }
                                     }
-                                }
+                    }
                             }
                         },
+                }
                 }
             },
         }

@@ -11,6 +11,7 @@ use crate::stores::{
     user_store::{UserInfo, UserStore},
 };
 use crate::views::shared::Toast;
+use crate::views::tenant::common::WorkspaceScope;
 use ui::layout::sidebar::NavIcon;
 use ui::{AppShell, NavItem, NavSection, ThemeCtx, UserMenuAction};
 
@@ -313,6 +314,7 @@ pub fn AppLayout() -> Element {
     }
 
     let can_manage_platform = user_store.can_manage_platform();
+    let has_workspace = WorkspaceScope::from_stores(auth_store, user_store).is_some();
     let user_name = user_store
         .info
         .read()
@@ -404,6 +406,15 @@ pub fn AppLayout() -> Element {
             ],
         },
     ];
+
+    // These entries call tenant-scoped APIs. Keep the workspace and account
+    // controls visible for a global session, but do not advertise pages that
+    // would otherwise mount requests before a tenant is selected.
+    if !has_workspace {
+        let account = nav_sections.remove(3);
+        nav_sections.clear();
+        nav_sections.push(account);
+    }
 
     let mut tenant_items = vec![NavItem::new(
         i18n.t("tenant.workspace"),

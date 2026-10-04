@@ -13,6 +13,7 @@ use crate::services::api_client::with_auto_refresh;
 use crate::services::payment_service;
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
+use crate::views::tenant::common::TenantRequiredPage;
 
 /// 支付方式枚举
 #[derive(Clone, PartialEq)]
@@ -69,6 +70,11 @@ enum OrderState {
 
 #[component]
 pub fn Recharge() -> Element {
+    rsx! { TenantRequiredPage { RechargeContent {} } }
+}
+
+#[component]
+fn RechargeContent() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut ui_store = use_context::<UiStore>();

@@ -313,6 +313,7 @@ pub fn localize_error(err: &client_api::error::ClientError) -> String {
     use client_api::error::ClientError;
     match err {
         ClientError::Unauthorized(_) => "登录已过期，请重新登录".to_string(),
+        ClientError::TenantSelectionRequired(_) => "请先选择租户工作区".to_string(),
         ClientError::Forbidden(_) => "权限不足，无法执行此操作".to_string(),
         ClientError::NotFound(_) => "资源不存在或已被删除".to_string(),
         ClientError::RateLimited(_) => "请求过于频繁，请稍候再试".to_string(),
@@ -346,6 +347,7 @@ pub fn user_error_message(err: &client_api::error::ClientError) -> String {
     }
 
     match err {
+        ClientError::TenantSelectionRequired(_) => localize_error(err),
         ClientError::Network(_)
         | ClientError::Serialization(_)
         | ClientError::InvalidResponse(_) => localize_error(err),

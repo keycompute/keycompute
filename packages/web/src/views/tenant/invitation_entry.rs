@@ -107,7 +107,17 @@ pub fn post_login_route(auth: AuthStore) -> Route {
     {
         Route::TenantInvitationAccept {}
     } else {
+        default_authenticated_route(&state)
+    }
+}
+
+fn default_authenticated_route(state: &AuthState) -> Route {
+    if state.selected_tenant_id.is_some() {
         Route::Dashboard {}
+    } else {
+        // Login intentionally starts with a global identity. Let the user
+        // choose a verified workspace before mounting tenant-scoped pages.
+        Route::TenantWorkspace {}
     }
 }
 
@@ -198,6 +208,20 @@ fn InvitationAcceptPage() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_login_starts_at_workspace_while_selected_session_starts_at_dashboard() {
+        let global = AuthState::logged_in("global".into());
+        assert_eq!(
+            default_authenticated_route(&global),
+            Route::TenantWorkspace {}
+        );
+
+        let mut selected = global;
+        selected.selected_tenant_id = Some(Uuid::new_v4().to_string());
+        assert_eq!(default_authenticated_route(&selected), Route::Dashboard {});
+    }
+
     #[test]
     fn invitation_survives_first_login_but_not_account_or_workspace_changes() {
         let mut pending = PendingState::from_fragment(&format!("#token={}", "a".repeat(64)));

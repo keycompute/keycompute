@@ -13,6 +13,8 @@ use std::fmt;
 
 const UPSTREAM_REQUEST_FAILED_MESSAGE: &str = "Upstream request failed";
 const UPSTREAM_REQUEST_TIMEOUT_MESSAGE: &str = "Upstream request timed out";
+pub(crate) const TENANT_SELECTION_REQUIRED_MESSAGE: &str =
+    "tenant selection required for inference";
 
 /// Marks responses whose client-facing message was produced by this service.
 /// Middleware must use this out-of-band marker instead of trusting a JSON
@@ -143,13 +145,15 @@ impl IntoResponse for ApiError {
             ApiError::PassthroughBinding(_) | ApiError::OpenAiUpstream(_) | ApiError::AnthropicUpstream(_) => unreachable!(),
         };
 
-        let body = Json(json!({
-            "error": {
-                "message": error_message,
-                "type": error_type(&self),
-                "code": status.as_u16(),
-            }
-        }));
+        let mut error = json!({
+            "message": error_message,
+            "type": error_type(&self),
+            "code": status.as_u16(),
+        });
+        if let Some(reason) = error_reason(&self) {
+            error["reason"] = Value::String(reason.to_string());
+        }
+        let body = Json(json!({"error": error}));
 
         let mut response = (status, body).into_response();
         response.extensions_mut().insert(TrustedLocalApiError);
@@ -175,6 +179,18 @@ fn error_type(error: &ApiError) -> &'static str {
         ApiError::NodeTaskConflict(_) => "node_task_conflict_error",
         ApiError::Conflict(_) => "conflict_error",
         ApiError::OpenAiUpstream(_) | ApiError::AnthropicUpstream(_) => "upstream_error",
+    }
+}
+
+/// Stable machine-readable reasons for client recovery decisions. The numeric
+/// HTTP code remains unchanged for compatibility; clients must not infer that
+/// every 401 means an expired credential.
+fn error_reason(error: &ApiError) -> Option<&'static str> {
+    match error {
+        ApiError::Auth(message) if message == TENANT_SELECTION_REQUIRED_MESSAGE => {
+            Some("tenant_selection_required")
+        }
+        _ => None,
     }
 }
 
@@ -590,6 +606,29 @@ mod tests {
         assert_eq!(body["error"]["type"], "rate_limit_error");
         assert_eq!(body["error"]["code"], 429);
         assert!(body["error"].get("param").is_none());
+    }
+
+    #[tokio::test]
+    async fn tenant_scope_auth_error_has_stable_reason_without_changing_status() {
+        let response =
+            ApiError::Auth(TENANT_SELECTION_REQUIRED_MESSAGE.to_string()).into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"]["code"], 401);
+        assert_eq!(body["error"]["reason"], "tenant_selection_required");
+    }
+
+    #[tokio::test]
+    async fn ordinary_auth_error_does_not_claim_tenant_scope_reason() {
+        let response = ApiError::Auth("token expired".to_string()).into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert!(body["error"].get("reason").is_none());
     }
 
     #[test]

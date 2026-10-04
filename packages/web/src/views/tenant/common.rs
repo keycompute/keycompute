@@ -2,7 +2,11 @@ use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
     services::api_client::{get_client, with_auto_refresh},
-    stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
+    stores::{
+        auth_store::AuthStore,
+        ui_store::UiStore,
+        user_store::{UserInfo, UserStore},
+    },
 };
 use client_api::{ApiClient, ClientError, Result, TenantControlApi};
 use dioxus::prelude::*;
@@ -127,6 +131,48 @@ pub fn invalidate_own_session(
         ui.show_success(message);
     }
 }
+
+/// Gate pages whose APIs require a verified selected tenant. Global sessions
+/// remain valid and are sent to the existing workspace/operations entrypoints;
+/// the child page is not mounted, so no tenant-scoped resource is started.
+#[component]
+pub fn TenantRequiredPage(children: Element) -> Element {
+    let auth = use_context::<AuthStore>();
+    let users = use_context::<UserStore>();
+    let i18n = use_i18n();
+    let state = (auth.state)();
+
+    if state.is_authenticated && *users.loaded_session_id.peek() != state.session_id {
+        return rsx! {
+            div { class: "auth-redirect-loading", role: "status",
+                {i18n.t("common.loading")}
+            }
+        };
+    }
+
+    if WorkspaceScope::from_stores(auth, users).is_some() {
+        return rsx! { {children} };
+    }
+
+    let can_view_operations = users
+        .info
+        .read()
+        .as_ref()
+        .is_some_and(UserInfo::can_view_operations);
+    rsx! {
+        div { class: "page-container", role: "alert",
+            h1 { class: "page-title", {i18n.t("tenant.workspace")} }
+            p { class: "alert alert-info", {i18n.t("tenant.selection_required")} }
+            nav { class: "toolbar", aria_label: i18n.t("tenant.workspace"),
+                Link { class: "btn btn-primary", to: Route::TenantWorkspace {}, {i18n.t("tenant.workspace")} }
+                if can_view_operations {
+                    Link { class: "btn btn-secondary", to: Route::PlatformOperations {}, {i18n.t("operations.title")} }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn WorkspaceLinks() -> Element {
     let users = use_context::<UserStore>();

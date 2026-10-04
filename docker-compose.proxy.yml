@@ -1,18 +1,21 @@
 services:
+  # BuildKit runs these build stages with the host network. Use the Docker
+  # host gateway by default; on a Linux host where the proxy listens only on
+  # loopback, set KC_BUILD_PROXY_URL=http://127.0.0.1:7890 explicitly.
   keycompute-server:
     build:
       network: host
       extra_hosts:
         - "host.docker.internal:host-gateway"
       args:
-        HTTP_PROXY: http://host.docker.internal:7890
-        HTTPS_PROXY: http://host.docker.internal:7890
-        ALL_PROXY: http://host.docker.internal:7890
-        NO_PROXY: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,npmjs.org
-        http_proxy: http://host.docker.internal:7890
-        https_proxy: http://host.docker.internal:7890
-        all_proxy: http://host.docker.internal:7890
-        no_proxy: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,npmjs.org
+        HTTP_PROXY: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        HTTPS_PROXY: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        ALL_PROXY: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        NO_PROXY: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,registry.npmjs.org,npmjs.org
+        http_proxy: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        https_proxy: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        all_proxy: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        no_proxy: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,registry.npmjs.org,npmjs.org
         CARGO_HTTP_PROXY:
         CARGO_HTTPS_PROXY:
         CARGO_HTTP_TIMEOUT: 120
@@ -26,25 +29,26 @@ services:
         - "host.docker.internal:host-gateway"
       args:
         API_BASE_URL: ${API_BASE_URL:-}
-        HTTP_PROXY: http://host.docker.internal:7890
-        HTTPS_PROXY: http://host.docker.internal:7890
-        ALL_PROXY: http://host.docker.internal:7890
-        NO_PROXY: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,npmjs.org
-        http_proxy: http://host.docker.internal:7890
-        https_proxy: http://host.docker.internal:7890
-        all_proxy: http://host.docker.internal:7890
-        no_proxy: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,npmjs.org
+        BINARYEN_DOWNLOAD_BASE_URL: ${BINARYEN_DOWNLOAD_BASE_URL:-https://github.com/WebAssembly/binaryen/releases/download}
+        HTTP_PROXY: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        HTTPS_PROXY: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        ALL_PROXY: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        NO_PROXY: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,registry.npmjs.org,npmjs.org
+        http_proxy: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        https_proxy: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        all_proxy: ${KC_BUILD_PROXY_URL:-http://host.docker.internal:7890}
+        no_proxy: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,registry.npmjs.org,npmjs.org
         CARGO_HTTP_PROXY:
         CARGO_HTTPS_PROXY:
         CARGO_HTTP_TIMEOUT: 120
         RUSTUP_DIST_SERVER: https://static.rust-lang.org
         RUSTUP_UPDATE_ROOT: https://static.rust-lang.org/rustup
     environment:
-      HTTP_PROXY: http://host.docker.internal:7890
-      HTTPS_PROXY: http://host.docker.internal:7890
-      ALL_PROXY: http://host.docker.internal:7890
-      NO_PROXY: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,npmjs.org
-      http_proxy: http://host.docker.internal:7890
-      https_proxy: http://host.docker.internal:7890
-      all_proxy: http://host.docker.internal:7890
-      no_proxy: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,github.com,raw.githubusercontent.com,objects.githubusercontent.com,registry.npmjs.org,npmjs.org
+      HTTP_PROXY: ${KC_RUNTIME_PROXY_URL:-http://host.docker.internal:7890}
+      HTTPS_PROXY: ${KC_RUNTIME_PROXY_URL:-http://host.docker.internal:7890}
+      ALL_PROXY: ${KC_RUNTIME_PROXY_URL:-http://host.docker.internal:7890}
+      NO_PROXY: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,registry.npmjs.org,npmjs.org
+      http_proxy: ${KC_RUNTIME_PROXY_URL:-http://host.docker.internal:7890}
+      https_proxy: ${KC_RUNTIME_PROXY_URL:-http://host.docker.internal:7890}
+      all_proxy: ${KC_RUNTIME_PROXY_URL:-http://host.docker.internal:7890}
+      no_proxy: 127.0.0.1,localhost,deb.debian.org,security.debian.org,crates.io,index.crates.io,static.crates.io,static.rust-lang.org,registry.npmjs.org,npmjs.org

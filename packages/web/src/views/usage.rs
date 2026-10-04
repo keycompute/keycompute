@@ -8,10 +8,16 @@ use crate::services::{api_client::with_auto_refresh, usage_service};
 use crate::stores::auth_store::AuthStore;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
+use crate::views::tenant::common::TenantRequiredPage;
 
 /// 用量统计页面 - /usage
 #[component]
 pub fn Usage() -> Element {
+    rsx! { TenantRequiredPage { UsageContent {} } }
+}
+
+#[component]
+fn UsageContent() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let mut page = use_signal(|| 1u32);

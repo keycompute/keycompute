@@ -11,6 +11,7 @@ use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::user_store::UserStore;
 use crate::utils::display::usage_status_label;
 use crate::utils::time::format_time;
+use crate::views::tenant::common::TenantRequiredPage;
 
 #[derive(Clone)]
 struct TrendPoint {
@@ -20,6 +21,11 @@ struct TrendPoint {
 
 #[component]
 pub fn Dashboard() -> Element {
+    rsx! { TenantRequiredPage { DashboardContent {} } }
+}
+
+#[component]
+fn DashboardContent() -> Element {
     let i18n = use_i18n();
     let user_store = use_context::<UserStore>();
     let auth_store = use_context::<AuthStore>();

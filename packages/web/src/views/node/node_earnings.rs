@@ -9,6 +9,7 @@ use crate::services::node_tips_service;
 use crate::stores::{auth_store::AuthStore, ui_store::UiStore};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::{display::short_id, format_precise_cny_str, time::format_time};
+use crate::views::tenant::common::TenantRequiredPage;
 
 const HISTORY_PAGE_SIZE: u32 = 20;
 
@@ -96,6 +97,11 @@ impl WithdrawalStatus {
 
 #[component]
 pub fn NodeEarnings() -> Element {
+    rsx! { TenantRequiredPage { NodeEarningsContent {} } }
+}
+
+#[component]
+fn NodeEarningsContent() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
     let _ui_store = use_context::<UiStore>();

@@ -14,6 +14,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     ("tenant.current", "当前工作区", "Current workspace"),
     (
+        "tenant.selection_required",
+        "当前会话尚未选择租户工作区，请先选择后再访问租户数据。",
+        "This session has no tenant workspace selected. Choose a workspace before viewing tenant data.",
+    ),
+    (
         "tenant.global",
         "全局身份（未选择租户）",
         "Global identity (no tenant selected)",

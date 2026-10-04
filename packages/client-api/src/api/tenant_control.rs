@@ -347,6 +347,7 @@ fn safe_invitation_error(error: ClientError) -> ClientError {
         "Invitation acceptance failed; refresh memberships to check the outcome".to_owned();
     match error {
         ClientError::Unauthorized(_) => ClientError::Unauthorized(message),
+        ClientError::TenantSelectionRequired(_) => ClientError::Other(message),
         ClientError::Forbidden(_) => ClientError::Forbidden(message),
         ClientError::NotFound(_) => ClientError::NotFound(message),
         ClientError::RateLimited(mut info) => {

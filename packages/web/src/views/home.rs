@@ -10,6 +10,7 @@ use crate::stores::auth_store::AuthStore;
 use crate::stores::public_settings_store::PublicSettingsStore;
 use crate::stores::referral_store::ReferralStore;
 use crate::stores::user_store::{UserInfo, UserStore};
+use crate::views::tenant::common::WorkspaceScope;
 use ui::components::modal::Modal;
 use ui::{GITHUB_REPOSITORY_URL, ThemeCtx};
 
@@ -103,7 +104,12 @@ pub fn Home() -> Element {
 
     // 检查是否已登录（使用 memo 响应 auth_store.state 的变化）
     let auth_store = use_context::<AuthStore>();
+    let user_store = use_context::<UserStore>();
     let is_authenticated = use_memo(move || auth_store.is_authenticated());
+    // Restored tokens do not carry a locally decoded tenant. Use the verified
+    // profile scope so a valid persisted session can enter the console directly.
+    let has_workspace =
+        use_memo(move || WorkspaceScope::from_stores(auth_store, user_store).is_some());
 
     // 平台名称（从公开设置读取，动态加载）
     let public_settings_store = use_context::<PublicSettingsStore>();
@@ -449,7 +455,12 @@ pub fn Home() -> Element {
                                 class: "kc-home-btn-register",
                                 r#type: "button",
                                 onclick: move |_| {
-                                    nav.push(Route::Dashboard {});
+                                    let route = if has_workspace() {
+                                        Route::Dashboard {}
+                                    } else {
+                                        Route::TenantWorkspace {}
+                                    };
+                                    nav.push(route);
                                 },
                                 "{i18n.t(\"home.console\")}"
                             }

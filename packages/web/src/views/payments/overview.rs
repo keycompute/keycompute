@@ -9,6 +9,7 @@ use crate::utils::display::payment_status_label;
 use crate::utils::format_cny_str;
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
+use crate::views::tenant::common::TenantRequiredPage;
 
 const PAGE_SIZE: usize = 20;
 
@@ -17,6 +18,11 @@ const PAGE_SIZE: usize = 20;
 /// 包含：账户余额、充值记录和账单统计
 #[component]
 pub fn PaymentsOverview() -> Element {
+    rsx! { TenantRequiredPage { PaymentsOverviewContent {} } }
+}
+
+#[component]
+fn PaymentsOverviewContent() -> Element {
     let i18n = use_i18n();
     let auth_store = use_context::<AuthStore>();
 
