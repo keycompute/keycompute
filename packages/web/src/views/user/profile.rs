@@ -74,6 +74,11 @@ pub fn UserProfile() -> Element {
         .as_ref()
         .and_then(|u| u.active_tenant_id().map(str::to_owned))
         .unwrap_or_default();
+    let tenant_badge = if tenant_id.is_empty() {
+        i18n.t("tenant.global").to_string()
+    } else {
+        format!("{} {tenant_id}", i18n.t("profile.tenant"))
+    };
     let memberships = user_info
         .as_ref()
         .map(|u| u.memberships.clone())
@@ -157,7 +162,9 @@ pub fn UserProfile() -> Element {
                     .any(|m| m.tenant_id == target && m.status.as_deref() == Some("active"))
             });
         if !known {
-            tenant_error.set(Some("Select an active membership".into()));
+            tenant_error.set(Some(
+                i18n.t("profile.active_membership_required").to_string(),
+            ));
             return;
         }
         tenant_saving.set(true);
@@ -186,7 +193,8 @@ pub fn UserProfile() -> Element {
                         target,
                         &session,
                     ) {
-                        tenant_error.set(Some("The returned session does not match this identity and tenant selection".into()));
+                        tenant_error
+                            .set(Some(i18n.t("profile.tenant_session_mismatch").to_string()));
                         tenant_saving.set(false);
                         return;
                     }
@@ -213,14 +221,14 @@ pub fn UserProfile() -> Element {
                 div { class: "alert alert-success", "{msg}" }
             }
 
-            div { class: "card",
-                label { class: "form-label", "Selected tenant" }
+            div { class: "card card-body profile-tenant-card",
+                label { class: "form-label", {i18n.t("profile.selected_tenant")} }
                 select {
                     class: "input-field",
                     value: "{tenant_id}",
                     disabled: tenant_saving(),
                     onchange: on_tenant_change,
-                    option { value: "", "Global session (no tenant selected)" }
+                    option { value: "", {i18n.t("tenant.global")} }
                     for membership in memberships.iter().filter(|m| m.status.as_deref() == Some("active")) {
                         option { value: "{membership.tenant_id}",
                             "{membership.tenant_name.as_deref().unwrap_or(&membership.tenant_id)} ({membership.tenant_role})"
@@ -246,7 +254,7 @@ pub fn UserProfile() -> Element {
                             div {
                                 class: "profile-badges",
                                 span { class: "profile-badge", "{platform_role}" }
-                                span { class: "profile-badge profile-badge-muted", "{i18n.t(\"profile.tenant\")} {tenant_id}" }
+                                span { class: "profile-badge profile-badge-muted", "{tenant_badge}" }
                             }
                         }
                     }

@@ -2160,6 +2160,14 @@ input, textarea, select {
   padding: 0;
 }
 
+.tenant-workspace > .section {
+  padding: 20px;
+}
+
+.tenant-workspace > .section > .section-title {
+  margin: -20px -20px 20px;
+}
+
 .section > .section-title,
 .card > .section-title {
   padding: 17px 20px;
@@ -4449,7 +4457,7 @@ select.form-input:focus {
 
 .dashboard-trend-labels {
   display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
 }
@@ -5833,8 +5841,10 @@ select.form-input:focus {
   color: var(--kc-home-text-muted);
 }
 
-/* MODAL OVERRIDES FOR HOME PAGE */
-.modal-backdrop {
+/* MODAL OVERRIDES FOR HOME PAGE
+   Keep these selectors inside the landing page so console dialogs continue
+   to use the shared UI modal contract. */
+.kc-home-page .modal-backdrop {
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -5850,7 +5860,7 @@ select.form-input:focus {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-.modal {
+.kc-home-page .modal {
   width: 100%;
   background: var(--kc-home-surface);
   border: 1px solid var(--kc-home-border);
@@ -5863,21 +5873,21 @@ select.form-input:focus {
   from { opacity: 0; transform: translateY(20px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
-.modal-header {
+.kc-home-page .modal-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 20px 24px;
   border-bottom: 1px solid var(--kc-home-border);
 }
-.modal-title {
+.kc-home-page .modal-title {
   margin: 0;
   font-family: "Space Grotesk", sans-serif;
   font-size: 1.2rem;
   font-weight: 600;
   color: var(--kc-home-text-primary);
 }
-.modal-close {
+.kc-home-page .modal-close {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5891,16 +5901,16 @@ select.form-input:focus {
   cursor: pointer;
   transition: all 0.2s;
 }
-.modal-close:hover {
+.kc-home-page .modal-close:hover {
   background: var(--kc-home-surface-hover);
   color: var(--kc-home-error);
 }
-.modal-body {
+.kc-home-page .modal-body {
   padding: 24px;
   max-height: 70vh;
   overflow-y: auto;
 }
-.modal-footer {
+.kc-home-page .modal-footer {
   padding: 16px 24px;
   border-top: 1px solid var(--kc-home-border);
 }
@@ -6414,7 +6424,7 @@ select.form-input:focus {
   .kc-home-features { padding: 40px 0 60px; }
   .kc-home-section-title { font-size: 1.4rem; }
   .kc-home-features-grid { grid-template-columns: 1fr; }
-  .modal {
+  .kc-home-page .modal {
     border-radius: 16px 16px 0 0;
     position: fixed;
     bottom: 0;
@@ -6427,7 +6437,7 @@ select.form-input:focus {
     from { transform: translateY(100%); }
     to { transform: translateY(0); }
   }
-  .modal-backdrop { align-items: flex-end; padding: 0; }
+  .kc-home-page .modal-backdrop { align-items: flex-end; padding: 0; }
 }
 
 /* ── Custom Select Dropdown ───────────────────── */

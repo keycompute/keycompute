@@ -147,6 +147,51 @@
     padding-inline: 0;
   }
 
+  /* The header toggle reuses the mobile-open state as an explicit tablet
+     expansion state. Keep it inline (not an overlay drawer) at this width. */
+  .sidebar.mobile-open {
+    width: var(--sidebar-width);
+  }
+
+  .sidebar.mobile-open + .main-area {
+    margin-left: var(--sidebar-width);
+  }
+
+  .sidebar.mobile-open .sidebar-logo {
+    justify-content: flex-start;
+    padding-inline: 14px;
+  }
+
+  .sidebar.mobile-open .sidebar-logo-copy,
+  .sidebar.mobile-open .sidebar-footer {
+    display: flex;
+  }
+
+  .sidebar.mobile-open .sidebar-section-title {
+    display: block;
+  }
+
+  .sidebar.mobile-open .sidebar-item-label {
+    position: static;
+    width: auto;
+    height: auto;
+    margin: 0;
+    padding: 0;
+    overflow: visible;
+    clip: auto;
+    white-space: nowrap;
+  }
+
+  .sidebar.mobile-open .sidebar-item {
+    justify-content: flex-start;
+    gap: 12px;
+    padding-inline: 12px;
+  }
+
+  .sidebar-overlay.visible {
+    display: none;
+  }
+
   /* 双列卡片布局 */
   .card-grid-3,
   .card-grid-4 {

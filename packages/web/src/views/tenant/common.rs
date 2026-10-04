@@ -150,8 +150,14 @@ pub fn TenantRequiredPage(children: Element) -> Element {
         };
     }
 
-    if WorkspaceScope::from_stores(auth, users).is_some() {
-        return rsx! { {children} };
+    if let Some(scope) = WorkspaceScope::from_stores(auth, users) {
+        // A workspace switch must unmount every child resource and local form
+        // state. Dioxus otherwise retains the previous resource value while the
+        // new request is pending, which can expose stale tenant data briefly.
+        let scope_key = format!("{scope:?}");
+        return rsx! {
+            TenantScopedChildren { key: "{scope_key}", children }
+        };
     }
 
     let can_view_operations = users
@@ -171,6 +177,12 @@ pub fn TenantRequiredPage(children: Element) -> Element {
             }
         }
     }
+}
+
+/// Key-only boundary used by [`TenantRequiredPage`] without adding a DOM node.
+#[component]
+fn TenantScopedChildren(children: Element) -> Element {
+    children
 }
 
 #[component]

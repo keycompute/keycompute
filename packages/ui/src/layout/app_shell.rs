@@ -189,6 +189,7 @@ pub fn AppShell(
                     lang,
                     home_title: home_title.clone(),
                     open_menu_title: open_menu_title.clone(),
+                    close_menu_title: close_menu_title.clone(),
                     switch_to_light_theme_title: switch_to_light_theme_title.clone(),
                     switch_to_dark_theme_title: switch_to_dark_theme_title.clone(),
                     switch_to_zh_title: switch_to_zh_title.clone(),

@@ -32,6 +32,7 @@ pub fn Header(
     lang: Signal<String>,
     #[props(default)] home_title: String,
     #[props(default)] open_menu_title: String,
+    #[props(default)] close_menu_title: String,
     #[props(default)] switch_to_light_theme_title: String,
     #[props(default)] switch_to_dark_theme_title: String,
     #[props(default)] switch_to_zh_title: String,
@@ -72,6 +73,11 @@ pub fn Header(
     } else {
         user_menu_label
     };
+    let sidebar_menu_title = if sidebar_mobile_open() {
+        close_menu_title
+    } else {
+        open_menu_title
+    };
 
     rsx! {
         header {
@@ -93,11 +99,11 @@ pub fn Header(
                     },
                     IconHome { size: 20 }
                 }
-                // 移动端汉堡菜单
+                // 移动端抽屉／平板端展开侧栏
                 button {
-                    class: "header-toggle-btn hide-desktop hide-tablet",
-                    title: "{open_menu_title}",
-                    aria_label: "{open_menu_title}",
+                    class: "header-toggle-btn hide-desktop",
+                    title: "{sidebar_menu_title}",
+                    aria_label: "{sidebar_menu_title}",
                     aria_controls: "app-sidebar",
                     aria_expanded: sidebar_mobile_open(),
                     onclick: move |_| {

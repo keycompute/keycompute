@@ -2,13 +2,17 @@ use dioxus::prelude::*;
 use ui::PageHeader;
 
 use crate::hooks::use_i18n::use_i18n;
-use crate::services::user_service;
+use crate::router::Route;
+use crate::services::{api_client::user_error_message, user_service};
 use crate::stores::auth_store::AuthStore;
+use crate::stores::ui_store::UiStore;
 
 #[component]
 pub fn UserSettings() -> Element {
     let i18n = use_i18n();
-    let auth_store = use_context::<AuthStore>();
+    let mut auth_store = use_context::<AuthStore>();
+    let mut ui_store = use_context::<UiStore>();
+    let nav = use_navigator();
     let mut current_pwd = use_signal(String::new);
     let mut new_pwd = use_signal(String::new);
     let mut confirm_pwd = use_signal(String::new);
@@ -72,9 +76,12 @@ pub fn UserSettings() -> Element {
             let token = auth_store.token().unwrap_or_default();
             match user_service::change_password(&cur, &nw, &token).await {
                 Ok(_) => {
-                    success_msg.set(Some(
-                        i18n.t("account_settings.password_changed").to_string(),
-                    ));
+                    // The server revokes every existing token after a password
+                    // change. Clear the local session immediately so the user
+                    // is not left on a page that can only produce 401s.
+                    ui_store.show_success(i18n.t("account_settings.password_changed_relogin"));
+                    auth_store.logout();
+                    nav.replace(Route::Login {});
                     current_pwd.set(String::new());
                     new_pwd.set(String::new());
                     confirm_pwd.set(String::new());
@@ -82,8 +89,9 @@ pub fn UserSettings() -> Element {
                 }
                 Err(e) => {
                     error_msg.set(Some(format!(
-                        "{}：{e}",
-                        i18n.t("account_settings.change_failed")
+                        "{}：{}",
+                        i18n.t("account_settings.change_failed"),
+                        user_error_message(&e)
                     )));
                     saving.set(false);
                 }

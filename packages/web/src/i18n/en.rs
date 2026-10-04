@@ -675,6 +675,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "account_settings.password_changed",
         "Password changed successfully",
     );
+    m.insert(
+        "account_settings.password_changed_relogin",
+        "Password changed. Please sign in again.",
+    );
     m.insert("account_settings.change_failed", "Change failed");
     m.insert("account_settings.change_password", "Change Password");
     m.insert(
@@ -717,6 +721,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "View your current account identity information and maintain the display name shown in the console.",
     );
     m.insert("profile.tenant", "Tenant");
+    m.insert("profile.selected_tenant", "Selected tenant");
+    m.insert(
+        "profile.active_membership_required",
+        "Select an active membership",
+    );
+    m.insert(
+        "profile.tenant_session_mismatch",
+        "The returned session does not match this identity and tenant selection",
+    );
     m.insert("profile.user_id", "User ID");
     m.insert("profile.edit", "Edit Profile");
 
@@ -1645,6 +1658,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.empty", "No users yet");
     m.insert("users.user", "User");
     m.insert("users.tenant", "Tenant");
+    m.insert("users.memberships_suffix", "memberships");
+    m.insert(
+        "users.select_wallet_tenant",
+        "Select a wallet tenant to view its balance",
+    );
     m.insert("users.tenant_unknown", "Unknown tenant");
     m.insert("users.tenant_keep", "Keep current tenant");
     m.insert(
@@ -1665,6 +1683,10 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "Only system role can delete admin users",
     );
     m.insert("users.edit_title", "Edit User");
+    m.insert(
+        "users.global_profile_only",
+        "Global profile only. Tenant memberships are managed separately.",
+    );
     m.insert("users.display_name", "Display Name");
     m.insert(
         "users.display_name_placeholder",
@@ -1691,6 +1713,11 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.frozen_short", "Frozen");
     m.insert("users.balance_manage", "Balance");
     m.insert("users.balance_title", "Balance Management");
+    m.insert("users.target_wallet_tenant", "Target wallet tenant UUID");
+    m.insert(
+        "users.target_wallet_tenant_hint",
+        "Enter the target user's tenant UUID explicitly. The server verifies membership. In-flight operations retain their original tenant.",
+    );
     m.insert("users.balance_available", "Available Balance");
     m.insert("users.balance_frozen", "Frozen Balance");
     m.insert("users.balance_total_frozen", "Total Frozen Balance");

@@ -25,13 +25,18 @@ pub fn TenantAdminLayout() -> Element {
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
     let scope = common::WorkspaceScope::from_stores(auth, users);
-    let allowed = scope.is_some()
-        && users
-            .info
-            .read()
-            .as_ref()
-            .is_some_and(|u| u.can_manage_tenant());
-    if !allowed {
+    if scope.is_none() {
+        return rsx! { div { class:"page-container", role:"alert",
+            p { class: "alert alert-info", {i18n.t("tenant.selection_required")} }
+            Link { to:Route::TenantWorkspace {}, {i18n.t("tenant.workspace")} }
+        }};
+    }
+    if !users
+        .info
+        .read()
+        .as_ref()
+        .is_some_and(|u| u.can_manage_tenant())
+    {
         return rsx! { div { class:"page-container", role:"alert",
             p { {i18n.t("tenant.admin_required")} }
             Link { to:Route::TenantWorkspace {}, {i18n.t("tenant.workspace")} }

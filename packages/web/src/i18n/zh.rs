@@ -618,6 +618,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "新密码需包含至少一个特殊字符",
     );
     m.insert("account_settings.password_changed", "密码修改成功");
+    m.insert(
+        "account_settings.password_changed_relogin",
+        "密码修改成功，请重新登录。",
+    );
     m.insert("account_settings.change_failed", "修改失败");
     m.insert("account_settings.change_password", "修改密码");
     m.insert(
@@ -660,6 +664,15 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "查看当前账户身份信息，并维护控制台显示名称。",
     );
     m.insert("profile.tenant", "租户");
+    m.insert("profile.selected_tenant", "当前租户");
+    m.insert(
+        "profile.active_membership_required",
+        "请选择有效的租户成员关系",
+    );
+    m.insert(
+        "profile.tenant_session_mismatch",
+        "返回的会话与当前身份及租户选择不匹配",
+    );
     m.insert("profile.user_id", "用户 ID");
     m.insert("profile.edit", "编辑资料");
 
@@ -1440,6 +1453,8 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.empty", "暂无用户数据");
     m.insert("users.user", "用户");
     m.insert("users.tenant", "租户");
+    m.insert("users.memberships_suffix", "个成员关系");
+    m.insert("users.select_wallet_tenant", "请选择租户以查看对应余额");
     m.insert("users.tenant_unknown", "未知租户");
     m.insert("users.tenant_keep", "保持当前租户");
     m.insert(
@@ -1457,6 +1472,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "仅 system 角色可删除管理员用户",
     );
     m.insert("users.edit_title", "编辑用户");
+    m.insert(
+        "users.global_profile_only",
+        "这里只管理全局用户资料，租户成员关系请在租户管理中维护。",
+    );
     m.insert("users.display_name", "显示名称");
     m.insert("users.display_name_placeholder", "留空则不修改");
     m.insert("users.role_none", "none（无平台权限）");
@@ -1474,6 +1493,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.frozen_short", "冻");
     m.insert("users.balance_manage", "余额");
     m.insert("users.balance_title", "余额管理");
+    m.insert("users.target_wallet_tenant", "目标钱包租户 UUID");
+    m.insert(
+        "users.target_wallet_tenant_hint",
+        "请明确输入目标用户的租户 UUID，服务端会校验成员关系；进行中的操作仍按原租户处理。",
+    );
     m.insert("users.balance_available", "可用余额");
     m.insert("users.balance_frozen", "冻结余额");
     m.insert("users.balance_total_frozen", "总冻结余额");

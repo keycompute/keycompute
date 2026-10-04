@@ -1871,12 +1871,12 @@ fn AdminUsersView() -> Element {
                                         }
                                         td {
                                             if let Some(memberships) = &u.memberships {
-                                                span { "{memberships.len()} memberships" }
+                                                span { {format!("{} {}", memberships.len(), i18n.t("users.memberships_suffix"))} }
                                             } else {
                                                 span { "—" }
                                             }
                                         }
-                                        td { "Select a wallet tenant" }
+                                        td { {i18n.t("users.select_wallet_tenant")} }
                                         td { {format_time(&u.created_at)} }
                                         td {
                                             div { class: "btn-group",
@@ -2007,7 +2007,7 @@ fn AdminUsersView() -> Element {
                                     oninput: move |e| *edit_name.write() = e.value(),
                                 }
                             }
-                            p { "Global profile only. Tenant memberships are managed separately." }
+                            p { {i18n.t("users.global_profile_only")} }
                         }
                         div { class: "modal-footer",
                             Button {
@@ -2112,7 +2112,7 @@ fn AdminUsersView() -> Element {
                         }
                         div { class: "modal-body",
                             div { class: "form-group",
-                                label { class: "form-label", "Target wallet tenant UUID" }
+                                label { class: "form-label", {i18n.t("users.target_wallet_tenant")} }
                                 input {
                                     class: "input-field",
                                     value: "{balance_tenant}",
@@ -2126,7 +2126,7 @@ fn AdminUsersView() -> Element {
                                         balance_error.set(String::new());
                                     },
                                 }
-                                small { "Enter the target user's tenant UUID explicitly. The server verifies membership. In-flight operations retain their original tenant." }
+                                small { {i18n.t("users.target_wallet_tenant_hint")} }
                             }
 
                             // 弹窗内联错误提示
