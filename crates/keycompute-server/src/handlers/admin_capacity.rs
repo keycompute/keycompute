@@ -2,7 +2,7 @@
 //! other monitoring endpoints. Never export principal IDs or connection URLs.
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::GlobalConsoleAuth,
     state::AppState,
 };
 use axum::{Json, extract::State};
@@ -47,24 +47,28 @@ pub fn process_snapshot(state: &AppState) -> Value {
         "stages":keycompute_observability::capacity::snapshot(),
     })
 }
-pub async fn capacity(State(state): State<AppState>, auth: AuthExtractor) -> Result<Json<Value>> {
-    if !auth.has_permission(&keycompute_auth::Permission::PlatformDiagnostics) {
-        return Err(ApiError::Forbidden(
-            "System administration permission is required".into(),
-        ));
-    }
+pub async fn capacity(
+    State(state): State<AppState>,
+    auth: GlobalConsoleAuth,
+) -> Result<Json<Value>> {
+    auth.require_platform(keycompute_auth::AuthorizationAction::ManagePlatform)
+        .map_err(ApiError::from)?;
     Ok(Json(process_snapshot(&state)))
 }
 #[cfg(test)]
 mod tests {
     use super::*;
-    use keycompute_types::CredentialKind;
     #[tokio::test]
     async fn role_text_cannot_bypass_capacity_permission() {
         let state = AppState::new();
         let id = uuid::Uuid::new_v4();
-        let mut auth = AuthExtractor::new(id, id, id, CredentialKind::Jwt);
-        auth.permissions = vec![keycompute_auth::Permission::UseApi];
+        let auth = GlobalConsoleAuth::try_from(
+            keycompute_auth::AuthContext::global(id).with_permissions(vec![
+                keycompute_auth::Permission::AccessConsole,
+                keycompute_auth::Permission::UseApi,
+            ]),
+        )
+        .unwrap();
         assert!(matches!(
             capacity(State(state.clone()), auth).await,
             Err(ApiError::Forbidden(_))
@@ -73,5 +77,11 @@ mod tests {
         assert_eq!(response["scope"], "application_process");
         assert!(response.get("stages").unwrap().is_array());
         assert!(!response.to_string().contains("redis://"));
+
+        let mut context = keycompute_auth::AuthContext::global(id)
+            .with_permissions(vec![keycompute_auth::Permission::AccessConsole]);
+        context.platform_role = keycompute_types::PlatformRole::Root;
+        let root = GlobalConsoleAuth::try_from(context).unwrap();
+        assert!(capacity(State(state), root).await.is_ok());
     }
 }

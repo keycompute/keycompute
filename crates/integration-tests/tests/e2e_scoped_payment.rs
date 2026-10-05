@@ -51,6 +51,15 @@ async fn token(state: &AppState, db: &DatabaseConnection, user: Uuid, tenant: Uu
         .unwrap()
         .access_token
 }
+async fn global_token(state: &AppState, db: &DatabaseConnection, user: Uuid) -> String {
+    let user = User::find_by_id(db, user).await.unwrap().unwrap();
+    state
+        .auth
+        .get_jwt_validator()
+        .unwrap()
+        .generate_identity_token(user.id, None, user.token_version, None, None, 3600)
+        .unwrap()
+}
 async fn get(state: &AppState, token: &str, path: &str) -> (StatusCode, Value) {
     let response = create_router(state.clone())
         .oneshot(
@@ -116,6 +125,43 @@ async fn tenant_admin_cannot_read_other_members_or_foreign_payment_orders_throug
     assert_eq!(status, StatusCode::OK);
     assert_eq!(page["total"], json!(1));
     assert_eq!(page["orders"][0]["id"], own_order.id.to_string());
+    guard.cleanup().await.unwrap();
+}
+
+#[tokio::test]
+async fn global_root_can_read_all_payment_orders_without_selected_tenant() {
+    let db = create_test_pool().await;
+    let run = generate_test_id();
+    let mut guard = TestDataGuard::new(db.clone(), run.clone());
+    let a = create_test_tenant(&db, "payment-platform-a", &run).await;
+    let b = create_test_tenant(&db, "payment-platform-b", &run).await;
+    let root = create_test_user(&db, a.id, "payment-platform-root", &run).await;
+    let user_a = create_test_user(&db, a.id, "payment-platform-user-a", &run).await;
+    let user_b = create_test_user(&db, b.id, "payment-platform-user-b", &run).await;
+    db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE users SET platform_role='root' WHERE id=$1",
+        [root.id.into()],
+    ))
+    .await
+    .unwrap();
+    let order_a = order(&db, a.id, user_a.id).await;
+    let order_b = order(&db, b.id, user_b.id).await;
+    let state = AppState::with_pool(DbRouter::single(db.clone()));
+    let root_token = global_token(&state, &db, root.id).await;
+    let (status, page) = get(&state, &root_token, "/api/v1/admin/payments/orders").await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["total"], json!(2));
+    let tenant_ids = page["orders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|row| row["tenant_id"].as_str())
+        .collect::<Vec<_>>();
+    let tenant_a = order_a.tenant_id.to_string();
+    let tenant_b = order_b.tenant_id.to_string();
+    assert!(tenant_ids.contains(&tenant_a.as_str()));
+    assert!(tenant_ids.contains(&tenant_b.as_str()));
     guard.cleanup().await.unwrap();
 }
 

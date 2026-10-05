@@ -3957,6 +3957,32 @@ select.form-input:focus {
   margin-bottom: 16px;
 }
 
+.payment-provider-target {
+  max-width: 720px;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.payment-provider-target label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.payment-provider-target .input-field {
+  width: 100%;
+}
+
+.payment-provider-target .text-secondary {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
 .payment-provider-card {
   padding: 16px;
   background: var(--bg-card);

@@ -335,7 +335,7 @@ POST /api/v1/payments/orders/{order_id}/sync
 2. 公开设置字段增加 deprecated 标记或改名为仅管理语义的 `*_admin_enabled`；新客户端不再消费。
 3. 至少保留一个发布版本的兼容返回，确认没有旧客户端依赖后再从公开响应删除。
 4. 管理员使用独立的 `GET /api/v1/admin/payments/providers` 查看所有渠道的运营、配置验证和运行状态；普通方法接口永远不返回内部原因。
-5. 管理员通过独立的高权限 `POST /api/v1/admin/payments/providers/{method}/verify` 创建受控验证订单。该接口不依赖用户端方法列表，验证成功后立即关单，并把当前配置指纹标记为 `verified`。
+5. 管理员通过独立的高权限 `POST /api/v1/admin/payments/providers/{method}/verify` 创建受控验证订单。该接口不依赖用户端方法列表；平台 root 使用显式 `tenant_id` 指定验证订单归属租户，不依赖当前工作区。为兼容旧的已选租户会话，空 JSON 对象仍可回退到已验证的当前租户。验证成功后立即关单，并把当前配置指纹标记为 `verified`。
 
 ## 7. 用户支付中心与充值页重构
 

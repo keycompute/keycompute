@@ -719,7 +719,17 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("payment_orders.subtitle_user", "查看您的充值和支付记录");
     m.insert("payment_orders.empty", "暂无订单记录");
+    m.insert("payment_orders.col_tenant", "租户");
     m.insert("payment_orders.col_user", "用户");
+    m.insert("payment_orders.verification_tenant", "验证归属租户");
+    m.insert(
+        "payment_orders.select_verification_tenant",
+        "请选择活跃租户",
+    );
+    m.insert(
+        "payment_orders.verification_tenant_hint",
+        "验证会为所选租户所有者创建并关闭一笔真实的 0.01 元订单。",
+    );
     m.insert("payment_orders.provider_switch", "运营开关");
     m.insert("payment_orders.provider_config", "配置状态");
     m.insert("payment_orders.verify_provider", "验证渠道配置");

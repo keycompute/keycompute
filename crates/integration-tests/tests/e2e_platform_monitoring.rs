@@ -295,6 +295,8 @@ async fn canonical_and_retained_root_reads_share_scope_currency_and_server_audit
         let a=trace(&f,f.tenant,f.user,"RAW_A_MARKER","CNY").await;
         let b=trace(&f,other.id,other.owner_user_id,"RAW_B_MARKER","USD").await;
         let state=f.state();let root=f.token(&state,f.root,false,3600).await;let app=create_router(state);
+        let capacity=ok(call(app.clone(),"GET","/api/v1/admin/monitoring/capacity",&root,Value::Null).await);
+        assert_eq!(capacity["scope"],"application_process");
         for base in ["/api/v1/platform/monitoring","/api/v1/admin/monitoring"] {
             let page=call(app.clone(),"GET",&format!("{base}/requests?tenant_id={}&limit=1",f.tenant),&root,Value::Null).await;
             assert_eq!(page.0,StatusCode::OK,"{}",page.1);

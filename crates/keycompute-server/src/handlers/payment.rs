@@ -4,7 +4,7 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::{AuthExtractor, GlobalConsoleAuth},
     middleware::PaymentNotifyClientIp,
     state::AppState,
 };
@@ -31,11 +31,42 @@ fn require_own_billing_permission(auth: &AuthExtractor) -> Result<keycompute_typ
     auth.require_owner(auth.user_id, AuthorizationAction::ManagePersonalResource)
 }
 
-/// Platform payment operations never derive authority from a tenant role.
+/// Test-only compatibility helper for the tenant-bound extractor contract.
+#[cfg(test)]
 fn require_billing_admin_permission(
     auth: &AuthExtractor,
 ) -> Result<keycompute_types::PlatformScope> {
     auth.require_platform(AuthorizationAction::ManagePlatform)
+}
+
+/// Platform payment reads and control commands are global root operations.
+/// They must not require a selected tenant just because payment orders carry
+/// tenant ownership in the data model.
+fn require_global_billing_admin_permission(
+    auth: &GlobalConsoleAuth,
+) -> Result<keycompute_types::PlatformScope> {
+    auth.require_platform(AuthorizationAction::ManagePlatform)
+        .map_err(ApiError::from)
+}
+
+fn resolve_verification_tenant(
+    auth: &GlobalConsoleAuth,
+    request: VerifyPaymentProviderRequest,
+) -> Result<Uuid> {
+    let tenant_id = request
+        .tenant_id
+        .or(auth.selected_tenant_id)
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "An explicit target tenant is required for a global session".into(),
+            )
+        })?;
+    if tenant_id.is_nil() {
+        return Err(ApiError::BadRequest(
+            "A non-zero target tenant is required".into(),
+        ));
+    }
+    Ok(tenant_id)
 }
 
 async fn load_payment_amount_limits(pool: &keycompute_db::DbRouter) -> Result<(Decimal, Decimal)> {
@@ -171,6 +202,16 @@ pub struct AdminPaymentProviderStatus {
     pub status: &'static str,
     pub scenes: &'static [&'static str],
     pub message: Option<&'static str>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyPaymentProviderRequest {
+    /// A provider verification creates a real tenant-owned order. The target
+    /// is explicit for global sessions. An empty object remains accepted for
+    /// older selected-tenant clients and falls back to their verified tenant.
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
 }
 
 /// 支付订单列表响应
@@ -776,11 +817,11 @@ async fn record_security_event(
 ///
 /// GET /api/v1/admin/payments/orders
 pub async fn admin_list_payment_orders(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Query(params): Query<PaymentOrderQueryParams>,
 ) -> Result<Json<serde_json::Value>> {
-    let scope = require_billing_admin_permission(&auth)?;
+    let scope = require_global_billing_admin_permission(&auth)?;
     let pool = state
         .pool
         .as_deref()
@@ -831,11 +872,11 @@ pub async fn admin_list_payment_orders(
 
 /// 管理员查看所有支付渠道的运营开关与实际运行状态。
 pub async fn admin_payment_providers(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AdminPaymentProviderStatus>>> {
     use keycompute_db::models::system_setting::setting_keys;
-    require_billing_admin_permission(&auth)?;
+    require_global_billing_admin_permission(&auth)?;
     let pool = state
         .pool
         .as_deref()
@@ -920,19 +961,38 @@ pub async fn admin_payment_providers(
 
 /// 管理员通过创建并关闭一笔真实的 0.01 元订单验证当前渠道配置。
 pub async fn admin_verify_payment_provider(
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     State(state): State<AppState>,
     Path(method): Path<String>,
+    Json(request): Json<VerifyPaymentProviderRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    require_billing_admin_permission(&auth)?;
+    require_global_billing_admin_permission(&auth)?;
+    let tenant_id = resolve_verification_tenant(&auth, request)?;
     let method = keycompute_db::PaymentMethod::parse(&method)
         .ok_or_else(|| ApiError::BadRequest("不支持的支付渠道".to_string()))?;
+    let pool = state
+        .pool
+        .as_deref()
+        .ok_or_else(|| payment_internal_error("verify_provider", "database unavailable"))?;
+    #[derive(FromQueryResult)]
+    struct TenantVerificationOwner {
+        owner_user_id: Uuid,
+    }
+    let owner = TenantVerificationOwner::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT t.owner_user_id FROM tenants t JOIN users u ON u.id=t.owner_user_id AND u.status='active' WHERE t.id=$1 AND t.status='active'",
+        [tenant_id.into()],
+    ))
+    .one(pool.write_conn())
+    .await
+    .map_err(|error| payment_internal_error("verify_provider_target", error))?
+    .ok_or_else(|| ApiError::NotFound("Target tenant not found or inactive".into()))?;
     let registry = state
         .payment
         .as_ref()
         .ok_or_else(|| payment_internal_error("verify_provider", "payment registry unavailable"))?;
     registry
-        .verify_provider(method, auth.tenant_id, auth.user_id)
+        .verify_provider(method, tenant_id, owner.owner_user_id)
         .await
         .map_err(|error| match error {
             crate::payment_registry::RegistryError::UserTenantMismatch => {
@@ -958,6 +1018,55 @@ mod tests {
         };
 
         assert_eq!(req.amount, Decimal::new(100, 0));
+    }
+
+    #[test]
+    fn provider_verification_requires_an_explicit_target_tenant() {
+        let legacy: VerifyPaymentProviderRequest = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(legacy.tenant_id.is_none());
+        let request: VerifyPaymentProviderRequest =
+            serde_json::from_str(r#"{"tenant_id":"11111111-1111-4111-8111-111111111111"}"#)
+                .unwrap();
+        assert_eq!(
+            request.tenant_id,
+            Some(Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap())
+        );
+
+        let mut root_context = keycompute_auth::AuthContext::global(Uuid::new_v4())
+            .with_permissions(vec![keycompute_auth::Permission::AccessConsole]);
+        root_context.platform_role = PlatformRole::Root;
+        let root = GlobalConsoleAuth::try_from(root_context).unwrap();
+        assert!(resolve_verification_tenant(&root, legacy).is_err());
+
+        let selected_tenant = Uuid::new_v4();
+        let mut selected_context = keycompute_auth::AuthContext::global(Uuid::new_v4())
+            .with_permissions(vec![keycompute_auth::Permission::AccessConsole]);
+        selected_context.platform_role = PlatformRole::Root;
+        selected_context.selected_tenant_id = Some(selected_tenant);
+        let selected = GlobalConsoleAuth::try_from(selected_context).unwrap();
+        assert_eq!(
+            resolve_verification_tenant(
+                &selected,
+                VerifyPaymentProviderRequest { tenant_id: None }
+            )
+            .unwrap(),
+            selected_tenant
+        );
+    }
+
+    #[test]
+    fn global_root_payment_scope_does_not_require_a_selected_tenant() {
+        let mut context = keycompute_auth::AuthContext::global(Uuid::new_v4())
+            .with_permissions(vec![keycompute_auth::Permission::AccessConsole]);
+        context.platform_role = PlatformRole::Root;
+        let root = GlobalConsoleAuth::try_from(context).unwrap();
+        assert!(require_global_billing_admin_permission(&root).is_ok());
+
+        let mut context = keycompute_auth::AuthContext::global(Uuid::new_v4())
+            .with_permissions(vec![keycompute_auth::Permission::AccessConsole]);
+        context.platform_role = PlatformRole::Operator;
+        let operator = GlobalConsoleAuth::try_from(context).unwrap();
+        assert!(require_global_billing_admin_permission(&operator).is_err());
     }
 
     #[test]

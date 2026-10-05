@@ -785,7 +785,17 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "View your recharge and payment records",
     );
     m.insert("payment_orders.empty", "No payment orders yet");
+    m.insert("payment_orders.col_tenant", "Tenant");
     m.insert("payment_orders.col_user", "User");
+    m.insert("payment_orders.verification_tenant", "Verification tenant");
+    m.insert(
+        "payment_orders.select_verification_tenant",
+        "Select an active tenant",
+    );
+    m.insert(
+        "payment_orders.verification_tenant_hint",
+        "Verification creates and closes a real 0.01 CNY order for the selected tenant owner.",
+    );
     m.insert("payment_orders.provider_switch", "Admin switch");
     m.insert("payment_orders.provider_config", "Configuration");
     m.insert("payment_orders.verify_provider", "Verify provider");

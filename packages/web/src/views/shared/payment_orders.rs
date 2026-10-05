@@ -7,7 +7,7 @@ const PAGE_SIZE: usize = 20;
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{
     api_client::{get_client, with_auto_refresh},
-    payment_service,
+    payment_service, tenant_service,
 };
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
@@ -110,6 +110,31 @@ pub fn PaymentOrders() -> Element {
         })
         .await
     });
+    // Provider verification creates a real tenant-owned order. Keep the
+    // platform page global, but require an explicit active target for that
+    // side effect instead of inheriting the current workspace (which may be
+    // absent for a root session).
+    let verification_tenants = use_resource(move || async move {
+        if !can_manage_platform {
+            return Ok(vec![]);
+        }
+        with_auto_refresh(auth_store, |token| async move {
+            tenant_service::list_active(&token).await
+        })
+        .await
+    });
+    let mut verification_tenant = use_signal(String::new);
+    use_effect(move || {
+        let Some(Ok(tenants)) = verification_tenants() else {
+            return;
+        };
+        let current = verification_tenant();
+        if !current.is_empty() && !tenants.iter().any(|tenant| tenant.id == current) {
+            // Verification creates a real order; never silently target the
+            // first tenant when the current selection is missing or stale.
+            verification_tenant.set(String::new());
+        }
+    });
     let mut verifying_provider = use_signal(|| None::<String>);
     let mut provider_action_error = use_signal(|| None::<String>);
 
@@ -136,6 +161,28 @@ pub fn PaymentOrders() -> Element {
             if can_manage_platform {
                 if let Some(error) = provider_action_error() {
                     div { class: "alert alert-error", "{error}" }
+                }
+                match verification_tenants() {
+                    None => rsx! { div { class: "loading-state", {i18n.t("table.loading")} } },
+                    Some(Err(error)) => rsx! {
+                        div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}：{error}" }
+                    },
+                    Some(Ok(tenants)) => rsx! {
+                        div { class: "payment-provider-target",
+                            label { r#for: "payment-provider-tenant", {i18n.t("payment_orders.verification_tenant")} }
+                            select {
+                                id: "payment-provider-tenant",
+                                class: "input-field",
+                                value: "{verification_tenant}",
+                                onchange: move |event| verification_tenant.set(event.value()),
+                                option { value: "", disabled: true, {i18n.t("payment_orders.select_verification_tenant")} }
+                                for tenant in tenants {
+                                    option { value: "{tenant.id}", "{tenant.name} ({tenant.slug})" }
+                                }
+                            }
+                            p { class: "text-secondary", {i18n.t("payment_orders.verification_tenant_hint")} }
+                        }
+                    },
                 }
                 div { class: "payment-provider-grid",
                     match provider_statuses() {
@@ -193,14 +240,16 @@ pub fn PaymentOrders() -> Element {
                                     if provider.configured && !provider.available {
                                         {
                                             let method = provider.code.clone();
+                                            let tenant_id = verification_tenant();
                                             let is_verifying = verifying_provider().as_deref() == Some(method.as_str());
                                             rsx! {
                                                 button {
                                                     class: "btn btn-primary btn-sm payment-provider-action",
                                                     r#type: "button",
-                                                    disabled: verifying_provider().is_some(),
+                                                    disabled: verifying_provider().is_some() || tenant_id.is_empty(),
                                                     onclick: move |_| {
                                                         let method = method.clone();
+                                                        let tenant_id = tenant_id.clone();
                                                         verifying_provider.set(Some(method.clone()));
                                                         provider_action_error.set(None);
                                                         spawn(async move {
@@ -208,10 +257,11 @@ pub fn PaymentOrders() -> Element {
                                                                     auth_store,
                                                                     |token| {
                                                                         let method = method.clone();
+                                                                        let tenant_id = tenant_id.clone();
                                                                         async move {
                                                                             let client = get_client();
                                                                             AdminApi::new(&client)
-                                                                                .verify_payment_provider(&method, &token)
+                                                                                .verify_payment_provider_for_tenant(&method, &tenant_id, &token)
                                                                                 .await
                                                                         }
                                                                     },
@@ -279,10 +329,11 @@ pub fn PaymentOrders() -> Element {
                                 _ => (false, ""),
                             };
                             rsx! {
-                                Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 6,
+                                Table { empty: is_empty, empty_text: empty_text.to_string(), col_count: 7,
                                     thead {
                                         tr {
                                             TableHead { {i18n.t("payments.order_no")} }
+                                            TableHead { {i18n.t("payment_orders.col_tenant")} }
                                             TableHead { {i18n.t("payment_orders.col_user")} }
                                             TableHead { {i18n.t("recharge.payment_method")} }
                                             TableHead { {i18n.t("common.amount")} }
@@ -296,6 +347,19 @@ pub fn PaymentOrders() -> Element {
                                                 tr {
                                                     td {
                                                         code { "{o.out_trade_no}" }
+                                                    }
+                                                    td {
+                                                        {
+                                                            let tenant_id = o.tenant_id.clone().unwrap_or_default();
+                                                            let short = short_id(&tenant_id);
+                                                            rsx! {
+                                                                span {
+                                                                    title: "{tenant_id}",
+                                                                    style: "cursor:help;font-family:monospace;font-size:13px;",
+                                                                    "{short}"
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                     td {
                                                         {

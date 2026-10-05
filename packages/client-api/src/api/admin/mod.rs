@@ -803,6 +803,9 @@ impl AdminApi {
     }
 
     /// 创建并关闭一笔真实小额订单，验证当前支付渠道配置。
+    ///
+    /// 保留无租户参数的旧调用契约。服务端会在已有选中租户的旧会话中
+    /// 继续使用该租户；全局 root 会收到“需要明确租户”的校验错误。
     pub async fn verify_payment_provider(
         &self,
         method: &str,
@@ -812,6 +815,22 @@ impl AdminApi {
             .post_json(
                 &format!("/api/v1/admin/payments/providers/{method}/verify"),
                 &serde_json::json!({}),
+                Some(token),
+            )
+            .await
+    }
+
+    /// 创建并关闭一笔真实小额订单，并显式指定验证订单归属租户。
+    pub async fn verify_payment_provider_for_tenant(
+        &self,
+        method: &str,
+        tenant_id: &str,
+        token: &str,
+    ) -> Result<MessageResponse> {
+        self.client
+            .post_json(
+                &format!("/api/v1/admin/payments/providers/{method}/verify"),
+                &serde_json::json!({"tenant_id": tenant_id}),
                 Some(token),
             )
             .await
