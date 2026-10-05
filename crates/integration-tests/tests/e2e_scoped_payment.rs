@@ -149,12 +149,27 @@ async fn global_root_can_read_all_payment_orders_without_selected_tenant() {
     let order_b = order(&db, b.id, user_b.id).await;
     let state = AppState::with_pool(DbRouter::single(db.clone()));
     let root_token = global_token(&state, &db, root.id).await;
-    let (status, page) = get(&state, &root_token, "/api/v1/admin/payments/orders").await;
+    let (status, page) = get(
+        &state,
+        &root_token,
+        "/api/v1/admin/payments/orders?page=1&page_size=1000",
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{page}");
-    assert_eq!(page["total"], json!(2));
-    let tenant_ids = page["orders"]
-        .as_array()
-        .unwrap()
+    assert!(
+        page["total"].as_i64().unwrap_or_default() >= 2,
+        "global root page should include at least the orders created by this test: {page}"
+    );
+    let rows = page["orders"].as_array().unwrap();
+    let order_ids = rows
+        .iter()
+        .filter_map(|row| row["id"].as_str())
+        .collect::<Vec<_>>();
+    let order_a_id = order_a.id.to_string();
+    let order_b_id = order_b.id.to_string();
+    assert!(order_ids.contains(&order_a_id.as_str()));
+    assert!(order_ids.contains(&order_b_id.as_str()));
+    let tenant_ids = rows
         .iter()
         .filter_map(|row| row["tenant_id"].as_str())
         .collect::<Vec<_>>();
