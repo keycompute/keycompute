@@ -12,6 +12,7 @@ use integration_tests::{
 use keycompute_db::models::{
     distribution_scope::{self as dao, DistributionScope, RecordFilter, RuleFilter},
     referral_display::find_referral_display_page,
+    system_setting::setting_keys,
 };
 use keycompute_db::{CreateUsageLogRequest, DbRouter, Tenant, UsageLog, User};
 use keycompute_server::{AppState, create_router};
@@ -370,9 +371,32 @@ async fn forged_roles_stale_memberships_and_inference_credentials_never_read_rep
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
+#[serial_test::serial]
 async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_tenants() {
     let mut f = Fixture::new().await;
     f.seed().await;
+    let original_distribution_enabled =
+        f.db.query_one(Statement::from_string(
+            DbBackend::Postgres,
+            format!(
+                "SELECT value FROM system_settings WHERE key='{}'",
+                setting_keys::DISTRIBUTION_ENABLED
+            ),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get_by_index::<String>(0)
+        .unwrap();
+    f.db.execute(Statement::from_string(
+        DbBackend::Postgres,
+        format!(
+            "UPDATE system_settings SET value='true' WHERE key='{}'",
+            setting_keys::DISTRIBUTION_ENABLED
+        ),
+    ))
+    .await
+    .unwrap();
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO user_referrals(user_id,level1_referrer_id) VALUES($1,$2)",
@@ -429,6 +453,16 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
         BigDecimal::from(30)
     );
     assert_eq!(referrals.referrals[0].earnings, BigDecimal::from(1));
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            "UPDATE system_settings SET value=$1 WHERE key='{}'",
+            setting_keys::DISTRIBUTION_ENABLED
+        ),
+        [original_distribution_enabled.into()],
+    ))
+    .await
+    .unwrap();
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
