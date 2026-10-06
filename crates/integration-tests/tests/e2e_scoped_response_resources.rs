@@ -655,7 +655,10 @@ async fn wait_state(f: &Fixture, path: &str, status: &str) -> Value {
     .expect("managed response did not reach expected status")
 }
 async fn wait_calls(f: &Fixture, count: usize) {
-    tokio::time::timeout(Duration::from_secs(8), async {
+    // The dispatch worker can be delayed by the full integration suite's
+    // database and node-session load; keep this assertion within the same
+    // 20-second envelope used by fixture HTTP requests.
+    tokio::time::timeout(Duration::from_secs(20), async {
         while f.upstream.calls.lock().unwrap().len() < count {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
