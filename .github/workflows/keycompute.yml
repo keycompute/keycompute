@@ -396,7 +396,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "client-api"
+          # Invalidate caches produced by the failed Clippy runs so the next
+          # client job starts from a clean target/registry state.
+          shared-key: "client-api-v2"
 
       # Format checking already done once in the server job across the full
       # workspace. No need to repeat here.
