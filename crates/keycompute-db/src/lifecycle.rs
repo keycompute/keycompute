@@ -294,9 +294,9 @@ async fn run_intermediate_worker(
                 // locked prevents a successfully enqueued update from being
                 // dropped as the idle worker exits.
                 let mut handles = workers.lock().expect("intermediate worker state poisoned");
-                if !handles
+                if handles
                     .get(&request_id)
-                    .is_some_and(|handle| handle.generation == generation)
+                    .is_none_or(|handle| handle.generation != generation)
                 {
                     None
                 } else {

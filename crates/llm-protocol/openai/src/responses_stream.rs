@@ -276,7 +276,7 @@ fn parse_responses_stream_with_limits_and_empty_eof(
                 return;
             }
         }
-        if !state.terminal_received && !(allow_empty_eof && !state.event_received) {
+        if !(state.terminal_received || allow_empty_eof && !state.event_received) {
             send_error(
                 &tx,
                 "Responses stream ended without a terminal response.completed, response.failed, response.incomplete, or error event",

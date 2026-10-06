@@ -335,14 +335,14 @@ fn validate_native_openai_chunk(value: &serde_json::Value) -> Result<()> {
         ));
     }
     if let Some(created) = object.get("created")
-        && !created.as_i64().is_some_and(|created| created >= 0)
+        && created.as_i64().is_none_or(|created| created < 0)
     {
         return Err(KeyComputeError::ProviderError(
             "OpenAI stream event has an invalid created timestamp".to_string(),
         ));
     }
     if let Some(model) = object.get("model")
-        && !model.as_str().is_some_and(|model| !model.is_empty())
+        && model.as_str().is_none_or(|model| model.is_empty())
     {
         return Err(KeyComputeError::ProviderError(
             "OpenAI stream event has an invalid model".to_string(),

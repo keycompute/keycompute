@@ -315,17 +315,17 @@ impl OpenAIProvider {
         }) {
             return Err("Chat Completions response has an invalid id");
         }
-        if !object
+        if object
             .get("created")
             .and_then(serde_json::Value::as_i64)
-            .is_some_and(|created| created >= 0)
+            .is_none_or(|created| created < 0)
         {
             return Err("Chat Completions response has an invalid created timestamp");
         }
-        if !object
+        if object
             .get("model")
             .and_then(serde_json::Value::as_str)
-            .is_some_and(|model| !model.is_empty())
+            .is_none_or(|model| model.is_empty())
         {
             return Err("Chat Completions response has an invalid model");
         }
@@ -336,10 +336,10 @@ impl OpenAIProvider {
             let Some(choice) = choice.as_object() else {
                 return Err("Chat Completions response choices must contain objects");
             };
-            if !choice
+            if choice
                 .get("index")
                 .and_then(serde_json::Value::as_u64)
-                .is_some()
+                .is_none()
             {
                 return Err("Chat Completions response choice has an invalid index");
             }

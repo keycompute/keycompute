@@ -1304,41 +1304,39 @@ pub(super) async fn response_affinity(
             .ok_or_else(|| {
                 ApiError::NotFound(format!("Responses resource not found: {response_id}"))
             })?
+    } else if let Some(affinity) = state
+        .responses_affinity
+        .read()
+        .await
+        .get(&affinity_storage_key_for_user(
+            tenant_id,
+            user_id,
+            response_id,
+        ))
+        .cloned()
+        && affinity.expires_at_unix > now
+        && affinity.tenant_id == tenant_id
+        && affinity.user_id == user_id
+    {
+        affinity
     } else {
-        if let Some(affinity) = state
-            .responses_affinity
-            .read()
-            .await
-            .get(&affinity_storage_key_for_user(
+        state
+            .runtime_state
+            .get::<ResponsesAffinity>(&affinity_cache_key_for_user(
                 tenant_id,
                 user_id,
                 response_id,
             ))
-            .cloned()
-            && affinity.expires_at_unix > now
-            && affinity.tenant_id == tenant_id
-            && affinity.user_id == user_id
-        {
-            affinity
-        } else {
-            state
-                .runtime_state
-                .get::<ResponsesAffinity>(&affinity_cache_key_for_user(
-                    tenant_id,
-                    user_id,
-                    response_id,
-                ))
-                .await
-                .map_err(|error| {
-                    ApiError::Internal(format!("Responses affinity lookup failed: {error}"))
-                })?
-                .filter(|affinity| affinity.expires_at_unix > now)
-                .filter(|affinity| affinity.tenant_id == tenant_id)
-                .filter(|affinity| affinity.user_id == user_id)
-                .ok_or_else(|| {
-                    ApiError::NotFound(format!("Responses resource not found: {response_id}"))
-                })?
-        }
+            .await
+            .map_err(|error| {
+                ApiError::Internal(format!("Responses affinity lookup failed: {error}"))
+            })?
+            .filter(|affinity| affinity.expires_at_unix > now)
+            .filter(|affinity| affinity.tenant_id == tenant_id)
+            .filter(|affinity| affinity.user_id == user_id)
+            .ok_or_else(|| {
+                ApiError::NotFound(format!("Responses resource not found: {response_id}"))
+            })?
     };
     if !cache_response_affinity_locally(
         state,
