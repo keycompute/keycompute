@@ -455,16 +455,6 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
     assert_eq!(referrals.referrals[0].earnings, BigDecimal::from(1));
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        format!(
-            "UPDATE system_settings SET value=$1 WHERE key='{}'",
-            setting_keys::DISTRIBUTION_ENABLED
-        ),
-        [original_distribution_enabled.into()],
-    ))
-    .await
-    .unwrap();
-    f.db.execute(Statement::from_sql_and_values(
-        DbBackend::Postgres,
         "UPDATE tenant_memberships SET status='removed' WHERE tenant_id=$1 AND user_id=$2",
         [f.b.id.into(), f.a.owner_user_id.into()],
     ))
@@ -482,6 +472,16 @@ async fn personal_earnings_cached_overviews_and_referral_amounts_do_not_cross_te
             .0,
         StatusCode::OK
     );
+    f.db.execute(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        format!(
+            "UPDATE system_settings SET value=$1 WHERE key='{}'",
+            setting_keys::DISTRIBUTION_ENABLED
+        ),
+        [original_distribution_enabled.into()],
+    ))
+    .await
+    .unwrap();
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
