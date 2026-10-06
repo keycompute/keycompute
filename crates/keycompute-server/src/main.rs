@@ -867,6 +867,14 @@ mod tests {
         let Some((admin, isolated, schema)) = isolated_bootstrap_database().await else {
             return;
         };
+        // The production schema rejects this invalid state through the deferred
+        // identity invariant. Disable only the isolated fixture's guard so this
+        // test can exercise the application-level refusal to promote an existing
+        // non-root identity automatically.
+        isolated
+            .execute_unprepared("DROP TRIGGER identity_users_guard ON users")
+            .await
+            .unwrap();
         isolated
             .execute(Statement::from_sql_and_values(
                 DbBackend::Postgres,
