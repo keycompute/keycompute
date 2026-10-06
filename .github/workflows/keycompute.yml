@@ -402,13 +402,13 @@ jobs:
       # workspace. No need to repeat here.
 
       - name: Lint (Clippy)
-        run: cargo clippy --locked --package client-api --all-targets -- -D warnings
+        run: cargo clippy --package client-api --all-targets -- -D warnings
 
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
       - name: Check WASM (Clippy)
-        run: cargo clippy --locked --package client-api --target wasm32-unknown-unknown -- -D warnings
+        run: cargo clippy --package client-api --target wasm32-unknown-unknown -- -D warnings
 
       - name: Check WASM compilation
         run: cargo check --package client-api --target wasm32-unknown-unknown
