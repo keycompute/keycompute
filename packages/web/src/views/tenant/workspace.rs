@@ -85,6 +85,15 @@ impl ConfigDraft {
     }
 }
 
+fn has_active_membership(user: Option<&UserInfo>) -> bool {
+    user.is_some_and(|value| {
+        value
+            .memberships
+            .iter()
+            .any(|membership| membership.status.as_deref() == Some("active"))
+    })
+}
+
 /// The router may reuse an Outlet VNode across AppShell remounts. A page-local
 /// key must discard drafts, confirmation dialogs and one-time secrets as well.
 #[component]
@@ -263,6 +272,12 @@ fn TenantWorkspacePage() -> Element {
             if let Some(tenant)=user.as_ref().and_then(|u|u.selected_tenant.as_ref()) {
                 p {"{tenant.name.as_deref().unwrap_or(&tenant.id)} · {tenant.id} · {tenant.tenant_role.as_str()}"}
             } else {p {{i18n.t("tenant.global")}}}
+            if user
+                .as_ref()
+                .is_some_and(|value| !has_active_membership(Some(value)))
+            {
+                p {class:"alert alert-info",role:"status",{i18n.t("tenant.no_memberships")}}
+            }
             label {class:"form-label",r#for:"workspace-select",{i18n.t("tenant.switch")}}
             select {id:"workspace-select",class:"input-field",value:"{target}",disabled:switching()||saving(),onchange:move |e|target.set(e.value()),
                 option {value:"",{i18n.t("tenant.global")}}
@@ -300,6 +315,30 @@ fn TenantWorkspacePage() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_identity_without_memberships_is_explicitly_detected() {
+        let user = UserInfo::default();
+        assert!(!has_active_membership(Some(&user)));
+    }
+
+    #[test]
+    fn suspended_memberships_do_not_count_as_available_workspaces() {
+        let mut user = UserInfo::default();
+        user.memberships
+            .push(client_api::api::auth::TenantMembership {
+                tenant_id: "tenant-1".into(),
+                tenant_name: Some("Tenant".into()),
+                tenant_role: client_api::TenantRole::Member,
+                status: Some("suspended".into()),
+                invited_by: None,
+                joined_at: None,
+                removed_at: None,
+                authz_version: Some(1),
+            });
+        assert!(!has_active_membership(Some(&user)));
+    }
+
     #[test]
     fn config_validation_does_not_guess_revisions_or_permit_negative_limits() {
         let mut value = ConfigDraft {

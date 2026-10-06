@@ -15,8 +15,8 @@
 #   KC_RESET_DB_USER=<postgres user>
 #   KC_RESET_DB_NAME=<database name>
 #   KC_RESET_DB_PASSWORD=<database password, optional; defaults to POSTGRES_PASSWORD in the container>
-#   KC_RESET_ADMIN_EMAIL=<system account email>
-#   KC_RESET_ADMIN_NAME=<system account display name>
+#   KC_RESET_ADMIN_EMAIL=<platform root email>
+#   KC_RESET_ADMIN_NAME=<platform root display name>
 # =============================================================================
 
 set -euo pipefail
@@ -36,7 +36,7 @@ DB_PASSWORD_OVERRIDE="${KC_RESET_DB_PASSWORD:-}"
 
 # 默认管理员参数（用于脚本自动补齐）。密码按产品约定固定为 12345，脚本不读取 stdin。
 DEFAULT_ADMIN_EMAIL="${KC_RESET_ADMIN_EMAIL:-${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}}"
-DEFAULT_ADMIN_NAME="${KC_RESET_ADMIN_NAME:-System Administrator}"
+DEFAULT_ADMIN_NAME="${KC_RESET_ADMIN_NAME:-Platform Administrator}"
 DEFAULT_PASSWORD="12345"
 PYTHON_BIN="python3"
 ARGON2_VENV=""
@@ -250,9 +250,9 @@ echo ""
 
 # ── 非交互式原子重置/补齐 ─────────────────────────────────────────────────────
 
-# 账号、凭证、余额和账本流水必须在同一事务内完成。这样脚本可重复执行，
-# 任一步失败都会整体回滚，不会留下“有用户但没有凭证/余额”的半初始化状态。
-info "正在以非交互方式重置系统账号并设置余额..."
+# root 身份和凭证必须在同一事务内完成。这样脚本可重复执行，任一步失败
+# 都会整体回滚；脚本不创建租户、余额或其他业务资源。
+info "正在以非交互方式重置平台 root 身份..."
 
 if ! PASSWORD_HASH="$(generate_password_hash "${DEFAULT_PASSWORD}")"; then
     error "默认管理员密码哈希生成失败！"
@@ -291,20 +291,9 @@ UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE;
 
 DO $bootstrap$
 DECLARE
-    v_system_tenant_id UUID;
     v_admin_id UUID;
-    v_admin_tenant_id UUID;
-    v_existing_id UUID;
     v_existing_role TEXT;
     v_existing_admin BOOLEAN := FALSE;
-    v_balance user_balances%ROWTYPE;
-    v_delta DECIMAL(20, 10);
-    v_active_reserved DECIMAL(20, 10);
-    v_expired_amount DECIMAL(20, 10);
-    v_active_count BIGINT;
-    v_level1_ratio NUMERIC;
-    v_level2_ratio NUMERIC;
-    v_effective_from TIMESTAMPTZ;
 BEGIN
     SELECT id, platform_role INTO v_admin_id, v_existing_role
     FROM users WHERE lower(email)=lower({email_sql}) FOR UPDATE;
@@ -321,18 +310,6 @@ BEGIN
         VALUES(lower({email_sql}),{name_sql},'root','active') RETURNING id INTO v_admin_id;
     END IF;
     UPDATE users SET status='active' WHERE id=v_admin_id;
-
-    INSERT INTO tenants(owner_user_id,name,slug,description,status)
-    VALUES(v_admin_id,'System','system','System administrative workspace','active')
-    ON CONFLICT(slug) DO NOTHING;
-    SELECT id INTO v_system_tenant_id FROM tenants
-    WHERE slug='system' AND owner_user_id=v_admin_id FOR UPDATE;
-    IF v_system_tenant_id IS NULL THEN
-        RAISE EXCEPTION 'system workspace belongs to another root; refuse to change its wallet';
-    END IF;
-    INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status)
-    VALUES(v_system_tenant_id,v_admin_id,'admin','active')
-    ON CONFLICT(tenant_id,user_id) DO NOTHING;
 
     IF v_existing_admin THEN
         UPDATE users
@@ -353,181 +330,6 @@ BEGIN
         failed_login_attempts = 0,
         locked_until = NULL,
         updated_at = NOW();
-
-    SELECT * INTO v_balance
-    FROM user_balances
-    WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
-    FOR UPDATE;
-
-    IF NOT FOUND THEN
-        SELECT COUNT(*)
-        INTO v_active_count
-        FROM balance_reservations
-        WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
-          AND status = 'active';
-
-        IF v_active_count > 0 THEN
-            RAISE EXCEPTION 'cannot initialize balance while active reservations exist';
-        END IF;
-
-        INSERT INTO user_balances (
-            tenant_id, user_id, available_balance, frozen_balance,
-            total_recharged, total_consumed
-        )
-        VALUES (v_system_tenant_id, v_admin_id, 10000, 0, 10000, 0);
-
-        INSERT INTO balance_transactions (
-            tenant_id, user_id, transaction_type, amount,
-            balance_before, balance_after, description
-        )
-        VALUES (
-            v_system_tenant_id, v_admin_id, 'recharge', 10000,
-            0, 10000, 'reset_admin_password.sh 初始化系统账号余额'
-        );
-    ELSE
-        IF v_balance.tenant_id IS DISTINCT FROM v_system_tenant_id THEN
-            RAISE EXCEPTION 'system admin balance is not attached to the system tenant';
-        END IF;
-
-        SELECT COALESCE(SUM(amount), 0), COUNT(*)
-        INTO v_active_reserved, v_active_count
-        FROM balance_reservations
-        WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
-          AND status = 'active';
-
-        IF v_active_reserved > v_balance.frozen_balance THEN
-            RAISE EXCEPTION 'active balance reservations exceed frozen balance';
-        END IF;
-
-        WITH expired AS (
-            UPDATE balance_reservations
-            SET status = 'expired',
-                updated_at = NOW()
-            WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
-              AND status = 'active'
-              AND expires_at <= NOW()
-            RETURNING amount
-        )
-        SELECT COALESCE(SUM(amount), 0)
-        INTO v_expired_amount
-        FROM expired;
-
-        IF v_expired_amount > 0 THEN
-            UPDATE user_balances
-            SET available_balance = available_balance + v_expired_amount,
-                frozen_balance = frozen_balance - v_expired_amount,
-                updated_at = NOW()
-            WHERE id = v_balance.id;
-
-            SELECT * INTO v_balance
-            FROM user_balances
-            WHERE id = v_balance.id
-            FOR UPDATE;
-        END IF;
-
-        SELECT COUNT(*)
-        INTO v_active_count
-        FROM balance_reservations
-        WHERE tenant_id=v_system_tenant_id AND user_id = v_admin_id
-          AND status = 'active';
-
-        IF v_active_count > 0 THEN
-            RAISE EXCEPTION 'cannot reset balance while active reservations exist';
-        END IF;
-
-        IF v_balance.frozen_balance <> 0 THEN
-            RAISE EXCEPTION 'cannot reset balance while frozen balance remains';
-        END IF;
-
-        v_delta := 10000 - v_balance.available_balance;
-        IF v_delta <> 0 THEN
-            UPDATE user_balances
-            SET available_balance = 10000,
-                total_recharged = CASE
-                    WHEN v_delta > 0 THEN total_recharged + v_delta
-                    ELSE total_recharged
-                END,
-                total_consumed = CASE
-                    WHEN v_delta < 0 THEN total_consumed + (-v_delta)
-                    ELSE total_consumed
-                END,
-                updated_at = NOW()
-            WHERE id = v_balance.id;
-
-            INSERT INTO balance_transactions (
-                tenant_id, user_id, transaction_type, amount,
-                balance_before, balance_after, description
-            )
-            VALUES (
-                v_system_tenant_id,
-                v_admin_id,
-                CASE WHEN v_delta > 0 THEN 'recharge' ELSE 'consume' END,
-                v_delta,
-                v_balance.available_balance,
-                10000,
-                'reset_admin_password.sh 将系统账号余额调整为 10000'
-            );
-        END IF;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1
-        FROM tenant_distribution_rules
-        WHERE tenant_id = v_system_tenant_id
-    ) THEN
-        SELECT CASE
-            WHEN value ~ '^[0-9]+([.][0-9]+)?$' THEN value::numeric
-            ELSE 0.03
-        END
-        INTO v_level1_ratio
-        FROM system_settings
-        WHERE key = 'distribution_level1_default_ratio';
-
-        SELECT CASE
-            WHEN value ~ '^[0-9]+([.][0-9]+)?$' THEN value::numeric
-            ELSE 0.02
-        END
-        INTO v_level2_ratio
-        FROM system_settings
-        WHERE key = 'distribution_level2_default_ratio';
-
-        IF v_level1_ratio IS NULL OR v_level1_ratio < 0 OR v_level1_ratio > 1 THEN
-            v_level1_ratio := 0.03;
-        END IF;
-        IF v_level2_ratio IS NULL OR v_level2_ratio < 0 OR v_level2_ratio > 1 THEN
-            v_level2_ratio := 0.02;
-        END IF;
-
-        v_effective_from := clock_timestamp();
-
-        INSERT INTO tenant_distribution_rules (
-            tenant_id, beneficiary_scope, beneficiary_id, name, description, commission_rate,
-            priority, effective_from
-        )
-        VALUES (
-            v_system_tenant_id,
-            'everyone', NULL,
-            '一级分销规则',
-            '默认一级分销规则，推荐人可获得指定比例的分销佣金',
-            v_level1_ratio,
-            10,
-            v_effective_from
-        );
-
-        INSERT INTO tenant_distribution_rules (
-            tenant_id, beneficiary_scope, beneficiary_id, name, description, commission_rate,
-            priority, effective_from
-        )
-        VALUES (
-            v_system_tenant_id,
-            'everyone', NULL,
-            '二级分销规则',
-            '默认二级分销规则，间接推荐人可获得指定比例的分销佣金',
-            v_level2_ratio,
-            5,
-            v_effective_from + interval '1 microsecond'
-        );
-    END IF;
     INSERT INTO tenant_audit_events(scope_type,tenant_id,actor_user_id,credential_kind,platform_role,
         action,resource_type,resource_id,metadata,result)
     VALUES('platform',NULL,v_admin_id,'system','root','user.recovery','user',v_admin_id::text,
@@ -567,15 +369,15 @@ if not lines:
 print(lines[-1])
 PYEOF
 )"; then
-    error "系统账号重置失败，事务已回滚！"
+    error "平台 root 身份重置失败，事务已回滚！"
     exit 1
 fi
 
 ADMIN_ID="${ADMIN_INFO%%|*}"
 ADMIN_EMAIL_FOUND="${ADMIN_INFO#*|}"
-ok "系统账号重置成功"
+ok "平台 root 身份重置成功"
 info "用户 ID：${ADMIN_ID}"
 info "邮箱：${ADMIN_EMAIL_FOUND}"
 info "密码：已重置"
-info "余额：10000"
+info "未创建租户、余额或分销规则"
 warn "请登录后立即修改默认密码。"

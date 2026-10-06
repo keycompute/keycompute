@@ -210,8 +210,7 @@ pub fn Tenants() -> Element {
                                                 Button {
                                                     variant: if t.is_active { ButtonVariant::Secondary } else { ButtonVariant::Primary },
                                                     size: ButtonSize::Small,
-                                                    disabled: pending_tenant().as_deref() == Some(t.id.as_str())
-                                                        || (t.slug == "system" && t.is_active),
+                                                    disabled: pending_tenant().as_deref() == Some(t.id.as_str()),
                                                     onclick: {
                                                         let id = t.id.clone();
                                                         let next_status = if t.is_active { "inactive" } else { "active" }.to_string();
@@ -246,7 +245,6 @@ pub fn Tenants() -> Element {
                                                     variant: ButtonVariant::Danger,
                                                     size: ButtonSize::Small,
                                                     disabled: pending_tenant().as_deref() == Some(t.id.as_str())
-                                                                                                    || t.slug == "system"
                                                         || t.user_count > 0
                                                         || t.account_count > 0,
                                                     onclick: {

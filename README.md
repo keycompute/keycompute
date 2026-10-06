@@ -102,7 +102,8 @@ score = 0.30 × Cost Factor + 0.25 × Latency Factor + 0.25 × Success Rate + 0.
 
 - **Dual authentication**: JWT (user sessions) + API Key (`sk-...`, API access)
 - **Permission separation**: API Key with admin role cannot access management interface
-- **Complete user management**: Registration → Email verification → Login → Password reset → Role management
+- **Complete user management**: Registration → Email verification → Login → Password reset → Explicit platform/tenant role management
+- **Explicit tenant membership**: Registration creates a global identity without a tenant; an invitation adds a membership, and users can switch among verified memberships.
 - **Group-based rate limiting**: User-level / tenant-level / API Key-level throttling (in-memory / Redis dual backend)
 - **Generation quota semantics**: Generation RPM is charged once per execution on the authenticated tenant/user/API-key bucket; a selected account may tighten the tenant limit, while fallback attempts remain part of the same logical request. Account limits intentionally use that caller-scoped bucket (they are not an aggregate upstream-account bucket). Malformed requests, routing failures, and completed idempotency replays do not consume execution RPM.
 
@@ -175,7 +176,7 @@ cp .env.example .env
 # - KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET: non-default, at least 16 bytes
 #   (required here because this Compose stack enables Redis/Node Gateway)
 # - KC__DEFAULT_ADMIN_PASSWORD: non-default, non-blank, at least 12 characters
-#   (required only while creating the first system administrator)
+#   (required only while creating the first platform root identity)
 
 # Start all services
 docker compose up -d
@@ -189,7 +190,7 @@ After deployment, visit `http://localhost` to get started (or use the port set b
 Unless overridden, the bootstrap administrator email is `admin@keycompute.local`.
 Its password is the value you set in `KC__DEFAULT_ADMIN_PASSWORD`; production
 never accepts `change-me-admin-password` for a fresh database. After the first
-`system` administrator has been created, remove this one-time password from the
+platform root identity has been created, remove this one-time password from the
 environment; later restarts do not require it.
 
 ### Option 2: Local development
@@ -296,7 +297,7 @@ uses `config.toml` instead.
 | `KC__EMAIL__REQUIREMENT_RECIPIENT` | Requirement collection recipient email (optional; required to receive homepage submissions) | ⚪ |
 | `APP_BASE_URL` | Current deployment's public frontend URL; required when SMTP is enabled and before enabling public invite links | Conditional |
 | `KC__DEFAULT_ADMIN_EMAIL` | Default administrator email (optional) | ⚪ |
-| `KC__DEFAULT_ADMIN_PASSWORD` | One-time bootstrap password: required only when production creates the first `system` administrator; non-default/non-blank and at least 12 characters | Conditional |
+| `KC__DEFAULT_ADMIN_PASSWORD` | One-time bootstrap password: required only when production creates the first platform root identity; non-default/non-blank and at least 12 characters | Conditional |
 
 ---
 

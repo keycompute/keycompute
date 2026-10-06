@@ -1410,7 +1410,7 @@ fn AdminUsersView() -> Element {
             let msg = if u.id == current_user_id_for_delete {
                 i18n.t("users.delete_self_forbidden")
             } else if u.platform_role == Some(PlatformRole::Root) {
-                i18n.t("users.cannot_modify_system")
+                i18n.t("users.cannot_modify_platform")
             } else {
                 i18n.t("users.delete_admin_forbidden")
             };
@@ -1880,7 +1880,7 @@ fn AdminUsersView() -> Element {
                                         td { {format_time(&u.created_at)} }
                                         td {
                                             div { class: "btn-group",
-                                                // 仅 system 角色可编辑 system 用户；admin 可编辑其他用户
+                                                // Only root may edit root users; platform admins may edit other users.
                                                 if u.platform_role != Some(PlatformRole::Root) || can_current_user_manage_roles {
                                                     Button {
                                                         variant: ButtonVariant::Ghost,
@@ -1895,7 +1895,7 @@ fn AdminUsersView() -> Element {
                                                         {i18n.t("form.edit")}
                                                     }
                                                 }
-                                                // 仅 system 角色可管理 system 用户的余额；admin 可管理其他用户
+                                                // Only root may manage root-user balances; platform admins may manage others.
                                                 if u.platform_role != Some(PlatformRole::Root) || can_current_user_manage_roles {
                                                     Button {
                                                         variant: ButtonVariant::Ghost,

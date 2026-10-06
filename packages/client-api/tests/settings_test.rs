@@ -21,8 +21,7 @@ async fn test_get_system_settings_success() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "site_name": "KeyCompute",
             "maintenance_mode": false,
-            "max_api_keys_per_user": 10,
-            "default_quota": 1000.0
+            "max_api_keys_per_user": 10
         })))
         .mount(&mock_server)
         .await;

@@ -39,7 +39,7 @@ pub use server::ServerConfig;
 
 /// 首次启动时创建的示例管理员邮箱。
 pub const DEFAULT_ADMIN_EMAIL: &str = "admin@keycompute.local";
-/// 首次启动时创建的示例管理员密码；生产环境首次创建 system 管理员时会拒绝该值。
+/// 首次启动时创建的示例管理员密码；生产环境首次创建 platform root 身份时会拒绝该值。
 pub const DEFAULT_ADMIN_PASSWORD: &str = "change-me-admin-password";
 
 /// 全局应用配置
@@ -1153,11 +1153,11 @@ mod tests {
 
         for contents in [&env_example, &config_example] {
             assert!(contents.contains("配置 Redis"));
-            assert!(contents.contains("首次创建 system 管理员"));
+            assert!(contents.contains("首次创建 platform root 身份"));
             assert!(contents.contains("不会") && contents.contains("统一拦截"));
         }
         assert!(contributing.contains("When Redis enables Node Gateway"));
-        assert!(contributing.contains("Only the first\n  `system` administrator bootstrap"));
+        assert!(contributing.contains("Only the first\n  `platform root` identity bootstrap"));
         assert!(contributing.contains("are not covered by\n  the application placeholder checks"));
         assert!(contributing.contains(
             "docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml"
@@ -1222,7 +1222,7 @@ mod tests {
             assert!(jwt.contains("32"), "{file}: JWT 门槛未记录");
             assert!(crypto.contains("Base64") && crypto.contains("32"), "{file}");
             assert!(node.contains("Redis") && node.contains("16"), "{file}");
-            assert!(admin.contains("system") && admin.contains("12"), "{file}");
+            assert!(admin.contains("root") && admin.contains("12"), "{file}");
             assert!(
                 !node.ends_with("✅ |"),
                 "{file}: 节点密钥不应标成无条件必填"

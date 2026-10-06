@@ -2,7 +2,7 @@
 //!
 //! 新注册链路采用“先验证码、后开户”的两阶段流程：
 //! 1. 请求邮箱验证码，只占位邮箱，不写正式用户
-//! 2. 验证码通过后一次性完成正式开户和副作用写入
+//! 2. 验证码通过后一次性完成正式开户，并写入凭证和推荐关系
 //!
 //! `pending_registrations` 记录只会在正式注册成功后删除。
 //! 邮件发送失败、验证码过期、验证失败等异常路径都会保留 pending 记录，
@@ -11,7 +11,7 @@
 use crate::password::{EmailValidator, PasswordHasher, PasswordValidator};
 use chrono::{Duration, Utc};
 use keycompute_db::{
-    DbRouter, PendingRegistration, Tenant, UpsertPendingRegistrationRequest, User, UserCredential,
+    DbRouter, PendingRegistration, UpsertPendingRegistrationRequest, User, UserCredential,
 };
 use keycompute_emailserver::EmailService;
 use keycompute_types::{KeyComputeError, Result};
@@ -61,8 +61,6 @@ pub struct CompleteRegistrationRequest {
 pub struct CompleteRegistrationResponse {
     /// 用户 ID
     pub user_id: Uuid,
-    /// 租户 ID
-    pub tenant_id: Uuid,
     /// 邮箱
     pub email: String,
     /// 消息
@@ -272,11 +270,10 @@ impl RegistrationService {
 
     /// 验证邮箱验证码并完成正式注册。
     ///
-    /// 只有在验证码校验通过后，才会一次性写入正式用户、凭证、余额和推荐关系。
+    /// 只有在验证码校验通过后，才会一次性写入正式用户、凭证和推荐关系。
     pub async fn complete_registration(
         &self,
         req: &CompleteRegistrationRequest,
-        default_quota: f64,
     ) -> Result<CompleteRegistrationResponse> {
         let email = self.email_validator.normalize(&req.email);
         self.email_validator.validate(&email)?;
@@ -354,20 +351,8 @@ impl RegistrationService {
         let user = self
             .create_user_in_tx(&tx, &email, req.name.clone())
             .await?;
-        let tenant = self
-            .create_personal_tenant_in_tx(
-                &tx,
-                user.id,
-                req.name.as_deref().unwrap_or("Personal tenant"),
-            )
-            .await?;
         self.create_verified_credential_in_tx(&tx, user.id, &password_hash)
             .await?;
-
-        if default_quota > 0.0 {
-            self.initialize_user_balance_in_tx(&tx, user.id, tenant.id, default_quota)
-                .await?;
-        }
 
         self.create_referral_in_tx(&tx, user.id, pending.referral_code)
             .await?;
@@ -400,48 +385,14 @@ impl RegistrationService {
 
         tracing::info!(
             user_id = %user.id,
-            tenant_id = %tenant.id,
             email = %email,
             "User registration completed after code verification"
         );
 
         Ok(CompleteRegistrationResponse {
             user_id: user.id,
-            tenant_id: tenant.id,
             email,
             message: "注册成功，您现在可以登录了".to_string(),
-        })
-    }
-
-    async fn create_personal_tenant_in_tx(
-        &self,
-        tx: &DatabaseTransaction,
-        owner_user_id: Uuid,
-        label: &str,
-    ) -> Result<Tenant> {
-        let slug = format!("personal-{}", owner_user_id.simple());
-        let request = keycompute_db::CreateTenantRequest {
-            name: format!("{}'s tenant", label),
-            slug,
-            description: Some("Personal tenant".into()),
-            default_rpm_limit: None,
-            default_tpm_limit: None,
-        };
-        Tenant::create_owned(
-            tx,
-            &request,
-            owner_user_id,
-            &keycompute_db::AuditContext {
-                actor_user_id: owner_user_id,
-                credential_kind: keycompute_types::CredentialKind::System,
-                actor_platform_role: keycompute_types::PlatformRole::None,
-                actor_tenant_role: None,
-                request_id: None,
-            },
-        )
-        .await
-        .map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to create personal tenant: {e}"))
         })
     }
 
@@ -522,41 +473,6 @@ impl RegistrationService {
                 )
             })?;
         Ok(credential)
-    }
-
-    async fn initialize_user_balance_in_tx(
-        &self,
-        tx: &DatabaseTransaction,
-        user_id: Uuid,
-        tenant_id: Uuid,
-        initial_balance: f64,
-    ) -> Result<()> {
-        use rust_decimal::Decimal;
-
-        let amount = Decimal::from_f64_retain(initial_balance).unwrap_or(Decimal::ZERO);
-
-        let stmt1 = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"INSERT INTO user_balances (tenant_id, user_id, available_balance, total_recharged) VALUES ($1, $2, $3, $3) ON CONFLICT (tenant_id, user_id) DO UPDATE SET available_balance = user_balances.available_balance + $3, total_recharged = user_balances.total_recharged + $3, updated_at = NOW()"#,
-            [tenant_id.into(), user_id.into(), amount.into()],
-        );
-        tx.execute(stmt1).await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!("Failed to initialize balance: {}", e))
-        })?;
-
-        let stmt2 = Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"INSERT INTO balance_transactions (tenant_id, user_id, transaction_type, amount, balance_before, balance_after, description) VALUES ($1, $2, 'recharge', $3, 0, $3, 'Initial quota from system')"#,
-            [tenant_id.into(), user_id.into(), amount.into()],
-        );
-        tx.execute(stmt2).await.map_err(|e| {
-            KeyComputeError::DatabaseError(format!(
-                "Failed to record initial balance transaction: {}",
-                e
-            ))
-        })?;
-
-        Ok(())
     }
 
     async fn create_referral_in_tx(

@@ -123,7 +123,7 @@ impl PassthroughBinding {
         if !active || !account.enabled || !supported {
             return Err(DbError::Other("account and tenant must be active and the account must declare a supported native API capability".into()));
         }
-        // An authenticated system administrator is explicitly granting access;
+        // An authenticated platform administrator is explicitly granting access;
         // legacy account visibility is not a prerequisite for the new grant.
         Ok(account)
     }

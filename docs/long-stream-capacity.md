@@ -31,7 +31,7 @@ financial fencing in the service remain unchanged.
 ## Required comparison
 
 Use the separate-process TLS/AOF lab in `production-capacity-lab.md`. Hold the
-same users, model, request rate and stream length fixed. Compare default tenant
+same users, model, request rate and stream length fixed. Compare a single-tenant
 admission with a workload-matched tenant budget; then vary writer connections
 separately. For a 40 RPS / 5-second run use 256 client workers so the generator
 can represent the workload without imposing its own 128-request ceiling.
@@ -58,7 +58,7 @@ eight accounts and 256 bounded client workers:
 
 | Profile | Measured requests | Completed | Complete p99 | First-content p99 |
 | --- | ---: | ---: | ---: | ---: |
-| Default tenant 32, queue 128/16, 1000 ms; 20-second run | 800 | 543 | 6032 ms | 1510 ms |
+| Single tenant 32, queue 128/16, 1000 ms; 20-second run | 800 | 543 | 6032 ms | 1510 ms |
 | Tenant 63, queue 20/5, 500 ms, writer 10; 30-second run A | 1200 | 1200 | 5113 ms | 580 ms |
 | Same matched settings, fresh run B | 1200 | 1200 | 5098 ms | 564 ms |
 | Same matched settings, writer 20 | 1200 | 1200 | 5476 ms | 882 ms |

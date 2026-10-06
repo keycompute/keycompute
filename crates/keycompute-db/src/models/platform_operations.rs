@@ -1,24 +1,16 @@
 //! Explicit read-only platform operations. No business objects or secrets are projected.
 use crate::DbError;
 use chrono::{DateTime, Duration, Utc};
-use keycompute_types::{CredentialKind, PlatformRole, PlatformScope, TenantRole};
+use keycompute_types::{CredentialKind, PlatformRole, PlatformScope};
 use sea_orm::{ConnectionTrait, DbBackend, Statement, Value};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy)]
-pub struct OperationsMembership {
-    pub tenant_id: Uuid,
-    pub tenant_role: TenantRole,
-    pub tenant_authz_version: i64,
-    pub membership_authz_version: i64,
-}
-#[derive(Debug, Clone, Copy)]
 pub struct OperationsSession {
     pub credential_kind: CredentialKind,
     pub token_version: i32,
     pub expires_at: i64,
-    pub selected: Option<OperationsMembership>,
 }
 /// Read capability constructed from central platform authorization, checked again in SQL.
 #[derive(Debug, Clone, Copy)]
@@ -85,7 +77,10 @@ fn denied() -> DbError {
 fn invalid() -> DbError {
     DbError::Other("platform_operations_query_invalid".into())
 }
-const AUTHORITY: &str = "EXISTS(SELECT 1 FROM users ops_actor WHERE ops_actor.id=$1 AND ops_actor.platform_role=$2 AND ops_actor.platform_role IN ('root','operator') AND ops_actor.status='active' AND ops_actor.token_version=$3 AND clock_timestamp()<to_timestamp($4::double precision) AND ($5::uuid IS NULL OR EXISTS(SELECT 1 FROM tenant_memberships ops_member JOIN tenants ops_selected ON ops_selected.id=ops_member.tenant_id WHERE ops_member.user_id=$1 AND ops_member.tenant_id=$5 AND ops_member.status='active' AND ops_member.tenant_role=$6 AND ops_member.authz_version=$8 AND ops_selected.status='active' AND ops_selected.authz_version=$7)))";
+// Platform operations are deliberately global.  Tenant selection remains
+// meaningful for tenant-scoped business APIs, but it must not narrow the
+// bounded health/aggregate projection for a verified root or operator.
+const AUTHORITY: &str = "EXISTS(SELECT 1 FROM users ops_actor WHERE ops_actor.id=$1 AND ops_actor.platform_role=$2 AND ops_actor.platform_role IN ('root','operator') AND ops_actor.status='active' AND ops_actor.token_version=$3 AND clock_timestamp()<to_timestamp($4::double precision))";
 const HEALTH: &str = "t.id AS tenant_id,t.name,t.slug,t.status,t.default_rpm_limit,t.default_tpm_limit,
 (SELECT COUNT(*)::bigint FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=t.id AND m.status='active' AND u.status='active') AS active_members,
 (SELECT COUNT(*)::bigint FROM tenant_memberships m JOIN users u ON u.id=m.user_id WHERE m.tenant_id=t.id AND m.status='active' AND m.tenant_role='admin' AND u.status='active') AS active_admins,
@@ -106,27 +101,17 @@ impl PlatformOperationsScope {
             || session.credential_kind != CredentialKind::Jwt
             || session.token_version < 0
             || session.expires_at <= Utc::now().timestamp()
-            || session.selected.is_some_and(|m| {
-                m.tenant_id.is_nil()
-                    || m.tenant_authz_version <= 0
-                    || m.membership_authz_version <= 0
-            })
         {
             return Err(denied());
         }
         Ok(Self { platform, session })
     }
     fn values(self) -> Vec<Value> {
-        let member = self.session.selected;
         vec![
             self.platform.user_id().into(),
             self.platform.platform_role().as_str().into(),
             self.session.token_version.into(),
             self.session.expires_at.into(),
-            member.map(|m| m.tenant_id).into(),
-            member.map(|m| m.tenant_role.as_str()).into(),
-            member.map(|m| m.tenant_authz_version).into(),
-            member.map(|m| m.membership_authz_version).into(),
         ]
     }
     /// Primary validation for in-process diagnostics, without global locks or cached authority.
@@ -171,7 +156,7 @@ impl PlatformOperationsScope {
             query.offset.into(),
         ]);
         let sql = format!(
-            "WITH authority AS MATERIALIZED (SELECT 1 AS granted WHERE {AUTHORITY}), visible AS MATERIALIZED (SELECT t.id,t.name,t.slug,t.status,t.default_rpm_limit,t.default_tpm_limit,t.created_at FROM tenants t CROSS JOIN authority WHERE ($9='' OR strpos(lower(t.name),lower($9))>0 OR strpos(lower(t.slug),lower($9))>0) AND ($10::text IS NULL OR t.status=$10)), selected AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $11 OFFSET $12), health AS (SELECT {HEALTH},t.created_at FROM selected t) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(h)-'created_at' ORDER BY h.created_at DESC,h.tenant_id DESC),'[]'::jsonb) FROM health h) AS items,statement_timestamp() AS as_of FROM authority"
+            "WITH authority AS MATERIALIZED (SELECT 1 AS granted WHERE {AUTHORITY}), visible AS MATERIALIZED (SELECT t.id,t.name,t.slug,t.status,t.default_rpm_limit,t.default_tpm_limit,t.created_at FROM tenants t CROSS JOIN authority WHERE ($5='' OR strpos(lower(t.name),lower($5))>0 OR strpos(lower(t.slug),lower($5))>0) AND ($6::text IS NULL OR t.status=$6)), selected AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $7 OFFSET $8), health AS (SELECT {HEALTH},t.created_at FROM selected t) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(h)-'created_at' ORDER BY h.created_at DESC,h.tenant_id DESC),'[]'::jsonb) FROM health h) AS items,statement_timestamp() AS as_of FROM authority"
         );
         let row = db
             .query_one(Statement::from_sql_and_values(
@@ -201,7 +186,7 @@ impl PlatformOperationsScope {
         let mut values = self.values();
         values.push(tenant.into());
         let sql = format!(
-            "WITH authority AS MATERIALIZED (SELECT 1 WHERE {AUTHORITY}), health AS (SELECT {HEALTH} FROM tenants t CROSS JOIN authority WHERE t.id=$9) SELECT (SELECT to_jsonb(h) FROM health h) AS item FROM authority"
+            "WITH authority AS MATERIALIZED (SELECT 1 WHERE {AUTHORITY}), health AS (SELECT {HEALTH} FROM tenants t CROSS JOIN authority WHERE t.id=$5) SELECT (SELECT to_jsonb(h) FROM health h) AS item FROM authority"
         );
         let row = db
             .query_one(Statement::from_sql_and_values(
@@ -235,13 +220,13 @@ impl PlatformOperationsScope {
                 }
                 values.push(id.into());
                 (
-                    "u.tenant_id=$11",
-                    "EXISTS(SELECT 1 FROM tenants WHERE id=$11)",
+                    "u.tenant_id=$7",
+                    "EXISTS(SELECT 1 FROM tenants WHERE id=$7)",
                 )
             }
         };
         let sql = format!(
-            "WITH authority AS MATERIALIZED (SELECT 1 WHERE {AUTHORITY}), aggregate AS (SELECT u.currency,COUNT(*)::bigint AS requests,COUNT(*) FILTER(WHERE u.status='success')::bigint AS successful_requests,COALESCE(SUM(u.total_tokens::numeric),0)::text AS total_tokens,COALESCE(SUM(u.user_amount),0)::text AS billed_amount FROM usage_logs u CROSS JOIN authority WHERE u.created_at >= $9 AND u.created_at < $10 AND {tenant_filter} GROUP BY u.currency) SELECT {existence} AS target_exists,(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.currency),'[]'::jsonb) FROM aggregate a) AS currencies,statement_timestamp() AS as_of FROM authority"
+            "WITH authority AS MATERIALIZED (SELECT 1 WHERE {AUTHORITY}), aggregate AS (SELECT u.currency,COUNT(*)::bigint AS requests,COUNT(*) FILTER(WHERE u.status='success')::bigint AS successful_requests,COALESCE(SUM(u.total_tokens::numeric),0)::text AS total_tokens,COALESCE(SUM(u.user_amount),0)::text AS billed_amount FROM usage_logs u CROSS JOIN authority WHERE u.created_at >= $5 AND u.created_at < $6 AND {tenant_filter} GROUP BY u.currency) SELECT {existence} AS target_exists,(SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY a.currency),'[]'::jsonb) FROM aggregate a) AS currencies,statement_timestamp() AS as_of FROM authority"
         );
         let row = db
             .query_one(Statement::from_sql_and_values(

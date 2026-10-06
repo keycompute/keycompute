@@ -159,7 +159,9 @@ const TENANT_ACCOUNT_LOCK_SQL: &str =
 
 impl Tenant {
     /// Create an organization and its owner membership in one transaction.
-    /// System credentials are only accepted for self-owned bootstrap/registration.
+    /// Platform/system credentials are only accepted for an explicit self-owned tenant
+    /// provisioning operation.  Registration and server startup never call
+    /// this method implicitly.
     pub async fn create_owned(
         tx: &DatabaseTransaction,
         req: &CreateTenantRequest,
@@ -167,15 +169,18 @@ impl Tenant {
         actor: &AuditContext,
     ) -> Result<Tenant, DbError> {
         lock_identity_admin(tx).await?;
+        let slug = req.slug.trim();
         if owner_user_id.is_nil()
             || req.name.trim().is_empty()
             || req.name.len() > 255
-            || req.slug.is_empty()
-            || req.slug.len() > 100
-            || !req
-                .slug
+            || slug.is_empty()
+            || slug.len() > 100
+            || slug != req.slug
+            || !slug
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || slug.starts_with('-')
+            || slug.ends_with('-')
             || req.default_rpm_limit.is_some_and(|limit| limit < 0)
             || req.default_tpm_limit.is_some_and(|limit| limit < 0)
         {
@@ -207,7 +212,7 @@ impl Tenant {
         let tenant = Self::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "INSERT INTO tenants(owner_user_id,name,slug,description,default_rpm_limit,default_tpm_limit) VALUES($1,$2,$3,$4,COALESCE($5,60),COALESCE($6,100000)) RETURNING *",
-            [owner_user_id.into(), req.name.trim().into(), req.slug.as_str().into(),
+            [owner_user_id.into(), req.name.trim().into(), slug.into(),
                 req.description.clone().into(), req.default_rpm_limit.into(), req.default_tpm_limit.into()],
         )).one(tx).await?.ok_or_else(|| DbError::Other("tenant insert returned no row".into()))?;
         tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,

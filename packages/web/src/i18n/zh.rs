@@ -876,17 +876,12 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.basic_title", "基础配置");
     m.insert(
         "settings.basic_desc",
-        "定义平台名称、新用户赠送额度和充值基础参数。界面刻意保持窄栏，避免输入区在宽屏下失控铺开。",
+        "定义平台名称和充值基础参数。界面刻意保持窄栏，避免输入区在宽屏下失控铺开。",
     );
     m.insert("settings.site_name_label", "平台名称");
     m.insert(
         "settings.site_name_desc",
         "显示在登录页、后台导航和邮件模板中的平台名称。",
-    );
-    m.insert("settings.default_user_quota_label", "新用户默认赠送额度");
-    m.insert(
-        "settings.default_user_quota_desc",
-        "运行时按此值决定新用户注册赠送额度；只有大于 0 才会赠送，0 或负数表示不赠送。",
     );
     m.insert("settings.default_currency_label", "默认货币");
     m.insert(
@@ -929,7 +924,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.distribution_title", "分销开关");
     m.insert(
         "settings.distribution_desc",
-        "分销功能只保留一个全局开关，由 system 角色统一控制。",
+        "分销功能只保留一个全局开关，由平台 root 角色统一控制。",
     );
     m.insert("settings.distribution_enabled_label", "启用分销功能");
     m.insert(
@@ -938,7 +933,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "settings.distribution_enabled_system_only_desc",
-        "当前状态仅供查看。只有 system 角色可以在后台修改分销开关。",
+        "当前状态仅供查看。只有平台 root 角色可以在后台修改分销开关。",
     );
 
     // ── Pricing ─────────────────────────────────
@@ -1479,7 +1474,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("users.delete_self_forbidden", "不能删除自己的账户");
     m.insert(
         "users.delete_admin_forbidden",
-        "仅 system 角色可删除管理员用户",
+        "仅平台 root 角色可删除管理员用户",
     );
     m.insert("users.edit_title", "编辑用户");
     m.insert(
@@ -1582,7 +1577,10 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "users.balance_idempotency_cleanup_failed",
         "余额操作已在服务端完成，但无法安全保存完成标记；请保留当前页面并重试，系统会复用原重试标识",
     );
-    m.insert("users.cannot_modify_system", "仅 system 角色可操作系统用户");
+    m.insert(
+        "users.cannot_modify_platform",
+        "仅平台 root 角色可操作平台用户",
+    );
     m.insert("tenants.subtitle", "查看和管理平台所有租户信息");
     m.insert("tenants.search_placeholder", "搜索租户名称或 ID...");
     m.insert("tenants.empty", "暂无租户数据");
@@ -1621,7 +1619,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution_records.rules_title", "分销规则（只读）");
     m.insert(
         "distribution_records.rules_hint",
-        "分销规则由平台运营方统一配置，如需调整请联系系统管理员。",
+        "分销规则由平台运营方统一配置，如需调整请联系平台管理员。",
     );
     m.insert("distribution_records.no_rules", "当前无分销规则");
     m.insert("distribution_records.rule_name", "规则名称");

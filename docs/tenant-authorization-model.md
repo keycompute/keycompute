@@ -19,6 +19,21 @@ The migration is a hard cutover. There is no runtime compatibility path for the 
 
 A tenant role never grants a platform role. A platform role never silently grants access to private tenant data.
 
+## Registration and membership lifecycle
+
+Registration creates a global user identity, verified credential and optional
+referral relation. It does not create a tenant, membership, balance or initial
+credit. A newly registered user therefore has `platform_role = none`, no active
+tenant memberships and a valid global console session.
+
+Tenant membership is added explicitly by tenant administration or by accepting a
+single-use invitation addressed to the user's verified email. Accepting an
+invitation adds or reactivates that tenant membership; it does not remove any
+other active membership. Users may belong to multiple tenants and select one
+verified membership for tenant-scoped APIs, or clear the selection to return to a
+global identity. The selected tenant is a request context, not the user's global
+ownership or platform role.
+
 ## Resource ownership contract
 
 Every resource is classified as one of:

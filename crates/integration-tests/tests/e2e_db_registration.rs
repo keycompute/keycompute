@@ -130,14 +130,14 @@ mod tests {
         assert_eq!(pending.requested_from_ip.as_deref(), Some("127.0.0.1"));
     }
 
-    /// 测试 default_user_quota 小于等于 0 时，不会赠送初始额度
+    /// 注册只创建用户身份，不隐式创建租户或初始余额。
     #[tokio::test]
-    async fn test_complete_registration_skips_initial_balance_when_default_quota_not_positive() {
+    async fn test_complete_registration_does_not_create_tenant_or_initial_balance() {
         let pool = create_test_pool().await;
         let test_id = generate_test_id();
         cleanup_test_data(&pool, &test_id)
             .await
-            .expect("registration quota cleanup should succeed");
+            .expect("registration cleanup should succeed");
 
         let email = format!("registration-no-quota-{}@example.com", test_id);
         delete_user_by_email(&pool, &email)
@@ -164,19 +164,58 @@ mod tests {
 
         let service = RegistrationService::new(DbRouter::single(pool.clone()));
         let response = service
-            .complete_registration(
-                &keycompute_auth::CompleteRegistrationRequest {
-                    email: email.clone(),
-                    code: code.to_string(),
-                    password: "StrongPassword123!".to_string(),
-                    name: Some("No Quota User".to_string()),
-                },
-                0.0,
-            )
+            .complete_registration(&keycompute_auth::CompleteRegistrationRequest {
+                email: email.clone(),
+                code: code.to_string(),
+                password: "StrongPassword123!".to_string(),
+                name: Some("No Tenant User".to_string()),
+            })
             .await
-            .expect("registration should succeed without initial quota");
+            .expect("registration should succeed without tenant provisioning");
 
-        let balance_count: i64 = pool
+        let tenant_row = pool
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT COUNT(*) FROM tenants WHERE owner_user_id = $1",
+                [response.user_id.into()],
+            ))
+            .await
+            .expect("tenant count query should succeed")
+            .expect("tenant count query should return a row");
+        let tenant_count = tenant_row
+            .try_get_by_index::<i64>(0)
+            .expect("tenant count should decode");
+        assert_eq!(tenant_count, 0);
+
+        let membership_row = pool
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT COUNT(*) FROM tenant_memberships WHERE user_id = $1",
+                [response.user_id.into()],
+            ))
+            .await
+            .expect("membership count query should succeed")
+            .expect("membership count query should return a row");
+        let membership_count = membership_row
+            .try_get_by_index::<i64>(0)
+            .expect("membership count should decode");
+        assert_eq!(membership_count, 0);
+
+        let user_row = pool
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT platform_role FROM users WHERE id = $1",
+                [response.user_id.into()],
+            ))
+            .await
+            .expect("registered user query should succeed")
+            .expect("registered user query should return a row");
+        let platform_role: String = user_row
+            .try_get_by_index(0)
+            .expect("registered platform role should decode");
+        assert_eq!(platform_role, "none");
+
+        let balance_row = pool
             .query_one(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "SELECT COUNT(*) FROM user_balances WHERE user_id = $1",
@@ -184,15 +223,19 @@ mod tests {
             ))
             .await
             .expect("balance count query should succeed")
-            .and_then(|r| r.try_get_by_index::<i64>(0).ok())
-            .unwrap_or(0);
+            .expect("balance count query should return a row");
+        let balance_count = balance_row
+            .try_get_by_index::<i64>(0)
+            .expect("balance count should decode");
         assert_eq!(balance_count, 0);
 
-        let transaction_count: i64 = pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT COUNT(*) FROM balance_transactions WHERE user_id = $1 AND description = 'Initial quota from system'", [response.user_id.into()]))
+        let transaction_row = pool.query_one(Statement::from_sql_and_values(DbBackend::Postgres, "SELECT COUNT(*) FROM balance_transactions WHERE user_id = $1 AND transaction_type = 'recharge'", [response.user_id.into()]))
             .await
             .expect("transaction count query should succeed")
-            .and_then(|r| r.try_get_by_index::<i64>(0).ok())
-            .unwrap_or(0);
+            .expect("transaction count query should return a row");
+        let transaction_count = transaction_row
+            .try_get_by_index::<i64>(0)
+            .expect("transaction count should decode");
         assert_eq!(transaction_count, 0);
 
         delete_user_by_email(&pool, &email)

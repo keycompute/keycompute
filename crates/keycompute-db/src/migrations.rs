@@ -418,6 +418,10 @@ mod tests {
         assert!(!sql.contains("tenant_id UUID NOT NULL REFERENCES users"));
         assert!(!sql.contains("ALTER TABLE"));
         assert!(!sql.contains("00000000-0000-0000-0000-000000000000' AS tenant_id"));
+        assert!(!sql.contains("default_user_quota"));
+        assert!(!sql.contains("default_user_role"));
+        assert!(!sql.contains("slug,'default'"));
+        assert!(!sql.contains("slug='system'"));
     }
 
     #[test]
@@ -427,6 +431,8 @@ mod tests {
             "responses_idempotency_claim_count BIGINT NOT NULL DEFAULT 0",
             "CONSTRAINT ck_tenants_responses_idempotency_claim_count",
             "CONSTRAINT ck_tenants_status CHECK",
+            "CONSTRAINT ck_tenants_slug_format CHECK",
+            "('distribution_enabled', 'false', 'bool'",
             "CREATE TABLE IF NOT EXISTS gateway_request_attempts",
             "last_probe_at TIMESTAMPTZ",
             "last_probe_latency_ms BIGINT",

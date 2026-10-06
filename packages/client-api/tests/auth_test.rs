@@ -113,7 +113,6 @@ async fn test_complete_registration_success() {
         .and(body_json(&expected_body))
         .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
             "user_id": "user_new_001",
-            "tenant_id": "tenant_001",
             "email": "new@example.com",
             "message": "注册成功，您现在可以登录了"
         })))

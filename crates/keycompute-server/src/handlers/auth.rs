@@ -168,27 +168,10 @@ pub async fn complete_registration_handler(
     State(state): State<AppState>,
     Json(req): Json<CompleteRegistrationRequestJson>,
 ) -> Result<impl IntoResponse> {
-    use keycompute_db::models::system_setting::setting_keys;
-
     let pool = state
         .pool
         .as_ref()
         .ok_or_else(|| ApiError::Internal("Database not configured".into()))?;
-    let default_quota_setting =
-        keycompute_db::SystemSetting::find_by_key(pool.as_ref(), setting_keys::DEFAULT_USER_QUOTA)
-            .await
-            .map_err(|e| ApiError::Internal(format!("Failed to query default user quota: {}", e)))?
-            .ok_or_else(|| {
-                ApiError::Config("Missing system setting: default_user_quota".to_string())
-            })?;
-    let default_quota = default_quota_setting.parse_decimal().map_err(|e| {
-        ApiError::Config(format!("Invalid system setting default_user_quota: {}", e))
-    })?;
-    if !default_quota.is_finite() {
-        return Err(ApiError::Config(
-            "Invalid system setting default_user_quota: value must be finite".to_string(),
-        ));
-    }
 
     let complete_req = CompleteRegistrationRequest {
         email: req.email,
@@ -200,7 +183,7 @@ pub async fn complete_registration_handler(
     let service = RegistrationService::new(Arc::clone(pool))
         .with_email_service((*state.email_service).clone());
     let response = service
-        .complete_registration(&complete_req, default_quota)
+        .complete_registration(&complete_req)
         .await
         .map_err(ApiError::from)?;
 
@@ -208,7 +191,6 @@ pub async fn complete_registration_handler(
         StatusCode::CREATED,
         Json(serde_json::json!({
             "user_id": response.user_id.to_string(),
-            "tenant_id": response.tenant_id.to_string(),
             "email": response.email,
             "message": response.message
         })),

@@ -997,8 +997,8 @@ remain open; this does not close the complete tenant subsystem.
 ## Current phases 3/6 — global settings and earnings policy accepted
 
 The baseline was `b833c42` with a clean main checkout; prior CI123 was confirmed
-successful separately. Global configuration belongs to the platform, not the
-default tenant. A current root console identity without any selected membership
+successful separately. Global configuration belongs to the platform, not a
+tenant. A current root console identity without any selected membership
 can use canonical platform settings and earnings-ratio routes. Operator, ordinary
 member and tenant-admin roles cannot obtain platform settings authority, including
 when a handler is mounted without the outer platform middleware.
@@ -1030,7 +1030,8 @@ A real PostgreSQL regression exposed the old settings timestamp trigger overridi
 the new monotonic revision. The conflicting legacy function/trigger was removed
 from greenfield001; the single remaining identity/version guard handles runtime
 writers and no-ops. Repeated startup seed inserts are safe and do not recreate
-`default_user_role`. No incremental schema/compatibility migration was added.
+user privilege state; new users always start with the fixed global
+`platform_role = 'none'` value. No incremental schema/compatibility migration was added.
 
 Final default-parallel native workspace: **2,627 passed, 0 failed, 30 original
 default ignored**, including desktop/mobile. All-target check, strict all-target/
@@ -1048,17 +1049,16 @@ platform routing, native resource adaptation and release gates remain separate.
 Baseline `c6e095e` global settings was committed before integrating this slice.
 Five canonical GET-only platform operations routes expose tenant health metadata,
 platform/named-tenant usage aggregates, and safe process-capacity diagnostics.
-Root and operator can use a global console session without default-tenant or
-other-target membership. This does not authorize tenant membership routes, raw
+Root and operator can use a global console session without joining any target
+tenant. This does not authorize tenant membership routes, raw
 monitoring traces, individual orders/wallets, secrets, Responses bodies or any
 business write. It does not claim completion of all platform lifecycle endpoints.
 
-Typed PlatformOperationsScope carries the actual platform role, original JWT
-version/expiry and any selected membership's role and authorization versions.
-Every DAO query rechecks that current state on the primary. A selected-member
-revocation invalidates that selected context; an independently valid global
-operator session retains its platform capability. User revocation/demotion or
-expiry invalidates both. Read queries take no identity write fence or row locks.
+Typed PlatformOperationsScope carries the actual platform role and original JWT
+version/expiry. Every DAO query rechecks that current state on the primary;
+selected tenant membership is not part of this bounded platform read authority.
+User revocation/demotion or expiry invalidates the scope. Read queries take no
+identity write fence or row locks.
 
 Tenant list and total are one authorized SQL snapshot with literal substring
 search, stable paging and fixed safe fields. No owner identifiers, emails,
@@ -1107,8 +1107,9 @@ security changes or tenant/membership deletion, even after an outer catch/commit
 A valid self-demotion or selected-tenant state change intentionally invalidates its
 own old JWT: the authorized operation completes while rows are held, then later
 requests fail. Final wall-clock expiry after a target-row wait still rolls back.
-The existing default-tenant destructive-operation guard is preserved, not treated
-as payment/config ownership. No platform secret or resource owner is transferred.
+No tenant has platform identity semantics, so no tenant-specific destructive
+operation receives an implicit platform exemption. No platform secret or resource
+owner is transferred.
 
 Review found the old create-tenant SDK omitted the required owner_user_id. It now
 requires a real UUID in constructor/request, rejects nil before HTTP, and keeps
@@ -1267,7 +1268,7 @@ the newly selected tenant. Session comparisons include selected-tenant identity.
 Review caught a restored-browser no-op bug: an opaque stored token may not yet
 have a local selected_tenant_id even though the loaded server profile does.
 The profile is the source for the no-op comparison, so global selection remains
-possible. No default tenant is invented and no server authorization is inferred.
+possible. No tenant is invented and no server authorization is inferred.
 
 Eight added regressions cover subject/tenant mismatch, nil identifiers, empty
 credentials, refresh/selection races, stale callbacks, global selection and
@@ -1370,7 +1371,7 @@ Workspace configuration, member role/status/removal, ownership transfer, invitat
 create/list/revoke/accept and audit pagination use the already-verified SDK. Writes
 are single-dispatch with displayed revisions where required. Original selected
 user/tenant, UI epoch and authorization versions fence asynchronous results. Global
-selection never invents a default tenant; restored profiles remain authoritative.
+selection never invents a tenant; restored profiles remain authoritative.
 
 Browser review reproduced dirty A-form state under B. Page-local keyed fragments,
 not a key on a single static component, now remount all private form/dialog/link

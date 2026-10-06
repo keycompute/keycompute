@@ -1,4 +1,4 @@
-//! Root-only platform settings. Global means platform-owned, not default-tenant-owned.
+//! Root-only platform settings. Global means platform-owned, not tenant-owned.
 use super::{SystemSetting, setting_keys as keys};
 use crate::{AuditContext, DbError, TenantAuditEvent, models::financial_scope::FinancialScope};
 use keycompute_types::{AuditResult, AuditScopeType};
@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 pub struct SettingsPolicy {
     pub public_base_url_configured: bool,
 }
-const VISIBLE: &str = "key NOT IN ('default_user_role','allow_registration','registration_mode','email_verification_required')";
+const VISIBLE: &str = "TRUE";
 fn invalid(message: impl Into<String>) -> DbError {
     DbError::Other(message.into())
 }
@@ -38,7 +38,6 @@ const SETTING_DEFINITIONS: &[(&str, &str)] = &[
     (keys::LOGIN_FAILED_LIMIT, "int"),
     (keys::LOGIN_LOCKOUT_MINUTES, "int"),
     (keys::JWT_EXPIRE_HOURS, "int"),
-    (keys::DEFAULT_USER_QUOTA, "decimal"),
     (keys::MIN_RECHARGE_AMOUNT, "decimal"),
     (keys::MAX_RECHARGE_AMOUNT, "decimal"),
     (keys::DISTRIBUTION_LEVEL1_DEFAULT_RATIO, "decimal"),
@@ -67,19 +66,6 @@ fn safe_projection() -> String {
 
 /// Shared validation for HTTP and direct DAO callers; no arbitrary setting creation.
 pub fn normalize_platform_setting(key: &str, input: &str) -> Result<String, DbError> {
-    if key == keys::DEFAULT_USER_ROLE {
-        return Err(invalid(
-            "Setting default_user_role is fixed and cannot be edited",
-        ));
-    }
-    if matches!(
-        key,
-        "allow_registration" | "registration_mode" | "email_verification_required"
-    ) {
-        return Err(invalid(
-            "Setting has been removed and can no longer be edited",
-        ));
-    }
     if key == keys::NODE_TIP_RATIO {
         return Err(invalid(
             "Setting node_tip_ratio requires the versioned platform ratio endpoint",
@@ -118,11 +104,6 @@ pub fn normalize_platform_setting(key: &str, input: &str) -> Result<String, DbEr
                 .map_err(|_| invalid(format!("Setting {key} must be a valid decimal")))?
                 .normalize();
             let (max, scale, allow_nonpositive) = match key {
-                keys::DEFAULT_USER_QUOTA => (
-                    Decimal::from_i128_with_scale(99_999_999_999_999_999_999, 10),
-                    10,
-                    true,
-                ),
                 keys::DISTRIBUTION_LEVEL1_DEFAULT_RATIO
                 | keys::DISTRIBUTION_LEVEL2_DEFAULT_RATIO => (Decimal::ONE, 4, true),
                 _ => (Decimal::new(999_999_999_999, 2), 2, false),

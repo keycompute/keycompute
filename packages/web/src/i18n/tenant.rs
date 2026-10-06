@@ -23,6 +23,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "全局身份（未选择租户）",
         "Global identity (no tenant selected)",
     ),
+    (
+        "tenant.no_memberships",
+        "当前账号尚未加入任何租户。请使用租户邀请加入，接受后可在此切换工作区。",
+        "This account has not joined a tenant yet. Accept a tenant invitation, then switch to the workspace here.",
+    ),
     ("tenant.switch", "切换工作区", "Switch workspace"),
     ("tenant.config", "租户配置", "Tenant configuration"),
     ("tenant.owner", "拥有者", "Owner"),

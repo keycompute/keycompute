@@ -13,8 +13,7 @@ use integration_tests::{
 use keycompute_db::{
     CreateProduceAiKeyRequest, CreateUsageLogRequest, DbRouter, UsageLog, User,
     models::platform_operations::{
-        OperationsMembership, OperationsSession, OperationsTarget, PlatformOperationsScope,
-        TenantHealthQuery,
+        OperationsSession, OperationsTarget, PlatformOperationsScope, TenantHealthQuery,
     },
 };
 use keycompute_server::{AppState, create_router};
@@ -95,31 +94,12 @@ impl Fixture {
     fn state(&self) -> AppState {
         AppState::with_pool(DbRouter::single(self.db.clone()))
     }
-    async fn session(&self, id: Uuid, selected: bool) -> OperationsSession {
+    async fn session(&self, id: Uuid, _selected: bool) -> OperationsSession {
         let user = User::find_by_id(&self.db, id).await.unwrap().unwrap();
-        let member = if selected {
-            let t = keycompute_db::Tenant::find_by_id(&self.db, self.a)
-                .await
-                .unwrap()
-                .unwrap();
-            let m = keycompute_db::TenantMembership::find(&self.db, self.a, id)
-                .await
-                .unwrap()
-                .unwrap();
-            Some(OperationsMembership {
-                tenant_id: t.id,
-                tenant_role: m.tenant_role().unwrap(),
-                tenant_authz_version: t.authz_version,
-                membership_authz_version: m.authz_version,
-            })
-        } else {
-            None
-        };
         OperationsSession {
             credential_kind: CredentialKind::Jwt,
             token_version: user.token_version,
             expires_at: Utc::now().timestamp() + 3600,
-            selected: member,
         }
     }
     async fn scope(&self, id: Uuid, role: PlatformRole, selected: bool) -> PlatformOperationsScope {
@@ -130,17 +110,30 @@ impl Fixture {
         .unwrap()
     }
     async fn token(&self, state: &AppState, id: Uuid, selected: bool) -> String {
-        let session = self.session(id, selected).await;
+        let user = User::find_by_id(&self.db, id).await.unwrap().unwrap();
+        let selected = if selected {
+            let tenant = keycompute_db::Tenant::find_by_id(&self.db, self.a)
+                .await
+                .unwrap()
+                .unwrap();
+            let member = keycompute_db::TenantMembership::find(&self.db, self.a, id)
+                .await
+                .unwrap()
+                .unwrap();
+            Some((tenant.id, tenant.authz_version, member.authz_version))
+        } else {
+            None
+        };
         state
             .auth
             .get_jwt_validator()
             .unwrap()
             .generate_identity_token(
                 id,
-                session.selected.map(|m| m.tenant_id),
-                session.token_version,
-                session.selected.map(|m| m.tenant_authz_version),
-                session.selected.map(|m| m.membership_authz_version),
+                selected.map(|m| m.0),
+                user.token_version,
+                selected.map(|m| m.1),
+                selected.map(|m| m.2),
                 3600,
             )
             .unwrap()
@@ -262,6 +255,7 @@ async fn operator_global_identity_reads_explicit_tenant_health_without_membershi
         let state = f.state();
         let app = create_router(state.clone());
         let op = f.token(&state, f.operator, false).await;
+        let selected_op = f.token(&state, f.operator, true).await;
         let root = f.token(&state, f.root, false).await;
         let admin = f.token(&state, f.admin, true).await;
         let member = f.token(&state, f.user, true).await;
@@ -271,7 +265,7 @@ async fn operator_global_identity_reads_explicit_tenant_health_without_membershi
             "/api/v1/platform/operations/usage".to_owned(),
             "/api/v1/platform/operations/capacity".to_owned(),
         ] {
-            for token in [&op, &root] {
+            for token in [&op, &selected_op, &root] {
                 let r = call(app.clone(), "GET", &target, token).await;
                 assert_eq!(r.0, StatusCode::OK, "{target} {}", r.1);
                 assert!(r.2["cache-control"].to_str().unwrap().contains("no-store"));
@@ -542,7 +536,9 @@ async fn forged_or_stale_operational_scopes_cannot_authorize_live_reads() {
                 .is_err()
             );
         }
-        let scoped = f.scope(f.operator, PlatformRole::Operator, true).await;
+        // A selected tenant in the console must not narrow the global
+        // platform-operations projection.
+        let selected = f.scope(f.operator, PlatformRole::Operator, true).await;
         let global = f.scope(f.operator, PlatformRole::Operator, false).await;
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -551,7 +547,7 @@ async fn forged_or_stale_operational_scopes_cannot_authorize_live_reads() {
         ))
         .await
         .unwrap();
-        assert!(scoped.tenants(&f.db, &query).await.is_err());
+        assert!(selected.tenants(&f.db, &query).await.is_ok());
         assert!(global.tenants(&f.db, &query).await.is_ok());
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -588,7 +584,7 @@ async fn inactive_target_is_visible_operationally_but_invalid_dates_and_targets_
         .await
         .unwrap();
         assert_eq!(global.tenant(&f.db, f.a).await.unwrap().status, "inactive");
-        assert!(selected.tenant(&f.db, f.b).await.is_err());
+        assert!(selected.tenant(&f.db, f.b).await.is_ok());
         let now = Utc::now();
         assert!(
             global

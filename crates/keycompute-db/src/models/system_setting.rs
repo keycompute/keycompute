@@ -64,10 +64,6 @@ pub mod setting_keys {
     pub const SITE_LOGO_URL: &str = "site_logo_url";
     pub const SITE_FAVICON_URL: &str = "site_favicon_url";
 
-    // 注册设置
-    pub const DEFAULT_USER_QUOTA: &str = "default_user_quota";
-    pub const DEFAULT_USER_ROLE: &str = "default_user_role";
-
     // 限流设置
     pub const DEFAULT_RPM_LIMIT: &str = "default_rpm_limit";
     pub const DEFAULT_TPM_LIMIT: &str = "default_tpm_limit";
@@ -266,7 +262,6 @@ impl SystemSetting {
         let defaults = vec![
             (setting_keys::SITE_NAME, "KeyCompute", "string"),
             (setting_keys::SITE_DESCRIPTION, "AI 模型聚合平台", "string"),
-            (setting_keys::DEFAULT_USER_QUOTA, "10.00", "decimal"),
             (setting_keys::DEFAULT_RPM_LIMIT, "60", "int"),
             (setting_keys::DEFAULT_TPM_LIMIT, "10000", "int"),
             (setting_keys::MAINTENANCE_MODE, "false", "bool"),
@@ -347,9 +342,9 @@ impl SystemSetting {
 
     /// Ensure distribution cannot remain enabled without a public application URL.
     ///
-    /// The baseline historically seeds distribution as enabled. Keep that
-    /// migration immutable, but atomically disable (or create) the setting when
-    /// the current deployment has no URL from which referral links can be built.
+    /// Atomically disable (or create) the setting when the current deployment
+    /// has no URL from which referral links can be built. Fresh deployments
+    /// start disabled and require an explicit administrator enablement.
     /// Returns `true` when the database row was inserted or changed.
     pub async fn reconcile_distribution_public_url(
         db: &impl ConnectionTrait,

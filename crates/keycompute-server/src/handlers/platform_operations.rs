@@ -13,8 +13,8 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use keycompute_auth::AuthorizationAction;
 use keycompute_db::models::platform_operations::{
-    OperationsMembership, OperationsSession, OperationsTarget, PlatformOperationsScope,
-    TenantHealth, TenantHealthPage, TenantHealthQuery, UsageOperations,
+    OperationsSession, OperationsTarget, PlatformOperationsScope, TenantHealth, TenantHealthPage,
+    TenantHealthQuery, UsageOperations,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -59,23 +59,10 @@ fn db(state: &AppState) -> Result<&sea_orm::DatabaseConnection> {
 }
 fn scope(auth: &GlobalConsoleAuth, action: AuthorizationAction) -> Result<PlatformOperationsScope> {
     let platform = auth.require_platform(action)?;
-    let selected = auth
-        .selected_tenant_id
-        .map(|tenant_id| {
-            Ok::<_, ApiError>(OperationsMembership {
-                tenant_id,
-                tenant_role: auth
-                    .tenant_role
-                    .ok_or_else(|| ApiError::Forbidden("Current membership required".into()))?,
-                tenant_authz_version: auth
-                    .authz_version
-                    .ok_or_else(|| ApiError::Forbidden("Current tenant version required".into()))?,
-                membership_authz_version: auth.membership_authz_version.ok_or_else(|| {
-                    ApiError::Forbidden("Current membership version required".into())
-                })?,
-            })
-        })
-        .transpose()?;
+    // Platform operations are a global, bounded projection.  Do not copy the
+    // optional tenant selection into this scope; doing so would make the same
+    // root/operator identity return different tenant inventories depending on
+    // which workspace happened to be selected in the console.
     PlatformOperationsScope::checked(
         platform,
         OperationsSession {
@@ -84,7 +71,6 @@ fn scope(auth: &GlobalConsoleAuth, action: AuthorizationAction) -> Result<Platfo
             expires_at: auth
                 .credential_expires_at
                 .ok_or_else(|| ApiError::Auth("Expiring console session required".into()))?,
-            selected,
         },
     )
     .map_err(map_error)

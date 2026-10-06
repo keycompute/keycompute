@@ -73,8 +73,7 @@ async fn test_update_system_settings_requires_admin() {
         .header("Content-Type", "application/json")
         .body(Body::from(
             json!({
-                "site_name": "Test Site",
-                "default_user_quota": 0
+                "site_name": "Test Site"
             })
             .to_string(),
         ))

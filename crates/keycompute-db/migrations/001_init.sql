@@ -41,7 +41,13 @@ CREATE TABLE IF NOT EXISTS tenants (
     ),
     CONSTRAINT ck_tenants_status CHECK (status IN ('active', 'inactive')),
     CONSTRAINT ck_tenants_limits CHECK (default_rpm_limit >= 0 AND default_tpm_limit >= 0),
-    CONSTRAINT ck_tenants_real_id CHECK (id <> '00000000-0000-0000-0000-000000000000')
+    CONSTRAINT ck_tenants_real_id CHECK (id <> '00000000-0000-0000-0000-000000000000'),
+    -- Tenant slugs are canonical identifiers, not display text. No tenant has
+    -- platform identity semantics; these names are ordinary tenant names.
+    CONSTRAINT ck_tenants_slug_format CHECK (
+        slug = btrim(slug)
+        AND slug ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+    )
 );
 
 CREATE INDEX IF NOT EXISTS idx_tenants_slug ON tenants(slug);
@@ -1538,9 +1544,6 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
     ('site_logo_url', '', 'string', '站点 Logo URL'),
     ('site_favicon_url', '', 'string', '站点 Favicon URL'),
     
-    -- 注册设置
-    ('default_user_quota', '10.00', 'decimal', '新用户默认配额（元）'),
-    
     -- 限流设置
     ('default_rpm_limit', '60', 'int', '默认 RPM 限制'),
     ('default_tpm_limit', '100000', 'int', '默认 TPM 限制'),
@@ -1550,7 +1553,8 @@ INSERT INTO system_settings (key, value, value_type, description) VALUES
     ('maintenance_message', '', 'string', '维护模式提示信息'),
     
     -- 分销设置
-    ('distribution_enabled', 'true', 'bool', '是否启用分销系统'),
+    -- Distribution remains opt-in until an administrator creates rules.
+    ('distribution_enabled', 'false', 'bool', '是否启用分销系统'),
     ('distribution_level1_default_ratio', '0.03', 'decimal', '一级分销默认分成比例'),
     ('distribution_level2_default_ratio', '0.02', 'decimal', '二级分销默认分成比例'),
     ('distribution_min_withdraw', '10.00', 'decimal', '最低提现金额'),

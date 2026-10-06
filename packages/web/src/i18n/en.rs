@@ -967,17 +967,12 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.load_failed", "Failed to load settings");
     m.insert("settings.saved", "Settings saved");
     m.insert("settings.basic_title", "Basic Configuration");
-    m.insert("settings.basic_desc", "Define the platform name, default new-user credit, and recharge baseline settings. The form stays intentionally narrow on wide screens.");
+    m.insert("settings.basic_desc", "Define the platform name and recharge baseline settings. The form stays intentionally narrow on wide screens.");
     m.insert("settings.site_name_label", "Platform Name");
     m.insert(
         "settings.site_name_desc",
         "Shown in the sign-in page, admin navigation, and email templates.",
     );
-    m.insert(
-        "settings.default_user_quota_label",
-        "Default New User Credit",
-    );
-    m.insert("settings.default_user_quota_desc", "Controls the runtime signup credit for new users. Credit is only granted when the value is greater than 0; 0 or negative values disable the gift.");
     m.insert("settings.default_currency_label", "Default Currency");
     m.insert(
         "settings.default_currency_desc",
@@ -1016,7 +1011,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("settings.distribution_title", "Distribution Switch");
     m.insert(
         "settings.distribution_desc",
-        "Distribution now uses a single global switch managed only by the system role.",
+        "Distribution now uses a single global switch managed only by the platform root role.",
     );
     m.insert("settings.distribution_enabled_label", "Enable Distribution");
     m.insert(
@@ -1025,7 +1020,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "settings.distribution_enabled_system_only_desc",
-        "Current status is read-only here. Only the system role can change the distribution switch in the admin console.",
+        "Current status is read-only here. Only the platform root role can change the distribution switch in the admin console.",
     );
 
     // ── Pricing ─────────────────────────────────
@@ -1690,7 +1685,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "users.delete_admin_forbidden",
-        "Only system role can delete admin users",
+        "Only the platform root role can delete administrator users",
     );
     m.insert("users.edit_title", "Edit User");
     m.insert(
@@ -1827,8 +1822,8 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "The server completed the balance operation, but its completion marker could not be stored safely. Keep this page open and retry; the original retry key will be reused.",
     );
     m.insert(
-        "users.cannot_modify_system",
-        "Only system role can manage system users",
+        "users.cannot_modify_platform",
+        "Only the platform root role can manage platform users",
     );
     m.insert(
         "tenants.subtitle",
@@ -1881,7 +1876,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "distribution_records.rules_title",
         "Distribution Rules (Read Only)",
     );
-    m.insert("distribution_records.rules_hint", "Distribution rules are managed centrally by the platform. Contact a system administrator to change them.");
+    m.insert("distribution_records.rules_hint", "Distribution rules are managed centrally by the platform. Contact a platform administrator to change them.");
     m.insert(
         "distribution_records.no_rules",
         "No distribution rules found",

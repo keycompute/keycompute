@@ -173,7 +173,7 @@ cp .env.example .env
 # - KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET：非預設、至少 16 位元組
 #   （本 Compose 啟用 Redis/Node Gateway，因此必填）
 # - KC__DEFAULT_ADMIN_PASSWORD：非預設、非純空白、至少 12 個字元
-#   （僅第一次建立 system 管理員時必填）
+#   （僅第一次建立 platform root 身份時必填）
 
 # 啟動所有服務
 docker compose up -d
@@ -186,7 +186,7 @@ docker compose ps
 
 未覆寫時，引導管理員信箱為 `admin@keycompute.local`。密碼是啟動前設定的
 `KC__DEFAULT_ADMIN_PASSWORD`；全新的正式環境資料庫不接受
-`change-me-admin-password`。第一個 `system` 管理員建立完成後，應從環境變數
+`change-me-admin-password`。第一個 `platform root` 身份建立完成後，應從環境變數
 移除這個一次性引導密碼，後續重新啟動不再需要它。
 
 ### 方式二：本機開發
@@ -290,7 +290,7 @@ keycompute/
 | `KC__EMAIL__REQUIREMENT_RECIPIENT` | 需求收集表單接收信箱（選用；接收首頁提交需求時需要設定） | ⚪ |
 | `APP_BASE_URL` | 目前部署的公開前端地址；啟用 SMTP 時必填，啟用公開邀請連結前也必須設定 | 條件必填 |
 | `KC__DEFAULT_ADMIN_EMAIL` | 預設管理員電子郵件 | ⚪ |
-| `KC__DEFAULT_ADMIN_PASSWORD` | 一次性引導密碼：僅正式環境第一次建立 `system` 管理員時必填；非預設、非純空白且至少 12 個字元 | 條件必填 |
+| `KC__DEFAULT_ADMIN_PASSWORD` | 一次性引導密碼：僅正式環境第一次建立 `platform root` 身份時必填；非預設、非純空白且至少 12 個字元 | 條件必填 |
 
 ---
 

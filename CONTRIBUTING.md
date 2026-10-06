@@ -179,7 +179,7 @@ If your change touches `desktop` or `mobile`, run the relevant package commands 
   bytes) and a missing or invalid Provider API-key encryption key (Base64 for
   exactly 32 bytes). When Redis enables Node Gateway, it also rejects a
   blank/default node-registration secret shorter than 16 bytes. Only the first
-  `system` administrator bootstrap requires a non-default, non-blank password
+  `platform root` identity bootstrap requires a non-default, non-blank password
   of at least 12 characters; later restarts may omit that one-time secret.
 - PostgreSQL, Redis, SMTP, and payment example credentials are not covered by
   the application placeholder checks. Operators must still replace them for

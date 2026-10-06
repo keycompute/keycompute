@@ -95,7 +95,7 @@ remain separate from these console queries.
 ## Platform settings and shared payment configuration
 
 System settings and the node earnings ratio are platform-owned, not owned by a
-default tenant. All console settings reads/writes require a current root global
+tenant. All console settings reads/writes require a current root global
 scope, even when the root has no selected membership. A tenant admin or operator
 role does not grant settings management. Canonical and retained URLs share this
 same boundary. Sensitive and unclassified setting values never leave the safe
@@ -117,18 +117,19 @@ wallets, credentials, individual request traces, conversation content and busine
 mutations are not part of this grant. Existing broader platform lifecycle and
 raw monitoring endpoints remain independently protected.
 
-All operational queries revalidate current platform role, user/token state,
-selected membership/tenant versions and expiry. Explicit `Platform` and `Tenant`
-target variants distinguish aggregate domains; missing or nil tenant IDs never
-become a wildcard. List/count use the same snapshot and filters. Financial totals
-remain separate by currency with exact decimal strings. Aggregate routes use
-the existing bounded heavy-read admission class, not a higher inference quota.
+All operational queries revalidate current platform role, user/token state and
+expiry on the primary. Tenant selection is deliberately not an authority input
+for these bounded reads. Explicit `Platform` and `Tenant` target variants
+distinguish aggregate domains; missing or nil tenant IDs never become a wildcard.
+List/count use the same snapshot and filters. Financial totals remain separate by
+currency with exact decimal strings. Aggregate routes use the existing bounded
+heavy-read admission class, not a higher inference quota.
 
 ## Platform user and tenant lifecycle
 
 Canonical platform user CRUD and tenant create/update/delete/detail now use
 original signed root global authority inside retained database transactions.
-They do not require joining a default tenant and do not grant operator arbitrary
+They do not require joining a tenant and do not grant operator arbitrary
 identity or lifecycle writes. Safe user projection includes last-login time only,
 not credential rows. Lists/counts share a literal-filtered primary snapshot.
 

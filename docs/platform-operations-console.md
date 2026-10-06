@@ -10,10 +10,12 @@ The page uses the existing `PlatformOperationsApi` and its fresh GET methods:
 - `platform:aggregate_stats`: all-tenant or explicit-tenant usage aggregates.
 - `platform:diagnostics`: named numeric process capacity counters.
 
-No backend permission, resource ownership or runtime schema is changed. Server
-checks remain the security boundary. A global root/operator session can use the
-page without selecting or joining each target tenant. An already selected
-session retains its original membership and version requirements.
+Server checks remain the security boundary. A root/operator session can use the
+page without selecting or joining any target tenant. Tenant selection is not
+copied into this bounded operational read scope, so the same platform identity
+sees the same all-tenant inventory whether the UI currently shows a workspace or
+the global identity. Tenant business APIs still require a selected active
+membership.
 
 ## Queries and presentation
 

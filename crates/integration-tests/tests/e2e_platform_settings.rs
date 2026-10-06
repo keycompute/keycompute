@@ -315,7 +315,7 @@ async fn setting_batches_validate_inside_the_dao_and_preserve_atomic_payment_lim
     let invalid=changes(&[("site_name","must roll back"),("min_recharge_amount","100"),("max_recharge_amount","10")]);
     assert!(SystemSetting::update_platform_batch(&f.db,scope,&actor,&invalid,policy()).await.is_err());
     assert_eq!(SystemSetting::find_by_key(&f.db,"site_name").await.unwrap().unwrap().value,"KeyCompute");
-    for invalid in [changes(&[("node_tip_ratio","0.1")]),changes(&[("unregistered_field","secret")]),changes(&[("default_currency","USD")]),changes(&[("default_user_role","root")]),changes(&[("login_failed_limit","0")])] {
+    for invalid in [changes(&[("node_tip_ratio","0.1")]),changes(&[("unregistered_field","secret")]),changes(&[("default_currency","USD")]),changes(&[("login_failed_limit","0")])] {
         assert!(SystemSetting::update_platform_batch(&f.db,scope,&actor,&invalid,policy()).await.is_err());
     }
     assert!(SystemSetting::update_platform_batch(&f.db,scope,&actor,&changes(&[("distribution_enabled","true")]),SettingsPolicy{public_base_url_configured:false}).await.is_err());
@@ -466,7 +466,6 @@ async fn system_setting_version_is_monotonic_for_old_runtime_transactions_and_no
     assert_eq!(SystemSetting::find_by_key(&f.db,"site_name").await.unwrap().unwrap().updated_at,current.updated_at);
     assert!(f.db.execute_unprepared("UPDATE system_settings SET key='changed-key' WHERE key='site_name'").await.is_err());
     SystemSetting::init_default_settings(&f.db).await.unwrap();SystemSetting::init_default_settings(&f.db).await.unwrap();
-    assert!(SystemSetting::find_by_key(&f.db,"default_user_role").await.unwrap().is_none());
 }).await;
 }
 

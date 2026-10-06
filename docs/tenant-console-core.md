@@ -11,6 +11,11 @@ not change backend authorization, the database schema or resource ownership.
 - `/tenant/audit`: paginated audit events and canonical request IDs.
 - `/invite`: explicit one-time invitation acceptance, including return after login.
 
+Registration leaves a user at the global identity with zero memberships. The
+workspace page presents that state explicitly; an invitation acceptance adds the
+new membership without removing memberships in other tenants. The user can then
+select the joined tenant from the workspace switcher.
+
 Tenant administration consumes the server's tenant capability vector and selected
 membership. Platform role labels and platform capabilities never synthesize a
 tenant grant. Root/operator global identities cannot enter the tenant member
@@ -18,8 +23,9 @@ pages without an actual qualifying selected membership. Existing platform busine
 pages keep their independent platform guard. Backend checks remain authoritative.
 
 The workspace reads the already verified profile after opaque-token restoration;
-it never invents a default tenant from missing local selection metadata. Tenant
-selection verifies the original user and returned target through AuthStore's
+it keeps a global identity when the user has no memberships and never invents a
+tenant from missing local selection metadata. Tenant selection verifies the
+original user and returned target through AuthStore's
 existing compare-and-install operation. Configuration changes and ownership or
 self-membership changes that invalidate the current tenant JWT require signing
 in again. Other members' changes refresh the current page.

@@ -174,7 +174,7 @@ cp .env.example .env
 # - KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET: no predeterminado, al menos 16 bytes
 #   (obligatorio aquí porque este Compose habilita Redis/Node Gateway)
 # - KC__DEFAULT_ADMIN_PASSWORD: no predeterminado, no vacío, al menos 12 caracteres
-#   (solo al crear el primer administrador system)
+#   (solo al crear la primera identidad root de plataforma)
 
 # Iniciar todos los servicios
 docker compose up -d
@@ -188,7 +188,7 @@ Después del despliegue, abre `http://localhost` (o el puerto definido en `WEB_P
 Si no se cambia, el correo del administrador inicial es `admin@keycompute.local`.
 La contraseña es el valor configurado en `KC__DEFAULT_ADMIN_PASSWORD`; una base
 de datos de producción nueva nunca acepta `change-me-admin-password`. Después de
-crear el primer administrador `system`, elimina esta contraseña de un solo uso
+crear la primera identidad `root` de plataforma, elimina esta contraseña de un solo uso
 del entorno; los reinicios posteriores no la necesitan.
 
 ### Opción 2: desarrollo local
@@ -294,7 +294,7 @@ debug usa `config.toml`.
 | `KC__EMAIL__REQUIREMENT_RECIPIENT` | Correo receptor para solicitudes de requisitos (opcional; necesario para recibir envíos desde la página inicial) | ⚪ |
 | `APP_BASE_URL` | URL pública del frontend de este despliegue; obligatoria con SMTP y antes de habilitar invitaciones públicas | Condicional |
 | `KC__DEFAULT_ADMIN_EMAIL` | Correo del administrador por defecto | ⚪ |
-| `KC__DEFAULT_ADMIN_PASSWORD` | Contraseña inicial de un solo uso: solo obligatoria al crear el primer administrador `system` en producción; no predeterminada/no vacía y al menos 12 caracteres | Condicional |
+| `KC__DEFAULT_ADMIN_PASSWORD` | Contraseña inicial de un solo uso: solo obligatoria al crear la primera identidad `root` de plataforma en producción; no predeterminada/no vacía y al menos 12 caracteres | Condicional |
 
 ---
 

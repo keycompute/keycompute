@@ -155,7 +155,6 @@ impl CompleteRegistrationRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompleteRegistrationResponse {
     pub user_id: String,
-    pub tenant_id: String,
     pub email: String,
     pub message: String,
 }

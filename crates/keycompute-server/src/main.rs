@@ -5,20 +5,20 @@
 //! 2. 初始化可观测性（日志、指标、追踪）
 //! 3. 建立数据库连接并初始化新库结构
 //! 4. 初始化所有业务模块（Auth、RateLimit、Pricing、Routing、Gateway、Billing 等）
-//! 5. 初始化默认系统管理员（如果配置）
+//! 5. 初始化平台 root 身份（如果配置）
 //! 6. 启动 HTTP 服务器
 
 use futures::{StreamExt, stream};
 use keycompute_auth::PasswordHasher;
 use keycompute_config::{AppConfig, DEFAULT_ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD};
 use keycompute_db::{
-    CreateDistributionRuleRequest, CreateTenantRequest, CreateUserCredentialRequest, Database,
-    DatabaseConfig as DbConfig, DbRouter, SystemSetting, Tenant, User,
+    CreateUserCredentialRequest, Database, DatabaseConfig as DbConfig, DbRouter, SystemSetting,
+    User,
 };
 use keycompute_observability::{init_dev_observability, init_observability};
 use keycompute_server::{AppState, AppStateConfig, init_global_crypto, run_with_shutdown};
 use sea_orm::{
-    ConnectionTrait, DatabaseTransaction, DbBackend, FromQueryResult, Statement, TransactionTrait,
+    ConnectionTrait, DbBackend, FromQueryResult, Statement, TransactionTrait,
     sqlx::{Connection as SqlxConnection, PgConnection},
 };
 use std::time::Duration;
@@ -135,13 +135,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // ==================== 阶段 5: 初始化默认系统管理员 ====================
+    // ==================== 阶段 5: 初始化平台 root 身份 ====================
     let default_admin_email = env_var_or_default("KC__DEFAULT_ADMIN_EMAIL", DEFAULT_ADMIN_EMAIL);
     // 空字符串按未配置处理；这使 Compose 能在首次引导完成后安全移除该变量。
     let default_admin_password = std::env::var("KC__DEFAULT_ADMIN_PASSWORD")
         .ok()
         .filter(|value| !value.is_empty());
-    let _system_tenant = match initialize_default_admin(
+    let _root_user = match initialize_root_identity(
         pool.as_ref(),
         is_production,
         &default_admin_email,
@@ -149,12 +149,12 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     {
-        Ok(tenant) => {
-            info!(tenant_id = %tenant.id, "系统租户初始化成功");
-            tenant
+        Ok(user) => {
+            info!(user_id = %user.id, "平台 root 身份初始化成功");
+            user
         }
         Err(e) => {
-            error!("默认管理员初始化失败，服务拒绝继续启动: {}", e);
+            error!("平台 root 身份初始化失败，服务拒绝继续启动: {}", e);
             return Err(e);
         }
     };
@@ -166,8 +166,8 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => warn!("系统默认设置初始化失败（非致命错误）: {}", e),
     }
 
-    // 分销邀请链接必须使用当前部署显式配置的公开 URL。旧基线默认启用分销，
-    // 因此在路由开放前原子地收敛不兼容状态，避免请求期才返回配置错误。
+    // 分销邀请链接必须使用当前部署显式配置的公开 URL；没有公开 URL 时，
+    // 在路由开放前原子地关闭分销，避免请求期才返回配置错误。
     match SystemSetting::reconcile_distribution_public_url(
         pool.write_conn(),
         config.resolved_app_base_url().is_some(),
@@ -541,7 +541,7 @@ fn env_var_or_default(key: &str, default: &str) -> String {
 /// 解析用于创建默认管理员的密码。
 ///
 /// 未配置时使用公开示例值以便开发环境开箱运行；生产环境首次创建
-/// system 管理员时必须显式覆盖。已有 system 管理员后不再需要该引导密码。
+/// root 身份时必须显式覆盖。已有 root 身份后不再需要该引导密码。
 fn resolve_default_admin_password(configured: Option<String>) -> String {
     non_empty_or_default(configured, DEFAULT_ADMIN_PASSWORD)
 }
@@ -573,11 +573,11 @@ fn validate_default_admin_password_for_production(
 }
 
 fn validate_default_admin_bootstrap_password(
-    system_admin_exists: bool,
+    root_identity_exists: bool,
     is_production: bool,
     configured: Option<String>,
 ) -> anyhow::Result<()> {
-    if is_production && !system_admin_exists {
+    if is_production && !root_identity_exists {
         validate_default_admin_password_for_production(configured)?;
     }
     Ok(())
@@ -594,12 +594,12 @@ fn default_admin_bootstrap_connection(pool: &DbRouter) -> &sea_orm::DatabaseConn
 // lock is released automatically on commit or rollback.
 const DEFAULT_ADMIN_BOOTSTRAP_LOCK_ID: i64 = 5_421_647_644_090_913_945;
 
-async fn initialize_default_admin(
+async fn initialize_root_identity(
     pool: &DbRouter,
     is_production: bool,
     admin_email: &str,
     configured_password: Option<String>,
-) -> anyhow::Result<Tenant> {
+) -> anyhow::Result<User> {
     let writer = default_admin_bootstrap_connection(pool);
     let tx = writer.begin().await?;
     tx.query_one(Statement::from_sql_and_values(
@@ -618,11 +618,9 @@ async fn initialize_default_admin(
         is_production,
         configured_password.clone(),
     )?;
-    if existing.is_some() {
-        let tenant=Tenant::find_by_slug(&tx,"default").await?
-            .ok_or_else(||anyhow::anyhow!("initialized identity store has no default tenant; restore a verified complete snapshot"))?;
+    if let Some(existing) = existing {
         tx.commit().await?;
-        return Ok(tenant);
+        return Ok(existing);
     }
     if User::count_all(&tx).await? != 0 {
         anyhow::bail!(
@@ -632,27 +630,6 @@ async fn initialize_default_admin(
     let admin_password = resolve_default_admin_password(configured_password);
     let password_hash = PasswordHasher::new().hash(&admin_password)?;
     let user = User::bootstrap_root(&tx, admin_email, Some("Platform Administrator")).await?;
-    let actor = keycompute_db::AuditContext {
-        actor_user_id: user.id,
-        credential_kind: keycompute_types::CredentialKind::System,
-        actor_platform_role: keycompute_types::PlatformRole::Root,
-        actor_tenant_role: None,
-        request_id: None,
-    };
-    let tenant = Tenant::create_owned(
-        &tx,
-        &CreateTenantRequest {
-            name: "Default".into(),
-            slug: "default".into(),
-            description: Some("Default membership workspace".into()),
-            default_rpm_limit: None,
-            default_tpm_limit: None,
-        },
-        user.id,
-        &actor,
-    )
-    .await?;
-
     // 创建用户凭证
     let credential = keycompute_db::UserCredential::create(
         &tx,
@@ -676,194 +653,25 @@ async fn initialize_default_admin(
         )
         .await?;
 
-    // 初始化默认管理员余额（创建余额记录并充值 100 元）
-    initialize_admin_balance(&tx, tenant.id, user.id).await?;
-
-    // 创建默认分销规则（基于系统设置中的比例）
-    initialize_default_distribution_rules(&tx, tenant.id, user.id).await?;
-
     tx.commit().await?;
 
     info!(
         user_id = %user.id,
         email = %admin_email,
-        tenant_id = %tenant.id,
-        "默认系统管理员初始化成功"
+        "平台 root 身份初始化成功"
     );
-
-    Ok(tenant)
-}
-
-/// 初始化默认分销规则
-///
-/// 基于 system_settings 中的配置创建一级和二级分销规则
-async fn initialize_default_distribution_rules(
-    pool: &(impl ConnectionTrait + TransactionTrait),
-    tenant_id: uuid::Uuid,
-    admin_user_id: uuid::Uuid,
-) -> anyhow::Result<()> {
-    use bigdecimal::BigDecimal;
-    use std::str::FromStr;
-
-    use keycompute_db::models::{distribution_policy as policy, distribution_scope};
-    let user = User::find_by_id(pool, admin_user_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("bootstrap root is missing"))?;
-    let root = keycompute_types::PlatformScope::checked(user.id, user.platform_role()?)
-        .map_err(|e| anyhow::anyhow!(e))?;
-    let who = policy::PolicyActor::platform(root, tenant_id, user.token_version)?;
-    let audit = keycompute_db::AuditContext {
-        actor_user_id: user.id,
-        credential_kind: keycompute_types::CredentialKind::Jwt,
-        actor_platform_role: user.platform_role()?,
-        actor_tenant_role: None,
-        request_id: Some(uuid::Uuid::new_v4()),
-    };
-    let existing_rules = distribution_scope::rules(
-        pool,
-        distribution_scope::DistributionScope::Platform(root, tenant_id),
-        &distribution_scope::RuleFilter::default(),
-        1,
-        0,
-    )
-    .await?;
-    if !existing_rules.is_empty() {
-        info!(tenant_id = %tenant_id, "分销规则已存在，跳过初始化");
-        return Ok(());
-    }
-
-    // 从系统设置获取默认分销比例（与 RuleEngine 硬编码保持一致：3% 和 2%）
-    let level1_ratio_str =
-        SystemSetting::get_string(pool, "distribution_level1_default_ratio", "0.03").await;
-
-    let level2_ratio_str =
-        SystemSetting::get_string(pool, "distribution_level2_default_ratio", "0.02").await;
-
-    let level1_ratio = BigDecimal::from_str(&level1_ratio_str)
-        .unwrap_or_else(|_| BigDecimal::from_str("0.03").unwrap());
-    let level2_ratio = BigDecimal::from_str(&level2_ratio_str)
-        .unwrap_or_else(|_| BigDecimal::from_str("0.02").unwrap());
-
-    info!(
-        tenant_id = %tenant_id,
-        level1_ratio = %level1_ratio,
-        level2_ratio = %level2_ratio,
-        "正在创建默认分销规则"
-    );
-
-    // 创建一级分销规则（全局规则，对所有用户生效）
-    let level1_rule = CreateDistributionRuleRequest {
-        tenant_id,
-        beneficiary_scope:
-            keycompute_db::models::tenant_distribution_rule::BeneficiaryScope::Everyone,
-        beneficiary_id: None,
-        name: "一级分销规则".to_string(),
-        description: Some("默认一级分销规则，推荐人可获得指定比例的分销佣金".to_string()),
-        commission_rate: level1_ratio,
-        priority: Some(10),
-        effective_from: Some(chrono::Utc::now()),
-        effective_until: None,
-    };
-
-    let rule = policy::create(
-        pool,
-        who,
-        &audit,
-        &level1_rule,
-        "bootstrap level one policy",
-    )
-    .await?;
-    info!(rule_id = %rule.id, "一级分销规则创建成功");
-
-    // 创建二级分销规则（全局规则，对所有用户生效）
-    let level2_rule = CreateDistributionRuleRequest {
-        tenant_id,
-        beneficiary_scope:
-            keycompute_db::models::tenant_distribution_rule::BeneficiaryScope::Everyone,
-        beneficiary_id: None,
-        name: "二级分销规则".to_string(),
-        description: Some("默认二级分销规则，间接推荐人可获得指定比例的分销佣金".to_string()),
-        commission_rate: level2_ratio,
-        priority: Some(5),
-        effective_from: Some(chrono::Utc::now()),
-        effective_until: None,
-    };
-
-    let rule = policy::create(
-        pool,
-        who,
-        &audit,
-        &level2_rule,
-        "bootstrap level two policy",
-    )
-    .await?;
-    info!(rule_id = %rule.id, "二级分销规则创建成功");
-
-    info!(tenant_id = %tenant_id, "默认分销规则初始化完成");
-    Ok(())
-}
-
-/// 初始化管理员余额
-///
-/// 为默认系统管理员充值 100 元初始余额
-/// Bootstrap credit uses the normal immutable balance ledger.
-async fn initialize_admin_balance(
-    tx: &DatabaseTransaction,
-    tenant_id: uuid::Uuid,
-    user_id: uuid::Uuid,
-) -> anyhow::Result<()> {
-    use keycompute_db::UserBalance;
-    use rust_decimal::Decimal;
-
-    // 检查是否已存在余额记录
-    if let Some(existing_balance) = UserBalance::find_by_user(tx, tenant_id, user_id).await? {
-        // 如果已有余额且不为 0，说明已经初始化过，跳过
-        if existing_balance.available_balance > Decimal::ZERO {
-            info!(
-                user_id = %user_id,
-                balance = %existing_balance.available_balance,
-                "管理员余额已初始化，跳过"
-            );
-            return Ok(());
-        }
-    }
-
-    let initial_amount = Decimal::new(100, 0); // 100 元
-    let (updated_balance, transaction) = UserBalance::recharge_in_tx(
-        tx,
-        tenant_id,
-        user_id,
-        initial_amount,
-        None, // 无订单 ID
-        Some("系统管理员初始余额"),
-    )
-    .await?;
-
-    info!(
-        user_id = %user_id,
-        tenant_id = %tenant_id,
-        balance_id = %updated_balance.id,
-        initial_balance = %updated_balance.available_balance,
-        transaction_id = %transaction.id,
-        "系统管理员初始余额充值成功"
-    );
-
-    Ok(())
+    Ok(user)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        default_admin_bootstrap_connection, initialize_default_admin, non_empty_or_default,
+        default_admin_bootstrap_connection, initialize_root_identity, non_empty_or_default,
         resolve_default_admin_password, stale_trace_threshold_secs,
         validate_default_admin_bootstrap_password, validate_default_admin_password_for_production,
     };
     use keycompute_config::DEFAULT_ADMIN_PASSWORD;
-    use keycompute_db::models::system_setting::setting_keys;
-    use keycompute_db::{
-        DbRouter, SystemSetting, Tenant, TenantDistributionRule, User, UserBalance, UserCredential,
-    };
-    use rust_decimal::Decimal;
+    use keycompute_db::{DbRouter, User, UserCredential};
     use sea_orm::{
         ConnectOptions, ConnectionTrait, Database as SeaDatabase, DatabaseConnection, DbBackend,
         Statement,
@@ -1011,7 +819,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_admin_bootstrap_is_concurrent_and_idempotent_in_postgres() {
+    async fn root_identity_bootstrap_is_concurrent_and_idempotent_in_postgres() {
         let Some((admin, isolated, schema)) = isolated_bootstrap_database().await else {
             return;
         };
@@ -1020,8 +828,8 @@ mod tests {
         let password = "independent-bootstrap-password";
 
         let (first, second) = tokio::join!(
-            initialize_default_admin(router.as_ref(), true, email, Some(password.to_string())),
-            initialize_default_admin(router.as_ref(), true, email, Some(password.to_string()))
+            initialize_root_identity(router.as_ref(), true, email, Some(password.to_string())),
+            initialize_root_identity(router.as_ref(), true, email, Some(password.to_string()))
         );
         let first = first.expect("first bootstrap should succeed");
         let second = second.expect("concurrent bootstrap should reuse committed state");
@@ -1030,7 +838,7 @@ mod tests {
         let user = User::find_by_email(&isolated, email)
             .await
             .unwrap()
-            .expect("system user should exist");
+            .expect("bootstrap root should exist");
         assert_eq!(user.platform_role, "root");
         let credential = UserCredential::find_by_user_id(&isolated, user.id)
             .await
@@ -1038,55 +846,40 @@ mod tests {
             .expect("credential should exist");
         assert!(credential.email_verified);
         assert!(!credential.password_hash.trim().is_empty());
-        let balance = UserBalance::find_by_user(&isolated, first.id, user.id)
-            .await
-            .unwrap()
-            .expect("balance should exist");
-        assert_eq!(balance.available_balance, Decimal::new(100, 0));
-        assert_eq!(
-            TenantDistributionRule::find_effective_for_settlement(&isolated, first.id)
-                .await
-                .unwrap()
-                .len(),
-            2
-        );
-        let recharge_count = isolated
-            .query_one(Statement::from_sql_and_values(
+        let tenant_count = isolated
+            .query_one(Statement::from_string(
                 DbBackend::Postgres,
-                "SELECT COUNT(*)::BIGINT AS count FROM balance_transactions WHERE user_id = $1 AND transaction_type = 'recharge'",
-                [user.id.into()],
+                "SELECT COUNT(*)::BIGINT AS count FROM tenants".to_string(),
             ))
             .await
             .unwrap()
             .unwrap()
             .try_get::<i64>("", "count")
             .unwrap();
-        assert_eq!(recharge_count, 1);
+        assert_eq!(tenant_count, 0);
 
         drop(router);
         drop_isolated_bootstrap_database(admin, isolated, schema).await;
     }
 
     #[tokio::test]
-    async fn default_admin_bootstrap_rolls_back_partial_writes_in_postgres() {
+    async fn root_identity_bootstrap_rejects_nonempty_database_without_root() {
         let Some((admin, isolated, schema)) = isolated_bootstrap_database().await else {
             return;
         };
-        // DECIMAL(5,4) cannot store this ratio. The failure occurs after the
-        // tenant, user, credential, and balance writes, proving the outer
-        // bootstrap transaction rolls the entire sequence back.
-        SystemSetting::update_value(
-            &isolated,
-            setting_keys::DISTRIBUTION_LEVEL1_DEFAULT_RATIO,
-            "100",
-        )
-        .await
-        .unwrap();
+        isolated
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO users(email,name,platform_role,status) VALUES($1,$2,'none','active')",
+                ["unpromotable@example.com".into(), "Unpromotable".into()],
+            ))
+            .await
+            .unwrap();
         let router = DbRouter::single(isolated.clone());
-        let email = "bootstrap-rollback@example.com";
+        let email = "bootstrap-rejected@example.com";
 
         assert!(
-            initialize_default_admin(
+            initialize_root_identity(
                 router.as_ref(),
                 true,
                 email,
@@ -1097,12 +890,6 @@ mod tests {
         );
         assert!(
             User::find_by_email(&isolated, email)
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            Tenant::find_by_slug(&isolated, "default")
                 .await
                 .unwrap()
                 .is_none()

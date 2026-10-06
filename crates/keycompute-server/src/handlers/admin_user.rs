@@ -102,9 +102,6 @@ fn identity_error(error: keycompute_db::DbError) -> ApiError {
         if code == "platform_identity_request_invalid" {
             return ApiError::BadRequest("Invalid platform identity request".into());
         }
-        if code == "protected_default_tenant" {
-            return ApiError::Forbidden("The default tenant is protected".into());
-        }
         if code == "tenant_retained_members_or_accounts" {
             return ApiError::Conflict("Tenant retains members or accounts".into());
         }
@@ -374,7 +371,7 @@ struct BalanceOpContext {
 
 /// 余额操作公共前置校验，返回已校验的上下文
 ///
-/// 统一处理：权限检查、用户查询、system 保护、金额解析、原因校验
+/// 统一处理：权限检查、用户查询、root 保护、金额解析、原因校验
 async fn validate_balance_request(
     auth: &GlobalConsoleAuth,
     state: &AppState,

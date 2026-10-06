@@ -69,9 +69,10 @@ is permitted. JWT trust is rotated only during the final verified cutover.
 A failed release gate restores the complete snapshot and previous deployment.
 No reset or conversion is permitted before snapshot and restore verification.
 
-`system` maps to platform root. `user` maps to platform none and membership
-member in its recorded tenant. Every legacy admin needs an explicit mapping;
-neither operator nor tenant-admin authority is automatically assigned.
+There is no implicit system tenant or automatic tenant assignment. A newly
+registered user starts as a global identity with no memberships. Every legacy
+admin needs an explicit platform-role mapping; neither operator nor tenant-admin
+authority is automatically assigned.
 
 PostgreSQL constraint-trigger reference (version 16 used by this deployment):
 https://www.postgresql.org/docs/16/sql-createtrigger.html

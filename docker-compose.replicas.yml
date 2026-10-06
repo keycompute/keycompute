@@ -35,8 +35,8 @@
 #   POSTGRES_REPLICA_PASSWORD     — 复制角色密码（可选，默认同 POSTGRES_PASSWORD）
 #   KC__CRYPTO__SECRET_KEY        — Provider API Key 加密密钥（Base64 编码的 32 字节）
 #   KC__NODE_GATEWAY__REGISTRATION_TOKEN_SECRET — 节点 HMAC 密钥（至少 16 字节）
-#   KC__DEFAULT_ADMIN_EMAIL       — 首次创建 system 管理员的邮箱（可选）
-#   KC__DEFAULT_ADMIN_PASSWORD    — 首次创建 system 管理员的密码（首次必填，至少 12 字符）
+#   KC__DEFAULT_ADMIN_EMAIL       — 首次创建 platform root 身份的邮箱（可选）
+#   KC__DEFAULT_ADMIN_PASSWORD    — 首次创建 platform root 身份的密码（首次必填，至少 12 字符）
 # =============================================================================
 
 name: keycompute-replicas
@@ -471,7 +471,7 @@ services:
       KC__SERVER__PORT: "3000"
       KC__SERVER__SHUTDOWN_TIMEOUT_SECS: ${KC__SERVER__SHUTDOWN_TIMEOUT_SECS:-120}
 
-      # 默认系统管理员配置（仅首次创建 system 管理员时使用；创建后可删除密码变量）
+      # 平台 root 身份配置（仅首次初始化时使用；创建后可删除密码变量）
       KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
       KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-}
 

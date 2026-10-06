@@ -240,11 +240,11 @@ fn test_user_info_functionality() {
         admin.platform_role == keycompute_types::PlatformRole::None,
     );
 
-    // 3. 创建系统管理员
+    // 3. 创建平台 root 身份
     let system_admin = UserInfo::new(
         Uuid::new_v4(),
         "system@test.com",
-        "System Admin",
+        "Platform Administrator",
         keycompute_types::PlatformRole::Root,
         keycompute_types::UserStatus::Active,
         0,

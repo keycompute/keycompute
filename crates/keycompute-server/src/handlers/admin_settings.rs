@@ -28,9 +28,6 @@ pub struct AdminSystemSettings {
     pub site_logo_url: Option<String>,
     pub site_favicon_url: Option<String>,
 
-    // 注册设置
-    pub default_user_quota: f64,
-
     // 限流设置
     pub default_rpm_limit: i32,
     pub default_tpm_limit: i32,
@@ -110,8 +107,6 @@ impl AdminSystemSettings {
             site_logo_url: get_value(setting_keys::SITE_LOGO_URL),
             site_favicon_url: get_value(setting_keys::SITE_FAVICON_URL),
 
-            default_user_quota: get_decimal(setting_keys::DEFAULT_USER_QUOTA, 0.0),
-
             default_rpm_limit: get_int(setting_keys::DEFAULT_RPM_LIMIT, 60),
             default_tpm_limit: get_int(setting_keys::DEFAULT_TPM_LIMIT, 100000),
 
@@ -146,17 +141,6 @@ impl AdminSystemSettings {
             privacy_policy_url: get_value(setting_keys::PRIVACY_POLICY_URL),
         }
     }
-}
-
-fn is_hidden_setting(key: &str) -> bool {
-    key == setting_keys::DEFAULT_USER_ROLE
-}
-
-fn is_removed_setting(key: &str) -> bool {
-    matches!(
-        key,
-        "allow_registration" | "registration_mode" | "email_verification_required"
-    )
 }
 
 fn normalize_setting_update(key: &str, value: impl Into<String>) -> Result<String> {
@@ -241,10 +225,6 @@ fn payload_to_settings_map(
         Ok(obj
             .into_iter()
             .filter_map(|(key, value)| {
-                if key == setting_keys::DEFAULT_USER_QUOTA && value.is_null() {
-                    return None;
-                }
-
                 let value_str = match value {
                     serde_json::Value::String(s) => s,
                     serde_json::Value::Number(n) => n.to_string(),
@@ -283,7 +263,6 @@ pub async fn get_system_settings(
     // value 根据 value_type 转换为对应的 JSON 类型
     let map: std::collections::HashMap<String, serde_json::Value> = settings
         .into_iter()
-        .filter(|s| !is_hidden_setting(&s.key) && !is_removed_setting(&s.key))
         .map(|s| {
             let val = if s.is_sensitive {
                 serde_json::Value::String("[REDACTED]".into())
@@ -370,10 +349,6 @@ pub async fn get_system_setting_by_key(
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
-    if is_hidden_setting(&key) || is_removed_setting(&key) {
-        return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
-    }
-
     let setting = keycompute_db::SystemSetting::find_platform(pool.write_conn(), scope, &key)
         .await
         .map_err(settings_error)?
@@ -398,10 +373,6 @@ pub async fn update_system_setting_by_key(
         .pool
         .as_deref()
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
-
-    if is_hidden_setting(&key) || is_removed_setting(&key) {
-        return Err(ApiError::NotFound(format!("Setting not found: {}", key)));
-    }
 
     let normalized_value = normalize_setting_update(&key, payload.value)?;
     let mut settings_map = std::collections::HashMap::new();
@@ -473,50 +444,11 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn test_hidden_setting_marks_default_user_role() {
-        assert!(is_hidden_setting(setting_keys::DEFAULT_USER_ROLE));
-        assert!(!is_hidden_setting("site_name"));
-    }
-
-    #[test]
-    fn test_removed_setting_marks_allow_registration() {
-        assert!(is_removed_setting("allow_registration"));
-        assert!(!is_removed_setting("site_name"));
-    }
-
-    #[test]
-    fn test_normalize_setting_update_rejects_default_user_role() {
-        let err = normalize_setting_update(setting_keys::DEFAULT_USER_ROLE, "user").unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("cannot be edited")));
-    }
-
-    #[test]
     fn test_normalize_setting_update_accepts_normal_setting() {
         assert_eq!(
             normalize_setting_update("site_name", "KeyCompute").unwrap(),
             "KeyCompute"
         );
-    }
-
-    #[test]
-    fn test_normalize_setting_update_rejects_removed_setting() {
-        let err = normalize_setting_update("allow_registration", "false").unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("removed")));
-    }
-
-    #[test]
-    fn test_normalize_setting_update_accepts_negative_default_user_quota() {
-        assert_eq!(
-            normalize_setting_update(setting_keys::DEFAULT_USER_QUOTA, "-1").unwrap(),
-            "-1"
-        );
-    }
-
-    #[test]
-    fn test_normalize_setting_update_rejects_invalid_default_user_quota() {
-        let err =
-            normalize_setting_update(setting_keys::DEFAULT_USER_QUOTA, "not-a-number").unwrap_err();
-        assert!(matches!(err, ApiError::BadRequest(msg) if msg.contains("default_user_quota")));
     }
 
     #[test]
@@ -588,19 +520,6 @@ mod tests {
         assert!(
             matches!(error, ApiError::BadRequest(message) if message.contains("must not exceed"))
         );
-    }
-
-    #[test]
-    fn test_payload_to_settings_map_ignores_null_default_user_quota() {
-        let payload = serde_json::json!({
-            "default_user_quota": null,
-            "site_name": "KeyCompute"
-        });
-
-        let map = payload_to_settings_map(payload).unwrap();
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get("site_name"), Some(&"KeyCompute".to_string()));
-        assert!(!map.contains_key(setting_keys::DEFAULT_USER_QUOTA));
     }
 
     #[test]

@@ -51,7 +51,7 @@ All paths using one account share its RPM, TPM, concurrency and billing identity
 
 ## API contract
 
-Management requires an authorized system-administrator JWT. Generated platform
+Management requires an authorized platform-administrator JWT. Generated platform
 API keys never acquire management permissions merely because their owner is an
 administrator. Account and tenant selectors return bounded, searchable pages;
 account choices do not expose endpoints, credentials or key previews.

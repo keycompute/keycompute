@@ -229,7 +229,7 @@ services:
       KC__SERVER__PORT: "3000"
       KC__SERVER__SHUTDOWN_TIMEOUT_SECS: ${KC__SERVER__SHUTDOWN_TIMEOUT_SECS:-120}
 
-      # 默认系统管理员配置（仅首次创建 system 管理员时使用；创建后可删除密码变量）
+      # 平台 root 身份配置（仅首次初始化时使用；创建后可删除密码变量）
       KC__DEFAULT_ADMIN_EMAIL: ${KC__DEFAULT_ADMIN_EMAIL:-admin@keycompute.local}
       KC__DEFAULT_ADMIN_PASSWORD: ${KC__DEFAULT_ADMIN_PASSWORD:-}
 

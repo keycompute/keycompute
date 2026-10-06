@@ -10,7 +10,7 @@ use crate::stores::{
 /// 系统设置页面
 ///
 /// - 普通用户：无此页面入口（个人偏好通过导航栏按钮切换，存 localStorage）
-/// - Admin：全局系统参数配置（调用 SettingsApi，需 Admin token）
+/// - Platform root：全局平台参数配置（调用 SettingsApi，需平台权限）
 #[component]
 pub fn Settings() -> Element {
     let i18n = use_i18n();
@@ -21,7 +21,7 @@ pub fn Settings() -> Element {
         .as_ref()
         .map(|u| u.can_manage_platform())
         .unwrap_or(false);
-    let is_system = current_user
+    let is_root = current_user
         .as_ref()
         .map(|u| u.has_platform_permission("protected_users:manage"))
         .unwrap_or(false);
@@ -49,7 +49,6 @@ pub fn Settings() -> Element {
     let max_recharge = get_val("max_recharge_amount");
     let alipay_enabled = get_val("alipay_enabled");
     let wechatpay_enabled = get_val("wechatpay_enabled");
-    let default_user_quota = get_val("default_user_quota");
     let jwt_expire = get_val("jwt_expire_hours");
     let distribution_enabled = get_val("distribution_enabled");
     let page_description = if can_manage_platform {
@@ -111,17 +110,6 @@ pub fn Settings() -> Element {
                                     auth_store,
                                     save_ok,
                                     save_error
-                                }
-                                SettingItemNumber {
-                                    label: i18n.t("settings.default_user_quota_label").to_string(),
-                                    description: i18n.t("settings.default_user_quota_desc").to_string(),
-                                    setting_key: "default_user_quota",
-                                    value: default_user_quota.clone(),
-                                    editable: can_manage_platform,
-                                    auth_store,
-                                    save_ok,
-                                    save_error,
-                                    allow_negative: true
                                 }
                                 SettingItemSelect {
                                     label: i18n.t("settings.default_currency_label").to_string(),
@@ -229,14 +217,14 @@ pub fn Settings() -> Element {
                             div { class: "settings-section-body",
                                 SettingItemToggle {
                                     label: i18n.t("settings.distribution_enabled_label").to_string(),
-                                    description: if is_system {
+                                    description: if is_root {
                                         i18n.t("settings.distribution_enabled_desc").to_string()
                                     } else {
                                         i18n.t("settings.distribution_enabled_system_only_desc").to_string()
                                     },
                                     setting_key: "distribution_enabled",
                                     value: distribution_enabled.clone(),
-                                    editable: is_system,
+                                    editable: is_root,
                                     auth_store,
                                     save_ok,
                                     save_error

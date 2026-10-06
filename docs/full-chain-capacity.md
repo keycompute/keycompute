@@ -61,8 +61,8 @@ points, not an exhaustive maximum stable throughput claim or linear scaling law.
 
 ## Production diagnostics
 
-`GET /api/v1/admin/monitoring/capacity` is protected by existing admin middleware
-and explicit SystemAdmin permission, not by a role string. It exposes no tenant,
+`GET /api/v1/admin/monitoring/capacity` is protected by the platform diagnostics
+capability and explicit root/operator authorization, not by a role string. It exposes no tenant,
 account, key IDs or connection URLs. It reports local ingress/generation/account
 and balance queue occupancy, managed payload bytes, writer connection/idle counts,
 Redis command/cache/blocking pool counts and fixed-cardinality stage histograms.

@@ -1,4 +1,4 @@
-//! System-admin account-to-tenant grants. Writes do not call upstreams.
+//! Platform-admin account-to-tenant grants. Writes do not call upstreams.
 use crate::{
     error::{ApiError, Result},
     extractors::{GlobalConsoleAuth, RequestId},

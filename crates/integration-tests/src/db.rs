@@ -16,8 +16,8 @@ use uuid::Uuid;
 
 // 一个集成测试可并行运行多个 case，但它们共享同一个测试数据库。
 // schema 只需在进程内初始化一次，避免多个 case 同时执行 DDL。
-// 历史 system 用户的清理也在这里一次性完成：所有 case 都会等待
-// 初始化结束后才开始访问数据库，不会观察到清理过程的中间状态。
+// 测试根用户的初始化也在这里一次性完成：所有 case 都会等待
+// 初始化结束后才开始访问数据库，不会观察到初始化过程的中间状态。
 static SCHEMA_INITIALIZED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 pub async fn initialize_test_schema(db: &DatabaseConnection) -> Result<(), keycompute_db::DbError> {
@@ -32,30 +32,14 @@ pub async fn initialize_test_schema(db: &DatabaseConnection) -> Result<(), keyco
             ))
             .await?;
             if User::count_all(&tx).await? == 0 {
-                let root = User::bootstrap_root(
+                // The production bootstrap creates only the global root. Any
+                // tenant used by a test must be created explicitly by that
+                // test, so an accidental startup/registration provisioning
+                // path cannot hide behind shared fixtures.
+                User::bootstrap_root(
                     &tx,
                     "tenant-test-root@fixture.invalid",
                     Some("Test identity anchor"),
-                )
-                .await?;
-                let actor = keycompute_db::AuditContext {
-                    actor_user_id: root.id,
-                    credential_kind: keycompute_types::CredentialKind::System,
-                    actor_platform_role: keycompute_types::PlatformRole::Root,
-                    actor_tenant_role: None,
-                    request_id: None,
-                };
-                Tenant::create_owned(
-                    &tx,
-                    &CreateTenantRequest {
-                        name: "Default".into(),
-                        slug: "default".into(),
-                        description: None,
-                        default_rpm_limit: None,
-                        default_tpm_limit: None,
-                    },
-                    root.id,
-                    &actor,
                 )
                 .await?;
             }
@@ -344,8 +328,11 @@ pub async fn create_test_pending_registration(
     pending
 }
 
-/// Remove a freshly registered test identity and its personal workspace.
-/// Foreign keys continue to reject any unexpected retained business activity.
+/// Remove a freshly registered test identity.
+///
+/// Registration deliberately creates no tenant or financial rows. Deleting
+/// only the identity keeps this fixture aligned with the production lifecycle
+/// and lets foreign keys expose any unexpected side effect.
 pub async fn delete_user_by_email(
     pool: &DatabaseConnection,
     email: &str,
@@ -364,19 +351,6 @@ pub async fn delete_user_by_email(
         return tx.rollback().await;
     };
     let user: Uuid = row.try_get_by_index(0)?;
-    let slug = format!("personal-{}", user.simple());
-    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "DELETE FROM balance_transactions WHERE user_id=$1 AND tenant_id IN (SELECT id FROM tenants WHERE owner_user_id=$1 AND slug=$2) AND transaction_type='recharge' AND description='Initial quota from system'",
-        [user.into(),slug.clone().into()],
-    )).await?;
-    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "DELETE FROM user_balances WHERE user_id=$1 AND tenant_id IN (SELECT id FROM tenants WHERE owner_user_id=$1 AND slug=$2)",
-        [user.into(),slug.clone().into()],
-    )).await?;
-    tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-        "DELETE FROM tenants WHERE owner_user_id=$1 AND slug=$2 AND NOT EXISTS (SELECT 1 FROM tenant_memberships m WHERE m.tenant_id=tenants.id AND m.user_id<>$1)",
-        [user.into(),slug.into()],
-    )).await?;
     tx.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "DELETE FROM users WHERE id=$1",

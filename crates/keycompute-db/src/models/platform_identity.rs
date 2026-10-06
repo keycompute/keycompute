@@ -365,7 +365,6 @@ impl PlatformIdentity {
         let result=async {
             let actor=scope.lock_related(&tx,audit,&[id],&[]).await?;
             let before=Tenant::find_by_id_for_update(&tx,id).await?.ok_or_else(||DbError::not_found("Tenant",id))?;
-            if before.slug=="default" && request.status.is_some_and(|s|s.as_str()=="inactive"){return Err(DbError::Other("protected_default_tenant".into()));}
             let current=before.update(&tx,request).await?;
             change_audit(&tx,&actor,"tenant.update","tenant",id,"root updated tenant",serde_json::json!({"previous_status":before.status,"status":current.status,"authz_version":current.authz_version})).await?;
             // The authorized target may be the selected tenant; construct its
@@ -391,9 +390,6 @@ impl PlatformIdentity {
             let tenant = Tenant::find_by_id_for_update(&tx, id)
                 .await?
                 .ok_or_else(|| DbError::not_found("Tenant", id))?;
-            if tenant.slug == "default" {
-                return Err(DbError::Other("protected_default_tenant".into()));
-            }
             if Tenant::count_users(&tx, id).await? > 1 || Tenant::count_accounts(&tx, id).await? > 0
             {
                 return Err(DbError::Other("tenant_retained_members_or_accounts".into()));
