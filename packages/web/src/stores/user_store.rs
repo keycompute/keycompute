@@ -1,5 +1,5 @@
 use client_api::api::auth::{SelectedTenant, SessionCapabilities, TenantMembership};
-use client_api::{PlatformRole, UserStatus};
+use client_api::{PlatformRole, TenantRole, UserStatus};
 use dioxus::prelude::*;
 
 /// 当前用户信息
@@ -119,6 +119,45 @@ impl UserInfo {
             changed = true;
         }
         changed
+    }
+
+    /// Make a just-created, currently-owned workspace immediately available
+    /// in the header. This is presentation state only: entering it still calls
+    /// the server selection endpoint, which returns the authoritative role,
+    /// capabilities and authorization revisions. The profile bootstrap then
+    /// refreshes this optimistic row in the background.
+    pub fn add_created_owned_tenant(&mut self, tenant_id: &str, name: &str) -> bool {
+        if self
+            .memberships
+            .iter()
+            .any(|membership| membership.tenant_id == tenant_id)
+        {
+            return false;
+        }
+        self.memberships.push(TenantMembership {
+            tenant_id: tenant_id.to_owned(),
+            tenant_name: Some(name.to_owned()),
+            tenant_role: TenantRole::Admin,
+            status: Some("active".into()),
+            invited_by: None,
+            joined_at: None,
+            removed_at: None,
+            authz_version: None,
+        });
+        self.memberships.sort_by(|left, right| {
+            left.tenant_name
+                .as_deref()
+                .unwrap_or(&left.tenant_id)
+                .to_lowercase()
+                .cmp(
+                    &right
+                        .tenant_name
+                        .as_deref()
+                        .unwrap_or(&right.tenant_id)
+                        .to_lowercase(),
+                )
+        });
+        true
     }
 }
 
@@ -301,5 +340,22 @@ mod capability_tests {
         assert_eq!(selected.membership_authz_version, Some(9));
         assert_eq!(value.memberships[0].tenant_name.as_deref(), Some("After"));
         assert_eq!(value.memberships[0].authz_version, Some(9));
+    }
+
+    #[test]
+    fn a_created_owned_tenant_is_immediately_visible_without_granting_authority() {
+        let tenant_id = uuid::Uuid::new_v4().to_string();
+        let mut value = UserInfo::default();
+
+        assert!(value.add_created_owned_tenant(&tenant_id, "Default"));
+        assert!(!value.add_created_owned_tenant(&tenant_id, "Duplicate"));
+        assert_eq!(value.memberships.len(), 1);
+        assert_eq!(value.memberships[0].tenant_id, tenant_id);
+        assert_eq!(value.memberships[0].tenant_name.as_deref(), Some("Default"));
+        assert_eq!(value.memberships[0].tenant_role, TenantRole::Admin);
+        assert_eq!(value.memberships[0].status.as_deref(), Some("active"));
+        assert_eq!(value.memberships[0].authz_version, None);
+        assert!(value.selected_tenant.is_none());
+        assert!(value.capabilities.tenant.is_empty());
     }
 }

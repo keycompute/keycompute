@@ -19,7 +19,7 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ),
         ("tenant_keys.keys", "Key metadata", "Key 元数据"),
         ("tenant_keys.pending", "Pending issuance", "待领取申请"),
-        ("tenant_keys.owner", "Key owner UUID", "Key 拥有者 UUID"),
+        ("tenant_keys.owner", "Key owner ID", "Key 拥有者 ID"),
         (
             "tenant_keys.filter",
             "Apply key owner filter",
@@ -81,8 +81,8 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ),
         (
             "tenant_keys.expiry_time",
-            "Expiration (RFC3339)",
-            "到期时间（RFC3339）",
+            "Expiration (UTC)",
+            "到期时间（UTC）",
         ),
         (
             "tenant_keys.requested",
@@ -120,9 +120,30 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "搜索租户成员",
         ),
         (
+            "tenant_keys.search_placeholder",
+            "Search by member name or email",
+            "按成员姓名或邮箱搜索",
+        ),
+        (
+            "tenant_keys.manual_owner",
+            "Member ID (advanced)",
+            "成员 ID（高级选项）",
+        ),
+        ("tenant_keys.key_identity", "Key identity", "Key 标识"),
+        (
+            "tenant_keys.request_identity",
+            "Request identity",
+            "申请标识",
+        ),
+        (
             "tenant_keys.choose_member",
-            "Choose an active member, or enter their UUID below",
-            "选择有效成员，或在下方输入其 UUID",
+            "Choose an active member, or enter their member ID below",
+            "选择有效成员，或在下方输入其成员 ID",
+        ),
+        (
+            "tenant_keys.selected_member",
+            "Selected key owner",
+            "已选择的 Key 拥有者",
         ),
         (
             "tenant_keys.select_workspace",

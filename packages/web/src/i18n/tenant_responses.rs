@@ -9,7 +9,7 @@ pub(super) fn register(zh: &mut HashMap<&'static str, &'static str>, en: bool) {
         if en {
             "Responses and conversations"
         } else {
-            "Responses 与会话"
+            "响应与会话"
         },
     );
     zh.insert(
@@ -33,16 +33,12 @@ pub(super) fn register(zh: &mut HashMap<&'static str, &'static str>, en: bool) {
         if en {
             "Response records"
         } else {
-            "Responses 记录"
+            "响应记录"
         },
     );
     zh.insert(
         "tenant_responses.conversations",
-        if en {
-            "Conversations"
-        } else {
-            "Conversation 会话"
-        },
+        if en { "Conversations" } else { "会话" },
     );
     zh.insert(
         "tenant_responses.mode",
@@ -53,11 +49,31 @@ pub(super) fn register(zh: &mut HashMap<&'static str, &'static str>, en: bool) {
         },
     );
     zh.insert(
+        "tenant_responses.mode_passthrough",
+        if en { "Passthrough" } else { "透传" },
+    );
+    zh.insert(
+        "tenant_responses.mode_node",
+        if en { "Node dispatch" } else { "节点调度" },
+    );
+    zh.insert(
+        "tenant_responses.mode_pool",
+        if en { "Account pool" } else { "账号池" },
+    );
+    zh.insert(
         "tenant_responses.owner",
         if en {
-            "Original owner UUID"
+            "Original owner ID"
         } else {
-            "原拥有者 UUID"
+            "原拥有者 ID"
+        },
+    );
+    zh.insert(
+        "tenant_responses.owner_placeholder",
+        if en {
+            "Optional member ID"
+        } else {
+            "可选：填写成员 ID"
         },
     );
     zh.insert(

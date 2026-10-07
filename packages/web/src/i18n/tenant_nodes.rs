@@ -16,8 +16,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     (
         "tenant_nodes.owner",
-        "拥有者 UUID（留空查询本租户全部）",
-        "Owner UUID (blank means all owners in this tenant)",
+        "拥有者 ID（留空查询本工作区全部）",
+        "Owner ID (blank means all owners in this workspace)",
     ),
     ("tenant_nodes.owner_short", "拥有者", "Owner"),
     (
@@ -32,8 +32,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     (
         "tenant_nodes.invalid_query",
-        "请检查拥有者 UUID、搜索内容和查询范围。",
-        "Check the owner UUID, search text and query bounds.",
+        "请检查拥有者 ID、搜索内容和查询范围。",
+        "Check the owner ID, search text and query bounds.",
     ),
     ("tenant_nodes.resource", "资源", "Resource"),
     ("tenant_nodes.details", "查看元数据", "View metadata"),

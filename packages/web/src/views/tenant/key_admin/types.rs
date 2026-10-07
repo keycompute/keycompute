@@ -1,3 +1,4 @@
+use crate::utils::time::{datetime_input_to_rfc3339, rfc3339_to_datetime_local};
 use chrono::{DateTime, Duration, Utc};
 use client_api::{
     ClientError, Result,
@@ -118,7 +119,7 @@ pub fn owner_filter(raw: &str) -> Result<Option<Uuid>> {
         .ok()
         .filter(|id| !id.is_nil())
         .map(Some)
-        .ok_or_else(|| invalid("Select a real member UUID"))
+        .ok_or_else(|| invalid("Select a valid member ID"))
 }
 pub fn live_key(row: &KeyMetadata) -> bool {
     !row.revoked
@@ -139,14 +140,18 @@ impl Draft {
                 } else {
                     Expiry::Never
                 },
-                date: row.expires_at.clone().unwrap_or_default(),
+                date: row
+                    .expires_at
+                    .as_deref()
+                    .map(rfc3339_to_datetime_local)
+                    .unwrap_or_default(),
             }
         } else {
             Self {
                 owner: op.owner().map(|id| id.to_string()).unwrap_or_default(),
                 name: String::new(),
                 expiry: Expiry::At,
-                date: (Utc::now() + Duration::days(180)).to_rfc3339(),
+                date: rfc3339_to_datetime_local(&(Utc::now() + Duration::days(180)).to_rfc3339()),
             }
         }
     }
@@ -165,8 +170,10 @@ impl Draft {
             Expiry::Keep => Err(invalid("Choose the new key expiration explicitly")),
             Expiry::At => {
                 let raw = self.date.trim();
-                let date = DateTime::parse_from_rfc3339(raw)
-                    .map_err(|_| invalid("Use an RFC3339 expiration with a timezone"))?
+                let canonical = datetime_input_to_rfc3339(raw)
+                    .ok_or_else(|| invalid("Choose a valid UTC expiration"))?;
+                let date = DateTime::parse_from_rfc3339(&canonical)
+                    .map_err(|_| invalid("Choose a valid UTC expiration"))?
                     .with_timezone(&Utc);
                 let now = Utc::now();
                 if date <= now || date > now + Duration::days(3650) {

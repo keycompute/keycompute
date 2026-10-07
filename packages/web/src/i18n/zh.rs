@@ -6,11 +6,11 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     super::tenant_financial_controls::register(&mut m, false);
     m.insert(
         "tenant_responses.native_direct_hint",
-        "账号池原生 Responses 与 Conversations 会列出已记录资源；详情操作仍需准确的原始拥有者 UUID 与不透明资源 ID。",
+        "账号池原生响应与会话会列出已记录资源；详情操作仍需准确的原始拥有者 ID 与不透明资源 ID。",
     );
     m.insert(
         "tenant_responses.native_selector_error",
-        "请输入真实拥有者 UUID 与有效资源 ID。",
+        "请输入真实拥有者 ID 与有效资源 ID。",
     );
     m.insert("tenant_responses.open_native", "打开原生 Response");
     m.insert("tenant_providers.title", "上游渠道");
@@ -35,6 +35,17 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenant_providers.account_editor", "上游账号");
     m.insert("tenant_providers.binding_editor", "透传绑定");
     m.insert("tenant_providers.account", "账号");
+    m.insert("tenant_providers.search_placeholder", "搜索渠道账号");
+    m.insert("tenant_providers.base_url", "接口地址");
+    m.insert("tenant_providers.api_key", "API Key");
+    m.insert("tenant_providers.openai_compatible", "OpenAI 兼容协议");
+    m.insert(
+        "tenant_providers.anthropic_compatible",
+        "Anthropic 兼容协议",
+    );
+    m.insert("tenant_providers.capability_chat", "对话补全");
+    m.insert("tenant_providers.capability_responses", "响应 API");
+    m.insert("tenant_providers.capability_both", "对话补全与响应 API");
     m.insert(
         "tenant_providers.binding_hint",
         "绑定仅属于当前租户；模型来自所选账号，此处不能创建全局绑定。",

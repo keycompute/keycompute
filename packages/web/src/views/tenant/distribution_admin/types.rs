@@ -1,3 +1,4 @@
+use crate::utils::time::{datetime_input_to_rfc3339, rfc3339_to_datetime_local};
 use chrono::{DateTime, Utc};
 use client_api::{
     ClientError, Result,
@@ -70,8 +71,12 @@ impl Draft {
                 beneficiary_id: v.beneficiary_id.map(|v| v.to_string()).unwrap_or_default(),
                 priority: v.priority.to_string(),
                 active: v.is_active,
-                from: v.effective_from.clone(),
-                until: v.effective_until.clone().unwrap_or_default(),
+                from: rfc3339_to_datetime_local(&v.effective_from),
+                until: v
+                    .effective_until
+                    .as_deref()
+                    .map(rfc3339_to_datetime_local)
+                    .unwrap_or_default(),
                 reason: String::new(),
             }
         } else {
@@ -131,9 +136,9 @@ impl Draft {
         if v.is_empty() {
             return Ok(None);
         }
-        DateTime::parse_from_rfc3339(v)
-            .map_err(|_| ClientError::Config("Use RFC3339 timestamps with a timezone".into()))?;
-        Ok(Some(v.into()))
+        datetime_input_to_rfc3339(v)
+            .map(Some)
+            .ok_or_else(|| ClientError::Config("Choose a valid UTC date and time".into()))
     }
     fn window(&self) -> Result<(Option<String>, Option<String>)> {
         let from = Self::date(&self.from)?;
@@ -162,9 +167,7 @@ impl Draft {
                 let id = Uuid::parse_str(self.beneficiary_id.trim())
                     .ok()
                     .filter(|v| !v.is_nil())
-                    .ok_or_else(|| {
-                        ClientError::Config("Select a real tenant member UUID".into())
-                    })?;
+                    .ok_or_else(|| ClientError::Config("Select a valid tenant member ID".into()))?;
                 Ok((BeneficiaryScope::TenantMember, Some(id)))
             }
         }

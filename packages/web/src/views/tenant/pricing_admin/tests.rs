@@ -55,14 +55,17 @@ fn create_has_no_platform_or_tenant_payload_selector() {
     }
 }
 #[test]
-fn end_date_is_never_cleared_implicitly_and_windows_require_a_timezone() {
+fn end_date_is_never_cleared_implicitly_and_picker_values_are_utc() {
     let original = row();
     let mut draft = Draft::for_operation(&Operation::Edit(original.clone()));
     assert!(draft.update(&original).unwrap().effective_until.is_none());
     draft.until = "2025-01-01T00:00:00Z".into();
     assert!(draft.update(&original).is_err());
     draft.until = "2030-01-01T00:00:00".into();
-    assert!(draft.update(&original).is_err());
+    assert_eq!(
+        draft.update(&original).unwrap().effective_until.as_deref(),
+        Some("2030-01-01T00:00:00Z")
+    );
     draft.until = "2030-01-01T00:00:00+08:00".into();
     assert!(draft.update(&original).is_ok());
 }
@@ -96,10 +99,10 @@ fn tenant_pricing_has_a_canonical_route_separate_from_platform_pricing() {
 }
 
 #[test]
-fn direct_form_modal_keeps_a_viewport_bounded_scroll_container() {
+fn structured_modal_keeps_a_viewport_bounded_scroll_container() {
     let editor = include_str!("command.rs");
     assert!(editor.contains("class:\"modal tenant-pricing-editor\""));
-    assert!(!editor.contains("class:\"modal-body\""));
+    assert!(editor.contains("class:\"modal-body\""));
 
     let css = include_str!("../../../../assets/main.css");
     let final_modal_rule = css
@@ -110,6 +113,5 @@ fn direct_form_modal_keeps_a_viewport_bounded_scroll_container() {
         .expect("complete shared modal rule")
         .0;
     assert!(final_modal_rule.contains("overflow-y: auto"));
-    assert!(!final_modal_rule.contains("overflow: hidden"));
     assert!(css.contains(".modal:has(> .modal-body)"));
 }

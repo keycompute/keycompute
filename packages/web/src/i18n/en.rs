@@ -4,10 +4,10 @@ use std::sync::LazyLock;
 pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     let mut m = HashMap::new();
     super::tenant_financial_controls::register(&mut m, true);
-    m.insert("tenant_responses.native_direct_hint", "Account-pool Responses and Conversations list resources recorded by KeyCompute; inspect uses the exact owner UUID and opaque resource ID.");
+    m.insert("tenant_responses.native_direct_hint", "Account-pool responses and conversations list resources recorded by KeyCompute; inspect uses the exact owner ID and opaque resource ID.");
     m.insert(
         "tenant_responses.native_selector_error",
-        "Enter a real owner UUID and a bounded resource ID.",
+        "Enter a real owner ID and a bounded resource ID.",
     );
     m.insert("tenant_responses.open_native", "Open native Response");
     m.insert("tenant_providers.title", "Provider channels");
@@ -32,6 +32,23 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenant_providers.account_editor", "Provider account");
     m.insert("tenant_providers.binding_editor", "Passthrough binding");
     m.insert("tenant_providers.account", "Account");
+    m.insert(
+        "tenant_providers.search_placeholder",
+        "Search provider accounts",
+    );
+    m.insert("tenant_providers.base_url", "Base URL");
+    m.insert("tenant_providers.api_key", "API key");
+    m.insert("tenant_providers.openai_compatible", "OpenAI-compatible");
+    m.insert(
+        "tenant_providers.anthropic_compatible",
+        "Anthropic-compatible",
+    );
+    m.insert("tenant_providers.capability_chat", "Chat Completions");
+    m.insert("tenant_providers.capability_responses", "Responses API");
+    m.insert(
+        "tenant_providers.capability_both",
+        "Chat Completions and Responses",
+    );
     m.insert("tenant_providers.binding_hint", "The binding is tenant-only. Models come from the selected account; global scope cannot be selected here.");
     m.insert("tenant_providers.select_account", "Select an account");
     m.insert("tenant_providers.saved", "Saved");

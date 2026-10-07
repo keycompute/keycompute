@@ -5,7 +5,7 @@ mod table;
 mod tests;
 mod types;
 
-use super::common::{WorkspaceLinks, WorkspaceScope};
+use super::common::{WorkspaceContext, WorkspaceLinks, WorkspaceScope};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::{get_client, with_auto_refresh},
@@ -155,7 +155,7 @@ fn TenantNodeWorkspace(scope: NodeAdminScope) -> Element {
     rsx! {div {class:"page-container tenant-node-admin",
         ui::PageHeader {title:i18n.t("tenant_nodes.title").to_string(),description:i18n.t("tenant_nodes.hint").to_string()}
         WorkspaceLinks {}
-        p {class:"alert alert-info",{i18n.t("tenant_nodes.scope")} " {scope.tenant_id()}"}
+        WorkspaceContext {}
         NodeResourceConsole { scope }
     }}
 }

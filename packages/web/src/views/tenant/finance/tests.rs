@@ -1,12 +1,16 @@
 use super::types::*;
+use crate::{
+    i18n::{I18n, Lang},
+    utils::display::payment_status_label,
+};
 use client_api::api::tenant_reporting::{PaymentState, TenantPaymentRecord};
 use serde_json::json;
 use uuid::Uuid;
 #[test]
-fn report_windows_require_explicit_timezones_and_a_bounded_ordered_range() {
+fn report_windows_accept_utc_picker_values_and_keep_a_bounded_ordered_range() {
     assert!(window("2026-01-01T00:00:00Z", "2026-02-01T00:00:00Z").is_ok());
+    assert!(window("2026-01-01T00:00", "2026-01-02T00:00").is_ok());
     for (from, to) in [
-        ("2026-01-01T00:00:00", "2026-01-02T00:00:00Z"),
         ("2026-01-02T00:00:00Z", "2026-01-01T00:00:00Z"),
         ("2026-01-01T00:00:00Z", "2026-03-01T00:00:00Z"),
         ("bad", "bad"),
@@ -48,4 +52,11 @@ fn tenant_finance_route_does_not_reuse_platform_payment_administration() {
     assert_eq!(q.page, 1);
     assert_eq!(q.report().owner_user_id, None);
     assert!(window(&q.window.from, &q.window.to).is_ok());
+}
+
+#[test]
+fn payment_rows_localize_known_states_and_preserve_unknown_states() {
+    let zh = I18n::new(Lang::Zh);
+    assert_eq!(payment_status_label("paid", &zh), "已支付");
+    assert_eq!(payment_status_label("future_state", &zh), "future_state");
 }

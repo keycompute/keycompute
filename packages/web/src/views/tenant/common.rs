@@ -7,6 +7,7 @@ use crate::{
         ui_store::UiStore,
         user_store::{UserInfo, UserStore},
     },
+    utils::display::short_id,
 };
 use client_api::{ApiClient, ClientError, Result, TenantControlApi};
 use dioxus::prelude::*;
@@ -189,22 +190,179 @@ fn TenantScopedChildren(children: Element) -> Element {
 pub fn WorkspaceLinks() -> Element {
     let users = use_context::<UserStore>();
     let i18n = use_i18n();
+    let route = use_route::<Route>();
     let admin = users
         .info
         .read()
         .as_ref()
         .is_some_and(|u| u.can_manage_tenant());
-    rsx! {nav {class:"toolbar tenant-workspace-links", aria_label:i18n.t("tenant.workspace"),
-        Link {class:"btn btn-secondary",to:Route::TenantWorkspace {},{i18n.t("tenant.workspace")}}
-        Link {class:"btn btn-secondary",to:Route::OwnerKeyIssuance {},{i18n.t("tenant_keys.my_requests")}}
+    let overview_active = route == (Route::TenantWorkspace {});
+    let issuance_active = route == (Route::OwnerKeyIssuance {});
+    let settings_active = route == (Route::TenantSettings {});
+    rsx! {nav {class:"tenant-workspace-links", aria_label:i18n.t("tenant.quick_links"),
+        span {class:"tenant-workspace-links-label",{i18n.t("tenant.quick_links")}}
+        Link {
+            class: if overview_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
+            aria_current: if overview_active {"page"} else {"false"},
+            to:Route::TenantWorkspace {},
+            {i18n.t("tenant.workspace")}
+        }
+        Link {
+            class: if issuance_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
+            aria_current: if issuance_active {"page"} else {"false"},
+            to:Route::OwnerKeyIssuance {},
+            {i18n.t("tenant_keys.my_requests")}
+        }
         if admin {
-            Link {class:"btn btn-secondary",to:Route::TenantSettings {},{i18n.t("tenant.settings")}}
+            Link {
+                class: if settings_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
+                aria_current: if settings_active {"page"} else {"false"},
+                to:Route::TenantSettings {},
+                {i18n.t("tenant.settings")}
+            }
         }
     }}
+}
+
+/// Compact, human-readable tenant scope. The workspace name and role are the
+/// primary information; the technical UUID stays available in a disclosure
+/// for support and audit workflows without dominating every page.
+#[component]
+pub fn WorkspaceContext(#[props(default)] note: String) -> Element {
+    let users = use_context::<UserStore>();
+    let i18n = use_i18n();
+    let Some(tenant) = users
+        .info
+        .read()
+        .as_ref()
+        .and_then(|user| user.selected_tenant.clone())
+    else {
+        return rsx! {};
+    };
+    let name = tenant
+        .name
+        .as_deref()
+        .or(tenant.slug.as_deref())
+        .unwrap_or(tenant.id.as_str())
+        .to_owned();
+    let role = match tenant.tenant_role {
+        client_api::TenantRole::Admin => i18n.t("tenant.role_admin"),
+        client_api::TenantRole::Member => i18n.t("tenant.role_member"),
+    };
+    let abbreviated = short_id(&tenant.id);
+
+    rsx! {
+        aside { class: "tenant-context-bar", aria_label: i18n.t("tenant.current_context"),
+            div { class: "tenant-context-identity",
+                span { class: "tenant-context-label", {i18n.t("tenant.current")} }
+                strong { "{name}" }
+                span { class: "badge tenant-context-role", "{role}" }
+                details { class: "tenant-context-id",
+                    summary { "{i18n.t(\"tenant.workspace_id\")} · {abbreviated}" }
+                    code { title: "{tenant.id}", "{tenant.id}" }
+                }
+            }
+            if !note.trim().is_empty() {
+                p { "{note}" }
+            }
+        }
+    }
+}
+
+pub fn workspace_name(users: UserStore, scope: WorkspaceScope) -> String {
+    users
+        .info
+        .peek()
+        .as_ref()
+        .and_then(|user| user.selected_tenant.as_ref())
+        .filter(|tenant| tenant.id == scope.tenant_id.to_string())
+        .and_then(|tenant| tenant.name.as_deref().or(tenant.slug.as_deref()))
+        .map(str::to_owned)
+        .unwrap_or_else(|| short_id(&scope.tenant_id.to_string()))
+}
+
+/// Keep opaque identifiers available for support workflows without allowing
+/// them to dominate ordinary tables and summaries.
+#[component]
+pub fn TechnicalId(value: String) -> Element {
+    rsx! {
+        code {
+            class: "technical-id",
+            tabindex: "0",
+            title: "{value}",
+            aria_label: "{value}",
+            "{value}"
+        }
+    }
+}
+
+/// Member ID input with tenant-scoped, active-member suggestions. UUID entry
+/// remains available for large tenants whose member is outside the first page,
+/// while the common case no longer requires copying an opaque identifier.
+#[component]
+pub fn MemberIdField(
+    scope: WorkspaceScope,
+    input_id: String,
+    label: String,
+    value: String,
+    on_input: EventHandler<String>,
+    #[props(default = false)] disabled: bool,
+) -> Element {
+    let auth = use_context::<AuthStore>();
+    let users = use_context::<UserStore>();
+    let i18n = use_i18n();
+    let suggestions = use_resource(move || {
+        let can_list_members = users
+            .info
+            .read()
+            .as_ref()
+            .is_some_and(UserInfo::can_manage_members);
+        async move {
+            if !can_list_members {
+                return Ok(None);
+            }
+            read(auth, users, scope, move |token| async move {
+                scope.api()?.members(1, 100, None, &token).await
+            })
+            .await
+            .map(Some)
+        }
+    });
+    let list_id = format!("{input_id}-options");
+
+    rsx! {
+        div { class: "form-field member-id-field",
+            label { class: "form-label", r#for: "{input_id}", "{label}" }
+            input {
+                id: "{input_id}",
+                class: "input-field",
+                list: "{list_id}",
+                maxlength: "36",
+                value: "{value}",
+                disabled,
+                placeholder: i18n.t("tenant.member_id_placeholder"),
+                oninput: move |event| on_input.call(event.value()),
+            }
+            datalist { id: "{list_id}",
+                if let Some(Ok(Some(page))) = suggestions() {
+                    for member in page.items.iter().filter(|member| {
+                        member.membership_status == client_api::MembershipStatus::Active
+                            && member.user_status == client_api::UserStatus::Active
+                    }) {
+                        option { value: "{member.user_id}", "{member.email}" }
+                    }
+                }
+            }
+            small { class: "form-hint", {i18n.t("tenant.member_id_hint")} }
+        }
+    }
 }
 #[component]
 pub fn Pager(page: u32, total_pages: i64, total: i64, on_page: EventHandler<u32>) -> Element {
     let i18n = use_i18n();
+    if total <= 0 && page <= 1 {
+        return rsx! {};
+    }
     rsx! {div {class:"table-pagination-footer",
         button {class:"btn btn-secondary",r#type:"button",disabled:page<=1,onclick:move |_|on_page.call(page-1),{i18n.t("tenant.previous")}}
         span { "{page} / {total_pages.max(1)} · {total} " {i18n.t("tenant.records")} }

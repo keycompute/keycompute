@@ -3,14 +3,17 @@ mod inspector;
 #[cfg(test)]
 mod tests;
 mod types;
-use super::common::{self, Pager, WorkspaceLinks, WorkspaceScope};
+use super::common::{
+    self, MemberIdField, Pager, TechnicalId, WorkspaceContext, WorkspaceLinks, WorkspaceScope,
+};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::{get_client, user_error_message},
     stores::{auth_store::AuthStore, user_store::UserStore},
     utils::{
+        display::payment_status_label,
         resource::{KeyedResourceValue, current_keyed_value},
-        time::format_time,
+        time::{format_time, rfc3339_to_datetime_local},
     },
 };
 use client_api::api::tenant_reporting::{
@@ -34,7 +37,7 @@ pub fn TenantFinance() -> Element {
         .info
         .read()
         .as_ref()
-        .is_some_and(|v| v.can_manage_tenant());
+        .is_some_and(|v| v.can_manage_billing());
     rsx! {if let Some(scope)=WorkspaceScope::from_stores(auth,users).filter(|_|allowed){for key in [format!("{scope:?}")]{FinanceWorkspace{key:"{key}",scope}}}else{p{role:"alert",{i18n.t("tenant.admin_required")}}}}
 }
 #[component]
@@ -44,8 +47,8 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
     let i18n = use_i18n();
     let mut query = use_signal(Query::default);
     let mut owner = use_signal(String::new);
-    let mut from = use_signal(move || query.peek().window.from.clone());
-    let mut to = use_signal(move || query.peek().window.to.clone());
+    let mut from = use_signal(move || rfc3339_to_datetime_local(&query.peek().window.from));
+    let mut to = use_signal(move || rfc3339_to_datetime_local(&query.peek().window.to));
     let mut status = use_signal(String::new);
     let mut error = use_signal(String::new);
     let mut detail = use_signal(|| None::<Detail>);
@@ -148,29 +151,34 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
     rsx! {div{class:"page-container tenant-finance",
         ui::PageHeader{title:i18n.t("tenant_finance.title").to_string(),description:i18n.t("tenant_finance.hint").to_string()}
         WorkspaceLinks{}
-        p{class:"alert alert-info",{i18n.t("tenant_finance.shared_payment")} " · {scope.tenant_id}"}
-        div{class:"toolbar",style:"display:flex;flex-wrap:wrap;gap:12px",
-            button{class:"btn btn-secondary",onclick:move |_|select_tab(Tab::Usage),{i18n.t("tenant_finance.usage")}}
-            button{class:"btn btn-secondary",onclick:move |_|select_tab(Tab::Orders),{i18n.t("tenant_finance.orders")}}
-            button{class:"btn btn-secondary",onclick:move |_|select_tab(Tab::Wallet),{i18n.t("tenant_finance.wallet")}}
-            label{r#for:"finance-owner",{i18n.t("tenant_finance.owner")}}input{id:"finance-owner",class:"input-field",style:"width:25rem;max-width:100%",value:"{owner}",maxlength:"36",oninput:move|e|owner.set(e.value())}
-            if query().tab==Tab::Usage{
-                label{r#for:"finance-from",{i18n.t("tenant_finance.from")}}input{id:"finance-from",class:"input-field",style:"width:22rem;max-width:100%",value:"{from}",maxlength:"128",oninput:move|e|from.set(e.value())}
-                label{r#for:"finance-to",{i18n.t("tenant_finance.to")}}input{id:"finance-to",class:"input-field",style:"width:22rem;max-width:100%",value:"{to}",maxlength:"128",oninput:move|e|to.set(e.value())}
-            }
-            if query().tab==Tab::Orders{label{r#for:"finance-payment-state",{i18n.t("tenant_finance.state")}}select{id:"finance-payment-state",class:"input-field",value:"{status}",onchange:move|e|status.set(e.value()),option{value:"",{i18n.t("tenant_finance.all_states")}}for value in ["pending","paid","failed","closed"]{option{value,"{value}"}}}}
-            button{class:"btn btn-secondary",onclick:apply,{i18n.t("tenant_finance.apply")}}
-            button{class:"btn btn-secondary",onclick:move |_|{detail.set(None);generation+=1;},{i18n.t("tenant.reload")}}
+        WorkspaceContext{note:i18n.t("tenant_finance.shared_payment").to_string()}
+        nav{class:"segmented-control",aria_label:i18n.t("tenant_finance.title"),
+            button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Usage,onclick:move |_|select_tab(Tab::Usage),{i18n.t("tenant_finance.usage")}}
+            button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Orders,onclick:move |_|select_tab(Tab::Orders),{i18n.t("tenant_finance.orders")}}
+            button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Wallet,onclick:move |_|select_tab(Tab::Wallet),{i18n.t("tenant_finance.wallet")}}
         }
-        p{class:"text-secondary",{i18n.t("tenant_finance.active_owner")} " " {query().owner.map(|id|id.to_string()).unwrap_or_else(||i18n.t("tenant_finance.all_owners").into())}}
-        if query().tab==Tab::Usage{p{class:"text-secondary",{i18n.t("tenant_finance.window")} " {query().window.from} — {query().window.to}"}}
+        section{class:"filter-panel",aria_label:i18n.t("tenant_finance.apply"),
+            div{class:"filter-grid tenant-finance-filter-grid",
+                MemberIdField{scope,input_id:"finance-owner".to_string(),label:i18n.t("tenant_finance.owner").to_string(),value:owner(),on_input:move|value|owner.set(value)}
+                if query().tab==Tab::Usage{
+                    div{class:"form-field",label{r#for:"finance-from",{i18n.t("tenant_finance.from")}}input{id:"finance-from",class:"input-field",r#type:"datetime-local",step:"any",value:"{from}",oninput:move|e|from.set(e.value())}}
+                    div{class:"form-field",label{r#for:"finance-to",{i18n.t("tenant_finance.to")}}input{id:"finance-to",class:"input-field",r#type:"datetime-local",step:"any",value:"{to}",oninput:move|e|to.set(e.value())}}
+                }
+                if query().tab==Tab::Orders{div{class:"form-field",label{r#for:"finance-payment-state",{i18n.t("tenant_finance.state")}}select{id:"finance-payment-state",class:"input-field",value:"{status}",onchange:move|e|status.set(e.value()),option{value:"",{i18n.t("tenant_finance.all_states")}}option{value:"pending",{i18n.t("tenant_finance.state_pending")}}option{value:"paid",{i18n.t("tenant_finance.state_paid")}}option{value:"failed",{i18n.t("tenant_finance.state_failed")}}option{value:"closed",{i18n.t("tenant_finance.state_closed")}}}}}
+                div{class:"filter-actions",button{class:"btn btn-primary",onclick:apply,{i18n.t("tenant_finance.apply")}} button{class:"btn btn-ghost",onclick:move |_|{detail.set(None);generation+=1;},{i18n.t("tenant.reload")}}}
+            }
+        }
+        div{class:"data-meta-row",
+            span{{i18n.t("tenant_finance.active_owner")} " " if let Some(id)=query().owner{TechnicalId{value:id.to_string()}}else{{i18n.t("tenant_finance.all_owners")}}}
+            if query().tab==Tab::Usage{span{{i18n.t("tenant_finance.window")} " " {format_time(&query().window.from)} " — " {format_time(&query().window.to)}}}
+        }
         if !error().is_empty(){p{role:"alert",class:"alert alert-error","{error}"}}
         if query().tab==Tab::Usage{
             match summary{
                 Some(Ok(Some(totals)))=>rsx!{section{class:"finance-currency-totals",aria_label:i18n.t("tenant_finance.currency_totals"),
                     h2{{i18n.t("tenant_finance.currency_totals")}}
                     div{style:"display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px",for g in &totals.currencies{article{class:"card",key:"{g.currency}",h3{"{g.currency}"}p{{i18n.t("tenant_finance.amount")} ": {g.total_amount}"}p{{i18n.t("tenant_finance.requests")} ": {g.total_requests}"}p{{i18n.t("tenant_finance.tokens")} ": {g.total_input_tokens} / {g.total_output_tokens} / {g.total_tokens}"}}}}
-                    if totals.currencies.is_empty(){p{{i18n.t("tenant.empty")}}}
+                    if totals.currencies.is_empty(){div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}
                 }},
                 Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},
                 _=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
@@ -179,10 +187,8 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},
             Some(Ok(Rows::ChooseOwner))=>rsx!{p{class:"alert alert-info",{i18n.t("tenant_finance.choose_wallet")}}},
-            Some(Ok(Rows::Wallet(wallet)))=>rsx!{section{class:"card tenant-member-wallet",h2{{i18n.t("tenant_finance.wallet")}}p{code{"{wallet.user_id}"}}p{class:"text-secondary",{i18n.t("tenant_finance.wallet_scope")}}
-                p{{i18n.t("tenant_finance.available")} ": {wallet.available_balance}"}p{{i18n.t("tenant_finance.frozen")} ": {wallet.frozen_balance}"}
-                p{{i18n.t("tenant_finance.recharged")} ": {wallet.total_recharged}"}p{{i18n.t("tenant_finance.consumed")} ": {wallet.total_consumed}"}
-                p{{i18n.t("tenant_finance.as_of")} ": " {format_time(&wallet.as_of)}}
+            Some(Ok(Rows::Wallet(wallet)))=>rsx!{section{class:"card tenant-member-wallet",h2{{i18n.t("tenant_finance.wallet")}}p{class:"text-secondary",{i18n.t("tenant_finance.wallet_scope")}}
+                dl{class:"detail-grid",div{dt{{i18n.t("tenant_finance.owner")}}dd{TechnicalId{value:wallet.user_id.to_string()}}}div{dt{{i18n.t("tenant_finance.available")}}dd{"{wallet.available_balance}"}}div{dt{{i18n.t("tenant_finance.frozen")}}dd{"{wallet.frozen_balance}"}}div{dt{{i18n.t("tenant_finance.recharged")}}dd{"{wallet.total_recharged}"}}div{dt{{i18n.t("tenant_finance.consumed")}}dd{"{wallet.total_consumed}"}}div{dt{{i18n.t("tenant_finance.as_of")}}dd{{format_time(&wallet.as_of)}}}}
                 if !wallet.initialized{p{class:"alert alert-info",{i18n.t("tenant_finance.uninitialized")}}}
             }},
             Some(Ok(Rows::Usage(p)))=>rsx!{UsageTable{page:p,on_detail:move|row|detail.set(Some(Detail::Usage(row))),on_page:move|page|{query.write().page=page;detail.set(None);}}},
@@ -215,7 +221,7 @@ fn UsageTable(
                         for row in &page.items {
                             {let selected=row.clone();rsx! {tr {key:"{row.id}",
                                 td { p {"{row.model_name}"} p {"{row.provider_name}"} details {summary {"ID"} code {"{row.id}"}} }
-                                td {code {"{row.user_id}"}}
+                                td {TechnicalId{value:row.user_id.to_string()}}
                                 td {"{row.input_tokens} / {row.output_tokens} / {row.total_tokens}"}
                                 td {"{row.currency} {row.user_amount}"}
                                 td {{format_time(&row.created_at)}}
@@ -225,7 +231,7 @@ fn UsageTable(
                     }
                 }
             }
-            if page.items.is_empty() {p {{i18n.t("tenant.empty")}}}
+            if page.items.is_empty() {div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}
         }
         Pager {page:page.page,total_pages:page.total_pages,total:page.total,on_page}
     }
@@ -253,9 +259,9 @@ fn PaymentTable(
                         for row in &page.items {
                             {let selected=row.clone();rsx! {tr {key:"{row.id}",
                                 td {code {"{row.id}"} p {"{row.payment_method} / {row.payment_scene}"}}
-                                td {code {"{row.user_id}"}}
+                                td {TechnicalId{value:row.user_id.to_string()}}
                                 td {"{row.currency} {row.amount}"}
-                                td {"{row.status.as_str()}"}
+                                td {{payment_status_label(row.status.as_str(), &i18n)}}
                                 td {{format_time(&row.created_at)}}
                                 td {button {class:"btn btn-secondary",onclick:move |_|on_detail.call(selected.clone()),{i18n.t("tenant_finance.details")}}}
                             }}}
@@ -263,7 +269,7 @@ fn PaymentTable(
                     }
                 }
             }
-            if page.items.is_empty() {p {{i18n.t("tenant.empty")}}}
+            if page.items.is_empty() {div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}
         }
         Pager {page:page.page,total_pages:page.total_pages,total:page.total,on_page}
     }

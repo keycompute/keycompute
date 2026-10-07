@@ -1,3 +1,4 @@
+use crate::utils::time::{datetime_input_to_rfc3339, rfc3339_to_datetime_local};
 use chrono::{DateTime, Utc};
 use client_api::{
     ClientError, Result,
@@ -70,8 +71,12 @@ impl Draft {
                 currency: v.currency.clone(),
                 input: display_decimal(&v.input_price_per_1k),
                 output: display_decimal(&v.output_price_per_1k),
-                from: v.effective_from.clone(),
-                until: v.effective_until.clone().unwrap_or_default(),
+                from: rfc3339_to_datetime_local(&v.effective_from),
+                until: v
+                    .effective_until
+                    .as_deref()
+                    .map(rfc3339_to_datetime_local)
+                    .unwrap_or_default(),
                 is_default: v.is_default,
             }
         } else {
@@ -99,9 +104,9 @@ impl Draft {
         if raw.is_empty() {
             return Ok(None);
         }
-        DateTime::parse_from_rfc3339(raw)
-            .map_err(|_| ClientError::Config("Use RFC3339 timestamps with a timezone".into()))?;
-        Ok(Some(raw.into()))
+        datetime_input_to_rfc3339(raw)
+            .map(Some)
+            .ok_or_else(|| ClientError::Config("Choose a valid UTC date and time".into()))
     }
     fn window(&self) -> Result<(Option<String>, Option<String>)> {
         let from = Self::date(&self.from)?;

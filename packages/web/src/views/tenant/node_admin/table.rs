@@ -1,4 +1,4 @@
-use super::super::common::Pager;
+use super::super::common::{MemberIdField, Pager};
 use super::{
     NodeAdminScope,
     command::CommandDialog,
@@ -116,9 +116,13 @@ pub(super) fn ResourceTable(scope: NodeAdminScope, kind: Kind) -> Element {
     rsx! {section {class:"tenant-node-resources",
         div {class:"card filter-panel tenant-node-filters",
             div {class:"filter-grid filter-grid-nodes",
-                div {class:"form-field",
-                    label {class:"form-label",r#for:"node-owner",{i18n.t("tenant_nodes.owner")}}
-                    input {id:"node-owner",class:"input-field",value:"{draft().owner}",maxlength:"36",oninput:move |e|draft.write().owner=e.value()}
+                if let NodeAdminScope::Tenant(tenant_scope)=scope {
+                    MemberIdField {scope:tenant_scope,input_id:"node-owner".to_string(),label:i18n.t("tenant_nodes.owner").to_string(),value:draft().owner,on_input:move |value|draft.write().owner=value}
+                } else {
+                    div {class:"form-field",
+                        label {class:"form-label",r#for:"node-owner",{i18n.t("tenant_nodes.owner")}}
+                        input {id:"node-owner",class:"input-field",value:"{draft().owner}",maxlength:"36",oninput:move |e|draft.write().owner=e.value()}
+                    }
                 }
                 div {class:"form-field filter-field-grow",
                     label {class:"form-label",r#for:"node-search",{i18n.t("tenant_nodes.search")}}

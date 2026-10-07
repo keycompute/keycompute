@@ -3,14 +3,17 @@ mod command;
 #[cfg(test)]
 mod tests;
 mod types;
-use super::common::{self, Pager, WorkspaceLinks, WorkspaceScope};
+use super::common::{self, Pager, WorkspaceContext, WorkspaceLinks, WorkspaceScope};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::{get_client, user_error_message},
     stores::{auth_store::AuthStore, user_store::UserStore},
-    utils::resource::{KeyedResourceValue, current_keyed_value},
+    utils::{
+        resource::{KeyedResourceValue, current_keyed_value},
+        time::format_time,
+    },
 };
-use client_api::api::tenant_pricing::TenantPricingApi;
+use client_api::api::tenant_pricing::{BillingDimension, TenantPricingApi};
 use dioxus::prelude::*;
 use types::{Operation, Query};
 
@@ -24,7 +27,7 @@ pub fn TenantPricing() -> Element {
         .info
         .read()
         .as_ref()
-        .is_some_and(|u| u.can_manage_tenant());
+        .is_some_and(|u| u.can_manage_pricing());
     rsx! {if let Some(scope)=scope.filter(|_|allowed){for key in [format!("{scope:?}")]{PricingWorkspace{key:"{key}",scope}}}
     else {p {role:"alert",{i18n.t("tenant.admin_required")}}}}
 }
@@ -59,13 +62,16 @@ fn PricingWorkspace(scope: WorkspaceScope) -> Element {
     rsx! {div {class:"page-container tenant-pricing-admin",
         ui::PageHeader{title:i18n.t("tenant_pricing.title").to_string(),description:i18n.t("tenant_pricing.hint").to_string()}
         WorkspaceLinks{}
-        p {class:"alert alert-info",{i18n.t("tenant_pricing.scope")} " {scope.tenant_id}"}
-        div {class:"toolbar",
-            label {r#for:"tenant-pricing-search",{i18n.t("tenant_pricing.search")}}
-            input {id:"tenant-pricing-search",class:"input-field",value:"{search}",maxlength:"255",oninput:move|e|search.set(e.value())}
-            button {class:"btn btn-secondary",onclick:move |_|query.set(Query{search:search().trim().into(),page:1}),{i18n.t("tenant_pricing.search")}}
-            button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
-            button {class:"btn btn-primary",onclick:move |_|open(Operation::Create),{i18n.t("tenant_pricing.create")}}
+        WorkspaceContext{}
+        section {class:"filter-panel",aria_label:i18n.t("tenant_pricing.search"),
+            div{class:"filter-grid tenant-pricing-filter-grid",
+                div{class:"form-field",label {r#for:"tenant-pricing-search",{i18n.t("tenant_pricing.search")}}input {id:"tenant-pricing-search",class:"input-field",r#type:"search",value:"{search}",maxlength:"255",oninput:move|e|search.set(e.value())}}
+                div{class:"filter-actions",
+                    button {class:"btn btn-primary",onclick:move |_|query.set(Query{search:search().trim().into(),page:1}),{i18n.t("tenant_pricing.search")}}
+                    button {class:"btn btn-ghost",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+                    button {class:"btn btn-secondary",onclick:move |_|open(Operation::Create),{i18n.t("tenant_pricing.create")}}
+                }
+            }
         }
         match loaded {
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
@@ -77,17 +83,17 @@ fn PricingWorkspace(scope: WorkspaceScope) -> Element {
                         let edit=row.clone();let del=row.clone();let default=row.clone();
                         rsx!{tr {key:"{row.id}",
                             td {span {"{row.model_name}"} details {summary {"ID"} code {"{row.id}"}}}
-                            td {"{row.billing_dimension.as_str()}"}
+                            td {{i18n.t(match row.billing_dimension {BillingDimension::ProviderAccount=>"tenant_pricing.dimension_provider_account",BillingDimension::Node=>"tenant_pricing.dimension_node"})}}
                             td {"{row.currency}" p {"{row.input_price_per_1k} / {row.output_price_per_1k}"}}
                             td {p {{i18n.t(if row.is_effective{"tenant_pricing.effective"}else{"tenant_pricing.ineffective"})}}
                                 if row.is_default {span {class:"badge",{i18n.t("tenant_pricing.default_badge")}}}
-                                details {summary {{i18n.t("tenant_pricing.window")}} p {"{row.effective_from}"} p {{row.effective_until.as_deref().unwrap_or("—")}} p {{i18n.t("tenant_pricing.version")} ": {row.version}"}}}
+                                details {summary {{i18n.t("tenant_pricing.window")}} p {{format_time(&row.effective_from)}} p {{row.effective_until.as_deref().map(format_time).unwrap_or_else(||"—".into())}} p {{i18n.t("tenant_pricing.version")} ": {row.version}"}}}
                             td {button {class:"btn btn-secondary btn-sm",onclick:move |_|open(Operation::Edit(edit.clone())),{i18n.t("tenant_pricing.edit")}}
                                 button {class:"btn btn-secondary btn-sm",disabled:row.is_default,onclick:move |_|open(Operation::Default(default.clone())),{i18n.t("tenant_pricing.default")}}
                                 button {class:"btn btn-danger btn-sm",onclick:move |_|open(Operation::Delete(del.clone())),{i18n.t("tenant_pricing.delete")}}}
                         }}
                     }}}
-                }} if page.pricing.is_empty(){p {{i18n.t("tenant.empty")}}}}
+                }} if page.pricing.is_empty(){div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}}
                 Pager {page:query().page,total_pages:page.total_pages,total:page.total,on_page:move|page|query.write().page=page}
             }
         }

@@ -68,15 +68,14 @@ fn new_issuance_requires_an_explicit_member_and_bounded_future_expiration() {
     let wire = serde_json::to_value(request).unwrap();
     assert!(wire.get("tenant_id").is_none());
     assert!(wire.get("platform_role").is_none());
-    for value in [
-        "2000-01-01T00:00:00Z",
-        "2099-01-01T00:00:00Z",
-        "2030-01-01T00:00:00",
-        "not-a-date",
-    ] {
+    for value in ["2000-01-01T00:00:00Z", "2099-01-01T00:00:00Z", "not-a-date"] {
         draft.date = value.into();
         assert!(draft.request().is_err(), "{value}");
     }
+    draft.date = (Utc::now() + Duration::days(365))
+        .format("%Y-%m-%dT%H:%M:%S")
+        .to_string();
+    assert!(draft.request().is_ok());
     draft.expiry = Expiry::Never;
     assert!(draft.request().unwrap().expires_at.is_none());
     draft.expiry = Expiry::Keep;
@@ -140,9 +139,21 @@ fn owner_and_administrator_key_routes_are_distinct_and_labels_exist() {
         "decline",
         "copied",
         "copy_failed",
+        "selected_member",
     ] {
         let key = format!("tenant_keys.{suffix}");
         assert!(EN.contains_key(key.as_str()), "{key}");
         assert!(ZH.contains_key(key.as_str()), "{key}");
     }
+}
+
+#[test]
+fn owner_picker_keeps_and_confirms_the_selected_member() {
+    let editor = include_str!("editor.rs");
+    assert!(editor.contains("selected:draft().owner.clone()"));
+    assert!(editor.contains("value:\"{selected}\""));
+    assert!(editor.contains("!selected_is_listed"));
+    assert!(editor.contains("class:\"tenant-owner-selected\""));
+    assert!(editor.contains("common::TechnicalId{value:selected.clone()}"));
+    assert!(!editor.contains("key-owner-option\",class:\"input-field\",disabled,value:\"\""));
 }

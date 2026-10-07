@@ -20,6 +20,12 @@ pub(super) fn register(map: &mut HashMap<&'static str, &'static str>, zh: bool) 
         ("tenant_pricing.default_badge", "默认", "Default"),
         ("tenant_pricing.model", "模型名称", "Model name"),
         ("tenant_pricing.dimension", "计费维度", "Billing dimension"),
+        (
+            "tenant_pricing.dimension_provider_account",
+            "上游账号",
+            "Provider account",
+        ),
+        ("tenant_pricing.dimension_node", "节点", "Node"),
         ("tenant_pricing.currency", "币种", "Currency"),
         (
             "tenant_pricing.prices",
@@ -45,16 +51,8 @@ pub(super) fn register(map: &mut HashMap<&'static str, &'static str>, zh: bool) 
         ),
         ("tenant_pricing.window", "生效时间范围", "Effective window"),
         ("tenant_pricing.version", "版本", "Version"),
-        (
-            "tenant_pricing.from",
-            "开始时间（RFC3339）",
-            "Start time (RFC3339)",
-        ),
-        (
-            "tenant_pricing.until",
-            "结束时间（RFC3339）",
-            "End time (RFC3339)",
-        ),
+        ("tenant_pricing.from", "开始时间（UTC）", "Start time (UTC)"),
+        ("tenant_pricing.until", "结束时间（UTC）", "End time (UTC)"),
         (
             "tenant_pricing.create_times",
             "开始留空表示立即生效，结束留空表示无到期时间。金额最多10位整数、10位小数，不进行浮点舍入。",

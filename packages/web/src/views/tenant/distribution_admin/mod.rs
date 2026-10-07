@@ -4,7 +4,7 @@ mod command;
 mod tests;
 mod types;
 
-use super::common::{self, Pager, WorkspaceLinks, WorkspaceScope};
+use super::common::{self, Pager, TechnicalId, WorkspaceContext, WorkspaceLinks, WorkspaceScope};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::{get_client, user_error_message},
@@ -62,10 +62,7 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
         div {class:"page-container tenant-distribution-admin",
             ui::PageHeader {title:i18n.t("tenant_distribution.title").to_string(),description:i18n.t("tenant_distribution.hint").to_string()}
             WorkspaceLinks {}
-            div {class:"scope-banner",
-                span {class:"scope-banner-label",{i18n.t("tenant_distribution.scope")}}
-                code {"{scope.tenant_id}"}
-            }
+            WorkspaceContext {}
             div {class:"toolbar",
                 button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
                 button {class:"btn btn-secondary",onclick:move |_|open(Operation::Default),{i18n.t("tenant_distribution.default")}}
@@ -96,7 +93,7 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
                                         {let edit=row.clone();let del=row.clone();rsx! {
                                             tr {key:"{row.id}",
                                                 td {strong {"{row.name}"} details {summary {"ID"} code {"{row.id}"}}}
-                                                td {if let Some(id)=row.beneficiary_id {code {"{id}"}} else {{i18n.t("tenant_distribution.everyone")}}}
+                                                td {if let Some(id)=row.beneficiary_id {TechnicalId {value:id.to_string()}} else {{i18n.t("tenant_distribution.everyone")}}}
                                                 td {"{row.commission_rate}"}
                                                 td {p {if row.is_active {{i18n.t("tenant_distribution.active")}} else {{i18n.t("tenant_distribution.inactive")}}} small {class:"table-meta",{i18n.t("tenant_distribution.priority")} " {row.priority}"}}
                                                 td {details {summary {{i18n.t("tenant_distribution.window")}}

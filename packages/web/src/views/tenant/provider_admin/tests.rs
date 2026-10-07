@@ -3,6 +3,12 @@ use super::{capability_mode, caps, models};
 fn model_input_is_deduplicated_without_rewriting_ids() {
     assert_eq!(models(" a, b,a "), ["a", "b"]);
 }
+
+#[test]
+fn provider_pool_controls_use_the_shared_checkbox_layout() {
+    let source = include_str!("mod.rs");
+    assert!(source.matches("label{class:\"checkbox-field\"").count() >= 2);
+}
 #[test]
 fn capability_mode_round_trips_supported_protocol_sets() {
     assert_eq!(caps("anthropic", "both"), ["messages"]);

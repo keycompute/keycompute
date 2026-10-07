@@ -1,4 +1,6 @@
-use super::super::common::{self, Pager, WorkspaceLinks, WorkspaceScope};
+use super::super::common::{
+    self, Pager, TechnicalId, WorkspaceContext, WorkspaceLinks, WorkspaceScope,
+};
 use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
@@ -94,7 +96,7 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
     rsx! {div{class:"page-container owner-key-issuance",
         ui::PageHeader{title:i18n.t("tenant_keys.my_requests").to_string(),description:i18n.t("tenant_keys.owner_hint").to_string()}
         WorkspaceLinks{}
-        p{class:"text-secondary","{scope.tenant_id} · {scope.user_id}"}
+        WorkspaceContext{}
         Link{class:"btn btn-secondary",to:Route::ApiKeyList{},{i18n.t("page.api_keys")}}
         SecretPanel{scope,secret,on_close:move |_|secret.set(None)}
         if !notice().is_empty(){p{class:"alert alert-success",role:"status","{notice}"}}
@@ -118,18 +120,21 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
                             }}
                         }
                     }
-                    if result.intents.is_empty() {p {{i18n.t("tenant.empty")}}}
+                    if result.intents.is_empty() {div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}
                 }
                 Pager {page:page(),total_pages:result.total_pages,total:result.total,on_page:move|p|if !busy(){page.set(p);choice.set(None);}}
             }
 
         }
-        if let Some(selected)=choice(){div{class:"modal-overlay",div{class:"modal",style:"width:min(800px,95vw);max-height:85vh;overflow:auto;box-sizing:border-box;overflow-wrap:anywhere;background:var(--bg-primary,#fff);animation:none;opacity:1",tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();choice.set(None);}},role:"dialog",aria_modal:"true",aria_label:i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"}),
-            h2{{i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"})}}
-            p{"{selected.intent.requested_name}"}p{code{"{selected.intent.id}"}}p{{i18n.t("tenant_keys.owner_hint")}}
-            if selected.intent.replaces_key_id.is_some(){p{class:"alert alert-info",{i18n.t("tenant_keys.rotation_hint")}}}
-            p{class:"text-secondary",{i18n.t("tenant.command_hint")}}
-            div{class:"modal-actions",
+        if let Some(selected)=choice(){div{class:"modal-overlay",div{class:"modal tenant-key-editor",tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();choice.set(None);}},role:"dialog",aria_modal:"true",aria_label:i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"}),
+            div{class:"modal-header",div{h2{class:"modal-title",{i18n.t(if selected.claim{"tenant_keys.claim"}else{"tenant_keys.decline"})}}p{class:"modal-context","{selected.intent.requested_name}"}}button{class:"modal-close",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|choice.set(None),"×"}}
+            div{class:"modal-body",
+                details{class:"technical-details",summary{{i18n.t("tenant_keys.request_identity")}}code{"{selected.intent.id}"}}
+                p{{i18n.t("tenant_keys.owner_hint")}}
+                if selected.intent.replaces_key_id.is_some(){p{class:"alert alert-info",{i18n.t("tenant_keys.rotation_hint")}}}
+                p{class:"command-note",{i18n.t("tenant.command_hint")}}
+            }
+            div{class:"modal-footer",
                 button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|choice.set(None),{i18n.t("form.cancel")}}
                 button{class:"btn btn-primary",disabled:busy(),onclick:confirm,{i18n.t("tenant.confirm")}}
             }
@@ -185,7 +190,7 @@ fn SecretPanel(
         return rsx! {};
     };
     rsx! {section{class:"kc-api-success-panel owner-issued-secret",
-        h2{{i18n.t("tenant_keys.secret_title")}}p{{i18n.t("tenant_keys.secret_hint")}}p{code{"{key.key_id}"}}
+        h2{{i18n.t("tenant_keys.secret_title")}}p{{i18n.t("tenant_keys.secret_hint")}}p{TechnicalId{value:key.key_id.to_string()}}
         pre{class:"kc-api-example",style:"white-space:pre-wrap;overflow-wrap:anywhere","{key.key.expose()}"}
         button{class:"btn btn-secondary",disabled:copying(),onclick:copy,{i18n.t("tenant_keys.copy")}}
         button{class:"btn btn-secondary",onclick:move |_|on_close.call(()),{i18n.t("tenant_keys.clear_secret")}}
@@ -222,7 +227,7 @@ fn PendingRow(intent: IssuanceIntent, blocked: bool, on_choice: EventHandler<Cho
     let decline = intent.clone();
     rsx! {tr {
         td {p {"{intent.requested_name}"} details {summary {"ID"} code {"{intent.id}"}
-            p {{i18n.t("tenant_keys.requester")} " {intent.requested_by_user_id}"}
+            p {{i18n.t("tenant_keys.requester")} " " TechnicalId{value:intent.requested_by_user_id.to_string()}}
             if let Some(old)=intent.replaces_key_id {p {{i18n.t("tenant_keys.replaces")} " {old}"}}
         }}
         td {{format_time(&intent.expires_at)}}

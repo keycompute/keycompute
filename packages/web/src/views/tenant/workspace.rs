@@ -66,7 +66,10 @@ fn TenantWorkspacePage() -> Element {
     let user = (users.info)();
     let can_manage_settings = user.as_ref().is_some_and(UserInfo::can_manage_tenant);
     let can_manage_members = user.as_ref().is_some_and(UserInfo::can_manage_members);
+    let can_invite_members = user.as_ref().is_some_and(UserInfo::can_invite_members);
     let can_manage_providers = user.as_ref().is_some_and(UserInfo::can_manage_providers);
+    let can_manage_keys = user.as_ref().is_some_and(UserInfo::can_manage_api_keys);
+    let can_manage_pricing = user.as_ref().is_some_and(UserInfo::can_manage_pricing);
     let can_manage_billing = user.as_ref().is_some_and(UserInfo::can_manage_billing);
     let context = use_resource(move || {
         let scope = WorkspaceScope::from_stores(auth, users);
@@ -162,7 +165,14 @@ fn TenantWorkspacePage() -> Element {
                     OverviewCard { title: i18n.t("nav.payments").to_string(), description: i18n.t("tenant.payments_card").to_string(), route: Route::PaymentsOverview {} }
                 }
 
-                if can_manage_settings || can_manage_members || can_manage_providers || can_manage_billing {
+                if can_manage_settings
+                    || can_manage_members
+                    || can_invite_members
+                    || can_manage_providers
+                    || can_manage_keys
+                    || can_manage_pricing
+                    || can_manage_billing
+                {
                     h2 { class: "tenant-overview-section-title", {i18n.t("tenant.admin_get_started")} }
                     div { class: "tenant-overview-grid",
                         if can_manage_settings {
@@ -171,11 +181,29 @@ fn TenantWorkspacePage() -> Element {
                         if can_manage_members {
                             OverviewCard { title: i18n.t("tenant.members").to_string(), description: i18n.t("tenant.members_card").to_string(), route: Route::TenantMembers {} }
                         }
+                        if can_invite_members {
+                            OverviewCard { title: i18n.t("tenant.invitations").to_string(), description: i18n.t("tenant.invitations_hint").to_string(), route: Route::TenantInvitations {} }
+                        }
                         if can_manage_providers {
                             OverviewCard { title: i18n.t("tenant_providers.title").to_string(), description: i18n.t("tenant.providers_card").to_string(), route: Route::TenantProviders {} }
                         }
+                        if can_manage_keys {
+                            OverviewCard { title: i18n.t("tenant_keys.title").to_string(), description: i18n.t("tenant_keys.hint").to_string(), route: Route::TenantKeys {} }
+                        }
+                        if can_manage_settings {
+                            OverviewCard { title: i18n.t("tenant_responses.title").to_string(), description: i18n.t("tenant_responses.hint").to_string(), route: Route::TenantResponses {} }
+                            OverviewCard { title: i18n.t("tenant_nodes.title").to_string(), description: i18n.t("tenant_nodes.hint").to_string(), route: Route::TenantNodes {} }
+                        }
+                        if can_manage_pricing {
+                            OverviewCard { title: i18n.t("tenant_pricing.title").to_string(), description: i18n.t("tenant_pricing.hint").to_string(), route: Route::TenantPricing {} }
+                        }
                         if can_manage_billing {
                             OverviewCard { title: i18n.t("tenant_finance.title").to_string(), description: i18n.t("tenant.finance_card").to_string(), route: Route::TenantFinance {} }
+                            OverviewCard { title: i18n.t("tenant_financial_controls.title").to_string(), description: i18n.t("tenant_financial_controls.hint").to_string(), route: Route::TenantFinancialControls {} }
+                        }
+                        if can_manage_settings {
+                            OverviewCard { title: i18n.t("tenant_distribution.title").to_string(), description: i18n.t("tenant_distribution.hint").to_string(), route: Route::TenantDistribution {} }
+                            OverviewCard { title: i18n.t("tenant.audit").to_string(), description: i18n.t("tenant.audit_hint").to_string(), route: Route::TenantAudit {} }
                         }
                     }
                 }

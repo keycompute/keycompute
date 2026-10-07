@@ -1,4 +1,4 @@
-use super::common::{self, Pager, WorkspaceLinks, WorkspaceScope};
+use super::common::{self, Pager, TechnicalId, WorkspaceContext, WorkspaceLinks, WorkspaceScope};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::user_error_message,
@@ -52,6 +52,7 @@ fn TenantAuditPage() -> Element {
     rsx! {div {class:"page-container tenant-audit",
         ui::PageHeader {title:i18n.t("tenant.audit").to_string(),description:i18n.t("tenant.audit_hint").to_string()}
         WorkspaceLinks {}
+        WorkspaceContext {}
         button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
         match loaded {
             None=>rsx!{div {class:"content-loading",role:"status",span {class:"spinner",aria_hidden:"true"} span {{i18n.t("common.loading")}}}},
@@ -61,9 +62,9 @@ fn TenantAuditPage() -> Element {
                     div {class:"table-container",tabindex:"0",table {class:"table",thead {tr {th {{i18n.t("tenant.time")}} th {{i18n.t("tenant.actor")}} th {{i18n.t("tenant.action")}} th {{i18n.t("tenant.resource")}} th {{i18n.t("tenant.result")}}}}
                         tbody {for event in value.items.iter(){tr {key:"{event.id}",
                             td {{format_time(&event.created_at)}}
-                            td {"{event.actor_user_id}"}
+                            td {TechnicalId {value:event.actor_user_id.to_string()}}
                             td {"{event.action}"}
-                            td {"{event.resource_type}" p {{event.resource_id.as_deref().unwrap_or("—")}}}
+                            td {"{event.resource_type}" if let Some(id)=event.resource_id.as_deref(){p{TechnicalId{value:id.to_string()}}}else{p{"—"}}}
                             td {"{event.result}" details {summary {"Request ID"} code {"{event.request_id.map(|id|id.to_string()).unwrap_or_default()}"} pre {"{event.metadata}"}}}
                         }}}
                     }}

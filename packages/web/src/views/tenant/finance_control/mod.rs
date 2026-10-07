@@ -2,7 +2,9 @@
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
 
-use super::common::{self, WorkspaceLinks, WorkspaceScope};
+use super::common::{
+    self, MemberIdField, Pager, TechnicalId, WorkspaceContext, WorkspaceLinks, WorkspaceScope,
+};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::{get_client, user_error_message},
@@ -32,7 +34,7 @@ fn owner(raw: &str) -> client_api::Result<Uuid> {
     Uuid::parse_str(raw.trim())
         .ok()
         .filter(|value| !value.is_nil())
-        .ok_or_else(|| client_api::ClientError::Config("Select a real member UUID".into()))
+        .ok_or_else(|| client_api::ClientError::Config("Select a valid member ID".into()))
 }
 
 fn expired(raw: &str) -> bool {
@@ -52,6 +54,28 @@ fn pages(total: i64) -> i64 {
     }
 }
 
+fn withdrawal_status_label(i18n: crate::i18n::I18n, status: &str) -> String {
+    let key = match status {
+        "pending" => Some("tenant_financial_controls.pending"),
+        "approved" => Some("tenant_financial_controls.approved"),
+        "completed" => Some("tenant_financial_controls.completed"),
+        "rejected" => Some("tenant_financial_controls.rejected"),
+        _ => None,
+    };
+    key.map(|key| i18n.t(key).to_owned())
+        .unwrap_or_else(|| status.to_owned())
+}
+
+fn withdrawal_type_label(i18n: crate::i18n::I18n, withdrawal_type: &str) -> String {
+    let key = match withdrawal_type {
+        "balance" => Some("tenant_financial_controls.type_balance"),
+        "alipay" => Some("tenant_financial_controls.type_alipay"),
+        _ => None,
+    };
+    key.map(|key| i18n.t(key).to_owned())
+        .unwrap_or_else(|| withdrawal_type.to_owned())
+}
+
 #[component]
 pub fn TenantFinancialControls() -> Element {
     let auth = use_context::<AuthStore>();
@@ -61,7 +85,7 @@ pub fn TenantFinancialControls() -> Element {
         .info
         .read()
         .as_ref()
-        .is_some_and(|value| value.can_manage_tenant());
+        .is_some_and(|value| value.can_manage_billing());
 
     rsx! {
         if let Some(scope) = WorkspaceScope::from_stores(auth, users).filter(|_| allowed) {
@@ -86,8 +110,8 @@ fn Workspace(scope: WorkspaceScope) -> Element {
                 description: i18n.t("tenant_financial_controls.hint").to_string(),
             }
             WorkspaceLinks {}
-            p { class: "alert alert-info", {i18n.t("tenant_financial_controls.boundary")} }
-            nav { class: "toolbar",
+            WorkspaceContext { note: i18n.t("tenant_financial_controls.boundary").to_string() }
+            nav { class: "segmented-control",
                 button {
                     class: "btn btn-secondary",
                     aria_pressed: tab() == Tab::Reservations,
@@ -200,14 +224,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
             h2 { {i18n.t("tenant_financial_controls.reservations")} }
             p { class: "text-secondary", {i18n.t("tenant_financial_controls.reservation_hint")} }
             div { class: "toolbar",
-                label { r#for: "financial-owner", {i18n.t("tenant_financial_controls.owner")} }
-                input {
-                    id: "financial-owner",
-                    class: "input-field",
-                    maxlength: "36",
-                    value: "{draft}",
-                    oninput: move |event| draft.set(event.value()),
-                }
+                MemberIdField { scope, input_id: "financial-owner".to_string(), label: i18n.t("tenant_financial_controls.owner").to_string(), value: draft(), on_input: move |value| draft.set(value) }
                 button { class: "btn btn-secondary", onclick: apply, {i18n.t("tenant_financial_controls.load")} }
                 button {
                     class: "btn btn-secondary",
@@ -260,7 +277,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                     div { class: "modal", role: "dialog", aria_modal: "true", aria_label: i18n.t("tenant_financial_controls.release"),
                         div { class: "modal-header", h2 { {i18n.t("tenant_financial_controls.release")} } }
                         div { class: "modal-body",
-                            p { code { "{row.request_id}" } }
+                            p { TechnicalId { value: row.request_id.to_string() } }
                             p { class: "alert alert-warning", {i18n.t("tenant_financial_controls.release_warning")} }
                             label { r#for: "financial-recovery-reason", {i18n.t("tenant_financial_controls.reason")} }
                             textarea {
@@ -313,7 +330,7 @@ fn ReservationPage(
                             {
                                 let selected_row = row.clone();
                                 rsx! { tr { key: "{row.request_id}",
-                                    td { code { "{row.request_id}" } p { class: "table-meta", "v {row.version}" } }
+                                    td { TechnicalId { value: row.request_id.to_string() } p { class: "table-meta", "v {row.version}" } }
                                     td { "{row.amount}" }
                                     td { {format_time(&row.expires_at)} }
                                     td { button {
@@ -329,12 +346,14 @@ fn ReservationPage(
                 }
             }
             if page.reservations.is_empty() {
-                p { {i18n.t("tenant.empty")} }
+                div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {i18n.t("tenant.empty")} } }
             }
-            div { class: "toolbar",
-                button { class: "btn btn-secondary", disabled: !can_back, onclick: move |_| on_back.call(()), {i18n.t("tenant.previous")} }
+            if can_back || next_cursor.is_some() {
+                div { class: "toolbar",
+                    button { class: "btn btn-secondary", disabled: !can_back, onclick: move |_| on_back.call(()), {i18n.t("tenant.previous")} }
                 if let Some(next) = next_cursor {
                     button { class: "btn btn-secondary", onclick: move |_| on_next.call(next.clone()), {i18n.t("tenant.next")} }
+                }
                 }
             }
         }
@@ -406,7 +425,11 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
             busy.set(false);
             match result {
                 Ok(value) => {
-                    notice.set(format!("{} · r{}", value.status, value.revision));
+                    notice.set(format!(
+                        "{} · r{}",
+                        withdrawal_status_label(i18n, &value.status),
+                        value.revision
+                    ));
                     action.set(None);
                     reason.set(String::new());
                     generation += 1;
@@ -428,9 +451,10 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
                     value: "{status}",
                     onchange: move |event| status.set(event.value()),
                     option { value: "", {i18n.t("tenant_finance.all_states")} }
-                    for value in ["pending", "approved", "completed", "rejected"] {
-                        option { value: "{value}", "{value}" }
-                    }
+                    option { value: "pending", {i18n.t("tenant_financial_controls.pending")} }
+                    option { value: "approved", {i18n.t("tenant_financial_controls.approved")} }
+                    option { value: "completed", {i18n.t("tenant_financial_controls.completed")} }
+                    option { value: "rejected", {i18n.t("tenant_financial_controls.rejected")} }
                 }
                 button { class: "btn btn-secondary", onclick: move |_| { applied.set(status()); page.set(1); action.set(None); reason.set(String::new()); error.set(String::new()); notice.set(String::new()); }, {i18n.t("tenant_financial_controls.apply")} }
                 button { class: "btn btn-secondary", onclick: move |_| { notice.set(String::new()); generation += 1; }, {i18n.t("tenant.reload")} }
@@ -464,7 +488,7 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
                         div { class: "modal-header", h2 { {i18n.t("tenant_financial_controls.review")} } }
                         div { class: "modal-body",
                             p { "{row.currency} {row.total_amount}" }
-                            p { code { "{row.id}" } }
+                            p { TechnicalId { value: row.id.to_string() } }
                             p { class: "text-secondary",
                                 {if decision == WithdrawalDecision::Approve {
                                     i18n.t("tenant_financial_controls.approve_hint")
@@ -519,10 +543,10 @@ fn WithdrawalTable(
                                 let approve = row.clone();
                                 let reject = row.clone();
                                 rsx! { tr { key: "{row.id}",
-                                    td { code { "{row.owner_user_id}" } details { summary { "ID" } code { "{row.id}" } } }
+                                    td { TechnicalId { value: row.owner_user_id.to_string() } details { summary { "ID" } code { "{row.id}" } } }
                                     td { "{row.currency} {row.total_amount}" }
-                                    td { "{row.status} · r{row.revision}" }
-                                    td { "{row.withdrawal_type}" }
+                                    td { {withdrawal_status_label(i18n, &row.status)} " · r{row.revision}" }
+                                    td { {withdrawal_type_label(i18n, &row.withdrawal_type)} }
                                     td { {format_time(&row.created_at)} }
                                     td {
                                         if row.status == "pending" && row.withdrawal_type == "alipay" {
@@ -539,13 +563,9 @@ fn WithdrawalTable(
                 }
             }
             if data.items.is_empty() {
-                p { {i18n.t("tenant.empty")} }
+                div { class: "empty-state compact-empty-state", h3 { class: "empty-title", {i18n.t("tenant.empty")} } }
             }
-            div { class: "table-pagination-footer",
-                button { class: "btn btn-secondary", disabled: page <= 1, onclick: move |_| on_page.call(page - 1), {i18n.t("tenant.previous")} }
-                span { "{page} / {total_pages} · {data.total} " {i18n.t("tenant.records")} }
-                button { class: "btn btn-secondary", disabled: i64::from(page) >= total_pages, onclick: move |_| on_page.call(page + 1), {i18n.t("tenant.next")} }
-            }
+            Pager { page, total_pages, total: data.total, on_page }
         }
     }
 }

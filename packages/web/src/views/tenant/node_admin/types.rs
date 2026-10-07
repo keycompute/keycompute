@@ -73,7 +73,7 @@ impl Filter {
                 Uuid::parse_str(self.owner.trim())
                     .ok()
                     .filter(|id| !id.is_nil())
-                    .ok_or_else(|| ClientError::Config("A real owner UUID is required".into()))?,
+                    .ok_or_else(|| ClientError::Config("A valid owner ID is required".into()))?,
             )
         };
         Ok(NodeListQuery {

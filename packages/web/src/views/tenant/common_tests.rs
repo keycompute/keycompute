@@ -196,3 +196,46 @@ fn read_completion_cannot_publish_rows_for_another_membership_revision() {
         })
     });
 }
+
+#[test]
+fn technical_ids_keep_the_full_value_in_the_accessible_dom() {
+    let source = include_str!("common.rs");
+    let component = source
+        .split_once("pub fn TechnicalId")
+        .expect("technical ID component")
+        .1
+        .split_once("pub fn MemberIdField")
+        .expect("bounded component source")
+        .0;
+    assert!(component.contains("tabindex: \"0\""));
+    assert!(component.contains("aria_label: \"{value}\""));
+    assert!(component.contains("\"{value}\""));
+    assert!(!component.contains("short_id"));
+
+    let settings = include_str!("settings.rs");
+    assert!(settings.contains("TechnicalId { value: value.owner_user_id.to_string() }"));
+    assert!(!settings.contains("short_id"));
+}
+
+#[test]
+fn tenant_css_overrides_shared_grid_and_modal_rules_with_specific_selectors() {
+    let css = include_str!("../../../assets/main.css");
+    for selector in [
+        ".filter-grid.tenant-finance-filter-grid",
+        ".filter-grid.tenant-key-filter-grid",
+        ".filter-grid.tenant-pricing-filter-grid",
+    ] {
+        assert!(css.contains(selector), "missing {selector}");
+    }
+    for selector in [
+        ".modal-overlay .modal.tenant-key-editor",
+        ".modal-overlay .modal.tenant-pricing-editor",
+        ".modal-overlay .modal.tenant-distribution-editor",
+    ] {
+        assert!(css.contains(selector), "missing {selector}");
+    }
+    assert!(css.contains(".tenant-provider-admin .modal-body > label:not(.checkbox-field)"));
+    assert!(!css.contains(
+        ".tenant-provider-admin .modal-body > label,\n.tenant-provider-admin .modal-body > label:not(.checkbox-field)"
+    ));
+}

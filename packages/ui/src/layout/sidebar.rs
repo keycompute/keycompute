@@ -102,6 +102,11 @@ pub fn Sidebar(
         }
         cls
     };
+    // Several routes intentionally share a path prefix (for example
+    // `/tenant/finance` and `/tenant/finance/controls`). Pick the most
+    // specific matching item once for the whole navigation so only one entry
+    // can be active at a time while parent-only console routes still work.
+    let active_path = active_nav_path(&sections, &current_path).map(str::to_owned);
 
     // 折叠/展开图标
     let toggle_icon = if is_collapsed {
@@ -149,7 +154,7 @@ pub fn Sidebar(
                                 item: item.clone(),
                                 collapsed: is_collapsed,
                                 mobile_open,
-                                current_path: current_path.clone(),
+                                active: active_path.as_deref() == Some(item.path.as_str()),
                             }
                         }
                     }
@@ -181,11 +186,9 @@ fn SidebarNavItem(
     item: NavItem,
     collapsed: bool,
     mut mobile_open: Signal<bool>,
-    current_path: String,
+    active: bool,
 ) -> Element {
-    let is_active = nav_item_is_active(&current_path, &item.path);
-
-    let item_class = if is_active {
+    let item_class = if active {
         "sidebar-item active"
     } else {
         "sidebar-item"
@@ -236,6 +239,15 @@ fn SidebarNavItem(
     }
 }
 
+fn active_nav_path<'a>(sections: &'a [NavSection], current_path: &str) -> Option<&'a str> {
+    sections
+        .iter()
+        .flat_map(|section| section.items.iter())
+        .filter(|item| nav_item_is_active(current_path, &item.path))
+        .max_by_key(|item| item.path.len())
+        .map(|item| item.path.as_str())
+}
+
 fn nav_item_is_active(current_path: &str, item_path: &str) -> bool {
     current_path == item_path
         || (item_path != "/"
@@ -246,7 +258,7 @@ fn nav_item_is_active(current_path: &str, item_path: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::nav_item_is_active;
+    use super::{NavIcon, NavItem, NavSection, active_nav_path, nav_item_is_active};
 
     #[test]
     fn nested_console_routes_keep_their_parent_navigation_active() {
@@ -260,5 +272,29 @@ mod tests {
             "/admin/monitoring"
         ));
         assert!(!nav_item_is_active("/dashboard", "/"));
+    }
+
+    #[test]
+    fn the_longest_matching_route_is_the_only_active_item() {
+        let sections = vec![NavSection {
+            title: None,
+            items: vec![
+                NavItem::new("Finance", "/tenant/finance", NavIcon::Wallet),
+                NavItem::new(
+                    "Financial controls",
+                    "/tenant/finance/controls",
+                    NavIcon::Wallet,
+                ),
+            ],
+        }];
+
+        assert_eq!(
+            active_nav_path(&sections, "/tenant/finance/controls"),
+            Some("/tenant/finance/controls")
+        );
+        assert_eq!(
+            active_nav_path(&sections, "/tenant/finance"),
+            Some("/tenant/finance")
+        );
     }
 }

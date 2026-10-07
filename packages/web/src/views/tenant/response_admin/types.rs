@@ -56,7 +56,7 @@ pub fn owner(value: &str) -> Result<Option<Uuid>> {
         .ok()
         .filter(|id| !id.is_nil())
         .map(Some)
-        .ok_or_else(|| ClientError::Config("Use a real owner UUID".into()))
+        .ok_or_else(|| ClientError::Config("Use a valid owner ID".into()))
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {

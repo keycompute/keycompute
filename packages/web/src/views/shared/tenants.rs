@@ -42,6 +42,7 @@ impl TenantListQuery {
     }
 }
 
+use crate::app::UserBootstrap;
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{
     api_client::{get_client, user_error_message, with_auto_refresh},
@@ -85,6 +86,7 @@ pub fn Tenants() -> Element {
     let mut operation_error = use_signal(String::new);
     let mut pending_tenant = use_signal(|| None::<String>);
     let mut ui_store = use_context::<UiStore>();
+    let mut user_bootstrap = use_context::<UserBootstrap>();
 
     use_effect(move || {
         let next_search = search();
@@ -302,6 +304,7 @@ pub fn Tenants() -> Element {
                         show_create.set(false);
                         query.write().page = 1;
                         tenants.restart();
+                        user_bootstrap.0.restart();
                         ui_store.show_success(i18n.t("tenants.created"));
                     },
                 }
@@ -362,7 +365,7 @@ fn TenantCreateModal(
     on_created: EventHandler<()>,
 ) -> Element {
     let i18n = use_i18n();
-    let user_store = use_context::<UserStore>();
+    let mut user_store = use_context::<UserStore>();
     let opened_session = use_hook(|| auth_store.state.peek().session_id);
     let mut owner_user_id = use_signal(|| {
         if *user_store.loaded_session_id.peek() != auth_store.state.peek().session_id {
@@ -449,6 +452,7 @@ fn TenantCreateModal(
             request = request.with_slug(slug_value);
         }
         let request_auth = auth_store;
+        let owner_user_id = owner.to_string();
         saving.set(true);
         error.set(String::new());
         let on_created = on_created.clone();
@@ -462,7 +466,18 @@ fn TenantCreateModal(
                 return;
             }
             match result {
-                Ok(_) => on_created.call(()),
+                Ok(tenant) => {
+                    if user_store
+                        .info
+                        .peek()
+                        .as_ref()
+                        .is_some_and(|user| user.id == owner_user_id)
+                        && let Some(user) = user_store.info.write().as_mut()
+                    {
+                        user.add_created_owned_tenant(&tenant.id, &tenant.name);
+                    }
+                    on_created.call(())
+                }
                 Err(value) => error.set(user_error_message(i18n, &value)),
             }
             saving.set(false);

@@ -1,4 +1,6 @@
-use super::super::common::{self, Pager, WorkspaceLinks, WorkspaceScope};
+use super::super::common::{
+    self, MemberIdField, Pager, TechnicalId, WorkspaceContext, WorkspaceLinks, WorkspaceScope,
+};
 use super::{
     editor::Editor,
     types::{self, Operation, Query, Tab},
@@ -43,7 +45,7 @@ pub fn TenantKeys() -> Element {
         .info
         .read()
         .as_ref()
-        .is_some_and(|u| u.can_manage_tenant());
+        .is_some_and(|u| u.can_manage_api_keys());
     rsx! {if let Some(scope)=WorkspaceScope::from_stores(auth,users).filter(|_|allowed){for key in [format!("{scope:?}")]{KeyWorkspace{key:"{key}",scope}}}else{p{role:"alert",{i18n.t("tenant.admin_required")}}}}
 }
 #[component]
@@ -96,19 +98,26 @@ fn KeyWorkspace(scope: WorkspaceScope) -> Element {
     rsx! {div{class:"page-container tenant-key-admin",
         ui::PageHeader{title:i18n.t("tenant_keys.title").to_string(),description:i18n.t("tenant_keys.hint").to_string()}
         WorkspaceLinks{}
-        p{class:"alert alert-info",{i18n.t("tenant_keys.metadata_only")} " · {scope.tenant_id}"}
-        Link{class:"btn btn-secondary",to:Route::OwnerKeyIssuance{},{i18n.t("tenant_keys.my_requests")}}
-        div{class:"toolbar",style:"flex-wrap:wrap;gap:12px",
-            button{class:"btn btn-secondary",onclick:move |_|{query.write().tab=Tab::Keys;query.write().page=1;operation.set(None);},{i18n.t("tenant_keys.keys")}}
-            button{class:"btn btn-secondary",onclick:move |_|{query.write().tab=Tab::Pending;query.write().page=1;operation.set(None);},{i18n.t("tenant_keys.pending")}}
-            label{r#for:"tenant-key-owner",{i18n.t("tenant_keys.owner")}}
-            input{id:"tenant-key-owner",class:"input-field",style:"width:24rem;max-width:100%",value:"{owner}",maxlength:"36",oninput:move|e|owner.set(e.value())}
-            button{class:"btn btn-secondary",onclick:move |_|match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(i18n, &e))},{i18n.t("tenant_keys.filter")}}
-            if query().tab==Tab::Keys{label{input{r#type:"checkbox",checked:query().revoked,onchange:move|e|{query.write().revoked=e.checked();query.write().page=1;}}{i18n.t("tenant_keys.include_revoked")}}}
-            button{class:"btn btn-secondary",onclick:move |_|{operation.set(None);data.restart();},{i18n.t("tenant.reload")}}
+        WorkspaceContext{note:i18n.t("tenant_keys.metadata_only").to_string()}
+        div{class:"tenant-key-actions",
+            nav{class:"segmented-control",aria_label:i18n.t("tenant_keys.title"),
+                button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Keys,onclick:move |_|{query.write().tab=Tab::Keys;query.write().page=1;operation.set(None);},{i18n.t("tenant_keys.keys")}}
+                button{class:"btn btn-secondary",aria_pressed:query().tab==Tab::Pending,onclick:move |_|{query.write().tab=Tab::Pending;query.write().page=1;operation.set(None);},{i18n.t("tenant_keys.pending")}}
+            }
+            Link{class:"btn btn-ghost",to:Route::OwnerKeyIssuance{},{i18n.t("tenant_keys.my_requests")}}
             button{class:"btn btn-primary",onclick:move |_|operation.set(Some(Operation::Request)),{i18n.t("tenant_keys.request")}}
         }
-        p{class:"text-secondary",{i18n.t("tenant_keys.active_filter")} " " {query().owner.map(|id|id.to_string()).unwrap_or_else(||i18n.t("tenant_keys.all_owners").into())}}
+        section{class:"filter-panel",aria_label:i18n.t("tenant_keys.filter"),
+            div{class:"filter-grid tenant-key-filter-grid",
+                MemberIdField{scope,input_id:"tenant-key-owner".to_string(),label:i18n.t("tenant_keys.owner").to_string(),value:owner(),on_input:move|value|owner.set(value)}
+                if query().tab==Tab::Keys{label{class:"checkbox-field",input{r#type:"checkbox",checked:query().revoked,onchange:move|e|{query.write().revoked=e.checked();query.write().page=1;}}{i18n.t("tenant_keys.include_revoked")}}}
+                div{class:"filter-actions",
+                    button{class:"btn btn-primary",onclick:move |_|match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(i18n, &e))},{i18n.t("tenant_keys.filter")}}
+                    button{class:"btn btn-ghost",onclick:move |_|{operation.set(None);data.restart();},{i18n.t("tenant.reload")}}
+                }
+            }
+        }
+        div{class:"data-meta-row",span{{i18n.t("tenant_keys.active_filter")}} span{if let Some(id)=query().owner{TechnicalId{value:id.to_string()}}else{{i18n.t("tenant_keys.all_owners")}}}}
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
@@ -136,7 +145,7 @@ fn KeyWorkspace(scope: WorkspaceScope) -> Element {
                             }
                         }
                     }
-                    if rows.total()==0 { p {{i18n.t("tenant.empty")}} }
+                    if rows.total()==0 { div{class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}} }
                 }
                 Pager { page:query().page,total_pages:rows.pages(),total:rows.total(),on_page:move|p|{query.write().page=p;operation.set(None);} }
             }
@@ -160,7 +169,7 @@ fn KeyRow(
         td { p {"{row.name}"} code {"{row.key_preview}"}
             details { summary {"ID"} code {"{row.id}"} p {{i18n.t("tenant_keys.version")} " {format_time(&row.updated_at)}"} }
         }
-        td {code {"{row.owner_user_id}"}}
+        td {TechnicalId{value:row.owner_user_id.to_string()}}
         td {{i18n.t(if row.revoked{"tenant_keys.revoked"}else if types::live_key(&row){"tenant_keys.active"}else{"tenant_keys.expired"})}}
         td {{row.expires_at.as_deref().map(format_time).unwrap_or_else(||i18n.t("tenant_keys.never").into())}}
         td { div { class:"action-buttons",style:"display:flex;flex-wrap:wrap;gap:8px",
@@ -183,7 +192,7 @@ fn IntentRow(
             p {{i18n.t("tenant_keys.requester")} " {row.requested_by_user_id}"}
             if let Some(old)=row.replaces_key_id {p {{i18n.t("tenant_keys.replaces")} " {old}"}}
         }}
-        td {code {"{row.owner_user_id}"}}
+        td {TechnicalId{value:row.owner_user_id.to_string()}}
         td {{i18n.t("tenant_keys.pending")}}
         td {p {{i18n.t("tenant_keys.claim_by")} " " {format_time(&row.expires_at)}}
             p {{i18n.t("tenant_keys.expiration")} " " {row.requested_expires_at.as_deref().map(format_time).unwrap_or_else(||i18n.t("tenant_keys.never").into())}}

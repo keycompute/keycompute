@@ -28,8 +28,8 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ("tenant_distribution.member", "Tenant member", "租户成员"),
         (
             "tenant_distribution.member_hint",
-            "Select an active member suggestion or enter an explicit member UUID; the server verifies current membership.",
-            "可选择活跃成员建议或输入明确的成员 UUID；服务端会验证当前成员关系。",
+            "Select an active member suggestion or enter an explicit member ID; the server verifies current membership.",
+            "可选择有效成员建议或输入明确的成员 ID；服务端会验证当前成员关系。",
         ),
         (
             "tenant_distribution.immutable_beneficiary",
@@ -48,13 +48,13 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ("tenant_distribution.inactive", "Inactive", "停用"),
         (
             "tenant_distribution.from",
-            "Effective from (RFC3339)",
-            "生效时间（RFC3339）",
+            "Effective from (UTC)",
+            "生效时间（UTC）",
         ),
         (
             "tenant_distribution.until",
-            "Effective until / blank to clear",
-            "结束时间 / 留空清除",
+            "Effective until (UTC) / blank to clear",
+            "结束时间（UTC）/ 留空清除",
         ),
         (
             "tenant_distribution.window",

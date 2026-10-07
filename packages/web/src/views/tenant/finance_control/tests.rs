@@ -32,3 +32,17 @@ fn tenant_financial_control_route_is_distinct_from_read_only_finance() {
         Route::TenantFinance {}.to_string()
     );
 }
+
+#[test]
+fn withdrawal_status_and_type_labels_are_localized_with_unknown_fallbacks() {
+    use crate::i18n::{I18n, Lang};
+
+    let zh = I18n::new(Lang::Zh);
+    let en = I18n::new(Lang::En);
+    assert_eq!(withdrawal_status_label(zh, "pending"), "待审核");
+    assert_eq!(withdrawal_status_label(en, "approved"), "Approved");
+    assert_eq!(withdrawal_type_label(zh, "balance"), "转入余额");
+    assert_eq!(withdrawal_type_label(en, "alipay"), "Alipay payout");
+    assert_eq!(withdrawal_status_label(zh, "future_state"), "future_state");
+    assert_eq!(withdrawal_type_label(en, "future_type"), "future_type");
+}

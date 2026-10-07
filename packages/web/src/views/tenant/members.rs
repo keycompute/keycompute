@@ -1,4 +1,4 @@
-use super::common::{self, CommandDialog, Pager, WorkspaceLinks, WorkspaceScope};
+use super::common::{self, CommandDialog, Pager, WorkspaceContext, WorkspaceLinks, WorkspaceScope};
 use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
@@ -11,6 +11,23 @@ use client_api::{
     api::tenant_control::{MemberPatch, Page, TenantContext, TenantMember},
 };
 use dioxus::prelude::*;
+
+fn role_label(i18n: crate::i18n::I18n, role: TenantRole) -> &'static str {
+    i18n.t(match role {
+        TenantRole::Admin => "tenant.role_admin",
+        TenantRole::Member => "tenant.role_member",
+    })
+}
+
+fn status_label(i18n: crate::i18n::I18n, status: &str) -> String {
+    match status {
+        "active" => i18n.t("tenant.status_active").to_owned(),
+        "suspended" => i18n.t("tenant.status_suspended").to_owned(),
+        "removed" => i18n.t("tenant.status_removed").to_owned(),
+        value => value.to_owned(),
+    }
+}
+
 const PAGE_SIZE: u32 = 20;
 #[derive(Clone, Copy, PartialEq)]
 enum Action {
@@ -174,6 +191,7 @@ fn TenantMembersPage() -> Element {
     rsx! {div {class:"page-container tenant-members",
         ui::PageHeader {title:i18n.t("tenant.members").to_string(),description:i18n.t("tenant.members_hint").to_string()}
         WorkspaceLinks {}
+        WorkspaceContext {}
         if !error().is_empty(){div {class:"alert alert-error",role:"alert","{error}"}}
         div {class:"card filter-panel tenant-member-filter",
             div {class:"filter-grid filter-grid-health",
@@ -201,9 +219,9 @@ fn TenantMembersPage() -> Element {
                                     let can_transfer=scope.is_some_and(|s|s.user_id==value.context.owner_user_id) && !owner && member.membership_status==MembershipStatus::Active && member.user_status==UserStatus::Active && member.tenant_role==TenantRole::Admin;
                                     rsx!{tr {key:"{member.user_id}",
                                         td {"{member.email}" if owner {span {class:"badge",{i18n.t("tenant.owner")}}}}
-                                        td {"{member.tenant_role.as_str()}"}
-                                        td {"{member.membership_status.as_str()}"}
-                                        td {"{member.user_status.as_str()}"}
+                                        td {{role_label(i18n, member.tenant_role)}}
+                                        td {{status_label(i18n, member.membership_status.as_str())}}
+                                        td {{status_label(i18n, member.user_status.as_str())}}
                                         td {
                                             if !owner && !removed {
                                                 button {class:"btn btn-secondary btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(Pending{member:role_member.clone(),action:Action::Role})),{i18n.t("tenant.change_role")}}

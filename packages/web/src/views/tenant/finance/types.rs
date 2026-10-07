@@ -1,3 +1,4 @@
+use crate::utils::time::datetime_input_to_rfc3339;
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use client_api::{
     ClientError, Result,
@@ -54,13 +55,14 @@ pub fn owner(raw: &str) -> Result<Option<Uuid>> {
         .ok()
         .filter(|v| !v.is_nil())
         .map(Some)
-        .ok_or_else(|| ClientError::Config("Select a real member UUID".into()))
+        .ok_or_else(|| ClientError::Config("Select a valid member ID".into()))
 }
 pub fn window(from: &str, to: &str) -> Result<ReportWindow> {
     let parse = |s: &str| {
-        DateTime::parse_from_rfc3339(s.trim())
+        datetime_input_to_rfc3339(s)
+            .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
             .map(|v| v.with_timezone(&Utc))
-            .map_err(|_| ClientError::Config("Use RFC3339 dates with a timezone".into()))
+            .ok_or_else(|| ClientError::Config("Choose a valid UTC date and time".into()))
     };
     let from = parse(from)?;
     let to = parse(to)?;

@@ -1,4 +1,4 @@
-use super::common::{self, CommandDialog, Pager, WorkspaceLinks, WorkspaceScope};
+use super::common::{self, CommandDialog, Pager, WorkspaceContext, WorkspaceLinks, WorkspaceScope};
 use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::user_error_message,
@@ -16,6 +16,17 @@ use client_api::{
     },
 };
 use dioxus::prelude::*;
+
+fn invitation_status_label(i18n: crate::i18n::I18n, status: &str) -> String {
+    match status {
+        "pending" => i18n.t("tenant.status_pending").to_owned(),
+        "accepted" => i18n.t("tenant.status_accepted").to_owned(),
+        "revoked" => i18n.t("tenant.status_revoked").to_owned(),
+        "expired" => i18n.t("tenant.status_expired").to_owned(),
+        value => value.to_owned(),
+    }
+}
+
 fn notification_label(value: &NotificationStatus) -> &'static str {
     match value {
         NotificationStatus::Sent => "tenant.notification_sent",
@@ -159,6 +170,7 @@ fn TenantInvitationsPage() -> Element {
     rsx! {div {class:"page-container tenant-invitations",
         ui::PageHeader {title:i18n.t("tenant.invitations").to_string(),description:i18n.t("tenant.invitations_hint").to_string()}
         WorkspaceLinks {}
+        WorkspaceContext {}
         if !error().is_empty(){div {class:"alert alert-error",role:"alert","{error}" p {{i18n.t("tenant.command_hint")}}}}
         section {class:"section tenant-invite-card",aria_label:i18n.t("tenant.invite"),
             h2 {class:"section-title",{i18n.t("tenant.invite")}}
@@ -169,7 +181,7 @@ fn TenantInvitationsPage() -> Element {
                 }
                 div {class:"form-field",
                     label {class:"form-label",r#for:"invite-role",{i18n.t("tenant.role")}}
-                    select {id:"invite-role",class:"input-field",value:"{role().as_str()}",disabled:busy(),onchange:move |e|{if let Ok(value)=e.value().parse::<TenantRole>(){role.set(value);}},option {value:"member","member"} option {value:"admin","admin"}}
+                    select {id:"invite-role",class:"input-field",value:"{role().as_str()}",disabled:busy(),onchange:move |e|{if let Ok(value)=e.value().parse::<TenantRole>(){role.set(value);}},option {value:"member",{i18n.t("tenant.role_member")}} option {value:"admin",{i18n.t("tenant.role_admin")}}}
                 }
                 div {class:"form-field",
                     label {class:"form-label",r#for:"invite-duration",{i18n.t("tenant.duration_hours")}}
@@ -195,7 +207,7 @@ fn TenantInvitationsPage() -> Element {
                 div {class:"table-pagination-panel table-pagination-frame",div {class:"table-container",table {class:"table",
                     thead {tr {th {{i18n.t("tenant.email")}} th {{i18n.t("tenant.role")}} th {{i18n.t("tenant.result")}} th {{i18n.t("tenant.expires")}} th {{i18n.t("tenant.actions")}}}}
                     tbody {for invitation in value.items.iter(){
-                        {let selected=invitation.clone();rsx!{tr {key:"{invitation.id}",td {"{invitation.email}"} td {"{invitation.tenant_role.as_str()}"} td {"{invitation.status}"} td {{format_time(&invitation.expires_at)}}
+                        {let selected=invitation.clone();rsx!{tr {key:"{invitation.id}",td {"{invitation.email}"} td {{if invitation.tenant_role==TenantRole::Admin{i18n.t("tenant.role_admin")}else{i18n.t("tenant.role_member")}}} td {{invitation_status_label(i18n, &invitation.status)}} td {{format_time(&invitation.expires_at)}}
                             td {if invitation.status=="pending" {button {class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(selected.clone())),{i18n.t("tenant.revoke")}}}}
                         }}}
                     }}

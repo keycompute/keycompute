@@ -78,35 +78,37 @@ pub(super) fn Editor(
             }
         });
     };
+    let workspace = common::workspace_name(users, scope);
+    let dimension_label = match draft().dimension {
+        BillingDimension::ProviderAccount => i18n.t("tenant_pricing.dimension_provider_account"),
+        BillingDimension::Node => i18n.t("tenant_pricing.dimension_node"),
+    };
     rsx! {div {class:"modal-overlay",
         div {class:"modal tenant-pricing-editor",role:"dialog",aria_modal:"true",aria_label:i18n.t(label),
-            h2 {{i18n.t(label)}}
-            p {class:"text-secondary",{i18n.t("tenant_pricing.scope")} " {scope.tenant_id}"}
-            if !error().is_empty(){p {class:"alert alert-error",role:"alert","{error}"}}
-            if editing {
-                label {class:"form-label",r#for:"pricing-model",{i18n.t("tenant_pricing.model")}}
-                input {id:"pricing-model",class:"input-field",value:"{draft().model}",maxlength:"255",disabled:busy()||!creating,oninput:move|e|draft.write().model=e.value()}
-                label {class:"form-label",r#for:"pricing-dimension",{i18n.t("tenant_pricing.dimension")}}
-                select {id:"pricing-dimension",class:"input-field",value:draft().dimension.as_str(),disabled:busy()||!creating,onchange:move |e|{
-                    let value=match e.value().as_str(){"provideraccount"=>BillingDimension::ProviderAccount,"node"=>BillingDimension::Node,_=>return};draft.write().dimension=value;
-                },option {value:"provideraccount","Provider account"} option {value:"node","Node"}}
-                label {class:"form-label",r#for:"pricing-currency",{i18n.t("tenant_pricing.currency")}}
-                input {id:"pricing-currency",class:"input-field",value:"{draft().currency}",maxlength:"3",disabled:busy()||!creating,oninput:move|e|draft.write().currency=e.value()}
-                label {class:"form-label",r#for:"pricing-input",{i18n.t("tenant_pricing.input")}}
-                input {id:"pricing-input",class:"input-field",r#type:"text",inputmode:"decimal",value:"{draft().input}",maxlength:"64",disabled:busy(),oninput:move|e|draft.write().input=e.value()}
-                label {class:"form-label",r#for:"pricing-output",{i18n.t("tenant_pricing.output")}}
-                input {id:"pricing-output",class:"input-field",r#type:"text",inputmode:"decimal",value:"{draft().output}",maxlength:"64",disabled:busy(),oninput:move|e|draft.write().output=e.value()}
-                label {class:"form-label",r#for:"pricing-from",{i18n.t("tenant_pricing.from")}}
-                input {id:"pricing-from",class:"input-field",value:"{draft().from}",placeholder:"2026-10-01T00:00:00Z",disabled:busy()||!creating,oninput:move|e|draft.write().from=e.value()}
-                label {class:"form-label",r#for:"pricing-until",{i18n.t("tenant_pricing.until")}}
-                input {id:"pricing-until",class:"input-field",value:"{draft().until}",placeholder:"2026-11-01T00:00:00Z",disabled:busy(),oninput:move|e|draft.write().until=e.value()}
-                p {class:"text-secondary",{i18n.t(if creating{"tenant_pricing.create_times"}else{"tenant_pricing.edit_times"})}}
-                if creating {label {class:"form-label",input {r#type:"checkbox",checked:draft().is_default,disabled:busy(),onchange:move|e|draft.write().is_default=e.checked()} {i18n.t("tenant_pricing.default")}}}
-            } else {p {"{draft().model} · {draft().dimension.as_str()} · {draft().currency}"}
-                p {{i18n.t(if label=="tenant_pricing.delete"{"tenant_pricing.delete_hint"}else{"tenant_pricing.default_hint"})}}
+            div{class:"modal-header",
+                div{h2{class:"modal-title",{i18n.t(label)}}p{class:"modal-context","{i18n.t(\"tenant.current\")} · {workspace}"}}
+                button{class:"modal-close",r#type:"button",aria_label:i18n.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"×"}
             }
-            p {class:"text-secondary",{i18n.t("tenant.command_hint")}}
-            div {class:"modal-actions",
+            div{class:"modal-body",
+                if !error().is_empty(){p {class:"alert alert-error",role:"alert","{error}"}}
+                if editing {
+                    div{class:"modal-form-grid",
+                        div{class:"form-field modal-field-wide",label {class:"form-label",r#for:"pricing-model",{i18n.t("tenant_pricing.model")}} input {id:"pricing-model",class:"input-field",value:"{draft().model}",maxlength:"255",disabled:busy()||!creating,oninput:move|e|draft.write().model=e.value()}}
+                        div{class:"form-field",label {class:"form-label",r#for:"pricing-dimension",{i18n.t("tenant_pricing.dimension")}} select {id:"pricing-dimension",class:"input-field",value:draft().dimension.as_str(),disabled:busy()||!creating,onchange:move |e|{let value=match e.value().as_str(){"provideraccount"=>BillingDimension::ProviderAccount,"node"=>BillingDimension::Node,_=>return};draft.write().dimension=value;},option {value:"provideraccount",{i18n.t("tenant_pricing.dimension_provider_account")}} option {value:"node",{i18n.t("tenant_pricing.dimension_node")}}}}
+                        div{class:"form-field",label {class:"form-label",r#for:"pricing-currency",{i18n.t("tenant_pricing.currency")}} input {id:"pricing-currency",class:"input-field",value:"{draft().currency}",maxlength:"3",disabled:busy()||!creating,oninput:move|e|draft.write().currency=e.value()}}
+                        div{class:"form-field",label {class:"form-label",r#for:"pricing-input",{i18n.t("tenant_pricing.input")}} input {id:"pricing-input",class:"input-field",r#type:"text",inputmode:"decimal",value:"{draft().input}",maxlength:"64",disabled:busy(),oninput:move|e|draft.write().input=e.value()}}
+                        div{class:"form-field",label {class:"form-label",r#for:"pricing-output",{i18n.t("tenant_pricing.output")}} input {id:"pricing-output",class:"input-field",r#type:"text",inputmode:"decimal",value:"{draft().output}",maxlength:"64",disabled:busy(),oninput:move|e|draft.write().output=e.value()}}
+                        div{class:"form-field",label {class:"form-label",r#for:"pricing-from",{i18n.t("tenant_pricing.from")}} input {id:"pricing-from",class:"input-field",r#type:"datetime-local",step:"any",value:"{draft().from}",disabled:busy()||!creating,oninput:move|e|draft.write().from=e.value()}}
+                        div{class:"form-field",label {class:"form-label",r#for:"pricing-until",{i18n.t("tenant_pricing.until")}} input {id:"pricing-until",class:"input-field",r#type:"datetime-local",step:"any",value:"{draft().until}",disabled:busy(),oninput:move|e|draft.write().until=e.value()}}
+                    }
+                    p {class:"form-hint",{i18n.t(if creating{"tenant_pricing.create_times"}else{"tenant_pricing.edit_times"})}}
+                    if creating {label {class:"checkbox-field",input {r#type:"checkbox",checked:draft().is_default,disabled:busy(),onchange:move|e|draft.write().is_default=e.checked()} {i18n.t("tenant_pricing.default")}}}
+                } else {p {class:"modal-record-summary","{draft().model} · {dimension_label} · {draft().currency}"}
+                    p {{i18n.t(if label=="tenant_pricing.delete"{"tenant_pricing.delete_hint"}else{"tenant_pricing.default_hint"})}}
+                }
+                p {class:"command-note",{i18n.t("tenant.command_hint")}}
+            }
+            div {class:"modal-footer",
                 button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|on_close.call(()),{i18n.t("form.cancel")}}
                 button {class:"btn btn-primary",disabled:busy(),onclick:submit,{i18n.t("tenant.confirm")}}
             }

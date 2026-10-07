@@ -126,7 +126,10 @@ pub(super) fn Editor(
             }
         });
     };
-    rsx! {div{class:"modal-overlay",div{class:"modal tenant-distribution-editor",style:"width:min(820px,95vw);max-height:85vh;overflow:auto",role:"dialog",aria_modal:"true",aria_label:i.t(label),tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(())}},h2{{i.t(label)}}p{class:"text-secondary",{i.t("tenant_distribution.scope")} " {scope.tenant_id}"}
+    let workspace = common::workspace_name(users, scope);
+    rsx! {div{class:"modal-overlay",div{class:"modal tenant-distribution-editor",role:"dialog",aria_modal:"true",aria_label:i.t(label),tabindex:"-1",onkeydown:move|e|{if e.key()==Key::Escape&&!busy(){e.stop_propagation();on_close.call(())}},
+     div{class:"modal-header",div{h2{class:"modal-title",{i.t(label)}}p{class:"modal-context","{i.t(\"tenant.current\")} · {workspace}"}}button{class:"modal-close",r#type:"button",aria_label:i.t("common.close"),disabled:busy(),onclick:move |_|on_close.call(()),"×"}}
+     div{class:"modal-body",
      if let Some(policy_id)=policy_id.as_ref(){p{class:"text-secondary",{i.t("tenant_distribution.policy_id")} " {policy_id}"}}
      if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
      if editing||defaulting{label{class:"form-label",r#for:"distribution-name",{i.t("tenant_distribution.name")}}input{id:"distribution-name",class:"input-field",maxlength:"255",value:"{draft().name}",disabled:busy(),oninput:move|e|draft.write().name=e.value()}
@@ -138,13 +141,14 @@ pub(super) fn Editor(
       else{p{class:"text-secondary",{i.t("tenant_distribution.immutable_beneficiary")} " " {draft().beneficiary_id.clone()}}}
       label{class:"form-label",r#for:"distribution-description",{i.t("tenant_distribution.description")}}textarea{id:"distribution-description",class:"input-field",maxlength:"4096",value:"{draft().description}",disabled:busy(),oninput:move|e|draft.write().description=e.value()}
       label{class:"form-label",r#for:"distribution-priority",{i.t("tenant_distribution.priority")}}input{id:"distribution-priority",class:"input-field",r#type:"number",min:"-1000",max:"1000",value:"{draft().priority}",disabled:busy(),oninput:move|e|draft.write().priority=e.value()}
-      label{class:"form-label",r#for:"distribution-from",{i.t("tenant_distribution.from")}}input{id:"distribution-from",class:"input-field",value:"{draft().from}",placeholder:"2026-10-01T00:00:00Z",disabled:busy()||!creating,oninput:move|e|draft.write().from=e.value()}
-      label{class:"form-label",r#for:"distribution-until",{i.t("tenant_distribution.until")}}input{id:"distribution-until",class:"input-field",value:"{draft().until}",placeholder:"2026-12-01T00:00:00Z",disabled:busy(),oninput:move|e|draft.write().until=e.value()}
+      label{class:"form-label",r#for:"distribution-from",{i.t("tenant_distribution.from")}}input{id:"distribution-from",class:"input-field",r#type:"datetime-local",step:"any",value:"{draft().from}",disabled:busy()||!creating,oninput:move|e|draft.write().from=e.value()}
+      label{class:"form-label",r#for:"distribution-until",{i.t("tenant_distribution.until")}}input{id:"distribution-until",class:"input-field",r#type:"datetime-local",step:"any",value:"{draft().until}",disabled:busy(),oninput:move|e|draft.write().until=e.value()}
       if !creating{label{class:"form-label",input{r#type:"checkbox",checked:draft().active,disabled:busy(),onchange:move|e|draft.write().active=e.checked()}{i.t("tenant_distribution.active")}}}
      }
      if deleting{p{{i.t("tenant_distribution.delete_hint")}}}
      label{class:"form-label",r#for:"distribution-reason",{i.t("tenant_distribution.reason")}}textarea{id:"distribution-reason",class:"input-field",maxlength:"500",value:"{draft().reason}",disabled:busy(),oninput:move|e|draft.write().reason=e.value()}
-     p{class:"text-secondary",{i.t("tenant_distribution.effect_hint")}}
-     div{class:"modal-actions",button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i.t("form.cancel")}}button{class:"btn btn-primary",disabled:busy(),onclick:submit,{i.t("tenant.confirm")}}}
+     p{class:"command-note",{i.t("tenant_distribution.effect_hint")}}
+     }
+     div{class:"modal-footer",button{class:"btn btn-secondary",onmounted:move|e|async move{let _=e.set_focus(true).await;},disabled:busy(),onclick:move |_|on_close.call(()),{i.t("form.cancel")}}button{class:"btn btn-primary",disabled:busy(),onclick:submit,{i.t("tenant.confirm")}}}
     }}}
 }

@@ -1,6 +1,6 @@
 use super::{
     WorkspaceDraftState,
-    common::{self, CommandDialog, WorkspaceLinks, WorkspaceScope},
+    common::{self, CommandDialog, TechnicalId, WorkspaceContext, WorkspaceLinks, WorkspaceScope},
 };
 use crate::{
     hooks::use_i18n::use_i18n,
@@ -180,25 +180,43 @@ fn TenantSettingsPage() -> Element {
         div { class: "page-container tenant-workspace tenant-settings",
             ui::PageHeader { title: i18n.t("tenant.settings").to_string(), description: i18n.t("tenant.settings_hint").to_string() }
             WorkspaceLinks {}
+            WorkspaceContext {}
             if !error().is_empty() { div { class: "alert alert-error", role: "alert", "{error}" } }
             if let Some(value) = current {
                 section { class: "section", aria_label: i18n.t("tenant.settings"),
                     h2 { class: "section-title", {i18n.t("tenant.general_settings")} }
-                    p { class: "text-secondary tenant-settings-owner", {i18n.t("tenant.owner")} ": {value.owner_user_id}" }
-                    label { class: "form-label", r#for: "tenant-name", {i18n.t("tenants.name")} }
-                    input { id: "tenant-name", class: "input-field", value: "{draft().name}", maxlength: "255", disabled: saving(), oninput: move |event| { draft.write().name = event.value(); dirty.set(true); } }
-                    label { class: "form-label", r#for: "tenant-description", {i18n.t("tenant.description")} }
-                    textarea { id: "tenant-description", class: "input-field", value: "{draft().description}", maxlength: "16384", disabled: saving(), oninput: move |event| { draft.write().description = event.value(); dirty.set(true); } }
-                    h3 { class: "tenant-settings-subtitle", {i18n.t("tenant.default_limits")} }
-                    p { class: "text-secondary", {i18n.t("tenant.default_limits_hint")} }
-                    label { class: "form-label", r#for: "tenant-rpm", "RPM" }
-                    input { id: "tenant-rpm", class: "input-field", r#type: "number", min: "0", value: "{draft().rpm}", disabled: saving(), oninput: move |event| { draft.write().rpm = event.value(); dirty.set(true); } }
-                    label { class: "form-label", r#for: "tenant-tpm", "TPM" }
-                    input { id: "tenant-tpm", class: "input-field", r#type: "number", min: "0", value: "{draft().tpm}", disabled: saving(), oninput: move |event| { draft.write().tpm = event.value(); dirty.set(true); } }
-                    div { class: "toolbar tenant-settings-actions",
-                        button { class: "btn btn-primary", disabled: saving() || !dirty(), onclick: save, {i18n.t("tenant.save")} }
-                        button { class: "btn btn-secondary", disabled: saving(), onclick: move |_| { pending.set(None); error.set(String::new()); dirty.set(false); shared_dirty.0.set(false); draft.set(ConfigDraft::from_context(&value)); }, {i18n.t("form.cancel")} }
-                        button { class: "btn btn-secondary", disabled: saving(), onclick: reload, {i18n.t("tenant.reload")} }
+                    div { class: "section-body tenant-settings-form",
+                        div { class: "tenant-settings-owner",
+                            span { class: "tenant-settings-owner-label", {i18n.t("tenant.owner_id")} }
+                            TechnicalId { value: value.owner_user_id.to_string() }
+                        }
+                        div { class: "form-field",
+                            label { class: "form-label", r#for: "tenant-name", {i18n.t("tenants.name")} }
+                            input { id: "tenant-name", class: "input-field", value: "{draft().name}", maxlength: "255", disabled: saving(), oninput: move |event| { draft.write().name = event.value(); dirty.set(true); } }
+                        }
+                        div { class: "form-field",
+                            label { class: "form-label", r#for: "tenant-description", {i18n.t("tenant.description")} }
+                            textarea { id: "tenant-description", class: "input-field", rows: "4", value: "{draft().description}", maxlength: "16384", disabled: saving(), oninput: move |event| { draft.write().description = event.value(); dirty.set(true); } }
+                        }
+                        div { class: "tenant-settings-limit-heading",
+                            h3 { {i18n.t("tenant.default_limits")} }
+                            p { class: "text-secondary", {i18n.t("tenant.default_limits_hint")} }
+                        }
+                        div { class: "tenant-settings-limit-grid",
+                            div { class: "form-field",
+                                label { class: "form-label", r#for: "tenant-rpm", "RPM" }
+                                input { id: "tenant-rpm", class: "input-field", r#type: "number", min: "0", value: "{draft().rpm}", disabled: saving(), oninput: move |event| { draft.write().rpm = event.value(); dirty.set(true); } }
+                            }
+                            div { class: "form-field",
+                                label { class: "form-label", r#for: "tenant-tpm", "TPM" }
+                                input { id: "tenant-tpm", class: "input-field", r#type: "number", min: "0", value: "{draft().tpm}", disabled: saving(), oninput: move |event| { draft.write().tpm = event.value(); dirty.set(true); } }
+                            }
+                        }
+                        div { class: "tenant-settings-actions",
+                            button { class: "btn btn-primary", disabled: saving() || !dirty(), onclick: save, {i18n.t("tenant.save")} }
+                            button { class: "btn btn-secondary", disabled: saving(), onclick: move |_| { pending.set(None); error.set(String::new()); dirty.set(false); shared_dirty.0.set(false); draft.set(ConfigDraft::from_context(&value)); }, {i18n.t("form.cancel")} }
+                            button { class: "btn btn-ghost", disabled: saving(), onclick: reload, {i18n.t("tenant.reload")} }
+                        }
                     }
                 }
             } else if let Some(Err(value)) = loaded {

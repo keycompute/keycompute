@@ -15,16 +15,17 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ("tenant_finance.usage", "Usage and billing", "用量与账单"),
         ("tenant_finance.orders", "Payment records", "支付记录"),
         ("tenant_finance.wallet", "Member wallet", "成员钱包"),
-        ("tenant_finance.owner", "Member UUID", "成员 UUID"),
+        ("tenant_finance.owner", "Member ID", "成员 ID"),
         (
-            "tenant_finance.from",
-            "From (RFC3339)",
-            "起始时间（RFC3339）",
+            "tenant_finance.owner_placeholder",
+            "Optional member ID",
+            "可选：填写成员 ID",
         ),
+        ("tenant_finance.from", "From (UTC)", "起始时间（UTC）"),
         (
             "tenant_finance.to",
-            "Until, exclusive (RFC3339)",
-            "截止时间，不含（RFC3339）",
+            "Until, exclusive (UTC)",
+            "截止时间，不含（UTC）",
         ),
         (
             "tenant_finance.apply",
@@ -64,6 +65,10 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
             "模型 / 上游协议",
         ),
         ("tenant_finance.state", "Payment state", "支付状态"),
+        ("tenant_finance.state_pending", "Pending", "待支付"),
+        ("tenant_finance.state_paid", "Paid", "已支付"),
+        ("tenant_finance.state_failed", "Failed", "失败"),
+        ("tenant_finance.state_closed", "Closed", "已关闭"),
         (
             "tenant_finance.all_states",
             "All payment states",
@@ -83,8 +88,8 @@ pub(super) fn register(m: &mut HashMap<&'static str, &'static str>, en: bool) {
         ),
         (
             "tenant_finance.choose_wallet",
-            "Select and apply a member UUID to read that member's wallet.",
-            "请填写并应用成员 UUID，查看该成员钱包。",
+            "Select and apply a member to read that member's wallet.",
+            "请选择并应用成员，以查看该成员钱包。",
         ),
         (
             "tenant_finance.wallet_scope",
