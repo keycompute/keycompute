@@ -34,6 +34,7 @@ pub use stream::{LARGE_NATIVE_EVENT_CHANNEL_CAPACITY, NativeStreamEvent, StreamE
 /// Provider 适配器 trait
 ///
 /// 所有 LLM Provider 必须实现此 trait，提供统一的上游调用接口
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync + std::fmt::Debug {
     /// Provider 名称

@@ -517,6 +517,7 @@ async fn http_failure(response: reqwest::Response, meta: UpstreamResponseMeta) -
 /// - 流式请求
 /// - multipart/form-data 请求
 /// - 超时控制
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait HttpTransport: Send + Sync + std::fmt::Debug {
     /// Structured response variant. Implementations should override this to preserve metadata.
