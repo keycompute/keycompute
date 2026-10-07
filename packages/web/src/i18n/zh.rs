@@ -73,7 +73,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.pricing", "定价管理");
     m.insert("nav.payment_orders", "支付订单");
     m.insert("nav.distribution_records", "分销记录");
-    m.insert("nav.tenants", "租户管理");
+    m.insert("nav.tenants", "平台租户");
     m.insert("nav.node_gateway", "节点网关");
     m.insert("nav.monitoring", "监控与诊断");
     m.insert("nav.account_settings", "账户设置");
@@ -242,7 +242,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.pricing", "定价管理");
     m.insert("page.payment_orders", "支付订单");
     m.insert("page.distribution_records", "分销记录");
-    m.insert("page.tenants", "租户管理");
+    m.insert("page.tenants", "平台租户");
     m.insert("page.account_settings", "账户设置");
     m.insert("page.settings", "系统设置");
     m.insert("page.node_gateway", "节点网关");
@@ -1581,7 +1581,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "users.cannot_modify_platform",
         "仅平台 root 角色可操作平台用户",
     );
-    m.insert("tenants.subtitle", "查看和管理平台所有租户信息");
+    m.insert("tenants.subtitle", "创建、查找和治理平台范围内的租户");
     m.insert("tenants.search_placeholder", "搜索租户名称或 ID...");
     m.insert("tenants.empty", "暂无租户数据");
     m.insert("tenants.tenant_id", "租户 ID");
@@ -1591,12 +1591,15 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "租户名称");
     m.insert("tenants.name_placeholder", "例如：研发中心");
     m.insert("tenants.name_required", "请输入租户名称");
-    m.insert("tenants.owner", "拥有者用户 ID");
+    m.insert("tenants.owner", "工作区拥有者");
     m.insert(
         "tenants.owner_hint",
-        "填写已存在的全局用户 ID；该用户将成为首位租户管理员。",
+        "按姓名或邮箱查找已有用户；该用户将成为首位工作区管理员。",
     );
-    m.insert("tenants.owner_required", "请填写有效的拥有者用户 ID。");
+    m.insert("tenants.owner_placeholder", "输入姓名或邮箱搜索…");
+    m.insert("tenants.owner_results", "用户搜索结果");
+    m.insert("tenants.owner_selected", "已选择工作区拥有者");
+    m.insert("tenants.owner_required", "请选择有效的工作区拥有者。");
     m.insert("tenants.slug", "Slug（可选）");
     m.insert("tenants.slug_placeholder", "例如：research-center");
     m.insert("tenants.slug_hint", "仅支持小写字母、数字和连字符");

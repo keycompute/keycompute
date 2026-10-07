@@ -27,6 +27,15 @@ impl UserInfo {
             .any(|value| value == permission)
     }
 
+    pub fn has_tenant_permission(&self, permission: &str) -> bool {
+        self.selected_tenant.is_some()
+            && self
+                .capabilities
+                .tenant
+                .iter()
+                .any(|value| value == permission)
+    }
+
     /// Gate the existing root business-console pages using the platform vector.
     /// Tenant capabilities and role labels never imply this capability.
     pub fn can_manage_platform(&self) -> bool {
@@ -35,12 +44,31 @@ impl UserInfo {
 
     /// Verified tenant capabilities never imply any platform grant.
     pub fn can_manage_tenant(&self) -> bool {
-        self.selected_tenant.is_some()
-            && self
-                .capabilities
-                .tenant
-                .iter()
-                .any(|p| p == "tenant:manage")
+        self.has_tenant_permission("tenant:manage")
+    }
+
+    pub fn can_manage_members(&self) -> bool {
+        self.has_tenant_permission("members:manage")
+    }
+
+    pub fn can_invite_members(&self) -> bool {
+        self.has_tenant_permission("invitations:manage")
+    }
+
+    pub fn can_manage_providers(&self) -> bool {
+        self.has_tenant_permission("providers:manage")
+    }
+
+    pub fn can_manage_api_keys(&self) -> bool {
+        self.has_tenant_permission("api_keys:manage")
+    }
+
+    pub fn can_manage_billing(&self) -> bool {
+        self.has_tenant_permission("billing:manage")
+    }
+
+    pub fn can_manage_pricing(&self) -> bool {
+        self.has_tenant_permission("pricing:manage")
     }
 
     /// Read-only platform operations are independent of root business management.
@@ -66,6 +94,31 @@ impl UserInfo {
             .next()
             .map(|c| c.to_uppercase().next().unwrap_or(c))
             .unwrap_or('U')
+    }
+
+    /// Keep session-scoped workspace labels coherent after an in-place
+    /// configuration edit. Authorization-bearing fields are deliberately
+    /// untouched; only server-returned display metadata is synchronized.
+    pub fn sync_tenant_display(&mut self, tenant_id: &str, name: &str, slug: &str) -> bool {
+        let mut changed = false;
+        if let Some(selected) = self
+            .selected_tenant
+            .as_mut()
+            .filter(|selected| selected.id == tenant_id)
+        {
+            selected.name = Some(name.to_owned());
+            selected.slug = Some(slug.to_owned());
+            changed = true;
+        }
+        for membership in self
+            .memberships
+            .iter_mut()
+            .filter(|membership| membership.tenant_id == tenant_id)
+        {
+            membership.tenant_name = Some(name.to_owned());
+            changed = true;
+        }
+        changed
     }
 }
 
@@ -177,6 +230,25 @@ mod capability_tests {
         assert!(user(PlatformRole::None, &["users:manage"], &[]).can_manage_platform());
     }
     #[test]
+    fn tenant_navigation_capabilities_remain_independent() {
+        let mut tenant_user = user(PlatformRole::None, &[], &["providers:manage"]);
+        tenant_user.selected_tenant = Some(SelectedTenant {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: Some("Workspace".into()),
+            slug: Some("workspace".into()),
+            tenant_role: client_api::TenantRole::Admin,
+            authz_version: Some(1),
+            membership_authz_version: Some(1),
+        });
+        assert!(tenant_user.can_manage_providers());
+        assert!(!tenant_user.can_manage_tenant());
+        assert!(!tenant_user.can_manage_members());
+        assert!(!tenant_user.can_invite_members());
+        assert!(!tenant_user.can_manage_billing());
+        assert!(!tenant_user.can_manage_pricing());
+        assert!(!tenant_user.can_manage_api_keys());
+    }
+    #[test]
     fn store_gate_reacts_to_the_current_profile_and_denies_missing_profiles() {
         let mut dom = VirtualDom::new(|| rsx! {div{}});
         dom.rebuild_in_place();
@@ -194,5 +266,40 @@ mod capability_tests {
             store.clear();
             assert!(!store.can_manage_platform());
         });
+    }
+
+    #[test]
+    fn configuration_save_synchronizes_workspace_labels_without_touching_authority() {
+        let tenant_id = uuid::Uuid::new_v4().to_string();
+        let mut value = user(PlatformRole::None, &[], &["tenant:manage"]);
+        value.selected_tenant = Some(SelectedTenant {
+            id: tenant_id.clone(),
+            name: Some("Before".into()),
+            slug: Some("before".into()),
+            tenant_role: client_api::TenantRole::Admin,
+            authz_version: Some(7),
+            membership_authz_version: Some(9),
+        });
+        value
+            .memberships
+            .push(client_api::api::auth::TenantMembership {
+                tenant_id: tenant_id.clone(),
+                tenant_name: Some("Before".into()),
+                tenant_role: client_api::TenantRole::Admin,
+                status: Some("active".into()),
+                invited_by: None,
+                joined_at: None,
+                removed_at: None,
+                authz_version: Some(9),
+            });
+
+        assert!(value.sync_tenant_display(&tenant_id, "After", "after"));
+        let selected = value.selected_tenant.as_ref().unwrap();
+        assert_eq!(selected.name.as_deref(), Some("After"));
+        assert_eq!(selected.slug.as_deref(), Some("after"));
+        assert_eq!(selected.authz_version, Some(7));
+        assert_eq!(selected.membership_authz_version, Some(9));
+        assert_eq!(value.memberships[0].tenant_name.as_deref(), Some("After"));
+        assert_eq!(value.memberships[0].authz_version, Some(9));
     }
 }

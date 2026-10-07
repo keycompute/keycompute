@@ -25,6 +25,7 @@ pub struct Tenant {
     /// Internal safety counter for permanent Responses idempotency identities.
     #[serde(skip)]
     pub responses_idempotency_claim_count: i64,
+    pub revision: i64,
     pub authz_version: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

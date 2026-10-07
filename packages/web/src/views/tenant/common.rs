@@ -198,17 +198,7 @@ pub fn WorkspaceLinks() -> Element {
         Link {class:"btn btn-secondary",to:Route::TenantWorkspace {},{i18n.t("tenant.workspace")}}
         Link {class:"btn btn-secondary",to:Route::OwnerKeyIssuance {},{i18n.t("tenant_keys.my_requests")}}
         if admin {
-            Link {class:"btn btn-secondary",to:Route::TenantProviders {},{i18n.t("tenant_providers.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantFinance {},{i18n.t("tenant_finance.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantFinancialControls {},{i18n.t("tenant_financial_controls.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantDistribution {},{i18n.t("tenant_distribution.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantKeys {},{i18n.t("tenant_keys.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantResponses {},{i18n.t("tenant_responses.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantPricing {},{i18n.t("tenant_pricing.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantNodes {},{i18n.t("tenant_nodes.title")}}
-            Link {class:"btn btn-secondary",to:Route::TenantMembers {},{i18n.t("tenant.members")}}
-            Link {class:"btn btn-secondary",to:Route::TenantInvitations {},{i18n.t("tenant.invitations")}}
-            Link {class:"btn btn-secondary",to:Route::TenantAudit {},{i18n.t("tenant.audit")}}
+            Link {class:"btn btn-secondary",to:Route::TenantSettings {},{i18n.t("tenant.settings")}}
         }
     }}
 }

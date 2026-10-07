@@ -901,19 +901,24 @@ fn LoginModal(
                 Ok(resp) => {
                     get_client().set_token(&resp.access_token);
                     auth_store.login_with_session(&resp, should_remember);
-                    *user_store.info.write() = Some(UserInfo {
+                    let user_info = UserInfo {
                         id: resp.user_id.clone(),
                         email: resp.email.clone(),
-                        name: None,
+                        name: resp.name.clone(),
                         platform_role: resp.platform_role,
-                        status: None,
+                        status: resp.status,
                         memberships: resp.memberships.clone(),
                         selected_tenant: resp.selected_tenant.clone(),
                         capabilities: resp.capabilities.clone(),
-                    });
+                    };
+                    *user_store.info.write() = Some(user_info.clone());
+                    user_store
+                        .loaded_session_id
+                        .set(auth_store.state.peek().session_id);
+                    user_store.load_failed.set(false);
                     onclose.call(());
                     nav.replace(crate::views::tenant::invitation_entry::post_login_route(
-                        auth_store,
+                        auth_store, &user_info,
                     ));
                 }
                 Err(e) => {
@@ -1226,18 +1231,21 @@ fn RegisterModal(
                                         Ok(resp) => {
                                             get_client().set_token(&resp.access_token);
                                             auth_store.login_with_session(&resp, false);
-                                            *user_store.info.write() = Some(UserInfo {
+                                            let user_info = UserInfo {
                                                 id: resp.user_id.clone(),
                                                 email: resp.email.clone(),
-                                                name: None,
+                                                name: resp.name.clone(),
                                                 platform_role: resp.platform_role,
-                                                status: None,
+                                                status: resp.status,
                                                 memberships: resp.memberships.clone(),
                                                 selected_tenant: resp.selected_tenant.clone(),
                                                 capabilities: resp.capabilities.clone(),
-                                            });
+                                            };
+                                            *user_store.info.write() = Some(user_info.clone());
+                                            user_store.loaded_session_id.set(auth_store.state.peek().session_id);
+                                            user_store.load_failed.set(false);
                                             onclose.call(());
-                                            nav.replace(crate::views::tenant::invitation_entry::post_login_route(auth_store));
+                                            nav.replace(crate::views::tenant::invitation_entry::post_login_route(auth_store, &user_info));
                                         }
                                         Err(e) => {
                                             let err_text = user_error_message(&e);

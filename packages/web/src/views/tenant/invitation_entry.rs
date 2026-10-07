@@ -6,10 +6,16 @@ use crate::{
     services::api_client::{get_client, user_error_message},
     stores::{
         auth_store::{AuthState, AuthStore},
-        user_store::UserStore,
+        user_store::{UserInfo, UserStore},
     },
 };
-use client_api::api::tenant_control::{InvitationToken, accept_invitation};
+use client_api::{
+    AuthApi,
+    api::{
+        auth::SelectTenantRequest,
+        tenant_control::{InvitationToken, accept_invitation},
+    },
+};
 use dioxus::prelude::*;
 use uuid::Uuid;
 #[derive(Clone, Default, PartialEq)]
@@ -96,7 +102,7 @@ pub fn capture_before_router() -> PendingState {
 }
 /// Login resumes a captured invitation without accepting it automatically.
 /// A capability bound to another UI identity is never adopted after login.
-pub fn post_login_route(auth: AuthStore) -> Route {
+pub fn post_login_route(auth: AuthStore, user: &UserInfo) -> Route {
     let state = auth.state.peek();
     let pending = try_consume_context::<PendingInvitation>();
     if state.is_authenticated
@@ -107,17 +113,7 @@ pub fn post_login_route(auth: AuthStore) -> Route {
     {
         Route::TenantInvitationAccept {}
     } else {
-        default_authenticated_route(&state)
-    }
-}
-
-fn default_authenticated_route(state: &AuthState) -> Route {
-    if state.selected_tenant_id.is_some() {
-        Route::Dashboard {}
-    } else {
-        // Login intentionally starts with a global identity. Let the user
-        // choose a verified workspace before mounting tenant-scoped pages.
-        Route::TenantWorkspace {}
+        super::workspace_switcher::landing_route(user)
     }
 }
 
@@ -138,9 +134,11 @@ fn InvitationAcceptPage() -> Element {
     let mut invitation = use_context::<PendingInvitation>();
     let mut bootstrap = use_context::<UserBootstrap>();
     let i18n = use_i18n();
+    let nav = use_navigator();
     let mut busy = use_signal(|| false);
     let mut message = use_signal(String::new);
     let mut failed = use_signal(|| false);
+    let mut accepted_tenant = use_signal(|| None::<String>);
     let observed = (auth.state)();
     let ready = observed.is_authenticated && (users.loaded_session_id)() == observed.session_id;
     let user = if ready { (users.info)() } else { None };
@@ -173,6 +171,7 @@ fn InvitationAcceptPage() -> Element {
             busy.set(false);
             match result {
                 Ok(result) if result.membership.user_id.to_string() == user.id => {
+                    accepted_tenant.set(Some(result.tenant.id.to_string()));
                     message.set(i18n.t("tenant.accepted").into());
                     bootstrap.0.restart();
                 }
@@ -187,6 +186,53 @@ fn InvitationAcceptPage() -> Element {
             }
         });
     };
+    let enter = move |_| {
+        if busy() {
+            return;
+        }
+        let observed = auth.state.peek().clone();
+        let Some(user) = users.info.peek().clone() else {
+            return;
+        };
+        let Some(tenant_id) = accepted_tenant() else {
+            return;
+        };
+        busy.set(true);
+        failed.set(false);
+        spawn(async move {
+            let result = AuthApi::new(&get_client())
+                .select_tenant(
+                    &SelectTenantRequest::new(tenant_id.clone()),
+                    observed.access_token.as_deref().unwrap_or_default(),
+                )
+                .await;
+            if !auth.same_session(&observed) {
+                return;
+            }
+            busy.set(false);
+            match result {
+                Ok(response) => {
+                    if super::workspace::install_selection(
+                        auth,
+                        users,
+                        &observed,
+                        &user.id,
+                        Some(tenant_id.as_str()),
+                        response,
+                    ) {
+                        nav.replace(Route::Dashboard {});
+                    } else {
+                        failed.set(true);
+                        message.set(i18n.t("tenant.session_changed").into());
+                    }
+                }
+                Err(error) => {
+                    failed.set(true);
+                    message.set(user_error_message(&error));
+                }
+            }
+        });
+    };
     rsx! {main {class:"page-container tenant-invitation-accept",
         ui::PageHeader {title:i18n.t("tenant.accept_title").to_string(),description:i18n.t("tenant.accept_hint").to_string()}
         if !message().is_empty(){div {class:if failed(){"alert alert-error"}else{"alert alert-success"},role:"status","{message}"}}
@@ -197,7 +243,11 @@ fn InvitationAcceptPage() -> Element {
         } else if !ready {p {role:"status",{i18n.t("common.loading")}}}
         else {
             if let Some(user)=user {p {{i18n.t("tenant.accept_as")} ": {user.email}"}}
-            button {class:"btn btn-primary",disabled:busy()||!invitation.0.read().has_token(),onclick:accept,{i18n.t("tenant.accept")}}
+            if accepted_tenant().is_some() {
+                button {class:"btn btn-primary",disabled:busy(),onclick:enter,{i18n.t("tenant.enter_workspace")}}
+            } else {
+                button {class:"btn btn-primary",disabled:busy()||!invitation.0.read().has_token(),onclick:accept,{i18n.t("tenant.accept")}}
+            }
             Link {class:"btn btn-secondary",to:Route::TenantWorkspace {},{i18n.t("tenant.workspace")}}
             button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|bootstrap.0.restart(),{i18n.t("tenant.reload_memberships")}}
         }
@@ -210,16 +260,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn global_login_starts_at_workspace_while_selected_session_starts_at_dashboard() {
-        let global = AuthState::logged_in("global".into());
+    fn global_login_is_role_aware_while_selected_session_starts_at_dashboard() {
+        let ordinary = UserInfo::default();
         assert_eq!(
-            default_authenticated_route(&global),
+            super::super::workspace_switcher::landing_route(&ordinary),
             Route::TenantWorkspace {}
         );
 
-        let mut selected = global;
-        selected.selected_tenant_id = Some(Uuid::new_v4().to_string());
-        assert_eq!(default_authenticated_route(&selected), Route::Dashboard {});
+        let mut selected_user = ordinary;
+        selected_user.selected_tenant = Some(client_api::api::auth::SelectedTenant {
+            id: Uuid::new_v4().to_string(),
+            name: Some("Workspace".into()),
+            slug: Some("workspace".into()),
+            tenant_role: client_api::TenantRole::Member,
+            authz_version: Some(1),
+            membership_authz_version: Some(1),
+        });
+        assert_eq!(
+            super::super::workspace_switcher::landing_route(&selected_user),
+            Route::Dashboard {}
+        );
     }
 
     #[test]

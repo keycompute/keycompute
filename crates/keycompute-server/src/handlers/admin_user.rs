@@ -26,7 +26,7 @@ use keycompute_db::models::tenant::{
     CreateTenantRequest as DbCreateTenantRequest, UpdateTenantRequest as DbUpdateTenantRequest,
 };
 use keycompute_db::models::user::User;
-use keycompute_types::PlatformRole;
+use keycompute_types::{PlatformRole, UserStatus};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -49,6 +49,7 @@ pub struct AdminUserInfo {
 #[serde(deny_unknown_fields)]
 pub struct UserListQueryParams {
     pub platform_role: Option<PlatformRole>,
+    pub status: Option<UserStatus>,
     pub search: Option<String>,
     #[serde(default = "default_page")]
     pub page: i64,
@@ -134,6 +135,7 @@ pub async fn list_all_users(
         identity_pool(&state)?.write_conn(),
         scope,
         query.platform_role,
+        query.status,
         query.search.as_deref(),
         page_size,
         offset,
@@ -1202,6 +1204,25 @@ mod tests {
         assert_eq!(normalize_tenant_status("active").unwrap(), "active");
         assert_eq!(normalize_tenant_status("DISABLED").unwrap(), "inactive");
         assert!(normalize_tenant_status("suspended").is_err());
+    }
+
+    #[test]
+    fn platform_user_query_accepts_only_typed_lifecycle_statuses() {
+        let query: UserListQueryParams = serde_json::from_value(serde_json::json!({
+            "status": "active",
+            "page": 1,
+            "page_size": 8
+        }))
+        .unwrap();
+        assert_eq!(query.status, Some(UserStatus::Active));
+        assert!(
+            serde_json::from_value::<UserListQueryParams>(serde_json::json!({
+                "status": "inactive",
+                "page": 1,
+                "page_size": 8
+            }))
+            .is_err()
+        );
     }
 
     #[test]

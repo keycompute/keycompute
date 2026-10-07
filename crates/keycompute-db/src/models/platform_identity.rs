@@ -123,6 +123,7 @@ impl PlatformIdentity {
         db: &impl ConnectionTrait,
         scope: FinancialScope,
         role: Option<PlatformRole>,
+        status: Option<UserStatus>,
         search: Option<&str>,
         limit: i64,
         offset: i64,
@@ -132,12 +133,13 @@ impl PlatformIdentity {
         let mut values = scope.values();
         values.extend([
             role.map(|r| r.as_str()).into(),
+            status.map(|value| value.as_str()).into(),
             search.into(),
             limit.into(),
             offset.into(),
         ]);
         let sql = format!(
-            "WITH authority AS MATERIALIZED(SELECT 1 WHERE {}),visible AS MATERIALIZED(SELECT {USER_COLUMNS} FROM users u CROSS JOIN authority WHERE ($10::text IS NULL OR u.platform_role=$10) AND ($11='' OR strpos(lower(u.email||' '||COALESCE(u.name,'')),lower($11))>0)),page AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $12 OFFSET $13) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.created_at DESC,p.id DESC),'[]'::jsonb) FROM page p) AS items FROM authority",
+            "WITH authority AS MATERIALIZED(SELECT 1 WHERE {}),visible AS MATERIALIZED(SELECT {USER_COLUMNS} FROM users u CROSS JOIN authority WHERE ($10::text IS NULL OR u.platform_role=$10) AND ($11::text IS NULL OR u.status=$11) AND ($12='' OR strpos(lower(u.email||' '||COALESCE(u.name,'')),lower($12))>0)),page AS (SELECT * FROM visible ORDER BY created_at DESC,id DESC LIMIT $13 OFFSET $14) SELECT (SELECT COUNT(*)::bigint FROM visible) AS total,(SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY p.created_at DESC,p.id DESC),'[]'::jsonb) FROM page p) AS items FROM authority",
             scope.predicate()
         );
         let row = db

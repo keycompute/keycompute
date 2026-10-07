@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
  status TEXT, token_version INTEGER, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
 );
 CREATE TABLE IF NOT EXISTS tenants (
- id UUID, owner_user_id UUID NOT NULL, authz_version BIGINT NOT NULL,
+ id UUID, owner_user_id UUID NOT NULL, revision BIGINT NOT NULL,
+ authz_version BIGINT NOT NULL,
  status TEXT CHECK(status IN ('active','inactive'))
 );
 CREATE TABLE IF NOT EXISTS tenant_memberships (

@@ -500,7 +500,7 @@ async fn membership_and_tenant_versions_revoke_only_their_own_scope() {
     ))
     .await
     .unwrap();
-    assert!(f.state.auth.verify_token(&current).await.is_err());
+    f.state.auth.verify_token(&current).await.unwrap();
     f.state.auth.verify_token(&b).await.unwrap();
     let new_key = f.key(user.id, f.a.id).await;
     f.db.execute(Statement::from_sql_and_values(

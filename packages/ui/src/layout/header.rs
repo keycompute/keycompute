@@ -41,6 +41,7 @@ pub fn Header(
     #[props(default)] user_menu_label: String,
     #[props(default)] account_settings_label: String,
     #[props(default)] logout_label: String,
+    #[props(default)] header_context: Option<Element>,
     #[props(default)] on_user_menu: EventHandler<UserMenuAction>,
 ) -> Element {
     // 头像首字母
@@ -111,6 +112,10 @@ pub fn Header(
                         *sidebar_mobile_open.write() = !cur;
                     },
                     IconMenu { size: 20 }
+                }
+
+                if let Some(context) = header_context {
+                    {context}
                 }
 
             }

@@ -202,7 +202,7 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
     failures: list[str] = []
     required = {
         'users': {'id', 'email', 'name', 'platform_role', 'status', 'token_version', 'created_at', 'updated_at'},
-        'tenants': {'id', 'owner_user_id', 'authz_version', 'status'},
+        'tenants': {'id', 'owner_user_id', 'revision', 'authz_version', 'status'},
         'tenant_memberships': {'tenant_id', 'user_id', 'tenant_role', 'status', 'authz_version'},
         'tenant_invitations': {'tenant_id', 'email', 'tenant_role', 'token_hash', 'status', 'expires_at', 'accepted_by'},
         'tenant_audit_events': {'scope_type', 'tenant_id', 'actor_user_id', 'credential_kind', 'platform_role', 'tenant_role', 'request_id', 'action', 'result', 'metadata'},
@@ -222,7 +222,8 @@ def schema_issues(schema: str, inventory: str) -> tuple[list[str], int]:
     ]:
         if domain(tables.get(table, []), field) != allowed:
             failures.append(f'{table}: {field} domain differs from the final contract')
-    for table, field in [('tenants', 'owner_user_id'), ('tenants', 'authz_version'),
+    for table, field in [('tenants', 'owner_user_id'), ('tenants', 'revision'),
+                         ('tenants', 'authz_version'),
                          ('tenant_memberships', 'tenant_id'), ('tenant_memberships', 'user_id'),
                          ('tenant_invitations', 'token_hash')]:
         if not contains(columns(tables.get(table, [])).get(field, []), ['not', 'null']):

@@ -19,7 +19,7 @@ use keycompute_db::{
     },
 };
 use keycompute_server::{AppState, create_router};
-use keycompute_types::{CredentialKind, PlatformRole, PlatformScope};
+use keycompute_types::{CredentialKind, PlatformRole, PlatformScope, UserStatus};
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement,
     TransactionTrait,
@@ -250,13 +250,20 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
         ))
         .await
         .unwrap();
-        let filtered =
-            PlatformIdentity::users(&f.db, scope, Some(PlatformRole::Operator), Some("%_"), 1, 0)
-                .await
-                .unwrap();
+        let filtered = PlatformIdentity::users(
+            &f.db,
+            scope,
+            Some(PlatformRole::Operator),
+            Some(UserStatus::Active),
+            Some("%_"),
+            1,
+            0,
+        )
+        .await
+        .unwrap();
         assert_eq!(filtered.total, 1);
         assert_eq!(filtered.items[0].id, f.operator);
-        let out = PlatformIdentity::users(&f.db, scope, None, Some("%_"), 1, 1)
+        let out = PlatformIdentity::users(&f.db, scope, None, None, Some("%_"), 1, 1)
             .await
             .unwrap();
         assert_eq!(out.total, 1);
@@ -270,7 +277,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
         for id in [f.user, f.admin, f.operator] {
             let forged = f.scope(id).await;
             assert!(
-                PlatformIdentity::users(&f.db, forged, None, None, 20, 0)
+                PlatformIdentity::users(&f.db, forged, None, None, None, 20, 0)
                     .await
                     .is_err()
             );
@@ -281,7 +288,7 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
             );
         }
         assert!(
-            PlatformIdentity::users(&f.db, scope, None, None, 0, 0)
+            PlatformIdentity::users(&f.db, scope, None, None, None, 0, 0)
                 .await
                 .is_err()
         );

@@ -7239,4 +7239,42 @@ select.form-input:focus {
 .tenant-pricing-admin .toolbar { gap: 8px; flex-wrap: wrap; }
 
 .tenant-workspace-links { flex-wrap: wrap; gap: 8px; justify-content: flex-start; }
+.tenant-overview { min-width: 0; }
+.tenant-empty-state { max-width: 760px; }
+.tenant-empty-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.tenant-overview-hero { margin-top: 18px; }
+.tenant-overview-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.tenant-overview-heading h2 { margin: 2px 0 8px; font-size: 24px; }
+.tenant-overview-eyebrow { margin: 0; color: var(--text-tertiary); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+.tenant-overview-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+.tenant-overview-facts > div { padding: 12px 14px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: var(--radius-md); }
+.tenant-overview-facts dt { color: var(--text-secondary); font-size: 12px; }
+.tenant-overview-facts dd { margin-top: 5px; overflow-wrap: anywhere; font-weight: 650; }
+.tenant-overview-section-title { margin: 28px 0 12px; font-size: 16px; }
+.tenant-overview-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.tenant-overview-card { position: relative; display: block; min-height: 128px; padding: 20px 52px 20px 20px; color: var(--text-primary); text-decoration: none; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-lg); transition: border-color var(--transition-fast), transform var(--transition-fast); }
+.tenant-overview-card:hover { border-color: var(--color-primary); transform: translateY(-1px); }
+.tenant-overview-card h3 { margin: 0 0 8px; font-size: 16px; }
+.tenant-overview-card p { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+.tenant-overview-card span { position: absolute; top: 20px; right: 20px; color: var(--color-primary); font-size: 20px; }
+.tenant-settings-owner { padding: 0 20px; margin-top: 18px; overflow-wrap: anywhere; }
+.tenant-settings .form-label,
+.tenant-settings .input-field,
+.tenant-settings .tenant-settings-subtitle,
+.tenant-settings .section > .text-secondary:not(.tenant-settings-owner) { margin-left: 20px; margin-right: 20px; }
+.tenant-settings .input-field { width: calc(100% - 40px); }
+.tenant-settings-subtitle { margin-top: 24px; }
+.tenant-settings-actions { justify-content: flex-start; padding: 0 20px 20px; }
+.tenant-owner-results { display: grid; max-height: 220px; margin-top: 8px; overflow-y: auto; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: var(--radius-md); box-shadow: var(--shadow-md); }
+.tenant-owner-option { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; padding: 10px 12px; color: var(--text-primary); text-align: left; background: transparent; border: 0; border-bottom: 1px solid var(--border-color); cursor: pointer; }
+.tenant-owner-option:last-child { border-bottom: 0; }
+.tenant-owner-option:hover,
+.tenant-owner-option:focus-visible { background: var(--bg-tertiary); }
+.tenant-owner-option small { color: var(--text-secondary); overflow-wrap: anywhere; }
+.tenant-owner-selected { display: block; margin-top: 7px; color: var(--color-success); }
+@media (max-width: 720px) {
+  .tenant-overview-facts,
+  .tenant-overview-grid { grid-template-columns: 1fr; }
+  .tenant-overview-heading { align-items: flex-start; flex-direction: column; }
+}
 .tenant-pricing-admin td .btn { margin: 2px; }

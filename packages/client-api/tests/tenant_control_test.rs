@@ -1,4 +1,4 @@
-use client_api::api::tenant_control::{self as client, InvitationToken, MemberPatch};
+use client_api::api::tenant_control::{self as client, InvitationToken, MemberPatch, TenantPatch};
 use client_api::{ClientError, TenantControlApi};
 use keycompute_types::TenantRole;
 use serde_json::json;
@@ -29,6 +29,20 @@ fn invitation_secrets_and_role_contracts_have_no_legacy_fallback() {
     let selected: client_api::api::auth::SelectedTenant =
         serde_json::from_value(json!({"id":"tenant","tenant_role":"admin"})).unwrap();
     assert_eq!(selected.tenant_role, TenantRole::Admin);
+}
+
+#[test]
+fn tenant_configuration_uses_a_non_authorization_revision() {
+    let body = serde_json::to_value(TenantPatch {
+        expected_revision: 7,
+        name: Some("Workspace".into()),
+        description: None,
+        default_rpm_limit: None,
+        default_tpm_limit: None,
+    })
+    .unwrap();
+    assert_eq!(body["expected_revision"], 7);
+    assert!(body.get("expected_authz_version").is_none());
 }
 #[tokio::test]
 async fn mutations_are_not_replayed_and_delete_keeps_its_revision_body() {

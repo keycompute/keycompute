@@ -10,6 +10,8 @@ use crate::api::common::encode_query_value;
 pub struct UserQueryParams {
     /// Global platform role filter.
     pub platform_role: Option<PlatformRole>,
+    /// Global user lifecycle filter.
+    pub status: Option<UserStatus>,
     /// 搜索关键词（邮箱或名称）
     pub search: Option<String>,
     /// 页码（从 1 开始）
@@ -27,6 +29,11 @@ impl UserQueryParams {
 
     pub fn with_platform_role(mut self, role: PlatformRole) -> Self {
         self.platform_role = Some(role);
+        self
+    }
+
+    pub fn with_status(mut self, status: UserStatus) -> Self {
+        self.status = Some(status);
         self
     }
 
@@ -52,6 +59,9 @@ impl UserQueryParams {
                 "platform_role={}",
                 encode_query_value(role.as_str())
             ));
+        }
+        if let Some(status) = self.status {
+            params.push(format!("status={}", encode_query_value(status.as_str())));
         }
         if let Some(ref search) = self.search {
             params.push(format!("search={}", encode_query_value(search)));
@@ -344,5 +354,18 @@ mod tests {
         assert_eq!(response.platform_role, Some(PlatformRole::None));
         assert_eq!(response.status, Some(UserStatus::Active));
         assert!(response.memberships.is_none());
+    }
+
+    #[test]
+    fn user_query_serializes_active_status_for_owner_searches() {
+        let query = UserQueryParams::new()
+            .with_status(UserStatus::Active)
+            .with_search("alice+owner@example.com")
+            .with_page(1)
+            .with_page_size(8);
+        assert_eq!(
+            query.to_query_string(),
+            "status=active&search=alice%2Bowner%40example.com&page=1&page_size=8"
+        );
     }
 }

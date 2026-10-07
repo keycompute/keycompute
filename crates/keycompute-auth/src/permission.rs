@@ -13,6 +13,8 @@ pub enum Permission {
     ManageApiKeys,
     ManageUsers,
     ManageTenant,
+    ManageTenantMembers,
+    InviteTenantMembers,
     ViewBilling,
     ManageOwnBilling,
     ManageBilling,
@@ -34,6 +36,8 @@ impl Permission {
             Self::ManageApiKeys => "api_keys:manage",
             Self::ManageUsers => "users:manage",
             Self::ManageTenant => "tenant:manage",
+            Self::ManageTenantMembers => "members:manage",
+            Self::InviteTenantMembers => "invitations:manage",
             Self::ViewBilling => "billing:view",
             Self::ManageOwnBilling => "billing:self_manage",
             Self::ManageBilling => "billing:manage",
@@ -55,6 +59,8 @@ impl Permission {
             Self::ManageApiKeys,
             Self::ManageUsers,
             Self::ManageTenant,
+            Self::ManageTenantMembers,
+            Self::InviteTenantMembers,
             Self::ViewBilling,
             Self::ManageOwnBilling,
             Self::ManageBilling,
@@ -169,6 +175,8 @@ pub fn permissions_for(
         out.extend([
             Permission::ManageApiKeys,
             Permission::ManageTenant,
+            Permission::ManageTenantMembers,
+            Permission::InviteTenantMembers,
             Permission::ViewBilling,
             Permission::ManageBilling,
             Permission::ManageProviders,
@@ -448,6 +456,24 @@ mod tests {
             ),
             AuthorizationDecision::Deny
         );
+    }
+
+    #[test]
+    fn tenant_admin_presentation_capabilities_include_member_and_invitation_domains() {
+        let permissions = permissions_for(
+            CredentialKind::Jwt,
+            PlatformRole::None,
+            Some(TenantRole::Admin),
+        );
+        assert!(permissions.contains(&Permission::ManageTenantMembers));
+        assert!(permissions.contains(&Permission::InviteTenantMembers));
+        let member = permissions_for(
+            CredentialKind::Jwt,
+            PlatformRole::None,
+            Some(TenantRole::Member),
+        );
+        assert!(!member.contains(&Permission::ManageTenantMembers));
+        assert!(!member.contains(&Permission::InviteTenantMembers));
     }
     #[test]
     fn unknown_roles_fail_closed() {

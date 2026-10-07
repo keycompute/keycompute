@@ -96,6 +96,40 @@
   /* 简化 header */
   .header {
     padding: 0 var(--space-md);
+    gap: 8px;
+  }
+
+  .header-left {
+    min-width: 0;
+    gap: 8px;
+  }
+
+  .header-workspace-switcher {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .header-workspace-select {
+    width: 100%;
+    min-width: 0;
+    max-width: 220px;
+  }
+
+  .header-workspace-role,
+  .header-workspace-status {
+    display: none;
+  }
+
+  .header-right {
+    gap: 6px;
+  }
+
+  /* Keep the mobile Home and account actions reachable. Repository and theme
+     shortcuts are secondary at this width; removing them leaves a real touch
+     target for workspace selection instead of squeezing it to a few pixels. */
+  .header-github-link,
+  .header-theme-btn {
+    display: none;
   }
 
 }

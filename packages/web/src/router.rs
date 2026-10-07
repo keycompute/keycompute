@@ -19,7 +19,7 @@ use crate::views::{
         OwnerKeyIssuance, TenantAdminLayout, TenantAudit, TenantDistribution, TenantFinance,
         TenantFinancialControls, TenantInvitationAccept, TenantInvitations, TenantKeys,
         TenantMembers, TenantNodes, TenantPricing, TenantProviders, TenantResponses,
-        TenantWorkspace,
+        TenantSettings, TenantWorkspace,
     },
     user::{UserProfile, UserSettings},
 };
@@ -79,6 +79,8 @@ pub enum Route {
         #[route("/tenant")]
         TenantWorkspace {},
         #[layout(TenantAdminLayout)]
+            #[route("/tenant/settings")]
+            TenantSettings {},
             #[route("/tenant/providers")]
             TenantProviders {},
             #[route("/tenant/finance/controls")]

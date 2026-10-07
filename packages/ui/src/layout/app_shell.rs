@@ -70,6 +70,10 @@ pub fn AppShell(
     #[props(default)] collapse_label: String,
     #[props(default = "KeyCompute".to_string())] site_name: String,
     #[props(default)] site_logo_src: String,
+    /// Optional product-specific context control rendered in the header.
+    /// The UI crate deliberately does not interpret its contents.
+    #[props(default)]
+    header_context: Option<Element>,
     #[props(default)] on_user_menu: EventHandler<UserMenuAction>,
     children: Element,
 ) -> Element {
@@ -198,6 +202,7 @@ pub fn AppShell(
                     user_menu_label: user_menu_label.clone(),
                     account_settings_label: account_settings_label.clone(),
                     logout_label: logout_label.clone(),
+                    header_context,
                     on_user_menu,
                 }
 
@@ -238,5 +243,13 @@ mod tests {
         let css = include_str!("../../assets/styling/responsive.css");
         assert!(css.contains("@media (max-width: 639px) { .hide-mobile"));
         assert!(!css.contains(".hide-mobile  { display: revert; }"));
+    }
+
+    #[test]
+    fn mobile_header_reserves_space_for_workspace_selection() {
+        let css = include_str!("../../assets/styling/responsive.css");
+        assert!(css.contains(".header-workspace-switcher {\n    flex: 1 1 auto;"));
+        assert!(css.contains(".header-workspace-select {\n    width: 100%;"));
+        assert!(css.contains(".header-github-link,\n  .header-theme-btn"));
     }
 }

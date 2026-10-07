@@ -341,6 +341,53 @@ html, body {
   flex: 1;
 }
 
+.header-workspace-switcher {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.header-workspace-select {
+  width: min(280px, 32vw);
+  height: 34px;
+  padding: 0 32px 0 11px;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--bg-secondary) 82%, transparent);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.header-workspace-select:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.header-workspace-select:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.header-workspace-role,
+.header-workspace-status {
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.header-workspace-role {
+  padding: 2px 6px;
+  color: var(--color-primary);
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  border-radius: var(--radius-full);
+}
+
 .header-right {
   display: flex;
   align-items: center;

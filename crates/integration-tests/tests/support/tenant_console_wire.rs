@@ -176,7 +176,7 @@ async fn sdk_member_versions_owner_transfer_and_tenant_selection_are_real_server
     let after = control
         .patch_context(
             &TenantPatch {
-                expected_authz_version: before.authz_version,
+                expected_revision: before.revision,
                 name: Some("Console contract tenant".into()),
                 description: Some("Updated using the actual SDK".into()),
                 default_rpm_limit: Some(70),
@@ -187,8 +187,9 @@ async fn sdk_member_versions_owner_transfer_and_tenant_selection_are_real_server
         .await
         .unwrap();
     assert_eq!(after.name, "Console contract tenant");
-    assert!(after.authz_version > before.authz_version);
-    assert!(control.context(&fresh).await.is_err());
+    assert!(after.revision > before.revision);
+    assert_eq!(after.authz_version, before.authz_version);
+    assert!(control.context(&fresh).await.is_ok());
     let global = AuthApi::new(api)
         .select_tenant(
             &SelectTenantRequest::global(),

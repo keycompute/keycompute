@@ -60,7 +60,7 @@ pub struct AcceptInvitationPath {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantPatchRequest {
-    pub expected_authz_version: i64,
+    pub expected_revision: i64,
     pub name: Option<String>,
     pub description: Option<String>,
     pub default_rpm_limit: Option<i32>,
@@ -201,6 +201,7 @@ fn db_error(error: keycompute_db::DbError) -> ApiError {
             {
                 ApiError::Conflict(message)
             } else if lower.contains("expected_authz_version")
+                || lower.contains("expected_revision")
                 || lower.contains("at least one")
                 || lower.contains("invalid")
             {
@@ -298,7 +299,7 @@ pub async fn patch_tenant(
     access.require_path_tenant(path.tenant_id)?;
     access.require(AuthorizationAction::ManageTenantResource)?;
     let patch = TenantPatch {
-        expected_authz_version: request.expected_authz_version,
+        expected_revision: request.expected_revision,
         name: request.name,
         description: request.description,
         default_rpm_limit: request.default_rpm_limit,
@@ -853,6 +854,20 @@ mod tests {
                 "platform_role": "root"
             }))
             .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TenantPatchRequest>(serde_json::json!({
+                "expected_authz_version": 1,
+                "name": "legacy client"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<TenantPatchRequest>(serde_json::json!({
+                "expected_revision": 1,
+                "name": "current client"
+            }))
+            .is_ok()
         );
     }
 }

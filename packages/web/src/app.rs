@@ -12,6 +12,7 @@ use crate::stores::{
 };
 use crate::views::shared::Toast;
 use crate::views::tenant::common::WorkspaceScope;
+use crate::views::tenant::{WorkspaceDraftState, WorkspaceSwitcher};
 use ui::layout::sidebar::NavIcon;
 use ui::{AppShell, NavItem, NavSection, ThemeCtx, UserMenuAction};
 
@@ -34,6 +35,7 @@ pub fn App() -> Element {
     let user_loaded_session = use_signal(uuid::Uuid::nil);
     let public_settings_state = use_signal(PublicSettingsState::default);
     let toast_signal = use_signal(|| None::<ToastMsg>);
+    let workspace_draft_signal = use_signal(|| false);
     let lang_signal = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
@@ -61,6 +63,7 @@ pub fn App() -> Element {
     let public_settings_store =
         use_context_provider(|| PublicSettingsStore::new(public_settings_state));
     let _ui_store = use_context_provider(|| UiStore::new(toast_signal));
+    let _workspace_drafts = use_context_provider(|| WorkspaceDraftState(workspace_draft_signal));
     let _lang = use_context_provider(|| lang_signal);
     let _theme = use_context_provider(|| ThemeCtx(theme_signal));
 
@@ -416,82 +419,122 @@ pub fn AppLayout() -> Element {
         nav_sections.push(account);
     }
 
-    let mut tenant_items = vec![NavItem::new(
+    let mut workspace_items = vec![NavItem::new(
         i18n.t("tenant.workspace"),
         Route::TenantWorkspace {}.to_string(),
         NavIcon::Home,
     )];
-    if user_store
-        .info
-        .read()
-        .as_ref()
-        .is_some_and(UserInfo::can_manage_tenant)
-    {
-        tenant_items.extend([
-            NavItem::new(
-                i18n.t("tenant_providers.title"),
-                Route::TenantProviders {}.to_string(),
-                NavIcon::Server,
-            ),
-            NavItem::new(
-                i18n.t("tenant_finance.title"),
-                Route::TenantFinance {}.to_string(),
-                NavIcon::Wallet,
-            ),
-            NavItem::new(
-                i18n.t("tenant_financial_controls.title"),
-                Route::TenantFinancialControls {}.to_string(),
-                NavIcon::Wallet,
-            ),
-            NavItem::new(
-                i18n.t("tenant_distribution.title"),
-                Route::TenantDistribution {}.to_string(),
-                NavIcon::Wallet,
-            ),
-            NavItem::new(
-                i18n.t("tenant_keys.title"),
-                Route::TenantKeys {}.to_string(),
-                NavIcon::Key,
-            ),
-            NavItem::new(
-                i18n.t("tenant_responses.title"),
-                Route::TenantResponses {}.to_string(),
-                NavIcon::Activity,
-            ),
-            NavItem::new(
-                i18n.t("tenant_pricing.title"),
-                Route::TenantPricing {}.to_string(),
-                NavIcon::Wallet,
-            ),
-            NavItem::new(
-                i18n.t("tenant_nodes.title"),
-                Route::TenantNodes {}.to_string(),
-                NavIcon::Activity,
-            ),
-            NavItem::new(
+    let mut tenant_sections = Vec::new();
+    if let Some(user) = user_store.info.read().as_ref() {
+        if user.can_manage_tenant() {
+            workspace_items.push(NavItem::new(
+                i18n.t("tenant.settings"),
+                Route::TenantSettings {}.to_string(),
+                NavIcon::Settings,
+            ));
+        }
+        if user.can_manage_members() {
+            workspace_items.push(NavItem::new(
                 i18n.t("tenant.members"),
                 Route::TenantMembers {}.to_string(),
                 NavIcon::User,
-            ),
-            NavItem::new(
+            ));
+        }
+        if user.can_invite_members() {
+            workspace_items.push(NavItem::new(
                 i18n.t("tenant.invitations"),
                 Route::TenantInvitations {}.to_string(),
                 NavIcon::Share,
-            ),
-            NavItem::new(
+            ));
+        }
+        if user.can_manage_tenant() {
+            workspace_items.push(NavItem::new(
                 i18n.t("tenant.audit"),
                 Route::TenantAudit {}.to_string(),
                 NavIcon::Activity,
-            ),
-        ]);
+            ));
+        }
+        let mut resource_items = Vec::new();
+        if user.can_manage_providers() {
+            resource_items.push(NavItem::new(
+                i18n.t("tenant_providers.title"),
+                Route::TenantProviders {}.to_string(),
+                NavIcon::Server,
+            ));
+        }
+        if user.can_manage_api_keys() {
+            resource_items.push(NavItem::new(
+                i18n.t("tenant_keys.title"),
+                Route::TenantKeys {}.to_string(),
+                NavIcon::Key,
+            ));
+        }
+        if user.can_manage_tenant() {
+            resource_items.extend([
+                NavItem::new(
+                    i18n.t("tenant_responses.title"),
+                    Route::TenantResponses {}.to_string(),
+                    NavIcon::Activity,
+                ),
+                NavItem::new(
+                    i18n.t("tenant_nodes.title"),
+                    Route::TenantNodes {}.to_string(),
+                    NavIcon::Activity,
+                ),
+            ]);
+        }
+        if !resource_items.is_empty() {
+            tenant_sections.push(NavSection {
+                title: Some(i18n.t("tenant.resources_group").into()),
+                items: resource_items,
+            });
+        }
+        let mut commerce_items = Vec::new();
+        if user.can_manage_pricing() {
+            commerce_items.push(NavItem::new(
+                i18n.t("tenant_pricing.title"),
+                Route::TenantPricing {}.to_string(),
+                NavIcon::Wallet,
+            ));
+        }
+        if user.can_manage_billing() {
+            commerce_items.extend([
+                NavItem::new(
+                    i18n.t("tenant_finance.title"),
+                    Route::TenantFinance {}.to_string(),
+                    NavIcon::Wallet,
+                ),
+                NavItem::new(
+                    i18n.t("tenant_financial_controls.title"),
+                    Route::TenantFinancialControls {}.to_string(),
+                    NavIcon::Wallet,
+                ),
+            ]);
+        }
+        if user.can_manage_tenant() {
+            commerce_items.push(NavItem::new(
+                i18n.t("tenant_distribution.title"),
+                Route::TenantDistribution {}.to_string(),
+                NavIcon::Share,
+            ));
+        }
+        if !commerce_items.is_empty() {
+            tenant_sections.push(NavSection {
+                title: Some(i18n.t("tenant.commerce_group").into()),
+                items: commerce_items,
+            });
+        }
     }
-    nav_sections.insert(
-        1,
+    tenant_sections.insert(
+        0,
         NavSection {
             title: Some(i18n.t("tenant.management").into()),
-            items: tenant_items,
+            items: workspace_items,
         },
     );
+    for (offset, section) in tenant_sections.into_iter().enumerate() {
+        nav_sections.insert(1 + offset, section);
+    }
 
     if user_store
         .info
@@ -558,6 +601,7 @@ pub fn AppLayout() -> Element {
             current_path,
             site_name,
             site_logo_src,
+            header_context: rsx! { WorkspaceSwitcher {} },
             home_title: i18n.t("layout.back_to_home"),
             open_menu_title: i18n.t("layout.open_menu"),
             close_menu_title: i18n.t("layout.close_menu"),
@@ -668,6 +712,7 @@ fn route_page_title(route: &Route, i18n: &I18n) -> String {
         Route::OwnerKeyIssuance {} => "tenant_keys.my_requests",
         Route::TenantPricing {} => "tenant_pricing.title",
         Route::TenantWorkspace {} => "tenant.workspace",
+        Route::TenantSettings {} => "tenant.settings",
         Route::TenantMembers {} => "tenant.members",
         Route::TenantInvitations {} => "tenant.invitations",
         Route::TenantAudit {} => "tenant.audit",

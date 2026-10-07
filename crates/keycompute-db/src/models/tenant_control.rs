@@ -37,6 +37,7 @@ pub struct TenantContext {
     pub status: String,
     pub default_rpm_limit: i32,
     pub default_tpm_limit: i32,
+    pub revision: i64,
     pub authz_version: i64,
     pub tenant_role: String,
     pub membership_authz_version: i64,
@@ -118,7 +119,7 @@ pub struct MemberPatch {
 
 #[derive(Debug, Clone)]
 pub struct TenantPatch {
-    pub expected_authz_version: i64,
+    pub expected_revision: i64,
     pub name: Option<String>,
     pub description: Option<String>,
     pub default_rpm_limit: Option<i32>,
@@ -292,7 +293,7 @@ pub async fn get_tenant_context(
     scope: TenantScope,
 ) -> Result<Option<TenantContext>, DbError> {
     let sql = format!(
-        "SELECT t.id,t.owner_user_id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.authz_version,m.tenant_role,m.authz_version AS membership_authz_version
+        "SELECT t.id,t.owner_user_id,t.name,t.slug,t.description,t.status,t.default_rpm_limit,t.default_tpm_limit,t.revision,t.authz_version,m.tenant_role,m.authz_version AS membership_authz_version
          FROM tenants t
          JOIN tenant_memberships m ON m.tenant_id=t.id AND m.user_id=$2 AND m.status='active'
          JOIN users u ON u.id=m.user_id AND u.status='active'
@@ -432,7 +433,7 @@ pub async fn update_tenant(
     {
         return Err(invariant("at least one tenant field is required"));
     }
-    if patch.expected_authz_version <= 0 {
+    if patch.expected_revision <= 0 {
         return Err(conflict("tenant", scope.tenant_id()));
     }
     if patch
@@ -454,8 +455,8 @@ pub async fn update_tenant(
         .ok_or_else(|| DbError::not_found("Tenant", authority.tenant_id))?;
     let updated = Tenant::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "UPDATE tenants SET name=COALESCE($2,name),description=COALESCE($3,description),default_rpm_limit=COALESCE($4,default_rpm_limit),default_tpm_limit=COALESCE($5,default_tpm_limit) WHERE id=$1 AND authz_version=$6 RETURNING *",
-        [tenant.id.into(), patch.name.as_deref().map(str::trim).into(), patch.description.clone().into(), patch.default_rpm_limit.into(), patch.default_tpm_limit.into(), patch.expected_authz_version.into()],
+        "UPDATE tenants SET name=COALESCE($2,name),description=COALESCE($3,description),default_rpm_limit=COALESCE($4,default_rpm_limit),default_tpm_limit=COALESCE($5,default_tpm_limit) WHERE id=$1 AND revision=$6 RETURNING *",
+        [tenant.id.into(), patch.name.as_deref().map(str::trim).into(), patch.description.clone().into(), patch.default_rpm_limit.into(), patch.default_tpm_limit.into(), patch.expected_revision.into()],
     ))
     .one(tx)
     .await?
@@ -470,7 +471,7 @@ pub async fn update_tenant(
         Some(&tenant.id.to_string()),
         AuditResult::Success,
         serde_json::json!({
-            "authz_version": updated.authz_version,
+            "revision": updated.revision,
             "changed": {
                 "name": patch.name.is_some(),
                 "description": patch.description.is_some(),

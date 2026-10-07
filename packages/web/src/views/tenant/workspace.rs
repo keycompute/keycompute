@@ -1,22 +1,15 @@
-use super::common::{self, CommandDialog, WorkspaceLinks, WorkspaceScope};
+use super::common::{self, WorkspaceScope};
 use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
-    services::api_client::{get_client, user_error_message},
+    services::api_client::user_error_message,
     stores::{
         auth_store::{AuthState, AuthStore},
-        ui_store::UiStore,
         user_store::{UserInfo, UserStore},
     },
     utils::resource::{KeyedResourceValue, current_keyed_value},
 };
-use client_api::{
-    AuthApi, ClientError,
-    api::{
-        auth::{AuthResponse, SelectTenantRequest},
-        tenant_control::{TenantContext, TenantPatch},
-    },
-};
+use client_api::api::{auth::AuthResponse, tenant_control::TenantContext};
 use dioxus::prelude::*;
 
 pub(super) fn install_selection(
@@ -45,46 +38,6 @@ pub(super) fn install_selection(
     true
 }
 
-#[derive(Clone, Default, PartialEq)]
-struct ConfigDraft {
-    name: String,
-    description: String,
-    rpm: String,
-    tpm: String,
-    revision: i64,
-}
-impl ConfigDraft {
-    fn from_context(c: &TenantContext) -> Self {
-        Self {
-            name: c.name.clone(),
-            description: c.description.clone().unwrap_or_default(),
-            rpm: c.default_rpm_limit.to_string(),
-            tpm: c.default_tpm_limit.to_string(),
-            revision: c.authz_version,
-        }
-    }
-    fn patch(&self) -> client_api::Result<TenantPatch> {
-        let rpm = self.rpm.trim().parse::<i32>().ok().filter(|v| *v >= 0);
-        let tpm = self.tpm.trim().parse::<i32>().ok().filter(|v| *v >= 0);
-        if self.revision <= 0
-            || self.name.trim().is_empty()
-            || self.name.len() > 255
-            || self.description.len() > 16 * 1024
-            || rpm.is_none()
-            || tpm.is_none()
-        {
-            return Err(ClientError::Config("Invalid tenant configuration".into()));
-        }
-        Ok(TenantPatch {
-            expected_authz_version: self.revision,
-            name: Some(self.name.trim().into()),
-            description: Some(self.description.clone()),
-            default_rpm_limit: rpm,
-            default_tpm_limit: tpm,
-        })
-    }
-}
-
 fn has_active_membership(user: Option<&UserInfo>) -> bool {
     user.is_some_and(|value| {
         value
@@ -94,8 +47,6 @@ fn has_active_membership(user: Option<&UserInfo>) -> bool {
     })
 }
 
-/// The router may reuse an Outlet VNode across AppShell remounts. A page-local
-/// key must discard drafts, confirmation dialogs and one-time secrets as well.
 #[component]
 pub fn TenantWorkspace() -> Element {
     let auth = use_context::<AuthStore>();
@@ -103,8 +54,6 @@ pub fn TenantWorkspace() -> Element {
     let epoch = (auth.state)().session_id;
     let scope = WorkspaceScope::from_stores(auth, users);
     let key = format!("{epoch}:{scope:?}");
-    // A keyed fragment is required: a key on one static component alone
-    // does not engage Dioxus's keyed child reconciliation.
     rsx! { for identity in [key] { TenantWorkspacePage { key: "{identity}" } } }
 }
 
@@ -113,27 +62,13 @@ fn TenantWorkspacePage() -> Element {
     let i18n = use_i18n();
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
-    let mut ui = use_context::<UiStore>();
-    let nav = use_navigator();
-    let mut target = use_signal(|| {
-        users
-            .info
-            .peek()
-            .as_ref()
-            .and_then(|u| u.active_tenant_id())
-            .unwrap_or_default()
-            .to_owned()
-    });
-    let mut switching = use_signal(|| false);
-    let mut saving = use_signal(|| false);
-    let mut error = use_signal(String::new);
-    let mut draft = use_signal(ConfigDraft::default);
-    let mut dirty = use_signal(|| false);
-    let mut pending = use_signal(|| None::<TenantPatch>);
     let scope = WorkspaceScope::from_stores(auth, users);
     let user = (users.info)();
-    let can_manage = user.as_ref().is_some_and(UserInfo::can_manage_tenant);
-    let mut context = use_resource(move || {
+    let can_manage_settings = user.as_ref().is_some_and(UserInfo::can_manage_tenant);
+    let can_manage_members = user.as_ref().is_some_and(UserInfo::can_manage_members);
+    let can_manage_providers = user.as_ref().is_some_and(UserInfo::can_manage_providers);
+    let can_manage_billing = user.as_ref().is_some_and(UserInfo::can_manage_billing);
+    let context = use_resource(move || {
         let scope = WorkspaceScope::from_stores(auth, users);
         async move {
             let result = if let Some(scope) = scope {
@@ -149,167 +84,119 @@ fn TenantWorkspacePage() -> Element {
         }
     });
     let loaded = current_keyed_value(&scope, context.state().cloned(), context());
-    let current = loaded
+    let current: Option<TenantContext> = loaded
         .as_ref()
-        .and_then(|v| v.as_ref().ok())
-        .and_then(|v| v.as_ref())
+        .and_then(|value| value.as_ref().ok())
+        .and_then(|value| value.as_ref())
         .cloned();
-    use_effect(move || {
-        let scope = WorkspaceScope::from_stores(auth, users);
-        let loaded = current_keyed_value(&scope, context.state().cloned(), context());
-        if let Some(Ok(Some(value))) = loaded
-            && !dirty()
-            && draft.peek().revision != value.authz_version
-        {
-            draft.set(ConfigDraft::from_context(&value));
-        }
-    });
-    let switch = move |_| {
-        if switching() || saving() {
-            return;
-        }
-        let observed = auth.state.peek().clone();
-        let Some(user) = users
-            .info
-            .peek()
-            .clone()
-            .filter(|_| *users.loaded_session_id.peek() == observed.session_id)
-        else {
-            return;
-        };
-        let selected = target().trim().to_owned();
-        let selected = (!selected.is_empty()).then_some(selected);
-        if selected.as_deref() == user.active_tenant_id() {
-            return;
-        }
-        switching.set(true);
-        error.set(String::new());
-        spawn(async move {
-            let selection = selected.clone();
-            let request = SelectTenantRequest {
-                tenant_id: selection,
-            };
-            let result = AuthApi::new(&get_client())
-                .select_tenant(
-                    &request,
-                    observed.access_token.as_deref().unwrap_or_default(),
-                )
-                .await;
-            if !auth.same_session(&observed) {
-                return;
-            }
-            match result {
-                Ok(response) => {
-                    if !install_selection(
-                        auth,
-                        users,
-                        &observed,
-                        &user.id,
-                        selected.as_deref(),
-                        response,
-                    ) {
-                        error.set(i18n.t("tenant.session_changed").into());
-                    } else {
-                        nav.replace(Route::TenantWorkspace {});
-                    }
-                }
-                Err(e) => error.set(user_error_message(&e)),
-            }
-            switching.set(false);
-        });
-    };
-    let save = move |_| match draft().patch() {
-        Ok(body) => pending.set(Some(body)),
-        Err(_) => error.set(i18n.t("tenant.invalid_config").into()),
-    };
-    let confirm = move |_| {
-        if saving() {
-            return;
-        }
-        let (Some(scope), Some(body)) = (WorkspaceScope::from_stores(auth, users), pending())
-        else {
-            return;
-        };
-        let expected = body.expected_authz_version;
-        saving.set(true);
-        error.set(String::new());
-        spawn(async move {
-            let result = common::command(auth, users, scope, move |token| async move {
-                scope.api()?.patch_context(&body, &token).await
-            })
-            .await;
-            if !scope.is_current(auth, users) {
-                return;
-            }
-            saving.set(false);
-            pending.set(None);
-            match result {
-                Ok(row) if row.authz_version != expected => {
-                    common::invalidate_own_session(
-                        auth,
-                        users,
-                        scope,
-                        ui,
-                        i18n.t("tenant.saved_relogin"),
-                    );
-                    nav.replace(Route::Login {});
-                }
-                Ok(_) => {
-                    dirty.set(false);
-                    context.restart();
-                    ui.show_success(i18n.t("tenant.saved"));
-                }
-                Err(e) => error.set(user_error_message(&e)),
-            }
-        });
-    };
-    rsx! {div {class:"page-container tenant-workspace",
-        ui::PageHeader {title:i18n.t("tenant.workspace").to_string(),description:i18n.t("tenant.workspace_hint").to_string()}
-        WorkspaceLinks {}
-        if !error().is_empty(){div {class:"alert alert-error",role:"alert","{error}"}}
-        section {class:"section",aria_label:i18n.t("tenant.switch"),
-            h2 {class:"section-title",{i18n.t("tenant.current")}}
-            if let Some(tenant)=user.as_ref().and_then(|u|u.selected_tenant.as_ref()) {
-                p {"{tenant.name.as_deref().unwrap_or(&tenant.id)} · {tenant.id} · {tenant.tenant_role.as_str()}"}
-            } else {p {{i18n.t("tenant.global")}}}
+    let role_label = current
+        .as_ref()
+        .map(|value| {
             if user
                 .as_ref()
-                .is_some_and(|value| !has_active_membership(Some(value)))
+                .is_some_and(|user| user.id == value.owner_user_id.to_string())
             {
-                p {class:"alert alert-info",role:"status",{i18n.t("tenant.no_memberships")}}
+                i18n.t("tenant.role_owner")
+            } else if value.tenant_role == client_api::TenantRole::Admin {
+                i18n.t("tenant.role_admin")
+            } else {
+                i18n.t("tenant.role_member")
             }
-            label {class:"form-label",r#for:"workspace-select",{i18n.t("tenant.switch")}}
-            select {id:"workspace-select",class:"input-field",value:"{target}",disabled:switching()||saving(),onchange:move |e|target.set(e.value()),
-                option {value:"",{i18n.t("tenant.global")}}
-                if let Some(user)=user.as_ref(){
-                    for membership in user.memberships.iter().filter(|m|m.status.as_deref()==Some("active")) {
-                        option {value:"{membership.tenant_id}","{membership.tenant_name.as_deref().unwrap_or(&membership.tenant_id)} · {membership.tenant_role.as_str()}"}
+        })
+        .unwrap_or_default()
+        .to_string();
+
+    rsx! {
+        div { class: "page-container tenant-workspace tenant-overview",
+            ui::PageHeader {
+                title: i18n.t("tenant.workspace").to_string(),
+                description: i18n.t("tenant.workspace_hint").to_string()
+            }
+
+            if scope.is_none() {
+                section { class: "section tenant-empty-state", aria_label: i18n.t("tenant.no_workspace_title"),
+                    div { class: "section-body",
+                        h2 { class: "section-body-title", {i18n.t("tenant.no_workspace_title")} }
+                        if !has_active_membership(user.as_ref()) {
+                            p { class: "text-secondary", {i18n.t("tenant.no_memberships")} }
+                            div { class: "tenant-empty-actions",
+                                if user.as_ref().is_some_and(UserInfo::can_manage_platform) {
+                                    Link { class: "btn btn-primary", to: Route::Tenants {}, {i18n.t("tenant.open_platform_tenants")} }
+                                } else if user.as_ref().is_some_and(UserInfo::can_view_operations) {
+                                    Link { class: "btn btn-primary", to: Route::PlatformOperations {}, {i18n.t("tenant.open_operations")} }
+                                }
+                                Link { class: "btn btn-secondary", to: Route::UserProfile {}, {i18n.t("tenant.check_account")} }
+                            }
+                        } else {
+                            p { class: "text-secondary", {i18n.t("tenant.choose_from_header")} }
+                        }
                     }
                 }
+            } else if let Some(value) = current {
+                section { class: "section tenant-overview-hero",
+                    div { class: "section-body",
+                        div { class: "tenant-overview-heading",
+                            div {
+                                p { class: "tenant-overview-eyebrow", {i18n.t("tenant.current")} }
+                                h2 { "{value.name}" }
+                                if let Some(description) = value.description.as_deref().filter(|value| !value.is_empty()) {
+                                    p { class: "text-secondary", "{description}" }
+                                }
+                            }
+                            span { class: "badge", "{role_label}" }
+                        }
+                        dl { class: "tenant-overview-facts",
+                            div { dt { {i18n.t("tenant.slug")} } dd { "{value.slug}" } }
+                            div { dt { {i18n.t("tenant.membership_role")} } dd { "{role_label}" } }
+                            div { dt { "RPM" } dd { "{value.default_rpm_limit}" } }
+                            div { dt { "TPM" } dd { "{value.default_tpm_limit}" } }
+                        }
+                    }
+                }
+
+                h2 { class: "tenant-overview-section-title", {i18n.t("tenant.my_workspace_actions")} }
+                div { class: "tenant-overview-grid",
+                    OverviewCard { title: i18n.t("page.home").to_string(), description: i18n.t("tenant.dashboard_card").to_string(), route: Route::Dashboard {} }
+                    OverviewCard { title: i18n.t("nav.api_keys").to_string(), description: i18n.t("tenant.keys_card").to_string(), route: Route::ApiKeyList {} }
+                    OverviewCard { title: i18n.t("nav.usage").to_string(), description: i18n.t("tenant.usage_card").to_string(), route: Route::Usage {} }
+                    OverviewCard { title: i18n.t("nav.payments").to_string(), description: i18n.t("tenant.payments_card").to_string(), route: Route::PaymentsOverview {} }
+                }
+
+                if can_manage_settings || can_manage_members || can_manage_providers || can_manage_billing {
+                    h2 { class: "tenant-overview-section-title", {i18n.t("tenant.admin_get_started")} }
+                    div { class: "tenant-overview-grid",
+                        if can_manage_settings {
+                            OverviewCard { title: i18n.t("tenant.settings").to_string(), description: i18n.t("tenant.settings_card").to_string(), route: Route::TenantSettings {} }
+                        }
+                        if can_manage_members {
+                            OverviewCard { title: i18n.t("tenant.members").to_string(), description: i18n.t("tenant.members_card").to_string(), route: Route::TenantMembers {} }
+                        }
+                        if can_manage_providers {
+                            OverviewCard { title: i18n.t("tenant_providers.title").to_string(), description: i18n.t("tenant.providers_card").to_string(), route: Route::TenantProviders {} }
+                        }
+                        if can_manage_billing {
+                            OverviewCard { title: i18n.t("tenant_finance.title").to_string(), description: i18n.t("tenant.finance_card").to_string(), route: Route::TenantFinance {} }
+                        }
+                    }
+                }
+            } else if let Some(Err(error)) = loaded {
+                div { class: "alert alert-error", role: "alert", {user_error_message(&error)} }
+            } else {
+                p { role: "status", {i18n.t("common.loading")} }
             }
-            button {class:"btn btn-primary",disabled:switching()||saving(),onclick:switch,{i18n.t("tenant.switch")}}
         }
-        if let Some(value)=current {
-            section {class:"section",aria_label:i18n.t("tenant.config"),
-                h2 {class:"section-title",{i18n.t("tenant.config")}}
-                p {class:"text-secondary",{i18n.t("tenant.owner")} ": {value.owner_user_id}"}
-                label {class:"form-label",r#for:"tenant-name",{i18n.t("tenants.name")}}
-                input {id:"tenant-name",class:"input-field",value:"{draft().name}",maxlength:"255",disabled:!can_manage||saving(),oninput:move |e|{draft.write().name=e.value();dirty.set(true);}}
-                label {class:"form-label",r#for:"tenant-description",{i18n.t("tenant.description")}}
-                textarea {id:"tenant-description",class:"input-field",value:"{draft().description}",maxlength:"16384",disabled:!can_manage||saving(),oninput:move |e|{draft.write().description=e.value();dirty.set(true);}}
-                label {class:"form-label",r#for:"tenant-rpm","RPM"}
-                input {id:"tenant-rpm",class:"input-field",r#type:"number",min:"0",value:"{draft().rpm}",disabled:!can_manage||saving(),oninput:move |e|{draft.write().rpm=e.value();dirty.set(true);}}
-                label {class:"form-label",r#for:"tenant-tpm","TPM"}
-                input {id:"tenant-tpm",class:"input-field",r#type:"number",min:"0",value:"{draft().tpm}",disabled:!can_manage||saving(),oninput:move |e|{draft.write().tpm=e.value();dirty.set(true);}}
-                if can_manage {button {class:"btn btn-primary",disabled:saving()||switching()||!dirty(),onclick:save,{i18n.t("tenant.save")}}}
-                button {class:"btn btn-secondary",disabled:saving()||switching(),onclick:move |_|{pending.set(None);dirty.set(false);draft.set(ConfigDraft::default());context.restart();},{i18n.t("tenant.reload")}}
-            }
-        } else if scope.is_some() {
-            if let Some(Err(e))=loaded {div {class:"alert alert-error",role:"alert",{user_error_message(&e)}}}
-            else {p {role:"status",{i18n.t("common.loading")}}}
+    }
+}
+
+#[component]
+fn OverviewCard(title: String, description: String, route: Route) -> Element {
+    rsx! {
+        Link { class: "tenant-overview-card", to: route,
+            h3 { "{title}" }
+            p { "{description}" }
+            span { aria_hidden: "true", "→" }
         }
-        if pending().is_some() {CommandDialog {title:i18n.t("tenant.save").to_string(),target:i18n.t("tenant.config_relogin").to_string(),busy:saving(),on_cancel:move |_|pending.set(None),on_confirm:confirm}}
-    }}
+    }
 }
 
 #[cfg(test)]
@@ -337,25 +224,5 @@ mod tests {
                 authz_version: Some(1),
             });
         assert!(!has_active_membership(Some(&user)));
-    }
-
-    #[test]
-    fn config_validation_does_not_guess_revisions_or_permit_negative_limits() {
-        let mut value = ConfigDraft {
-            name: "Example".into(),
-            description: String::new(),
-            rpm: "60".into(),
-            tpm: "1000".into(),
-            revision: 1,
-        };
-        assert!(value.patch().is_ok());
-        value.rpm = "-1".into();
-        assert!(value.patch().is_err());
-        value.rpm = "60".into();
-        value.revision = 0;
-        assert!(value.patch().is_err());
-        value.revision = 1;
-        value.name = " ".into();
-        assert!(value.patch().is_err());
     }
 }

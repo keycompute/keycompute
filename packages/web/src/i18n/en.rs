@@ -67,7 +67,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.pricing", "Pricing");
     m.insert("nav.payment_orders", "Payment Orders");
     m.insert("nav.distribution_records", "Distribution Records");
-    m.insert("nav.tenants", "Tenants");
+    m.insert("nav.tenants", "Platform tenants");
     m.insert("nav.node_gateway", "Node Gateway");
     m.insert("nav.monitoring", "Monitoring & Diagnostics");
     m.insert("nav.account_settings", "Account Settings");
@@ -242,7 +242,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("page.pricing", "Pricing");
     m.insert("page.payment_orders", "Payment Orders");
     m.insert("page.distribution_records", "Distribution Records");
-    m.insert("page.tenants", "Tenants");
+    m.insert("page.tenants", "Platform tenants");
     m.insert("page.account_settings", "Account Settings");
     m.insert("page.settings", "Settings");
     m.insert("page.node_gateway", "Node Gateway");
@@ -1827,7 +1827,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert(
         "tenants.subtitle",
-        "View and manage all tenant records on the platform",
+        "Create, find, and govern tenants across the platform",
     );
     m.insert(
         "tenants.search_placeholder",
@@ -1841,15 +1841,15 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "Tenant name");
     m.insert("tenants.name_placeholder", "e.g. Research Center");
     m.insert("tenants.name_required", "Tenant name is required");
-    m.insert("tenants.owner", "Owner user ID");
+    m.insert("tenants.owner", "Workspace owner");
     m.insert(
         "tenants.owner_hint",
-        "Enter an existing global user ID. The owner becomes the first tenant administrator.",
+        "Find an existing user by name or email. The owner becomes the first workspace administrator.",
     );
-    m.insert(
-        "tenants.owner_required",
-        "A valid owner user ID is required.",
-    );
+    m.insert("tenants.owner_placeholder", "Search by name or email…");
+    m.insert("tenants.owner_results", "User search results");
+    m.insert("tenants.owner_selected", "Workspace owner selected");
+    m.insert("tenants.owner_required", "Select a valid workspace owner.");
     m.insert("tenants.slug", "Slug (optional)");
     m.insert("tenants.slug_placeholder", "e.g. research-center");
     m.insert(

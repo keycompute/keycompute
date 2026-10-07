@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS tenants (
     default_rpm_limit INTEGER NOT NULL DEFAULT 60,
     default_tpm_limit INTEGER NOT NULL DEFAULT 100000,
     responses_idempotency_claim_count BIGINT NOT NULL DEFAULT 0,
+    -- Optimistic concurrency for editable tenant configuration. This is
+    -- intentionally separate from authz_version so cosmetic/limit changes do
+    -- not invalidate every selected-workspace session.
+    revision BIGINT NOT NULL DEFAULT 1 CHECK (revision > 0),
     authz_version BIGINT NOT NULL DEFAULT 1 CHECK (authz_version > 0),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -2110,9 +2114,15 @@ BEGIN
     END IF;
     IF ROW(NEW.owner_user_id,NEW.name,NEW.slug,NEW.description,NEW.status,NEW.default_rpm_limit,NEW.default_tpm_limit)
        IS DISTINCT FROM ROW(OLD.owner_user_id,OLD.name,OLD.slug,OLD.description,OLD.status,OLD.default_rpm_limit,OLD.default_tpm_limit) THEN
+        NEW.revision := OLD.revision+1;
+    ELSIF NEW.revision < OLD.revision THEN
+        RAISE EXCEPTION 'tenant revision cannot decrease' USING ERRCODE='23514';
+    END IF;
+    IF ROW(NEW.owner_user_id,NEW.status)
+       IS DISTINCT FROM ROW(OLD.owner_user_id,OLD.status) THEN
         NEW.authz_version := OLD.authz_version+1;
     ELSIF NEW.authz_version < OLD.authz_version THEN
-        RAISE EXCEPTION 'tenant version cannot decrease' USING ERRCODE='23514';
+        RAISE EXCEPTION 'tenant authorization version cannot decrease' USING ERRCODE='23514';
     END IF;
     NEW.updated_at := NOW();
     RETURN NEW;

@@ -483,7 +483,7 @@ async fn existing_members_and_empty_configuration_changes_are_business_rejection
             Method::PATCH,
             format!("/api/v1/tenants/{}", f.tenant.id),
             &f.inviter_token,
-            Some(json!({"expected_authz_version":f.tenant.authz_version})),
+            Some(json!({"expected_revision":f.tenant.revision})),
         )
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

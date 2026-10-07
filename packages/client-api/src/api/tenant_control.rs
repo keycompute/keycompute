@@ -24,6 +24,7 @@ pub struct TenantContext {
     pub status: String,
     pub default_rpm_limit: i32,
     pub default_tpm_limit: i32,
+    pub revision: i64,
     pub authz_version: i64,
     pub tenant_role: TenantRole,
     pub membership_authz_version: i64,
@@ -74,7 +75,7 @@ pub struct TenantAuditEvent {
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct TenantPatch {
-    pub expected_authz_version: i64,
+    pub expected_revision: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,7 +210,7 @@ impl TenantControlApi {
         self.client.get_json_fresh(&self.base, Some(token)).await
     }
     pub async fn patch_context(&self, body: &TenantPatch, token: &str) -> Result<TenantContext> {
-        version(body.expected_authz_version)?;
+        version(body.expected_revision)?;
         self.command(Method::PATCH, &self.base, body, token).await
     }
     pub async fn members(
