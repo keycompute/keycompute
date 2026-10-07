@@ -33,6 +33,7 @@ pub enum ModelHealthObservation {
 /// Revalidates a trusted binding and captures health in the same writer snapshot.
 /// The caller has already waited for local/account quota admission. This check
 /// is the admission linearization point; it never holds locks over HTTP or SSE.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait PassthroughBindingValidator: Send + Sync {
     async fn validate_target(
@@ -47,6 +48,7 @@ pub trait PassthroughBindingValidator: Send + Sync {
 
 /// Model observations are shared by ordinary and bound account execution.
 /// Absence means an untracked model, not an implicit healthy declaration.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait AccountModelHealthObserver: Send + Sync {
     async fn snapshot(

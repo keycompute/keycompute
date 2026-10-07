@@ -13,6 +13,7 @@ pub struct AccountCapacitySnapshot {
     pub in_flight_limit: u32,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AccountCapacityPolicy: Send + Sync + Debug {
     async fn snapshot(&self, account_id: Uuid) -> Result<AccountCapacitySnapshot>;
@@ -23,6 +24,7 @@ pub trait AccountCapacityPolicy: Send + Sync + Debug {
     ) -> Result<Box<dyn AccountAttemptLease>>;
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AccountAttemptLease: Send + Sync + Debug {
     /// Runs alongside upstream execution. Losing the reservation is fail-closed;
