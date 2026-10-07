@@ -32,9 +32,9 @@ pub fn landing_route(user: &UserInfo) -> Route {
 fn confirm_discard(message: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
-        return web_sys::window()
+        web_sys::window()
             .and_then(|window| window.confirm_with_message(message).ok())
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -153,7 +153,7 @@ pub fn WorkspaceSwitcher() -> Element {
                             }
                             Err(error) => {
                                 target.set(reset_value.clone());
-                                ui.show_error(user_error_message(&error));
+                                ui.show_error(user_error_message(i18n, &error));
                             }
                         }
                     });
@@ -170,7 +170,10 @@ pub fn WorkspaceSwitcher() -> Element {
                 span { class: "header-workspace-status", role: "status", {i18n.t("tenant.switching")} }
             } else if let Some(role) = current_role {
                 span { class: "header-workspace-role", "{role}" }
-            } else if active_memberships.is_empty() {
+            } else if active_memberships.is_empty()
+                && !user.can_manage_platform()
+                && !user.can_view_operations()
+            {
                 span { class: "header-workspace-status", {i18n.t("tenant.no_workspace_short")} }
             }
         }

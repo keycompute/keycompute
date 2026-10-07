@@ -3,7 +3,10 @@ use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::user_error_message,
     stores::{auth_store::AuthStore, ui_store::UiStore, user_store::UserStore},
-    utils::resource::{KeyedResourceValue, current_keyed_value},
+    utils::{
+        resource::{KeyedResourceValue, current_keyed_value},
+        time::format_time,
+    },
 };
 use client_api::{
     ClientError, TenantRole,
@@ -114,7 +117,7 @@ fn TenantInvitationsPage() -> Element {
                     data.restart();
                 }
                 Err(e) => {
-                    error.set(user_error_message(&e));
+                    error.set(user_error_message(i18n, &e));
                     data.restart();
                 }
             }
@@ -147,7 +150,7 @@ fn TenantInvitationsPage() -> Element {
                     ui.show_success(i18n.t("tenant.saved"));
                 }
                 Err(e) => {
-                    error.set(user_error_message(&e));
+                    error.set(user_error_message(i18n, &e));
                     data.restart();
                 }
             }
@@ -157,14 +160,23 @@ fn TenantInvitationsPage() -> Element {
         ui::PageHeader {title:i18n.t("tenant.invitations").to_string(),description:i18n.t("tenant.invitations_hint").to_string()}
         WorkspaceLinks {}
         if !error().is_empty(){div {class:"alert alert-error",role:"alert","{error}" p {{i18n.t("tenant.command_hint")}}}}
-        section {class:"section",aria_label:i18n.t("tenant.invite"),
-            label {class:"form-label",r#for:"invite-email",{i18n.t("tenant.email")}}
-            input {id:"invite-email",class:"input-field",r#type:"email",maxlength:"255",value:"{email}",disabled:busy(),oninput:move |e|email.set(e.value())}
-            label {class:"form-label",r#for:"invite-role",{i18n.t("tenant.role")}}
-            select {id:"invite-role",class:"input-field",value:"{role().as_str()}",disabled:busy(),onchange:move |e|{if let Ok(value)=e.value().parse::<TenantRole>(){role.set(value);}},option {value:"member","member"} option {value:"admin","admin"}}
-            label {class:"form-label",r#for:"invite-duration",{i18n.t("tenant.duration_hours")}}
-            input {id:"invite-duration",class:"input-field",r#type:"number",min:"1",max:"168",value:"{hours}",disabled:busy(),oninput:move |e|hours.set(e.value())}
-            button {class:"btn btn-primary",disabled:busy()||email().trim().is_empty(),onclick:create,{i18n.t("tenant.invite")}}
+        section {class:"section tenant-invite-card",aria_label:i18n.t("tenant.invite"),
+            h2 {class:"section-title",{i18n.t("tenant.invite")}}
+            div {class:"section-body tenant-invite-form",
+                div {class:"form-field",
+                    label {class:"form-label",r#for:"invite-email",{i18n.t("tenant.email")}}
+                    input {id:"invite-email",class:"input-field",r#type:"email",maxlength:"255",value:"{email}",disabled:busy(),oninput:move |e|email.set(e.value())}
+                }
+                div {class:"form-field",
+                    label {class:"form-label",r#for:"invite-role",{i18n.t("tenant.role")}}
+                    select {id:"invite-role",class:"input-field",value:"{role().as_str()}",disabled:busy(),onchange:move |e|{if let Ok(value)=e.value().parse::<TenantRole>(){role.set(value);}},option {value:"member","member"} option {value:"admin","admin"}}
+                }
+                div {class:"form-field",
+                    label {class:"form-label",r#for:"invite-duration",{i18n.t("tenant.duration_hours")}}
+                    input {id:"invite-duration",class:"input-field",r#type:"number",min:"1",max:"168",value:"{hours}",disabled:busy(),oninput:move |e|hours.set(e.value())}
+                }
+                button {class:"btn btn-primary",disabled:busy()||email().trim().is_empty(),onclick:create,{i18n.t("tenant.invite")}}
+            }
         }
         if let Some(result)=created(){section {class:"alert alert-info",role:"status",
             p {{i18n.t(notification_label(&result.notification))}}
@@ -177,17 +189,17 @@ fn TenantInvitationsPage() -> Element {
         }}
         button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
         match loaded {
-            None=>rsx!{p {role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            None=>rsx!{div {class:"content-loading",role:"status",span{class:"spinner",aria_hidden:"true"}span{{i18n.t("common.loading")}}}},
+            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(value))=>rsx!{
-                div {class:"table-pagination-panel",table {class:"table",
+                div {class:"table-pagination-panel table-pagination-frame",div {class:"table-container",table {class:"table",
                     thead {tr {th {{i18n.t("tenant.email")}} th {{i18n.t("tenant.role")}} th {{i18n.t("tenant.result")}} th {{i18n.t("tenant.expires")}} th {{i18n.t("tenant.actions")}}}}
                     tbody {for invitation in value.items.iter(){
-                        {let selected=invitation.clone();rsx!{tr {key:"{invitation.id}",td {"{invitation.email}"} td {"{invitation.tenant_role.as_str()}"} td {"{invitation.status}"} td {"{invitation.expires_at}"}
+                        {let selected=invitation.clone();rsx!{tr {key:"{invitation.id}",td {"{invitation.email}"} td {"{invitation.tenant_role.as_str()}"} td {"{invitation.status}"} td {{format_time(&invitation.expires_at)}}
                             td {if invitation.status=="pending" {button {class:"btn btn-danger btn-sm",disabled:busy(),onclick:move |_|pending.set(Some(selected.clone())),{i18n.t("tenant.revoke")}}}}
                         }}}
                     }}
-                } if value.items.is_empty(){p {{i18n.t("tenant.empty")}}}}
+                }} if value.items.is_empty(){div {class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}}
                 Pager {page:page(),total_pages:value.total_pages,total:value.total,on_page:move |p|page.set(p)}
             }
         }

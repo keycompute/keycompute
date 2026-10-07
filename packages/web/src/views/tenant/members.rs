@@ -165,7 +165,7 @@ fn TenantMembersPage() -> Element {
                     ui.show_success(i18n.t("tenant.saved"));
                 }
                 Err(e) => {
-                    error.set(user_error_message(&e));
+                    error.set(user_error_message(i18n, &e));
                     data.restart();
                 }
             }
@@ -175,18 +175,24 @@ fn TenantMembersPage() -> Element {
         ui::PageHeader {title:i18n.t("tenant.members").to_string(),description:i18n.t("tenant.members_hint").to_string()}
         WorkspaceLinks {}
         if !error().is_empty(){div {class:"alert alert-error",role:"alert","{error}"}}
-        div {class:"toolbar",
-            label {r#for:"member-search",{i18n.t("tenant.search")}}
-            input {id:"member-search",class:"input-field",value:"{search_input}",maxlength:"255",oninput:move |e|search_input.set(e.value())}
-            button {class:"btn btn-secondary",onclick:move |_|{search.set(search_input().trim().into());page.set(1);},{i18n.t("tenant.search")}}
-            button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+        div {class:"card filter-panel tenant-member-filter",
+            div {class:"filter-grid filter-grid-health",
+                div {class:"form-field filter-field-grow",
+                    label {class:"form-label",r#for:"member-search",{i18n.t("tenant.search")}}
+                    input {id:"member-search",class:"input-field",r#type:"search",value:"{search_input}",maxlength:"255",oninput:move |e|search_input.set(e.value())}
+                }
+                div {class:"filter-actions",
+                    button {class:"btn btn-primary",onclick:move |_|{search.set(search_input().trim().into());page.set(1);},{i18n.t("tenant.search")}}
+                    button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+                }
+            }
         }
         match loaded {
-            None=>rsx!{p {role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            None=>rsx!{div {class:"content-loading",role:"status",span{class:"spinner",aria_hidden:"true"}span{{i18n.t("common.loading")}}}},
+            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(value))=>rsx!{
-                div {class:"table-pagination-panel",
-                    table {class:"table",thead {tr {th {{i18n.t("tenant.user")}} th {{i18n.t("tenant.role")}} th {{i18n.t("tenant.membership_status")}} th {{i18n.t("tenant.user_status")}} th {{i18n.t("tenant.actions")}}}}
+                div {class:"table-pagination-panel table-pagination-frame",
+                    div {class:"table-container",table {class:"table",thead {tr {th {{i18n.t("tenant.user")}} th {{i18n.t("tenant.role")}} th {{i18n.t("tenant.membership_status")}} th {{i18n.t("tenant.user_status")}} th {{i18n.t("tenant.actions")}}}}
                         tbody {
                             for member in value.page.items.iter() {
                                 {let role_member=member.clone();let suspend_member=member.clone();let remove_member=member.clone();let transfer_member=member.clone();
@@ -211,8 +217,8 @@ fn TenantMembersPage() -> Element {
                                 }
                             }
                         }
-                    }
-                    if value.page.items.is_empty(){p {{i18n.t("tenant.empty")}}}
+                    }}
+                    if value.page.items.is_empty(){div {class:"empty-state compact-empty-state",h3{class:"empty-title",{i18n.t("tenant.empty")}}}}
                 }
                 Pager {page:page(),total_pages:value.page.total_pages,total:value.page.total,on_page:move |p|page.set(p)}
             },

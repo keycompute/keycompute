@@ -163,7 +163,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
             error.set(String::new());
             notice.set(String::new());
         }
-        Err(value) => error.set(user_error_message(&value)),
+        Err(value) => error.set(user_error_message(i18n, &value)),
     };
 
     let confirm = move |_| {
@@ -190,7 +190,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                     reason.set(String::new());
                     generation += 1;
                 }
-                Err(value) => error.set(user_error_message(&value)),
+                Err(value) => error.set(user_error_message(i18n, &value)),
             }
         });
     };
@@ -228,7 +228,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
                 } else {
                     rsx! { p { class: "alert alert-info", {i18n.t("tenant_financial_controls.choose_owner")} } }
                 },
-                Some(Err(value)) => rsx! { p { role: "alert", class: "alert alert-error", {user_error_message(&value)} } },
+                Some(Err(value)) => rsx! { p { role: "alert", class: "alert alert-error", {user_error_message(i18n, &value)} } },
                 Some(Ok(None)) => rsx! { p { class: "alert alert-info", {i18n.t("tenant_financial_controls.choose_owner")} } },
                 Some(Ok(Some(value))) => rsx! {
                     ReservationPage {
@@ -411,7 +411,7 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
                     reason.set(String::new());
                     generation += 1;
                 }
-                Err(value) => error.set(user_error_message(&value)),
+                Err(value) => error.set(user_error_message(i18n, &value)),
             }
         });
     };
@@ -443,7 +443,7 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
             }
             match loaded {
                 None => rsx! { p { role: "status", {i18n.t("common.loading")} } },
-                Some(Err(value)) => rsx! { p { role: "alert", class: "alert alert-error", {user_error_message(&value)} } },
+                Some(Err(value)) => rsx! { p { role: "alert", class: "alert alert-error", {user_error_message(i18n, &value)} } },
                 Some(Ok(value)) => rsx! {
                     WithdrawalTable {
                         data: value.clone(),

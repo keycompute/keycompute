@@ -1,4 +1,5 @@
 mod en;
+pub(crate) mod errors;
 pub(crate) mod operations;
 mod tenant;
 pub(crate) mod tenant_nodes;

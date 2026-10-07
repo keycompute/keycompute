@@ -94,3 +94,22 @@ fn tenant_pricing_has_a_canonical_route_separate_from_platform_pricing() {
     assert_eq!(route, crate::router::Route::TenantPricing {});
     assert_eq!(route.to_string(), "/tenant/pricing");
 }
+
+#[test]
+fn direct_form_modal_keeps_a_viewport_bounded_scroll_container() {
+    let editor = include_str!("command.rs");
+    assert!(editor.contains("class:\"modal tenant-pricing-editor\""));
+    assert!(!editor.contains("class:\"modal-body\""));
+
+    let css = include_str!("../../../../assets/main.css");
+    let final_modal_rule = css
+        .rsplit_once("\n.modal {")
+        .expect("shared modal rule")
+        .1
+        .split_once('}')
+        .expect("complete shared modal rule")
+        .0;
+    assert!(final_modal_rule.contains("overflow-y: auto"));
+    assert!(!final_modal_rule.contains("overflow: hidden"));
+    assert!(css.contains(".modal:has(> .modal-body)"));
+}

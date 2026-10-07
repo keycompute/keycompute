@@ -4,7 +4,7 @@ pub(crate) mod common;
 pub(crate) mod invitation_entry;
 mod invitations;
 mod members;
-mod node_admin;
+pub(crate) mod node_admin;
 pub use node_admin::TenantNodes;
 mod settings;
 mod workspace;

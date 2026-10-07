@@ -228,7 +228,12 @@ impl DistributionPolicyApi {
         Ok(row)
     }
     fn check_page(&self, result: &PolicyPage, page: u32, size: u32) -> Result<()> {
-        let expected = (result.total + i64::from(size) - 1) / i64::from(size);
+        let expected = if result.total <= 0 {
+            0
+        } else {
+            let size = i64::from(size);
+            result.total / size + i64::from(result.total % size != 0)
+        };
         if result.page != i64::from(page)
             || result.page_size != i64::from(size)
             || result.total < 0

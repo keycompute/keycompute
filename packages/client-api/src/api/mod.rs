@@ -11,6 +11,7 @@ pub mod console;
 pub mod debug;
 pub mod distribution;
 pub mod distribution_policy;
+pub mod distribution_reporting;
 pub mod health;
 pub mod node_control;
 pub mod node_gateway_token;

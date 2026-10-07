@@ -46,7 +46,7 @@ pub(super) fn Editor(
             _ => Ok(()),
         };
         if let Err(e) = validated {
-            error.set(user_error_message(&e));
+            error.set(user_error_message(i18n, &e));
             return;
         }
         busy.set(true);
@@ -131,7 +131,7 @@ pub(super) fn Editor(
                     ui.show_success(i18n.t(message));
                     on_changed.call(());
                 }
-                Err(e) => error.set(user_error_message(&e)),
+                Err(e) => error.set(user_error_message(i18n, &e)),
             }
         });
     };
@@ -196,7 +196,7 @@ fn OwnerPicker(scope: WorkspaceScope, disabled: bool, on_select: EventHandler<Uu
         }
         match loaded{
             None=>rsx!{p{{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p{role:"alert",{user_error_message(&e)}}},
+            Some(Err(e))=>rsx!{p{role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(members))=>rsx!{
                 select{id:"key-owner-option",class:"input-field",disabled,value:"",onchange:move|e|if let Ok(id)=e.value().parse::<Uuid>() && !id.is_nil(){on_select.call(id);},
                     option{value:"",{i18n.t("tenant_keys.choose_member")}}

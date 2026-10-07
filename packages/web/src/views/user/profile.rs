@@ -134,7 +134,11 @@ pub fn UserProfile() -> Element {
                     saving.set(false);
                 }
                 Err(e) => {
-                    save_error.set(Some(format!("{}：{e}", i18n.t("profile.save_failed"))));
+                    save_error.set(Some(format!(
+                        "{}：{}",
+                        i18n.t("profile.save_failed"),
+                        crate::services::api_client::user_error_message(i18n, &e)
+                    )));
                     saving.set(false);
                 }
             }
@@ -202,7 +206,7 @@ pub fn UserProfile() -> Element {
                     user_store.clear();
                 }
                 Err(error) => tenant_error.set(Some(
-                    crate::services::api_client::user_error_message(&error),
+                    crate::services::api_client::user_error_message(i18n, &error),
                 )),
             }
             tenant_saving.set(false);

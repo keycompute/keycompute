@@ -91,7 +91,7 @@ pub fn UserSettings() -> Element {
                     error_msg.set(Some(format!(
                         "{}：{}",
                         i18n.t("account_settings.change_failed"),
-                        user_error_message(&e)
+                        user_error_message(i18n, &e)
                     )));
                     saving.set(false);
                 }

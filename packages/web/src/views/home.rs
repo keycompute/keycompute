@@ -922,7 +922,7 @@ fn LoginModal(
                     ));
                 }
                 Err(e) => {
-                    let err_text = user_error_message(&e);
+                    let err_text = user_error_message(i18n, &e);
                     error_msg.set(Some(format!("{t_login_failed}：{err_text}")));
                     loading.set(false);
                 }
@@ -1146,7 +1146,7 @@ fn RegisterModal(
                     Err(e) => {
                         error_msg.set(Some(format!(
                             "{t_request_code_failed}：{}",
-                            user_error_message(&e)
+                            user_error_message(i18n, &e)
                         )));
                         loading.set(false);
                     }
@@ -1189,7 +1189,7 @@ fn RegisterModal(
                 Err(e) => {
                     error_msg.set(Some(format!(
                         "{t_register_failed}：{}",
-                        user_error_message(&e)
+                        user_error_message(i18n, &e)
                     )));
                     loading.set(false);
                 }
@@ -1248,7 +1248,7 @@ fn RegisterModal(
                                             nav.replace(crate::views::tenant::invitation_entry::post_login_route(auth_store, &user_info));
                                         }
                                         Err(e) => {
-                                            let err_text = user_error_message(&e);
+                                            let err_text = user_error_message(i18n, &e);
                                             error_msg.set(Some(format!("{t_login_failed}：{err_text}")));
                                             loading.set(false);
                                         }

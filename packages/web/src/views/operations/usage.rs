@@ -3,23 +3,29 @@ use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::{get_client, user_error_message},
     stores::{auth_store::AuthStore, user_store::UserStore},
-    utils::resource::{KeyedResourceValue, current_keyed_value},
+    utils::{
+        resource::{KeyedResourceValue, current_keyed_value},
+        time::format_time,
+    },
 };
 use chrono::{Duration, NaiveDateTime, Utc};
 use client_api::api::platform_operations::{PlatformOperationsApi, UsageOperationsQuery};
 use dioxus::prelude::*;
 use uuid::Uuid;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Target {
     Platform,
     Tenant(Uuid),
 }
+
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct Filter {
     pub target: Target,
     pub from: String,
     pub to: String,
 }
+
 impl Filter {
     pub fn parse(target: &str, tenant: &str, from: &str, to: &str) -> Option<Self> {
         let target = match target {
@@ -47,6 +53,7 @@ impl Filter {
         })
     }
 }
+
 #[component]
 pub(super) fn UsagePanel(scope: OperationsScope) -> Element {
     let i18n = use_i18n();
@@ -91,34 +98,131 @@ pub(super) fn UsagePanel(scope: OperationsScope) -> Element {
         Target::Platform => i18n.t("operations.platform").to_string(),
         Target::Tenant(id) => id.to_string(),
     };
-    rsx! {section {class:"operations-usage",
-        div {class:"card operations-filters",
-            label {r#for:"operations-target",{i18n.t("operations.target")}}
-            select {id:"operations-target",class:"input-field",value:"{target}",onchange:move |e|target.set(e.value()),option {value:"platform",{i18n.t("operations.platform")}} option {value:"tenant",{i18n.t("operations.one_tenant")}}}
-            if target()=="tenant"{label {r#for:"operations-tenant-id",{i18n.t("operations.tenant_id")}}
-                input {id:"operations-tenant-id",class:"input-field",value:"{tenant}",maxlength:"36",oninput:move |e|tenant.set(e.value())}}
-            label {r#for:"operations-from",{i18n.t("operations.from")}}
-            input {id:"operations-from",class:"input-field",r#type:"datetime-local",value:"{from}",oninput:move |e|from.set(e.value())}
-            label {r#for:"operations-to",{i18n.t("operations.to")}}
-            input {id:"operations-to",class:"input-field",r#type:"datetime-local",value:"{to}",oninput:move |e|to.set(e.value())}
-            p {class:"text-secondary",{i18n.t("operations.range_hint")}}
-            button {class:"btn btn-primary",onclick:move |_| {
-                let Some(next)=Filter::parse(&target(),&tenant(),&from(),&to()) else{error.set(i18n.t("operations.invalid_range").into());return;};
-                error.set(String::new());if filter()==next{data.restart();}else{filter.set(next);}
-            },{i18n.t("operations.apply")}}
+
+    rsx! {
+        section { class: "operations-usage",
+            div { class: "card filter-panel operations-filters",
+                div { class: "filter-grid filter-grid-usage",
+                    div { class: "form-field",
+                        label { class: "form-label", r#for: "operations-target", {i18n.t("operations.target")} }
+                        select {
+                            id: "operations-target",
+                            class: "input-field",
+                            value: "{target}",
+                            onchange: move |event| target.set(event.value()),
+                            option { value: "platform", {i18n.t("operations.platform")} }
+                            option { value: "tenant", {i18n.t("operations.one_tenant")} }
+                        }
+                    }
+                    if target() == "tenant" {
+                        div { class: "form-field filter-field-grow",
+                            label { class: "form-label", r#for: "operations-tenant-id", {i18n.t("operations.tenant_id")} }
+                            input {
+                                id: "operations-tenant-id",
+                                class: "input-field",
+                                value: "{tenant}",
+                                maxlength: "36",
+                                placeholder: "00000000-0000-0000-0000-000000000000",
+                                oninput: move |event| tenant.set(event.value()),
+                            }
+                        }
+                    }
+                    div { class: "form-field",
+                        label { class: "form-label", r#for: "operations-from", {i18n.t("operations.from")} }
+                        input {
+                            id: "operations-from",
+                            class: "input-field",
+                            r#type: "datetime-local",
+                            value: "{from}",
+                            oninput: move |event| from.set(event.value()),
+                        }
+                    }
+                    div { class: "form-field",
+                        label { class: "form-label", r#for: "operations-to", {i18n.t("operations.to")} }
+                        input {
+                            id: "operations-to",
+                            class: "input-field",
+                            r#type: "datetime-local",
+                            value: "{to}",
+                            oninput: move |event| to.set(event.value()),
+                        }
+                    }
+                    div { class: "filter-actions",
+                        button {
+                            class: "btn btn-primary",
+                            r#type: "button",
+                            onclick: move |_| {
+                                let Some(next) = Filter::parse(&target(), &tenant(), &from(), &to()) else {
+                                    error.set(i18n.t("operations.invalid_range").into());
+                                    return;
+                                };
+                                error.set(String::new());
+                                if filter() == next { data.restart(); } else { filter.set(next); }
+                            },
+                            {i18n.t("operations.apply")}
+                        }
+                    }
+                }
+                p { class: "form-hint filter-panel-hint", {i18n.t("operations.range_hint")} }
+            }
+
+            if !error().is_empty() {
+                p { role: "alert", class: "alert alert-error", "{error}" }
+            }
+
+            div { class: "scope-banner",
+                span { class: "scope-banner-label", {i18n.t("operations.showing")} }
+                code { "{shown_target}" }
+            }
+
+            match loaded {
+                None => rsx! {
+                    div { class: "content-loading", role: "status",
+                        span { class: "spinner", aria_hidden: "true" }
+                        span { {i18n.t("common.loading")} }
+                    }
+                },
+                Some(Err(error)) => rsx! {
+                    p { role: "alert", class: "alert alert-error", {user_error_message(i18n, &error)} }
+                },
+                Some(Ok(value)) => rsx! {
+                    div { class: "data-meta-row",
+                        span { "{format_time(&value.from)} — {format_time(&value.to)}" }
+                        span { {format!("{} · {}", i18n.t("operations.as_of"), format_time(&value.as_of))} }
+                    }
+                    if value.currencies.is_empty() {
+                        div { class: "empty-state bordered-empty-state",
+                            h3 { class: "empty-title", {i18n.t("tenant.empty")} }
+                            p { class: "empty-description", {i18n.t("operations.usage_empty_hint")} }
+                        }
+                    } else {
+                        div { class: "table-pagination-frame operations-table",
+                            div { class: "table-container", tabindex: "0",
+                                table { class: "table",
+                                    thead { tr {
+                                        th { {i18n.t("operations.currency")} }
+                                        th { {i18n.t("operations.requests")} }
+                                        th { {i18n.t("operations.successful")} }
+                                        th { {i18n.t("usage.total_tokens")} }
+                                        th { {i18n.t("operations.amount")} }
+                                    } }
+                                    tbody {
+                                        for row in &value.currencies {
+                                            tr { key: "{row.currency}",
+                                                td { strong { "{row.currency}" } }
+                                                td { "{row.requests}" }
+                                                td { "{row.successful_requests}" }
+                                                td { "{row.total_tokens}" }
+                                                td { "{row.billed_amount}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
         }
-        if !error().is_empty(){p {role:"alert",class:"alert alert-error","{error}"}}
-        p {class:"operations-target-label",{i18n.t("operations.showing")} " {shown_target}"}
-        match loaded {
-            None=>rsx!{p {role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p {role:"alert",class:"alert alert-error",{user_error_message(&e)}}},
-            Some(Ok(value))=>rsx!{
-                p {class:"text-secondary","{value.from} — {value.to}"} p {class:"text-secondary",{i18n.t("operations.as_of")} " {value.as_of}"}
-                div {class:"operations-table",table {class:"table",thead {tr {th {{i18n.t("operations.currency")}} th {{i18n.t("operations.requests")}} th {{i18n.t("operations.successful")}} th {"Tokens"} th {{i18n.t("operations.amount")}}}}
-                    tbody {for row in &value.currencies {tr {key:"{row.currency}",td {"{row.currency}"} td {"{row.requests}"} td {"{row.successful_requests}"} td {"{row.total_tokens}"} td {"{row.billed_amount}"}}}}
-                }}
-                if value.currencies.is_empty(){p {{i18n.t("tenant.empty")}}}
-            },
-        }
-    }}
+    }
 }

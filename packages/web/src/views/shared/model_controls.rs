@@ -96,7 +96,7 @@ pub fn TenantPicker(
                 button {class:"btn btn-ghost btn-sm",disabled:disabled||page()>=pages,r#type:"button",onclick:move|_|{page+=1;},{i.t("table.next")}}
             }
             match result {
-                Some(Err(e))=>rsx!{div{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+                Some(Err(e))=>rsx!{div{class:"alert alert-error",role:"alert",{user_error_message(i, &e)}}},
                 None=>rsx!{small{role:"status",{i.t("common.loading")}}},
                 _=>rsx!{}
             }

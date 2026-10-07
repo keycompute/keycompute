@@ -62,12 +62,16 @@ pub(super) fn CapacityPanel(scope: OperationsScope) -> Element {
     });
     let loaded = current_keyed_value(&scope, data.state().cloned(), data());
     rsx! {section {class:"operations-capacity",
-        p {class:"text-secondary",{i18n.t("operations.process_hint")}}
-        button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+        div {class:"card capacity-intro-card",
+            div {class:"card-body capacity-intro-body",
+                p {class:"text-secondary",{i18n.t("operations.process_hint")}}
+                button {class:"btn btn-secondary",r#type:"button",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
+            }
+        }
         match loaded {
-            None=>rsx!{p {role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p {role:"alert",class:"alert alert-error",{user_error_message(&e)}}},
-            Some(Ok(rows))=>rsx!{div {class:"operations-table",table {class:"table",thead {tr {th {{i18n.t("operations.metric")}} th {{i18n.t("operations.value")}}}} tbody {for (name,value) in rows {tr {key:"{name}",td {code {"{name}"}} td {"{value}"}}}}}}},
+            None=>rsx!{div {class:"content-loading",role:"status",span {class:"spinner",aria_hidden:"true"} span {{i18n.t("common.loading")}}}},
+            Some(Err(e))=>rsx!{p {role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},
+            Some(Ok(rows))=>rsx!{div {class:"table-pagination-frame operations-table",div {class:"table-container",tabindex:"0",table {class:"table",thead {tr {th {{i18n.t("operations.metric")}} th {{i18n.t("operations.value")}}}} tbody {for (name,value) in rows {tr {key:"{name}",td {code {"{name}"}} td {strong {"{value}"}}}}}}}}},
         }
     }}
 }

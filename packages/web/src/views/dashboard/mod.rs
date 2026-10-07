@@ -163,7 +163,7 @@ fn DashboardContent() -> Element {
     let summary_ready = summary.is_some();
     let summary_error = overview()
         .and_then(Result::err)
-        .map(|error| user_error_message(&error));
+        .map(|error| user_error_message(i18n, &error));
     let snapshot_time = summary.as_ref().map(|value| format_time(&value.as_of));
     let active_key_value = summary
         .as_ref()

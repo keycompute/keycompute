@@ -227,7 +227,7 @@ fn GuideMode(mode: ModelAccessMode, api_key: Option<String>) -> Element {
         p {code {"Base URL: {displayed_base}"}}
         match result {
             None=>rsx!{p {role:"status",{i.t("common.loading")}}},
-            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(i, &e)}}},
             Some(Ok(r)) if r.data.is_empty()=>rsx!{p {class:"form-hint",{i.t("models.no_examples")}}},
             Some(Ok(r))=>rsx!{
                 label {class:"form-label",{i.t("models.choose_model")}}

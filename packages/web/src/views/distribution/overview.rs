@@ -52,13 +52,9 @@ pub fn DistributionOverview() -> Element {
     if !public_settings_store.loaded() {
         return rsx! {
             div { class: "page-container",
-                div {
-                    class: "distribution-loading",
-                    style: "display:flex;align-items:center;justify-content:center;padding:64px",
-                    div { style: "display:flex;align-items:center;gap:12px;color:var(--text-secondary,#64748b)",
-                        div { class: "spinner", style: "width:24px;height:24px" }
-                        span { {i18n.t("table.loading")} }
-                    }
+                div { class: "content-loading distribution-loading", role: "status",
+                    span { class: "spinner", aria_hidden: "true" }
+                    span { {i18n.t("common.loading")} }
                 }
             }
         };
@@ -144,7 +140,7 @@ fn DistributionOverviewContent() -> Element {
         if error.is_rate_limited() {
             i18n.t("common.rate_limited_hint").to_string()
         } else {
-            user_error_message(error)
+            user_error_message(i18n, error)
         }
     });
     let referral_total = referral_result

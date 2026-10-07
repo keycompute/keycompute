@@ -3,7 +3,10 @@ use crate::{
     hooks::use_i18n::use_i18n,
     services::api_client::user_error_message,
     stores::{auth_store::AuthStore, user_store::UserStore},
-    utils::resource::{KeyedResourceValue, current_keyed_value},
+    utils::{
+        resource::{KeyedResourceValue, current_keyed_value},
+        time::format_time,
+    },
 };
 use client_api::ClientError;
 use dioxus::prelude::*;
@@ -51,20 +54,20 @@ fn TenantAuditPage() -> Element {
         WorkspaceLinks {}
         button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
         match loaded {
-            None=>rsx!{p {role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            None=>rsx!{div {class:"content-loading",role:"status",span {class:"spinner",aria_hidden:"true"} span {{i18n.t("common.loading")}}}},
+            Some(Err(e))=>rsx!{div {class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(value))=>rsx!{
-                div {class:"table-pagination-panel",
-                    table {class:"table",thead {tr {th {{i18n.t("tenant.time")}} th {{i18n.t("tenant.actor")}} th {{i18n.t("tenant.action")}} th {{i18n.t("tenant.resource")}} th {{i18n.t("tenant.result")}}}}
+                div {class:"table-pagination-panel table-pagination-frame",
+                    div {class:"table-container",tabindex:"0",table {class:"table",thead {tr {th {{i18n.t("tenant.time")}} th {{i18n.t("tenant.actor")}} th {{i18n.t("tenant.action")}} th {{i18n.t("tenant.resource")}} th {{i18n.t("tenant.result")}}}}
                         tbody {for event in value.items.iter(){tr {key:"{event.id}",
-                            td {"{event.created_at}"}
+                            td {{format_time(&event.created_at)}}
                             td {"{event.actor_user_id}"}
                             td {"{event.action}"}
                             td {"{event.resource_type}" p {{event.resource_id.as_deref().unwrap_or("—")}}}
                             td {"{event.result}" details {summary {"Request ID"} code {"{event.request_id.map(|id|id.to_string()).unwrap_or_default()}"} pre {"{event.metadata}"}}}
                         }}}
-                    }
-                    if value.items.is_empty(){p {{i18n.t("tenant.empty")}}}
+                    }}
+                    if value.items.is_empty(){div {class:"empty-state",h3 {class:"empty-title",{i18n.t("tenant.empty")}}}}
                 }
                 Pager {page:page(),total_pages:value.total_pages,total:value.total,on_page:move |p|page.set(p)}
             }

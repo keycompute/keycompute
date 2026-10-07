@@ -207,6 +207,13 @@ fn operational_search_and_window_validation_cannot_turn_bad_tenant_into_global_q
         Some(literal)
     );
 }
+
+#[test]
+fn health_pager_remains_available_for_an_empty_nonfirst_page() {
+    assert!(!super::health::should_show_pager(0, 0));
+    assert!(super::health::should_show_pager(20, 0));
+    assert!(super::health::should_show_pager(0, 20));
+}
 #[test]
 fn capacity_projection_never_dumps_unexpected_fields_or_coerces_strings_to_numbers() {
     let v = json!({"writer_pool":{"connections":7,"idle":null,"url":"secret"},"redis_cache":{"connections":"secret"},"shutdown":"secret","stages":[{"tenant":"secret"}],"managed_payload_bytes":{"limit":18446744073709551615u64}});

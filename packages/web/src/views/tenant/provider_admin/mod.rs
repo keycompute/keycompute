@@ -4,7 +4,7 @@ mod tests;
 use super::common::{Pager, WorkspaceLinks, WorkspaceScope, command, read};
 use crate::{
     hooks::use_i18n::use_i18n,
-    services::api_client::get_client,
+    services::api_client::{get_client, user_error_message},
     stores::{auth_store::AuthStore, user_store::UserStore},
 };
 use client_api::api::tenant_providers::*;
@@ -105,7 +105,7 @@ fn Accounts(scope: WorkspaceScope) -> Element {
         .and_then(|x| x.as_ref().ok())
         .map(|x| (x.total_pages, x.total))
         .unwrap_or((1, 0));
-    rsx! {div{class:"resource-panel",div{class:"toolbar",input{class:"input-field",r#type:"search",value:"{q}",oninput:move|e|q.set(e.value())} button{class:"btn btn-secondary",onclick:move |_|{applied.set(q());page.set(1)},{i.t("tenant_providers.apply")}} button{class:"btn btn-primary",onclick:move |_|edit.set(Some(None)),{i.t("tenant_providers.add_account")}}} match d{None=>rsx!{p{role:"status",{i.t("common.loading")}}},Some(Err(e))=>rsx!{p{role:"alert","{e}"}},Some(Ok(_))if rows.is_empty()=>rsx!{p{{i.t("tenant_providers.empty_accounts")}}},Some(Ok(_))=>rsx!{div{class:"table-container",table{class:"data-table",thead{tr{th{{i.t("tenant_providers.name")}} th{{i.t("tenant_providers.provider")}} th{{i.t("tenant_providers.models")}} th{{i.t("tenant_providers.pool")}} th{{i.t("common.actions")}}}} tbody{for row in rows{AccountRow{key:"{row.id}",scope,row,onedit:move|v|edit.set(Some(Some(v))),changed:move |_|tick+=1}}}}} Pager{page:page(),total_pages:totals.0,total:totals.1,on_page:move|v|page.set(v)}}} if let Some(v)=edit(){AccountEditor{scope,existing:v,onclose:move |_|edit.set(None),saved:move |_|{edit.set(None);tick+=1}}}}}
+    rsx! {div{class:"resource-panel",div{class:"toolbar",input{class:"input-field",r#type:"search",value:"{q}",oninput:move|e|q.set(e.value())} button{class:"btn btn-secondary",onclick:move |_|{applied.set(q());page.set(1)},{i.t("tenant_providers.apply")}} button{class:"btn btn-primary",onclick:move |_|edit.set(Some(None)),{i.t("tenant_providers.add_account")}}} match d{None=>rsx!{p{role:"status",{i.t("common.loading")}}},Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i, &e)}}},Some(Ok(_))if rows.is_empty()=>rsx!{div{class:"empty-state bordered-empty-state",h3{class:"empty-title",{i.t("tenant_providers.empty_accounts")}}}},Some(Ok(_))=>rsx!{div{class:"table-container",table{class:"data-table",thead{tr{th{{i.t("tenant_providers.name")}} th{{i.t("tenant_providers.provider")}} th{{i.t("tenant_providers.models")}} th{{i.t("tenant_providers.pool")}} th{{i.t("common.actions")}}}} tbody{for row in rows{AccountRow{key:"{row.id}",scope,row,onedit:move|v|edit.set(Some(Some(v))),changed:move |_|tick+=1}}}}} Pager{page:page(),total_pages:totals.0,total:totals.1,on_page:move|v|page.set(v)}}} if let Some(v)=edit(){AccountEditor{scope,existing:v,onclose:move |_|edit.set(None),saved:move |_|{edit.set(None);tick+=1}}}}}
 }
 async fn account_control(
     a: AuthStore,
@@ -309,7 +309,7 @@ fn Bindings(scope: WorkspaceScope) -> Element {
         .and_then(|x| x.as_ref().ok())
         .map(|x| (x.total_pages, x.total))
         .unwrap_or((1, 0));
-    rsx! {div{class:"resource-panel",div{class:"toolbar",button{class:"btn btn-primary",onclick:move |_|edit.set(Some(None)),{i.t("tenant_providers.add_binding")}}} match d{None=>rsx!{p{role:"status",{i.t("common.loading")}}},Some(Err(e))=>rsx!{p{role:"alert","{e}"}},Some(Ok(_))if rows.is_empty()=>rsx!{p{{i.t("tenant_providers.empty_bindings")}}},Some(Ok(_))=>rsx!{div{class:"table-container",table{class:"data-table",thead{tr{th{{i.t("tenant_providers.name")}} th{{i.t("tenant_providers.models")}} th{{i.t("tenant_providers.pool")}} th{{i.t("tenant_providers.health")}} th{{i.t("common.actions")}}}} tbody{for row in rows{BindingRow{key:"{row.id}",scope,row,onedit:move|v|edit.set(Some(Some(v))),changed:move |_|tick+=1}}}}} Pager{page:page(),total_pages:totals.0,total:totals.1,on_page:move|v|page.set(v)}}} if let Some(v)=edit(){BindingEditor{scope,existing:v,onclose:move |_|edit.set(None),saved:move |_|{edit.set(None);tick+=1}}}}}
+    rsx! {div{class:"resource-panel",div{class:"toolbar",button{class:"btn btn-primary",onclick:move |_|edit.set(Some(None)),{i.t("tenant_providers.add_binding")}}} match d{None=>rsx!{p{role:"status",{i.t("common.loading")}}},Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i, &e)}}},Some(Ok(_))if rows.is_empty()=>rsx!{div{class:"empty-state bordered-empty-state",h3{class:"empty-title",{i.t("tenant_providers.empty_bindings")}}}},Some(Ok(_))=>rsx!{div{class:"table-container",table{class:"data-table",thead{tr{th{{i.t("tenant_providers.name")}} th{{i.t("tenant_providers.models")}} th{{i.t("tenant_providers.pool")}} th{{i.t("tenant_providers.health")}} th{{i.t("common.actions")}}}} tbody{for row in rows{BindingRow{key:"{row.id}",scope,row,onedit:move|v|edit.set(Some(Some(v))),changed:move |_|tick+=1}}}}} Pager{page:page(),total_pages:totals.0,total:totals.1,on_page:move|v|page.set(v)}}} if let Some(v)=edit(){BindingEditor{scope,existing:v,onclose:move |_|edit.set(None),saved:move |_|{edit.set(None);tick+=1}}}}}
 }
 #[component]
 fn BindingRow(

@@ -100,6 +100,19 @@ async fn fresh_reads_validate_exact_tenant_page_ids_and_beneficiary_shape() {
     }
     s.reset().await;
     Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "rules": [],
+            "total": i64::MAX,
+            "page": 1,
+            "page_size": 20,
+            "total_pages": i64::MAX
+        })))
+        .expect(1)
+        .mount(&s)
+        .await;
+    assert!(api.list(1, 20, fixtures::TEST_ACCESS_TOKEN).await.is_err());
+    s.reset().await;
+    Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(row(Uuid::new_v4(), id)))
         .expect(1)
         .mount(&s)

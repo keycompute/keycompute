@@ -8,7 +8,6 @@ pub mod distribution_service;
 pub mod health_service;
 pub mod model_service;
 pub mod monitoring_service;
-pub mod node_gateway_service;
 pub mod node_gateway_token_service;
 pub mod node_tips_service;
 pub mod payment_service;

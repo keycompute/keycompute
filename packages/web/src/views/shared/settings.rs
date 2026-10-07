@@ -2,7 +2,10 @@ use dioxus::prelude::*;
 use ui::{Button, ButtonVariant, PageHeader};
 
 use crate::hooks::use_i18n::use_i18n;
-use crate::services::{api_client::with_auto_refresh, settings_service};
+use crate::services::{
+    api_client::{user_error_message, with_auto_refresh},
+    settings_service,
+};
 use crate::stores::{
     auth_store::AuthStore, public_settings_store::PublicSettingsStore, user_store::UserStore,
 };
@@ -76,8 +79,17 @@ pub fn Settings() -> Element {
             }
 
             match settings() {
-                None => rsx! { p { class: "text-secondary", {i18n.t("table.loading")} } },
-                Some(Err(_)) => rsx! { p { class: "text-secondary", {i18n.t("settings.load_failed")} } },
+                None => rsx! {
+                    div { class: "content-loading", role: "status",
+                        span { class: "spinner", aria_hidden: "true" }
+                        span { {i18n.t("common.loading")} }
+                    }
+                },
+                Some(Err(ref error)) => rsx! {
+                    div { class: "alert alert-error", role: "alert",
+                        "{i18n.t(\"settings.load_failed\")}：{user_error_message(i18n, error)}"
+                    }
+                },
                 Some(Ok(_)) => rsx! {
                     if save_ok() {
                         div { class: "alert alert-success",

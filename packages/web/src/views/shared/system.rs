@@ -10,7 +10,11 @@ use ui::{Badge, BadgeVariant, Table, TableHead};
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
-use crate::services::{account_service, api_client::with_auto_refresh, debug_service};
+use crate::services::{
+    account_service,
+    api_client::{user_error_message, with_auto_refresh},
+    debug_service,
+};
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
 use crate::views::shared::accounts::NoPermissionView;
@@ -346,7 +350,7 @@ pub fn SystemDiagnostics() -> Element {
                     },
                     Some(Err(ref error)) => rsx! {
                         div { class: "alert alert-error",
-                            "{i18n.t(\"common.load_failed\")}: {error}"
+                            "{i18n.t(\"common.load_failed\")}: {user_error_message(i18n, error)}"
                         }
                     },
                     Some(Ok(ref response)) => rsx! {
@@ -368,7 +372,7 @@ pub fn SystemDiagnostics() -> Element {
                     },
                     Some(Err(ref error)) => rsx! {
                         div { class: "alert alert-error",
-                            "{i18n.t(\"common.load_failed\")}: {error}"
+                            "{i18n.t(\"common.load_failed\")}: {user_error_message(i18n, error)}"
                         }
                     },
                     Some(Ok(ref stats)) => rsx! {
@@ -392,7 +396,7 @@ pub fn SystemDiagnostics() -> Element {
                         },
                         Some(Err(ref e)) => rsx! {
                             div { class: "alert alert-error",
-                                p { "{i18n.t(\"common.load_failed\")}: {e}" }
+                                p { {format!("{}：{}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, e))} }
                             }
                         },
                         Some(Ok(None)) => rsx! {

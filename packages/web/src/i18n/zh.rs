@@ -1103,6 +1103,28 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "node_gateway.subtitle",
         "管理本地节点接入、任务队列和 NodeDispatch 执行路径。",
     );
+    m.insert("node_gateway.target_title", "选择管理范围");
+    m.insert(
+        "node_gateway.target_hint",
+        "节点、注册申请和任务都属于具体租户。请选择一个租户后再读取或操作数据。",
+    );
+    m.insert("node_gateway.target_label", "目标租户");
+    m.insert("node_gateway.target_placeholder", "请选择租户…");
+    m.insert(
+        "node_gateway.target_safety_hint",
+        "切换目标会清空当前筛选、详情和未提交操作，避免跨租户残留。",
+    );
+    m.insert("node_gateway.current_target", "当前管理范围");
+    m.insert("node_gateway.no_target_title", "暂无可管理的租户");
+    m.insert(
+        "node_gateway.no_target_hint",
+        "请先创建并启用租户，再管理其节点资源。",
+    );
+    m.insert("node_gateway.select_target_title", "请选择目标租户");
+    m.insert(
+        "node_gateway.select_target_hint",
+        "选择后将显示该租户的节点、任务和注册申请。",
+    );
     m.insert("node_gateway.native_unverified", "尚无已确认的原生模型能力");
     m.insert("node_gateway.request_title", "NodeDispatch 请求入口");
     m.insert(
@@ -1591,14 +1613,19 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "租户名称");
     m.insert("tenants.name_placeholder", "例如：研发中心");
     m.insert("tenants.name_required", "请输入租户名称");
-    m.insert("tenants.owner", "工作区拥有者");
+    m.insert("tenants.owner", "初始管理员");
     m.insert(
         "tenants.owner_hint",
-        "按姓名或邮箱查找已有用户；该用户将成为首位工作区管理员。",
+        "按姓名或邮箱选择已有用户。创建成功后，该用户将拥有此租户的管理权限。",
     );
     m.insert("tenants.owner_placeholder", "输入姓名或邮箱搜索…");
     m.insert("tenants.owner_results", "用户搜索结果");
-    m.insert("tenants.owner_selected", "已选择工作区拥有者");
+    m.insert("tenants.owner_selected", "已选择初始管理员");
+    m.insert("tenants.create_intro", "创建一个独立的租户工作区");
+    m.insert(
+        "tenants.create_intro_hint",
+        "租户名称和初始管理员为必填项；英文标识可留空由系统生成。",
+    );
     m.insert("tenants.owner_required", "请选择有效的工作区拥有者。");
     m.insert("tenants.slug", "Slug（可选）");
     m.insert("tenants.slug_placeholder", "例如：research-center");
@@ -1613,7 +1640,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.deleted", "租户已删除");
     m.insert(
         "distribution_records.admin_desc",
-        "查看全平台分销收益记录，及当前生效的分销规则",
+        "按工作区查看分销收益记录与当前生效规则",
     );
     m.insert(
         "distribution_records.user_desc",
@@ -1635,6 +1662,32 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution_records.referrer_id", "推荐人 ID");
     m.insert("distribution_records.empty_user", "暂无推荐记录");
     m.insert("distribution_records.referred_user", "被推荐用户");
+    m.insert("distribution_records.target_title", "选择查看范围");
+    m.insert(
+        "distribution_records.target_hint",
+        "分销数据按工作区隔离，请先选择一个工作区。",
+    );
+    m.insert("distribution_records.target_label", "目标工作区");
+    m.insert("distribution_records.target_placeholder", "请选择工作区");
+    m.insert(
+        "distribution_records.target_safety_hint",
+        "切换工作区会重新加载规则与收益记录，不会修改任何数据。",
+    );
+    m.insert("distribution_records.current_target", "当前工作区");
+    m.insert("distribution_records.select_target_title", "请选择工作区");
+    m.insert(
+        "distribution_records.select_target_hint",
+        "选择后将显示该工作区的生效规则和分销记录。",
+    );
+    m.insert(
+        "distribution_records.no_tenants_title",
+        "暂无可查看的工作区",
+    );
+    m.insert(
+        "distribution_records.no_tenants_hint",
+        "请先创建并启用工作区，再查看分销数据。",
+    );
+    m.insert("distribution_records.beneficiary_id", "受益人 ID");
     m.insert(
         "accounts.subtitle",
         "统一维护各 Provider 渠道、模型映射与可用性状态，确保路由层始终有可审阅的账号资产池。",
@@ -2174,6 +2227,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
 
     for &(key, zh, _) in super::tenant::TEXT {
+        m.insert(key, zh);
+    }
+    for &(key, zh, _) in super::errors::TEXT {
         m.insert(key, zh);
     }
     for &(key, zh, _) in super::operations::TEXT {

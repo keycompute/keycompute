@@ -6,7 +6,7 @@ const PAGE_SIZE: usize = 20;
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::services::{
-    api_client::{get_client, with_auto_refresh},
+    api_client::{get_client, user_error_message, with_auto_refresh},
     payment_service, tenant_service,
 };
 use crate::stores::auth_store::AuthStore;
@@ -165,7 +165,9 @@ pub fn PaymentOrders() -> Element {
                 match verification_tenants() {
                     None => rsx! { div { class: "loading-state", {i18n.t("table.loading")} } },
                     Some(Err(error)) => rsx! {
-                        div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}：{error}" }
+                        div { class: "alert alert-error", role: "alert",
+                            "{i18n.t(\"common.load_failed\")}：{user_error_message(i18n, &error)}"
+                        }
                     },
                     Some(Ok(tenants)) => rsx! {
                         div { class: "payment-provider-target",
@@ -190,7 +192,9 @@ pub fn PaymentOrders() -> Element {
                             div { class: "loading-state", {i18n.t("table.loading")} }
                         },
                         Some(Err(error)) => rsx! {
-                            div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}：{error}" }
+                            div { class: "alert alert-error", role: "alert",
+                                "{i18n.t(\"common.load_failed\")}：{user_error_message(i18n, &error)}"
+                            }
                         },
                         Some(Ok(providers)) => rsx! {
                             for provider in providers {
@@ -268,7 +272,7 @@ pub fn PaymentOrders() -> Element {
                                                                 )
                                                                 .await;
                                                             if let Err(error) = result {
-                                                                provider_action_error.set(Some(error.to_string()));
+                                                                provider_action_error.set(Some(user_error_message(i18n, &error)));
                                                             } else {
                                                                 provider_statuses.restart();
                                                             }

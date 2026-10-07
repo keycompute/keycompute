@@ -82,7 +82,7 @@ pub fn ForgotPassword() -> Element {
                     loading.set(false);
                 }
                 Err(e) => {
-                    let message = user_error_message(&e);
+                    let message = user_error_message(i18n, &e);
                     if message == FORGOT_PASSWORD_IDENTITY_ERROR {
                         start_error_cooldown(cooldown_signal);
                     }

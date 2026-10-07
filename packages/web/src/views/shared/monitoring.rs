@@ -8,7 +8,10 @@ use ui::{Badge, BadgeVariant, ConfirmModal, CursorPagination, PageHeader};
 use crate::hooks::use_i18n::use_i18n;
 use crate::i18n::I18n;
 use crate::router::Route;
-use crate::services::{api_client::with_auto_refresh, monitoring_service};
+use crate::services::{
+    api_client::{user_error_message, with_auto_refresh},
+    monitoring_service,
+};
 use crate::stores::{auth_store::AuthStore, user_store::UserStore};
 use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
@@ -430,7 +433,9 @@ pub fn Monitoring() -> Element {
                     p { class: "text-secondary monitoring-load-state", {i18n.t("table.loading")} }
                 },
                 Some(Err(ref error)) => rsx! {
-                    div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}: {error}" }
+                    div { class: "alert alert-error", role: "alert",
+                        "{i18n.t(\"common.load_failed\")}: {user_error_message(i18n, error)}"
+                    }
                 },
                 Some(
                     Ok(
@@ -576,7 +581,9 @@ pub fn Monitoring() -> Element {
                     }
                 },
                 Some(Some(Err(ref error))) => rsx! {
-                    div { class: "alert alert-error", "{i18n.t(\"monitoring.detail_load_failed\")}: {error}" }
+                    div { class: "alert alert-error", role: "alert",
+                        "{i18n.t(\"monitoring.detail_load_failed\")}: {user_error_message(i18n, error)}"
+                    }
                 },
                 _ => rsx! {},
             }

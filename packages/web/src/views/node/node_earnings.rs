@@ -197,8 +197,8 @@ fn NodeEarningsContent() -> Element {
             }
 
             // 错误提示
-            if let Some(Err(ref e)) = summary_resource().as_ref().map(|r| r.as_ref()) {
-                Alert { variant: AlertVariant::Error, "{i18n.t(\"common.load_failed\")}：{e}" }
+            if let Some(Err(e)) = summary_resource().as_ref().map(|r| r.as_ref()) {
+                Alert { variant: AlertVariant::Error, {format!("{}：{}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, e))} }
             }
 
             // 汇总卡片
@@ -243,7 +243,7 @@ fn NodeEarningsContent() -> Element {
                             div { class: "text-secondary", {i18n.t("table.loading")} }
                         },
                         Some(Err(e)) => rsx! {
-                            Alert { variant: AlertVariant::Error, "{e}" }
+                            Alert { variant: AlertVariant::Error, {crate::services::api_client::user_error_message(i18n, e)} }
                         },
                         Some(Ok(resp)) => rsx! {
                             Table {
@@ -316,7 +316,7 @@ fn NodeEarningsContent() -> Element {
                             div { class: "text-secondary", {i18n.t("table.loading")} }
                         },
                         Some(Err(e)) => rsx! {
-                            Alert { variant: AlertVariant::Error, "{e}" }
+                            Alert { variant: AlertVariant::Error, {crate::services::api_client::user_error_message(i18n, e)} }
                         },
                         Some(Ok(records)) => rsx! {
                             Table {

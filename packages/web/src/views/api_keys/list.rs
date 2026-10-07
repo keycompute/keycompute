@@ -86,7 +86,10 @@ fn ApiKeyWorkspace(scope: WorkspaceScope) -> Element {
                     keys.restart();
                 }
                 Err(e) => {
-                    create_error.set(Some(format!("{create_failed}：{e}")));
+                    create_error.set(Some(format!(
+                        "{create_failed}：{}",
+                        crate::services::api_client::user_error_message(i18n, &e)
+                    )));
                     creating.set(false);
                 }
             }
@@ -258,7 +261,9 @@ fn ApiKeyWorkspace(scope: WorkspaceScope) -> Element {
                         div { class: "loading-state", {i18n.t("table.loading")} }
                     },
                     Some(Err(e)) => rsx! {
-                        div { class: "alert alert-error", "{i18n.t(\"api_keys.loading_failed\")}：{e}" }
+                        div { class: "alert alert-error",
+                            {format!("{}：{}", i18n.t("api_keys.loading_failed"), crate::services::api_client::user_error_message(i18n, &e))}
+                        }
                     },
                     Some(Ok(result)) => {
                         let total = result.total.max(0) as usize;

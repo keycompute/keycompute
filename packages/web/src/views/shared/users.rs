@@ -1391,7 +1391,7 @@ fn AdminUsersView() -> Element {
                     ui_store.show_error(format!(
                         "{}: {}",
                         i18n.t("users.update_failed"),
-                        user_error_message(&e)
+                        user_error_message(i18n, &e)
                     ));
                 }
             }
@@ -1430,7 +1430,11 @@ fn AdminUsersView() -> Element {
                     users_resource.restart();
                 }
                 Err(e) => {
-                    ui_store.show_error(format!("{}: {e}", i18n.t("users.delete_failed")));
+                    ui_store.show_error(format!(
+                        "{}：{}",
+                        i18n.t("users.delete_failed"),
+                        crate::services::api_client::user_error_message(i18n, &e)
+                    ));
                 }
             }
             delete_saving.set(false);
@@ -1691,7 +1695,7 @@ fn AdminUsersView() -> Element {
                         balance_error.set(format!(
                             "{}: {}",
                             i18n.t("users.balance_update_failed"),
-                            user_error_message(&e)
+                            user_error_message(i18n, &e)
                         ));
                     }
                 }
@@ -1770,7 +1774,7 @@ fn AdminUsersView() -> Element {
                         balance_error.set(format!(
                             "{}: {}",
                             i18n.t("users.balance_reservation_release_failed"),
-                            user_error_message(&e)
+                            user_error_message(i18n, &e)
                         ));
                     }
                 }
@@ -2144,7 +2148,7 @@ fn AdminUsersView() -> Element {
                                     p { class: "text-secondary", {i18n.t("table.loading")} }
                                 },
                                 Some(Err(ref e)) => {
-                                    let message = user_error_message(e);
+                                    let message = user_error_message(i18n, e);
                                     let reservation_page_number =
                                         balance_reservation_pagination.read().page_number();
                                     let can_go_back = balance_reservation_pagination.read().can_go_back();

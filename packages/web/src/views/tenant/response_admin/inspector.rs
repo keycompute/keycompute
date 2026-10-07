@@ -109,7 +109,7 @@ pub(super) fn Inspector(
         p{code{"{id}"}}p{{i18n.t("tenant_responses.owner")} " {owner}"}p{{i18n.t("tenant_responses.mode")} " {family}"}p{class:"text-secondary",{i18n.t("tenant_responses.private_hint")}}
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(Content::Detail(body)))=>rsx!{pre{class:"resource-content",style:"white-space:pre-wrap;overflow-wrap:anywhere",{serde_json::to_string_pretty(&body).unwrap_or_default()}}},
             Some(Ok(Content::Items(page)))=>rsx!{
                 for item in &page.data{{let id=item["id"].as_str().unwrap_or_default().to_owned();let row=row.clone();rsx!{section{class:"card",key:"{id}",pre{class:"resource-content",style:"white-space:pre-wrap;overflow-wrap:anywhere",{serde_json::to_string_pretty(item).unwrap_or_default()}}

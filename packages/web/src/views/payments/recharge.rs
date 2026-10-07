@@ -9,7 +9,7 @@ use ui::PageHeader;
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
-use crate::services::api_client::with_auto_refresh;
+use crate::services::api_client::{user_error_message, with_auto_refresh};
 use crate::services::payment_service;
 use crate::stores::auth_store::AuthStore;
 use crate::stores::ui_store::UiStore;
@@ -299,9 +299,9 @@ fn RechargeContent() -> Element {
                 }
                 Err(e) => {
                     loading.set(false);
+                    let message = user_error_message(i18n, &e);
                     order_state.set(OrderState::Failed {
-                        reason: i18n
-                            .t_with_args("recharge.create_failed", &[("error", &e.to_string())]),
+                        reason: i18n.t_with_args("recharge.create_failed", &[("error", &message)]),
                     });
                 }
             }
@@ -347,7 +347,9 @@ fn RechargeContent() -> Element {
                             match methods() {
                                 None => rsx! { div { class: "loading-state", {i18n.t("table.loading")} } },
                                 Some(Err(error)) => rsx! {
-                                    div { class: "alert alert-error", "{i18n.t(\"common.load_failed\")}：{error}" }
+                                    div { class: "alert alert-error", role: "alert",
+                                        "{i18n.t(\"common.load_failed\")}：{user_error_message(i18n, &error)}"
+                                    }
                                 },
                                 Some(Ok(response)) if response.methods.is_empty() => rsx! {
                                     div { class: "empty-state",

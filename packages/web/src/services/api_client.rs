@@ -305,59 +305,76 @@ where
     replay
 }
 
-/// 将 ClientError 转为用户友好的中文提示文本
-///
-/// 在 UI 层展示错误时调用，避免直接折射原始英文错误字符串给用户。
+/// 将 ClientError 转为跟随当前界面语言的安全提示文本。
 #[allow(dead_code)]
-pub fn localize_error(err: &client_api::error::ClientError) -> String {
+pub fn localize_error(i18n: crate::i18n::I18n, err: &client_api::error::ClientError) -> String {
     use client_api::error::ClientError;
-    match err {
-        ClientError::Unauthorized(_) => "登录已过期，请重新登录".to_string(),
-        ClientError::TenantSelectionRequired(_) => "请先选择租户工作区".to_string(),
-        ClientError::Forbidden(_) => "权限不足，无法执行此操作".to_string(),
-        ClientError::NotFound(_) => "资源不存在或已被删除".to_string(),
-        ClientError::RateLimited(_) => "请求过于频繁，请稍候再试".to_string(),
-        ClientError::Verification(_) => "验证码校验失败，请检查后重试".to_string(),
-        ClientError::Network(_) => "网络连接失败，请检查网络设置".to_string(),
-        ClientError::ServerError(_) => "服务器内部错误，请稍候重试".to_string(),
-        ClientError::ServiceUnavailable(_) => "服务暂时不可用，请稍候再试".to_string(),
-        ClientError::Serialization(_) | ClientError::InvalidResponse(_) => {
-            "数据解析失败，请刷新页面".to_string()
-        }
-        ClientError::Config(msg) => format!("配置错误：{}", msg),
+    let key = match err {
+        ClientError::Unauthorized(_) => "error.unauthorized",
+        ClientError::TenantSelectionRequired(_) => "error.tenant_selection_required",
+        ClientError::Forbidden(_) => "error.forbidden",
+        ClientError::NotFound(_) => "error.not_found",
+        ClientError::RateLimited(_) => "error.rate_limited",
+        ClientError::Verification(_) => "error.verification",
+        ClientError::Network(_) => "error.network",
+        ClientError::ServerError(_) => "error.server",
+        ClientError::ServiceUnavailable(_) => "error.service_unavailable",
+        ClientError::Serialization(_) | ClientError::InvalidResponse(_) => "error.invalid_response",
+        ClientError::Config(_) => "error.config",
         ClientError::Http(msg) => {
-            // 尝试提取状态码后的消息部分
             if msg.contains("400") {
-                "请求参数错误，请检查输入".to_string()
+                "error.bad_request"
             } else if msg.contains("409") {
-                "数据冲突，该资源可能已存在".to_string()
+                "error.conflict"
             } else {
-                "请求失败，请稍候重试".to_string()
+                "error.request_failed"
             }
         }
-        ClientError::Other(msg) => msg.clone(),
-    }
+        ClientError::Other(_) => "error.request_failed",
+    };
+    i18n.t(key).to_string()
 }
 
 /// 优先使用后端返回的业务消息；如消息过于底层，再回退到本地友好文案。
-pub fn user_error_message(err: &client_api::error::ClientError) -> String {
+pub fn user_error_message(i18n: crate::i18n::I18n, err: &client_api::error::ClientError) -> String {
     let message = err.message();
     if message.trim().is_empty() {
-        return localize_error(err);
+        return localize_error(i18n, err);
     }
 
     match err {
-        ClientError::TenantSelectionRequired(_) => localize_error(err),
+        ClientError::TenantSelectionRequired(_) => localize_error(i18n, err),
         ClientError::Network(_)
         | ClientError::Serialization(_)
-        | ClientError::InvalidResponse(_) => localize_error(err),
+        | ClientError::InvalidResponse(_)
+        | ClientError::Config(_)
+        | ClientError::Http(_)
+        | ClientError::ServerError(_)
+        | ClientError::ServiceUnavailable(_) => localize_error(i18n, err),
         _ => message,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{append_v1, normalize_api_root};
+    use super::{append_v1, normalize_api_root, user_error_message};
+    use crate::i18n::{I18n, Lang};
+    use client_api::ClientError;
+
+    #[test]
+    fn transport_and_deserialization_details_are_not_rendered_to_users() {
+        let error = ClientError::Http(
+            "HTTP 400: Failed to deserialize query string: missing field `tenant_id`".into(),
+        );
+        let zh = user_error_message(I18n::new(Lang::Zh), &error);
+        let en = user_error_message(I18n::new(Lang::En), &error);
+        assert_eq!(zh, "请求参数错误，请检查输入");
+        assert_eq!(en, "The request is invalid. Check the input and try again.");
+        for message in [zh, en] {
+            assert!(!message.contains("tenant_id"));
+            assert!(!message.contains("deserialize"));
+        }
+    }
 
     #[test]
     fn normalize_api_root_strips_known_suffixes() {

@@ -103,7 +103,7 @@ fn KeyWorkspace(scope: WorkspaceScope) -> Element {
             button{class:"btn btn-secondary",onclick:move |_|{query.write().tab=Tab::Pending;query.write().page=1;operation.set(None);},{i18n.t("tenant_keys.pending")}}
             label{r#for:"tenant-key-owner",{i18n.t("tenant_keys.owner")}}
             input{id:"tenant-key-owner",class:"input-field",style:"width:24rem;max-width:100%",value:"{owner}",maxlength:"36",oninput:move|e|owner.set(e.value())}
-            button{class:"btn btn-secondary",onclick:move |_|match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(&e))},{i18n.t("tenant_keys.filter")}}
+            button{class:"btn btn-secondary",onclick:move |_|match types::owner_filter(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;operation.set(None);error.set(String::new());},Err(e)=>error.set(user_error_message(i18n, &e))},{i18n.t("tenant_keys.filter")}}
             if query().tab==Tab::Keys{label{input{r#type:"checkbox",checked:query().revoked,onchange:move|e|{query.write().revoked=e.checked();query.write().page=1;}}{i18n.t("tenant_keys.include_revoked")}}}
             button{class:"btn btn-secondary",onclick:move |_|{operation.set(None);data.restart();},{i18n.t("tenant.reload")}}
             button{class:"btn btn-primary",onclick:move |_|operation.set(Some(Operation::Request)),{i18n.t("tenant_keys.request")}}
@@ -112,7 +112,7 @@ fn KeyWorkspace(scope: WorkspaceScope) -> Element {
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(rows))=>rsx!{
                 div { class:"table-pagination-panel",
                     div { style:"overflow-x:auto",
@@ -158,7 +158,7 @@ fn KeyRow(
     let delete = row.clone();
     rsx! { tr {
         td { p {"{row.name}"} code {"{row.key_preview}"}
-            details { summary {"ID"} code {"{row.id}"} p {{i18n.t("tenant_keys.version")} " {row.updated_at}"} }
+            details { summary {"ID"} code {"{row.id}"} p {{i18n.t("tenant_keys.version")} " {format_time(&row.updated_at)}"} }
         }
         td {code {"{row.owner_user_id}"}}
         td {{i18n.t(if row.revoked{"tenant_keys.revoked"}else if types::live_key(&row){"tenant_keys.active"}else{"tenant_keys.expired"})}}

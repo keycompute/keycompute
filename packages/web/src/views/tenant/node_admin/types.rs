@@ -25,6 +25,23 @@ impl Kind {
             Self::Registrations => &["pending", "approved", "rejected", "consumed"],
         }
     }
+    pub fn status_key(self, status: &str) -> Option<&'static str> {
+        match (self, status) {
+            (Self::Nodes, "online") => Some("node_gateway.status_online"),
+            (Self::Nodes, "offline") => Some("node_gateway.status_offline"),
+            (Self::Nodes, "excluded") => Some("node_gateway.status_excluded"),
+            (Self::Tasks, "queued") => Some("node_gateway.task_queued"),
+            (Self::Tasks, "leased") => Some("node_gateway.task_leased"),
+            (Self::Tasks, "succeeded") => Some("node_gateway.task_succeeded"),
+            (Self::Tasks, "failed") => Some("node_gateway.task_failed"),
+            (Self::Tasks, "expired") => Some("node_gateway.task_expired"),
+            (Self::Registrations, "pending") => Some("node_token.status_pending"),
+            (Self::Registrations, "approved") => Some("node_token.status_approved"),
+            (Self::Registrations, "rejected") => Some("node_token.status_rejected"),
+            (Self::Registrations, "consumed") => Some("node_token.status_consumed"),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct Filter {

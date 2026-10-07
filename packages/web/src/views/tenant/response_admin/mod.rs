@@ -93,7 +93,7 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
             if query().mode!=client_api::api::response_control::ResponseMode::AccountPool{
                 label{r#for:"managed-resource-owner",{i18n.t("tenant_responses.owner")}}
                 input{id:"managed-resource-owner",class:"input-field",value:"{owner}",maxlength:"36",oninput:move|e|owner.set(e.value())}
-                button{class:"btn btn-secondary",onclick:move |_|match types::owner(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;error.set(String::new());inspection.set(None);mutation.set(None);},Err(e)=>error.set(user_error_message(&e))},{i18n.t("tenant_responses.filter")}}
+                button{class:"btn btn-secondary",onclick:move |_|match types::owner(&owner()){Ok(owner)=>{query.write().owner=owner;query.write().page=1;error.set(String::new());inspection.set(None);mutation.set(None);},Err(e)=>error.set(user_error_message(i18n, &e))},{i18n.t("tenant_responses.filter")}}
                 button{class:"btn btn-secondary",onclick:move |_|{inspection.set(None);mutation.set(None);data.restart();},{i18n.t("tenant.reload")}}
             }
         }
@@ -101,7 +101,7 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}}
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(page))=>rsx!{
                 div{class:"table-pagination-panel",div{class:"table-container",style:"overflow-x:auto",table{class:"table",
                     thead{tr{th{{i18n.t("tenant_responses.resource")}}th{{i18n.t("tenant_responses.owner")}}th{{i18n.t("tenant_responses.state")}}th{{i18n.t("tenant_responses.created")}}th{{i18n.t("tenant.actions")}}}}

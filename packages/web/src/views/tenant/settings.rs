@@ -163,7 +163,7 @@ fn TenantSettingsPage() -> Element {
                     context.restart();
                     ui.show_success(i18n.t("tenant.saved"));
                 }
-                Err(value) => error.set(user_error_message(&value)),
+                Err(value) => error.set(user_error_message(i18n, &value)),
             }
         });
     };
@@ -202,7 +202,7 @@ fn TenantSettingsPage() -> Element {
                     }
                 }
             } else if let Some(Err(value)) = loaded {
-                div { class: "alert alert-error", role: "alert", {user_error_message(&value)} }
+                div { class: "alert alert-error", role: "alert", {user_error_message(i18n, &value)} }
             } else {
                 p { role: "status", {i18n.t("common.loading")} }
             }

@@ -42,10 +42,6 @@ mod pagination_layout_tests {
         ),
         ("shared/monitoring.rs", include_str!("shared/monitoring.rs")),
         (
-            "shared/node_gateway.rs",
-            include_str!("shared/node_gateway.rs"),
-        ),
-        (
             "shared/payment_orders.rs",
             include_str!("shared/payment_orders.rs"),
         ),

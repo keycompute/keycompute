@@ -66,7 +66,7 @@ pub(super) fn MutationEditor(
             }
         });
         if let Err(e) = validation {
-            error.set(user_error_message(&e));
+            error.set(user_error_message(i18n, &e));
             return;
         }
         busy.set(true);
@@ -231,7 +231,7 @@ pub(super) fn MutationEditor(
                     ui.show_success(i18n.t("tenant_responses.saved"));
                     on_changed.call(());
                 }
-                Err(e) => error.set(user_error_message(&e)),
+                Err(e) => error.set(user_error_message(i18n, &e)),
             }
         });
     };

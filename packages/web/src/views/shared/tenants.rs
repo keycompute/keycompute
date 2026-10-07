@@ -237,7 +237,7 @@ pub fn Tenants() -> Element {
                                                                     .await;
                                                                 match result {
                                                                     Ok(_) => tenants.restart(),
-                                                                    Err(error) => operation_error.set(user_error_message(&error)),
+                                                                    Err(error) => operation_error.set(user_error_message(i18n, &error)),
                                                                 }
                                                                 pending_tenant.set(None);
                                                             });
@@ -344,7 +344,7 @@ pub fn Tenants() -> Element {
                             }
                             Err(error) => {
                                 delete_modal_open.set(false);
-                                operation_error.set(user_error_message(&error));
+                                operation_error.set(user_error_message(i18n, &error));
                             }
                         }
                         pending_tenant.set(None);
@@ -463,7 +463,7 @@ fn TenantCreateModal(
             }
             match result {
                 Ok(_) => on_created.call(()),
-                Err(value) => error.set(user_error_message(&value)),
+                Err(value) => error.set(user_error_message(i18n, &value)),
             }
             saving.set(false);
         });
@@ -488,12 +488,19 @@ fn TenantCreateModal(
                     }
                 }
                 div { class: "modal-body",
+                    div { class: "modal-intro",
+                        p { {i18n.t("tenants.create_intro")} }
+                        p { class: "text-secondary", {i18n.t("tenants.create_intro_hint")} }
+                    }
                     if !error().is_empty() {
                         div { class: "alert alert-error", "{error}" }
                     }
                     div { class: "form-group",
-                        label { class: "form-label", {i18n.t("tenants.name")} }
+                        label { class: "form-label", r#for: "tenant-create-name",
+                            {i18n.t("tenants.name")} span { class: "required-mark", " *" }
+                        }
                         input {
+                            id: "tenant-create-name",
                             class: "input-field",
                             r#type: "text",
                             required: true,
@@ -504,8 +511,11 @@ fn TenantCreateModal(
                         }
                     }
                     div { class: "form-group",
-                        label { class: "form-label", {i18n.t("tenants.owner")} }
+                        label { class: "form-label", r#for: "tenant-create-owner",
+                            {i18n.t("tenants.owner")} span { class: "required-mark", " *" }
+                        }
                         input {
+                            id: "tenant-create-owner",
                             class: "input-field", r#type: "search", required: true, maxlength: "255",
                             value: "{owner_search}",
                             placeholder: i18n.t("tenants.owner_placeholder"),
@@ -541,17 +551,24 @@ fn TenantCreateModal(
                                 }
                             }
                         } else if let Some(Err(value)) = visible_owner_results.as_ref() {
-                            small { class: "text-error", role: "alert", {user_error_message(value)} }
+                            small { class: "text-error", role: "alert", {user_error_message(i18n, value)} }
                         } else if owner_results.state() == UseResourceState::Pending && owner_query.chars().count() >= 2 {
                             small { class: "text-secondary", role: "status", {i18n.t("common.loading")} }
                         }
                         if !owner_user_id().is_empty() {
-                            small { class: "tenant-owner-selected", {i18n.t("tenants.owner_selected")} }
+                            div { class: "tenant-owner-selected",
+                                span { aria_hidden: "true", "✓" }
+                                div {
+                                    strong { {i18n.t("tenants.owner_selected")} }
+                                    small { "{owner_search}" }
+                                }
+                            }
                         }
                     }
                     div { class: "form-group",
-                        label { class: "form-label", {i18n.t("tenants.slug")} }
+                        label { class: "form-label", r#for: "tenant-create-slug", {i18n.t("tenants.slug")} }
                         input {
+                            id: "tenant-create-slug",
                             class: "input-field",
                             r#type: "text",
                             maxlength: "100",

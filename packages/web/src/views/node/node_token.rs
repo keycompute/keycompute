@@ -150,8 +150,8 @@ fn NodeTokenContent() -> Element {
                 description: i18n.t("node_token.subtitle").to_string(),
             }
 
-            if let Some(Err(ref e)) = tokens_resource().as_ref().map(|r| r.as_ref()) {
-                Alert { variant: AlertVariant::Error, "{i18n.t(\"common.load_failed\")}: {e}" }
+            if let Some(Err(e)) = tokens_resource().as_ref().map(|r| r.as_ref()) {
+                Alert { variant: AlertVariant::Error, {format!("{}：{}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, e))} }
             }
 
             // ── 主操作卡片 ──
@@ -327,7 +327,7 @@ fn TokenListItem(detail: TokenDetail) -> Element {
                     code { class: "node-token-card-preview", "{detail.token.token_preview}" }
                 }
                 div { class: "node-token-card-summary-meta",
-                    span { class: "node-token-card-time", "{detail.token.issued_at}" }
+                    span { class: "node-token-card-time", {format_time(&detail.token.issued_at)} }
                     span { class: "node-token-card-expand", "{expand_label}" }
                 }
             }
@@ -366,7 +366,7 @@ fn TokenListItem(detail: TokenDetail) -> Element {
                             span { class: "node-token-card-meta-label",
                                 {i18n.t("node_token.issued_at")}
                             }
-                            span { class: "node-token-card-meta-value", "{detail.token.issued_at}" }
+                            span { class: "node-token-card-meta-value", {format_time(&detail.token.issued_at)} }
                         }
                     }
 

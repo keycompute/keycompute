@@ -77,7 +77,7 @@ pub fn PassthroughBindings() -> Element {
             }
             match data {
                 None => rsx! { div { class: "loading-state", role: "status", {i.t("common.loading")} } },
-                Some(Err(error)) => rsx! { div { class: "alert alert-error", role: "alert", "{user_error_message(&error)}" } },
+                Some(Err(error)) => rsx! { div { class: "alert alert-error", role: "alert", "{user_error_message(i, &error)}" } },
                 Some(Ok(_)) if rows.is_empty() => rsx! { div { class: "empty-state", {i.t("passthrough.empty")} } },
                 Some(Ok(_)) => rsx! {
                     div { class: "table-container",
@@ -146,7 +146,7 @@ fn PassthroughRow(
             pending.set(false);
             match result {
                 Ok(()) => onchanged.call(()),
-                Err(e) => error.set(user_error_message(&e)),
+                Err(e) => error.set(user_error_message(i, &e)),
             }
         });
     };
@@ -178,7 +178,7 @@ fn PassthroughRow(
                             diagnostic.set(format!("{}: {}", i.t("passthrough.diagnostic"), i.t(runtime_health_key(Some(&result.status)))));
                             onchanged.call(());
                         },
-                        Err(e) => error.set(user_error_message(&e)),
+                        Err(e) => error.set(user_error_message(i, &e)),
                     }
                 });
             }, {i.t("passthrough.confirm_probe")} }
@@ -353,7 +353,7 @@ fn PassthroughBindingEditor(
             pending.set(false);
             match result {
                 Ok(()) => onsaved.call(()),
-                Err(e) => error.set(user_error_message(&e)),
+                Err(e) => error.set(user_error_message(i, &e)),
             }
         });
     };
@@ -385,7 +385,7 @@ fn PassthroughBindingEditor(
                         }
                         match &account_data {
                             None=>rsx!{small{role:"status",{i.t("common.loading")}}},
-                            Some(Err(e))=>rsx!{div{class:"alert alert-error",role:"alert",{user_error_message(e)}}},
+                            Some(Err(e))=>rsx!{div{class:"alert alert-error",role:"alert",{user_error_message(i, e)}}},
                             Some(Ok(v)) if v.accounts.is_empty()=>rsx!{small{{i.t("passthrough.no_accounts")}}},
                             _=>rsx!{},
                         }
@@ -415,7 +415,7 @@ fn PassthroughBindingEditor(
                         }
                         match &tenant_data {
                             None=>rsx!{small{role:"status",{i.t("common.loading")}}},
-                            Some(Err(e))=>rsx!{div{class:"alert alert-error",role:"alert",{user_error_message(e)}}},
+                            Some(Err(e))=>rsx!{div{class:"alert alert-error",role:"alert",{user_error_message(i, e)}}},
                             Some(Ok(v)) if v.tenants.is_empty()=>rsx!{small{{i.t("passthrough.no_tenants")}}},
                             _=>rsx!{},
                         }

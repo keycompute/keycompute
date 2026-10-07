@@ -142,7 +142,7 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
                 detail.set(None);
                 error.set(String::new());
             }
-            Err(e) => error.set(user_error_message(&e)),
+            Err(e) => error.set(user_error_message(i18n, &e)),
         }
     };
     rsx! {div{class:"page-container tenant-finance",
@@ -172,12 +172,12 @@ fn FinanceWorkspace(scope: WorkspaceScope) -> Element {
                     div{style:"display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px",for g in &totals.currencies{article{class:"card",key:"{g.currency}",h3{"{g.currency}"}p{{i18n.t("tenant_finance.amount")} ": {g.total_amount}"}p{{i18n.t("tenant_finance.requests")} ": {g.total_requests}"}p{{i18n.t("tenant_finance.tokens")} ": {g.total_input_tokens} / {g.total_output_tokens} / {g.total_tokens}"}}}}
                     if totals.currencies.is_empty(){p{{i18n.t("tenant.empty")}}}
                 }},
-                Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(&e)}}},
+                Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},
                 _=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
             }
         }
         match loaded{
-            None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(&e)}}},
+            None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},Some(Err(e))=>rsx!{p{role:"alert",class:"alert alert-error",{user_error_message(i18n, &e)}}},
             Some(Ok(Rows::ChooseOwner))=>rsx!{p{class:"alert alert-info",{i18n.t("tenant_finance.choose_wallet")}}},
             Some(Ok(Rows::Wallet(wallet)))=>rsx!{section{class:"card tenant-member-wallet",h2{{i18n.t("tenant_finance.wallet")}}p{code{"{wallet.user_id}"}}p{class:"text-secondary",{i18n.t("tenant_finance.wallet_scope")}}
                 p{{i18n.t("tenant_finance.available")} ": {wallet.available_balance}"}p{{i18n.t("tenant_finance.frozen")} ": {wallet.frozen_balance}"}

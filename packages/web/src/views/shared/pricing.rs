@@ -227,7 +227,10 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                     pricing_list.state().cloned(),
                     pricing_list(),
                 );
-                let load_error = result.as_ref().and_then(|r|r.as_ref().err()).map(crate::services::api_client::user_error_message);
+                let load_error = result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().err())
+                    .map(|error| crate::services::api_client::user_error_message(i18n, error));
                 let (is_empty, empty_text) = match &result {
                     None => (true, i18n.t("table.loading")),
                     Some(Err(_)) => (true, i18n.t("common.load_failed")),
@@ -379,7 +382,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                                                                                     }
                                                                                     Err(e) => {
                                                                                         op_err
-                                                                                            .set(format!("{}：{e}", i18n.t("pricing.set_default_failed")));
+                                                                                            .set(format!("{}：{}", i18n.t("pricing.set_default_failed"), crate::services::api_client::user_error_message(i18n, &e)));
                                                                                         spawn(async move {
                                                                                             gloo_timers::future::TimeoutFuture::new(3_000).await;
                                                                                             op_err.set(String::new());
@@ -531,7 +534,7 @@ fn PricingRecords(target: PricingTarget, identity: authority::PricingIdentity) -
                                     });
                                 }
                                 Err(e) => {
-                                    op_err.set(format!("{}：{e}", i18n.t("pricing.delete_failed")));
+                                    op_err.set(format!("{}：{}", i18n.t("pricing.delete_failed"), crate::services::api_client::user_error_message(i18n, &e)));
                                 }
                             }
                         });
@@ -611,7 +614,11 @@ fn CreatePricingModal(
                     on_created.call(());
                 }
                 Err(e) => {
-                    form_err.set(format!("{}：{e}", i18n.t("pricing.create_failed")));
+                    form_err.set(format!(
+                        "{}：{}",
+                        i18n.t("pricing.create_failed"),
+                        crate::services::api_client::user_error_message(i18n, &e)
+                    ));
                     saving.set(false);
                 }
             }
@@ -781,7 +788,11 @@ fn EditPricingModal(
                     on_updated.call(());
                 }
                 Err(e) => {
-                    form_err.set(format!("{}：{e}", i18n.t("pricing.update_failed")));
+                    form_err.set(format!(
+                        "{}：{}",
+                        i18n.t("pricing.update_failed"),
+                        crate::services::api_client::user_error_message(i18n, &e)
+                    ));
                     saving.set(false);
                 }
             }

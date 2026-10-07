@@ -81,7 +81,7 @@ pub(super) fn Editor(
             }
         };
         if let Err(e) = validation {
-            error.set(user_error_message(&e));
+            error.set(user_error_message(i, &e));
             return;
         }
         busy.set(true);
@@ -122,7 +122,7 @@ pub(super) fn Editor(
                     ui.show_success(i.t("tenant.saved"));
                     on_changed.call(())
                 }
-                Err(e) => error.set(user_error_message(&e)),
+                Err(e) => error.set(user_error_message(i, &e)),
             }
         });
     };

@@ -48,7 +48,7 @@ fn OperationsPage(scope: OperationsScope) -> Element {
     rsx! { div {class:"page-container operations-console",
         ui::PageHeader {title:i18n.t("operations.title").to_string(), description:i18n.t("operations.hint").to_string()}
         p {class:"alert alert-info",{i18n.t("operations.boundary")}}
-        nav {class:"toolbar",aria_label:i18n.t("operations.title"),
+        nav {class:"segmented-control operations-tabs",aria_label:i18n.t("operations.title"),
             if scope.health {button {class:"btn btn-secondary",aria_pressed:tab()==Tab::Health,onclick:move |_|tab.set(Tab::Health),{i18n.t("operations.health")}}}
             if scope.usage {button {class:"btn btn-secondary",aria_pressed:tab()==Tab::Usage,onclick:move |_|tab.set(Tab::Usage),{i18n.t("operations.usage")}}}
             if scope.capacity {button {class:"btn btn-secondary",aria_pressed:tab()==Tab::Capacity,onclick:move |_|tab.set(Tab::Capacity),{i18n.t("operations.capacity")}}}

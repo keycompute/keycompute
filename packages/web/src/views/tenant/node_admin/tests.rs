@@ -110,4 +110,23 @@ fn node_admin_route_and_dynamic_labels_are_available_in_both_languages() {
         assert!(crate::i18n::EN.contains_key(key));
         assert!(crate::i18n::ZH.contains_key(key));
     }
+
+    for (kind, status) in [
+        (Kind::Nodes, "online"),
+        (Kind::Nodes, "offline"),
+        (Kind::Nodes, "excluded"),
+        (Kind::Tasks, "queued"),
+        (Kind::Tasks, "leased"),
+        (Kind::Tasks, "succeeded"),
+        (Kind::Tasks, "failed"),
+        (Kind::Tasks, "expired"),
+        (Kind::Registrations, "pending"),
+        (Kind::Registrations, "approved"),
+        (Kind::Registrations, "rejected"),
+        (Kind::Registrations, "consumed"),
+    ] {
+        let key = kind.status_key(status).expect("known node status label");
+        assert_ne!(crate::i18n::I18n::new(crate::i18n::Lang::Zh).t(key), status);
+        assert_ne!(crate::i18n::I18n::new(crate::i18n::Lang::En).t(key), "?");
+    }
 }

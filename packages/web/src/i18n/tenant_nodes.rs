@@ -10,6 +10,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant_nodes.tasks", "任务", "Tasks"),
     ("tenant_nodes.registrations", "注册审批", "Registrations"),
     (
+        "tenant_nodes.empty_hint",
+        "当前范围和筛选条件下没有记录。可调整筛选或刷新数据。",
+        "No records match the current scope and filters. Adjust the filters or refresh.",
+    ),
+    (
         "tenant_nodes.owner",
         "拥有者 UUID（留空查询本租户全部）",
         "Owner UUID (blank means all owners in this tenant)",
@@ -82,6 +87,7 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "Consecutive failures / threshold:",
     ),
     ("tenant_nodes.heartbeat", "最后心跳：", "Last heartbeat:"),
+    ("tenant_nodes.request_id", "请求 ID：", "Request ID:"),
     ("tenant_nodes.assigned", "分配节点：", "Assigned node:"),
     ("tenant_nodes.deadline", "截止时间：", "Deadline:"),
     ("tenant_nodes.preview", "令牌预览：", "Token preview:"),
@@ -107,7 +113,7 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("tenant_nodes.unchanged", "未产生新变更", "No new change"),
     (
         "tenant_nodes.registration_decided",
-        "注册处理结果 / 通知状态",
-        "Registration result / notification status",
+        "注册申请已处理",
+        "Registration updated",
     ),
 ];

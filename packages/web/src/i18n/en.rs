@@ -1260,6 +1260,28 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "node_gateway.subtitle",
         "Manage local node access, task queues, and the NodeDispatch execution path.",
     );
+    m.insert("node_gateway.target_title", "Choose management scope");
+    m.insert(
+        "node_gateway.target_hint",
+        "Nodes, registration requests, and tasks belong to a specific tenant. Select one before reading or changing data.",
+    );
+    m.insert("node_gateway.target_label", "Target tenant");
+    m.insert("node_gateway.target_placeholder", "Select a tenant…");
+    m.insert(
+        "node_gateway.target_safety_hint",
+        "Changing the target clears filters, details, and unsubmitted actions to prevent cross-tenant residue.",
+    );
+    m.insert("node_gateway.current_target", "Current scope");
+    m.insert("node_gateway.no_target_title", "No manageable tenants");
+    m.insert(
+        "node_gateway.no_target_hint",
+        "Create and enable a tenant before managing its node resources.",
+    );
+    m.insert("node_gateway.select_target_title", "Select a target tenant");
+    m.insert(
+        "node_gateway.select_target_hint",
+        "The tenant's nodes, tasks, and registration requests will appear here.",
+    );
     m.insert(
         "node_gateway.native_unverified",
         "No verified native model capability",
@@ -1841,14 +1863,22 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.name", "Tenant name");
     m.insert("tenants.name_placeholder", "e.g. Research Center");
     m.insert("tenants.name_required", "Tenant name is required");
-    m.insert("tenants.owner", "Workspace owner");
+    m.insert("tenants.owner", "Initial administrator");
     m.insert(
         "tenants.owner_hint",
-        "Find an existing user by name or email. The owner becomes the first workspace administrator.",
+        "Choose an existing user by name or email. They receive tenant administration access after creation.",
     );
     m.insert("tenants.owner_placeholder", "Search by name or email…");
     m.insert("tenants.owner_results", "User search results");
-    m.insert("tenants.owner_selected", "Workspace owner selected");
+    m.insert("tenants.owner_selected", "Initial administrator selected");
+    m.insert(
+        "tenants.create_intro",
+        "Create an isolated tenant workspace",
+    );
+    m.insert(
+        "tenants.create_intro_hint",
+        "Tenant name and initial administrator are required. Leave the slug blank to generate it automatically.",
+    );
     m.insert("tenants.owner_required", "Select a valid workspace owner.");
     m.insert("tenants.slug", "Slug (optional)");
     m.insert("tenants.slug_placeholder", "e.g. research-center");
@@ -1866,7 +1896,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.deleted", "Tenant deleted");
     m.insert(
         "distribution_records.admin_desc",
-        "Review platform-wide distribution earnings and currently effective rules",
+        "Review distribution earnings and effective rules by workspace",
     );
     m.insert(
         "distribution_records.user_desc",
@@ -1894,6 +1924,41 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("distribution_records.referrer_id", "Referrer ID");
     m.insert("distribution_records.empty_user", "No referral records yet");
     m.insert("distribution_records.referred_user", "Referred User");
+    m.insert(
+        "distribution_records.target_title",
+        "Select reporting scope",
+    );
+    m.insert(
+        "distribution_records.target_hint",
+        "Distribution data is isolated by workspace. Select a workspace to continue.",
+    );
+    m.insert("distribution_records.target_label", "Target workspace");
+    m.insert(
+        "distribution_records.target_placeholder",
+        "Select a workspace",
+    );
+    m.insert(
+        "distribution_records.target_safety_hint",
+        "Changing the workspace reloads rules and records without modifying data.",
+    );
+    m.insert("distribution_records.current_target", "Current workspace");
+    m.insert(
+        "distribution_records.select_target_title",
+        "Select a workspace",
+    );
+    m.insert(
+        "distribution_records.select_target_hint",
+        "The effective rules and distribution records will appear after selection.",
+    );
+    m.insert(
+        "distribution_records.no_tenants_title",
+        "No workspace available",
+    );
+    m.insert(
+        "distribution_records.no_tenants_hint",
+        "Create and activate a workspace before reviewing distribution data.",
+    );
+    m.insert("distribution_records.beneficiary_id", "Beneficiary ID");
     m.insert("accounts.subtitle", "Maintain provider channels, model mapping, and availability in one reviewable asset pool for the routing layer.");
     m.insert("accounts.reset_failed", "Reset failed");
     m.insert("accounts.fill_required", "Please fill in required fields");
@@ -2445,6 +2510,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("models.node_stream_help", "Native node Chat, Messages and Responses preserve protocol data. Streaming requires a worker explicitly advertising SSE for that model and operation.");
 
     for &(key, _, en) in super::tenant::TEXT {
+        m.insert(key, en);
+    }
+    for &(key, _, en) in super::errors::TEXT {
         m.insert(key, en);
     }
     for &(key, _, en) in super::operations::TEXT {

@@ -180,7 +180,7 @@ fn TenantWorkspacePage() -> Element {
                     }
                 }
             } else if let Some(Err(error)) = loaded {
-                div { class: "alert alert-error", role: "alert", {user_error_message(&error)} }
+                div { class: "alert alert-error", role: "alert", {user_error_message(i18n, &error)} }
             } else {
                 p { role: "status", {i18n.t("common.loading")} }
             }

@@ -69,7 +69,7 @@ fn PricingWorkspace(scope: WorkspaceScope) -> Element {
         }
         match loaded {
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(page))=>rsx!{
                 div {class:"table-pagination-panel",div {class:"tenant-pricing-table-scroll",table {class:"table",
                     thead {tr {th {{i18n.t("tenant_pricing.model")}} th {{i18n.t("tenant_pricing.dimension")}} th {{i18n.t("tenant_pricing.prices")}} th {{i18n.t("tenant_pricing.validity")}} th {{i18n.t("tenant.actions")}}}}

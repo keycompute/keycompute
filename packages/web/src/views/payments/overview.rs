@@ -3,7 +3,10 @@ use ui::{Badge, BadgeVariant, PageHeader, Pagination, Table, TableHead};
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
-use crate::services::{api_client::with_auto_refresh, billing_service, payment_service};
+use crate::services::{
+    api_client::{user_error_message, with_auto_refresh},
+    billing_service, payment_service,
+};
 use crate::stores::auth_store::AuthStore;
 use crate::utils::display::payment_status_label;
 use crate::utils::format_cny_str;
@@ -76,7 +79,7 @@ fn PaymentsOverviewContent() -> Element {
     let orders_error = orders_result
         .as_ref()
         .and_then(|result| result.as_ref().err())
-        .map(ToString::to_string);
+        .map(|error| user_error_message(i18n, error));
     let orders_rows = orders_result
         .as_ref()
         .and_then(|result| result.as_ref().ok())
@@ -115,7 +118,7 @@ fn PaymentsOverviewContent() -> Element {
             }
 
             if let Some(Err(error)) = balance() {
-                p { class: "alert alert-error", role: "alert", {crate::services::api_client::user_error_message(&error)} }
+                p { class: "alert alert-error", role: "alert", {crate::services::api_client::user_error_message(i18n, &error)} }
             }
             // ─── 账户余额 ───
             div { class: "stats-grid",
@@ -131,7 +134,7 @@ fn PaymentsOverviewContent() -> Element {
                         Some(Ok(b)) => rsx! {
                             p {
                                 class: "stat-value",
-                                title: if b.as_of.is_empty() { i18n.t("common.balance_snapshot").to_string() } else { format!("{}: {}", i18n.t("common.balance_snapshot"), b.as_of) },
+                                title: if b.as_of.is_empty() { i18n.t("common.balance_snapshot").to_string() } else { format!("{}: {}", i18n.t("common.balance_snapshot"), format_time(&b.as_of)) },
                                 {format_cny_str(&b.available_balance)}
                             }
                         },
@@ -353,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn recharge_load_errors_keep_the_underlying_reason_visible() {
+    fn recharge_load_errors_use_the_shared_user_safe_message() {
         let source = include_str!("overview.rs");
         let component_source = source.split("#[cfg(test)]").next().unwrap_or(source);
 
@@ -362,8 +365,8 @@ mod tests {
             "充值记录加载失败应使用独立的错误提示样式"
         );
         assert!(
-            component_source.contains("：{error}"),
-            "充值记录加载失败时必须展示具体错误原因"
+            component_source.contains("user_error_message(i18n, error)"),
+            "充值记录加载失败时必须经过统一的用户安全错误映射"
         );
     }
 }

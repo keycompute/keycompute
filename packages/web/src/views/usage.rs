@@ -83,7 +83,7 @@ fn UsageContent() -> Element {
                         p { {i18n.t("table.loading")} }
                     },
                     Some(Err(e)) => rsx! {
-                        p { "{i18n.t(\"common.load_failed\")}：{e}" }
+                        p { {format!("{}：{}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, &e))} }
                     },
                     Some(Ok(s)) => rsx! {
                         div { class: "stat-card",
@@ -114,7 +114,7 @@ fn UsageContent() -> Element {
             }
 
             if let Some(Err(error)) = trend() {
-                p { class: "alert alert-error", role: "alert", {format!("{}: {}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(&error))} }
+                p { class: "alert alert-error", role: "alert", {format!("{}: {}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, &error))} }
             }
             if let Some(Ok(value)) = trend() {
                 p { class: "text-secondary", {format!("UTC · {}: {}", i18n.t("common.display_snapshot"), format_time(&value.as_of))} }
@@ -160,7 +160,7 @@ fn UsageContent() -> Element {
                                 p { class: "loading-text", {i18n.t("table.loading")} }
                             },
                             Some(Err(e)) => rsx! {
-                                p { class: "error-text", "{i18n.t(\"common.load_failed\")}：{e}" }
+                                p { class: "error-text", {format!("{}：{}", i18n.t("common.load_failed"), crate::services::api_client::user_error_message(i18n, &e))} }
                             },
                             Some(Ok(result)) if result.records.is_empty() => rsx! {
                                 p { class: "empty-text", {i18n.t("usage.no_records")} }

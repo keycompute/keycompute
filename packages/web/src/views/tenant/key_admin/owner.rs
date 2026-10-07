@@ -87,7 +87,7 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
                     notice.set(i18n.t("tenant_keys.declined_result").into());
                     generation += 1;
                 }
-                Err(e) => error.set(user_error_message(&e)),
+                Err(e) => error.set(user_error_message(i18n, &e)),
             }
         });
     };
@@ -102,7 +102,7 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
         button{class:"btn btn-secondary",disabled:busy(),onclick:move |_|{choice.set(None);data.restart();},{i18n.t("tenant.reload")}}
         match loaded{
             None=>rsx!{p{role:"status",{i18n.t("common.loading")}}},
-            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(&e)}}},
+            Some(Err(e))=>rsx!{p{class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(result))=>rsx!{
                 div {class:"table-pagination-panel",
                     div {style:"overflow-x:auto",

@@ -1,8 +1,10 @@
-use super::super::common::{self, WorkspaceScope};
-use super::types::{Action, Pending, Row};
+use super::{
+    NodeAdminScope,
+    types::{Action, Pending, Row},
+};
 use crate::{
     hooks::use_i18n::use_i18n,
-    services::api_client::{get_client, user_error_message},
+    services::api_client::user_error_message,
     stores::{auth_store::AuthStore, user_store::UserStore},
 };
 use client_api::{
@@ -45,7 +47,7 @@ impl Draft {
 }
 #[component]
 pub(super) fn CommandDialog(
-    scope: WorkspaceScope,
+    scope: NodeAdminScope,
     pending: Pending,
     on_close: EventHandler<()>,
     on_success: EventHandler<String>,
@@ -76,7 +78,7 @@ pub(super) fn CommandDialog(
         let body = draft();
         let command = pending.clone();
         if !body.valid(&command)
-            || command.row.tenant() != scope.tenant_id
+            || command.row.tenant() != scope.tenant_id()
             || command.row.id().is_nil()
             || command.row.owner().is_nil()
         {
@@ -86,22 +88,15 @@ pub(super) fn CommandDialog(
         busy.set(true);
         error.set(String::new());
         spawn(async move {
-            let result = common::command(auth, users, scope, move |token| async move {
-                let api = NodeControlApi::tenant(&get_client(), scope.tenant_id)?;
-                execute(api, command, body, &token).await
-            })
-            .await;
-            if !scope.is_current(auth, users) {
-                return;
-            }
+            let result = scope
+                .command(auth, users, move |token, api| async move {
+                    execute(api, command, body, &token).await
+                })
+                .await;
             busy.set(false);
             match result {
-                Ok((label, extra)) => on_success.call(if extra.is_empty() {
-                    i18n.t(label).to_string()
-                } else {
-                    format!("{}: {}", i18n.t(label), extra)
-                }),
-                Err(e) => error.set(user_error_message(&e)),
+                Ok(label) => on_success.call(i18n.t(label).to_string()),
+                Err(e) => error.set(user_error_message(i18n, &e)),
             }
         });
     };
@@ -135,7 +130,7 @@ async fn execute(
     pending: Pending,
     draft: Draft,
     token: &str,
-) -> Result<(&'static str, String)> {
+) -> Result<&'static str> {
     let expected = pending.row.version().to_string();
     let id = pending.row.id();
     let command = NodeCommand {
@@ -181,16 +176,13 @@ async fn execute(
                     "Node mutation identity mismatch; refresh records".into(),
                 ));
             }
-            Ok((
-                if result.deleted {
-                    "tenant_nodes.deleted"
-                } else if result.changed {
-                    "tenant_nodes.updated"
-                } else {
-                    "tenant_nodes.unchanged"
-                },
-                result.node.status,
-            ))
+            Ok(if result.deleted {
+                "tenant_nodes.deleted"
+            } else if result.changed {
+                "tenant_nodes.updated"
+            } else {
+                "tenant_nodes.unchanged"
+            })
         }
         (Row::Task(_), action @ (Action::Cancel | Action::Archive)) => {
             let operation = if action == Action::Cancel {
@@ -207,16 +199,13 @@ async fn execute(
                     "Task mutation identity mismatch; refresh records".into(),
                 ));
             }
-            Ok((
-                if result.archived {
-                    "tenant_nodes.archived"
-                } else if result.cancellation_requested {
-                    "tenant_nodes.cancel_requested"
-                } else {
-                    "tenant_nodes.unchanged"
-                },
-                result.task.status,
-            ))
+            Ok(if result.archived {
+                "tenant_nodes.archived"
+            } else if result.cancellation_requested {
+                "tenant_nodes.cancel_requested"
+            } else {
+                "tenant_nodes.unchanged"
+            })
         }
         (Row::Registration(_), action) => {
             let action = match action {
@@ -244,10 +233,7 @@ async fn execute(
                     "Registration identity mismatch; refresh records".into(),
                 ));
             }
-            Ok((
-                "tenant_nodes.registration_decided",
-                format!("{}; {}", result.token.status, result.notification),
-            ))
+            Ok("tenant_nodes.registration_decided")
         }
         _ => Err(ClientError::Config("Invalid resource command".into())),
     }

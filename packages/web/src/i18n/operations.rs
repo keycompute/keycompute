@@ -25,6 +25,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "租户名称或标识（按字面搜索）",
         "Tenant name or slug (literal search)",
     ),
+    (
+        "operations.search_placeholder",
+        "输入租户名称或标识",
+        "Enter a tenant name or slug",
+    ),
     ("operations.status", "状态", "Status"),
     ("operations.all_status", "全部状态", "All statuses"),
     (
@@ -33,6 +38,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "The search or page exceeds the supported range.",
     ),
     ("operations.apply", "应用查询", "Apply query"),
+    (
+        "operations.empty_hint",
+        "当前筛选条件下没有租户记录，可调整关键词或状态后重试。",
+        "No tenants match these filters. Try another keyword or status.",
+    ),
     ("operations.as_of", "数据时间", "As of"),
     ("operations.tenant", "租户", "Tenant"),
     (
@@ -96,6 +106,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("operations.requests", "请求数", "Requests"),
     ("operations.successful", "成功请求", "Successful requests"),
     ("operations.amount", "已计费金额", "Billed amount"),
+    (
+        "operations.usage_empty_hint",
+        "所选范围和时间内没有产生可汇总的计费用量。",
+        "There is no billable usage for this scope and time range.",
+    ),
     (
         "operations.process_hint",
         "仅展示当前服务进程的指定计数器，不是全节点或全集群容量。缺失指标显示为 —，不会当作 0。",

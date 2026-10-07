@@ -10,6 +10,7 @@ use crate::{
     services::api_client::{get_client, user_error_message},
     stores::{auth_store::AuthStore, user_store::UserStore},
     utils::resource::{KeyedResourceValue, current_keyed_value},
+    utils::time::format_time,
 };
 use client_api::api::distribution_policy::DistributionPolicyApi;
 use dioxus::prelude::*;
@@ -61,18 +62,26 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
         div {class:"page-container tenant-distribution-admin",
             ui::PageHeader {title:i18n.t("tenant_distribution.title").to_string(),description:i18n.t("tenant_distribution.hint").to_string()}
             WorkspaceLinks {}
-            p {class:"alert alert-info",{i18n.t("tenant_distribution.scope")} " {scope.tenant_id}"}
+            div {class:"scope-banner",
+                span {class:"scope-banner-label",{i18n.t("tenant_distribution.scope")}}
+                code {"{scope.tenant_id}"}
+            }
             div {class:"toolbar",
                 button {class:"btn btn-secondary",onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
                 button {class:"btn btn-secondary",onclick:move |_|open(Operation::Default),{i18n.t("tenant_distribution.default")}}
                 button {class:"btn btn-primary",onclick:move |_|open(Operation::Create),{i18n.t("tenant_distribution.create")}}
             }
             match loaded {
-                None => rsx! { p {role:"status",{i18n.t("common.loading")}} },
-                Some(Err(e)) => rsx! { p {class:"alert alert-error",role:"alert",{user_error_message(&e)}} },
+                None => rsx! {
+                    div {class:"content-loading",role:"status",
+                        span {class:"spinner",aria_hidden:"true"}
+                        span {{i18n.t("common.loading")}}
+                    }
+                },
+                Some(Err(e)) => rsx! { p {class:"alert alert-error",role:"alert",{user_error_message(i18n, &e)}} },
                 Some(Ok(page)) => rsx! {
-                    div {class:"table-pagination-panel",
-                        div {style:"overflow-x:auto",
+                    div {class:"table-pagination-panel table-pagination-frame",
+                        div {class:"table-container",
                             table {class:"table",
                                 thead {tr {
                                     th {{i18n.t("tenant_distribution.name")}}
@@ -90,7 +99,11 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
                                                 td {if let Some(id)=row.beneficiary_id {code {"{id}"}} else {{i18n.t("tenant_distribution.everyone")}}}
                                                 td {"{row.commission_rate}"}
                                                 td {p {if row.is_active {{i18n.t("tenant_distribution.active")}} else {{i18n.t("tenant_distribution.inactive")}}} small {class:"table-meta",{i18n.t("tenant_distribution.priority")} " {row.priority}"}}
-                                                td {details {summary {{i18n.t("tenant_distribution.window")}} p {"{row.effective_from}"} p {{row.effective_until.as_deref().unwrap_or("—")}} p {code {"{row.updated_at}"}}}}
+                                                td {details {summary {{i18n.t("tenant_distribution.window")}}
+                                                    p {{format_time(&row.effective_from)}}
+                                                    p {{row.effective_until.as_deref().map(format_time).unwrap_or_else(|| "—".into())}}
+                                                    p {code {{format_time(&row.updated_at)}}}
+                                                }}
                                                 td {
                                                     button {class:"btn btn-secondary btn-sm",onclick:move |_|open(Operation::Edit(edit.clone())),{i18n.t("form.edit")}}
                                                     button {class:"btn btn-danger btn-sm",onclick:move |_|open(Operation::Delete(del.clone())),{i18n.t("form.delete")}}
@@ -101,7 +114,11 @@ fn DistributionWorkspace(scope: WorkspaceScope) -> Element {
                                 }
                             }
                         }
-                        if page.rules.is_empty() { p {{i18n.t("tenant.empty")}} }
+                        if page.rules.is_empty() {
+                            div {class:"empty-state compact-empty-state",
+                                h3 {class:"empty-title",{i18n.t("tenant.empty")}}
+                            }
+                        }
                     }
                     Pager {page:query().page,total_pages:page.total_pages,total:page.total,on_page:move|p|query.write().page=p}
                 },

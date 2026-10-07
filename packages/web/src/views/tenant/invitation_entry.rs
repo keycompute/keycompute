@@ -93,7 +93,7 @@ pub fn capture_before_router() -> PendingState {
                 ..Default::default()
             };
         }
-        return PendingState::from_fragment(&fragment);
+        PendingState::from_fragment(&fragment)
     }
     #[cfg(any(not(target_arch = "wasm32"), test))]
     {
@@ -181,7 +181,7 @@ fn InvitationAcceptPage() -> Element {
                 }
                 Err(e) => {
                     failed.set(true);
-                    message.set(user_error_message(&e));
+                    message.set(user_error_message(i18n, &e));
                 }
             }
         });
@@ -228,7 +228,7 @@ fn InvitationAcceptPage() -> Element {
                 }
                 Err(error) => {
                     failed.set(true);
-                    message.set(user_error_message(&error));
+                    message.set(user_error_message(i18n, &error));
                 }
             }
         });
