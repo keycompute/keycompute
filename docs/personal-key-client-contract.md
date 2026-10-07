@@ -46,7 +46,7 @@ row when permitted by persistence constraints. The new real test asserts both
 steps instead of treating the first operation as unconditional physical deletion.
 No key format, database owner, accounting identity or inference grant changes.
 
-## Verification and remaining UI work
+## Verification and UI scope
 
 The real native client test proves default 180-day and explicit permanent creation,
 original tenant/user/hash, owner-only lists, foreign/member deletion rejection,
@@ -56,10 +56,9 @@ both lifetime request shapes, malformed success rejection, error/Debug redaction
 no automatic creation replay and fresh reads with display caching enabled.
 Existing owner issuance and backend session/concurrency tests are retained.
 
-The prepared tenant-Key metadata and owner-claim pages are NOT included in this
-SDK-only slice. Their initial compilation/native tests ran, but the browser
-validation script write was safety-denied in full and not executed. Fifteen UI
-files were archived and restored out of the main worktree. The archived page also
-uses a deprecated ReadOnlySignal alias that must be replaced before strict UI
-acceptance. No production DB, credential, actual payment, notification, service or
-deployment was changed. Resource pages and final release gates remain unfinished.
+The tenant-Key metadata and owner-claim pages are implemented and verified under
+the separate `tenant-key-console.md` contract. They are not evidence that this
+personal SDK grants tenant-administrator authority: personal creation and deletion
+remain bound to the authenticated owner. No production DB, credential, actual
+payment, notification, service or deployment was changed. Final release gates are
+tracked separately.

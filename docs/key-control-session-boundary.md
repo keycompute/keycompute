@@ -73,7 +73,7 @@ New and existing key ownership,
 concurrency, audit and display-cache tests are retained.
 
 This is a key-control boundary, not a certification of every resource handler.
-Provider/pricing and other control transaction deadline coverage, native account-
-pool resources, remaining tenant resource pages and production release gates
-remain separate. No production data, payment, SMTP, credentials or deployment
+Provider/pricing and other control transaction deadline coverage, native
+account-pool resources, other resource consoles and production release gates have
+their own contracts. No production data, payment, SMTP, credentials or deployment
 are changed by these tests or this delivery.

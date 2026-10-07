@@ -5,12 +5,15 @@ The latest user request is authoritative where earlier sketches differ.
 ## Canonical names and endpoints
 
 Platform roles: `root/operator/none`; tenant roles: `admin/member`.
-Membership states: `active/suspended/removed`; revision column: `authz_version`.
+Membership states: `active/suspended/removed`; membership compare-and-swap and
+session authorization use `tenant_memberships.authz_version`.
 Membership role column: `tenant_role`; provenance: `invited_by`, `joined_at`,
 `removed_at`. Invitation role/provenance columns: `tenant_role`, `invited_by`,
 `accepted_by`. Audit record fields: `platform_role`, `tenant_role`, `metadata`.
 API-key and invitation revocation keep their distinct revoked semantics.
-Tenant state remains `active/inactive`, with `authz_version`.
+Tenant state remains `active/inactive`. `tenants.authz_version` changes only for
+authorization-bearing owner/status changes; editable tenant configuration uses the
+independent monotonic `tenants.revision`.
 User identity is global; a console identity may have no selected tenant.
 Tenant APIs use `/api/v1/tenants/{tenant_id}/**`. The path selector must equal
 the current verified membership tenant; it never grants membership.
@@ -55,19 +58,19 @@ No changes to this independent ignored repository are included in Rust commits.
 
 ## Delivery
 
-All work, review, commits and pushes take place on `main`, never a new branch.
+Code changes follow the repository contribution workflow in `CONTRIBUTING.md`.
 Dependency updates needed to keep a stage buildable are part of that stage.
 Deployment happens only after the complete security and cutover gates pass.
 
 ## Offline cutover
 
-Application startup initializes the final `001_init.sql` only. The latest greenfield release
-contract permits final-schema initialization or an isolated database rebuild
-only after verified backup and restore checks. A reviewed identity/owner mapping
-is required if any previous data is retained; no automatic legacy-admin upgrade
-is permitted. JWT trust is rotated only during the final verified cutover.
-A failed release gate restores the complete snapshot and previous deployment.
-No reset or conversion is permitted before snapshot and restore verification.
+Application startup initializes the complete `001_init.sql` schema only. The current
+development phase supports greenfield databases; it does not define an incremental
+or compatibility upgrade for retained production data. Isolated restore rehearsal
+and production backup/rollback evidence are still required before a deployment is
+approved. JWT trust is rotated only during a separately verified cutover. A failed
+release gate restores the approved snapshot and previous deployment; no reset or
+conversion is permitted before snapshot and restore verification.
 
 There is no implicit system tenant or automatic tenant assignment. A newly
 registered user starts as a global identity with no memberships. Every legacy

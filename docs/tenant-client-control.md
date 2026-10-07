@@ -1,7 +1,8 @@
 # Tenant control client contract
 
-This client implements the existing tenant control HTTP contract; it does not
-replace server authorization and is not a completed tenant management UI.
+This client implements the tenant-control HTTP contract. It does not replace
+server authorization; the Web console consumes it through separately guarded
+workspace, settings, member, invitation and audit pages.
 `TenantControlApi::new(&client, tenant_id)` requires an explicit nonzero UUID.
 A tenant selector never grants membership. Global platform administration uses
 separate clients and endpoints; no platform role is sent in a tenant command.
@@ -18,15 +19,19 @@ The selected-session contract is `selected_tenant.tenant_role`, not `role`.
 It is a required typed enum; there is no legacy-role alias or default admin.
 Member records distinguish `membership_status` from global `user_status`.
 
-Member update/removal and tenant configuration carry a positive
-`expected_authz_version`. Removal uses DELETE with the version JSON body.
+Member update/removal carries a positive `expected_authz_version`; removal uses
+DELETE with the version JSON body. Tenant configuration carries a separate
+positive `expected_revision`, so concurrent name, description and default-limit
+edits are detected without treating display configuration as authorization.
 Ownership transfer sends only the explicit new owner UUID. The server enforces
 current membership, active-owner and last-admin invariants under its transaction.
 
 All tenant mutations use the SDK's single-dispatch path. Network/503 failures
-are not automatically retried. A configuration/ownership/self-role change can
-invalidate the current selected JWT even after a successful command: do not
-replay the write; obtain a valid session through the supported login flow.
+are not automatically retried. Ordinary configuration changes advance
+`revision` but keep the selected JWT valid. Ownership, tenant-status and
+self-membership changes can advance authorization versions and invalidate the
+selected JWT even after a successful command: do not replay the write; obtain a
+fresh supported selection or login session.
 
 ## Invitations and one-time secrets
 
@@ -43,19 +48,23 @@ Acceptance uses the existing `/api/v1/invitations/{token}/accept` contract.
 Transport and reflected response errors are mapped to fixed safe messages before
 being returned to callers. A failed or uncertain acceptance is never silently
 resent. Refresh memberships to check its outcome; consumed or revoked invitations
-cannot be used again. A future UI must capture and scrub the URL fragment before
-routing, bind completion to its initiating login/workspace and avoid persistence.
+cannot be used again. The Web entry flow captures and scrubs the URL fragment
+before routing, binds completion to its initiating login/session and keeps the
+token out of persistent storage.
 
 ## Executable contract coverage
 
-`tests/tenant_control_test.rs` covers typed role parsing, secret redaction,
+`packages/client-api/tests/tenant_control_test.rs` covers typed role parsing,
+configuration revision serialization, secret redaction,
 no mutation retries, versioned DELETE, fresh reads, bounds and query injection.
-`integration-tests/tests/support/tenant_console_wire.rs` runs this exact client
+`crates/integration-tests/tests/support/tenant_console_wire.rs` runs this exact client
 against a real loopback Axum server and isolated PostgreSQL, covering membership,
 invitation, owner transfer, configuration, audit and session selection responses.
-It also checks that restored membership does not revive old JWTs and a removed
-membership requires a new invitation. These are not mock-only wire fixtures.
+It also checks that configuration updates preserve the current authorization
+session, restored membership does not revive old JWTs and a removed membership
+requires a new invitation. These are not mock-only wire fixtures.
 
-The workspace switcher, member/invitation pages and complete resource UI remain
-separate implementation and browser-acceptance work. No production cutover is
-part of this client change.
+The role-aware workspace, global switcher, settings, member, invitation and audit
+flows are implemented in the Web package. Resource consoles have their own scope
+documents and tests; their presence does not turn this SDK into an authorization
+boundary or constitute production cutover evidence.

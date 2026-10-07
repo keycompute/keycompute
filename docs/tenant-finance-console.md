@@ -16,13 +16,13 @@ callback payload or payment credential is displayed or serialized by the inspect
 
 Amounts and stored prices are exact strings, including server scientific notation.
 No currency conversion, float parsing or cross-currency total is introduced.
-64-bit request/token counters remain integers in Rust, including in WASM; browser
+64-bit request/token counters remain integers in Rust, including in WASM; code-level
 checks include values beyond JavaScript's exact-number range. Wallet values have
 no currency field in the existing DTO and are shown without inventing a currency.
 A missing wallet for an existing member is shown as uninitialized; a failed or
 foreign member lookup is an error rather than a synthetic zero balance.
 
-Usage reads use an explicit applied RFC3339 window, at most31 days in this UI.
+Usage reads use an explicit applied RFC3339 window, at most 31 days in this UI.
 Input and applied filters are separate. Payment status/owner filters do not
 silently inherit a usage time filter unsupported by the payment endpoint. Lists
 are paginated, and an independent memoized summary key avoids refetching heavy
@@ -33,7 +33,7 @@ The SDK preserves server-side calendar validation and exact query encoding.
 
 An isolated actual HTTP regression blocked the exact reporting connection at a
 table read, then revoked its original token version. The previous handler returned
-HTTP200 with financial data after release. All six report handlers now use the
+HTTP 200 with financial data after release. All six report handlers now use the
 existing ConsoleSessionProof to recheck the original user, platform and selected
 membership versions/states on the writer after their final DAO query. Expiry is
 checked before and after that lookup. The existing mandatory tenant/owner DAO
@@ -58,10 +58,11 @@ Wire tests cover fixed scopes, exact values, malformed/foreign results, currency
 separation, fresh reads and read-only missing-wallet behavior. The actual Rust
 SDK/Axum/PostgreSQL test covers filters, paging, detail, totals, metadata projection,
 member/inference/foreign rejection and no wallet creation. Native UI tests cover
-calendar windows, selectors and detail identity. The production-compiled Chromium
-runner uses synthetic HTTP and is not represented as a production payment test.
+calendar windows, selectors, detail identity and workspace-race isolation. These
+tests are not represented as a production payment test.
 
 Withdrawal decisions, reservation recovery and distribution-rule management are
-separate existing control APIs and are not granted by this read-only page. Provider
-UI, native account-pool resources and final endpoint/release gates remain separate.
+separate control APIs and are not granted by this read-only page. Provider and
+native account-pool consoles have their own scope contracts; final endpoint and
+release gates remain separate.
 No production database, credentials, real payment, SMTP or deployment is changed.

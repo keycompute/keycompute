@@ -79,8 +79,8 @@ The account-pool UI exposes tenant-scoped Response and Conversation indexes
 backed by proven affinity rows, plus direct owner UUID + opaque ID detail access.
 Switching between resource families preserves the selected mode and scope.
 Detail/items/cancel/delete and Conversation metadata/item mutations use the native
-SDK contract without synthetic revisions; private synthetic browser payloads remain
-escaped and absent from browser storage.
+SDK contract without synthetic revisions; private response payloads remain escaped
+and absent from persistent client storage.
 
 ## Verification boundary
 
@@ -90,10 +90,8 @@ pre-dispatch membership/expiry revocation, post-upstream expiry/grant revocation
 and stable-user continuation ownership. SDK tests cover native envelopes, no fake
 revision, single dispatch, indexed enumeration and exact scope rejection.
 Migration tests cover fresh baseline and rejection of historical or tampered
-checksums without mutating the database.
-Compiled-browser tests remain UI
-evidence with synthetic HTTP and are not a substitute for those server/database
-checks.
+checksums without mutating the database. Code-level Web tests cover UI state and
+response validation but are not a substitute for those server/database checks.
 
 Native account-pool enumeration and Conversation administration are covered
 by the indexed and direct-resource contracts above. No production database,

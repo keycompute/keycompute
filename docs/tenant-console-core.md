@@ -1,11 +1,15 @@
 # Core tenant console
 
-This slice wires the existing tenant-control SDK into actual Web routes. It does
-not change backend authorization, the database schema or resource ownership.
+The tenant console is a selected-workspace experience, not a second platform
+administration console. Every signed-in identity can discover or enter the
+workspace overview. Management controls appear only when the verified session
+contains the corresponding tenant capability; platform roles remain independent.
 
 ## Routes and capabilities
 
-- `/tenant`: selected workspace, global-session selection and tenant configuration.
+- Global header switcher: personal/platform context plus active memberships.
+- `/tenant`: role-aware workspace overview and zero-membership guidance.
+- `/tenant/settings`: workspace name, description and default limits.
 - `/tenant/members`: member role/status changes, removal and ownership transfer.
 - `/tenant/invitations`: create, inspect and revoke invitations.
 - `/tenant/audit`: paginated audit events and canonical request IDs.
@@ -13,29 +17,46 @@ not change backend authorization, the database schema or resource ownership.
 
 Registration leaves a user at the global identity with zero memberships. The
 workspace page presents that state explicitly; an invitation acceptance adds the
-new membership without removing memberships in other tenants. The user can then
-select the joined tenant from the workspace switcher.
+new membership without removing memberships in other tenants. The acceptance
+page can immediately select the new membership and enter its dashboard; later
+switching remains available from the global header.
 
 Tenant administration consumes the server's tenant capability vector and selected
-membership. Platform role labels and platform capabilities never synthesize a
-tenant grant. Root/operator global identities cannot enter the tenant member
-pages without an actual qualifying selected membership. Existing platform business
-pages keep their independent platform guard. Backend checks remain authoritative.
+membership. Navigation and route guards distinguish settings, members,
+invitations, providers, keys, billing and pricing instead of using one broad UI
+flag. The persisted roles remain deliberately small: Owner is the immutable
+ownership identity, while Admin and Member are inviteable membership roles.
+Platform role labels and platform capabilities never synthesize a tenant grant.
+Root/operator global identities cannot enter tenant-scoped management or resource
+pages without an actual qualifying selected membership. They can still open the
+role-aware workspace overview and their separately authorized platform consoles.
+Backend checks remain authoritative.
 
 The workspace reads the already verified profile after opaque-token restoration;
 it keeps a global identity when the user has no memberships and never invents a
 tenant from missing local selection metadata. Tenant selection verifies the
 original user and returned target through AuthStore's
-existing compare-and-install operation. Configuration changes and ownership or
-self-membership changes that invalidate the current tenant JWT require signing
-in again. Other members' changes refresh the current page.
+existing compare-and-install operation. Editable configuration uses its own
+monotonic `revision`, so ordinary name, description and limit updates do not
+invalidate selected sessions. Ownership, tenant status and self-membership
+changes still advance authorization versions and require a fresh selection or
+sign-in. A configuration conflict keeps the local draft visible and exposes an
+explicit refresh action that loads the latest revision before a corrected save.
+Successful name changes synchronize the header and membership labels in the
+current session. Other members' changes refresh the current page.
+
+Platform tenant creation searches only active global users for the initial
+owner, with the lifecycle filter enforced by the server query and checked again
+by the client. On narrow mobile headers, secondary repository/theme shortcuts
+yield space to the workspace selector while Home and account actions remain
+available.
 
 ## Component and request isolation
 
 A page-local keyed fragment owns form drafts, confirmation dialogs, pagination,
 errors and one-time links. Keying only AppShell or a single static component was
-insufficient in a real-browser regression: tenant A's dirty form survived in B.
-The keyed-fragment regression retains its dirty-A sentinel assertion. A workspace
+insufficient: tenant A's dirty form could survive in B. The keyed-fragment unit
+regression retains its dirty-A sentinel assertion. A workspace
 or selected authorization-version change also cancels old component-owned work.
 Results carry the exact user, tenant, UI epoch and selected authorization versions.
 Pending or mismatched list results are not rendered. Same-workspace token refresh
@@ -68,25 +89,22 @@ storage, serialized into audit metadata, or used as a frontend route parameter.
 
 The native Web tests cover the actual shared scope/command helpers, capability
 vectors, restored profiles, nil/version rejection, same-workspace refresh and
-old-result suppression. Route tests include the five real routes. Existing real
+old-result suppression. Route tests cover the workspace, settings, member,
+invitation, audit and acceptance routes. Existing real
 SDK/Axum/PostgreSQL tests continue to cover server contracts and tenant authority.
 
-`scripts/tests/tenant_console_browser.mjs` runs compiled WASM in fresh Chromium
-contexts against synthetic intercepted HTTP. It covers member role/status/removal
-with exact revisions, literal search, invitation creation/duplicate/revocation,
-uncertain-write single dispatch, audit navigation, dirty-A-to-B isolation, member
-and global guards, fragment scrubbing, login resumption and one-shot acceptance.
-All API calls remain inside the synthetic origin; it never uses a real user's
-browser session or credentials. CI exports assets from the locally built production
-Web image and runs the same checks; no image is pushed by that validation step.
+Code-level UI and integration regressions cover exact-revision member commands,
+literal search, invitation lifecycle, uncertain-write single dispatch, workspace
+switch isolation, route guards, fragment scrubbing, login resumption and direct
+workspace entry after acceptance. They also verify that configuration saves do not
+invalidate the selected authorization session, ownership transfer does, and an
+expired restored token cannot consume an invitation before verified login. CI runs
+these tests and verifies the production Web image can be built; backend isolation
+continues to be proven by the real SDK/Axum/PostgreSQL suites.
 
-The browser script also exercises configuration save and ownership transfer,
-followed by clearing the invalidated selected session. An expired restored token
-must not consume the invitation before the first verified login. Browser evidence
-is UI behavior with controlled HTTP, not a substitute for backend isolation tests.
-
-Remaining work is explicit: tenant Provider/Key/pricing/finance/node/task/resource
-pages, the operator console, native account-pool Responses/Conversation management,
-remaining endpoint/object-scope review, and final production cutover. Core member
-and invitation pages do not certify that the whole tenant subsystem is complete.
+Provider, Key, pricing, finance, financial-control, distribution, node/task and
+managed Response/Conversation consoles are documented and tested separately.
+Open gates are the remaining endpoint/object-scope review, the exhaustive security
+matrix and final production backup/rollback/cutover evidence. The existence of the
+core workspace and resource pages does not certify the whole tenant subsystem.
 No production database, signing material, payments or deployment is changed here.

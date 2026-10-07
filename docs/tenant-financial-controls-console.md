@@ -15,7 +15,7 @@ Foreign or malformed rows fail closed; they are never filtered into an apparentl
 valid page. Reads remain fresh and do not create a wallet, reclaim expiry or move
 money.
 
-The browser only enables recovery when the displayed RFC3339 expiry is in the past,
+The UI only enables recovery when the displayed RFC3339 expiry is in the past,
 but the server remains authoritative. Recovery sends the exact observed ownership
 version plus a bounded reason. A future/live reservation, changed version or changed
 financial authority is rejected by the server. The command is single-dispatch: a
@@ -47,7 +47,7 @@ Root-only recipient access and completion remain separate audited platform flows
 Balance-conversion withdrawals are not review buttons because their accepted flow
 completes transactionally at creation.
 
-## Session and browser lifecycle
+## Session and client lifecycle
 
 Both controls use the existing verified workspace identity. Lists are keyed by the
 selected tenant plus submitted owner/filter/page state. Commands use the shared
@@ -62,12 +62,12 @@ check prevents a delayed result from being returned after the original signed
 console session has become stale. Responses are private/no-store; wallet responses
 also carry no-cache.
 
-The compiled-browser acceptance runner uses synthetic same-origin HTTP and verifies
-expired-only UI behavior, exact version/revision payloads, no platform payout calls,
-uncertain-write single dispatch, workspace-race isolation, foreign-row fail-closed
-behavior and tenant-admin route gates. It is UI evidence only. Real PostgreSQL/Axum
-wallet/tip suites separately verify financial locks, audit rollback, current roles,
-credential expiry, payout-secret separation and root-only completion.
+Code-level Web tests verify expired-only UI behavior, exact version/revision
+payloads, no platform payout calls, uncertain-write single dispatch,
+workspace-race isolation, foreign-row fail-closed behavior and tenant-admin route
+gates. Real PostgreSQL/Axum wallet/tip suites verify financial locks, audit
+rollback, current roles, credential expiry, payout-secret separation and root-only
+completion.
 
 No production database, balance, payout, payment provider, credential, SMTP, service
 restart or deployment is changed by this console delivery.

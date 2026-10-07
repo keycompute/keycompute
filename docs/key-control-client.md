@@ -1,8 +1,9 @@
 # Tenant key metadata and owner issuance client
 
-`client_api::api::key_control` is the typed client for the already existing key
-control handlers. This delivery does not add a Web page, change backend grants,
-alter the schema, or create a new platform-level key-management bypass.
+`client_api::api::key_control` is the typed client for the existing key-control
+handlers. The client contract does not change backend grants, alter the schema or
+create a platform-level key-management bypass. The Web pages that consume it are
+documented separately in `tenant-key-console.md`.
 
 ## Two distinct clients
 
@@ -36,14 +37,15 @@ explicit null clears it, and a value sets it. A metadata patch must carry the
 observed updated_at; an absent or empty version is not invented by the client.
 
 Every command is single dispatch, including after authentication failure, 503 or
-uncertain transport results. The ClientError returned by a one-time claim is sanitized before it is handed
-to an application: reflected server messages are not returned with a secret. A claim result and
-its secret wrapper do not implement Serialize, have redacted Debug output and
-require an explicit `expose()` call to use the raw key. This type discipline does
-not itself guarantee that an application never copies or persists an exposed
-string; the future owner page must still keep it in memory and clear it on exit.
+uncertain transport results. The `ClientError` returned by a one-time claim is
+sanitized before it is handed to an application: reflected server messages are not
+returned with a secret. A claim result and its secret wrapper do not implement
+`Serialize`, have redacted `Debug` output and require an explicit `expose()` call
+to use the raw key. This type discipline does not itself guarantee that an
+application never copies or persists an exposed string; the owner page therefore
+keeps it in memory and clears it on exit.
 
-## Verification and remaining work
+## Verification and scope
 
 Wire tests verify fresh scoped reads, query ownership, omitted/null expirations,
 correct paths and status results, malformed identities, redacted secret results,
@@ -57,6 +59,7 @@ original ownership and audits. These are isolated synthetic accounts/keys, not
 production credentials or a deployed tenant UI.
 
 Existing server key authorization, audit rollback, concurrency and display-cache
-regressions remain part of workspace verification. The separate metadata/owner
-Web pages and remaining backend deadline review are not completed by this SDK.
-No production data, payment, SMTP, credentials or deployment is changed.
+regressions remain part of workspace verification. The metadata and owner Web
+pages are verified separately; broader backend deadline review and final release
+gates are outside this SDK contract. No production data, payment, SMTP,
+credentials or deployment is changed.

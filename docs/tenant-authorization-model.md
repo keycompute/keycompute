@@ -2,7 +2,9 @@
 
 This document defines the final authorization model for the Rust service and any service that shares its identity or authorization data.
 
-The migration is a hard cutover. There is no runtime compatibility path for the legacy `system/admin/user` role model, no dual-write, and no fallback from a missing tenant scope to a global query.
+The schema is greenfield-only in the current development phase. There is no runtime
+compatibility path for the legacy `system/admin/user` role model, no dual-write,
+and no fallback from a missing tenant scope to a global query.
 
 ## Final role axes
 
@@ -47,7 +49,9 @@ Tenant-scoped data always carries a server-verified `tenant_id`. User-owned data
 
 Tenant administrators may manage all tenant resources, including other members' tenant Responses. The original owner and billing subject remain immutable. Secrets are rotatable and revocable, never readable in plaintext.
 
-Personal `/me` endpoints always remain `tenant_id + user_id` scoped, even for a tenant admin.
+Tenant-owned personal-resource `/me` endpoints remain `tenant_id + user_id`
+scoped, even for a tenant admin. Global profile endpoints such as `/api/v1/me`
+remain user-scoped and do not invent a tenant.
 
 ## Authorization decision
 
@@ -67,7 +71,8 @@ The final context contains:
 - platform role;
 - active tenant ID;
 - verified tenant role and membership status;
-- token and authorization versions;
+- token and authorization versions; tenant configuration `revision` is not an
+  authorization input;
 - calculated permissions.
 
 API keys are fixed to their tenant and only receive inference permissions. Console sessions, inference keys, and node sessions are distinct credential kinds.
@@ -87,7 +92,9 @@ No handler may perform an unscoped object lookup for a tenant-sensitive resource
 
 ## Hard-cutover data model
 
-The final schema contains global users with `platform_role`, tenants with an owner and authorization version, `tenant_memberships` keyed by `(tenant_id, user_id)`, one-time `tenant_invitations`, and `tenant_audit_events`.
+The final schema contains global users with `platform_role`, tenants with an owner,
+configuration `revision` and authorization version, `tenant_memberships` keyed by
+`(tenant_id, user_id)`, one-time `tenant_invitations`, and `tenant_audit_events`.
 
 The legacy `users.tenant_id`, `users.role`, `UserRole::System/Admin/User`, `Permission::SystemAdmin`, and `is_admin()` semantics are removed rather than retained as aliases.
 
@@ -97,7 +104,9 @@ The `new/` Go service must consume this model if it shares identity or authoriza
 
 ## Delivery gates
 
-Each implementation phase is implemented, repeatedly reviewed, tested, committed and pushed directly on main. No new branch or worktree is created. The phases are development gates, not deployable mixed-mode states.
+Each implementation phase is repeatedly reviewed and tested through the repository
+contribution workflow. The phases are development gates, not deployable mixed-mode
+states.
 
 The final cutover requires schema assertions, authorization matrix tests, invitation concurrency tests, cross-tenant negative tests, cache and async isolation tests, Responses admin/member tests, formatting, workspace checks, Clippy, and a clean working tree.
 

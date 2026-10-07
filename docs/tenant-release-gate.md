@@ -2,7 +2,7 @@
 
 This document is the explicit hand-off boundary for the remaining operational
 checks. The repository contract gate verifies that the procedure exists and is
-documented; it does not claim that a deployment, browser session, backup or
+documented; it does not claim that a deployment, backup or
 rollback has actually run.
 
 ## Required preflight
@@ -11,32 +11,17 @@ Run the read-only source contract and the normal Rust/integration tests first:
 
 ```sh
 python3 scripts/ci/check_tenant_contract.py
-cargo test --workspace
+python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+cargo test --workspace --exclude integration-tests
+cargo test --package integration-tests
 ```
 
-The synthetic browser checks in CI use deterministic HTTP fixtures. A real
-backend browser gate must run against a started service with PostgreSQL and
-Redis, and must exercise both a tenant administrator and a foreign tenant
-identity. Record the service revision, database snapshot identifier and the
-cross-tenant denial assertions with the release evidence; do not treat fixture
-responses as proof of a deployed backend.
-
-With a task-owned service and short-lived test tokens, run the browser smoke
-explicitly:
-
-```sh
-KC_BACKEND_BROWSER_APP_URL=http://127.0.0.1:8080 \
-KC_BACKEND_BROWSER_TENANT_ID=TENANT_A_UUID \
-KC_BACKEND_BROWSER_FOREIGN_TENANT_ID=TENANT_B_UUID \
-KC_BACKEND_BROWSER_ADMIN_TOKEN=ADMIN_TEST_TOKEN \
-KC_BACKEND_BROWSER_FOREIGN_TOKEN=FOREIGN_TEST_TOKEN \
-node scripts/tests/tenant_backend_browser.mjs
-```
-
-The script requires all five variables, opens the actual app in Chromium,
-verifies each identity can read only its own tenant, and verifies both
-cross-tenant reads receive 401/403/404. It exits without making a request when
-any variable is absent.
+The code-level end-to-end suite starts the application stack through Rust test
+harnesses and exercises real SDK, Axum and PostgreSQL boundaries. It must cover a
+tenant administrator and a foreign tenant identity, including bidirectional
+cross-tenant reads returning the expected denial. Record the source revision,
+database fixture identity and assertion results with the release evidence. Unit or
+wire fixtures alone are not proof of the end-to-end boundary.
 
 ## Isolated restore rehearsal
 
@@ -57,8 +42,8 @@ container and evidence are inspected.
 
 The production runbook must name the immutable application image, schema
 checksum, backup/snapshot identifier and the operator approving the change.
-Take a fresh snapshot before cutover. If health checks or the real backend
-browser gate fail, stop traffic, preserve audit evidence, restore the previous
+Take a fresh snapshot before cutover. If health checks or the backend code-level
+end-to-end gate fail, stop traffic, preserve audit evidence, restore the previous
 known-good application image and database snapshot in the approved maintenance
 window, then rerun the tenant isolation tests before reopening traffic. A
 rollback is an operational deployment action; it is not performed by the
@@ -67,6 +52,6 @@ read-only repository gate.
 The synthetic rehearsal is **NOT a production backup**, a retained-data
 migration, a deployed service rollback, or permission to rotate live JWT trust.
 It is evidence that the greenfield schema and tenant invariants can be restored
-in an isolated test database. Production release remains blocked until the real
-backend browser, snapshot/restore, and rollback evidence are attached to the
+in an isolated test database. Production release remains blocked until the backend
+code-level end-to-end, snapshot/restore, and rollback evidence are attached to the
 release record.

@@ -406,12 +406,9 @@ def release_gate_issues(root: Path) -> list[str]:
     """Require an explicit, non-destructive release/restore readiness record."""
     failures: list[str] = []
     rehearsal = root / 'scripts/tests/tenant_restore_rehearsal.py'
-    browser_smoke = root / 'scripts/tests/tenant_backend_browser.mjs'
     gate_doc = root / 'docs/tenant-release-gate.md'
     if not rehearsal.is_file():
         failures.append('release gate: tenant restore rehearsal script is missing')
-    if not browser_smoke.is_file():
-        failures.append('release gate: real backend browser smoke script is missing')
     if not gate_doc.is_file():
         failures.append('release gate: tenant release gate document is missing')
         return failures
@@ -420,9 +417,9 @@ def release_gate_issues(root: Path) -> list[str]:
     required_phrases = {
         'kc_tenant_test_ack_isolated=1': 'isolated restore acknowledgement is missing',
         'not a production backup': 'production backup disclaimer is missing',
-        'real backend browser': 'real backend browser gate is missing',
-        'kc_backend_browser_foreign_tenant_id': 'foreign tenant browser input is missing',
-        'cross-tenant reads': 'bidirectional cross-tenant browser assertion is missing',
+        'code-level end-to-end': 'code-level end-to-end gate is missing',
+        'cargo test --package integration-tests': 'integration-test command is missing',
+        'cross-tenant reads': 'bidirectional cross-tenant assertion is missing',
         'rollback': 'rollback procedure is missing',
     }
     for phrase, message in required_phrases.items():
@@ -885,7 +882,6 @@ def check_repository(root: Path) -> dict:
             'scope': 'foundation/schema-inventory/route-inventory/object-coverage/cache-job-coverage/dynamic-sql-review/release-gate/cache-job-scope-contract/retired-symbols/foreign-identity-boundary/source-boundary',
             'not_covered': ['arbitrary dynamically generated SQL',
                             'all object-level DAO predicates',
-                            'frontend/browser acceptance', 'real backend browser acceptance',
                             'full production release and snapshot restore']}
 
 

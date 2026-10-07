@@ -81,5 +81,6 @@ automatic production cutover.
 
 A passing synthetic rehearsal is NOT a production backup, a retained-data
 migration, a deployed service rollback, or permission to rotate live JWT trust.
-The remaining full UI, native account-pool resource management, endpoint/security
-matrix and deployment gates must still pass before the final maintenance window.
+This foundation gate does not certify the full UI, native account-pool resource
+management, endpoint/security matrix, or deployment gates; each has its own
+acceptance evidence before a final maintenance window.

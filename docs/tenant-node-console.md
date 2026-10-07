@@ -50,9 +50,8 @@ audit and accepted-work completion protections remain authoritative.
 
 Native tests cover command/filter construction, revision and input constraints,
 state-specific actions, real route integration and bilingual dynamic labels.
-The browser runner exercises compiled WASM using intercepted synthetic metadata
-and command responses. It covers refusal without fake success, exact revisions,
+Code-level UI tests cover refusal without fake success, exact revisions,
 notification separation, archive filtering, context switches, in-flight result
-suppression, and non-admin/global-role denial. These UI tests are not worker,
+suppression, and non-admin/global-role denial. These tests are not worker,
 backend-authorization or production-settlement tests. Existing full-workspace
 PostgreSQL/HTTP and settlement regressions are run independently.

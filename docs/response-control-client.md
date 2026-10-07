@@ -47,10 +47,10 @@ success is reported. Append requests contain 1-512 objects and are bounded to
 backend cancellation and archive/settlement semantics are not replaced by a client
 success message.
 
-Private content response types retain redacted Debug formatting. Item pages also
+Private content response types retain redacted `Debug` formatting. Item pages also
 redact their content. This is not a promise that an application cannot explicitly
-serialize or retain resource content. No new UI or browser-storage policy is
-certified by this SDK-only delivery.
+serialize or retain resource content. The Web console's page-local handling and
+persistent-storage policy are documented in `tenant-response-console.md`.
 
 ## Verification
 
@@ -62,8 +62,9 @@ CAS, item pagination/append/removal, conversation/Response deletion and retained
 ownership. Deletion does not initiate extra upstream inference.
 
 The `/tenant/responses` UI now exposes local and indexed native modes, including
-native Response input-item inspection and indexed cancellation. Its production
-Chromium checks pass; synthetic browser fixtures are still not backend
-authorization evidence. Provider/Key/financial pages and final release gates
-remain separate. No production database, credentials, payment, notification,
+native Response input-item inspection and indexed cancellation. Code-level Web
+tests cover its state, routing and response-validation behavior;
+SDK/Axum/PostgreSQL tests remain the backend authorization evidence. Provider,
+Key and financial pages have separate scope documents, and final release gates
+remain independent. No production database, credentials, payment, notification,
 service or deployment is changed.

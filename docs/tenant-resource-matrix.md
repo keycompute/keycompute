@@ -4,10 +4,10 @@ The matrix is the source of truth for the hard-cutover authorization implementat
 
 | Resource | Scope | Tenant admin | Member | Platform |
 |---|---|---|---|---|
-| users | platform identity | manage members in own tenant | self only | root; operator allowlist |
-| tenants | tenant control plane | settings in own tenant | read active context | root/operator lifecycle |
-| tenant_memberships | tenant | full member CRUD except platform role | none | root explicit support; operator diagnostics only |
-| tenant_invitations | tenant | create/revoke/consume own tenant | none | root explicit support; operator diagnostics only |
+| users | platform identity | manage membership state in own tenant, not global users | self only | root lifecycle; operator bounded diagnostics only |
+| tenants | tenant control plane | settings in own tenant | read active context | root lifecycle; operator health metadata only |
+| tenant_memberships | tenant | member management except platform role | read own selected context | no platform-role bypass of tenant endpoints |
+| tenant_invitations | tenant | create/revoke in own tenant | accept an invitation addressed to the verified user | no platform-role bypass of tenant endpoints |
 | produce_ai_keys | tenant + user owner | manage all own-tenant keys; secrets never read | own keys | root audited |
 | accounts | tenant-owned | full CRUD in own tenant | use only | root global management; operator diagnostics |
 | passthrough_bindings | tenant-owned | full CRUD in own tenant | use only | root global management; operator diagnostics |

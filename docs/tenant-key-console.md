@@ -48,14 +48,13 @@ Existing DAO ownership, authorization, audit and cache rules are unchanged.
 ## Verification
 
 Native editor tests cover UUIDs, dates, exact nullable expiry, observed revisions,
-immutable ownership, state-key identity, routes and translated labels. A checked-in
-Chromium runner exercises the compiled WASM with synthetic intercepted HTTP:
-metadata and pending controls, member selection, retained history, current scopes,
-clipboard success/rejection, secret redaction/nonpersistence, direct personal
-creation, late results across workspace changes and narrow-viewport dialogs.
-It is UI evidence, not a production payment, upstream or security deployment.
+immutable ownership, state-key identity, routes and translated labels. Code-level
+Web tests cover metadata and pending controls, member selection, retained history,
+current scopes, clipboard result handling, secret redaction/nonpersistence, direct
+personal creation and late results across workspace changes. They are UI logic
+evidence, not a production payment, upstream or security deployment.
 Real key SDK/Axum/PostgreSQL, expiry, audit and concurrent-owner tests are retained
 in full workspace verification. No backend/schema/production credential changes.
 
-Provider/financial resource UI, account-pool native administration and complete
-endpoint/release gates remain separate from these Key pages.
+Provider, financial and account-pool native consoles have their own scope
+contracts. Complete endpoint and release gates remain separate from these Key pages.

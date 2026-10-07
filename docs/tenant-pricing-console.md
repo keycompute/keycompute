@@ -47,10 +47,10 @@ precision, immutable identity, dates, translated labels and the canonical route.
 An actual SDK/Axum/PostgreSQL test covers audited CRUD/default, version conflicts,
 member and inference-key rejection and foreign-tenant resource denial.
 
-The checked-in Chromium runner executes production-compiled WASM with synthetic
-same-origin HTTP. It covers the CRUD flow, error handling, literal search, an
-in-flight A command during a switch to member B, and foreign/global response
-guards. Existing tenant, operations and node browser runners remain in CI.
-Browser mocks are UI evidence, not a substitute for the real backend tests.
+Code-level Web tests cover CRUD state transitions, error handling, literal search,
+an in-flight A command during a switch to member B, and foreign/global response
+guards. CI runs these with the SDK/Axum/PostgreSQL end-to-end tests; deterministic
+in-process fixtures do not replace the real backend tests.
 Platform pricing is documented separately in `platform-pricing-console.md`;
-other remaining tenant resource pages are not certified by this delivery. No production deployment is performed.
+other tenant resource pages are not certified by this document. No production
+deployment is performed.

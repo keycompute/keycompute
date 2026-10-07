@@ -53,11 +53,10 @@ and observes HTTP 422 with no row created, then verifies explicit global and
 cross-tenant CRUD/default, current versions, audited writes and operator,
 tenant-admin and inference-key denial. All fixtures are isolated test data.
 
-The checked-in Chromium runner exercises compiled WASM with synthetic same-origin
-HTTP. It checks platform/tenant target separation, exact editor values, explicit
-writes, failure handling, delayed old-target completions and forbidden UI scopes.
-The existing tenant, operations, node and tenant-pricing browser runners remain.
-UI fixtures are not represented as production or backend security tests.
+Code-level Web tests check platform/tenant target separation, exact editor values,
+explicit writes, failure handling, delayed old-target completions and forbidden UI
+scopes. They run with the SDK/Axum/PostgreSQL end-to-end suite and are not
+represented as production or backend security tests.
 
 This delivery changes no database schema, backend grant, production credential,
 payment, service or deployment. Native account-pool resources, other resource

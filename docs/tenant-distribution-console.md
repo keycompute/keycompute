@@ -60,7 +60,6 @@ Client wire tests cover fresh reads, exact target/ID/page validation, beneficiar
 shape, exact commission-rate input, revisioned patch/delete and explicit platform
 targeting. Existing Axum/PostgreSQL distribution-policy tests remain the authority
 for transactional authorization, active-member validation, audit rollback and
-optimistic conflicts. Web unit tests cover draft identity, immutable beneficiary,
-nullable fields, route separation and exact revisions. The checked-in Chromium
-runner exercises the production-compiled WASM using synthetic intercepted HTTP;
-it is UI evidence, not evidence of a real payout or production deployment.
+optimistic conflicts. Code-level Web tests cover draft identity, immutable
+beneficiary, nullable fields, route separation, exact revisions and workspace-race
+isolation. These tests do not represent a real payout or production deployment.

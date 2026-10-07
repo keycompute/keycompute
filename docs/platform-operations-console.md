@@ -50,11 +50,11 @@ available from this console; it never reads Responses or Conversation bodies.
 
 Native tests exercise capability separation, global/selected profile validation,
 identity-change races, UTC window and literal-search limits, numeric projection
-and routing. `scripts/tests/operations_console_browser.mjs` runs actual compiled
-WASM against isolated synthetic HTTP, including delayed A-to-B report switching,
-partial capabilities, pagination, failures and exact currency values. CI runs it
-after the existing tenant console runner against the production image assets.
+and routing. Code-level SDK/Axum/PostgreSQL tests cover the request paths,
+authorization boundaries, pagination, failures and exact currency values. CI runs
+the native test suites and separately verifies that the production Web image builds.
 
-These are presentation tests, not a replacement for the existing real database
-and HTTP operations authorization tests. Tenant business-resource pages, operator
-node-control UI, native resource administration and final cutover remain separate.
+UI unit tests do not replace the real database and HTTP operations authorization
+tests. This platform console intentionally remains read-only; explicit platform
+node-control, privileged native-resource administration and final cutover have
+separate authorization and acceptance gates.

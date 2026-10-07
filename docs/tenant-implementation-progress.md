@@ -1,6 +1,6 @@
 # Current contract and acceptance status
 
-The acceptance contract is the latest **phase0–8** plan. The table below is the
+The acceptance contract is the latest **phase 0–8** plan. The table below is the
 current delivery summary; dated/phase-numbered entries below it are historical
 records, not statements that previously delivered features are still missing.
 No complete-subsystem or production-cutover acceptance is claimed.
@@ -10,11 +10,11 @@ No complete-subsystem or production-cutover acceptance is claimed.
 | 0 | Final roles, ownership rules and schema/route/cache-job inventories | Final exhaustive object/endpoint review |
 | 1 | Global identity, memberships, invitations/audits, explicit node sessions and resource ownership constraints | Production cutover is not this schema gate |
 | 2 | Credential separation, live original-session proof and queue/dispatch authority; Key/pricing/reporting timing regressions | Remaining provider/binding and other endpoint timing review |
-| 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks, local managed resources, native account-pool Responses and indexed Conversations/Responses control | Final resource UI and remaining control review |
+| 3/5 | Tenant-scoped core/resource backends, financial/distribution controls, node/tasks, local managed resources, native account-pool Responses and indexed Conversations/Responses control | Remaining control and object-scope review |
 | 4 | Member/invitation/ownership backend, typed SDK and working core Web pages | Final deployment acceptance |
 | 6 | Root lifecycle/settings, operator read allowlist and operations UI; platform monitoring | Remaining platform endpoint provenance review |
-| 7 | Workspace/member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding pages, local Responses/Conversation, indexed native account-pool Responses/Conversations, Key/owner pages, distribution and tenant financial-control pages | Final resource UI and release acceptance |
-| 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/smoke/rollback acceptance |
+| 7 | Role-aware workspace/settings/global switcher, member/invitation/audit, operator, nodes/tasks, tenant/platform pricing, provider/binding, local and indexed native Responses/Conversations, Key/owner, distribution and tenant financial pages | Final UI accessibility review and release acceptance |
+| 8 | Limited static foundation gate, Rust foreign-identity rejection and isolated snapshot recovery rehearsal | Full final security matrix, production deployment/rollback acceptance |
 
 Payment channels remain platform-wide. Financial records are tenant-scoped and
 wallets remain per-member, not a shared tenant balance pool. Finance pages stay
@@ -22,14 +22,37 @@ narrow: the control page exposes only expired-reservation recovery and metadata-
 pending-withdrawal review, and does not expose the broader financial write APIs.
 
 Page hiding is presentation only; the server continues to enforce the credential,
-current role/membership, resource scope, ownership and state. Synthetic Chromium
-fixtures demonstrate UI behavior, not production/backend authorization. Exact
-per-slice native/server/database and browser receipts are recorded below.
+current role/membership, resource scope, ownership and state. UI behavior is
+covered by code-level tests and does not establish production/backend authorization.
+Exact per-slice native/server/database receipts are recorded below.
 
-Foundation baseline `f427ae7`/CI106 is historical. Current accepted source is main;
+Foundation baseline `f427ae7`/CI106 is historical. Current accepted source is the
+repository HEAD;
 archived preparations are not implementation dependencies and must not be replayed
 as if verified. No production data, credentials, payments, SMTP or deployment is
 changed by these development deliveries.
+
+
+## Current follow-up — role-aware workspace and configuration revision
+
+The authenticated header now switches among personal/platform context and active
+tenant memberships. `/tenant` is a role-aware overview available to every signed-in
+user, including a zero-membership state; tenant controls and resource links render
+only for their verified capability. Workspace settings moved to
+`/tenant/settings`, and platform tenant creation searches active global users for
+the initial owner instead of requiring a raw UUID.
+
+Editable tenant configuration now uses `tenants.revision` and
+`expected_revision`, independently of authorization versions. Name, description
+and default-limit saves therefore preserve selected sessions, while owner, tenant
+status and self-membership changes retain the authorization invalidation boundary.
+Invitation acceptance can immediately select and enter the new membership. Unsaved
+settings require confirmation before a header workspace switch.
+
+Code-level Web, client and SDK/Axum/PostgreSQL tests cover capability routing,
+selection installation, configuration serialization/session preservation,
+invitation entry and stale-result fencing. The production Web image has a separate
+build gate. This development follow-up is not production cutover evidence.
 
 
 ## Current follow-up — native account-pool enumeration and Conversations
@@ -52,7 +75,7 @@ metadata/items. The stale direct-only native panel was removed.
 Focused validation for this follow-up: client-api wire tests **12/12**, native
 PostgreSQL/Axum control tests **8/8**, full scoped resource integration tests
 **42/42**, strict targeted Clippy, formatting and diff checks. The production Web
-bundle and Chromium acceptance now pass, including indexed native Response input
+bundle compiles, and code-level Web tests cover indexed native Response input
 items/cancellation and native Conversation PATCH/item commands. CI run
 `36848698538` is green for client-api, Web and server. The client rejects native
 Conversation envelopes with a local revision or missing owning account. No
@@ -73,7 +96,7 @@ The gate currently scans 296 production route literals, 47 schema tables
 and 634 Rust files with no findings.
 
 This is a provenance and classification gate, not a replacement for object-level
-DAO predicates, live authorization matrices, browser acceptance or deployment /
+DAO predicates, live authorization matrices, code-level end-to-end tests or deployment /
 restore rehearsal. No production data, credentials, upstream resources, restart or
 deployment changed.
 
@@ -1028,7 +1051,7 @@ checks cover row/audit waits. Existing already-credited earnings are not rewritt
 
 A real PostgreSQL regression exposed the old settings timestamp trigger overriding
 the new monotonic revision. The conflicting legacy function/trigger was removed
-from greenfield001; the single remaining identity/version guard handles runtime
+from the greenfield `001_init.sql` schema; the single remaining identity/version guard handles runtime
 writers and no-ops. Repeated startup seed inserts are safe and do not recreate
 user privilege state; new users always start with the fixed global
 `platform_role = 'none'` value. No incremental schema/compatibility migration was added.
@@ -1150,7 +1173,8 @@ InvitationToken accepts only the server's exact 64-hex fragment format, has no
 serialization implementation and redacts Debug. Invitation creation Debug omits
 its one-time recovery link. Acceptance strips token-bearing transport/reflected
 errors before returning them to callers, while preserving authorization and
-availability error categories. A future UI must keep tokens in temporary memory,
+availability error categories. At this checkpoint, a later UI still needed to keep
+tokens in temporary memory,
 scrub fragments before navigation and fence callbacks by login/workspace.
 
 Five new SDK tests cover role parsing, secret/error redaction, no unsafe retries,
@@ -1265,7 +1289,7 @@ Successful selection creates a new UI ownership epoch and invalidates cached
 reads while retaining remember-me. Old unauthorized requests do not replay as
 the newly selected tenant. Session comparisons include selected-tenant identity.
 
-Review caught a restored-browser no-op bug: an opaque stored token may not yet
+Review caught a restored-session no-op bug: an opaque stored token may not yet
 have a local selected_tenant_id even though the loaded server profile does.
 The profile is the source for the no-op comparison, so global selection remains
 possible. No tenant is invented and no server authorization is inferred.
@@ -1290,8 +1314,8 @@ and membership fields/domains, composite membership identity, hashed one-time
 invitations, the exact unique pending-email index, and all 47 classified schema
 tables. It rejects retired executable authorization symbols and explicit legacy
 users ownership SQL, while ignoring comments and quoted lookalikes. It reports
-its limits: SQL aliases/dynamic queries, complete DAO ownership, browser acceptance
-and production release are not certified by this lexical gate.
+its limits: SQL aliases/dynamic queries, complete DAO ownership, code-level
+end-to-end behavior and production release are not certified by this lexical gate.
 
 CI runs the checker and now triggers on schema-only, inventory-only and repository
 exclusion changes. The checker, inventory and restore safety suite has 30 passing
@@ -1373,9 +1397,9 @@ are single-dispatch with displayed revisions where required. Original selected
 user/tenant, UI epoch and authorization versions fence asynchronous results. Global
 selection never invents a tenant; restored profiles remain authoritative.
 
-Browser review reproduced dirty A-form state under B. Page-local keyed fragments,
+Code-level regression review reproduced dirty A-form state under B. Page-local keyed fragments,
 not a key on a single static component, now remount all private form/dialog/link
-state. Another real browser failure showed expired restored credentials clearing
+state. Another regression showed expired restored credentials clearing
 an invitation before login and redirecting to Dashboard. Pending invitation binds
 only after a verified profile is loaded; existing verified sessions still clear
 it on logout or workspace change. Acceptance remains explicit, one-shot and
@@ -1389,13 +1413,11 @@ included in the workspace total). Native all-target, Web/client WASM, strict
 all-target/all-feature Clippy, formatting and the 23 Python checks passed. The
 47-table foundation gate passed within its documented non-certification limits.
 
-A real production-mode WASM bundle passed six Chromium scenario groups with
-synthetic intercepted HTTP: member commands and revisions, literal filtering,
+Code-level Web regressions cover member commands and revisions, literal filtering,
 invitations/audit, dirty workspace switching, global/member/root/operator guards,
 login and expired-restoration invitation resumption, single acceptance, config
-save and ownership-transfer session invalidation. Browser page errors: zero.
-The same checked-in runner now executes against CI's locally built production
-image assets. UI fixture tests are not represented as production/backend tests.
+session preservation and ownership-transfer session invalidation. CI also builds the production
+Web image. UI unit fixtures are not represented as production/backend tests.
 Twenty-three source/workflow/test files were verified; no application source drift.
 
 This accepts the core tenant console only. Tenant resource pages, operator UI,
@@ -1426,17 +1448,14 @@ reuse a previous snapshot. Normal same-workspace refresh remains supported.
 No background polling, raw business resource reads or mutation controls exist.
 
 Final independent default-parallel workspace: 2707 passed, 0 failed, 30
-original ignored tests unchanged, including desktop/mobile. Web190 is an included
+original ignored tests unchanged, including desktop/mobile. Web 190 is an included
 subset with seven new cases. Native all-target, strict all-target/all-feature
-Clippy, Web/client WASM, format, whitespace and Python23 pass. Seventeen
-frozen source/workflow/browser files match the tested versions.
+Clippy, Web/client WASM, format, whitespace and Python 23 pass. Seventeen
+frozen source/workflow/test files match the tested versions.
 
-Production compiled WASM passed three operations browser scenario groups with
-synthetic HTTP, including delayed A-to-B aggregates, partial grants, exact values,
-pagination, query encoding and error handling. The existing six-group tenant
-console browser also passed against the same release bundle; zero page errors.
-The operations runner is registered in CI alongside the tenant runner. These UI
-fixtures do not replace backend authorization tests.
+Code-level Web tests cover delayed A-to-B aggregates, partial grants, exact values,
+pagination, query encoding and error handling. The release WASM bundle compiles,
+and the UI unit fixtures do not replace backend authorization tests.
 
 No backend permissions, schema, production DB, credentials, payments or deployment
 changed. Tenant resource UI, operator node-control UI, native account-pool resource
@@ -1466,21 +1485,20 @@ Metadata details use the observed list snapshot and never fetch task bodies.
 
 Tenant/user/epoch/version and submitted query keys fence all page results.
 Commands are single-dispatch, including uncertain failures, and returned resource
-identities are checked. A real browser scenario switches from A during a pending
-task command to member workspace B: old success is not displayed or replayed.
+identities are checked. A code-level race regression switches from A during a
+pending task command to member workspace B: old success is not displayed or replayed.
 Queries are bounded and literal; empty owner means only all owners of this tenant.
 
 Final independent default-parallel workspace: 2712 passed, 0 failed, 30
-original ignored tests unchanged, including desktop/mobile. Web195 is an included
+original ignored tests unchanged, including desktop/mobile. Web 195 is an included
 subset with five added cases. Native all-target, strict all-target/all-feature
-Clippy, Web/client WASM, format, whitespace, Python23 and foundation checks pass.
-Sixteen source/workflow/browser hashes match final verification.
+Clippy, Web/client WASM, format, whitespace, Python 23 and foundation checks pass.
+Sixteen source/workflow/test hashes match final verification.
 
-Production-mode WASM passed four new browser scenario groups, and the existing
-six core-tenant plus three operations groups also passed against that bundle.
-All HTTP data was synthetic and browser page errors were zero. The node runner
-is registered in CI beside the other two. This is UI evidence, not a new live
-worker, payment or backend-security test. Existing backend regressions remain.
+Code-level Web tests cover the node scenarios together with the core-tenant and
+operations cases, and the production-mode WASM bundle compiles. This is UI logic
+evidence, not a new live worker, payment or backend-security test. Existing backend
+regressions remain.
 
 Remaining: Provider/Key/pricing/finance/Responses resource UI, explicit-platform
 node control UI, native account-pool resource management and final endpoint/
@@ -1511,15 +1529,15 @@ stops. JWT lifetime remains five seconds. Live-key expiry and the original stop,
 owner, single-charge and no-extra-inference assertions remain. No production
 stream, authorization, schema or accounting code changed.
 
-The focused case, all33 resource tests with eight threads, and all three replay
+The focused case, all 33 resource tests with eight threads, and all three replay
 connection tests passed. Final independent default-parallel workspace: 2712
 passed, 0 failed, 30 original ignored unchanged, including desktop/mobile.
 Native all-target, strict all-target/all-feature Clippy, Web/client WASM, format,
-whitespace and Python23 checks pass. The one changed integration source hash
+whitespace and Python 23 checks pass. The one changed integration source hash
 matched final verification. This repair does not represent another UI feature.
 
-CI135 for the node UI independently passed, including all three production-image
-browser runners. CI134's old failed attempt remains historical; a separate commit
+CI135 for the node UI independently passed its native tests and production-image
+build. CI134's old failed attempt remains historical; a separate commit
 carries this deterministic correction and receives its own CI run. Full native
 resource management, remaining resource pages and final release remain unfinished.
 
@@ -1546,11 +1564,9 @@ parallel workspace, all-target native check, strict all-target/all-feature Clipp
 Web/client WASM, formatting and 23 Python tests all passed. Existing ignored tests
 were unchanged. No backend authorization, schema or settlement code changed.
 
-Production-compiled WASM passed three new pricing browser scenario groups with
-zero page errors. All existing six tenant, three operator and four node browser
-groups also passed on the same bundle. The new runner is added to CI's existing
-production-image browser step. UI HTTP fixtures are synthetic; backend contract
-coverage is the separately executed actual PostgreSQL/Axum test.
+Code-level Web tests cover the pricing scenarios together with the existing tenant,
+operator and node state transitions, and the production WASM bundle compiles.
+Backend contract coverage is the separately executed actual PostgreSQL/Axum test.
 
 Nineteen non-document source/test/workflow files were frozen before the final
 pipeline. An additional aggregate inspection was denied and not executed; the
@@ -1585,21 +1601,20 @@ backend grants, transaction semantics and cost estimation are not changed here.
 
 Five new wire tests and three Web regressions cover exact scope/versions, fresh
 reads, invalid/malformed results, no automatic replay and verified UI identity.
-A real SDK/Axum/PostgreSQL test first reproduces the previous missing-scope HTTP422
+A real SDK/Axum/PostgreSQL test first reproduces the previous missing-scope HTTP 422
 without creating a row, then verifies explicit global/tenant CRUD/default, stale
 versions, audit records and operator/tenant-admin/inference-key denial. A root
 selected in A can explicitly administer B without membership in B.
 
 Final independent default-parallel workspace: 2732 passed, 0 failed, 30 original
-ignored tests unchanged, including desktop/mobile. Web204 and the targeted SDK/
+ignored tests unchanged, including desktop/mobile. Web 204 and the targeted SDK/
 HTTP checks are included subsets. All-target native, strict all-target/all-feature
-Clippy, Web/client WASM, formatting, whitespace and Python23 pass. All twelve
+Clippy, Web/client WASM, formatting, whitespace and Python 23 pass. All twelve
 frozen source/workflow/test hashes match the verified versions.
 
-Production-mode compiled WASM passed three new platform-pricing browser groups;
-all four existing core-tenant, operator, node and tenant-pricing runners passed
-on the same bundle with no page errors. The new runner is registered in CI.
-Synthetic browser HTTP is UI evidence, not a substitute for backend tests.
+Code-level Web tests cover the new platform-pricing cases together with existing
+core-tenant, operator, node and tenant-pricing behavior. The production-mode WASM
+bundle compiles; UI unit fixtures are not a substitute for backend tests.
 
 No production database, credentials, payment, SMTP, service or deployment changed.
 Key SDK preparation remains separate and unintegrated; its UI preparation was
@@ -1634,7 +1649,7 @@ Existing key audit rollback, concurrency and display-cache tests were retained.
 Final independent default-parallel workspace: 2741 passed, 0 failed, 30 original
 ignored tests unchanged, including desktop/mobile. Targeted wire/HTTP and the
 19 scoped/issuance regressions are included subsets. All-target native, strict
-all-target/all-feature Clippy, Web/client WASM, formatting, whitespace, Python23
+all-target/all-feature Clippy, Web/client WASM, formatting, whitespace, Python 23
 and the foundation gate passed. All four frozen source/test files match.
 
 This is a verified client slice, not the Key administration/owner-claim Web page.
@@ -1647,7 +1662,7 @@ payment, SMTP, service or deployment was changed. See key-control-client.md.
 ## Current phases 2/3/5 — all key-control effects bound to the original session
 
 Actual isolated HTTP regressions reproduced owner rotation claims and direct
-personal key creation returning200 after their signed JWT expired during audit
+personal key creation returning HTTP 200 after their signed JWT expired during audit
 INSERT. A separate exact-backend tenant-lock wait reproduced personal creation
 accepting a revoked original token version. These were runtime authorization
 gaps, not just SDK or fixture improvements.
@@ -1679,7 +1694,7 @@ Final independent default-parallel workspace: 2745 passed, 0 failed, 30 original
 ignored tests unchanged, including desktop/mobile. Twelve final expiry/concurrent
 read cases passed with eight threads, and 27 existing key/SDK/read regressions
 passed; both are included subsets. All-target native, strict all-target/all-feature
-Clippy, Web/client WASM, formatting, whitespace, Python23 and foundation checks
+Clippy, Web/client WASM, formatting, whitespace, Python 23 and foundation checks
 passed. Five frozen source hashes match their tested bytes.
 
 No production database, credentials, payment, SMTP, service or deployment changed.
@@ -1714,9 +1729,9 @@ formatting, whitespace, Python CI tests and the foundation checker passed.
 All four source/test files match their frozen validation hashes.
 
 The separate /tenant/responses Web draft remains UNACCEPTED. Intermediate Web and
-browser checks passed after full owner/mode/type state keys were added, but its
+native checks passed after full owner/mode/type state keys were added, but its
 remaining strict lint correction was safety-denied and not replayed. All fifteen
-UI/workflow/browser files were archived and excluded from this client commit.
+UI/workflow/test files were archived and excluded from this client commit.
 Key/Provider/financial UI, native resources, other transaction boundaries and final
 release gates remain unfinished. No production DB, credential, payment, email,
 service or deployment was changed. See response-control-client.md.
@@ -1813,10 +1828,9 @@ Independent default-parallel workspace revalidation: 2773 passed, 0 failed,
 30 original ignored tests unchanged, including desktop/mobile. Native all-target
 check, strict all-target/all-feature Clippy, Web/client WASM, format/whitespace,
 Python CI tests and the limited foundation checker passed. All fifteen frozen
-source/test/workflow hashes match. The production-mode bundle passed four new
-resource browser scenario groups and all five existing browser runners. A fresh
-narrow-viewport screenshot was inspected. Browser HTTP is synthetic; real
-SDK/Axum/PostgreSQL resource regressions remain in the complete workspace.
+source/test/workflow hashes match. Code-level Web tests cover the new resource
+scenarios, and the production-mode bundle compiles. Real SDK/Axum/PostgreSQL
+resource regressions remain in the complete workspace.
 
 This accepts the actual resource page, not just the preceding SDK. Key/Provider/
 financial resource UI, account-pool native management and final endpoint/release
@@ -1841,18 +1855,18 @@ is not a memory-zeroization or system-clipboard-erasure guarantee. Uncertain cla
 are not replayed. Metadata expiry preserves omission/null/explicit values, and
 retained revocation is not misrepresented as physical deletion.
 
-Five editor/route tests and five Chromium scenario groups cover current member
+Five editor/route tests and code-level UI regressions cover current member
 selection, exact nullable expiration, metadata conflicts, one-time rotation/claim,
 secret error reflection and nonpersistence, private result isolation, personal Key
-creation, retained history, permission gates and mobile focused dialogs. All six
-existing browser runners also pass on the same production-mode bundle. Synthetic
-browser HTTP is distinct from the real SDK/Axum/PostgreSQL contracts.
+creation, retained history, permission gates and mobile focused dialogs. The
+production-mode bundle compiles, while the real SDK/Axum/PostgreSQL contracts
+remain the end-to-end authority.
 
 Independent default-parallel complete workspace: 2778 passed, 0 failed,
-30 original ignored tests unchanged, including desktop/mobile. Web216 and
+30 original ignored tests unchanged, including desktop/mobile. Web 216 and
 17 real key-client/owner/expiry regressions are included subsets. Native all-target
 check, strict all-target/all-feature Clippy, Web/client WASM, format, whitespace,
-Python23 and limited foundation checks pass. Seventeen frozen source/workflow/test
+Python 23 and limited foundation checks pass. Seventeen frozen source/workflow/test
 hashes match the tested bytes. No lint suppression or permission relaxation used.
 
 The read-only financial page/client remains preparation outside this accepted
@@ -1874,12 +1888,12 @@ wallet DTO. Uninitialized member wallets are distinguished from missing/forbidde
 owners, and viewing financial data never creates a wallet or moves money.
 
 The UI keeps applied filters separate from drafts. Usage windows require explicit
-timezones and at most31days in this page. Payment filters do not pretend to support
+timezones and at most 31 days in this page. Payment filters do not pretend to support
 usage dates. Memoized currency totals are not refetched on pagination. Workspace
 identity and original resource owners fence private inspector state and responses.
 The renderer escapes metadata in an opaque, focused mobile-bounded dialog.
 
-A real isolated table-lock regression first reproduced HTTP200 after revocation
+A real isolated table-lock regression first reproduced HTTP 200 after revocation
 of the original user token version. All six reporting handler families now use the
 existing ConsoleSessionProof on the writer after their final DAO query. Original
 signed expiry, token, tenant, role and suspend/regrant transitions are checked,
@@ -1892,11 +1906,11 @@ Axum/PostgreSQL contract were added alongside the two original-session regressio
 Independent final default-parallel workspace: 2790 passed, 0 failed,
 30 original ignored tests unchanged, including desktop/mobile. Targeted tests
 are included subsets. All-target native, strict all-target/all-feature Clippy,
-Web/client WASM, format, whitespace, Python23 and limited foundation checks passed.
-All20 frozen source/test/workflow hashes match. The production-mode WASM passed
-three new finance browser groups and all seven existing browser suites. A fresh
-mobile screenshot was inspected; synthetic browser HTTP is not backend or real
-payment evidence. Clippy's test initializer finding was fixed without suppression.
+Web/client WASM, format, whitespace, Python 23 and limited foundation checks passed.
+All 20 frozen source/test/workflow hashes match. The production-mode WASM passed
+compilation, and code-level Web tests cover the finance scenarios together with the
+existing tenant resource behavior. This is not backend or real payment evidence.
+Clippy's test initializer finding was fixed without suppression.
 
 The current summary at the top now replaces stale claims that core tenant pages
 and workspace switching remain unimplemented. This read-only finance page is not
@@ -1956,8 +1970,8 @@ policy 8/8, distribution rules 16/16 and scoped distribution reads 4/4. Strict
 client/Web Clippy and Web/client WASM checks pass. A full workspace build was started
 with incremental output disabled, then deliberately stopped when free disk reached
 the 15 GiB safety threshold; no failing test had been reported before the stop.
-The checked-in production-bundle Chromium scenario is therefore enforced by CI for
-this slice. No production data, balance, payment, SMTP, credential, restart or
+The code-level Web and PostgreSQL/Axum suites are the enforced regressions for this
+slice. No production data, balance, payment, SMTP, credential, restart or
 deployment is changed. See `tenant-distribution-console.md`.
 
 
@@ -1976,9 +1990,9 @@ DTOs deny unknown fields, validate exact decimal strings and fail closed on fore
 duplicate, over-limit or version-drift rows. Review dispatch is single-shot with no
 automatic retry, and the Web command path fences late results by workspace/session.
 
-The production-compiled WASM browser scenario passed five cases covering exact
-expired recovery, revision-bound metadata approval/rejection, uncertain single
-dispatch, late cross-workspace results and global-role/foreign-row rejection.
+Code-level Web tests cover exact expired recovery, revision-bound metadata
+approval/rejection, uncertain single dispatch, late cross-workspace results and
+global-role/foreign-row rejection.
 The focused client wire suite passed 6/6; the Web suite passed 231/231; isolated
 wallet and tenant-tip suites passed 12/12 and 11/11 on a fresh disposable database;
 server checks, format, strict client/Web Clippy and the release WASM build passed.

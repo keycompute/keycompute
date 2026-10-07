@@ -350,10 +350,9 @@ let quote = '\\''; let lifetime: &'a str = text; }
             )
             (root/'scripts/tests').mkdir(parents=True)
             (root/'scripts/tests/tenant_restore_rehearsal.py').write_text('# isolated fixture\n')
-            (root/'scripts/tests/tenant_backend_browser.mjs').write_text('// isolated fixture\n')
             (root/'docs/tenant-release-gate.md').write_text(
                 'KC_TENANT_TEST_ACK_ISOLATED=1\nNOT a production backup\n'
-                'real backend browser\nKC_BACKEND_BROWSER_FOREIGN_TENANT_ID\n'
+                'code-level end-to-end\ncargo test --package integration-tests\n'
                 'cross-tenant reads\nrollback\n'
             )
             (root/'Cargo.toml').write_text('[workspace]\nmembers = ["crates/example"]\n')
