@@ -445,6 +445,7 @@ impl RateLimitEntry {
 }
 
 /// 限流器 trait
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RateLimiter: Send + Sync + std::fmt::Debug {
     /// Drop expired process-local counters. Distributed backends may leave

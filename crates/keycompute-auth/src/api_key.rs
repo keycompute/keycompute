@@ -408,6 +408,7 @@ impl Default for ProduceAiKeyValidator {
 }
 
 /// Produce AI Key 认证 trait
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait ProduceAiKeyAuth: Send + Sync {
     /// 验证 Produce AI Key

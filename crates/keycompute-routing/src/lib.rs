@@ -35,6 +35,7 @@ use uuid::Uuid;
 /// - `nodes.capabilities_json->>'runtime' = 'ollama'` (runtime 类型匹配)
 /// - `node_sessions.accepted_models_json` 包含目标模型名 (已在 heartbeat 时校验为注册能力的子集)
 /// - 不读取 Redis，不使用客户端自报的负载或本地失败计数
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait NodeCapabilityIndex: Send + Sync {
     /// 检查是否存在 ready 节点可以处理指定模型

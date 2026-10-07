@@ -279,6 +279,7 @@ pub(super) fn responses_execution_reservation_ttl(
     .max(RESPONSES_EXECUTION_RESERVATION_MIN_TTL)
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub(super) trait ResponsesReservationCleanup: Send + Sync {
     async fn delete(
