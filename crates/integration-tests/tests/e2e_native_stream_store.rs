@@ -731,7 +731,7 @@ async fn node_tasks_use_explicit_tenant_for_multi_membership_users() {
 
 #[tokio::test]
 async fn queued_nodes_keep_original_versions_instead_of_refreshing_their_authority() {
-    for change in ["token", "membership", "tenant", "expiry"] {
+    for change in ["token", "membership", "tenant_status", "expiry"] {
         let f = Fixture::new(true).await;
         let mut proof = integration_tests::db::fixture_dispatch_identity(
             &f.pool,
@@ -762,15 +762,17 @@ async fn queued_nodes_keep_original_versions_instead_of_refreshing_their_authori
             "membership" => {
                 f.pool.execute(Statement::from_sql_and_values(DbBackend::Postgres,"UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",[f.node.tenant_id.into(),f.caller_id.into()])).await.unwrap();
             }
-            "tenant" => {
-                f.pool
-                    .execute(Statement::from_sql_and_values(
-                        DbBackend::Postgres,
-                        "UPDATE tenants SET name=name||'-updated' WHERE id=$1",
-                        [f.node.tenant_id.into()],
-                    ))
-                    .await
-                    .unwrap();
+            "tenant_status" => {
+                for status in ["inactive", "active"] {
+                    f.pool
+                        .execute(Statement::from_sql_and_values(
+                            DbBackend::Postgres,
+                            "UPDATE tenants SET status=$2 WHERE id=$1",
+                            [f.node.tenant_id.into(), status.into()],
+                        ))
+                        .await
+                        .unwrap();
+                }
             }
             "expiry" => {
                 while Utc::now().timestamp() < proof.credential_expires_at.unwrap() {
