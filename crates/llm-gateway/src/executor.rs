@@ -1015,6 +1015,14 @@ impl GatewayExecutor {
             } else {
                 None
             };
+            // A request may wait in the process-local account queue while its
+            // original credential or tenant authority is revoked. Revalidate
+            // immediately after that wait and before account quota/eligibility
+            // admission: those checks can also observe the tenant transition,
+            // but must not relabel an authorization denial as capacity
+            // exhaustion. The final check in `try_execute` remains the
+            // last-moment fence before physical upstream dispatch.
+            self.authorize_dispatch(&ctx).await?;
             let mut quota_lease = if let Some(capacity) = &self.account_capacity {
                 let admitted = tokio::select! {
                     biased;
@@ -6716,6 +6724,28 @@ mod tests {
         }
     }
     #[derive(Debug)]
+    struct RejectDispatchAfterFirstCheck {
+        unavailable: bool,
+        calls: AtomicUsize,
+    }
+    #[async_trait]
+    impl keycompute_types::DispatchAuthorizer for RejectDispatchAfterFirstCheck {
+        async fn authorize_dispatch(&self, _: &RequestContext) -> Result<()> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Ok(());
+            }
+            if self.unavailable {
+                Err(KeyComputeError::ServiceUnavailable(
+                    "execution_authority_unavailable".into(),
+                ))
+            } else {
+                Err(KeyComputeError::PermissionDenied(
+                    "execution_authority_invalid".into(),
+                ))
+            }
+        }
+    }
+    #[derive(Debug)]
     struct UnclassifiedDispatchFailure;
     #[async_trait]
     impl keycompute_types::DispatchAuthorizer for UnclassifiedDispatchFailure {
@@ -6742,6 +6772,72 @@ mod tests {
         assert_eq!(ctx.client_upstream_response().unwrap().status, 403);
     }
     #[tokio::test]
+    async fn dispatch_denial_after_account_queue_precedes_quota_admission() {
+        for unavailable in [false, true] {
+            let limiter = account_limiter(1);
+            let account_id = Uuid::new_v4();
+            let held = limiter.acquire(account_id).await.unwrap();
+            let admissions = Arc::new(Mutex::new(Vec::new()));
+            let settlements = Arc::new(Mutex::new(Vec::new()));
+            let quota = Arc::new(TestQuotaPolicy {
+                denied: None,
+                dependency_error: false,
+                admissions: admissions.clone(),
+                settlements: settlements.clone(),
+                lost: Arc::new(Notify::new()),
+            });
+            let calls = Arc::new(AtomicUsize::new(0));
+            let mut providers = HashMap::new();
+            providers.insert(
+                "counting".into(),
+                Arc::new(CountingProvider {
+                    calls: calls.clone(),
+                    notified: None,
+                }) as Arc<dyn ProviderAdapter>,
+            );
+            let executor = GatewayExecutor::new(GatewayConfig::default(), providers)
+                .with_account_admission(limiter.clone())
+                .with_account_capacity(quota)
+                .with_dispatch_authorizer(Arc::new(RejectDispatch { unavailable }));
+            let ctx = Arc::new(create_test_context());
+            let mut rx = executor
+                .execute(
+                    ctx.clone(),
+                    ExecutionPlan::new(ExecutionTarget::new_provider(
+                        "counting",
+                        account_id,
+                        "http://mock",
+                        "fixture",
+                    )),
+                    Arc::new(AccountStateStore::new()),
+                    None,
+                )
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while limiter.status().queued == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("request must wait in the account queue");
+            drop(held);
+            while tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                .await
+                .unwrap()
+                .is_some()
+            {}
+            assert!(admissions.lock().unwrap().is_empty());
+            assert!(settlements.lock().unwrap().is_empty());
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert_eq!(limiter.status().active, 0);
+            assert_eq!(
+                ctx.client_upstream_response().unwrap().status,
+                if unavailable { 503 } else { 403 }
+            );
+        }
+    }
+    #[tokio::test]
     async fn dispatch_denial_and_outage_release_quota_without_provider_or_fallback() {
         for unavailable in [false, true] {
             let primary = Uuid::new_v4();
@@ -6760,9 +6856,13 @@ mod tests {
                 "many-chunks".into(),
                 Arc::new(ManyChunksProvider { chunks: 1 }) as Arc<dyn ProviderAdapter>,
             );
+            let authorizer = Arc::new(RejectDispatchAfterFirstCheck {
+                unavailable,
+                calls: AtomicUsize::new(0),
+            });
             let executor = GatewayExecutor::new(GatewayConfig::default(), providers)
                 .with_account_capacity(quota)
-                .with_dispatch_authorizer(Arc::new(RejectDispatch { unavailable }));
+                .with_dispatch_authorizer(authorizer.clone());
             let ctx = Arc::new(create_test_context());
             let plan = ExecutionPlan::new(ExecutionTarget::new_provider(
                 "many-chunks",
@@ -6790,6 +6890,7 @@ mod tests {
                 );
             }
             assert_eq!(*admissions.lock().unwrap(), vec![primary]);
+            assert_eq!(authorizer.calls.load(Ordering::SeqCst), 2);
             assert_eq!(
                 *settlements.lock().unwrap(),
                 vec![(None, true)],
