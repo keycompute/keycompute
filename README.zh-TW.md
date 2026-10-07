@@ -102,7 +102,8 @@ score = 0.30 × 成本因子 + 0.25 × 延遲因子 + 0.25 × 成功率 + 0.20 �
 
 - **雙認證體系**：JWT（使用者工作階段）+ API Key（`sk-...`，API 存取）
 - **權限分離**：API Key 即便有 admin 角色也無法存取管理介面
-- **完整使用者管理**：註冊 → 郵箱驗證 → 登入 → 密碼重設 → 角色管理
+- **完整使用者管理**：註冊 → 郵箱驗證 → 登入 → 密碼重設 → 明確的平台/租戶角色管理
+- **明確租戶成員關係**：註冊只建立全域身分，不會自動加入租戶；使用者透過邀請加入租戶，並可在已驗證的成員關係之間切換
 - **分組限流**：使用者級/租戶級/API Key 級限流（記憶體 / Redis 雙後端）
 
 ### 可觀測性
@@ -118,7 +119,7 @@ score = 0.30 × 成本因子 + 0.25 × 延遲因子 + 0.25 × 成功率 + 0.20 �
 - **Web 管理後台**：Dioxus WASM SPA
 - **桌面端**：Dioxus Desktop 原生應用
 - **行動端**：Dioxus Mobile 跨平台支援
-- **路由級權限控制**：Admin 角色驗證，安全可控
+- **路由級權限控制**：同時驗證平台能力與租戶成員關係，並依目前身分限制各管理頁面
 
 ---
 
@@ -153,7 +154,7 @@ score = 0.30 × 成本因子 + 0.25 × 延遲因子 + 0.25 × 成功率 + 0.20 �
 |:---|:---|
 | Rust | ≥ 1.92 |
 | Axum | ≥ 0.8.0 |
-| Dioxus | ≥ 0.7.1 (前端開發) |
+| Dioxus | 0.7.9 (前端開發) |
 | PostgreSQL | ≥ 16 |
 | Redis | ≥ 7 (選用，用於分散式限流/節點佇列) |
 | Docker | 最新版 (容器部署) |
@@ -204,11 +205,11 @@ docker compose ps
 # 建立 cargo run 使用的設定
 cp config.example.toml config.toml
 
-# 啟動 PostgreSQL 與 Redis，並開放與 config.toml 相符的本機連接埠
-docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis
+# 啟動 PostgreSQL 與兩個 Redis 服務，並開放與 config.toml 相符的本機連接埠
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis redis-cache
 
-# 安裝 dioxus-cli
-curl -sSL http://dioxus.dev/install.sh | sh
+# 安裝與工作區一致的 CLI 版本
+cargo install dioxus-cli --version 0.7.9 --locked
 
 # 啟動後端
 cargo run -p keycompute-server
@@ -252,7 +253,7 @@ keycompute/
 │   │   └── provider/                 # 共用 Provider 協定型別
 │   ├── node-gateway/                 # 節點閘道（註冊/心跳/任務管理）
 │   └── integration-tests/           # 端到端整合測試
-├── packages/                         # 前端 (Dioxus 0.7)
+├── packages/                         # 前端 (Dioxus 0.7.9)
 │   ├── web/                          # Web 管理後台
 │   ├── ui/                           # 共享 UI 元件庫
 │   ├── desktop/                      # 桌面端原生應用
@@ -318,7 +319,7 @@ Responses API 同時支援 `POST /v1/responses`，以及透過 `GET /v1/response
 發起 WebSocket 升級。KeyCompute 的 WebSocket 模式目前僅接受 `response.create`
 事件；暫不支援 `response.steer`、`response.inject` 等連線控制事件。
 
-### 管理 API 概覽
+### 控制台 API 概覽
 
 | 分類 | 介面 | 說明 |
 |:---|:---|:---|
@@ -334,10 +335,13 @@ Responses API 同時支援 `POST /v1/responses`，以及透過 `GET /v1/response
 | 分銷 | `GET /api/v1/me/distribution/earnings` | 分銷收益 |
 | 節點 | `GET /api/v1/me/node-gateway/token` | 節點令牌 |
 | | `GET /api/v1/me/tips` | 小費摘要 |
-| 管理 | `GET/POST /api/v1/accounts` | 上游帳號管理 |
-| | `GET/POST /api/v1/settings` | 系統設定 |
-| | `GET/POST /api/v1/pricing` | 定價管理 |
-| | `GET /api/v1/admin/monitoring/overview` | 監控概覽 |
+| 管理 | `GET/POST /api/v1/platform/accounts` | 上游帳號管理 |
+| | `GET/POST /api/v1/admin/passthrough-bindings` | 列出/建立帳號到租戶的授權 |
+| | `PUT/DELETE /api/v1/admin/passthrough-bindings/{id}` | 透過樂觀修訂更新/刪除授權 |
+| | `POST /api/v1/admin/passthrough-bindings/{id}/probe` | 選用的單模型診斷 |
+| | `GET/POST /api/v1/platform/settings` | 系統設定 |
+| | `GET/POST /api/v1/platform/pricing` | 定價管理 |
+| | `GET /api/v1/platform/monitoring/overview` | 監控概覽 |
 
 > 完整的 API 文件請參考專案原始碼中的路由定義。
 

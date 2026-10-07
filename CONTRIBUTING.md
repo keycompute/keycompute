@@ -24,7 +24,7 @@ This guide is written for the current repository layout and workflow. If a comma
 ### Stack
 
 - Backend: Rust, Axum, Tokio
-- Frontend: Dioxus 0.7
+- Frontend: Dioxus 0.7.9
 - Database: PostgreSQL 16+
 - Cache / rate limiting: Redis 7+
 
@@ -37,7 +37,7 @@ This guide is written for the current repository layout and workflow. If a comma
 Install the Dioxus CLI if you plan to work on the web frontend:
 
 ```bash
-curl -sSL http://dioxus.dev/install.sh | sh
+cargo install dioxus-cli --version 0.7.9 --locked
 ```
 
 ## Local Setup
@@ -75,7 +75,7 @@ for this `cargo run` workflow.
 2. Start the local dependencies:
 
 ```bash
-docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis redis-cache
 ```
 
 3. Start the backend:
@@ -190,7 +190,7 @@ If your change touches `desktop` or `mobile`, run the relevant package commands 
 
 ### Frontend changes
 
-- This repository uses Dioxus 0.7. Do not introduce older Dioxus APIs.
+- This repository uses Dioxus 0.7.9. Do not introduce older Dioxus APIs.
 - Keep shared UI logic in `packages/ui` when it is platform-agnostic.
 - Keep web-specific dependencies and behavior in `packages/web`.
 

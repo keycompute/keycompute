@@ -102,7 +102,8 @@ KeyCompute هي منصة خدمات حوسبة رموز ذكاء اصطناعي 
 
 - **مصادقة مزدوجة**: JWT (جلسات المستخدم) + API Key (`sk-...`، وصول API)
 - **فصل الصلاحيات**: API Key حتى مع دور admin لا يمكنها الوصول إلى واجهة الإدارة
-- **إدارة كاملة للمستخدمين**: تسجيل → التحقق من البريد → تسجيل الدخول → إعادة تعيين كلمة المرور → إدارة الأدوار
+- **إدارة كاملة للمستخدمين**: تسجيل → التحقق من البريد → تسجيل الدخول → إعادة تعيين كلمة المرور → إدارة صريحة لأدوار المنصة/المستأجر
+- **عضوية مستأجر صريحة**: ينشئ التسجيل هوية عامة من دون إضافتها إلى مستأجر؛ تنشئ الدعوة العضوية ويمكن للمستخدم التبديل بين العضويات المتحقق منها
 - **تحديد المعدل حسب المجموعات**: تحديد على مستوى المستخدم / المستأجر / API Key (خلفية مزدوجة ذاكرة/Redis)
 
 ### قابلية المراقبة
@@ -118,7 +119,7 @@ KeyCompute هي منصة خدمات حوسبة رموز ذكاء اصطناعي 
 - **لوحة إدارة ويب**: Dioxus WASM SPA
 - **سطح المكتب**: تطبيق أصلي Dioxus Desktop
 - **الهاتف المحمول**: دعم متعدد المنصات Dioxus Mobile
-- **التحكم في الصلاحيات على مستوى المسار**: التحقق من دور Admin، آمن وقابل للإدارة
+- **التحكم في الصلاحيات على مستوى المسار**: التحقق من قدرات المنصة وعضوية المستأجر، وتقييد كل صفحة إدارة بالهوية النشطة
 
 ---
 
@@ -153,7 +154,7 @@ KeyCompute هي منصة خدمات حوسبة رموز ذكاء اصطناعي 
 |:---|:---|
 | Rust | ≥ 1.92 |
 | Axum | ≥ 0.8.0 |
-| Dioxus | ≥ 0.7.1 (لتطوير الواجهة الأمامية) |
+| Dioxus | 0.7.9 (لتطوير الواجهة الأمامية) |
 | PostgreSQL | ≥ 16 |
 | Redis | ≥ 7 (اختياري، لتحديد المعدل الموزع/قائمة مهام العقد) |
 | Docker | أحدث إصدار (للنشر عبر الحاويات) |
@@ -205,11 +206,11 @@ docker compose ps
 # إنشاء إعداد cargo run
 cp config.example.toml config.toml
 
-# تشغيل PostgreSQL وRedis بمنافذ محلية تطابق config.toml
-docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis
+# تشغيل PostgreSQL وخدمتي Redis بمنافذ محلية تطابق config.toml
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis redis-cache
 
-# تثبيت dioxus-cli
-curl -sSL http://dioxus.dev/install.sh | sh
+# تثبيت إصدار CLI المستخدم في مساحة العمل
+cargo install dioxus-cli --version 0.7.9 --locked
 
 # تشغيل الخلفية
 cargo run -p keycompute-server
@@ -253,7 +254,7 @@ keycompute/
 │   │   └── provider/                 # أنواع بروتوكول مقدمي الخدمة المشتركة
 │   ├── node-gateway/                 # بوابة العقد (التسجيل/نبضات القلب/إدارة المهام)
 │   └── integration-tests/           # اختبارات تكامل شاملة
-├── packages/                         # الواجهة الأمامية (Dioxus 0.7)
+├── packages/                         # الواجهة الأمامية (Dioxus 0.7.9)
 │   ├── web/                          # لوحة إدارة ويب
 │   ├── ui/                           # مكتبة مكونات UI مشتركة
 │   ├── desktop/                      # تطبيق أصلي لسطح المكتب
@@ -320,7 +321,7 @@ curl http://localhost:3000/v1/models \
 `response.create` فقط؛ ولا يدعم أحداث التحكم بالاتصال مثل `response.steer`
 و`response.inject`.
 
-### API الإدارة
+### نظرة عامة على API لوحدة التحكم
 
 | التصنيف | Endpoint | الوصف |
 |:---|:---|:---|
@@ -336,10 +337,13 @@ curl http://localhost:3000/v1/models \
 | التوزيع | `GET /api/v1/me/distribution/earnings` | أرباح التوزيع |
 | العقدة | `GET /api/v1/me/node-gateway/token` | رمز العقدة |
 | | `GET /api/v1/me/tips` | ملخص الإكراميات |
-| الإدارة | `GET/POST /api/v1/accounts` | إدارة الحسابات العلوية |
-| | `GET/POST /api/v1/settings` | إعدادات النظام |
-| | `GET/POST /api/v1/pricing` | إدارة التسعير |
-| | `GET /api/v1/admin/monitoring/overview` | نظرة عامة على المراقبة |
+| الإدارة | `GET/POST /api/v1/platform/accounts` | إدارة الحسابات العلوية |
+| | `GET/POST /api/v1/admin/passthrough-bindings` | عرض/إنشاء منح الحساب للمستأجر |
+| | `PUT/DELETE /api/v1/admin/passthrough-bindings/{id}` | تحديث/حذف باستخدام المراجعات التفاؤلية |
+| | `POST /api/v1/admin/passthrough-bindings/{id}/probe` | تشخيص اختياري لنموذج واحد |
+| | `GET/POST /api/v1/platform/settings` | إعدادات النظام |
+| | `GET/POST /api/v1/platform/pricing` | إدارة التسعير |
+| | `GET /api/v1/platform/monitoring/overview` | نظرة عامة على المراقبة |
 
 > للحصول على وثائق API كاملة، راجع تعريفات المسارات في الكود المصدري للمشروع.
 

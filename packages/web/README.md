@@ -15,12 +15,13 @@ web/
 ```
 
 ## Dependencies
-This crate will only be included in the web build, so you should add all web specific dependencies to this crate's [Cargo.toml](../Cargo.toml) file instead of the shared [ui](../ui/Cargo.toml) crate.
+
+This crate is included only in the web build. Add web-specific dependencies to this crate's [Cargo.toml](Cargo.toml), and put reusable components in the shared [ui](../ui/Cargo.toml) crate.
 
 ### Serving Your Web App
 
 You can start your web app with the following command:
 
 ```bash
-dx serve
+dx serve --package web --platform web --hot-reload true --addr 0.0.0.0
 ```

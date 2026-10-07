@@ -120,7 +120,7 @@ score = 0.30 × Cost Factor + 0.25 × Latency Factor + 0.25 × Success Rate + 0.
 - **Web admin dashboard**: Dioxus WASM SPA
 - **Desktop**: Dioxus Desktop native application
 - **Mobile**: Dioxus Mobile cross-platform support
-- **Route-level permission control**: Admin role verification, secure and manageable
+- **Route-level permission control**: verified platform capabilities and tenant memberships, with each management page scoped to the active identity
 
 ---
 
@@ -155,7 +155,7 @@ score = 0.30 × Cost Factor + 0.25 × Latency Factor + 0.25 × Success Rate + 0.
 |:---|:---|
 | Rust | ≥ 1.92 |
 | Axum | ≥ 0.8.0 |
-| Dioxus | ≥ 0.7.1 (frontend development) |
+| Dioxus | 0.7.9 (frontend development) |
 | PostgreSQL | ≥ 16 |
 | Redis | ≥ 7 (optional, for distributed rate limiting/node queue) |
 | Docker | Latest (container deployment) |
@@ -209,11 +209,11 @@ environment; later restarts do not require it.
 # Create the cargo-run configuration
 cp config.example.toml config.toml
 
-# Start PostgreSQL and Redis with host-local ports matching config.toml
-docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis
+# Start PostgreSQL and both Redis services with host-local ports matching config.toml
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis redis-cache
 
-# Install dioxus-cli
-curl -sSL http://dioxus.dev/install.sh | sh
+# Install the CLI version used by this workspace
+cargo install dioxus-cli --version 0.7.9 --locked
 
 # Start the backend
 cargo run -p keycompute-server
@@ -258,7 +258,7 @@ keycompute/
 │   │   └── provider/                 # Shared provider protocol types
 │   ├── node-gateway/                 # Node gateway (registration/heartbeat/task management)
 │   └── integration-tests/           # End-to-end integration tests
-├── packages/                         # Frontend (Dioxus 0.7)
+├── packages/                         # Frontend (Dioxus 0.7.9)
 │   ├── web/                          # Web admin dashboard
 │   ├── ui/                           # Shared UI component library
 │   ├── desktop/                      # Desktop native application
@@ -353,7 +353,7 @@ upgrade on `GET /v1/responses`. KeyCompute's WebSocket mode currently accepts
 `response.create` events only; connection-control events such as
 `response.steer` and `response.inject` are not supported.
 
-### Admin API Overview
+### Console API Overview
 
 | Category | Endpoint | Description |
 |:---|:---|:---|
@@ -369,13 +369,13 @@ upgrade on `GET /v1/responses`. KeyCompute's WebSocket mode currently accepts
 | Distribution | `GET /api/v1/me/distribution/earnings` | Distribution earnings |
 | Node | `GET /api/v1/me/node-gateway/token` | Node token |
 | | `GET /api/v1/me/tips` | Tip summary |
-| Admin | `GET/POST /api/v1/accounts` | Upstream account management |
+| Admin | `GET/POST /api/v1/platform/accounts` | Upstream account management |
 | | `GET/POST /api/v1/admin/passthrough-bindings` | List/create account-to-tenant grants |
 | | `PUT/DELETE /api/v1/admin/passthrough-bindings/{id}` | Update/delete with optimistic revisions |
 | | `POST /api/v1/admin/passthrough-bindings/{id}/probe` | Optional single-model diagnostic |
-| | `GET/POST /api/v1/settings` | System settings |
-| | `GET/POST /api/v1/pricing` | Pricing management |
-| | `GET /api/v1/admin/monitoring/overview` | Monitoring overview |
+| | `GET/POST /api/v1/platform/settings` | System settings |
+| | `GET/POST /api/v1/platform/pricing` | Pricing management |
+| | `GET /api/v1/platform/monitoring/overview` | Monitoring overview |
 
 > For complete API documentation, refer to the route definitions in the project source code.
 

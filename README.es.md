@@ -102,7 +102,8 @@ puntuación = 0.30 × Factor de costo + 0.25 × Factor de latencia + 0.25 × Tas
 
 - **Autenticación dual**: JWT (sesiones de usuario) + API Key (`sk-...`, acceso API)
 - **Separación de permisos**: una API Key con rol de admin no puede acceder a la interfaz de administración
-- **Gestión completa de usuarios**: Registro → Verificación de correo → Inicio de sesión → Restablecimiento de contraseña → Gestión de roles
+- **Gestión completa de usuarios**: Registro → Verificación de correo → Inicio de sesión → Restablecimiento de contraseña → Gestión explícita de roles de plataforma/inquilino
+- **Membresía explícita del inquilino**: el registro crea una identidad global sin añadirla a un inquilino; una invitación crea la membresía y el usuario puede alternar entre membresías verificadas
 - **Limitación por grupos**: limitación a nivel de usuario / inquilino / API Key (backend dual memoria/Redis)
 
 ### Observabilidad
@@ -118,7 +119,7 @@ puntuación = 0.30 × Factor de costo + 0.25 × Factor de latencia + 0.25 × Tas
 - **Panel de administración web**: Dioxus WASM SPA
 - **Escritorio**: aplicación nativa Dioxus Desktop
 - **Móvil**: soporte multiplataforma Dioxus Mobile
-- **Control de permisos a nivel de ruta**: verificación de rol Admin, seguro y manejable
+- **Control de permisos a nivel de ruta**: verifica las capacidades de plataforma y la membresía del inquilino, y limita cada página de administración a la identidad activa
 
 ---
 
@@ -153,7 +154,7 @@ puntuación = 0.30 × Factor de costo + 0.25 × Factor de latencia + 0.25 × Tas
 |:---|:---|
 | Rust | ≥ 1.92 |
 | Axum | ≥ 0.8.0 |
-| Dioxus | ≥ 0.7.1 (desarrollo frontend) |
+| Dioxus | 0.7.9 (desarrollo frontend) |
 | PostgreSQL | ≥ 16 |
 | Redis | ≥ 7 (opcional, para limitación distribuida/cola de nodos) |
 | Docker | Última versión (despliegue en contenedores) |
@@ -207,11 +208,11 @@ del entorno; los reinicios posteriores no la necesitan.
 # Crear la configuración usada por cargo run
 cp config.example.toml config.toml
 
-# Iniciar PostgreSQL y Redis con puertos locales que coinciden con config.toml
-docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis
+# Iniciar PostgreSQL y ambos servicios Redis con puertos locales que coinciden con config.toml
+docker compose --env-file .env.example -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis redis-cache
 
-# Instalar dioxus-cli
-curl -sSL http://dioxus.dev/install.sh | sh
+# Instalar la versión de CLI usada por este espacio de trabajo
+cargo install dioxus-cli --version 0.7.9 --locked
 
 # Iniciar el backend
 cargo run -p keycompute-server
@@ -255,7 +256,7 @@ keycompute/
 │   │   └── provider/                 # Tipos de protocolo compartidos
 │   ├── node-gateway/                 # Gateway de nodos (registro/heartbeat/gestión de tareas)
 │   └── integration-tests/           # Pruebas de integración integrales
-├── packages/                         # Frontend (Dioxus 0.7)
+├── packages/                         # Frontend (Dioxus 0.7.9)
 │   ├── web/                          # Panel de administración web
 │   ├── ui/                           # Biblioteca de componentes UI compartidos
 │   ├── desktop/                      # Aplicación nativa de escritorio
@@ -323,7 +324,7 @@ actualización a WebSocket en `GET /v1/responses`. El modo WebSocket de
 KeyCompute acepta actualmente solo eventos `response.create`; no admite eventos
 de control de conexión como `response.steer` y `response.inject`.
 
-### API de administración
+### Resumen de la API de consola
 
 | Categoría | Endpoint | Descripción |
 |:---|:---|:---|
@@ -339,10 +340,13 @@ de control de conexión como `response.steer` y `response.inject`.
 | Distribución | `GET /api/v1/me/distribution/earnings` | Ganancias de distribución |
 | Nodo | `GET /api/v1/me/node-gateway/token` | Token de nodo |
 | | `GET /api/v1/me/tips` | Resumen de propinas |
-| Admin | `GET/POST /api/v1/accounts` | Gestión de cuentas upstream |
-| | `GET/POST /api/v1/settings` | Configuración del sistema |
-| | `GET/POST /api/v1/pricing` | Gestión de precios |
-| | `GET /api/v1/admin/monitoring/overview` | Vista general de monitorización |
+| Admin | `GET/POST /api/v1/platform/accounts` | Gestión de cuentas upstream |
+| | `GET/POST /api/v1/admin/passthrough-bindings` | Listar/crear concesiones de cuenta a inquilino |
+| | `PUT/DELETE /api/v1/admin/passthrough-bindings/{id}` | Actualizar/eliminar con revisiones optimistas |
+| | `POST /api/v1/admin/passthrough-bindings/{id}/probe` | Diagnóstico opcional de un solo modelo |
+| | `GET/POST /api/v1/platform/settings` | Configuración del sistema |
+| | `GET/POST /api/v1/platform/pricing` | Gestión de precios |
+| | `GET /api/v1/platform/monitoring/overview` | Vista general de monitorización |
 
 > Para la documentación completa de la API, consulte las definiciones de rutas en el código fuente del proyecto.
 

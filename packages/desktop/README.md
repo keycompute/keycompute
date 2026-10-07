@@ -15,12 +15,13 @@ desktop/
 ```
 
 ## Dependencies
-This crate will only be included in the desktop build, so you should add all desktop specific dependencies to this crate's [Cargo.toml](../Cargo.toml) file instead of the shared [ui](../ui/Cargo.toml) crate.
+
+This crate is included only in the desktop build. Add desktop-specific dependencies to this crate's [Cargo.toml](Cargo.toml), and put reusable components in the shared [ui](../ui/Cargo.toml) crate.
 
 ### Serving Your Desktop App
 
 You can start your desktop app with the following command:
 
 ```bash
-dx serve
+dx serve --package desktop --platform desktop
 ```

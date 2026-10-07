@@ -15,12 +15,13 @@ mobile/
 ```
 
 ## Dependencies
-This crate will only be included in the mobile build, so you should add all mobile specific dependencies to this crate's [Cargo.toml](../Cargo.toml) file instead of the shared [ui](../ui/Cargo.toml) crate.
+
+This crate is included only in mobile builds. Add mobile-specific dependencies to this crate's [Cargo.toml](Cargo.toml), and put reusable components in the shared [ui](../ui/Cargo.toml) crate.
 
 ### Serving Your Mobile App
 
 Mobile platforms are shared in a single crate. To serve mobile, you need to explicitly set your target device to `android` or `ios`:
 
 ```bash
-dx serve --platform android
+dx serve --package mobile --platform android
 ```
