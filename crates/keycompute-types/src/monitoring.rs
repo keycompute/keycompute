@@ -280,6 +280,7 @@ pub fn client_response_trace_finish_with_failure(
 #[error("request lifecycle trace write failed: {0}")]
 pub struct TraceWriteError(pub String);
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait RequestLifecycleRecorder: Send + Sync {
     async fn start_request(&self, request: RequestTraceStart) -> Result<(), TraceWriteError>;

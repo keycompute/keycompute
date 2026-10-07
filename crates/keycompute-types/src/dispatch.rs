@@ -54,6 +54,7 @@ impl DispatchIdentity {
 /// The server installs this dependency unconditionally. Standalone gateway
 /// embeddings can supply their own authority source; absence of a proof in a
 /// server request is rejected, not interpreted as a privileged system task.
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait DispatchAuthorizer: std::fmt::Debug + Send + Sync {
     async fn authorize_dispatch(&self, ctx: &RequestContext) -> Result<()>;
