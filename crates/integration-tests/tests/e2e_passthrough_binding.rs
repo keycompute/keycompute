@@ -1800,7 +1800,7 @@ async fn verify_queued_dispatch_authority(case: &str, pool: bool) {
             f.user.id,
         )),
         "tenant_version" => Some((
-            "UPDATE tenants SET name=name||'-new' WHERE id=$1",
+            "UPDATE tenants SET status='inactive' WHERE id=$1",
             f.user.tenant_id,
         )),
         "unchanged" | "jwt_expiry" => None,
