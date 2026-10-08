@@ -218,6 +218,20 @@ impl NodeTestEnv {
             [],
         ))
         .await?;
+        // Request traces retain the tenant membership with ON DELETE RESTRICT.
+        // Remove only this suite's traces before deleting its tenant fixtures;
+        // the attempts table follows through ON DELETE CASCADE. Keeping this in
+        // setup also recovers cleanly when a preceding assertion aborts before
+        // its normal teardown runs.
+        pool.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"DELETE FROM gateway_requests
+               WHERE tenant_id IN (
+                   SELECT id FROM tenants WHERE slug LIKE 'ng-e2e-%'
+               )"#,
+            [],
+        ))
+        .await?;
         // node_tips 和 node_tip_withdrawals 通过 FK ON DELETE CASCADE 跟随 users/nodes 删除，
         // 此处显式清理以处理 CASCADE 未覆盖的孤立记录
         pool.execute(Statement::from_sql_and_values(DbBackend::Postgres, "DELETE FROM node_tip_withdrawals WHERE owner_user_id IN (SELECT id FROM users WHERE email LIKE 'ng-e2e-%')", [])).await?;
@@ -554,10 +568,13 @@ async fn test_sweeper_fails_and_removes_queued_work_after_authority_revocation()
 async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations()
 -> anyhow::Result<()> {
     let env = NodeTestEnv::new().await?;
-    let model = "deepseek-chat";
+    // Queue names are shared by every test using the CI Redis service. Unique
+    // models prevent an older stale hint from consuming this short poll's
+    // deadline before it reaches the task under test.
+    let model = format!("poll-revoked-{}", Uuid::new_v4());
     let queue_key = format!("queue:node:model:{model}");
     let native_queue_key = format!("queue:node:native:model:{model}");
-    let waiter_model = "llama3";
+    let waiter_model = format!("waiter-revoked-{}", Uuid::new_v4());
     let waiter_queue_key = format!("queue:node:model:{waiter_model}");
     let waiter_native_queue_key = format!("queue:node:native:model:{waiter_model}");
     let (tenant_id, user_id) = create_test_user(&env.pool, "poll-revoked").await;
@@ -568,10 +585,16 @@ async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations(
         &env.config.registration_token_secret,
     )
     .await;
-    let registered = env
-        .service
-        .register_node(&env.create_register_request("poll-revoked", &token))
-        .await?;
+    let mut register_request = env.create_register_request("poll-revoked", &token);
+    register_request.capabilities.models.extend([
+        NodeModelCapability {
+            model: model.clone(),
+        },
+        NodeModelCapability {
+            model: waiter_model.clone(),
+        },
+    ]);
+    let registered = env.service.register_node(&register_request).await?;
 
     let request_id = Uuid::new_v4();
     env.pool
@@ -587,7 +610,7 @@ async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations(
                 tenant_id.into(),
                 user_id.into(),
                 Uuid::new_v4().into(),
-                model.into(),
+                model.clone().into(),
             ],
         ))
         .await?;
@@ -597,7 +620,7 @@ async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations(
             tenant_id,
             request_id,
             user_id,
-            model: model.into(),
+            model: model.clone(),
             payload_json: serde_json::to_value(chat_task_payload(
                 request_id,
                 integration_tests::db::fixture_dispatch_identity(&env.pool, tenant_id, user_id)
@@ -615,7 +638,7 @@ async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations(
             tenant_id,
             request_id: waiter_request_id,
             user_id,
-            model: waiter_model.into(),
+            model: waiter_model.clone(),
             payload_json: serde_json::to_value(chat_task_payload(
                 waiter_request_id,
                 integration_tests::db::fixture_dispatch_identity(&env.pool, tenant_id, user_id)
@@ -668,7 +691,7 @@ async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations(
         .poll_task(
             registered.node_id,
             registered.session_id,
-            vec![model.into()],
+            vec![model.clone()],
         )
         .await?;
     assert!(response.task.is_none());
@@ -729,6 +752,27 @@ async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations(
 
     let _: usize = redis.del(&result_key).await?;
     let _: usize = redis.del(&waiter_result_key).await?;
+    let _: usize = redis.del(&queue_key).await?;
+    let _: usize = redis.del(&native_queue_key).await?;
+    let _: usize = redis.del(&waiter_queue_key).await?;
+    let _: usize = redis.del(&waiter_native_queue_key).await?;
+    drop(redis);
+    env.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM gateway_requests WHERE request_id=$1",
+            [request_id.into()],
+        ))
+        .await?;
+    for task_id in [task.id, waiter_task.id] {
+        env.pool
+            .execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "DELETE FROM node_tasks WHERE id=$1",
+                [task_id.into()],
+            ))
+            .await?;
+    }
     Ok(())
 }
 
