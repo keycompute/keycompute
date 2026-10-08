@@ -26,6 +26,7 @@ pub enum Permission {
     PlatformDiagnostics,
     PlatformAggregateStats,
     PlatformNodeOperations,
+    PlatformAuditRead,
 }
 impl Permission {
     pub const fn as_str(self) -> &'static str {
@@ -49,6 +50,7 @@ impl Permission {
             Self::PlatformDiagnostics => "platform:diagnostics",
             Self::PlatformAggregateStats => "platform:aggregate_stats",
             Self::PlatformNodeOperations => "platform:node_operations",
+            Self::PlatformAuditRead => "platform:audit_read",
         }
     }
     pub const fn all() -> &'static [Self] {
@@ -72,6 +74,7 @@ impl Permission {
             Self::PlatformDiagnostics,
             Self::PlatformAggregateStats,
             Self::PlatformNodeOperations,
+            Self::PlatformAuditRead,
         ]
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -109,6 +112,7 @@ pub enum AuthorizationAction {
     Diagnostics,
     AggregateStats,
     NodeOperations,
+    ReadPlatformAudit,
     ManageTenantResource,
     ReadPersonalResource,
     ManagePersonalResource,
@@ -195,12 +199,14 @@ pub fn permissions_for(
                 Permission::PlatformDiagnostics,
                 Permission::PlatformAggregateStats,
                 Permission::PlatformNodeOperations,
+                Permission::PlatformAuditRead,
             ]),
             PlatformRole::Operator => out.extend([
                 Permission::PlatformTenantHealth,
                 Permission::PlatformDiagnostics,
                 Permission::PlatformAggregateStats,
                 Permission::PlatformNodeOperations,
+                Permission::PlatformAuditRead,
             ]),
             PlatformRole::None => {}
         }
@@ -218,6 +224,7 @@ fn platform_allowed(role: PlatformRole, action: AuthorizationAction) -> bool {
                 | AuthorizationAction::Diagnostics
                 | AuthorizationAction::AggregateStats
                 | AuthorizationAction::NodeOperations
+                | AuthorizationAction::ReadPlatformAudit
         ),
         PlatformRole::Operator => matches!(
             action,
@@ -225,6 +232,7 @@ fn platform_allowed(role: PlatformRole, action: AuthorizationAction) -> bool {
                 | AuthorizationAction::Diagnostics
                 | AuthorizationAction::AggregateStats
                 | AuthorizationAction::NodeOperations
+                | AuthorizationAction::ReadPlatformAudit
         ),
         PlatformRole::None => false,
     }
@@ -416,6 +424,12 @@ mod tests {
                         AuthorizationAction::ReadTenantHealth,
                         ResourceScope::Platform,
                     );
+                    let audit = authorize(
+                        credential,
+                        s,
+                        AuthorizationAction::ReadPlatformAudit,
+                        ResourceScope::Platform,
+                    );
                     let expected = if credential == CredentialKind::Jwt
                         && matches!(platform, PlatformRole::Root | PlatformRole::Operator)
                     {
@@ -424,6 +438,7 @@ mod tests {
                         AuthorizationDecision::Deny
                     };
                     assert_eq!(ph, expected);
+                    assert_eq!(audit, expected);
                 }
             }
         }

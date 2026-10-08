@@ -18,6 +18,7 @@ pub mod node_gateway_token;
 pub mod node_tips;
 pub mod openai;
 pub mod payment;
+pub mod platform_audit;
 pub mod response_control;
 pub mod routes;
 pub mod settings;

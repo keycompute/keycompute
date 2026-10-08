@@ -156,6 +156,7 @@ fn no_action_can_cross_a_tenant_boundary_or_synthesize_a_membership() {
         AuthorizationAction::Diagnostics,
         AuthorizationAction::AggregateStats,
         AuthorizationAction::NodeOperations,
+        AuthorizationAction::ReadPlatformAudit,
         AuthorizationAction::ManageTenantResource,
         AuthorizationAction::ReadPersonalResource,
         AuthorizationAction::ManagePersonalResource,

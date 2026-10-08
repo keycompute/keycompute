@@ -25,6 +25,7 @@ pub mod node_tips;
 pub mod openai;
 pub(crate) mod pagination;
 pub mod payment;
+pub mod platform_audit;
 pub mod pricing;
 pub mod requirement;
 pub mod responses;

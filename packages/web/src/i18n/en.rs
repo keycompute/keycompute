@@ -124,12 +124,13 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.tenants", "Platform tenants");
     m.insert("nav.node_gateway", "Node Gateway");
     m.insert("nav.monitoring", "Monitoring & Diagnostics");
+    m.insert("nav.platform_audit", "Audit log");
     m.insert("nav.account_settings", "Account Settings");
     m.insert("nav.settings", "Settings");
     m.insert("nav.group.usage", "Usage");
     m.insert("nav.group.billing", "Billing");
     m.insert("nav.group.account", "Account");
-    m.insert("nav.group.admin", "Admin");
+    m.insert("nav.group.admin", "Platform management");
 
     // ── Auth ────────────────────────────────────
     m.insert("auth.login", "Sign In");
@@ -2586,6 +2587,9 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         m.insert(key, en);
     }
     for &(key, _, en) in super::operations::TEXT {
+        m.insert(key, en);
+    }
+    for &(key, _, en) in super::platform_audit::TEXT {
         m.insert(key, en);
     }
     for &(key, _, en) in super::tenant_nodes::TEXT {

@@ -1,0 +1,68 @@
+//! Platform-wide immutable audit timeline labels.
+
+pub const TEXT: &[(&str, &str, &str)] = &[
+    ("platform_audit.title", "审计日志", "Audit log"),
+    (
+        "platform_audit.hint",
+        "按时间查看平台级及所有租户的管理操作，并按租户或请求 ID 精确筛选。",
+        "Review platform and cross-tenant administrative events in time order, with exact tenant or request ID filters.",
+    ),
+    (
+        "platform_audit.boundary",
+        "该页面只读；平台角色不会因此获得任何租户成员身份。审计元数据已在写入时按白名单脱敏。",
+        "This page is read-only and grants no tenant membership. Audit metadata is allowlist-redacted when written.",
+    ),
+    (
+        "platform_audit.denied",
+        "当前会话没有平台审计日志读取权限。",
+        "This session has no platform audit read capability.",
+    ),
+    ("platform_audit.tenant_filter", "租户 UUID", "Tenant UUID"),
+    (
+        "platform_audit.tenant_placeholder",
+        "留空查看所有租户",
+        "Leave empty for all tenants",
+    ),
+    ("platform_audit.request_filter", "请求 UUID", "Request UUID"),
+    (
+        "platform_audit.request_placeholder",
+        "输入完整请求 ID",
+        "Enter the full request ID",
+    ),
+    ("platform_audit.apply", "应用筛选", "Apply filters"),
+    ("platform_audit.clear", "清除筛选", "Clear filters"),
+    ("platform_audit.page", "第 {page} 页", "Page {page}"),
+    (
+        "platform_audit.invalid_filter",
+        "租户和请求筛选必须为空或有效的非零 UUID。",
+        "Tenant and request filters must be empty or valid nonzero UUIDs.",
+    ),
+    ("platform_audit.empty", "没有审计记录", "No audit records"),
+    (
+        "platform_audit.empty_hint",
+        "当前筛选条件没有匹配记录，请检查完整 UUID 或清除筛选。",
+        "No events match these filters. Check the full UUIDs or clear the filters.",
+    ),
+    ("platform_audit.time", "时间", "Time"),
+    ("platform_audit.tenant", "租户／范围", "Tenant / scope"),
+    ("platform_audit.actor", "操作人", "Actor"),
+    ("platform_audit.action", "操作", "Action"),
+    ("platform_audit.resource", "资源", "Resource"),
+    ("platform_audit.request_id", "请求 ID", "Request ID"),
+    ("platform_audit.result", "结果", "Result"),
+    ("platform_audit.platform_scope", "平台级", "Platform"),
+    (
+        "platform_audit.unknown_tenant",
+        "已删除或未知租户",
+        "Deleted or unknown tenant",
+    ),
+    ("platform_audit.details", "技术详情", "Technical details"),
+    ("platform_audit.scope", "事件范围", "Event scope"),
+    ("platform_audit.credential", "凭证类型", "Credential kind"),
+    (
+        "platform_audit.roles",
+        "平台／租户角色",
+        "Platform / tenant roles",
+    ),
+    ("platform_audit.metadata", "脱敏元数据", "Redacted metadata"),
+];

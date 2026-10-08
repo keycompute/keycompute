@@ -134,9 +134,14 @@ CREATE TABLE IF NOT EXISTS tenant_audit_events (
     CONSTRAINT ck_audit_metadata_size CHECK (octet_length(metadata::text) <= 16384)
 );
 CREATE INDEX IF NOT EXISTS idx_tenant_audit_events_tenant_time
-    ON tenant_audit_events(tenant_id, created_at DESC);
+    ON tenant_audit_events(tenant_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_tenant_audit_events_actor_time
     ON tenant_audit_events(actor_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tenant_audit_events_time
+    ON tenant_audit_events(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_tenant_audit_events_request_time
+    ON tenant_audit_events(request_id, created_at DESC, id DESC)
+    WHERE request_id IS NOT NULL;
 
 -- produce_ai_keys: Produce AI Key 表（用户访问系统的 API Key）
 CREATE TABLE IF NOT EXISTS produce_ai_keys (

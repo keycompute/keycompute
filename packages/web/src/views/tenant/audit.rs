@@ -11,7 +11,7 @@ use crate::{
 use client_api::ClientError;
 use dioxus::prelude::*;
 
-fn action_label(i18n: crate::i18n::I18n, action: &str) -> String {
+pub(crate) fn action_label(i18n: crate::i18n::I18n, action: &str) -> String {
     let exact = match action {
         "tenant.transfer_owner" => Some("tenant.audit_action_transfer_owner"),
         "account.health_reset" => Some("tenant.audit_action_health_reset"),
@@ -62,7 +62,7 @@ fn action_label(i18n: crate::i18n::I18n, action: &str) -> String {
         .unwrap_or_else(|| action.to_owned())
 }
 
-fn resource_label(i18n: crate::i18n::I18n, resource: &str) -> String {
+pub(crate) fn resource_label(i18n: crate::i18n::I18n, resource: &str) -> String {
     let key = match resource {
         "tenant" => Some("tenant.audit_resource_tenant"),
         "tenant_membership" => Some("tenant.audit_resource_membership"),
@@ -88,7 +88,7 @@ fn resource_label(i18n: crate::i18n::I18n, resource: &str) -> String {
         .unwrap_or_else(|| resource.to_owned())
 }
 
-fn result_label(i18n: crate::i18n::I18n, result: &str) -> String {
+pub(crate) fn result_label(i18n: crate::i18n::I18n, result: &str) -> String {
     match result {
         "success" => i18n.t("tenant.audit_result_success").to_owned(),
         "denied" => i18n.t("tenant.audit_result_denied").to_owned(),

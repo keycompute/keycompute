@@ -20,6 +20,7 @@ pub mod passthrough_binding;
 pub mod password_reset;
 pub mod payment_order;
 pub mod pending_registration;
+pub mod platform_audit;
 pub mod pricing_model;
 mod query;
 pub mod response_affinity;
@@ -74,6 +75,10 @@ pub use payment_order::{
     PaymentOrderStats, PaymentOrderStatus,
 };
 pub use pending_registration::{PendingRegistration, UpsertPendingRegistrationRequest};
+pub use platform_audit::{
+    PlatformAuditCursor, PlatformAuditFilter, PlatformAuditRecord, PlatformAuditScope,
+    PlatformAuditSession,
+};
 pub use pricing_model::{
     CreatePricingRequest, PricingModel, PricingScopeType, UpdatePricingRequest,
 };

@@ -45,6 +45,10 @@ mod pagination_layout_tests {
             "shared/payment_orders.rs",
             include_str!("shared/payment_orders.rs"),
         ),
+        (
+            "shared/platform_audit.rs",
+            include_str!("shared/platform_audit.rs"),
+        ),
         ("shared/pricing.rs", include_str!("shared/pricing.rs")),
         ("shared/tenants.rs", include_str!("shared/tenants.rs")),
         ("shared/users.rs", include_str!("shared/users.rs")),

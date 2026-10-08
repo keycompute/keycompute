@@ -7848,6 +7848,38 @@ select.form-input:focus {
   grid-template-columns: minmax(220px, 0.9fr) minmax(260px, 1.4fr) minmax(160px, 0.7fr) auto;
 }
 
+.platform-audit-filter-grid {
+  grid-template-columns: repeat(2, minmax(260px, 1fr)) auto;
+}
+
+.platform-audit .table code,
+.platform-audit .table pre {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.audit-detail-list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 10px 0 0;
+}
+
+.audit-detail-list dt {
+  color: var(--text-secondary);
+}
+
+.audit-detail-list dd {
+  margin: 0;
+  min-width: 0;
+}
+
+.audit-detail-list pre {
+  max-width: 36rem;
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+}
+
 .filter-field-grow {
   min-width: min(100%, 240px);
 }
@@ -8406,7 +8438,8 @@ select.form-input:focus {
   .filter-grid-health,
   .filter-grid-usage,
   .filter-grid-nodes,
-  .detail-grid {
+  .detail-grid,
+  .audit-detail-list {
     grid-template-columns: 1fr;
   }
 

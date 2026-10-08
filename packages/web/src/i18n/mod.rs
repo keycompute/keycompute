@@ -1,6 +1,7 @@
 mod en;
 pub(crate) mod errors;
 pub(crate) mod operations;
+pub(crate) mod platform_audit;
 mod tenant;
 pub(crate) mod tenant_nodes;
 mod tenant_pricing;

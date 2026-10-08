@@ -172,6 +172,21 @@ fn schema_error(error: sea_orm::DbErr) -> DbError {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn platform_audit_schema_supports_stable_global_and_filtered_timelines() {
+        let sql = include_str!("../migrations/001_init.sql");
+        for index in [
+            "idx_tenant_audit_events_tenant_time",
+            "idx_tenant_audit_events_time",
+            "idx_tenant_audit_events_request_time",
+        ] {
+            assert!(sql.contains(index), "missing platform audit index: {index}");
+        }
+        assert!(sql.contains("ON tenant_audit_events(tenant_id, created_at DESC, id DESC)"));
+        assert!(sql.contains("ON tenant_audit_events(created_at DESC, id DESC)"));
+        assert!(sql.contains("ON tenant_audit_events(request_id, created_at DESC, id DESC)"));
+    }
+
+    #[test]
     fn platform_settings_schema_keeps_identity_and_monotonic_versions() {
         let sql = include_str!("../migrations/001_init.sql");
         assert!(sql.contains("guard_platform_setting_version"));

@@ -355,6 +355,11 @@ pub fn AppLayout() -> Element {
     }
 
     let can_manage_platform = user_store.can_manage_platform();
+    let can_view_platform_audit = user_store
+        .info
+        .read()
+        .as_ref()
+        .is_some_and(UserInfo::can_view_platform_audit);
     let has_workspace = WorkspaceScope::from_stores(auth_store, user_store).is_some();
     let user_name = user_store
         .info
@@ -380,6 +385,7 @@ pub fn AppLayout() -> Element {
     let r_admin_distribution = Route::DistributionRecords {}.to_string();
     let r_admin_tenants = Route::Tenants {}.to_string();
     let r_admin_monitoring = Route::Monitoring {}.to_string();
+    let r_platform_audit = Route::PlatformAudit {}.to_string();
     let r_admin_system_settings = Route::Settings {}.to_string();
     let site_name = public_settings_store
         .site_name()
@@ -590,40 +596,56 @@ pub fn AppLayout() -> Element {
         });
     }
 
-    // Existing platform business pages require a platform capability, never a tenant role.
+    // Platform business pages remain root-only. The audit entry is separately
+    // capability-gated so operators can investigate incidents without writes.
+    let mut platform_management_items = Vec::new();
     if can_manage_platform {
+        platform_management_items.extend([
+            NavItem::new(i18n.t("nav.users"), r_admin_users, NavIcon::User).admin(),
+            NavItem::new(i18n.t("nav.upstreams"), r_admin_upstreams, NavIcon::Key).admin(),
+            NavItem::new(i18n.t("nav.pricing"), r_admin_pricing, NavIcon::Wallet).admin(),
+            NavItem::new(
+                i18n.t("nav.payment_orders"),
+                r_admin_payment_orders,
+                NavIcon::Wallet,
+            )
+            .admin(),
+            NavItem::new(
+                i18n.t("nav.distribution_records"),
+                r_admin_distribution,
+                NavIcon::Share,
+            )
+            .admin(),
+            NavItem::new(i18n.t("nav.tenants"), r_admin_tenants, NavIcon::Home).admin(),
+        ]);
+    }
+    if can_view_platform_audit {
+        platform_management_items.push(NavItem::new(
+            i18n.t("nav.platform_audit"),
+            r_platform_audit,
+            NavIcon::Activity,
+        ));
+    }
+    if can_manage_platform {
+        platform_management_items.extend([
+            NavItem::new(
+                i18n.t("nav.monitoring"),
+                r_admin_monitoring,
+                NavIcon::Activity,
+            )
+            .admin(),
+            NavItem::new(
+                i18n.t("nav.settings"),
+                r_admin_system_settings,
+                NavIcon::Settings,
+            )
+            .admin(),
+        ]);
+    }
+    if !platform_management_items.is_empty() {
         nav_sections.push(NavSection {
             title: Some(i18n.t("nav.group.admin").to_string()),
-            items: vec![
-                NavItem::new(i18n.t("nav.users"), r_admin_users, NavIcon::User).admin(),
-                NavItem::new(i18n.t("nav.upstreams"), r_admin_upstreams, NavIcon::Key).admin(),
-                NavItem::new(i18n.t("nav.pricing"), r_admin_pricing, NavIcon::Wallet).admin(),
-                NavItem::new(
-                    i18n.t("nav.payment_orders"),
-                    r_admin_payment_orders,
-                    NavIcon::Wallet,
-                )
-                .admin(),
-                NavItem::new(
-                    i18n.t("nav.distribution_records"),
-                    r_admin_distribution,
-                    NavIcon::Share,
-                )
-                .admin(),
-                NavItem::new(i18n.t("nav.tenants"), r_admin_tenants, NavIcon::Home).admin(),
-                NavItem::new(
-                    i18n.t("nav.monitoring"),
-                    r_admin_monitoring,
-                    NavIcon::Activity,
-                )
-                .admin(),
-                NavItem::new(
-                    i18n.t("nav.settings"),
-                    r_admin_system_settings,
-                    NavIcon::Settings,
-                )
-                .admin(),
-            ],
+            items: platform_management_items,
         });
     }
 
@@ -747,6 +769,7 @@ pub fn AdminLayout() -> Element {
 fn route_page_title(route: &Route, i18n: &I18n) -> String {
     let key = match route {
         Route::PlatformOperations {} => "operations.title",
+        Route::PlatformAudit {} => "platform_audit.title",
         Route::TenantNodes {} => "tenant_nodes.title",
         Route::TenantResponses {} => "tenant_responses.title",
         Route::TenantKeys {} => "tenant_keys.title",
@@ -842,6 +865,7 @@ mod tests {
             Route::NodeGateway {},
             Route::Monitoring {},
             Route::MonitoringDiagnostics {},
+            Route::PlatformAudit {},
             Route::Settings {},
         ];
 

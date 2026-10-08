@@ -12,8 +12,8 @@ use crate::views::{
     payments::{PaymentsOverview, Recharge},
     shared::{
         Accounts, DistributionRecords, ModelBindings, ModelManagement, ModelManagementBase,
-        Monitoring, MonitoringDiagnostics, NodeGateway, PaymentOrders, Pricing, Settings, System,
-        Tenants, UpstreamAccounts, UpstreamNodes, UpstreamPassthrough, Users,
+        Monitoring, MonitoringDiagnostics, NodeGateway, PaymentOrders, PlatformAudit, Pricing,
+        Settings, System, Tenants, UpstreamAccounts, UpstreamNodes, UpstreamPassthrough, Users,
     },
     tenant::{
         OwnerKeyIssuance, TenantAdminLayout, TenantAudit, TenantDistribution, TenantFinance,
@@ -75,6 +75,9 @@ pub enum Route {
 
         #[route("/platform/operations")]
         PlatformOperations {},
+
+        #[route("/platform/audit")]
+        PlatformAudit {},
 
         #[route("/tenant")]
         TenantWorkspace {},
@@ -201,6 +204,13 @@ mod tests {
         let route = Route::from_str("/tenant/responses").unwrap();
         assert_eq!(route, Route::TenantResponses {});
         assert_eq!(route.to_string(), "/tenant/responses");
+    }
+
+    #[test]
+    fn platform_audit_has_a_distinct_global_route() {
+        let route = Route::from_str("/platform/audit").unwrap();
+        assert_eq!(route, Route::PlatformAudit {});
+        assert_eq!(route.to_string(), "/platform/audit");
     }
 
     /// 邀请链接的 ?ref= 参数必须能被解析，且序列化回 URL 时不丢失

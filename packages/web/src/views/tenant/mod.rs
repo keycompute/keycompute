@@ -1,5 +1,5 @@
 //! Selected-workspace controls. Backend authorization remains authoritative.
-mod audit;
+pub(crate) mod audit;
 pub(crate) mod common;
 pub(crate) mod invitation_entry;
 mod invitations;

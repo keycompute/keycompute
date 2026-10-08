@@ -5,19 +5,20 @@ use axum::{
     http::{HeaderMap, Request, StatusCode},
     routing::get,
 };
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use integration_tests::{
     common::resolve_database_url,
     db::{create_test_api_key, create_test_pool, create_test_tenant, create_test_user},
 };
 use keycompute_db::{
-    CreateProduceAiKeyRequest, CreateUsageLogRequest, DbRouter, UsageLog, User,
+    AuditContext, CreateProduceAiKeyRequest, CreateUsageLogRequest, DbRouter, TenantAuditEvent,
+    UsageLog, User,
     models::platform_operations::{
         OperationsSession, OperationsTarget, PlatformOperationsScope, TenantHealthQuery,
     },
 };
 use keycompute_server::{AppState, create_router};
-use keycompute_types::{CredentialKind, PlatformRole, PlatformScope};
+use keycompute_types::{AuditResult, AuditScopeType, CredentialKind, PlatformRole, PlatformScope};
 use sea_orm::{
     ConnectionTrait, Database, DatabaseConnection, DbBackend, Statement, TransactionTrait,
 };
@@ -182,6 +183,34 @@ impl Fixture {
         .await
         .unwrap()
     }
+
+    async fn seed_audit(&self, tenant: Option<Uuid>, request_id: Uuid, action: &str) {
+        let tx = self.db.begin().await.unwrap();
+        TenantAuditEvent::append(
+            &tx,
+            if tenant.is_some() {
+                AuditScopeType::Tenant
+            } else {
+                AuditScopeType::Platform
+            },
+            tenant,
+            &AuditContext {
+                actor_user_id: self.root,
+                credential_kind: CredentialKind::Jwt,
+                actor_platform_role: PlatformRole::Root,
+                actor_tenant_role: None,
+                request_id: Some(request_id),
+            },
+            action,
+            "user",
+            Some(&self.user.to_string()),
+            AuditResult::Success,
+            serde_json::json!({"request_id":request_id}),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
 }
 async fn isolated<F, Fut>(case: F)
 where
@@ -247,6 +276,160 @@ async fn call(
 fn ok(value: (StatusCode, Value, HeaderMap)) -> Value {
     assert_eq!(value.0, StatusCode::OK, "{}", value.1);
     value.1
+}
+
+#[tokio::test]
+async fn root_and_operator_read_global_audit_with_exact_intersection_filters() {
+    isolated(|f| async move {
+        let shared_request = Uuid::new_v4();
+        let platform_request = Uuid::new_v4();
+        f.seed_audit(Some(f.a), shared_request, "fixture.tenant_a")
+            .await;
+        f.seed_audit(Some(f.b), shared_request, "fixture.tenant_b")
+            .await;
+        f.seed_audit(None, platform_request, "fixture.platform")
+            .await;
+
+        let state = f.state();
+        let app = create_router(state.clone());
+        let root = f.token(&state, f.root, false).await;
+        let operator = f.token(&state, f.operator, false).await;
+        let selected_operator = f.token(&state, f.operator, true).await;
+        let admin = f.token(&state, f.admin, true).await;
+        let member = f.token(&state, f.user, true).await;
+
+        for token in [&root, &operator, &selected_operator] {
+            let response = call(
+                app.clone(),
+                "GET",
+                &format!(
+                    "/api/v1/platform/audit-events?request_id={shared_request}&page_size=20"
+                ),
+                token,
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::OK, "{}", response.1);
+            assert!(
+                response.2["cache-control"]
+                    .to_str()
+                    .unwrap()
+                    .contains("no-store")
+            );
+            assert_eq!(response.1["items"].as_array().unwrap().len(), 2);
+            assert_eq!(response.1["next_cursor"], Value::Null);
+            let rows = response.1["items"].as_array().unwrap();
+            assert!(rows.iter().all(|row| {
+                row["request_id"] == shared_request.to_string()
+                    && row["tenant_id"] != Value::Null
+                    && row["tenant_name"].is_string()
+                    && row["actor_email"] == "ops-root@fixture.invalid"
+            }));
+            let order = rows
+                .iter()
+                .map(|row| {
+                    (
+                        DateTime::parse_from_rfc3339(row["created_at"].as_str().unwrap()).unwrap(),
+                        Uuid::parse_str(row["id"].as_str().unwrap()).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert!(order.windows(2).all(|pair| pair[0] >= pair[1]));
+        }
+
+        let first_page = ok(call(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/platform/audit-events?request_id={shared_request}&page_size=1"
+            ),
+            &operator,
+        )
+        .await);
+        assert_eq!(first_page["items"].as_array().unwrap().len(), 1);
+        let first_id = first_page["items"][0]["id"].clone();
+        let cursor = first_page["next_cursor"].as_str().unwrap().to_owned();
+        let second_page = ok(call(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/platform/audit-events?request_id={shared_request}&page_size=1&cursor={cursor}"
+            ),
+            &operator,
+        )
+        .await);
+        assert_eq!(second_page["items"].as_array().unwrap().len(), 1);
+        assert_ne!(second_page["items"][0]["id"], first_id);
+        assert_eq!(second_page["next_cursor"], Value::Null);
+
+        assert_eq!(
+            call(
+                app.clone(),
+                "GET",
+                &format!(
+                    "/api/v1/platform/audit-events?tenant_id={}&request_id={shared_request}&page_size=1&cursor={cursor}",
+                    f.a
+                ),
+                &operator,
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        let one_tenant = ok(call(
+            app.clone(),
+            "GET",
+            &format!(
+                "/api/v1/platform/audit-events?tenant_id={}&request_id={shared_request}",
+                f.a
+            ),
+            &operator,
+        )
+        .await);
+        assert_eq!(one_tenant["items"].as_array().unwrap().len(), 1);
+        assert_eq!(one_tenant["items"][0]["tenant_id"], f.a.to_string());
+
+        let platform = ok(call(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/platform/audit-events?request_id={platform_request}"),
+            &operator,
+        )
+        .await);
+        assert_eq!(platform["items"].as_array().unwrap().len(), 1);
+        assert_eq!(platform["items"][0]["scope_type"], "platform");
+        assert_eq!(platform["items"][0]["tenant_id"], Value::Null);
+
+        for token in [&admin, &member, &f.key] {
+            assert!(matches!(
+                call(app.clone(), "GET", "/api/v1/platform/audit-events", token)
+                    .await
+                    .0,
+                StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+            ));
+        }
+        for query in [
+            "tenant_id=00000000-0000-0000-0000-000000000000",
+            "request_id=00000000-0000-0000-0000-000000000000",
+            "page_size=101",
+            "page=1",
+            "cursor=not-a-cursor",
+            "include_secrets=true",
+        ] {
+            assert_eq!(
+                call(
+                    app.clone(),
+                    "GET",
+                    &format!("/api/v1/platform/audit-events?{query}"),
+                    &operator,
+                )
+                .await
+                .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+    })
+    .await;
 }
 
 #[tokio::test]

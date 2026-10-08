@@ -112,12 +112,13 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("nav.tenants", "平台租户");
     m.insert("nav.node_gateway", "节点网关");
     m.insert("nav.monitoring", "监控与诊断");
+    m.insert("nav.platform_audit", "审计日志");
     m.insert("nav.account_settings", "账户设置");
     m.insert("nav.settings", "系统设置");
     m.insert("nav.group.usage", "用量");
     m.insert("nav.group.billing", "账务");
     m.insert("nav.group.account", "账户");
-    m.insert("nav.group.admin", "管理");
+    m.insert("nav.group.admin", "平台管理");
 
     // ── 认证 ────────────────────────────────────
     m.insert("auth.login", "登录");
@@ -2285,6 +2286,9 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         m.insert(key, zh);
     }
     for &(key, zh, _) in super::operations::TEXT {
+        m.insert(key, zh);
+    }
+    for &(key, zh, _) in super::platform_audit::TEXT {
         m.insert(key, zh);
     }
     for &(key, zh, _) in super::tenant_nodes::TEXT {

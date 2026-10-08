@@ -82,6 +82,11 @@ impl UserInfo {
         .any(|permission| self.has_platform_permission(permission))
     }
 
+    /// Cross-tenant audit is a dedicated read capability shared by root and operator.
+    pub fn can_view_platform_audit(&self) -> bool {
+        self.has_platform_permission("platform:audit_read")
+    }
+
     pub fn active_tenant_id(&self) -> Option<&str> {
         self.selected_tenant
             .as_ref()
@@ -257,6 +262,19 @@ mod capability_tests {
         ] {
             assert!(!user(PlatformRole::Operator, &capabilities, &[]).can_manage_platform());
         }
+    }
+
+    #[test]
+    fn audit_read_is_independent_of_root_business_management() {
+        let operator = user(PlatformRole::Operator, &["platform:audit_read"], &[]);
+        assert!(operator.can_view_platform_audit());
+        assert!(!operator.can_manage_platform());
+        let tenant_admin = user(
+            PlatformRole::None,
+            &[],
+            &["tenant:manage", "members:manage"],
+        );
+        assert!(!tenant_admin.can_view_platform_audit());
     }
     #[test]
     fn current_platform_capability_is_required_without_role_text_fallback() {
