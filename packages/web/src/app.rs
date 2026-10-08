@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use dioxus::router::RouterConfig;
 
 use crate::i18n::{I18n, Lang};
 use crate::router::Route;
@@ -12,7 +13,9 @@ use crate::stores::{
 };
 use crate::views::shared::Toast;
 use crate::views::tenant::common::WorkspaceScope;
-use crate::views::tenant::{WorkspaceDraftState, WorkspaceSwitcher};
+use crate::views::tenant::{
+    WorkspaceDraftState, WorkspaceRouteState, WorkspaceSwitcher, WorkspaceUnloadGuard,
+};
 use ui::layout::sidebar::NavIcon;
 use ui::{AppShell, NavItem, NavSection, ThemeCtx, UserMenuAction};
 
@@ -35,7 +38,8 @@ pub fn App() -> Element {
     let user_loaded_session = use_signal(uuid::Uuid::nil);
     let public_settings_state = use_signal(PublicSettingsState::default);
     let toast_signal = use_signal(|| None::<ToastMsg>);
-    let workspace_draft_signal = use_signal(|| false);
+    let workspace_draft_signal = use_signal(std::collections::BTreeSet::new);
+    let workspace_route_signal = use_signal(|| None::<Route>);
     let lang_signal = use_signal(|| {
         #[cfg(target_arch = "wasm32")]
         {
@@ -63,7 +67,8 @@ pub fn App() -> Element {
     let public_settings_store =
         use_context_provider(|| PublicSettingsStore::new(public_settings_state));
     let _ui_store = use_context_provider(|| UiStore::new(toast_signal));
-    let _workspace_drafts = use_context_provider(|| WorkspaceDraftState(workspace_draft_signal));
+    let workspace_drafts = use_context_provider(|| WorkspaceDraftState(workspace_draft_signal));
+    let workspace_routes = use_context_provider(|| WorkspaceRouteState(workspace_route_signal));
     let _lang = use_context_provider(|| lang_signal);
     let _theme = use_context_provider(|| ThemeCtx(theme_signal));
 
@@ -142,7 +147,36 @@ pub fn App() -> Element {
         }};
     }
     rsx! {
-        Router::<Route> {}
+        WorkspaceUnloadGuard {}
+        Router::<Route> {
+            config: move |_| {
+                RouterConfig::default().on_update(move |router| {
+                    let next = router.current();
+                    let previous = workspace_routes.current();
+                    let same_route = previous.as_ref() == Some(&next);
+                    // Authentication loss must always reach the public route;
+                    // otherwise a stale draft could trap the app on the
+                    // protected-layout loading screen.
+                    let blocked = auth_store.state.peek().is_authenticated
+                        && workspace_drafts.is_blocked();
+                    let confirmed = !blocked || same_route || {
+                        let i18n = I18n::new(Lang::from_str(&lang_signal.peek()));
+                        crate::views::tenant::workspace_switcher::confirm_discard(
+                            i18n.t("tenant.unsaved_switch_confirm"),
+                        )
+                    };
+                    if crate::views::tenant::workspace_switcher::should_restore_route(
+                        blocked,
+                        same_route,
+                        confirmed,
+                    ) {
+                        return previous.map(NavigationTarget::Internal);
+                    }
+                    workspace_routes.track(next);
+                    None
+                })
+            }
+        }
     }
 }
 
@@ -263,6 +297,10 @@ pub fn AppLayout() -> Element {
     let nav = use_navigator();
     let current_route = use_route::<Route>();
     let mut user_store_write = use_context::<UserStore>();
+    let workspace_drafts = use_context::<WorkspaceDraftState>();
+    let workspace_routes = use_context::<WorkspaceRouteState>();
+    let initial_route = current_route.clone();
+    use_hook(move || workspace_routes.track(initial_route));
 
     // 同步检查认证状态：在渲染之前立即判断，未登录则渲染重定向占位符
     // 同时通过 use_effect 执行实际导航（Dioxus 要求导航在 effect 中进行）
@@ -617,20 +655,27 @@ pub fn AppLayout() -> Element {
             collapse_sidebar_title: i18n.t("layout.collapse_sidebar"),
             expand_label: i18n.t("common.expand"),
             collapse_label: i18n.t("common.collapse"),
-            on_user_menu: move |action: UserMenuAction| match action {
-                UserMenuAction::Profile => {
-                    nav.push(Route::UserProfile {});
-                }
-                UserMenuAction::Settings => {
-                    nav.push(Route::UserSettings {});
-                }
-                UserMenuAction::Logout => {
-                    auth_store.logout();
-                    // 清除 API 客户端 token
-                    get_client().clear_token();
-                    // 清空用户信息，避免登出后旧数据残留
-                    *user_store_write.info.write() = None;
-                    nav.replace(Route::Home {});
+            on_user_menu: move |action: UserMenuAction| {
+                match action {
+                    UserMenuAction::Profile => {
+                        nav.push(Route::UserProfile {});
+                    }
+                    UserMenuAction::Settings => {
+                        nav.push(Route::UserSettings {});
+                    }
+                    UserMenuAction::Logout => {
+                        if !crate::views::tenant::workspace_switcher::confirm_workspace_leave(
+                            workspace_drafts,
+                            i18n.t("tenant.unsaved_switch_confirm"),
+                        ) {
+                            return;
+                        }
+                        workspace_drafts.clear();
+                        auth_store.logout();
+                        get_client().clear_token();
+                        *user_store_write.info.write() = None;
+                        nav.replace(Route::Home {});
+                    }
                 }
             },
             document::Title { "{document_title}" }

@@ -25,6 +25,25 @@ struct Rows {
     total: i64,
     total_pages: i64,
 }
+
+fn response_status_label(i18n: crate::i18n::I18n, status: &str) -> String {
+    let key = match status {
+        "queued" => Some("tenant_responses.status_queued"),
+        "in_progress" => Some("tenant_responses.status_in_progress"),
+        "completed" => Some("tenant_responses.status_completed"),
+        "failed" => Some("tenant_responses.status_failed"),
+        "cancelled" => Some("tenant_responses.status_cancelled"),
+        "incomplete" => Some("tenant_responses.status_incomplete"),
+        "expired" => Some("tenant_responses.status_expired"),
+        "deleted" => Some("tenant_responses.status_deleted"),
+        "active_response" => Some("tenant_responses.status_active_response"),
+        "ready" => Some("tenant_responses.status_ready"),
+        "indexed" => Some("tenant_responses.status_indexed"),
+        _ => None,
+    };
+    key.map(|key| i18n.t(key).to_owned())
+        .unwrap_or_else(|| status.to_owned())
+}
 #[component]
 pub fn TenantResponses() -> Element {
     let auth = use_context::<AuthStore>();
@@ -112,7 +131,7 @@ fn ResourceWorkspace(scope: WorkspaceScope) -> Element {
                     thead{tr{th{{i18n.t("tenant_responses.resource")}}th{{i18n.t("tenant_responses.owner")}}th{{i18n.t("tenant_responses.state")}}th{{i18n.t("tenant_responses.created")}}th{{i18n.t("tenant.actions")}}}}
                     tbody{for row in &page.rows{{let detail=row.clone();let items=row.clone();let cancel=row.clone();let delete=row.clone();let meta=row.clone();let append=row.clone();
                         rsx!{tr{key:"{row.key()}",td{TechnicalId{value:row.id().to_string()}p{"{row.model()}"}p{{i18n.t("tenant_responses.revision")} " " {row.revision().map(|v|v.to_string()).unwrap_or_else(|_|"—".into())}}}
-                        td{TechnicalId{value:row.owner().to_string()}}td{p{"{row.status()}"}if let Row::Conversation(c)=row{if let Some(active)=&c.active_response_id{details{summary{{i18n.t("tenant_responses.active")}}code{"{active}"}}}}}
+                        td{TechnicalId{value:row.owner().to_string()}}td{p{{response_status_label(i18n,row.status())}}if let Row::Conversation(c)=row{if let Some(active)=&c.active_response_id{details{summary{{i18n.t("tenant_responses.active")}}code{"{active}"}}}}}
                         td{p{{format_time(row.created())}}details{summary{{i18n.t("tenant_responses.expires")}}{format_time(row.expires())}}}
                         td{
                             button{class:"btn btn-secondary btn-sm",onclick:move |_|inspect(Inspection{row:detail.clone(),read:ReadKind::Detail}),{i18n.t("tenant_responses.inspect")}}

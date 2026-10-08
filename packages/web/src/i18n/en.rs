@@ -51,6 +51,43 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("tenant_providers.binding_hint", "The binding is tenant-only. Models come from the selected account; global scope cannot be selected here.");
     m.insert("tenant_providers.select_account", "Select an account");
+    m.insert(
+        "tenant_providers.options_search",
+        "Search available accounts",
+    );
+    m.insert(
+        "tenant_providers.selected_account_id",
+        "Selected account UUID",
+    );
+    m.insert("tenant_providers.limits", "Rate limits");
+    m.insert("tenant_providers.rpm_limit", "Requests per minute (RPM)");
+    m.insert("tenant_providers.tpm_limit", "Tokens per minute (TPM)");
+    m.insert("tenant_providers.priority", "Priority (0–10)");
+    m.insert("tenant_providers.active", "Account enabled");
+    m.insert(
+        "tenant_providers.invalid_limits",
+        "RPM and TPM must be positive integers; priority must be between 0 and 10.",
+    );
+    m.insert("tenant_providers.health_healthy", "Healthy");
+    m.insert("tenant_providers.health_degraded", "Degraded");
+    m.insert("tenant_providers.health_unhealthy", "Unhealthy");
+    m.insert("tenant_providers.health_unknown", "Not tested");
+    m.insert(
+        "tenant_providers.delete_account_title",
+        "Delete provider account",
+    );
+    m.insert(
+        "tenant_providers.delete_account_confirm",
+        "Delete provider account “{name}”? This cannot be undone.",
+    );
+    m.insert(
+        "tenant_providers.delete_binding_title",
+        "Delete passthrough binding",
+    );
+    m.insert(
+        "tenant_providers.delete_binding_confirm",
+        "Delete the passthrough binding for “{name}”? This cannot be undone.",
+    );
     m.insert("tenant_providers.saved", "Saved");
     m.insert("tenant_providers.scope", "Current tenant");
     super::tenant_finance::register(&mut m, true);
@@ -354,6 +391,7 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.expand", "Expand");
     m.insert("common.collapse", "Collapse");
     m.insert("common.enabled", "Enabled");
+    m.insert("common.status", "Status");
     m.insert("common.disabled", "Disabled");
     m.insert("common.yes", "Yes");
     m.insert("common.no", "No");
@@ -1905,8 +1943,23 @@ pub static EN: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     );
     m.insert("tenants.users", "Users");
     m.insert("tenants.accounts", "Channel accounts");
-    m.insert("tenants.disable", "Close");
-    m.insert("tenants.enable", "Open");
+    m.insert("tenants.disable", "Disable");
+    m.insert("tenants.enable", "Enable");
+    m.insert("tenants.disable_title", "Disable tenant");
+    m.insert("tenants.enable_title", "Enable tenant");
+    m.insert(
+        "tenants.disable_confirm",
+        "Disable “{name}”? Its members, API keys, nodes, and provider requests will stop working immediately.",
+    );
+    m.insert(
+        "tenants.enable_confirm",
+        "Enable “{name}” again? Members will then be able to enter the workspace.",
+    );
+    m.insert("tenants.status_updated", "Tenant status updated");
+    m.insert(
+        "tenants.disable_selected_first",
+        "Switch to platform mode before disabling the currently selected tenant.",
+    );
     m.insert("tenants.delete_title", "Delete tenant");
     m.insert("tenants.delete_confirm", "Delete this tenant");
     m.insert("tenants.created", "Tenant created");

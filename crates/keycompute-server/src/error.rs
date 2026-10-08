@@ -390,6 +390,9 @@ impl From<node_gateway::NodeExecutionError> for ApiError {
             NE::ClientError { code, message } => {
                 ApiError::BadRequest(format!("{}: {}", code, message))
             }
+            NE::Authorization { code, message } => {
+                ApiError::Forbidden(format!("{}: {}", code, message))
+            }
             NE::Other { source, .. } => ApiError::Internal(source.to_string()),
         }
     }

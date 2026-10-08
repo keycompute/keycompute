@@ -51,6 +51,31 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
         "绑定仅属于当前租户；模型来自所选账号，此处不能创建全局绑定。",
     );
     m.insert("tenant_providers.select_account", "请选择账号");
+    m.insert("tenant_providers.options_search", "搜索可绑定账号");
+    m.insert("tenant_providers.selected_account_id", "已选账号 UUID");
+    m.insert("tenant_providers.limits", "调用限额");
+    m.insert("tenant_providers.rpm_limit", "每分钟请求数（RPM）");
+    m.insert("tenant_providers.tpm_limit", "每分钟 Token 数（TPM）");
+    m.insert("tenant_providers.priority", "优先级（0–10）");
+    m.insert("tenant_providers.active", "启用账号");
+    m.insert(
+        "tenant_providers.invalid_limits",
+        "RPM 与 TPM 必须为正整数，优先级必须在 0 到 10 之间。",
+    );
+    m.insert("tenant_providers.health_healthy", "健康");
+    m.insert("tenant_providers.health_degraded", "性能下降");
+    m.insert("tenant_providers.health_unhealthy", "异常");
+    m.insert("tenant_providers.health_unknown", "尚未检测");
+    m.insert("tenant_providers.delete_account_title", "删除上游账号");
+    m.insert(
+        "tenant_providers.delete_account_confirm",
+        "确定删除上游账号“{name}”吗？此操作无法撤销。",
+    );
+    m.insert("tenant_providers.delete_binding_title", "删除透传绑定");
+    m.insert(
+        "tenant_providers.delete_binding_confirm",
+        "确定删除“{name}”的透传绑定吗？此操作无法撤销。",
+    );
     m.insert("tenant_providers.saved", "已保存");
     m.insert("tenant_providers.scope", "当前租户");
     super::tenant_finance::register(&mut m, false);
@@ -336,6 +361,7 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("common.expand", "展开");
     m.insert("common.collapse", "折叠");
     m.insert("common.enabled", "已启用");
+    m.insert("common.status", "状态");
     m.insert("common.disabled", "已禁用");
     m.insert("common.yes", "是");
     m.insert("common.no", "否");
@@ -1643,8 +1669,23 @@ pub static ZH: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| 
     m.insert("tenants.slug_hint", "仅支持小写字母、数字和连字符");
     m.insert("tenants.users", "用户数");
     m.insert("tenants.accounts", "渠道账号数");
-    m.insert("tenants.disable", "关闭");
-    m.insert("tenants.enable", "开启");
+    m.insert("tenants.disable", "停用");
+    m.insert("tenants.enable", "启用");
+    m.insert("tenants.disable_title", "停用租户");
+    m.insert("tenants.enable_title", "启用租户");
+    m.insert(
+        "tenants.disable_confirm",
+        "确定停用“{name}”吗？该租户的成员、API Key、节点和上游调用将立即停止使用。",
+    );
+    m.insert(
+        "tenants.enable_confirm",
+        "确定重新启用“{name}”吗？成员随后可以重新进入该工作区。",
+    );
+    m.insert("tenants.status_updated", "租户状态已更新");
+    m.insert(
+        "tenants.disable_selected_first",
+        "请先切换到平台模式，再停用当前选中的租户。",
+    );
     m.insert("tenants.delete_title", "删除租户");
     m.insert("tenants.delete_confirm", "确定删除租户");
     m.insert("tenants.created", "租户已创建");

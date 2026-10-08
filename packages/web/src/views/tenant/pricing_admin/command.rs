@@ -17,6 +17,7 @@ pub(super) fn Editor(
     on_close: EventHandler<()>,
     on_changed: EventHandler<()>,
 ) -> Element {
+    super::super::workspace_switcher::use_workspace_blocker();
     let i18n = use_i18n();
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();

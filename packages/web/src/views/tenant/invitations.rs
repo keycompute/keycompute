@@ -65,6 +65,9 @@ fn TenantInvitationsPage() -> Element {
     let mut pending = use_signal(|| None::<TenantInvitation>);
     // This one-time recovery link is intentionally kept only in this keyed component.
     let mut created = use_signal(|| None::<InvitationCreateResponse>);
+    super::workspace_switcher::use_workspace_dirty_blocker(move || {
+        busy() || !email().trim().is_empty() || role() != TenantRole::Member || hours() != "24"
+    });
     let mut data = use_resource(move || {
         let scope = WorkspaceScope::from_stores(auth, users);
         let page = page();
@@ -99,13 +102,13 @@ fn TenantInvitationsPage() -> Element {
             error.set(i18n.t("tenant.invalid_duration").into());
             return;
         };
-        let email = email().trim().to_owned();
-        if email.is_empty() || email.len() > 255 {
+        let email_value = email().trim().to_owned();
+        if email_value.is_empty() || email_value.len() > 255 {
             error.set(i18n.t("tenant.invalid_email").into());
             return;
         }
         let body = CreateInvitation {
-            email,
+            email: email_value,
             tenant_role: role(),
             expires_in_seconds: seconds,
         };
@@ -124,6 +127,9 @@ fn TenantInvitationsPage() -> Element {
             match result {
                 Ok(result) => {
                     created.set(Some(result));
+                    email.set(String::new());
+                    role.set(TenantRole::Member);
+                    hours.set("24".to_owned());
                     page.set(1);
                     data.restart();
                 }
@@ -193,10 +199,7 @@ fn TenantInvitationsPage() -> Element {
         if let Some(result)=created(){section {class:"alert alert-info",role:"status",
             p {{i18n.t(notification_label(&result.notification))}}
             if result.outcome==InvitationOutcome::AlreadyPending {p {{i18n.t("tenant.already_pending")}}}
-            if let Some(link)=result.acceptance_link {label {class:"form-label",r#for:"invite-recovery",{i18n.t("tenant.recovery_link")}}
-                input {id:"invite-recovery",class:"input-field",readonly:true,value:link,autocomplete:"off"}
-                p {{i18n.t("tenant.recovery_hint")}}
-            }
+            if let Some(link)=result.acceptance_link {RecoveryLink {link}}
             button {class:"btn btn-secondary",onclick:move |_|created.set(None),{i18n.t("tenant.hide")}}
         }}
         button {class:"btn btn-secondary",disabled:busy(),onclick:move |_|data.restart(),{i18n.t("tenant.reload")}}
@@ -217,4 +220,15 @@ fn TenantInvitationsPage() -> Element {
         }
         if let Some(invitation)=pending(){CommandDialog {title:i18n.t("tenant.revoke").to_string(),target:invitation.email,busy:busy(),on_cancel:move |_|pending.set(None),on_confirm:revoke}}
     }}
+}
+
+#[component]
+fn RecoveryLink(link: String) -> Element {
+    super::workspace_switcher::use_workspace_blocker();
+    let i18n = use_i18n();
+    rsx! {
+        label { class:"form-label", r#for:"invite-recovery", {i18n.t("tenant.recovery_link")} }
+        input { id:"invite-recovery", class:"input-field", readonly:true, value:link, autocomplete:"off" }
+        p { {i18n.t("tenant.recovery_hint")} }
+    }
 }

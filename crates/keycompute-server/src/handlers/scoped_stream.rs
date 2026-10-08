@@ -14,7 +14,9 @@ use crate::{
 };
 use axum::{body::Body, http::StatusCode, response::Response};
 use bytes::Bytes;
-use keycompute_db::models::NodeTask;
+use keycompute_db::models::node_task::{
+    EXECUTION_AUTHORITY_INVALID_CODE, NodeTask, TASK_STATUS_FAILED,
+};
 use keycompute_types::{
     ClientResponseOutcome, ExecutionPlan, ModelAccessMode, RequestContext,
     RequestLifecycleRecorder,
@@ -255,7 +257,7 @@ impl Owner {
                         self.finish_node(false, "error", ClientResponseOutcome::ResponseFailed)
                             .await;
                     }
-                    Err(message) => self.prehead_failure(&message, 502).await,
+                    Err((message, status)) => self.prehead_failure(&message, status).await,
                 }
                 return;
             }
@@ -304,8 +306,8 @@ impl Owner {
                                 })
                                 .await;
                             }
-                            Err(message) => {
-                                self.prehead_failure(&message, 502).await;
+                            Err((message, status)) => {
+                                self.prehead_failure(&message, status).await;
                                 return;
                             }
                         }
@@ -999,7 +1001,8 @@ impl Owner {
         &self,
         gateway: &node_gateway::NodeGatewayService,
         task_id: Uuid,
-    ) -> Option<std::result::Result<NodeNativeHttpResult, String>> {
+    ) -> Option<std::result::Result<NodeNativeHttpResult, (String, u16)>> {
+        gateway.converge_invalid_queued_task(task_id).await.ok()?;
         let task = tokio::time::timeout(
             Duration::from_secs(2),
             NodeTask::find_by_id_in_scope(
@@ -1015,24 +1018,35 @@ impl Owner {
         if !task.is_terminal() {
             return None;
         }
+        if task.status == TASK_STATUS_FAILED
+            && task
+                .error_json
+                .as_ref()
+                .and_then(|value| value.get("code"))
+                .and_then(Value::as_str)
+                == Some(EXECUTION_AUTHORITY_INVALID_CODE)
+        {
+            return Some(Err(("Execution authority is no longer valid".into(), 403)));
+        }
         let Some(value) = task.result_json else {
             return matches!(task.status.as_str(), "failed" | "expired")
-                .then(|| Err("native task completed without a result".into()));
+                .then(|| Err(("native task completed without a result".into(), 502)));
         };
         if value.get("body").is_none() {
             return matches!(task.status.as_str(), "failed" | "expired")
-                .then(|| Err("stream task completed without an HTTP result".into()));
+                .then(|| Err(("stream task completed without an HTTP result".into(), 502)));
         }
         let response: NodeNativeHttpResult = match serde_json::from_value(value) {
             Ok(response) => response,
-            Err(_) => return Some(Err("invalid native HTTP result".into())),
+            Err(_) => return Some(Err(("invalid native HTTP result".into(), 502))),
         };
         match response.validate_for(self.input.op, &self.input.model) {
             Ok(None) if (400..=599).contains(&response.status) => Some(Ok(response)),
-            Ok(_) => Some(Err(
-                "stream task returned an unexpected native result".into()
-            )),
-            Err(error) => Some(Err(format!("invalid native HTTP result: {error}"))),
+            Ok(_) => Some(Err((
+                "stream task returned an unexpected native result".into(),
+                502,
+            ))),
+            Err(error) => Some(Err((format!("invalid native HTTP result: {error}"), 502))),
         }
     }
 

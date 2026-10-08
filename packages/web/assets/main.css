@@ -7693,6 +7693,19 @@ select.form-input:focus {
   font-weight: 650;
 }
 
+.tenant-provider-admin .modal-backdrop .modal.modal-wide {
+  width: min(760px, calc(100vw - 32px));
+  max-width: 760px;
+}
+
+.tenant-provider-admin .modal-form-grid > label:not(.checkbox-field) {
+  display: grid;
+  gap: 7px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
 .tenant-provider-admin .resource-panel > .toolbar,
 .tenant-pricing-admin > .toolbar,
 .tenant-key-admin > .toolbar,

@@ -790,6 +790,30 @@ impl NodeGatewayStore {
         }
     }
 
+    /// Reject one queued task after its immutable execution authority becomes
+    /// stale, while keeping task state, trace state and metrics in step.
+    pub async fn reject_invalid_queued_task(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<NodeTask>, DbError> {
+        let tx = self.pool.begin().await?;
+        let rejected = NodeTask::fail_queued_with_invalid_authority_by_id(&tx, task_id).await?;
+        if let Some(task) = rejected.as_ref() {
+            Self::finish_node_trace_savepoint(&tx, task, None, NodeTaskCompleteAction::Failed)
+                .await;
+        }
+        tx.commit().await?;
+        if let Some(task) = rejected.as_ref() {
+            crate::metrics::record_node_task_completion(
+                &NodeTaskCompleteAction::Failed,
+                true,
+                task.claimed_at,
+                task.finished_at.unwrap_or_else(Utc::now),
+            );
+        }
+        Ok(rejected)
+    }
+
     pub async fn claim_next_native_task(
         &self,
         node_id: Uuid,

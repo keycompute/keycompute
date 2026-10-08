@@ -13,6 +13,7 @@ use client_api::{
     api::tenant_control::{TenantContext, TenantPatch},
 };
 use dioxus::prelude::*;
+use uuid::Uuid;
 
 #[derive(Clone, Default, PartialEq)]
 struct ConfigDraft {
@@ -82,14 +83,15 @@ fn TenantSettingsPage() -> Element {
     let auth = use_context::<AuthStore>();
     let mut users = use_context::<UserStore>();
     let mut ui = use_context::<UiStore>();
-    let mut shared_dirty = use_context::<WorkspaceDraftState>();
+    let shared_dirty = use_context::<WorkspaceDraftState>();
+    let draft_owner = use_hook(Uuid::new_v4);
     let scope = WorkspaceScope::from_stores(auth, users);
     let mut saving = use_signal(|| false);
     let mut error = use_signal(String::new);
     let mut draft = use_signal(ConfigDraft::default);
     let mut dirty = use_signal(|| false);
     let mut pending = use_signal(|| None::<TenantPatch>);
-    use_drop(move || shared_dirty.0.set(false));
+    use_drop(move || shared_dirty.set(draft_owner, false));
 
     let mut context = use_resource(move || {
         let scope = WorkspaceScope::from_stores(auth, users);
@@ -122,7 +124,7 @@ fn TenantSettingsPage() -> Element {
             draft.set(ConfigDraft::from_context(&value));
         }
     });
-    use_effect(move || shared_dirty.0.set(dirty()));
+    use_effect(move || shared_dirty.set(draft_owner, dirty()));
 
     let save = move |_| match draft().patch() {
         Ok(body) => pending.set(Some(body)),
@@ -159,7 +161,7 @@ fn TenantSettingsPage() -> Element {
                     }
                     draft.set(ConfigDraft::from_context(&row));
                     dirty.set(false);
-                    shared_dirty.0.set(false);
+                    shared_dirty.set(draft_owner, false);
                     context.restart();
                     ui.show_success(i18n.t("tenant.saved"));
                 }
@@ -171,7 +173,7 @@ fn TenantSettingsPage() -> Element {
         pending.set(None);
         error.set(String::new());
         dirty.set(false);
-        shared_dirty.0.set(false);
+        shared_dirty.set(draft_owner, false);
         draft.set(ConfigDraft::default());
         context.restart();
     };
@@ -214,7 +216,7 @@ fn TenantSettingsPage() -> Element {
                         }
                         div { class: "tenant-settings-actions",
                             button { class: "btn btn-primary", disabled: saving() || !dirty(), onclick: save, {i18n.t("tenant.save")} }
-                            button { class: "btn btn-secondary", disabled: saving(), onclick: move |_| { pending.set(None); error.set(String::new()); dirty.set(false); shared_dirty.0.set(false); draft.set(ConfigDraft::from_context(&value)); }, {i18n.t("form.cancel")} }
+                            button { class: "btn btn-secondary", disabled: saving(), onclick: move |_| { pending.set(None); error.set(String::new()); dirty.set(false); shared_dirty.set(draft_owner, false); draft.set(ConfigDraft::from_context(&value)); }, {i18n.t("form.cancel")} }
                             button { class: "btn btn-ghost", disabled: saving(), onclick: reload, {i18n.t("tenant.reload")} }
                         }
                     }

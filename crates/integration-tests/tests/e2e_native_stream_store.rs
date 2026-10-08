@@ -10,7 +10,7 @@ use keycompute_db::DbRouter;
 use keycompute_db::models::{
     node::{CreateNodeRequest, Node},
     node_session::{CreateNodeSessionRequest, NodeSession},
-    node_task::NodeTask,
+    node_task::{NodeTask, TASK_STATUS_QUEUED},
 };
 use keycompute_types::{
     node::{
@@ -808,8 +808,12 @@ async fn queued_nodes_keep_original_versions_instead_of_refreshing_their_authori
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(old.status, "queued");
+        // The database-only store cannot safely finalize the rejection: Redis
+        // queue cleanup belongs to the service/sweeper convergence path. Keep
+        // queued as its durable retry marker while still denying the claim.
+        assert_eq!(old.status, TASK_STATUS_QUEUED);
         assert!(old.lease_id.is_none());
+        assert!(old.error_json.is_none());
         assert_eq!(
             old.payload_json["dispatch_identity"],
             serde_json::to_value(proof).unwrap()

@@ -109,6 +109,9 @@ pub fn ConfirmModal(
     /// 确认按钮是否为危险变体
     #[props(default = false)]
     danger: bool,
+    /// 操作提交中；锁定所有关闭和重复确认入口。
+    #[props(default = false)]
+    busy: bool,
     /// 确认回调
     #[props(default)]
     onconfirm: EventHandler<()>,
@@ -131,11 +134,11 @@ pub fn ConfirmModal(
             class: "modal-backdrop",
             tabindex: "-1",
             onkeydown: move |event| {
-                if event.key() == Key::Escape {
+                if event.key() == Key::Escape && !busy {
                     oncancel.call(());
                 }
             },
-            onclick: move |_| oncancel.call(()),
+            onclick: move |_| if !busy { oncancel.call(()) },
             div {
                 class: "modal",
                 role: "alertdialog",
@@ -150,7 +153,8 @@ pub fn ConfirmModal(
                         r#type: "button",
                         autofocus: true,
                         aria_label: "{close_label}",
-                        onclick: move |_| oncancel.call(()),
+                        disabled: busy,
+                        onclick: move |_| if !busy { oncancel.call(()) },
                         "✕"
                     }
                 }
@@ -165,13 +169,15 @@ pub fn ConfirmModal(
                     button {
                         class: "btn btn-ghost",
                         r#type: "button",
-                        onclick: move |_| oncancel.call(()),
+                        disabled: busy,
+                        onclick: move |_| if !busy { oncancel.call(()) },
                         "{cancel_text}"
                     }
                     button {
                         class: "{confirm_class}",
                         r#type: "button",
-                        onclick: move |_| onconfirm.call(()),
+                        disabled: busy,
+                        onclick: move |_| if !busy { onconfirm.call(()) },
                         "{confirm_text}"
                     }
                 }

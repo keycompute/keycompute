@@ -440,6 +440,11 @@ jobs:
       - name: Install wasm32 target
         run: rustup target add wasm32-unknown-unknown
 
+      # Native workspace Clippy cannot see browser-only cfg branches such as
+      # beforeunload guards and Web Storage integration.
+      - name: Check Web WASM (Clippy)
+        run: cargo clippy --package web --target wasm32-unknown-unknown -- -D warnings
+
       - name: Build Web WASM
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"

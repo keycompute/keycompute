@@ -64,12 +64,21 @@ impl NodeGatewaySweeper {
         // 2. 将过期任务标记为 expired
         let expired_tasks = self.expire_overdue_tasks(&leader_tx).await?;
 
-        // 3. 在同一快照中查询需要补推的 queued 任务
+        // 3. 找出凭证、成员或租户版本已经失效、但尚未领取的任务。
+        // 保持 queued 直至 Redis 清理成功，让数据库行充当可靠重试标记。
+        let unauthorized_candidates =
+            NodeTask::find_queued_with_invalid_authority(&leader_tx).await?;
+
+        // 4. 在同一快照中查询需要补推的 queued 任务
         let tasks_to_repush = self.find_queued_tasks_to_repush(&leader_tx).await?;
 
         // 先提交数据库变更，再执行 Redis 副作用，避免提交失败时仍对外发布
         // 尚未生效的过期状态或队列消息。提交同时释放 advisory lock。
         leader_tx.commit().await?;
+
+        let unauthorized_tasks = self
+            .reject_invalid_authority_candidates(&unauthorized_candidates)
+            .await;
 
         if offline_nodes > 0 {
             tracing::info!("Marked {} nodes as offline", offline_nodes);
@@ -85,12 +94,20 @@ impl NodeGatewaySweeper {
             }
             tracing::info!("Marked {} tasks as expired", expired_tasks.len());
         }
+        if !unauthorized_tasks.is_empty() {
+            // reject_invalid_queued_task records the transition metric once;
+            // do not count the same completion again at the sweeper layer.
+            tracing::info!(
+                "Rejected {} queued tasks with invalid execution authority",
+                unauthorized_tasks.len()
+            );
+        }
 
-        // 4. 先清理已经终态的队列条目。历史版本可能留下同一任务的多个
+        // 5. 先清理已经终态的队列条目。历史版本可能留下同一任务的多个
         // List 元素，因此必须删除全部匹配项，而不是只弹出一个。
-        self.remove_expired_tasks_from_queues(&expired_tasks).await;
+        self.remove_terminal_tasks_from_queues(&expired_tasks).await;
 
-        // 5. 补推 queued 任务到 Redis
+        // 6. 补推 queued 任务到 Redis
         self.repush_queued_tasks(&tasks_to_repush).await;
 
         // Stream rows are bounded event storage, but terminal rows still need
@@ -111,7 +128,7 @@ impl NodeGatewaySweeper {
             _ => {}
         }
 
-        // 6. 通知等待方过期任务
+        // 7. 通知等待方终态任务
         for task in &expired_tasks {
             if let Err(e) = self
                 .redis
@@ -122,6 +139,15 @@ impl NodeGatewaySweeper {
                     "Failed to push expired notification for task {}: {}",
                     task.id,
                     e
+                );
+            }
+        }
+        for task in &unauthorized_tasks {
+            if let Err(error) = self.redis.push_result_notification(task.id, "failed").await {
+                tracing::warn!(
+                    task_id = %task.id,
+                    %error,
+                    "Failed to push invalid-authority task notification"
                 );
             }
         }
@@ -166,6 +192,36 @@ impl NodeGatewaySweeper {
         Ok(expired_tasks)
     }
 
+    async fn reject_invalid_authority_candidates(&self, candidates: &[NodeTask]) -> Vec<NodeTask> {
+        let store = NodeGatewayStore::new(Arc::clone(&self.pool), self.config.clone());
+        let mut rejected = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if let Err(error) = self
+                .redis
+                .remove_from_model_queue(&candidate.model, candidate.id)
+                .await
+            {
+                tracing::warn!(
+                    task_id = %candidate.id,
+                    model = %candidate.model,
+                    %error,
+                    "Failed to remove invalid Node task from Redis queues; leaving it queued for retry"
+                );
+                continue;
+            }
+            match store.reject_invalid_queued_task(candidate.id).await {
+                Ok(Some(task)) => rejected.push(task),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(
+                    task_id = %candidate.id,
+                    %error,
+                    "Failed to reject invalid Node task after Redis cleanup; leaving it queued for retry"
+                ),
+            }
+        }
+        rejected
+    }
+
     /// 查询需要补推到 Redis 的 queued 任务。
     async fn find_queued_tasks_to_repush(
         &self,
@@ -181,6 +237,9 @@ impl NodeGatewaySweeper {
             WHERE status = 'queued'
               AND deadline_at > NOW()
               AND queued_at < NOW() - MAKE_INTERVAL(secs => $1)
+              AND dispatch_identity_is_active(
+                    payload_json->'dispatch_identity', tenant_id, user_id
+                  )
             ORDER BY queued_at ASC
             "#,
             [repush_interval.into()],
@@ -210,8 +269,8 @@ impl NodeGatewaySweeper {
         }
     }
 
-    async fn remove_expired_tasks_from_queues(&self, expired_tasks: &[NodeTask]) {
-        for task in expired_tasks {
+    async fn remove_terminal_tasks_from_queues(&self, tasks: &[NodeTask]) {
+        for task in tasks {
             if let Err(error) = self
                 .redis
                 .remove_from_model_queue(&task.model, task.id)
@@ -221,7 +280,7 @@ impl NodeGatewaySweeper {
                     task_id = %task.id,
                     model = %task.model,
                     %error,
-                    "Failed to remove expired task from Redis queue"
+                    "Failed to remove terminal task from Redis queue"
                 );
             }
         }

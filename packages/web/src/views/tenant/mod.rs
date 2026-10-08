@@ -8,7 +8,7 @@ pub(crate) mod node_admin;
 pub use node_admin::TenantNodes;
 mod settings;
 mod workspace;
-mod workspace_switcher;
+pub(crate) mod workspace_switcher;
 use crate::{
     hooks::use_i18n::use_i18n,
     router::Route,
@@ -21,7 +21,9 @@ pub use invitations::TenantInvitations;
 pub use members::TenantMembers;
 pub use settings::TenantSettings;
 pub use workspace::TenantWorkspace;
-pub use workspace_switcher::{WorkspaceDraftState, WorkspaceSwitcher};
+pub use workspace_switcher::{
+    WorkspaceDraftState, WorkspaceRouteState, WorkspaceSwitcher, WorkspaceUnloadGuard,
+};
 
 fn can_access_admin_route(user: &crate::stores::user_store::UserInfo, route: &Route) -> bool {
     match route {

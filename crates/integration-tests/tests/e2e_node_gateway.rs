@@ -466,6 +466,272 @@ async fn test_sweeper_converges_redis_queue_entries() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Revoking a queued request's immutable authority must converge every durable
+/// and Redis representation to one terminal failure without waiting for the
+/// request deadline.
+#[tokio::test]
+#[serial(node_gateway)]
+async fn test_sweeper_fails_and_removes_queued_work_after_authority_revocation()
+-> anyhow::Result<()> {
+    let env = NodeTestEnv::new().await?;
+    let model = format!("sweeper-revoked-{}", Uuid::new_v4());
+    let queue_key = format!("queue:node:model:{model}");
+    let (tenant_id, user_id) = create_test_user(&env.pool, "sweeper-revoked").await;
+    let task = NodeTask::create(
+        &env.pool,
+        &CreateNodeTaskRequest {
+            tenant_id,
+            request_id: Uuid::new_v4(),
+            user_id,
+            model: model.clone(),
+            payload_json: serde_json::json!({
+                "dispatch_identity": integration_tests::db::fixture_dispatch_identity(
+                    &env.pool, tenant_id, user_id
+                ).await
+            }),
+            deadline_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            complete_grace_until: chrono::Utc::now() + chrono::Duration::minutes(6),
+        },
+    )
+    .await?;
+
+    let task_id = task.id.to_string();
+    let mut redis = env.redis_store.pool().get().await?;
+    let _: () = redis
+        .lpush(&queue_key, &[task_id.clone(), task_id.clone()])
+        .await?;
+    drop(redis);
+    env.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+            [user_id.into()],
+        ))
+        .await?;
+
+    env.service.sweeper().run_once().await?;
+
+    let terminal = NodeTask::find_by_id(&env.pool, task.id)
+        .await?
+        .expect("revoked task should remain available for audit");
+    assert_eq!(terminal.status, TASK_STATUS_FAILED);
+    assert_eq!(
+        terminal
+            .error_json
+            .as_ref()
+            .and_then(|value| value["code"].as_str()),
+        Some(EXECUTION_AUTHORITY_INVALID_CODE)
+    );
+    assert!(terminal.finished_at.is_some());
+    assert!(terminal.lease_id.is_none());
+
+    let mut redis = env.redis_store.pool().get().await?;
+    let queue_entries: Vec<String> = redis.lrange(&queue_key, 0, -1).await?;
+    assert!(queue_entries.is_empty());
+    let result_key = format!("task:result:{}", task.id);
+    let notification_ttl: i64 = redis.ttl(&result_key).await?;
+    assert!(notification_ttl > 0);
+    let notification: Vec<String> = redis.lrange(&result_key, 0, -1).await?;
+    assert_eq!(notification, ["failed"]);
+
+    let _: usize = redis.del(&queue_key).await?;
+    let _: usize = redis.del(&result_key).await?;
+    drop(redis);
+    env.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM node_tasks WHERE id=$1",
+            [task.id.into()],
+        ))
+        .await?;
+    Ok(())
+}
+
+/// A worker can pop a stale queue hint before the periodic sweeper runs. That
+/// claim path must perform the same durable/Redis/trace convergence itself.
+#[tokio::test]
+#[serial(node_gateway)]
+async fn test_poll_rejects_revoked_queue_hint_and_converges_all_representations()
+-> anyhow::Result<()> {
+    let env = NodeTestEnv::new().await?;
+    let model = "deepseek-chat";
+    let queue_key = format!("queue:node:model:{model}");
+    let native_queue_key = format!("queue:node:native:model:{model}");
+    let waiter_model = "llama3";
+    let waiter_queue_key = format!("queue:node:model:{waiter_model}");
+    let waiter_native_queue_key = format!("queue:node:native:model:{waiter_model}");
+    let (tenant_id, user_id) = create_test_user(&env.pool, "poll-revoked").await;
+    let token = create_test_hmac_token(
+        &env.pool,
+        tenant_id,
+        user_id,
+        &env.config.registration_token_secret,
+    )
+    .await;
+    let registered = env
+        .service
+        .register_node(&env.create_register_request("poll-revoked", &token))
+        .await?;
+
+    let request_id = Uuid::new_v4();
+    env.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"INSERT INTO gateway_requests (
+                    request_id,tenant_id,user_id,produce_ai_key_id,protocol,request_path,
+                    requested_model,is_stream,route_type,status,received_at,billing_status,trace_quality
+                ) VALUES ($1,$2,$3,$4,'openai','/v1/chat/completions',$5,FALSE,
+                          'node','queued',NOW(),'pending','actual')"#,
+            [
+                request_id.into(),
+                tenant_id.into(),
+                user_id.into(),
+                Uuid::new_v4().into(),
+                model.into(),
+            ],
+        ))
+        .await?;
+    let task = NodeTask::create(
+        &env.pool,
+        &CreateNodeTaskRequest {
+            tenant_id,
+            request_id,
+            user_id,
+            model: model.into(),
+            payload_json: serde_json::to_value(chat_task_payload(
+                request_id,
+                integration_tests::db::fixture_dispatch_identity(&env.pool, tenant_id, user_id)
+                    .await,
+            ))?,
+            deadline_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            complete_grace_until: chrono::Utc::now() + chrono::Duration::minutes(6),
+        },
+    )
+    .await?;
+    let waiter_request_id = Uuid::new_v4();
+    let waiter_task = NodeTask::create(
+        &env.pool,
+        &CreateNodeTaskRequest {
+            tenant_id,
+            request_id: waiter_request_id,
+            user_id,
+            model: waiter_model.into(),
+            payload_json: serde_json::to_value(chat_task_payload(
+                waiter_request_id,
+                integration_tests::db::fixture_dispatch_identity(&env.pool, tenant_id, user_id)
+                    .await,
+            ))?,
+            deadline_at: chrono::Utc::now() + chrono::Duration::minutes(5),
+            complete_grace_until: chrono::Utc::now() + chrono::Duration::minutes(6),
+        },
+    )
+    .await?;
+
+    let task_id = task.id.to_string();
+    let waiter_task_id = waiter_task.id.to_string();
+    let mut redis = env.redis_store.pool().get().await?;
+    let _: () = redis
+        .lpush(&queue_key, &[task_id.clone(), task_id.clone()])
+        .await?;
+    let _: () = redis
+        .lpush(&native_queue_key, std::slice::from_ref(&task_id))
+        .await?;
+    let _: () = redis
+        .lpush(
+            &waiter_queue_key,
+            &[waiter_task_id.clone(), waiter_task_id.clone()],
+        )
+        .await?;
+    let _: () = redis
+        .lpush(
+            &waiter_native_queue_key,
+            std::slice::from_ref(&waiter_task_id),
+        )
+        .await?;
+    drop(redis);
+    env.pool
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET token_version=token_version+1 WHERE id=$1",
+            [user_id.into()],
+        ))
+        .await?;
+
+    let mut short_poll_config = env.config.clone();
+    short_poll_config.poll_timeout_secs = 1;
+    let poll_service = NodeGatewayService::new(
+        env.service.store.clone(),
+        env.redis.clone(),
+        short_poll_config,
+    );
+    let response = poll_service
+        .poll_task(
+            registered.node_id,
+            registered.session_id,
+            vec![model.into()],
+        )
+        .await?;
+    assert!(response.task.is_none());
+
+    let terminal = NodeTask::find_by_id(&env.pool, task.id)
+        .await?
+        .expect("rejected task should remain available for audit");
+    assert_eq!(terminal.status, TASK_STATUS_FAILED);
+    assert_eq!(
+        terminal
+            .error_json
+            .as_ref()
+            .and_then(|value| value["code"].as_str()),
+        Some(EXECUTION_AUTHORITY_INVALID_CODE)
+    );
+    let trace_status = env
+        .pool
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT status FROM gateway_requests WHERE request_id=$1",
+            [request_id.into()],
+        ))
+        .await?
+        .expect("request trace should remain available")
+        .try_get::<String>("", "status")?;
+    // Node completion closes its execution stage only. The protocol handler
+    // owns the final client-delivery outcome and finishes the request trace.
+    assert_eq!(trace_status, "running");
+
+    // The request-side fallback can win the race before any worker sees its
+    // queue hint. It must perform the same convergence without a poll.
+    poll_service
+        .converge_invalid_queued_task(waiter_task.id)
+        .await?;
+    let waiter_terminal = NodeTask::find_by_id(&env.pool, waiter_task.id)
+        .await?
+        .expect("request-side rejected task should remain available for audit");
+    assert_eq!(waiter_terminal.status, TASK_STATUS_FAILED);
+
+    let mut redis = env.redis_store.pool().get().await?;
+    let queue_entries: Vec<String> = redis.lrange(&queue_key, 0, -1).await?;
+    let native_queue_entries: Vec<String> = redis.lrange(&native_queue_key, 0, -1).await?;
+    let waiter_queue_entries: Vec<String> = redis.lrange(&waiter_queue_key, 0, -1).await?;
+    let waiter_native_queue_entries: Vec<String> =
+        redis.lrange(&waiter_native_queue_key, 0, -1).await?;
+    assert!(queue_entries.is_empty());
+    assert!(native_queue_entries.is_empty());
+    assert!(waiter_queue_entries.is_empty());
+    assert!(waiter_native_queue_entries.is_empty());
+    let result_key = format!("task:result:{}", task.id);
+    let notification: Vec<String> = redis.lrange(&result_key, 0, -1).await?;
+    assert_eq!(notification, ["failed"]);
+    assert!(redis.ttl::<_, i64>(&result_key).await? > 0);
+    let waiter_result_key = format!("task:result:{}", waiter_task.id);
+    let waiter_notification: Vec<String> = redis.lrange(&waiter_result_key, 0, -1).await?;
+    assert_eq!(waiter_notification, ["failed"]);
+    assert!(redis.ttl::<_, i64>(&waiter_result_key).await? > 0);
+
+    let _: usize = redis.del(&result_key).await?;
+    let _: usize = redis.del(&waiter_result_key).await?;
+    Ok(())
+}
+
 /// Request-side waiting may close an expired attempt before the task sweeper
 /// observes the same deadline. Replaying that terminal state must remain
 /// idempotent and must not downgrade a complete trace.

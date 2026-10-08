@@ -202,22 +202,22 @@ pub fn WorkspaceLinks() -> Element {
     rsx! {nav {class:"tenant-workspace-links", aria_label:i18n.t("tenant.quick_links"),
         span {class:"tenant-workspace-links-label",{i18n.t("tenant.quick_links")}}
         Link {
+            to: Route::TenantWorkspace {},
             class: if overview_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
             aria_current: if overview_active {"page"} else {"false"},
-            to:Route::TenantWorkspace {},
             {i18n.t("tenant.workspace")}
         }
         Link {
+            to: Route::OwnerKeyIssuance {},
             class: if issuance_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
             aria_current: if issuance_active {"page"} else {"false"},
-            to:Route::OwnerKeyIssuance {},
             {i18n.t("tenant_keys.my_requests")}
         }
         if admin {
             Link {
+                to: Route::TenantSettings {},
                 class: if settings_active {"tenant-workspace-link active"} else {"tenant-workspace-link"},
                 aria_current: if settings_active {"page"} else {"false"},
-                to:Route::TenantSettings {},
                 {i18n.t("tenant.settings")}
             }
         }
@@ -377,6 +377,7 @@ pub fn CommandDialog(
     on_cancel: EventHandler<()>,
     on_confirm: EventHandler<()>,
 ) -> Element {
+    super::workspace_switcher::use_workspace_blocker();
     let i18n = use_i18n();
     rsx! {div {class:"modal-backdrop",
         div {class:"modal",role:"dialog",aria_modal:"true",aria_label:title.clone(),

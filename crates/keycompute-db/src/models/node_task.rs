@@ -14,6 +14,15 @@ pub const TASK_STATUS_LEASED: &str = "leased";
 pub const TASK_STATUS_SUCCEEDED: &str = "succeeded";
 pub const TASK_STATUS_FAILED: &str = "failed";
 pub const TASK_STATUS_EXPIRED: &str = "expired";
+pub const EXECUTION_AUTHORITY_INVALID_CODE: &str = "execution_authority_invalid";
+
+fn execution_authority_invalid_error() -> serde_json::Value {
+    serde_json::json!({
+        "code": EXECUTION_AUTHORITY_INVALID_CODE,
+        "message": "Execution authority is no longer valid",
+        "is_client_error": true,
+    })
+}
 
 /// 节点任务模型
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
@@ -438,6 +447,82 @@ impl NodeTask {
         let tasks = NodeTask::find_by_statement(stmt).all(db).await?;
 
         Ok(tasks)
+    }
+
+    /// Find queued work whose immutable dispatch proof is no longer valid.
+    ///
+    /// Already-leased work is deliberately excluded: a lease snapshots the
+    /// worker's completion authority, while queued work must still pass the
+    /// latest user, tenant, membership and credential revisions before it can
+    /// begin execution. Callers must remove Redis queue hints before changing
+    /// these rows to a terminal state so a failed cleanup remains retryable.
+    pub async fn find_queued_with_invalid_authority(
+        db: &impl ConnectionTrait,
+    ) -> Result<Vec<NodeTask>, DbError> {
+        let stmt = Statement::from_string(
+            DbBackend::Postgres,
+            r#"
+            SELECT * FROM node_tasks
+            WHERE status = 'queued'
+              AND NOT dispatch_identity_is_active(
+                    payload_json->'dispatch_identity', tenant_id, user_id
+                  )
+            ORDER BY queued_at ASC
+            "#,
+        );
+        Ok(NodeTask::find_by_statement(stmt).all(db).await?)
+    }
+
+    /// Task-scoped read used before the Redis cleanup side effect.
+    pub async fn find_queued_with_invalid_authority_by_id(
+        db: &impl ConnectionTrait,
+        task_id: Uuid,
+    ) -> Result<Option<NodeTask>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            SELECT * FROM node_tasks
+            WHERE id = $1
+              AND status = $2
+              AND NOT dispatch_identity_is_active(
+                    payload_json->'dispatch_identity', tenant_id, user_id
+                  )
+            "#,
+            [task_id.into(), TASK_STATUS_QUEUED.into()],
+        );
+        Ok(NodeTask::find_by_statement(stmt).one(db).await?)
+    }
+
+    /// Task-scoped variant used by request waiters and workers after a failed
+    /// claim. The conditional update is idempotent and cannot affect a lease
+    /// that won the race first.
+    pub async fn fail_queued_with_invalid_authority_by_id(
+        db: &impl ConnectionTrait,
+        task_id: Uuid,
+    ) -> Result<Option<NodeTask>, DbError> {
+        let stmt = Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
+            UPDATE node_tasks
+            SET status = $1,
+                error_json = $2,
+                finished_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $3
+              AND status = $4
+              AND NOT dispatch_identity_is_active(
+                    payload_json->'dispatch_identity', tenant_id, user_id
+                  )
+            RETURNING *
+            "#,
+            [
+                TASK_STATUS_FAILED.into(),
+                execution_authority_invalid_error().into(),
+                task_id.into(),
+                TASK_STATUS_QUEUED.into(),
+            ],
+        );
+        Ok(NodeTask::find_by_statement(stmt).one(db).await?)
     }
 
     /// 检查任务是否处于终态

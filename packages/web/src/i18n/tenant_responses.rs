@@ -96,6 +96,29 @@ pub(super) fn register(zh: &mut HashMap<&'static str, &'static str>, en: bool) {
         "tenant_responses.state",
         if en { "Resource state" } else { "资源状态" },
     );
+    for (key, english, chinese) in [
+        ("tenant_responses.status_queued", "Queued", "排队中"),
+        (
+            "tenant_responses.status_in_progress",
+            "In progress",
+            "处理中",
+        ),
+        ("tenant_responses.status_completed", "Completed", "已完成"),
+        ("tenant_responses.status_failed", "Failed", "失败"),
+        ("tenant_responses.status_cancelled", "Cancelled", "已取消"),
+        ("tenant_responses.status_incomplete", "Incomplete", "未完成"),
+        ("tenant_responses.status_expired", "Expired", "已过期"),
+        ("tenant_responses.status_deleted", "Deleted", "已删除"),
+        (
+            "tenant_responses.status_active_response",
+            "Active response",
+            "存在活动响应",
+        ),
+        ("tenant_responses.status_ready", "Ready", "可用"),
+        ("tenant_responses.status_indexed", "Indexed", "已建立索引"),
+    ] {
+        zh.insert(key, if en { english } else { chinese });
+    }
     zh.insert(
         "tenant_responses.created",
         if en { "Created" } else { "创建时间" },

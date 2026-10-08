@@ -33,6 +33,9 @@ pub enum NodeExecutionError {
     /// 请求本身有问题 (node 上报 is_client_error=true) → HTTP 4xx
     #[error("{code}: {message}")]
     ClientError { code: String, message: String },
+    /// The immutable request authority was revoked while work was queued.
+    #[error("{code}: {message}")]
+    Authorization { code: String, message: String },
     /// 其他失败 (节点错、超时、过期、内部错) → HTTP 5xx
     #[error("{source}")]
     Other {
@@ -72,6 +75,17 @@ impl NodeExecutionError {
                     origin: ErrorOrigin::Node,
                     category: TraceErrorCategory::NodeFailed,
                     code: "node_client_error".to_string(),
+                    summary: None,
+                    retryable: Some(false),
+                },
+                billing_status: BillingStatus::NotApplicable,
+            },
+            Self::Authorization { code, .. } => RequestExecutionFailure {
+                status: RequestStatus::Failed,
+                error: TraceErrorInfo {
+                    origin: ErrorOrigin::Gateway,
+                    category: TraceErrorCategory::Authorization,
+                    code: code.clone(),
                     summary: None,
                     retryable: Some(false),
                 },
@@ -242,6 +256,7 @@ impl NodeGatewayService {
                 }
 
                 // 3.3 直接查询 Postgres（兜底）
+                let _ = self.converge_invalid_queued_task(task.id).await;
                 if let Ok(Some(task)) = NodeTask::find_by_id_in_scope(
                     self.store.pool().write_conn(),
                     task.id,
@@ -369,6 +384,7 @@ impl NodeGatewayService {
         user_id: Uuid,
         model: &str,
     ) -> Result<NativeOutcome, DbError> {
+        self.converge_invalid_queued_task(task_id).await?;
         let task = NodeTask::find_by_id_in_scope(
             self.store.pool().write_conn(),
             task_id,
@@ -595,6 +611,66 @@ impl NodeGatewayService {
             .await
     }
 
+    /// Converge an invalid queued task from any participant: request waiter,
+    /// stream reader or worker claim. The queued database row is the durable
+    /// retry marker: remove every Redis queue hint first, then make the task
+    /// terminal. A Redis outage therefore leaves work for the next retry
+    /// instead of stranding duplicate queue entries behind a terminal row.
+    pub async fn converge_invalid_queued_task(&self, task_id: Uuid) -> Result<(), DbError> {
+        let candidate = NodeTask::find_queued_with_invalid_authority_by_id(
+            self.store.pool().write_conn(),
+            task_id,
+        )
+        .await?;
+        let mut queue_cleaned = false;
+        let transitioned = if let Some(task) = candidate.as_ref() {
+            if let Err(error) = self
+                .redis
+                .remove_from_model_queue(&task.model, task.id)
+                .await
+            {
+                tracing::warn!(task_id=%task.id, model=%task.model, %error, "Failed to remove invalid Node task from Redis queues; leaving it queued for retry");
+                return Ok(());
+            }
+            queue_cleaned = true;
+            self.store.reject_invalid_queued_task(task_id).await?
+        } else {
+            // Do not transition a task that became invalid after the candidate
+            // read: Redis has not been cleaned for that state yet. A waiter,
+            // worker or the next sweep will observe it as a fresh candidate.
+            None
+        };
+        let task = match transitioned {
+            Some(task) => task,
+            None => match NodeTask::find_by_id(self.store.pool().write_conn(), task_id).await? {
+                Some(task) => task,
+                None => return Ok(()),
+            },
+        };
+        let invalid_authority = task.status == TASK_STATUS_FAILED
+            && task
+                .error_json
+                .as_ref()
+                .and_then(|error| error.get("code"))
+                .and_then(serde_json::Value::as_str)
+                == Some(EXECUTION_AUTHORITY_INVALID_CODE);
+        if !invalid_authority {
+            return Ok(());
+        }
+        if !queue_cleaned
+            && let Err(error) = self
+                .redis
+                .remove_from_model_queue(&task.model, task.id)
+                .await
+        {
+            tracing::warn!(task_id=%task.id, model=%task.model, %error, "Failed to remove rejected Node task from Redis queues");
+        }
+        if let Err(error) = self.redis.push_result_notification(task.id, "failed").await {
+            tracing::warn!(task_id=%task.id, %error, "Failed to notify waiter about rejected Node task");
+        }
+        Ok(())
+    }
+
     /// 领取任务(长轮询)
     pub async fn poll_task(
         &self,
@@ -676,16 +752,21 @@ impl NodeGatewayService {
                     % 2
                     == 1
                     && let Some(id) = self.redis.try_pop_from_queues(&legacy_keys).await?
-                    && let Some((task, envelope)) =
-                        self.store.claim_task(id, node_id, session_id).await?
                 {
-                    self.record_claim(&task).await;
-                    record_node_task_running();
-                    return Ok(NodePollResponse {
-                        protocol_version: "node.v1".into(),
-                        task: Some(envelope),
-                        retry_after_ms: None,
-                    });
+                    if let Some((task, envelope)) =
+                        self.store.claim_task(id, node_id, session_id).await?
+                    {
+                        self.record_claim(&task).await;
+                        record_node_task_running();
+                        return Ok(NodePollResponse {
+                            protocol_version: "node.v1".into(),
+                            task: Some(envelope),
+                            retry_after_ms: None,
+                        });
+                    }
+                    if let Err(error) = self.converge_invalid_queued_task(id).await {
+                        tracing::warn!(task_id=%id, %error, "Failed to converge rejected Node task claim");
+                    }
                 }
                 if let Some((task, envelope)) = self
                     .store
@@ -713,16 +794,21 @@ impl NodeGatewayService {
                     .redis
                     .pop_from_queues(&legacy_keys, remaining.min(Duration::from_millis(500)))
                     .await?
-                    && let Some((task, envelope)) =
-                        self.store.claim_task(id, node_id, session_id).await?
                 {
-                    self.record_claim(&task).await;
-                    record_node_task_running();
-                    return Ok(NodePollResponse {
-                        protocol_version: "node.v1".into(),
-                        task: Some(envelope),
-                        retry_after_ms: None,
-                    });
+                    if let Some((task, envelope)) =
+                        self.store.claim_task(id, node_id, session_id).await?
+                    {
+                        self.record_claim(&task).await;
+                        record_node_task_running();
+                        return Ok(NodePollResponse {
+                            protocol_version: "node.v1".into(),
+                            task: Some(envelope),
+                            retry_after_ms: None,
+                        });
+                    }
+                    if let Err(error) = self.converge_invalid_queued_task(id).await {
+                        tracing::warn!(task_id=%id, %error, "Failed to converge rejected Node task claim");
+                    }
                 }
             }
             return Ok(NodePollResponse {
@@ -759,7 +845,11 @@ impl NodeGatewayService {
                             });
                         }
                         None => {
-                            // claim 失败,任务已过期或被其他节点领取
+                            // claim 失败：任务可能已由其他节点领取，也可能因
+                            // 授权失效转为终态。后者需要清理重复队列项并唤醒等待方。
+                            if let Err(error) = self.converge_invalid_queued_task(task_id).await {
+                                tracing::warn!(task_id=%task_id, %error, "Failed to converge rejected Node task claim");
+                            }
                             continue;
                         }
                     }
@@ -1016,6 +1106,9 @@ fn decode_chat_task_result(task: &NodeTask) -> Result<ChatCompletionResponse, No
                 .and_then(|value| value.as_str())
                 .unwrap_or("Task failed")
                 .to_string();
+            if code == EXECUTION_AUTHORITY_INVALID_CODE {
+                return Err(NodeExecutionError::Authorization { code, message });
+            }
             if is_client_error {
                 Err(NodeExecutionError::ClientError { code, message })
             } else {
@@ -1155,6 +1248,28 @@ mod tests {
         assert_eq!(error.origin, ErrorOrigin::Node);
         assert_eq!(error.category, TraceErrorCategory::Protocol);
         assert_eq!(error.code, "node_result_invalid");
+    }
+
+    #[test]
+    fn revoked_queued_authority_is_an_explicit_non_retryable_authorization_failure() {
+        let mut task = terminal_test_task(None);
+        task.status = TASK_STATUS_FAILED.to_string();
+        task.result_json = None;
+        task.error_json = Some(serde_json::json!({
+            "code": EXECUTION_AUTHORITY_INVALID_CODE,
+            "message": "Execution authority is no longer valid",
+            "is_client_error": true,
+        }));
+
+        let error = decode_chat_task_result(&task).expect_err("revoked work must fail");
+        assert!(matches!(error, NodeExecutionError::Authorization { .. }));
+        let failure = error.request_failure();
+        assert_eq!(failure.status, RequestStatus::Failed);
+        assert_eq!(failure.billing_status, BillingStatus::NotApplicable);
+        assert_eq!(failure.error.origin, ErrorOrigin::Gateway);
+        assert_eq!(failure.error.category, TraceErrorCategory::Authorization);
+        assert_eq!(failure.error.retryable, Some(false));
+        assert_eq!(failure.error.code, EXECUTION_AUTHORITY_INVALID_CODE);
     }
 
     #[test]

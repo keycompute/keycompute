@@ -56,6 +56,15 @@ use crate::utils::resource::{KeyedResourceValue, current_keyed_value};
 use crate::utils::time::format_time;
 use crate::views::shared::accounts::NoPermissionView;
 
+fn is_selected_tenant(user_store: UserStore, tenant_id: &str) -> bool {
+    user_store
+        .info
+        .peek()
+        .as_ref()
+        .and_then(|user| user.active_tenant_id())
+        == Some(tenant_id)
+}
+
 /// 租户管理页面（仅 Admin 可访问）
 ///
 /// - 普通用户：无权限提示
@@ -83,10 +92,15 @@ pub fn Tenants() -> Element {
     let mut show_create = use_signal(|| false);
     let mut delete_candidate = use_signal(|| None::<TenantInfo>);
     let mut delete_modal_open = use_signal(|| false);
+    let mut status_candidate = use_signal(|| None::<TenantInfo>);
+    let mut status_modal_open = use_signal(|| false);
     let mut operation_error = use_signal(String::new);
     let mut pending_tenant = use_signal(|| None::<String>);
     let mut ui_store = use_context::<UiStore>();
     let mut user_bootstrap = use_context::<UserBootstrap>();
+    crate::views::tenant::workspace_switcher::use_workspace_dirty_blocker(move || {
+        status_modal_open() || delete_modal_open()
+    });
 
     use_effect(move || {
         let next_search = search();
@@ -218,31 +232,17 @@ pub fn Tenants() -> Element {
                                                     size: ButtonSize::Small,
                                                     disabled: pending_tenant().as_deref() == Some(t.id.as_str()),
                                                     onclick: {
-                                                        let id = t.id.clone();
-                                                        let next_status = if t.is_active { "inactive" } else { "active" }.to_string();
+                                                        let candidate = t.clone();
                                                         move |_| {
-                                                            let id = id.clone();
-                                                            pending_tenant.set(Some(id.clone()));
-                                                            let request = UpdateTenantRequest::new().with_status(next_status.clone());
-                                                            let request_auth = auth_store;
-                                                            spawn(async move {
-                                                                let result = with_auto_refresh(
-                                                                        request_auth,
-                                                                        move |token| {
-                                                                            let id = id.clone();
-                                                                            let request = request.clone();
-                                                                            async move {
-                                                                                tenant_service::update(&id, request, &token).await
-                                                                            }
-                                                                        },
-                                                                    )
-                                                                    .await;
-                                                                match result {
-                                                                    Ok(_) => tenants.restart(),
-                                                                    Err(error) => operation_error.set(user_error_message(i18n, &error)),
-                                                                }
-                                                                pending_tenant.set(None);
-                                                            });
+                                                            if candidate.is_active
+                                                                && is_selected_tenant(user_store, &candidate.id)
+                                                            {
+                                                                operation_error.set(i18n.t("tenants.disable_selected_first").to_string());
+                                                                return;
+                                                            }
+                                                            status_candidate.set(Some(candidate.clone()));
+                                                            status_modal_open.set(true);
+                                                            operation_error.set(String::new());
                                                         }
                                                     },
                                                     {if t.is_active { i18n.t("tenants.disable") } else { i18n.t("tenants.enable") }}
@@ -310,6 +310,75 @@ pub fn Tenants() -> Element {
                 }
             }
             ConfirmModal {
+                open: status_modal_open,
+                title: status_candidate()
+                    .as_ref()
+                    .map(|tenant| i18n.t(if tenant.is_active { "tenants.disable_title" } else { "tenants.enable_title" }).to_string())
+                    .unwrap_or_default(),
+                message: status_candidate()
+                    .as_ref()
+                    .map(|tenant| i18n.t_with_args(
+                        if tenant.is_active { "tenants.disable_confirm" } else { "tenants.enable_confirm" },
+                        &[("name", tenant.name.as_str())],
+                    ))
+                    .unwrap_or_default(),
+                confirm_text: status_candidate()
+                    .as_ref()
+                    .map(|tenant| i18n.t(if tenant.is_active { "tenants.disable" } else { "tenants.enable" }).to_string())
+                    .unwrap_or_default(),
+                cancel_text: i18n.t("form.cancel").to_string(),
+                danger: status_candidate().as_ref().is_some_and(|tenant| tenant.is_active),
+                busy: pending_tenant().is_some(),
+                oncancel: move |_| {
+                    if pending_tenant().is_none() {
+                        status_modal_open.set(false);
+                        status_candidate.set(None);
+                    }
+                },
+                onconfirm: move |_| {
+                    let Some(candidate) = status_candidate() else {
+                        return;
+                    };
+                    if pending_tenant().is_some() {
+                        return;
+                    }
+                    if candidate.is_active && is_selected_tenant(user_store, &candidate.id) {
+                        status_modal_open.set(false);
+                        status_candidate.set(None);
+                        operation_error.set(i18n.t("tenants.disable_selected_first").to_string());
+                        return;
+                    }
+                    let id = candidate.id.clone();
+                    let next_status = if candidate.is_active { "inactive" } else { "active" };
+                    pending_tenant.set(Some(id.clone()));
+                    let request = UpdateTenantRequest::new().with_status(next_status);
+                    let request_auth = auth_store;
+                    spawn(async move {
+                        let result = with_auto_refresh(request_auth, move |token| {
+                            let id = id.clone();
+                            let request = request.clone();
+                            async move { tenant_service::update(&id, request, &token).await }
+                        })
+                        .await;
+                        match result {
+                            Ok(_) => {
+                                status_modal_open.set(false);
+                                status_candidate.set(None);
+                                tenants.restart();
+                                user_bootstrap.0.restart();
+                                ui_store.show_success(i18n.t("tenants.status_updated"));
+                            }
+                            Err(error) => {
+                                status_modal_open.set(false);
+                                status_candidate.set(None);
+                                operation_error.set(user_error_message(i18n, &error));
+                            }
+                        }
+                        pending_tenant.set(None);
+                    });
+                },
+            }
+            ConfirmModal {
                 open: delete_modal_open,
                 title: i18n.t("tenants.delete_title").to_string(),
                 message: delete_candidate()
@@ -318,14 +387,20 @@ pub fn Tenants() -> Element {
                 confirm_text: i18n.t("form.delete").to_string(),
                 cancel_text: i18n.t("form.cancel").to_string(),
                 danger: true,
+                busy: pending_tenant().is_some(),
                 oncancel: move |_| {
-                    delete_modal_open.set(false);
-                    delete_candidate.set(None);
+                    if pending_tenant().is_none() {
+                        delete_modal_open.set(false);
+                        delete_candidate.set(None);
+                    }
                 },
                 onconfirm: move |_| {
                     let Some(candidate) = delete_candidate() else {
                         return;
                     };
+                    if pending_tenant().is_some() {
+                        return;
+                    }
                     let id = candidate.id.clone();
                     pending_tenant.set(Some(id.clone()));
                     let request_auth = auth_store;
@@ -343,10 +418,12 @@ pub fn Tenants() -> Element {
                                 delete_modal_open.set(false);
                                 delete_candidate.set(None);
                                 tenants.restart();
+                                user_bootstrap.0.restart();
                                 ui_store.show_success(i18n.t("tenants.deleted"));
                             }
                             Err(error) => {
                                 delete_modal_open.set(false);
+                                delete_candidate.set(None);
                                 operation_error.set(user_error_message(i18n, &error));
                             }
                         }
@@ -365,6 +442,7 @@ fn TenantCreateModal(
     on_created: EventHandler<()>,
 ) -> Element {
     let i18n = use_i18n();
+    crate::views::tenant::workspace_switcher::use_workspace_blocker();
     let mut user_store = use_context::<UserStore>();
     let opened_session = use_hook(|| auth_store.state.peek().session_id);
     let mut owner_user_id = use_signal(|| {
@@ -430,6 +508,9 @@ fn TenantCreateModal(
     );
 
     let on_submit = move |_| {
+        if saving() {
+            return;
+        }
         let name_value = name().trim().to_string();
         let slug_value = slug().trim().to_string();
         if name_value.is_empty() {
@@ -485,7 +566,7 @@ fn TenantCreateModal(
     };
 
     rsx! {
-        div { class: "modal-backdrop", onclick: move |_| on_close.call(()),
+        div { class: "modal-backdrop", onclick: move |_| if !saving() { on_close.call(()) },
             div {
                 class: "modal",
                 role: "dialog",
@@ -498,7 +579,8 @@ fn TenantCreateModal(
                         class: "modal-close btn btn-ghost btn-sm",
                         r#type: "button",
                         aria_label: i18n.t("common.close"),
-                        onclick: move |_| on_close.call(()),
+                        disabled: saving(),
+                        onclick: move |_| if !saving() { on_close.call(()) },
                         "✕"
                     }
                 }
@@ -597,13 +679,14 @@ fn TenantCreateModal(
                 div { class: "modal-footer",
                     Button {
                         variant: ButtonVariant::Ghost,
-                        onclick: move |_| on_close.call(()),
+                        disabled: saving(),
+                        onclick: move |_| if !saving() { on_close.call(()) },
                         {i18n.t("form.cancel")}
                     }
                     Button {
                         variant: ButtonVariant::Primary,
                         loading: saving(),
-                        disabled: name().trim().is_empty() || owner_user_id().is_empty(),
+                        disabled: saving() || name().trim().is_empty() || owner_user_id().is_empty(),
                         onclick: on_submit,
                         {i18n.t("form.create")}
                     }

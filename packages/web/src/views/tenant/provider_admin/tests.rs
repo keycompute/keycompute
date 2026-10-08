@@ -1,4 +1,4 @@
-use super::{capability_mode, caps, models};
+use super::{capability_mode, caps, models, parse_account_limits};
 #[test]
 fn model_input_is_deduplicated_without_rewriting_ids() {
     assert_eq!(models(" a, b,a "), ["a", "b"]);
@@ -27,4 +27,16 @@ fn capability_mode_round_trips_supported_protocol_sets() {
         capability_mode("openai", &["chat_completions".into(), "responses".into()]),
         "both"
     );
+}
+
+#[test]
+fn provider_limits_reject_invalid_or_out_of_range_values() {
+    assert_eq!(
+        parse_account_limits("60", "100000", "0"),
+        Some((60, 100000, 0))
+    );
+    assert_eq!(parse_account_limits("0", "100000", "0"), None);
+    assert_eq!(parse_account_limits("60", "-1", "0"), None);
+    assert_eq!(parse_account_limits("60", "100000", "11"), None);
+    assert_eq!(parse_account_limits("rpm", "100000", "0"), None);
 }

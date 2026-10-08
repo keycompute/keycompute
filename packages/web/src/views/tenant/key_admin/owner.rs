@@ -38,6 +38,9 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
     let mut error = use_signal(String::new);
     let mut notice = use_signal(String::new);
     let mut secret = use_signal(|| None::<ClaimedKey>);
+    super::super::workspace_switcher::use_workspace_dirty_blocker(move || {
+        choice().is_some() || busy()
+    });
     let mut data = use_resource(move || {
         let key = (scope, page(), generation());
         async move {
@@ -98,7 +101,7 @@ fn OwnerWorkspace(scope: WorkspaceScope) -> Element {
         WorkspaceLinks{}
         WorkspaceContext{}
         Link{class:"btn btn-secondary",to:Route::ApiKeyList{},{i18n.t("page.api_keys")}}
-        SecretPanel{scope,secret,on_close:move |_|secret.set(None)}
+        if secret.read().is_some(){SecretPanel{scope,secret,on_close:move |_|secret.set(None)}}
         if !notice().is_empty(){p{class:"alert alert-success",role:"status","{notice}"}}
         if !error().is_empty(){p{class:"alert alert-error",role:"alert","{error}"}p{class:"text-secondary",{i18n.t("tenant_keys.claim_uncertain")}}}
         button{class:"btn btn-secondary",disabled:busy(),onclick:move |_|{choice.set(None);data.restart();},{i18n.t("tenant.reload")}}
@@ -147,6 +150,7 @@ fn SecretPanel(
     secret: Signal<Option<ClaimedKey>>,
     on_close: EventHandler<()>,
 ) -> Element {
+    super::super::workspace_switcher::use_workspace_blocker();
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let i18n = use_i18n();

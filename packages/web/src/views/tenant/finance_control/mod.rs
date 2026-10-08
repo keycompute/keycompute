@@ -149,6 +149,7 @@ fn ReservationPanel(scope: WorkspaceScope) -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
     let mut notice = use_signal(String::new);
+    super::workspace_switcher::use_workspace_dirty_blocker(move || action().is_some());
 
     let resource = use_resource(move || {
         let key = (scope, selected(), cursor(), generation());
@@ -374,6 +375,7 @@ fn WithdrawalPanel(scope: WorkspaceScope) -> Element {
     let mut busy = use_signal(|| false);
     let mut error = use_signal(String::new);
     let mut notice = use_signal(String::new);
+    super::workspace_switcher::use_workspace_dirty_blocker(move || action().is_some());
 
     let key = (scope, applied(), page(), generation());
     let resource = use_resource(move || {

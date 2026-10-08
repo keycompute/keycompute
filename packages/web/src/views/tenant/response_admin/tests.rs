@@ -2,6 +2,19 @@ use super::types::*;
 use client_api::api::response_control::{ResponseMode, ResponseSummary};
 use serde_json::{Value, json};
 use uuid::Uuid;
+
+#[test]
+fn response_statuses_are_localized_with_unknown_fallback() {
+    let zh = crate::i18n::I18n::new(crate::i18n::Lang::Zh);
+    let en = crate::i18n::I18n::new(crate::i18n::Lang::En);
+    assert_eq!(super::response_status_label(zh, "in_progress"), "处理中");
+    assert_eq!(super::response_status_label(en, "completed"), "Completed");
+    assert_eq!(
+        super::response_status_label(zh, "future_status"),
+        "future_status"
+    );
+}
+
 #[test]
 fn resource_mode_and_owner_selectors_never_invent_a_global_or_native_scope() {
     assert_eq!(mode("passthrough"), Some(ResponseMode::Passthrough));

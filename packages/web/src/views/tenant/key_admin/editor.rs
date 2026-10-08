@@ -20,6 +20,7 @@ pub(super) fn Editor(
     on_close: EventHandler<()>,
     on_changed: EventHandler<()>,
 ) -> Element {
+    super::super::workspace_switcher::use_workspace_blocker();
     let auth = use_context::<AuthStore>();
     let users = use_context::<UserStore>();
     let mut ui = use_context::<UiStore>();
@@ -196,6 +197,7 @@ fn OwnerPicker(
     let mut search = use_signal(String::new);
     let mut filter = use_signal(String::new);
     let mut page = use_signal(|| 1u32);
+    let mut selected_member = use_signal(|| None::<(String, String)>);
     let data = use_resource(move || {
         let q = (filter(), page());
         let key = (scope, q.clone());
@@ -219,10 +221,11 @@ fn OwnerPicker(
             None=>rsx!{p{{i18n.t("common.loading")}}},
             Some(Err(e))=>rsx!{p{role:"alert",{user_error_message(i18n, &e)}}},
             Some(Ok(members))=>{
-                let selected_email=members.items.iter().find(|member|member.user_id.to_string()==selected).map(|member|member.email.clone());
+                let selected_email=members.items.iter().find(|member|member.user_id.to_string()==selected).map(|member|member.email.clone()).or_else(||selected_member().filter(|(id,_)|id==&selected).map(|(_,email)|email));
                 let selected_is_listed=members.items.iter().any(|member|member.user_id.to_string()==selected);
+                let selectable_members=members.items.clone();
                 rsx!{
-                    select{id:"key-owner-option",class:"input-field",aria_label:i18n.t("tenant_keys.owner"),disabled,value:"{selected}",onchange:move|e|if let Ok(id)=e.value().parse::<Uuid>() && !id.is_nil(){on_select.call(id);},
+                    select{id:"key-owner-option",class:"input-field",aria_label:i18n.t("tenant_keys.owner"),disabled,value:"{selected}",onchange:move|e|if let Ok(id)=e.value().parse::<Uuid>() && !id.is_nil(){if let Some(member)=selectable_members.iter().find(|member|member.user_id==id){selected_member.set(Some((id.to_string(),member.email.clone())));}on_select.call(id);},
                         option{value:"",{i18n.t("tenant_keys.choose_member")}}
                         if !selected.trim().is_empty() && !selected_is_listed{option{value:"{selected}","{selected}"}}
                         for member in &members.items{option{key:"{member.user_id}",value:"{member.user_id}",title:"{member.user_id}",disabled:member.user_id.is_nil()||member.membership_status!=MembershipStatus::Active||member.user_status!=UserStatus::Active,"{member.email}"}}
