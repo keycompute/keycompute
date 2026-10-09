@@ -71,6 +71,10 @@ pub struct PlatformAuditRecord {
     pub resource_type: String,
     pub resource_id: Option<String>,
     pub request_id: Option<Uuid>,
+    /// Older platform-audit servers do not return the correlation count yet.
+    /// Treat that response as a single unaggregated record during rollout.
+    #[serde(default)]
+    pub request_event_count: i64,
     pub credential_kind: String,
     pub platform_role: String,
     pub tenant_role: Option<String>,

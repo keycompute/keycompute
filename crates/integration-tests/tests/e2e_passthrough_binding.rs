@@ -391,16 +391,16 @@ impl Fixture {
             StatusCode::OK,
         )
     }
-    async fn probe(&self, binding: &Value) -> Value {
-        expect(
-            self.admin(
-                Method::POST,
-                &format!("{ADMIN}/{}/probe", binding["id"].as_str().unwrap()),
-                Some(json!({"model": self.models[0], "timeout_ms": 5000})),
-            )
-            .await,
-            StatusCode::OK,
+    async fn probe_result(&self, binding: &Value) -> HttpResult {
+        self.admin(
+            Method::POST,
+            &format!("{ADMIN}/{}/probe", binding["id"].as_str().unwrap()),
+            Some(json!({"model": self.models[0], "timeout_ms": 5000})),
         )
+        .await
+    }
+    async fn probe(&self, binding: &Value) -> Value {
+        expect(self.probe_result(binding).await, StatusCode::OK)
     }
     async fn listed(&self) -> Vec<String> {
         let response = api(
@@ -471,9 +471,36 @@ async fn passthrough_defaults_missing_health_and_probe_is_diagnostic_only() {
     let b = f.bind(false).await;
     let response = f.chat(PT, f.body(0)).await;
     assert_eq!(response.status, StatusCode::OK, "{}", response.body);
-    let p = f.probe(&b).await;
+    let probe = f.probe_result(&b).await;
+    let request_id: Uuid = probe.headers["x-request-id"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let p = expect(probe, StatusCode::OK);
     assert_eq!(p["status"], "healthy");
     assert_eq!(p["scope"], "single_model_diagnostic");
+    let audit =
+        f.db.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT action FROM tenant_audit_events WHERE request_id=$1 ORDER BY action",
+            [request_id.into()],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        audit.len(),
+        2,
+        "one probe must record one intent and one result"
+    );
+    assert_eq!(
+        audit[0].try_get::<String>("", "action").unwrap(),
+        "passthrough_binding.probe"
+    );
+    assert_eq!(
+        audit[1].try_get::<String>("", "action").unwrap(),
+        "passthrough_binding.probe_requested"
+    );
     let after = expect(
         f.admin(
             Method::GET,

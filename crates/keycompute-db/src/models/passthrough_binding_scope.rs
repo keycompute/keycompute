@@ -816,12 +816,13 @@ impl PassthroughBinding {
         .await
     }
 
-    pub async fn prepare_probe(
+    async fn prepare_probe_inner(
         db: &(impl ConnectionTrait + TransactionTrait),
         scope: AccountManagementScope,
         id: Uuid,
         audit_ctx: &AuditContext,
         snapshot: ProviderAuthzSnapshot,
+        record_intent: bool,
     ) -> Result<Option<PreparedPassthroughProbe>, DbError> {
         let scope = management_scope(scope);
         validate_audit(scope, audit_ctx)?;
@@ -861,15 +862,17 @@ impl PassthroughBinding {
             }
             let account =
                 validate_target(&tx, scope, account, binding.tenant_id, binding.is_global).await?;
-            audit(
-                &tx,
-                scope,
-                &audit_ctx,
-                "passthrough_binding.probe_requested",
-                binding.id,
-                serde_json::json!({"account_id": account.id, "tenant_id": binding.tenant_id}),
-            )
-            .await?;
+            if record_intent {
+                audit(
+                    &tx,
+                    scope,
+                    &audit_ctx,
+                    "passthrough_binding.probe_requested",
+                    binding.id,
+                    serde_json::json!({"account_id": account.id, "tenant_id": binding.tenant_id}),
+                )
+                .await?;
+            }
             Ok(Some(PreparedPassthroughProbe { binding, account }))
         }
         .await;
@@ -883,6 +886,33 @@ impl PassthroughBinding {
                 Err(error)
             }
         }
+    }
+
+    /// Authorization/existence preflight before waiting for a probe permit.
+    /// The intent audit is deliberately deferred until the post-wait recheck so
+    /// one user request records exactly one accepted probe intent.
+    pub async fn preflight_probe(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        scope: AccountManagementScope,
+        id: Uuid,
+        audit_ctx: &AuditContext,
+        snapshot: ProviderAuthzSnapshot,
+    ) -> Result<bool, DbError> {
+        Ok(
+            Self::prepare_probe_inner(db, scope, id, audit_ctx, snapshot, false)
+                .await?
+                .is_some(),
+        )
+    }
+
+    pub async fn prepare_probe(
+        db: &(impl ConnectionTrait + TransactionTrait),
+        scope: AccountManagementScope,
+        id: Uuid,
+        audit_ctx: &AuditContext,
+        snapshot: ProviderAuthzSnapshot,
+    ) -> Result<Option<PreparedPassthroughProbe>, DbError> {
+        Self::prepare_probe_inner(db, scope, id, audit_ctx, snapshot, true).await
     }
 
     pub async fn record_probe(

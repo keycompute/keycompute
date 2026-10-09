@@ -299,7 +299,27 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
                                     } }
                                     tbody {
                                         for event in &value.items {
-                                            PlatformAuditRow { key: "{event.id}", event: event.clone() }
+                                            PlatformAuditRow {
+                                                key: "{event.id}",
+                                                event: event.clone(),
+                                                on_request_filter: move |request_id: Uuid| {
+                                                    tenant_input.set(String::new());
+                                                    request_input.set(request_id.to_string());
+                                                    filter_error.set(String::new());
+                                                    cursor.set(String::new());
+                                                    cursor_history.write().clear();
+                                                    page.set(1);
+                                                    let next = AuditFilter {
+                                                        tenant_id: None,
+                                                        request_id: Some(request_id),
+                                                    };
+                                                    if filter() == next {
+                                                        data.restart();
+                                                    } else {
+                                                        filter.set(next);
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -351,16 +371,16 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
 }
 
 #[component]
-fn PlatformAuditRow(event: PlatformAuditRecord) -> Element {
+fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<Uuid>) -> Element {
     let i18n = use_i18n();
     let tenant_id = event.tenant_id.map(|id| id.to_string());
-    let request_id = event.request_id.map(|id| id.to_string());
     let actor_label = event
         .actor_name
         .as_deref()
         .or(event.actor_email.as_deref())
         .unwrap_or("—");
     let tenant_role = event.tenant_role.as_deref().unwrap_or("—");
+    let request_event_count = event.request_event_count.to_string();
     rsx! {
         tr {
             td { "{format_time(&event.created_at)}" }
@@ -392,8 +412,25 @@ fn PlatformAuditRow(event: PlatformAuditRecord) -> Element {
                 }
             }
             td {
-                if let Some(request_id) = request_id.as_deref() {
-                    code { "{request_id}" }
+                if let Some(request_id) = event.request_id {
+                    div { class: "audit-request-cell",
+                        button {
+                            class: "btn btn-ghost btn-sm audit-request-filter",
+                            r#type: "button",
+                            title: i18n.t("platform_audit.filter_request"),
+                            aria_label: i18n.t("platform_audit.filter_request"),
+                            onclick: move |_| on_request_filter.call(request_id),
+                            code { "{request_id}" }
+                        }
+                        if event.request_event_count > 1 {
+                            Badge { variant: BadgeVariant::Neutral,
+                                {i18n.t_with_args(
+                                    "platform_audit.request_events",
+                                    &[("count", &request_event_count)],
+                                )}
+                            }
+                        }
+                    }
                 } else {
                     "—"
                 }
@@ -405,6 +442,10 @@ fn PlatformAuditRow(event: PlatformAuditRecord) -> Element {
                 details {
                     summary { {i18n.t("platform_audit.details")} }
                     dl { class: "audit-detail-list",
+                        dt { {i18n.t("platform_audit.event_id")} }
+                        dd { code { "{event.id}" } }
+                        dt { {i18n.t("platform_audit.action_code")} }
+                        dd { code { "{event.action}" } }
                         dt { {i18n.t("platform_audit.scope")} }
                         dd { code { "{event.scope_type}" } }
                         dt { {i18n.t("platform_audit.credential")} }

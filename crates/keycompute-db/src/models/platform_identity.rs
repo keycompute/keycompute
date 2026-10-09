@@ -258,9 +258,15 @@ impl PlatformIdentity {
             let before=Self::user(&tx,scope,id).await?;
             let role=patch.platform_role.unwrap_or(before.platform_role.parse().map_err(DbError::Other)?);
             let status=patch.status.unwrap_or(before.status.parse().map_err(DbError::Other)?);
-            let user=User::set_security(&tx,id,role,status,&actor).await?;
-            let user=user.update_in_tx(&tx,&crate::UpdateUserRequest{name:patch.name.clone()}).await?;
-            change_audit(&tx,&actor,"user.update","user",id,why,serde_json::json!({"before":{"platform_role":before.platform_role,"status":before.status},"after":{"platform_role":user.platform_role,"status":user.status},"name_changed":patch.name.is_some()})).await?;
+            let security_changed=before.platform_role!=role.as_str()||before.status!=status.as_str();
+            let name_changed=patch.name.as_ref().is_some_and(|name|before.name.as_ref()!=Some(name));
+            let user=if security_changed {
+                User::set_security_for_platform_command(&tx,id,role,status,&actor).await?
+            } else {
+                User::find_by_id(&tx,id).await?.ok_or_else(||DbError::not_found("User",id))?
+            };
+            let user=user.update_in_tx(&tx,&crate::UpdateUserRequest{name:if name_changed {patch.name.clone()} else {None}}).await?;
+            change_audit(&tx,&actor,"user.update","user",id,why,serde_json::json!({"before":{"platform_role":before.platform_role,"status":before.status},"after":{"platform_role":user.platform_role,"status":user.status},"name_changed":name_changed,"changed":security_changed||name_changed})).await?;
             // This command may intentionally invalidate its own selected context
             // or role. All authority rows remain locked; only wall-clock expiry
             // can change independently after the authorized mutation starts.
@@ -295,7 +301,7 @@ impl PlatformIdentity {
                 .collect::<Result<Vec<Uuid>, _>>()?;
             let actor = scope.lock_related(&tx, audit, &parents, &[id]).await?;
             let current = Self::user(&tx, scope, id).await?;
-            let user = User::set_security(
+            let user = User::set_security_for_platform_command(
                 &tx,
                 id,
                 current.platform_role.parse().map_err(DbError::Other)?,
@@ -311,7 +317,7 @@ impl PlatformIdentity {
                 "user",
                 id,
                 "root requested identity deletion",
-                serde_json::json!({}),
+                serde_json::json!({"before":{"platform_role":current.platform_role,"status":current.status}}),
             )
             .await?;
             scope.check_expiry()?;
@@ -335,16 +341,6 @@ impl PlatformIdentity {
         let result = async {
             let actor = scope.lock_related(&tx, audit, &[], &[owner]).await?;
             let tenant = Tenant::create_owned(&tx, request, owner, &actor).await?;
-            change_audit(
-                &tx,
-                &actor,
-                "tenant.create",
-                "tenant",
-                tenant.id,
-                "root created tenant",
-                serde_json::json!({"owner_user_id":owner}),
-            )
-            .await?;
             let result = Self::tenant(&tx, scope, tenant.id).await?;
             scope.check_expiry()?;
             Ok(result)

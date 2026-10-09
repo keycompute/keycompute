@@ -107,13 +107,13 @@ impl User {
 
     /// Security changes are separate from profile edits and require a current
     /// root session. Invariants are checked on final transaction state.
-    pub async fn set_security(
+    async fn set_security_state(
         tx: &DatabaseTransaction,
         id: Uuid,
         role: PlatformRole,
         status: UserStatus,
         actor: &AuditContext,
-    ) -> Result<Self, DbError> {
+    ) -> Result<(AuditContext, Self, Self), DbError> {
         lock_identity_admin(tx).await?;
         let actor = actor.require_root(tx).await?;
         tx.query_all(Statement::from_sql_and_values(
@@ -133,9 +133,35 @@ impl User {
         .one(tx)
         .await?
         .ok_or_else(|| DbError::not_found("User", id))?;
+        Ok((actor, before, user))
+    }
+
+    /// Apply a security transition and append its standalone audit event.
+    pub async fn set_security(
+        tx: &DatabaseTransaction,
+        id: Uuid,
+        role: PlatformRole,
+        status: UserStatus,
+        actor: &AuditContext,
+    ) -> Result<Self, DbError> {
+        let (actor, before, user) = Self::set_security_state(tx, id, role, status, actor).await?;
         TenantAuditEvent::append(tx, AuditScopeType::Platform, None, &actor, "user.security", "user",
             Some(&id.to_string()), AuditResult::Success,
             serde_json::json!({"before":{"platform_role":before.platform_role,"status":before.status},"after":{"platform_role":user.platform_role,"status":user.status}})).await?;
+        Ok(user)
+    }
+
+    /// Platform identity commands append one operation-level audit event after
+    /// all profile and security fields have changed. Keep this helper crate-only
+    /// so callers cannot silently mutate security state without that outer audit.
+    pub(crate) async fn set_security_for_platform_command(
+        tx: &DatabaseTransaction,
+        id: Uuid,
+        role: PlatformRole,
+        status: UserStatus,
+        actor: &AuditContext,
+    ) -> Result<Self, DbError> {
+        let (_, _, user) = Self::set_security_state(tx, id, role, status, actor).await?;
         Ok(user)
     }
 

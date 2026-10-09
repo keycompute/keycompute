@@ -442,14 +442,16 @@ pub(crate) async fn probe_with_scope(
     };
     let timeout = Duration::from_millis(req.timeout_ms.unwrap_or(2000).clamp(100, 10000));
     let db = pool(state)?.write_conn();
-    let _ = tokio::time::timeout(
+    let exists = tokio::time::timeout(
         TIMEOUT,
-        PassthroughBinding::prepare_probe(pool(state)?, scope, id, audit, snapshot),
+        PassthroughBinding::preflight_probe(pool(state)?, scope, id, audit, snapshot),
     )
     .await
     .map_err(|_| ApiError::ServiceUnavailable("Probe lookup timed out".into()))?
-    .map_err(map)?
-    .ok_or_else(|| ApiError::NotFound("Passthrough binding not found".into()))?;
+    .map_err(map)?;
+    if !exists {
+        return Err(ApiError::NotFound("Passthrough binding not found".into()));
+    }
     let _permit = tokio::time::timeout(timeout, Arc::clone(&PROBES).acquire_owned())
         .await
         .map_err(|_| ApiError::ServiceUnavailable("Diagnostic probes are busy".into()))?

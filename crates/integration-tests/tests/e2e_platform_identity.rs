@@ -302,19 +302,123 @@ async fn root_platform_user_and_tenant_lists_have_one_literal_paging_scope() {
 }
 #[tokio::test]
 async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owner_invariants() {
-    isolated(|f|async move {
-        let state=f.state();let root=f.token(&state,f.root,false,3600).await;let app=create_router(state);
-        let target=format!("/api/v1/platform/users/{}",f.user);
-        let changed=ok(call(app.clone(),"PATCH",&target,&root,json!({"name":"Changed","platform_role":"operator","reason":"operations assignment"})).await);
-        assert_eq!(changed["platform_role"],"operator");assert_eq!(changed["name"],"Changed");
-        let row=f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,"SELECT request_id,metadata FROM tenant_audit_events WHERE actor_user_id=$1 AND resource_id=$2 AND action='user.update'",[f.root.into(),f.user.to_string().into()])).await.unwrap().unwrap();assert!(!row.try_get::<Uuid>("","request_id").unwrap().is_nil());assert_eq!(row.try_get::<Value>("","metadata").unwrap()["reason"],"operations assignment");
-        let created=ok(call(app.clone(),"POST","/api/v1/platform/tenants",&root,json!({"owner_user_id":f.user,"name":"Owned business","slug":"owned-business"})).await);
-        let tenant=created["id"].as_str().unwrap();assert_eq!(created["user_count"],1);
-        let owner=keycompute_db::TenantMembership::find(&f.db,Uuid::parse_str(tenant).unwrap(),f.user).await.unwrap().unwrap();assert_eq!(owner.tenant_role,"admin");
-        assert_eq!(call(app.clone(),"PATCH",&target,&root,json!({"status":"suspended","reason":"invalid owner suspension"})).await.0,StatusCode::CONFLICT);
-        let deactivated=ok(call(app.clone(),"PATCH",&format!("/api/v1/platform/tenants/{tenant}"),&root,json!({"status":"inactive"})).await);assert_eq!(deactivated["status"],"inactive");
-        ok(call(app,"DELETE",&format!("/api/v1/platform/tenants/{tenant}"),&root,Value::Null).await);
-    }).await;
+    isolated(|f| async move {
+        let state = f.state();
+        let root = f.token(&state, f.root, false, 3600).await;
+        let app = create_router(state);
+        let target = format!("/api/v1/platform/users/{}", f.user);
+
+        let changed_response = call(
+            app.clone(),
+            "PATCH",
+            &target,
+            &root,
+            json!({"name":"Changed","platform_role":"operator","reason":"operations assignment"}),
+        )
+        .await;
+        let changed_request: Uuid = changed_response.2["x-request-id"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let changed = ok(changed_response);
+        assert_eq!(changed["platform_role"], "operator");
+        assert_eq!(changed["name"], "Changed");
+        let rows = f.db.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
+            [changed_request.into()],
+        )).await.unwrap();
+        assert_eq!(rows.len(), 1, "one PATCH must produce one operation audit");
+        assert_eq!(rows[0].try_get::<String>("", "action").unwrap(), "user.update");
+        let metadata = rows[0].try_get::<Value>("", "metadata").unwrap();
+        assert_eq!(metadata["reason"], "operations assignment");
+        assert_eq!(metadata["name_changed"], true);
+
+        let profile_response = call(
+            app.clone(),
+            "PATCH",
+            &target,
+            &root,
+            json!({"name":"Profile only"}),
+        )
+        .await;
+        let profile_request: Uuid = profile_response.2["x-request-id"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(ok(profile_response)["name"], "Profile only");
+        let rows = f.db.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
+            [profile_request.into()],
+        )).await.unwrap();
+        assert_eq!(rows.len(), 1, "profile-only PATCH must not emit user.security");
+        assert_eq!(rows[0].try_get::<String>("", "action").unwrap(), "user.update");
+
+        let create_response = call(
+            app.clone(),
+            "POST",
+            "/api/v1/platform/tenants",
+            &root,
+            json!({"owner_user_id":f.user,"name":"Owned business","slug":"owned-business"}),
+        )
+        .await;
+        let create_request: Uuid = create_response.2["x-request-id"]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let created = ok(create_response);
+        let tenant = Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
+        assert_eq!(created["user_count"], 1);
+        let rows = f.db.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT scope_type,tenant_id,action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
+            [create_request.into()],
+        )).await.unwrap();
+        assert_eq!(rows.len(), 1, "tenant creation must have one semantic audit event");
+        assert_eq!(rows[0].try_get::<String>("", "scope_type").unwrap(), "tenant");
+        assert_eq!(rows[0].try_get::<Uuid>("", "tenant_id").unwrap(), tenant);
+        assert_eq!(rows[0].try_get::<String>("", "action").unwrap(), "tenant.create");
+        let owner = keycompute_db::TenantMembership::find(&f.db, tenant, f.user)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.tenant_role, "admin");
+
+        assert_eq!(
+            call(
+                app.clone(),
+                "PATCH",
+                &target,
+                &root,
+                json!({"status":"suspended","reason":"invalid owner suspension"}),
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let deactivated = ok(call(
+            app.clone(),
+            "PATCH",
+            &format!("/api/v1/platform/tenants/{tenant}"),
+            &root,
+            json!({"status":"inactive"}),
+        )
+        .await);
+        assert_eq!(deactivated["status"], "inactive");
+        ok(call(
+            app,
+            "DELETE",
+            &format!("/api/v1/platform/tenants/{tenant}"),
+            &root,
+            Value::Null,
+        )
+        .await);
+    })
+    .await;
 }
 #[tokio::test]
 async fn user_security_audit_failure_rolls_back_profile_and_privilege_with_outer_commit() {
@@ -332,7 +436,7 @@ async fn user_security_audit_failure_rolls_back_profile_and_privilege_with_outer
 async fn lifecycle_audit_failure_keeps_tenant_memberships_and_configuration_atomic() {
     isolated(|f|async move {
         let scope=f.scope(f.root).await;let tx=f.db.begin().await.unwrap();tx.execute_unprepared("UPDATE identity_admin_fence SET version=version+1 WHERE id=TRUE").await.unwrap();
-        tx.execute_unprepared("CREATE FUNCTION lifecycle_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.scope_type='platform' AND NEW.action IN ('tenant.create','tenant.update','tenant.delete') THEN RAISE EXCEPTION 'isolated lifecycle audit failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER lifecycle_fault BEFORE INSERT ON tenant_audit_events FOR EACH ROW EXECUTE FUNCTION lifecycle_fault();").await.unwrap();
+        tx.execute_unprepared("CREATE FUNCTION lifecycle_fault() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='tenant.create' OR (NEW.scope_type='platform' AND NEW.action IN ('tenant.update','tenant.delete')) THEN RAISE EXCEPTION 'isolated lifecycle audit failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER lifecycle_fault BEFORE INSERT ON tenant_audit_events FOR EACH ROW EXECUTE FUNCTION lifecycle_fault();").await.unwrap();
         let request=CreateTenantRequest {name:"must roll back".into(),slug:"must-rollback".into(),description:None,default_rpm_limit:None,default_tpm_limit:None};
         assert!(PlatformIdentity::create_tenant(&tx,scope,&audit(f.root),&request,f.user).await.is_err());
         assert!(keycompute_db::Tenant::find_by_slug(&tx,"must-rollback").await.unwrap().is_none());

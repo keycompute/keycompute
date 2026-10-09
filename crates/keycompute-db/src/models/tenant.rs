@@ -229,7 +229,7 @@ impl Tenant {
             "tenant",
             Some(&tenant.id.to_string()),
             AuditResult::Success,
-            serde_json::json!({"owner_user_id":owner_user_id}),
+            serde_json::json!({"owner_user_id":owner_user_id,"reason":"tenant created"}),
         )
         .await?;
         Ok(tenant)

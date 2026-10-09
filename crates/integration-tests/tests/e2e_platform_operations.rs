@@ -320,6 +320,7 @@ async fn root_and_operator_read_global_audit_with_exact_intersection_filters() {
             let rows = response.1["items"].as_array().unwrap();
             assert!(rows.iter().all(|row| {
                 row["request_id"] == shared_request.to_string()
+                    && row["request_event_count"] == 2
                     && row["tenant_id"] != Value::Null
                     && row["tenant_name"].is_string()
                     && row["actor_email"] == "ops-root@fixture.invalid"
@@ -388,6 +389,7 @@ async fn root_and_operator_read_global_audit_with_exact_intersection_filters() {
         .await);
         assert_eq!(one_tenant["items"].as_array().unwrap().len(), 1);
         assert_eq!(one_tenant["items"][0]["tenant_id"], f.a.to_string());
+        assert_eq!(one_tenant["items"][0]["request_event_count"], 2);
 
         let platform = ok(call(
             app.clone(),
@@ -399,6 +401,7 @@ async fn root_and_operator_read_global_audit_with_exact_intersection_filters() {
         assert_eq!(platform["items"].as_array().unwrap().len(), 1);
         assert_eq!(platform["items"][0]["scope_type"], "platform");
         assert_eq!(platform["items"][0]["tenant_id"], Value::Null);
+        assert_eq!(platform["items"][0]["request_event_count"], 1);
 
         for token in [&admin, &member, &f.key] {
             assert!(matches!(

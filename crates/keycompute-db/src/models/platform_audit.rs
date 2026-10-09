@@ -50,6 +50,7 @@ pub struct PlatformAuditRecord {
     pub resource_type: String,
     pub resource_id: Option<String>,
     pub request_id: Option<Uuid>,
+    pub request_event_count: i64,
     pub credential_kind: String,
     pub platform_role: String,
     pub tenant_role: Option<String>,
@@ -147,7 +148,12 @@ impl PlatformAuditScope {
              LEFT JOIN LATERAL (
                  SELECT a.id,a.scope_type,a.tenant_id,t.name AS tenant_name,t.slug AS tenant_slug,
                         a.actor_user_id,u.email AS actor_email,u.name AS actor_name,
-                        a.action,a.resource_type,a.resource_id,a.request_id,a.credential_kind,
+                        a.action,a.resource_type,a.resource_id,a.request_id,
+                        CASE WHEN a.request_id IS NULL THEN 0 ELSE
+                            (SELECT COUNT(*)::bigint FROM tenant_audit_events related
+                             WHERE related.request_id=a.request_id)
+                        END AS request_event_count,
+                        a.credential_kind,
                         a.platform_role,a.tenant_role,a.metadata,a.result,a.created_at
                  FROM tenant_audit_events a
                  LEFT JOIN tenants t ON t.id=a.tenant_id

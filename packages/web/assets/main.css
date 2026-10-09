@@ -7858,6 +7858,23 @@ select.form-input:focus {
   word-break: break-word;
 }
 
+.audit-request-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.audit-request-filter {
+  max-width: 230px;
+  padding: 2px 0;
+  text-align: left;
+}
+
+.audit-request-filter code {
+  white-space: normal;
+}
+
 .audit-detail-list {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);

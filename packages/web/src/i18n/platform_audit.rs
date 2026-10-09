@@ -9,8 +9,8 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     (
         "platform_audit.boundary",
-        "该页面只读；平台角色不会因此获得任何租户成员身份。审计元数据已在写入时按白名单脱敏。",
-        "This page is read-only and grants no tenant membership. Audit metadata is allowlist-redacted when written.",
+        "该页面只读；平台角色不会因此获得任何租户成员身份。关联请求 ID 表示一次用户操作，可能包含多条不同事件；事件 ID 才是每条记录的唯一标识。审计元数据已在写入时按白名单脱敏。",
+        "This page is read-only and grants no tenant membership. A correlation request ID identifies one user operation and may contain multiple distinct events; the event ID uniquely identifies each record. Audit metadata is allowlist-redacted when written.",
     ),
     (
         "platform_audit.denied",
@@ -23,7 +23,11 @@ pub const TEXT: &[(&str, &str, &str)] = &[
         "留空查看所有租户",
         "Leave empty for all tenants",
     ),
-    ("platform_audit.request_filter", "请求 UUID", "Request UUID"),
+    (
+        "platform_audit.request_filter",
+        "关联请求 UUID",
+        "Correlation request UUID",
+    ),
     (
         "platform_audit.request_placeholder",
         "输入完整请求 ID",
@@ -48,7 +52,23 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ("platform_audit.actor", "操作人", "Actor"),
     ("platform_audit.action", "操作", "Action"),
     ("platform_audit.resource", "资源", "Resource"),
-    ("platform_audit.request_id", "请求 ID", "Request ID"),
+    (
+        "platform_audit.request_id",
+        "关联请求 ID",
+        "Correlation request ID",
+    ),
+    ("platform_audit.event_id", "事件 ID", "Event ID"),
+    ("platform_audit.action_code", "操作代码", "Action code"),
+    (
+        "platform_audit.request_events",
+        "{count} 条关联事件",
+        "{count} related events",
+    ),
+    (
+        "platform_audit.filter_request",
+        "查看此请求的全部事件",
+        "View every event for this request",
+    ),
     ("platform_audit.result", "结果", "Result"),
     ("platform_audit.platform_scope", "平台级", "Platform"),
     (
