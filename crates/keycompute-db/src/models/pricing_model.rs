@@ -318,6 +318,7 @@ fn target_group(row: &PricingModel) -> Result<PricingGroup, DbError> {
 
 async fn record_change(
     tx: &sea_orm::DatabaseTransaction,
+    authorization: &AuthorizationScope,
     actor: &AuditContext,
     action: &str,
     before: Option<&PricingModel>,
@@ -353,10 +354,9 @@ async fn record_change(
     ))
     .await?;
 
-    let scope = if target.tenant_id().is_some() {
-        AuditScopeType::Tenant
-    } else {
-        AuditScopeType::Platform
+    let scope = match authorization {
+        AuthorizationScope::Platform(_) => AuditScopeType::Platform,
+        AuthorizationScope::Tenant(_) => AuditScopeType::Tenant,
     };
     TenantAuditEvent::append(
         tx,
@@ -755,6 +755,7 @@ impl PricingModel {
             for (before, after) in cleared {
                 record_change(
                     tx,
+                    &authorization,
                     &authorized_actor,
                     "make_default",
                     Some(&before),
@@ -782,7 +783,15 @@ impl PricingModel {
         .one(tx)
         .await?
         .ok_or_else(|| DbError::Other("pricing insert returned no row".into()))?;
-        record_change(tx, &authorized_actor, "create", None, Some(&row)).await?;
+        record_change(
+            tx,
+            &authorization,
+            &authorized_actor,
+            "create",
+            None,
+            Some(&row),
+        )
+        .await?;
         Ok(row)
     }
 
@@ -887,6 +896,7 @@ impl PricingModel {
         })?;
         record_change(
             tx,
+            &authorization,
             &authorized_actor,
             "update",
             Some(&before),
@@ -967,7 +977,15 @@ impl PricingModel {
         if deleted.rows_affected() != 1 {
             return Err(DbError::Other("pricing delete changed no row".into()));
         }
-        record_change(tx, &authorized_actor, "delete", Some(&before), None).await
+        record_change(
+            tx,
+            &authorization,
+            &authorized_actor,
+            "delete",
+            Some(&before),
+            None,
+        )
+        .await
     }
 
     pub async fn make_default_platform(
@@ -1020,12 +1038,13 @@ impl PricingModel {
             .ok_or_else(|| DbError::not_found("pricing model", id))?;
         let group = PricingGroup::new(target, model_name, billing_dimension)?;
         lock_pricing_groups(tx, std::slice::from_ref(&group)).await?;
-        Self::make_default_locked(tx, target, id, &authorized_actor).await
+        Self::make_default_locked(tx, target, &authorization, id, &authorized_actor).await
     }
 
     async fn make_default_locked(
         tx: &sea_orm::DatabaseTransaction,
         target: PricingTarget,
+        authorization: &AuthorizationScope,
         id: Uuid,
         actor: &AuditContext,
     ) -> Result<Self, DbError> {
@@ -1056,9 +1075,25 @@ impl PricingModel {
         .await?
         .ok_or_else(|| DbError::Other("pricing default update returned no row".into()))?;
         for (before, after) in cleared {
-            record_change(tx, actor, "make_default", Some(&before), Some(&after)).await?;
+            record_change(
+                tx,
+                authorization,
+                actor,
+                "make_default",
+                Some(&before),
+                Some(&after),
+            )
+            .await?;
         }
-        record_change(tx, actor, "make_default", Some(&before), Some(&updated)).await?;
+        record_change(
+            tx,
+            authorization,
+            actor,
+            "make_default",
+            Some(&before),
+            Some(&updated),
+        )
+        .await?;
         Ok(updated)
     }
 
@@ -1159,7 +1194,10 @@ impl PricingModel {
         }
         let mut result = Vec::with_capacity(groups.len());
         for (_, (_, id)) in groups {
-            result.push(Self::make_default_locked(tx, target, id, &authorized_actor).await?);
+            result.push(
+                Self::make_default_locked(tx, target, &authorization, id, &authorized_actor)
+                    .await?,
+            );
         }
         Ok(result)
     }

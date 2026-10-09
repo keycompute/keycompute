@@ -13,7 +13,10 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromQueryResult, Serialize, Deserialize)]
 pub struct TenantAuditEvent {
     pub id: Uuid,
+    /// Authority class of the actor, not resource ownership.
     pub scope_type: String,
+    /// Tenant affected by the operation. This remains useful after the tenant
+    /// row itself is deleted because audit rows do not have a tenant FK.
     pub tenant_id: Option<Uuid>,
     pub actor_user_id: Uuid,
     pub action: String,
@@ -144,6 +147,10 @@ fn audit_metadata(mut metadata: Value) -> Result<Value, DbError> {
                             | "previous_owner_user_id"
                             | "user_id"
                             | "tenant_id"
+                            | "target_tenant_id"
+                            | "deleted_tenant_id"
+                            | "tenant_name"
+                            | "tenant_slug"
                             | "account_id"
                             | "previous_tenant_id"
                             | "visibility"
@@ -249,8 +256,10 @@ impl TenantAuditEvent {
         {
             return Err(DbError::Other("invalid audit identity or action".into()));
         }
-        if (scope == AuditScopeType::Tenant) != tenant_id.is_some() {
-            return Err(DbError::Other("audit scope and tenant must agree".into()));
+        if scope == AuditScopeType::Tenant && tenant_id.is_none() {
+            return Err(DbError::Other(
+                "tenant authority audit requires a target tenant".into(),
+            ));
         }
         let metadata = audit_metadata(metadata)?;
         Self::find_by_statement(Statement::from_sql_and_values(

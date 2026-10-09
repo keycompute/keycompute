@@ -94,8 +94,8 @@ async fn append_personal_audit(
     };
     keycompute_db::TenantAuditEvent::append(
         tx,
-        keycompute_types::AuditScopeType::Platform,
-        None,
+        keycompute_types::AuditScopeType::User,
+        auth.selected_tenant_id,
         &actor,
         action,
         "user",

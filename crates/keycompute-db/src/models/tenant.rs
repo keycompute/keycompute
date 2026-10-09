@@ -220,9 +220,16 @@ impl Tenant {
             "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,'admin','active')",
             [tenant.id.into(), owner_user_id.into()],
         )).await?;
+        let audit_scope = match actor.credential_kind {
+            CredentialKind::System => AuditScopeType::System,
+            CredentialKind::Jwt if actor.actor_platform_role.is_platform_admin() => {
+                AuditScopeType::Platform
+            }
+            _ => AuditScopeType::User,
+        };
         TenantAuditEvent::append(
             tx,
-            AuditScopeType::Tenant,
+            audit_scope,
             Some(tenant.id),
             &actor,
             "tenant.create",

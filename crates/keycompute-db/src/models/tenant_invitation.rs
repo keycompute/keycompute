@@ -224,12 +224,14 @@ impl TenantInvitation {
         }
         let actor = AuditContext {
             actor_platform_role: current.platform_role()?,
-            actor_tenant_role: Some(invitation.tenant_role()?),
+            // Accepting an invitation is a global user action which creates a
+            // membership; it is not yet a tenant-admin action.
+            actor_tenant_role: None,
             ..*actor
         };
         TenantAuditEvent::append(
             tx,
-            AuditScopeType::Tenant,
+            AuditScopeType::User,
             Some(tenant),
             &actor,
             "invitation.accept",
@@ -241,7 +243,7 @@ impl TenantInvitation {
         .await?;
         TenantAuditEvent::append(
             tx,
-            AuditScopeType::Tenant,
+            AuditScopeType::User,
             Some(tenant),
             &actor,
             "membership.join",

@@ -93,12 +93,14 @@ async fn begin(
         .await?;
     Ok(tx)
 }
+#[allow(clippy::too_many_arguments)]
 async fn change_audit(
     tx: &DatabaseTransaction,
     actor: &AuditContext,
     action: &str,
     resource: &str,
     id: Uuid,
+    target_tenant_id: Option<Uuid>,
     why: &str,
     metadata: serde_json::Value,
 ) -> Result<(), DbError> {
@@ -107,7 +109,7 @@ async fn change_audit(
     TenantAuditEvent::append(
         tx,
         AuditScopeType::Platform,
-        None,
+        target_tenant_id,
         actor,
         action,
         resource,
@@ -266,7 +268,7 @@ impl PlatformIdentity {
                 User::find_by_id(&tx,id).await?.ok_or_else(||DbError::not_found("User",id))?
             };
             let user=user.update_in_tx(&tx,&crate::UpdateUserRequest{name:if name_changed {patch.name.clone()} else {None}}).await?;
-            change_audit(&tx,&actor,"user.update","user",id,why,serde_json::json!({"before":{"platform_role":before.platform_role,"status":before.status},"after":{"platform_role":user.platform_role,"status":user.status},"name_changed":name_changed,"changed":security_changed||name_changed})).await?;
+            change_audit(&tx,&actor,"user.update","user",id,None,why,serde_json::json!({"before":{"platform_role":before.platform_role,"status":before.status},"after":{"platform_role":user.platform_role,"status":user.status},"name_changed":name_changed,"changed":security_changed||name_changed})).await?;
             // This command may intentionally invalidate its own selected context
             // or role. All authority rows remain locked; only wall-clock expiry
             // can change independently after the authorized mutation starts.
@@ -316,6 +318,7 @@ impl PlatformIdentity {
                 "user.delete",
                 "user",
                 id,
+                None,
                 "root requested identity deletion",
                 serde_json::json!({"before":{"platform_role":current.platform_role,"status":current.status}}),
             )
@@ -364,7 +367,7 @@ impl PlatformIdentity {
             let actor=scope.lock_related(&tx,audit,&[id],&[]).await?;
             let before=Tenant::find_by_id_for_update(&tx,id).await?.ok_or_else(||DbError::not_found("Tenant",id))?;
             let current=before.update(&tx,request).await?;
-            change_audit(&tx,&actor,"tenant.update","tenant",id,"root updated tenant",serde_json::json!({"previous_status":before.status,"status":current.status,"authz_version":current.authz_version})).await?;
+            change_audit(&tx,&actor,"tenant.update","tenant",id,Some(id),"root updated tenant",serde_json::json!({"tenant_id":id,"previous_status":before.status,"status":current.status,"authz_version":current.authz_version})).await?;
             // The authorized target may be the selected tenant; construct its
             // safe result directly rather than trying to renew an invalid token.
             let result=PlatformTenantInfo{id:current.id,name:current.name,slug:current.slug,description:current.description,user_count:Tenant::count_users(&tx,id).await?,account_count:Tenant::count_accounts(&tx,id).await?,is_active:current.status=="active",status:current.status,created_at:current.created_at,updated_at:current.updated_at};
@@ -399,8 +402,9 @@ impl PlatformIdentity {
                 "tenant.delete",
                 "tenant",
                 id,
+                Some(id),
                 "root deleted empty tenant",
-                serde_json::json!({}),
+                serde_json::json!({"tenant_id":id,"deleted_tenant_id":id,"tenant_name":tenant.name,"tenant_slug":tenant.slug}),
             )
             .await?;
             scope.check_expiry()?;

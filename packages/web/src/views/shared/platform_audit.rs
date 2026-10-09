@@ -104,6 +104,15 @@ fn result_variant(result: &str) -> BadgeVariant {
     }
 }
 
+fn scope_label_key(scope: &str) -> &'static str {
+    match scope {
+        "tenant" => "platform_audit.tenant_scope",
+        "user" => "platform_audit.user_scope",
+        "system" => "platform_audit.system_scope",
+        _ => "platform_audit.platform_scope",
+    }
+}
+
 #[component]
 pub fn PlatformAudit() -> Element {
     let auth = use_context::<AuthStore>();
@@ -385,7 +394,9 @@ fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<
         tr {
             td { "{format_time(&event.created_at)}" }
             td {
+                Badge { variant: BadgeVariant::Info, {i18n.t(scope_label_key(&event.scope_type))} }
                 if let Some(tenant_id) = tenant_id.as_deref() {
+                    span { class: "table-secondary", {i18n.t("platform_audit.target_tenant")} }
                     strong { class: "table-primary",
                         {event.tenant_name.as_deref().unwrap_or(i18n.t("platform_audit.unknown_tenant"))}
                     }
@@ -393,8 +404,6 @@ fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<
                         span { class: "table-secondary", "{slug}" }
                     }
                     code { class: "table-secondary", "{tenant_id}" }
-                } else {
-                    Badge { variant: BadgeVariant::Info, {i18n.t("platform_audit.platform_scope")} }
                 }
             }
             td {

@@ -1,6 +1,6 @@
 //! Immutable tenant-owned withdrawal intents; no secret-bearing list projections.
 use super::{
-    financial_scope::FinancialScope,
+    financial_scope::{FinancialAccess, FinancialScope},
     node_tip::{self, NodeTip},
 };
 use crate::{AuditContext, DbError, TenantAuditEvent, UserBalance};
@@ -182,12 +182,20 @@ async fn begin(
 }
 async fn audit(
     tx: &DatabaseTransaction,
+    scope: FinancialScope,
     actor: &AuditContext,
     row: &NodeTipWithdrawal,
     action: &str,
     why: &str,
 ) -> Result<(), DbError> {
-    TenantAuditEvent::append(tx,AuditScopeType::Tenant,Some(row.tenant_id),actor,action,"tip_withdrawal",Some(&row.id.to_string()),AuditResult::Success,
+    let scope_type = match scope.access() {
+        FinancialAccess::PlatformTenant | FinancialAccess::PlatformGlobal => {
+            AuditScopeType::Platform
+        }
+        FinancialAccess::TenantAdmin => AuditScopeType::Tenant,
+        FinancialAccess::Personal => AuditScopeType::User,
+    };
+    TenantAuditEvent::append(tx,scope_type,Some(row.tenant_id),actor,action,"tip_withdrawal",Some(&row.id.to_string()),AuditResult::Success,
         serde_json::json!({"owner_user_id":row.owner_user_id,"amount":row.total_amount.to_string(),"currency":row.currency,"status":row.status,"version":row.revision,"reason":why,"request_id":row.request_id})).await?;
     Ok(())
 }
@@ -414,7 +422,7 @@ impl NodeTipWithdrawal {
                     "UPDATE node_tip_withdrawals SET status='completed',balance_transaction_id=$4,completed_at=clock_timestamp(),actioned_at=clock_timestamp() WHERE tenant_id=$1 AND owner_user_id=$2 AND id=$3 AND status='pending' AND withdrawal_type='balance' RETURNING *",
                     [tenant.into(),scope.user_id().into(),row.id.into(),transaction.id.into()])).one(&tx).await?.ok_or_else(||invalid("withdrawal_state_conflict"))?;
             }
-            audit(&tx,&current,&row,if spec.withdrawal_type=="balance" {"tips.convert"}else{"withdrawal.create"},"owner requested withdrawal").await?;
+            audit(&tx,scope,&current,&row,if spec.withdrawal_type=="balance" {"tips.convert"}else{"withdrawal.create"},"owner requested withdrawal").await?;
             // A balance or audit lock wait can outlive a signed credential.
             // Reject before committing rather than grant authority from entry time.
             scope.current_actor(&tx).await?;
@@ -442,7 +450,7 @@ impl NodeTipWithdrawal {
             let mut values=scope.values();values.extend([command.id.into(),command.expected_revision.into(),status.into(),why.into()]);
             let sql=format!("UPDATE node_tip_withdrawals w SET status=$12,admin_id=$1,admin_remark=$13,actioned_at=clock_timestamp() WHERE w.tenant_id=$8 AND w.id=$10 AND w.revision=$11 AND w.status='pending' AND {} RETURNING w.*",scope.predicate());
             let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,sql,values)).one(&tx).await?.ok_or_else(||invalid("withdrawal_state_conflict"))?;
-            audit(&tx,&current,&row,if command.action==WithdrawalReview::Approve {"withdrawal.approve"}else{"withdrawal.reject"},why).await?;
+            audit(&tx,scope,&current,&row,if command.action==WithdrawalReview::Approve {"withdrawal.approve"}else{"withdrawal.reject"},why).await?;
             // A balance or audit lock wait can outlive a signed credential.
             // Reject before committing rather than grant authority from entry time.
             scope.current_actor(&tx).await?;
@@ -474,7 +482,7 @@ impl NodeTipWithdrawal {
             let mut values=scope.values();values.extend([command.id.into(),command.expected_revision.into(),reference.into(),why.into()]);
             let sql=format!("UPDATE node_tip_withdrawals w SET status='completed',payout_reference=$12,admin_id=$1,admin_remark=$13,completed_at=clock_timestamp(),actioned_at=clock_timestamp() WHERE w.tenant_id=$8 AND w.id=$10 AND w.revision=$11 AND w.status='approved' AND {} RETURNING w.*",scope.predicate());
             let row=Self::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,sql,values)).one(&tx).await?.ok_or_else(||invalid("withdrawal_state_conflict"))?;
-            audit(&tx,&current,&row,"withdrawal.complete",why).await?;
+            audit(&tx,scope,&current,&row,"withdrawal.complete",why).await?;
             // A balance or audit lock wait can outlive a signed credential.
             // Reject before committing rather than grant authority from entry time.
             scope.current_actor(&tx).await?;
@@ -500,7 +508,7 @@ impl NodeTipWithdrawal {
             if row.withdrawal_type != "alipay" {
                 return Err(invalid("payout_details_unavailable"));
             }
-            audit(&tx, &current, &row, "withdrawal.payout_access", why).await?;
+            audit(&tx, scope, &current, &row, "withdrawal.payout_access", why).await?;
             scope.current_actor(&tx).await?;
             Ok(PayoutSecrets {
                 alipay_account: row

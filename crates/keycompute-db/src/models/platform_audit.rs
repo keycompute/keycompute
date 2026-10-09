@@ -146,7 +146,9 @@ impl PlatformAuditScope {
              ) AS items
              FROM authority
              LEFT JOIN LATERAL (
-                 SELECT a.id,a.scope_type,a.tenant_id,t.name AS tenant_name,t.slug AS tenant_slug,
+                 SELECT a.id,a.scope_type,a.tenant_id,
+                        COALESCE(t.name,a.metadata->>'tenant_name') AS tenant_name,
+                        COALESCE(t.slug,a.metadata->>'tenant_slug') AS tenant_slug,
                         a.actor_user_id,u.email AS actor_email,u.name AS actor_name,
                         a.action,a.resource_type,a.resource_id,a.request_id,
                         CASE WHEN a.request_id IS NULL THEN 0 ELSE

@@ -66,6 +66,13 @@ impl PolicyActor {
             Authority::Platform(s, _) => s.user_id(),
         }
     }
+
+    fn audit_scope(self) -> AuditScopeType {
+        match self.authority {
+            Authority::Tenant(..) => AuditScopeType::Tenant,
+            Authority::Platform(..) => AuditScopeType::Platform,
+        }
+    }
 }
 #[derive(Debug, Clone)]
 pub struct PolicyPatch {
@@ -291,7 +298,7 @@ async fn record(
         "description_changed":before.map(|b| after.is_some_and(|a| a.description!=b.description)).unwrap_or(after.is_some())});
     TenantAuditEvent::append(
         tx,
-        AuditScopeType::Tenant,
+        who.audit_scope(),
         Some(who.tenant),
         audit,
         action,

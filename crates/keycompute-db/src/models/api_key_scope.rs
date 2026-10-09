@@ -233,9 +233,14 @@ async fn record(
     action: &str,
     reason: &str,
 ) -> Result<(), DbError> {
+    let scope_type = match scope {
+        Scope::Owned(_) => AuditScopeType::User,
+        Scope::Tenant(_) => AuditScopeType::Tenant,
+        Scope::Platform(_, _) => AuditScopeType::Platform,
+    };
     TenantAuditEvent::append(
         tx,
-        AuditScopeType::Tenant,
+        scope_type,
         Some(scope.tenant()),
         actor,
         action,

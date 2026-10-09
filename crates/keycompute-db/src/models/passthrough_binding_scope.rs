@@ -387,9 +387,16 @@ async fn audit(
     id: Uuid,
     metadata: serde_json::Value,
 ) -> Result<(), DbError> {
-    let (scope_type, tenant_id) = match scope {
-        Scope::Tenant(scope) => (AuditScopeType::Tenant, Some(scope.tenant_id())),
-        Scope::Platform(_) => (AuditScopeType::Platform, None),
+    let tenant_id = match scope {
+        Scope::Tenant(scope) => Some(scope.tenant_id()),
+        Scope::Platform(_) => metadata
+            .get("tenant_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse().ok()),
+    };
+    let scope_type = match scope {
+        Scope::Tenant(_) => AuditScopeType::Tenant,
+        Scope::Platform(_) => AuditScopeType::Platform,
     };
     TenantAuditEvent::append(
         tx,
@@ -997,7 +1004,7 @@ impl PassthroughBinding {
                 &audit_ctx,
                 "passthrough_binding.probe",
                 binding.id,
-                serde_json::json!({"account_id": current.account_id, "model": probe.model, "status": probe.status}),
+                serde_json::json!({"account_id": current.account_id, "tenant_id": current.tenant_id, "model": probe.model, "status": probe.status}),
             )
             .await?;
             Ok(Some(saved))

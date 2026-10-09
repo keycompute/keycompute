@@ -457,9 +457,16 @@ async fn audit(
     account_id: Uuid,
     metadata: serde_json::Value,
 ) -> Result<(), DbError> {
-    let (kind, tenant) = match scope {
-        WriteScope::Tenant(scope) => (AuditScopeType::Tenant, Some(scope.tenant_id())),
-        WriteScope::Platform(_) => (AuditScopeType::Platform, None),
+    let tenant = match scope {
+        WriteScope::Tenant(scope) => Some(scope.tenant_id()),
+        WriteScope::Platform(_) => metadata
+            .get("tenant_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| value.parse().ok()),
+    };
+    let kind = match scope {
+        WriteScope::Tenant(_) => AuditScopeType::Tenant,
+        WriteScope::Platform(_) => AuditScopeType::Platform,
     };
     TenantAuditEvent::append(
         tx,

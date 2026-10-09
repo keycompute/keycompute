@@ -9,7 +9,9 @@ Membership states: `active/suspended/removed`; membership compare-and-swap and
 session authorization use `tenant_memberships.authz_version`.
 Membership role column: `tenant_role`; provenance: `invited_by`, `joined_at`,
 `removed_at`. Invitation role/provenance columns: `tenant_role`, `invited_by`,
-`accepted_by`. Audit record fields: `platform_role`, `tenant_role`, `metadata`.
+`accepted_by`. Audit records keep `scope_type` as the authority class and
+`tenant_id` as the optional affected-tenant target, independently of
+`platform_role`, `tenant_role`, and redacted `metadata`.
 API-key and invitation revocation keep their distinct revoked semantics.
 Tenant state remains `active/inactive`. `tenants.authz_version` changes only for
 authorization-bearing owner/status changes; editable tenant configuration uses the

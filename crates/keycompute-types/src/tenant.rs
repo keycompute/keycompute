@@ -46,7 +46,15 @@ macro_rules! role_enum {
 
 role_enum!(UserStatus { Active => "active", Suspended => "suspended" });
 role_enum!(TenantStatus { Active => "active", Inactive => "inactive" });
-role_enum!(AuditScopeType { Platform => "platform", Tenant => "tenant" });
+// The authority which performed an audited operation. A separate nullable
+// tenant id on the audit row identifies the affected tenant; it is not what
+// determines this value.
+role_enum!(AuditScopeType {
+    Platform => "platform",
+    Tenant => "tenant",
+    User => "user",
+    System => "system"
+});
 role_enum!(AuditResult { Success => "success", Denied => "denied", Failure => "failure" });
 role_enum!(PlatformRole { Root => "root", Operator => "operator", None => "none" });
 role_enum!(CredentialKind { Jwt => "jwt", ApiKey => "api_key", Node => "node", System => "system" });

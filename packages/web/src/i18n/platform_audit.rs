@@ -71,6 +71,14 @@ pub const TEXT: &[(&str, &str, &str)] = &[
     ),
     ("platform_audit.result", "结果", "Result"),
     ("platform_audit.platform_scope", "平台级", "Platform"),
+    ("platform_audit.tenant_scope", "租户级", "Tenant"),
+    ("platform_audit.user_scope", "用户级", "User"),
+    ("platform_audit.system_scope", "系统级", "System"),
+    (
+        "platform_audit.target_tenant",
+        "目标租户：",
+        "Target tenant: ",
+    ),
     (
         "platform_audit.unknown_tenant",
         "已删除或未知租户",

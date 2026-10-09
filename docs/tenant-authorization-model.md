@@ -53,6 +53,24 @@ Tenant-owned personal-resource `/me` endpoints remain `tenant_id + user_id`
 scoped, even for a tenant admin. Global profile endpoints such as `/api/v1/me`
 remain user-scoped and do not invent a tenant.
 
+## Audit authority and target
+
+Audit records have two independent dimensions:
+
+- `scope_type` is the authority that performed the operation: `platform`,
+  `tenant`, `user`, or `system`.
+- `tenant_id` is the affected tenant, when the operation has a tenant target;
+  it is not a proxy for the authority that performed the operation.
+
+Creating, updating, suspending, or deleting a tenant is therefore a platform
+operation with the target tenant retained in the audit row. A tenant admin
+operating after selecting that tenant produces a tenant-scoped event. Personal
+`/me` actions, invitation acceptance, and owner self-service node actions are
+user-scoped even when they affect a tenant-owned resource. Background/bootstrap
+work is system-scoped. Tenant audit views include only `scope_type = tenant`;
+platform audit views can filter by the target `tenant_id`, including after a
+tenant has been deleted.
+
 ## Authorization decision
 
 The trusted service layer evaluates the intersection of:

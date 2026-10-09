@@ -125,7 +125,7 @@ pub async fn change_task(
             TaskAction::Cancel => {}
         }
         let current = metadata(&tx,&old).await?;
-        TenantAuditEvent::append(&tx,AuditScopeType::Tenant,Some(scope.tenant),&actor,
+        TenantAuditEvent::append(&tx,scope.audit_scope(),Some(scope.tenant),&actor,
             if mutation.action==TaskAction::Cancel {"node.task.cancel"} else {"node.task.archive"},
             "node_task",Some(&old.id.to_string()),AuditResult::Success,
             json!({"reason":reason,"user_id":old.user_id,"request_id":old.request_id,"changed":changed,

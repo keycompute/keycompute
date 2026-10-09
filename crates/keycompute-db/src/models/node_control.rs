@@ -123,6 +123,14 @@ impl NodeControlScope {
     pub const fn tenant_id(self) -> Uuid {
         self.tenant
     }
+
+    pub(crate) const fn audit_scope(self) -> AuditScopeType {
+        match self.authority {
+            Authority::Tenant(..) => AuditScopeType::Tenant,
+            Authority::Owned(..) => AuditScopeType::User,
+            Authority::Platform(..) => AuditScopeType::Platform,
+        }
+    }
     pub fn actor_user_id(self) -> Uuid {
         match self.authority {
             Authority::Tenant(s, _) | Authority::Owned(s, _) => s.user_id(),
@@ -652,7 +660,7 @@ pub async fn change_node(
                 if evidence.is_some(){return Err(conflict("node has retained task or financial evidence",id));}
                 let deleted=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,"DELETE FROM nodes WHERE tenant_id=$1 AND owner_user_id=$2 AND id=$3 AND updated_at=$4",[scope.tenant.into(),old.owner_user_id.into(),id.into(),expected.into()])).await?.rows_affected();
                 if deleted!=1{return Err(conflict("Node",id));}
-                TenantAuditEvent::append(&tx,AuditScopeType::Tenant,Some(scope.tenant),&actor,"node.delete","node",Some(&id.to_string()),AuditResult::Success,json!({"reason":reason,"before":before,"owner_user_id":old.owner_user_id,"changed":true})).await?;
+                TenantAuditEvent::append(&tx,scope.audit_scope(),Some(scope.tenant),&actor,"node.delete","node",Some(&id.to_string()),AuditResult::Success,json!({"reason":reason,"before":before,"owner_user_id":old.owner_user_id,"changed":true})).await?;
                 return Ok(NodeChange{node:old,changed:true,deleted:true});
             }
             NodeAction::Configure=>{}, _=>unreachable!(),
@@ -664,7 +672,7 @@ pub async fn change_node(
             NodeInfo::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,format!("UPDATE nodes r SET status=$5,consecutive_failure_count=$6,display_name=$7,failure_threshold=$8,updated_at=GREATEST(clock_timestamp(),updated_at+INTERVAL '1 microsecond') WHERE tenant_id=$1 AND owner_user_id=$2 AND id=$3 AND updated_at=$4 RETURNING {}",NodeResource::Node.columns()),[scope.tenant.into(),old.owner_user_id.into(),id.into(),expected.into(),status.into(),failures.into(),name.into(),threshold.into()])).one(&tx).await?.ok_or_else(||conflict("Node",id))?
         }else{old};
         let label=match action {NodeAction::Configure=>"node.configure",NodeAction::Exclude=>"node.exclude",NodeAction::Recover=>"node.recover",NodeAction::Revoke=>"node.revoke",_=>unreachable!()};
-        TenantAuditEvent::append(&tx,AuditScopeType::Tenant,Some(scope.tenant),&actor,label,"node",Some(&id.to_string()),AuditResult::Success,json!({"reason":reason,"before":before,"after":{"status":row.status,"failure_threshold":row.failure_threshold},"owner_user_id":row.owner_user_id,"changed":changed})).await?;
+        TenantAuditEvent::append(&tx,scope.audit_scope(),Some(scope.tenant),&actor,label,"node",Some(&id.to_string()),AuditResult::Success,json!({"reason":reason,"before":before,"after":{"status":row.status,"failure_threshold":row.failure_threshold},"owner_user_id":row.owner_user_id,"changed":changed})).await?;
         Ok(NodeChange{node:row,changed,deleted:false})
     }.await;
     finish(tx, result).await
@@ -712,7 +720,7 @@ pub async fn change_token(
             TokenInfo::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,format!("UPDATE user_node_gateway_tokens r SET status=$4,approved_by=$5,actioned_at=clock_timestamp(),revoke_reason=$6,updated_at=GREATEST(clock_timestamp(),updated_at+INTERVAL '1 microsecond') WHERE tenant_id=$1 AND user_id=$2 AND id=$3 RETURNING {}",NodeResource::Token.columns()),[scope.tenant.into(),old.user_id.into(),id.into(),state.into(),actor.actor_user_id.into(),if action==NodeAction::RevokeToken{Some(reason.to_owned())}else{None}.into()])).one(&tx).await?.ok_or_else(||conflict("Node registration",id))?
         }else{old.clone()};
         let label=match action{NodeAction::ApproveToken=>"node.registration.approve",NodeAction::RejectToken=>"node.registration.reject",_=>"node.registration.revoke"};
-        TenantAuditEvent::append(&tx,AuditScopeType::Tenant,Some(scope.tenant),&actor,label,"node_registration",Some(&id.to_string()),AuditResult::Success,json!({"reason":reason,"user_id":old.user_id,"before":{"status":old.status},"after":{"status":row.status},"changed":changed})).await?;
+        TenantAuditEvent::append(&tx,scope.audit_scope(),Some(scope.tenant),&actor,label,"node_registration",Some(&id.to_string()),AuditResult::Success,json!({"reason":reason,"user_id":old.user_id,"before":{"status":old.status},"after":{"status":row.status},"changed":changed})).await?;
         Ok(TokenChange{token:row,changed})
     }.await;
     finish(tx, result).await
@@ -795,7 +803,7 @@ pub async fn owner_registration_for_reveal(
         tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,"UPDATE user_node_gateway_tokens SET is_revealed=TRUE WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND status='approved'",[scope.tenant.into(),actor.actor_user_id.into(),record.id.into()])).await?;
         TenantAuditEvent::append(
             tx,
-            AuditScopeType::Tenant,
+            scope.audit_scope(),
             Some(scope.tenant),
             &actor,
             "node.registration.reveal",
@@ -835,7 +843,7 @@ pub async fn request_owner_registration(
         // Historical consumed/revoked tokens are not revived. A replacement is
         // a new pending request that needs a fresh administrative approval.
         let record=TokenInfo::find_by_statement(Statement::from_sql_and_values(DbBackend::Postgres,format!("INSERT INTO user_node_gateway_tokens AS r(id,tenant_id,user_id,token_hash,token_preview) VALUES($1,$2,$3,$4,$5) RETURNING {}",NodeResource::Token.columns()),[id.into(),scope.tenant.into(),actor.actor_user_id.into(),hash.into(),preview.into()])).one(&tx).await?.ok_or_else(||DbError::Other("node registration was not created".into()))?;
-        TenantAuditEvent::append(&tx,AuditScopeType::Tenant,Some(scope.tenant),&actor,"node.registration.request","node_registration",Some(&id.to_string()),AuditResult::Success,json!({"user_id":actor.actor_user_id,"status":"pending"})).await?;
+        TenantAuditEvent::append(&tx,scope.audit_scope(),Some(scope.tenant),&actor,"node.registration.request","node_registration",Some(&id.to_string()),AuditResult::Success,json!({"user_id":actor.actor_user_id,"status":"pending"})).await?;
         Ok(record)
     }.await;
     finish(tx, result).await
@@ -851,7 +859,7 @@ pub async fn delete_owner_rejected_registration(
         let actor=lock_owned_console(&tx,scope,audit).await?;
         let row=tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,"DELETE FROM user_node_gateway_tokens WHERE tenant_id=$1 AND user_id=$2 AND id=$3 AND status='rejected' AND revoke_reason IS NULL AND consumed_node_id IS NULL AND consumed_at IS NULL",[scope.tenant.into(),actor.actor_user_id.into(),id.into()])).await?;
         if row.rows_affected()!=1{return Err(DbError::not_found("Rejected node registration",id));}
-        TenantAuditEvent::append(&tx,AuditScopeType::Tenant,Some(scope.tenant),&actor,"node.registration.delete","node_registration",Some(&id.to_string()),AuditResult::Success,json!({"user_id":actor.actor_user_id})).await?;Ok(())
+        TenantAuditEvent::append(&tx,scope.audit_scope(),Some(scope.tenant),&actor,"node.registration.delete","node_registration",Some(&id.to_string()),AuditResult::Success,json!({"user_id":actor.actor_user_id})).await?;Ok(())
     }.await;
     finish(tx, result).await
 }

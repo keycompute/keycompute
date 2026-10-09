@@ -1587,7 +1587,7 @@ pub(crate) async fn append_control_audit(
                 Value::String(control.tenant_id().to_string()),
             );
         }
-        (AuditScopeType::Platform, None)
+        (AuditScopeType::Platform, Some(control.tenant_id()))
     } else {
         (AuditScopeType::Tenant, Some(control.tenant_id()))
     };

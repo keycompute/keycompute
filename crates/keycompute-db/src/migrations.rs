@@ -174,6 +174,12 @@ mod tests {
     #[test]
     fn platform_audit_schema_supports_stable_global_and_filtered_timelines() {
         let sql = include_str!("../migrations/001_init.sql");
+        assert!(sql.contains(
+            "scope_type VARCHAR(20) NOT NULL DEFAULT 'tenant' CHECK (scope_type IN ('platform','tenant','user','system'))"
+        ));
+        assert!(sql.contains(
+            "CONSTRAINT ck_audit_scope_tenant CHECK (scope_type <> 'tenant' OR tenant_id IS NOT NULL)"
+        ));
         for index in [
             "idx_tenant_audit_events_tenant_time",
             "idx_tenant_audit_events_time",

@@ -109,7 +109,10 @@ CREATE INDEX IF NOT EXISTS idx_tenant_invitations_token ON tenant_invitations(to
 
 CREATE TABLE IF NOT EXISTS tenant_audit_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    scope_type VARCHAR(20) NOT NULL DEFAULT 'tenant' CHECK (scope_type IN ('platform','tenant')),
+    -- scope_type is the authority that performed the operation. tenant_id is
+    -- the affected tenant and may be present for platform, user, or system
+    -- operations as well.
+    scope_type VARCHAR(20) NOT NULL DEFAULT 'tenant' CHECK (scope_type IN ('platform','tenant','user','system')),
     tenant_id UUID,
     actor_user_id UUID NOT NULL,
     action VARCHAR(100) NOT NULL CHECK (BTRIM(action) <> ''),
@@ -126,7 +129,7 @@ CREATE TABLE IF NOT EXISTS tenant_audit_events (
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb
         CHECK (jsonb_typeof(metadata) = 'object'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CONSTRAINT ck_audit_scope_tenant CHECK ((scope_type='platform' AND tenant_id IS NULL) OR (scope_type='tenant' AND tenant_id IS NOT NULL)),
+    CONSTRAINT ck_audit_scope_tenant CHECK (scope_type <> 'tenant' OR tenant_id IS NOT NULL),
     CONSTRAINT ck_audit_ids_real CHECK (
         actor_user_id <> '00000000-0000-0000-0000-000000000000'
         AND (tenant_id IS NULL OR tenant_id <> '00000000-0000-0000-0000-000000000000')

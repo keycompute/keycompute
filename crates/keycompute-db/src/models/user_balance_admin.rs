@@ -1,6 +1,6 @@
 //! Current platform authority and immutable manual-wallet operations.
 use super::*;
-use crate::models::financial_scope::FinancialScope;
+use crate::models::financial_scope::{FinancialAccess, FinancialScope};
 use crate::{AuditContext, TenantAuditEvent};
 use keycompute_types::{AuditResult, AuditScopeType};
 
@@ -27,9 +27,16 @@ async fn append_manual_audit(
     action: &str,
     result: AuditResult,
 ) -> Result<(), DbError> {
+    let scope_type = match scope.access() {
+        FinancialAccess::PlatformTenant | FinancialAccess::PlatformGlobal => {
+            AuditScopeType::Platform
+        }
+        FinancialAccess::TenantAdmin => AuditScopeType::Tenant,
+        FinancialAccess::Personal => AuditScopeType::User,
+    };
     TenantAuditEvent::append(
         tx,
-        AuditScopeType::Tenant,
+        scope_type,
         Some(scope.tenant_id()?),
         actor,
         action,

@@ -326,10 +326,12 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
         assert_eq!(changed["name"], "Changed");
         let rows = f.db.query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
+            "SELECT scope_type,tenant_id,action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
             [changed_request.into()],
         )).await.unwrap();
         assert_eq!(rows.len(), 1, "one PATCH must produce one operation audit");
+        assert_eq!(rows[0].try_get::<String>("", "scope_type").unwrap(), "platform");
+        assert!(rows[0].try_get::<Option<Uuid>>("", "tenant_id").unwrap().is_none());
         assert_eq!(rows[0].try_get::<String>("", "action").unwrap(), "user.update");
         let metadata = rows[0].try_get::<Value>("", "metadata").unwrap();
         assert_eq!(metadata["reason"], "operations assignment");
@@ -351,10 +353,12 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
         assert_eq!(ok(profile_response)["name"], "Profile only");
         let rows = f.db.query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
+            "SELECT scope_type,tenant_id,action,metadata FROM tenant_audit_events WHERE request_id=$1 ORDER BY id",
             [profile_request.into()],
         )).await.unwrap();
         assert_eq!(rows.len(), 1, "profile-only PATCH must not emit user.security");
+        assert_eq!(rows[0].try_get::<String>("", "scope_type").unwrap(), "platform");
+        assert!(rows[0].try_get::<Option<Uuid>>("", "tenant_id").unwrap().is_none());
         assert_eq!(rows[0].try_get::<String>("", "action").unwrap(), "user.update");
 
         let create_response = call(
@@ -379,7 +383,7 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
             [create_request.into()],
         )).await.unwrap();
         assert_eq!(rows.len(), 1, "tenant creation must have one semantic audit event");
-        assert_eq!(rows[0].try_get::<String>("", "scope_type").unwrap(), "tenant");
+        assert_eq!(rows[0].try_get::<String>("", "scope_type").unwrap(), "platform");
         assert_eq!(rows[0].try_get::<Uuid>("", "tenant_id").unwrap(), tenant);
         assert_eq!(rows[0].try_get::<String>("", "action").unwrap(), "tenant.create");
         let owner = keycompute_db::TenantMembership::find(&f.db, tenant, f.user)
@@ -409,6 +413,14 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
         )
         .await);
         assert_eq!(deactivated["status"], "inactive");
+        let rows = f.db.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT scope_type,tenant_id FROM tenant_audit_events WHERE action='tenant.update' AND resource_id=$1 ORDER BY id DESC LIMIT 1",
+            [tenant.to_string().into()],
+        )).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].try_get::<String>("", "scope_type").unwrap(), "platform");
+        assert_eq!(rows[0].try_get::<Uuid>("", "tenant_id").unwrap(), tenant);
         ok(call(
             app,
             "DELETE",
@@ -417,6 +429,16 @@ async fn root_mutations_are_audited_with_server_request_ids_and_keep_active_owne
             Value::Null,
         )
         .await);
+        let rows = f.db.query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT scope_type,tenant_id,metadata FROM tenant_audit_events WHERE action='tenant.delete' AND resource_id=$1 ORDER BY id DESC LIMIT 1",
+            [tenant.to_string().into()],
+        )).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].try_get::<String>("", "scope_type").unwrap(), "platform");
+        assert_eq!(rows[0].try_get::<Uuid>("", "tenant_id").unwrap(), tenant);
+        let metadata = rows[0].try_get::<Value>("", "metadata").unwrap();
+        assert_eq!(metadata["deleted_tenant_id"], tenant.to_string());
     })
     .await;
 }

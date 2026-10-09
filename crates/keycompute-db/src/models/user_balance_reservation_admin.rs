@@ -207,7 +207,14 @@ impl BalanceReservation {
             "UPDATE balance_reservations SET status='released',released_at=clock_timestamp(),release_kind='administrative',release_reason=$1,released_by=$2,updated_at=clock_timestamp() WHERE tenant_id=$3 AND user_id=$4 AND request_id=$5 AND owner_token=$6 AND status='active' RETURNING *",
             [reason.into(),released_by.into(),tenant_id.into(),user_id.into(),request_id.into(),command.expected_owner_token.into()]))
             .one(tx).await?.ok_or_else(||DbError::Other("financial_reservation_changed".into()))?;
-        TenantAuditEvent::append(tx,AuditScopeType::Tenant,Some(tenant_id),&current,"balance.reservation_release","balance_reservation",
+        let scope_type = match scope.access() {
+            FinancialAccess::PlatformTenant | FinancialAccess::PlatformGlobal => {
+                AuditScopeType::Platform
+            }
+            FinancialAccess::TenantAdmin => AuditScopeType::Tenant,
+            FinancialAccess::Personal => AuditScopeType::User,
+        };
+        TenantAuditEvent::append(tx,scope_type,Some(tenant_id),&current,"balance.reservation_release","balance_reservation",
             Some(&released.id.to_string()),AuditResult::Success,
             serde_json::json!({"owner_user_id":user_id,"request_id":request_id,"amount":released.amount.to_string(),"currency":"CNY","reason":reason})).await?;
         let breakdown = Self::breakdown_for_locked_balance(tx, updated).await?;

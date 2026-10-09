@@ -23,7 +23,7 @@ The matrix is the source of truth for the hard-cutover authorization implementat
 | nodes/node_tasks | tenant + owner | own-tenant management | assigned use | root/operator operations |
 | system_settings | platform | none | none | root only |
 | global shared accounts | global shared | consume only | consume only | owner/root write |
-| audit events | tenant/platform | read own tenant, cannot delete | no delete | root/operator policy |
+| audit events | authority + optional target tenant | read own tenant-scoped events, cannot delete | no delete | root/operator platform timeline, including target-tenant filters |
 
 ## Invariants
 
@@ -33,6 +33,9 @@ The matrix is the source of truth for the hard-cutover authorization implementat
 4. Global sharing grants use rights only; it never grants management rights.
 5. Personal /me endpoints always use the authenticated user ID.
 6. Platform-wide queries require an explicit platform authorization decision.
+7. Audit authority (`scope_type`) and affected tenant (`tenant_id`) are
+   independent; platform operations never become tenant operations merely
+   because they target a tenant.
 
 ## Required query families
 
