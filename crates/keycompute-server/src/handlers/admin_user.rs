@@ -104,7 +104,9 @@ fn identity_error(error: keycompute_db::DbError) -> ApiError {
             return ApiError::BadRequest("Invalid platform identity request".into());
         }
         if code == "tenant_retained_members_or_accounts" {
-            return ApiError::Conflict("Tenant retains members or accounts".into());
+            return ApiError::Conflict(
+                "Tenant retains more than one active member or a channel account".into(),
+            );
         }
     }
     let text = error.to_string();
@@ -1111,7 +1113,7 @@ pub async fn update_tenant(
     Ok(Json(build_tenant_info(tenant)))
 }
 
-/// 删除租户。只有没有用户、渠道账号和租户级定价的租户才允许删除。
+/// 删除租户。租户最多保留创建者这一名活跃成员，且不能有渠道账号或其它受保护资源。
 ///
 /// DELETE /api/v1/tenants/{id}
 pub async fn delete_tenant(

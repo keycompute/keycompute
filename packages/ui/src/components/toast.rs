@@ -50,10 +50,15 @@ pub fn Toast(toast: Signal<Option<ToastMsg>>) -> Element {
         };
         rsx! {
             div {
-                class: "toast {kind_class}",
-                p { class: "toast-title", "{msg.title}" }
-                if let Some(ref text) = msg.message {
-                    p { class: "toast-message", "{text}" }
+                class: "toast-container",
+                role: "status",
+                aria_live: "polite",
+                div {
+                    class: "toast {kind_class}",
+                    p { class: "toast-title", "{msg.title}" }
+                    if let Some(ref text) = msg.message {
+                        p { class: "toast-message", "{text}" }
+                    }
                 }
             }
         }

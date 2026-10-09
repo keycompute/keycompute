@@ -49,7 +49,7 @@ pub struct PlatformPage<T> {
 }
 pub struct PlatformIdentity;
 const USER_COLUMNS: &str = "u.id,u.email,u.name,u.platform_role,u.status,u.created_at,u.updated_at,(SELECT c.last_login_at FROM user_credentials c WHERE c.user_id=u.id) AS last_login_at";
-const TENANT_COLUMNS: &str = "t.id,t.name,t.slug,t.description,t.status,(t.status='active') AS is_active,t.created_at,t.updated_at,(SELECT COUNT(*)::bigint FROM tenant_memberships m WHERE m.tenant_id=t.id) AS user_count,(SELECT COUNT(*)::bigint FROM accounts a WHERE a.tenant_id=t.id) AS account_count";
+const TENANT_COLUMNS: &str = "t.id,t.name,t.slug,t.description,t.status,(t.status='active') AS is_active,t.created_at,t.updated_at,(SELECT COUNT(*)::bigint FROM tenant_memberships m WHERE m.tenant_id=t.id AND m.status='active') AS user_count,(SELECT COUNT(*)::bigint FROM accounts a WHERE a.tenant_id=t.id) AS account_count";
 fn invalid() -> DbError {
     DbError::Other("platform_identity_request_invalid".into())
 }

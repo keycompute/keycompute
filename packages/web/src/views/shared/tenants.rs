@@ -65,6 +65,13 @@ fn is_selected_tenant(user_store: UserStore, tenant_id: &str) -> bool {
         == Some(tenant_id)
 }
 
+/// Keep the button state aligned with the server's membership/account guard.
+/// A newly-created tenant necessarily has its owner as one active member and
+/// remains deletable until a second member or an account is retained.
+fn can_delete_tenant(tenant: &TenantInfo) -> bool {
+    tenant.user_count <= 1 && tenant.account_count == 0
+}
+
 /// 租户管理页面（仅 Admin 可访问）
 ///
 /// - 普通用户：无权限提示
@@ -251,8 +258,7 @@ pub fn Tenants() -> Element {
                                                     variant: ButtonVariant::Danger,
                                                     size: ButtonSize::Small,
                                                     disabled: pending_tenant().as_deref() == Some(t.id.as_str())
-                                                        || t.user_count > 0
-                                                        || t.account_count > 0,
+                                                        || !can_delete_tenant(t),
                                                     onclick: {
                                                         let candidate = t.clone();
                                                         move |_| {
@@ -698,7 +704,23 @@ fn TenantCreateModal(
 
 #[cfg(test)]
 mod tests {
-    use super::{PAGE_SIZE, SEARCH_DEBOUNCE_MS, TenantListQuery};
+    use super::{PAGE_SIZE, SEARCH_DEBOUNCE_MS, TenantListQuery, can_delete_tenant};
+    use client_api::api::tenant::TenantInfo;
+
+    fn tenant(user_count: i64, account_count: i64) -> TenantInfo {
+        TenantInfo {
+            id: "tenant".into(),
+            name: "Tenant".into(),
+            slug: "tenant".into(),
+            description: None,
+            user_count,
+            account_count,
+            status: "active".into(),
+            is_active: true,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
 
     #[test]
     fn tenant_search_uses_a_short_debounce() {
@@ -715,5 +737,13 @@ mod tests {
         query.commit_search("new".to_string());
         assert_eq!(query.search, "new");
         assert_eq!(query.page, 1);
+    }
+
+    #[test]
+    fn newly_created_tenant_remains_deletable_until_retained_resources_exist() {
+        assert!(can_delete_tenant(&tenant(0, 0)));
+        assert!(can_delete_tenant(&tenant(1, 0)));
+        assert!(!can_delete_tenant(&tenant(2, 0)));
+        assert!(!can_delete_tenant(&tenant(1, 1)));
     }
 }

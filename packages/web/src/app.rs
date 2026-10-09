@@ -38,6 +38,7 @@ pub fn App() -> Element {
     let user_loaded_session = use_signal(uuid::Uuid::nil);
     let public_settings_state = use_signal(PublicSettingsState::default);
     let toast_signal = use_signal(|| None::<ToastMsg>);
+    let toast_generation = use_signal(|| 0_u64);
     let workspace_draft_signal = use_signal(std::collections::BTreeSet::new);
     let workspace_route_signal = use_signal(|| None::<Route>);
     let lang_signal = use_signal(|| {
@@ -66,7 +67,7 @@ pub fn App() -> Element {
         use_context_provider(|| UserStore::new(user_info, user_load_failed, user_loaded_session));
     let public_settings_store =
         use_context_provider(|| PublicSettingsStore::new(public_settings_state));
-    let _ui_store = use_context_provider(|| UiStore::new(toast_signal));
+    let _ui_store = use_context_provider(|| UiStore::new(toast_signal, toast_generation));
     let workspace_drafts = use_context_provider(|| WorkspaceDraftState(workspace_draft_signal));
     let workspace_routes = use_context_provider(|| WorkspaceRouteState(workspace_route_signal));
     let _lang = use_context_provider(|| lang_signal);
