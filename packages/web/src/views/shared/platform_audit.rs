@@ -382,7 +382,6 @@ fn PlatformAuditPage(scope: AuditScope) -> Element {
 #[component]
 fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<Uuid>) -> Element {
     let i18n = use_i18n();
-    let tenant_id = event.tenant_id.map(|id| id.to_string());
     let actor_label = event
         .actor_name
         .as_deref()
@@ -395,16 +394,6 @@ fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<
             td { "{format_time(&event.created_at)}" }
             td {
                 Badge { variant: BadgeVariant::Info, {i18n.t(scope_label_key(&event.scope_type))} }
-                if let Some(tenant_id) = tenant_id.as_deref() {
-                    span { class: "table-secondary", {i18n.t("platform_audit.target_tenant")} }
-                    strong { class: "table-primary",
-                        {event.tenant_name.as_deref().unwrap_or(i18n.t("platform_audit.unknown_tenant"))}
-                    }
-                    if let Some(slug) = event.tenant_slug.as_deref() {
-                        span { class: "table-secondary", "{slug}" }
-                    }
-                    code { class: "table-secondary", "{tenant_id}" }
-                }
             }
             td {
                 strong { class: "table-primary", "{actor_label}" }
@@ -476,7 +465,7 @@ fn PlatformAuditRow(event: PlatformAuditRecord, on_request_filter: EventHandler<
 
 #[cfg(test)]
 mod tests {
-    use super::optional_uuid;
+    use super::{optional_uuid, scope_label_key};
     use uuid::Uuid;
 
     #[test]
@@ -486,5 +475,14 @@ mod tests {
         assert_eq!(optional_uuid(&id.to_string()), Some(Some(id)));
         assert_eq!(optional_uuid(&Uuid::nil().to_string()), None);
         assert_eq!(optional_uuid("tenant-name"), None);
+    }
+
+    #[test]
+    fn audit_scope_column_uses_only_the_authority_level_label() {
+        assert_eq!(scope_label_key("platform"), "platform_audit.platform_scope");
+        assert_eq!(scope_label_key("tenant"), "platform_audit.tenant_scope");
+        assert_eq!(scope_label_key("user"), "platform_audit.user_scope");
+        assert_eq!(scope_label_key("system"), "platform_audit.system_scope");
+        assert_eq!(scope_label_key("future"), "platform_audit.platform_scope");
     }
 }
