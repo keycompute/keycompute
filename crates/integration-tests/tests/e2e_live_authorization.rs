@@ -243,102 +243,98 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn credential_and_orthogonal_role_matrix_is_enforced_over_http() {
+async fn credential_and_disjoint_role_matrix_is_enforced_over_http() {
     let mut f = Fixture::new().await;
-    for platform in [
-        PlatformRole::Root,
-        PlatformRole::Operator,
-        PlatformRole::None,
-    ] {
-        let user = f.member(platform.as_str(), platform).await;
+    let root = User::find_by_email(&f.db, "tenant-test-root@fixture.invalid")
+        .await
+        .unwrap()
+        .unwrap();
+    let operator = User::create(
+        &f.db,
+        &CreateUserRequest {
+            email: format!("matrix-operator-{}@example.com", f.run),
+            name: None,
+        },
+    )
+    .await
+    .unwrap();
+    let operator = f.platform_role(operator.id, PlatformRole::Operator).await;
+    for user in [root, operator] {
         let global = f.global_token(user.id).await;
-        let a = f.selected(&global, f.a.id).await;
-        let b = f.selected(&global, f.b.id).await;
         assert_eq!(
             f.request(&global, "/platform").await,
-            if platform == PlatformRole::Root {
-                StatusCode::NO_CONTENT
-            } else {
-                StatusCode::FORBIDDEN
-            }
+            StatusCode::NO_CONTENT
         );
-        assert_eq!(
-            f.request(&global, "/health").await,
-            if platform == PlatformRole::None {
-                StatusCode::FORBIDDEN
-            } else {
-                StatusCode::NO_CONTENT
-            }
-        );
+        assert_eq!(f.request(&global, "/health").await, StatusCode::NO_CONTENT);
         assert_eq!(f.request(&global, "/admin").await, StatusCode::UNAUTHORIZED);
+    }
+
+    let user = f.member("tenant-matrix", PlatformRole::None).await;
+    let global = f.global_token(user.id).await;
+    let a = f.selected(&global, f.a.id).await;
+    let b = f.selected(&global, f.b.id).await;
+    assert_eq!(f.request(&global, "/platform").await, StatusCode::FORBIDDEN);
+    assert_eq!(f.request(&global, "/health").await, StatusCode::FORBIDDEN);
+    assert_eq!(f.request(&global, "/admin").await, StatusCode::UNAUTHORIZED);
+    assert_eq!(f.request(&a, "/admin").await, StatusCode::NO_CONTENT);
+    assert_eq!(f.request(&b, "/admin").await, StatusCode::FORBIDDEN);
+    for token in [&a, &b] {
         assert_eq!(
-            f.request(&a, "/admin").await,
-            StatusCode::NO_CONTENT,
-            "platform roles must not suppress tenant admin"
-        );
-        assert_eq!(
-            f.request(&b, "/admin").await,
-            StatusCode::FORBIDDEN,
-            "platform roles must not create tenant admin"
-        );
-        for token in [&a, &b] {
-            assert_eq!(
-                f.request(token, &format!("/personal/{}", user.id)).await,
-                StatusCode::NO_CONTENT
-            );
-            assert_eq!(
-                f.request(token, &format!("/personal/{}", f.a.owner_user_id))
-                    .await,
-                StatusCode::FORBIDDEN
-            );
-        }
-        assert_eq!(
-            f.request(&a, &format!("/resource/{}/{}", f.a.id, f.a.owner_user_id))
-                .await,
+            f.request(token, &format!("/personal/{}", user.id)).await,
             StatusCode::NO_CONTENT
         );
         assert_eq!(
-            f.request(&a, &format!("/resource/{}/{}", f.b.id, user.id))
+            f.request(token, &format!("/personal/{}", f.a.owner_user_id))
                 .await,
             StatusCode::FORBIDDEN
         );
-        let key = f.key(user.id, f.a.id).await;
-        for path in ["/platform", "/health", "/admin"] {
-            assert_eq!(f.request(&key, path).await, StatusCode::FORBIDDEN);
-        }
-        let (status, identity) = call(
-            probes(f.state.clone()),
+    }
+    assert_eq!(
+        f.request(&a, &format!("/resource/{}/{}", f.a.id, f.a.owner_user_id))
+            .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        f.request(&a, &format!("/resource/{}/{}", f.b.id, user.id))
+            .await,
+        StatusCode::FORBIDDEN
+    );
+    let key = f.key(user.id, f.a.id).await;
+    for path in ["/platform", "/health", "/admin"] {
+        assert_eq!(f.request(&key, path).await, StatusCode::FORBIDDEN);
+    }
+    let (status, identity) = call(
+        probes(f.state.clone()),
+        &key,
+        "GET",
+        "/identity",
+        Value::Null,
+        Some(f.b.id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        identity["tenant_id"],
+        f.a.id.to_string(),
+        "headers cannot retarget inference credentials"
+    );
+    assert_eq!(
+        call(
+            create_router(f.state.clone()),
             &key,
             "GET",
-            "/identity",
+            "/api/v1/me",
             Value::Null,
-            Some(f.b.id),
+            None
         )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            identity["tenant_id"],
-            f.a.id.to_string(),
-            "headers cannot retarget inference credentials"
-        );
-        assert_eq!(
-            call(
-                create_router(f.state.clone()),
-                &key,
-                "GET",
-                "/api/v1/me",
-                Value::Null,
-                None
-            )
-            .await
-            .0,
-            StatusCode::FORBIDDEN
-        );
-        let context = f.state.auth.verify_token(&key).await.unwrap();
-        let extracted = AuthExtractor::from_auth_context(context.clone()).unwrap();
-        for p in Permission::all() {
-            assert_eq!(context.has_permission(p), extracted.has_permission(p));
-        }
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let context = f.state.auth.verify_token(&key).await.unwrap();
+    let extracted = AuthExtractor::from_auth_context(context.clone()).unwrap();
+    for p in Permission::all() {
+        assert_eq!(context.has_permission(p), extracted.has_permission(p));
     }
     f.finish().await;
 }

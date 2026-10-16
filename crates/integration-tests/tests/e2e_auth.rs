@@ -243,7 +243,8 @@ fn test_admin_route_permission_gate() {
         keycompute_types::PlatformRole::Operator,
         None,
     );
-    assert!(!operator.contains(&Permission::ManageUsers));
+    assert!(operator.contains(&Permission::ManageUsers));
+    assert!(!operator.contains(&Permission::ManageProtectedUsers));
     let api_admin = keycompute_auth::permissions_for(
         keycompute_types::CredentialKind::ApiKey,
         keycompute_types::PlatformRole::Root,
@@ -256,10 +257,16 @@ fn test_admin_route_permission_gate() {
     );
     let tenant_api_key = keycompute_auth::permissions_for(
         keycompute_types::CredentialKind::ApiKey,
-        keycompute_types::PlatformRole::Root,
+        keycompute_types::PlatformRole::None,
         Some(keycompute_types::TenantRole::Member),
     );
     assert_eq!(tenant_api_key, vec![Permission::UseApi]);
+    let inconsistent_api_key = keycompute_auth::permissions_for(
+        keycompute_types::CredentialKind::ApiKey,
+        keycompute_types::PlatformRole::Root,
+        Some(keycompute_types::TenantRole::Member),
+    );
+    assert!(inconsistent_api_key.is_empty());
 }
 
 /// 测试用户信息
