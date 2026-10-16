@@ -68,11 +68,20 @@ fn ok(result: (StatusCode, Value, HeaderMap)) -> Value {
     assert_eq!(result.0, StatusCode::OK, "{}", result.1);
     result.1
 }
-fn audit(user: Uuid) -> AuditContext {
+fn tenant_audit(user: Uuid, role: TenantRole) -> AuditContext {
     AuditContext {
         actor_user_id: user,
         credential_kind: CredentialKind::Jwt,
         actor_platform_role: PlatformRole::None,
+        actor_tenant_role: Some(role),
+        request_id: Some(Uuid::new_v4()),
+    }
+}
+fn platform_audit(user: Uuid, role: PlatformRole) -> AuditContext {
+    AuditContext {
+        actor_user_id: user,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: role,
         actor_tenant_role: None,
         request_id: Some(Uuid::new_v4()),
     }
@@ -535,7 +544,7 @@ async fn concurrent_withdrawal_retries_never_double_credit_or_consume_future_ear
     let f = Fixture::new().await;
     let tip = f.seed(&f.a, "CNY", 100).await;
     let scope = f.scope(f.user.id, f.a.id, "personal").await;
-    let actor = audit(f.user.id);
+    let actor = tenant_audit(f.user.id, TenantRole::Member);
     let intent = balance_intent(Uuid::new_v4());
     let (one, two) = tokio::join!(
         NodeTipWithdrawal::create(&f.db, scope, &actor, &intent),
@@ -591,13 +600,13 @@ async fn financial_commands_reject_forged_credentials_audit_actors_and_current_r
     f.seed(&f.a, "CNY", 100).await;
     let scope = f.scope(f.user.id, f.a.id, "personal").await;
     let intent = balance_intent(Uuid::new_v4());
-    let mut wrong = audit(f.admin.id);
+    let mut wrong = tenant_audit(f.admin.id, TenantRole::Admin);
     assert!(
         NodeTipWithdrawal::create(&f.db, scope, &wrong, &intent)
             .await
             .is_err()
     );
-    wrong = audit(f.user.id);
+    wrong = tenant_audit(f.user.id, TenantRole::Member);
     wrong.credential_kind = CredentialKind::ApiKey;
     assert!(
         NodeTipWithdrawal::create(&f.db, scope, &wrong, &intent)
@@ -678,9 +687,14 @@ async fn financial_commands_reject_forged_credentials_audit_actors_and_current_r
     .await
     .unwrap();
     assert!(
-        NodeTipWithdrawal::create(&f.db, scope, &audit(u.id), &intent)
-            .await
-            .is_err()
+        NodeTipWithdrawal::create(
+            &f.db,
+            scope,
+            &tenant_audit(u.id, TenantRole::Member),
+            &intent,
+        )
+        .await
+        .is_err()
     );
     let rows =
         f.db.query_one(Statement::from_sql_and_values(
@@ -708,7 +722,13 @@ async fn withdrawal_audit_failure_rolls_back_wallet_and_intent_even_if_outer_tra
         .unwrap();
     let function = format!("tips_fault_{}", Uuid::new_v4().simple());
     outer.execute_unprepared(&format!("CREATE FUNCTION {function}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.tenant_id='{}'::uuid AND NEW.action='tips.convert' THEN RAISE EXCEPTION 'isolated financial audit failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER {function} BEFORE INSERT ON tenant_audit_events FOR EACH ROW EXECUTE FUNCTION {function}();",f.a.id)).await.unwrap();
-    let failed = NodeTipWithdrawal::create(&outer, scope, &audit(f.user.id), &intent).await;
+    let failed = NodeTipWithdrawal::create(
+        &outer,
+        scope,
+        &tenant_audit(f.user.id, TenantRole::Member),
+        &intent,
+    )
+    .await;
     assert!(failed.is_err());
     let counts=outer.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT (SELECT COUNT(*) FROM node_tip_withdrawals WHERE tenant_id=$1) AS withdrawals,(SELECT COUNT(*) FROM balance_transactions WHERE tenant_id=$1 AND transaction_type='tip_credit') AS credits",
@@ -722,9 +742,14 @@ async fn withdrawal_audit_failure_rolls_back_wallet_and_intent_even_if_outer_tra
         .await
         .unwrap();
     outer.commit().await.unwrap();
-    let valid = NodeTipWithdrawal::create(&f.db, scope, &audit(f.user.id), &intent)
-        .await
-        .unwrap();
+    let valid = NodeTipWithdrawal::create(
+        &f.db,
+        scope,
+        &tenant_audit(f.user.id, TenantRole::Member),
+        &intent,
+    )
+    .await
+    .unwrap();
     assert_eq!(valid.status, "completed");
     f.finish().await;
 }
@@ -737,7 +762,7 @@ async fn withdrawal_identity_amount_and_terminal_results_are_database_immutable(
     let row = NodeTipWithdrawal::create(
         &f.db,
         scope,
-        &audit(f.user.id),
+        &tenant_audit(f.user.id, TenantRole::Member),
         &balance_intent(Uuid::new_v4()),
     )
     .await
@@ -835,7 +860,7 @@ async fn accepted_tip_accrual_retains_removed_owner_but_removed_member_cannot_wi
         NodeTipWithdrawal::create(
             &f.db,
             scope,
-            &audit(f.user.id),
+            &tenant_audit(f.user.id, TenantRole::Member),
             &balance_intent(Uuid::new_v4())
         )
         .await
@@ -880,7 +905,7 @@ async fn failed_review_and_payout_access_audits_withhold_secrets_and_preserve_wi
         let result = NodeTipWithdrawal::review(
             &tx,
             admin,
-            &audit(f.admin.id),
+            &tenant_audit(f.admin.id, TenantRole::Admin),
             &ReviewWithdrawal {
                 id,
                 expected_revision: revision,
@@ -901,7 +926,7 @@ async fn failed_review_and_payout_access_audits_withhold_secrets_and_preserve_wi
         NodeTipWithdrawal::support_payout(
             &tx,
             root,
-            &audit(f.root.id),
+            &platform_audit(f.root.id, PlatformRole::Root),
             id,
             "audit failure regression"
         )
@@ -951,7 +976,7 @@ async fn failed_payout_completion_audit_does_not_record_a_paid_withdrawal() {
     let approved = NodeTipWithdrawal::review(
         &f.db,
         admin,
-        &audit(f.admin.id),
+        &tenant_audit(f.admin.id, TenantRole::Admin),
         &ReviewWithdrawal {
             id,
             expected_revision: created["revision"].as_i64().unwrap(),
@@ -974,9 +999,14 @@ async fn failed_payout_completion_audit_does_not_record_a_paid_withdrawal() {
     let name = format!("tip_complete_fault_{}", Uuid::new_v4().simple());
     tx.execute_unprepared(&format!("CREATE FUNCTION {name}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.tenant_id='{}'::uuid AND NEW.action='withdrawal.complete' THEN RAISE EXCEPTION 'isolated completion audit failure'; END IF; RETURN NEW; END; $$; CREATE TRIGGER {name} BEFORE INSERT ON tenant_audit_events FOR EACH ROW EXECUTE FUNCTION {name}();",f.a.id)).await.unwrap();
     assert!(
-        NodeTipWithdrawal::complete_external(&tx, root, &audit(f.root.id), &command)
-            .await
-            .is_err()
+        NodeTipWithdrawal::complete_external(
+            &tx,
+            root,
+            &platform_audit(f.root.id, PlatformRole::Root),
+            &command,
+        )
+        .await
+        .is_err()
     );
     let retained = NodeTipWithdrawal::find_in_scope(&tx, root, id)
         .await
@@ -991,13 +1021,23 @@ async fn failed_payout_completion_audit_does_not_record_a_paid_withdrawal() {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let paid = NodeTipWithdrawal::complete_external(&f.db, root, &audit(f.root.id), &command)
-        .await
-        .unwrap();
+    let paid = NodeTipWithdrawal::complete_external(
+        &f.db,
+        root,
+        &platform_audit(f.root.id, PlatformRole::Root),
+        &command,
+    )
+    .await
+    .unwrap();
     assert_eq!(paid.status, "completed");
-    let replay = NodeTipWithdrawal::complete_external(&f.db, root, &audit(f.root.id), &command)
-        .await
-        .unwrap();
+    let replay = NodeTipWithdrawal::complete_external(
+        &f.db,
+        root,
+        &platform_audit(f.root.id, PlatformRole::Root),
+        &command,
+    )
+    .await
+    .unwrap();
     assert_eq!(paid.revision, replay.revision);
     let count = f.db.query_one(Statement::from_sql_and_values(DbBackend::Postgres,
         "SELECT COUNT(*)::bigint AS n FROM tenant_audit_events WHERE tenant_id=$1 AND action='withdrawal.complete'",
@@ -1101,7 +1141,13 @@ async fn credential_expiry_during_wallet_lock_wait_rolls_back_conversion() {
     .unwrap();
     let db = worker.clone();
     let pending = tokio::spawn(async move {
-        NodeTipWithdrawal::create(&db, scope, &audit(u.id), &balance_intent(Uuid::new_v4())).await
+        NodeTipWithdrawal::create(
+            &db,
+            scope,
+            &tenant_audit(u.id, TenantRole::Member),
+            &balance_intent(Uuid::new_v4()),
+        )
+        .await
     });
     let reached = tokio::time::timeout(StdDuration::from_secs(1),async {
         loop {

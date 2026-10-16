@@ -1202,6 +1202,7 @@ async fn queued_task_commands_preserve_scope_and_archive_instead_of_erasing_evid
     let task = f.task(f.a.id, f.member.id, "queued-control").await;
     let peer = f.task(f.a.id, f.a.owner_user_id, "peer-control").await;
     let foreign = f.task(f.b.id, f.b.owner_user_id, "foreign-control").await;
+    let operator_task = f.task(f.a.id, f.a.owner_user_id, "operator-control").await;
     let command = json!({"expected_updated_at":task.updated_at,"reason":"cancel unused fixture"});
     assert_eq!(
         call(
@@ -1239,18 +1240,16 @@ async fn queued_task_commands_preserve_scope_and_archive_instead_of_erasing_evid
         .0,
         StatusCode::NOT_FOUND
     );
-    assert_eq!(
-        call(
-            create_router(f.state.clone()),
-            "POST",
-            &f.platform(&format!("tasks/{}/cancel", task.id)),
-            &f.operator_token,
-            command.clone()
-        )
-        .await
-        .0,
-        StatusCode::FORBIDDEN
-    );
+    let (operator_status, operator_cancelled, _) = call(
+        create_router(f.state.clone()),
+        "POST",
+        &f.platform(&format!("tasks/{}/cancel", operator_task.id)),
+        &f.operator_token,
+        json!({"expected_updated_at":operator_task.updated_at,"reason":"platform cancellation"}),
+    )
+    .await;
+    assert_eq!(operator_status, StatusCode::OK, "{operator_cancelled}");
+    assert_eq!(operator_cancelled["task"]["status"], "failed");
     assert_eq!(
         call(
             create_router(f.state.clone()),

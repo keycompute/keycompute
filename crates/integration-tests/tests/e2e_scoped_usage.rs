@@ -73,6 +73,7 @@ struct Fixture {
     a: Tenant,
     b: Tenant,
     user: TenantActor,
+    operator: User,
     own: UsageLog,
     other: UsageLog,
     foreign: UsageLog,
@@ -87,6 +88,23 @@ impl Fixture {
         let b = create_test_tenant(&db, "usage-scope-b", &run).await;
         let user = create_test_user(&db, a.id, "usage-shared", &run).await;
         let other_user = create_test_user(&db, a.id, "usage-other", &run).await;
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("test-usage-operator-{run}@example.com"),
+                name: Some("Usage platform operator".into()),
+            },
+        )
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            [operator.id.into()],
+        ))
+        .await
+        .unwrap();
+        let operator = User::find_by_id(&db, operator.id).await.unwrap().unwrap();
         let tx = db.begin().await.unwrap();
         TenantMembership::create(
             &tx,
@@ -108,6 +126,7 @@ impl Fixture {
             a,
             b,
             user,
+            operator,
             own,
             other,
             foreign,
@@ -252,8 +271,10 @@ async fn stale_scopes_cannot_survive_demotion_suspension_or_tenant_deactivation(
 #[tokio::test]
 async fn range_pagination_model_groups_and_currency_aggregates_are_consistent() {
     let mut f = Fixture::new().await;
-    let start: DateTime<Utc> = "2026-01-01T00:00:00Z".parse().unwrap();
-    let end = start + Duration::hours(1);
+    let base: DateTime<Utc> = "2000-01-01T00:00:00Z".parse().unwrap();
+    let offset_micros = (f.own.id.as_u128() % 31_536_000_000_000) as i64;
+    let start = base + Duration::microseconds(offset_micros);
+    let end = start + Duration::milliseconds(1);
     for (id, at) in [(f.own.id, start), (f.other.id, start), (f.foreign.id, end)] {
         f.db.execute(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -306,26 +327,9 @@ async fn range_pagination_model_groups_and_currency_aggregates_are_consistent() 
     let forged =
         PlatformUsageScope::new(PlatformScope::checked(f.user.id, PlatformRole::Root).unwrap());
     assert!(forged.stats(&f.db, start, end).await.unwrap().is_empty());
-    let tx = f.db.begin().await.unwrap();
-    let actor = AuditContext {
-        actor_user_id: root.id,
-        credential_kind: CredentialKind::Jwt,
-        actor_platform_role: PlatformRole::Root,
-        actor_tenant_role: None,
-        request_id: Some(Uuid::new_v4()),
-    };
-    User::set_security(
-        &tx,
-        f.user.id,
-        PlatformRole::Operator,
-        keycompute_types::UserStatus::Active,
-        &actor,
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    let operator =
-        PlatformUsageScope::new(PlatformScope::checked(f.user.id, PlatformRole::Operator).unwrap());
+    let operator = PlatformUsageScope::new(
+        PlatformScope::checked(f.operator.id, PlatformRole::Operator).unwrap(),
+    );
     assert_eq!(
         operator.stats(&f.db, start, end).await.unwrap()[0].total_requests,
         2
@@ -499,18 +503,18 @@ async fn platform_aggregate_scope_rechecks_current_role_and_status() {
     };
     let from = Utc::now() - Duration::hours(1);
     let to = Utc::now() + Duration::hours(1);
-    let scope =
-        PlatformUsageScope::new(PlatformScope::checked(f.user.id, PlatformRole::Operator).unwrap());
+    let scope = PlatformUsageScope::new(
+        PlatformScope::checked(f.operator.id, PlatformRole::Operator).unwrap(),
+    );
     use keycompute_types::UserStatus;
     for (role, status, permitted) in [
         (PlatformRole::None, UserStatus::Active, false),
         (PlatformRole::Operator, UserStatus::Active, true),
         (PlatformRole::Operator, UserStatus::Suspended, false),
         (PlatformRole::None, UserStatus::Active, false),
-        (PlatformRole::Root, UserStatus::Active, true),
     ] {
         let tx = f.db.begin().await.unwrap();
-        User::set_security(&tx, f.user.id, role, status, &actor)
+        User::set_security(&tx, f.operator.id, role, status, &actor)
             .await
             .unwrap();
         tx.commit().await.unwrap();

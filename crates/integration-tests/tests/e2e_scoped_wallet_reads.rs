@@ -28,12 +28,22 @@ fn actor(user: Uuid) -> AuditContext {
         request_id: Some(Uuid::new_v4()),
     }
 }
+fn platform_actor(user: Uuid) -> AuditContext {
+    AuditContext {
+        actor_user_id: user,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::Root,
+        actor_tenant_role: None,
+        request_id: Some(Uuid::new_v4()),
+    }
+}
 struct Fixture {
     db: DatabaseConnection,
     a: Tenant,
     b: Tenant,
     user: TenantActor,
     other: TenantActor,
+    operator: User,
     guard: TestDataGuard,
 }
 impl Fixture {
@@ -45,6 +55,22 @@ impl Fixture {
         let b = create_test_tenant(&db, "wallet-scope-b", &run).await;
         let user = create_test_user(&db, a.id, "wallet-multi", &run).await;
         let other = create_test_user(&db, a.id, "wallet-other", &run).await;
+        let operator = User::create(
+            &db,
+            &keycompute_db::CreateUserRequest {
+                email: format!("test-wallet-operator-{run}@example.com"),
+                name: Some("Wallet platform operator".into()),
+            },
+        )
+        .await
+        .unwrap();
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE users SET platform_role='operator' WHERE id=$1",
+            [operator.id.into()],
+        ))
+        .await
+        .unwrap();
         let tx = db.begin().await.unwrap();
         TenantMembership::create(
             &tx,
@@ -75,6 +101,7 @@ impl Fixture {
             b,
             user,
             other,
+            operator,
             guard,
         }
     }
@@ -171,7 +198,7 @@ async fn revoked_member_wallet_is_private_but_remains_inspectable_by_its_tenant_
     f.guard.cleanup().await.unwrap();
 }
 #[tokio::test]
-async fn wallet_admin_and_root_projections_recheck_current_role_and_lifecycle() {
+async fn wallet_admin_and_platform_projections_recheck_current_role_and_lifecycle() {
     let mut f = Fixture::new().await;
     let tx = f.db.begin().await.unwrap();
     let elevated = TenantMembership::set_role(
@@ -240,18 +267,22 @@ async fn wallet_admin_and_root_projections_recheck_current_role_and_lifecycle() 
         .await
         .unwrap();
     assert_eq!(rows[&f.user.id].available_balance, Decimal::from(12));
+    let op = PlatformScope::checked(f.operator.id, PlatformRole::Operator).unwrap();
+    let rows = UserBalance::find_display_snapshots_platform(&f.db, op, f.a.id, &[f.user.id])
+        .await
+        .unwrap();
+    assert_eq!(rows[&f.user.id].available_balance, Decimal::from(12));
     let tx = f.db.begin().await.unwrap();
     User::set_security(
         &tx,
-        f.other.id,
-        PlatformRole::Operator,
+        f.operator.id,
+        PlatformRole::None,
         UserStatus::Active,
-        &actor(root.id),
+        &platform_actor(root.id),
     )
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let op = PlatformScope::checked(f.other.id, PlatformRole::Operator).unwrap();
     assert!(
         UserBalance::find_display_snapshots_platform(&f.db, op, f.a.id, &[f.user.id])
             .await

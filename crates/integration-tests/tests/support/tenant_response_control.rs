@@ -1517,7 +1517,8 @@ async fn native_account_pool_response_control_is_exact_owner_account_and_kind_sc
     );
     assert_eq!(cancelled["id"], id);
 
-    // Current account-pool authorization remains authoritative for an old opaque resource.
+    // Binding pool state controls routing, not ownership of a tenant-owned account
+    // or access to a response that was already created through that account.
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE passthrough_bindings SET pool_enabled=FALSE,revision=revision+1 WHERE account_id=$1 AND tenant_id=$2",
@@ -1526,11 +1527,12 @@ async fn native_account_pool_response_control_is_exact_owner_account_and_kind_sc
     .await
     .unwrap();
     let calls = f.upstream.calls.lock().unwrap().len();
-    expect(
+    let retained = expect(
         http(f.app.clone(), Method::GET, &base, Some(&admin), None).await,
-        StatusCode::NOT_FOUND,
+        StatusCode::OK,
     );
-    assert_eq!(f.upstream.calls.lock().unwrap().len(), calls);
+    assert_eq!(retained["native_body"]["id"], id);
+    assert_eq!(f.upstream.calls.lock().unwrap().len(), calls + 1);
     f.db.execute(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "UPDATE passthrough_bindings SET pool_enabled=TRUE,revision=revision+1 WHERE account_id=$1 AND tenant_id=$2",
@@ -2174,7 +2176,7 @@ async fn native_response_delete_serializes_against_new_settlement_state() {
 }
 
 #[tokio::test]
-async fn native_response_private_result_is_withheld_after_pool_grant_revocation() {
+async fn native_response_private_result_remains_available_after_pool_binding_revocation() {
     let mut f = Fixture::new().await;
     let admin = tenant_owner_console_token(&f).await;
     let tenant = f.user.tenant_id;
@@ -2232,8 +2234,8 @@ async fn native_response_private_result_is_withheld_after_pool_grant_revocation(
     .unwrap();
     f.upstream.native_release.notify_waiters();
     let result = pending.await.unwrap();
-    assert_eq!(result.status, StatusCode::NOT_FOUND, "{}", result.body);
-    assert!(!result.body.to_string().contains("native-admin"));
+    assert_eq!(result.status, StatusCode::OK, "{}", result.body);
+    assert_eq!(result.body["native_body"]["model"], "native-admin");
     let count = f
         .upstream
         .calls
@@ -2244,7 +2246,7 @@ async fn native_response_private_result_is_withheld_after_pool_grant_revocation(
         .count();
     assert_eq!(
         count, 1,
-        "grant revocation must withhold the result without replaying upstream"
+        "binding changes must not replay an in-flight upstream read"
     );
     f.upstream.native_hold.store(false, Ordering::Relaxed);
     f.finish().await;
