@@ -7,18 +7,18 @@ use client_api::{
 };
 use dioxus::prelude::*;
 use ui::{Badge, BadgeVariant, Table, TableHead};
+use uuid::Uuid;
 
 use crate::hooks::use_i18n::use_i18n;
 use crate::router::Route;
 use crate::services::{
     account_service,
     api_client::{user_error_message, with_auto_refresh},
-    debug_service,
+    debug_service, tenant_service,
 };
 use crate::stores::auth_store::AuthStore;
 use crate::stores::user_store::UserStore;
 use crate::views::shared::accounts::NoPermissionView;
-use crate::views::tenant::common::WorkspaceScope;
 
 const FALLBACK_ROUTING_PROBE_MODEL: &str = "gpt-4o";
 /// 将候选诊断限制在较小常数内，避免异常账号较多时一次页面加载放大调试请求。
@@ -290,8 +290,13 @@ pub fn SystemDiagnostics() -> Element {
         };
     }
 
-    let routing_tenant_id = WorkspaceScope::from_stores(auth_store, user_store)
-        .map(|scope| scope.tenant_id.to_string());
+    let mut routing_tenant = use_signal(String::new);
+    let routing_tenants = use_resource(move || async move {
+        with_auto_refresh(auth_store, |token| async move {
+            tenant_service::list_active(&token).await
+        })
+        .await
+    });
 
     // 这两项来自网关进程内状态，不依赖监控聚合表。保持为独立资源，确保数据库
     // 查询异常时仍可查看当前 Provider 和网关运行状态。
@@ -309,36 +314,39 @@ pub fn SystemDiagnostics() -> Element {
         .await
     });
 
-    let routing_request_tenant_id = routing_tenant_id.clone();
     let routing_info = use_resource(move || {
-        let tenant_id = routing_request_tenant_id.clone();
+        let tenant_id = Uuid::parse_str(routing_tenant().trim())
+            .ok()
+            .filter(|tenant_id| !tenant_id.is_nil());
         async move {
             let Some(tenant_id) = tenant_id else {
-                // Platform diagnostics are valid without a tenant, but routing
-                // probes require a verified tenant-scoped AuthExtractor.
+                // Platform identities never inherit a tenant. Routing simulation
+                // therefore waits for a local, explicit target selection.
                 return Ok(None);
             };
-            with_auto_refresh(auth_store, |token| {
-                let tenant_id = tenant_id.clone();
-                async move {
-                    let probes = routing_probes_from_catalog(
-                        account_service::list(None, &token).await,
-                        &tenant_id,
-                    )?;
+            with_auto_refresh(auth_store, |token| async move {
+                let probes = routing_probes_from_catalog(
+                    account_service::list(None, &token).await,
+                    &tenant_id.to_string(),
+                )?;
 
-                    first_routable_probe(
-                        probes,
-                        |probe| {
-                            let token = token.clone();
-                            async move {
-                                debug_service::routing(&probe.model, probe.entry.as_str(), &token)
-                                    .await
-                            }
-                        },
-                        |info: &RoutingDebugInfo| info.routed,
-                    )
-                    .await
-                }
+                first_routable_probe(
+                    probes,
+                    |probe| {
+                        let token = token.clone();
+                        async move {
+                            debug_service::routing(
+                                tenant_id,
+                                &probe.model,
+                                probe.entry.as_str(),
+                                &token,
+                            )
+                            .await
+                        }
+                    },
+                    |info: &RoutingDebugInfo| info.routed,
+                )
+                .await
             })
             .await
         }
@@ -390,7 +398,35 @@ pub fn SystemDiagnostics() -> Element {
             },
             routing_info: rsx! {
                 h3 { class: "subsection-title section-body-title", {i18n.t("system.provider_status_diagnosis")} }
-                if routing_tenant_id.is_none() {
+                match routing_tenants() {
+                    None => rsx! {
+                        p { class: "text-secondary", {i18n.t("table.loading")} }
+                    },
+                    Some(Err(ref error)) => rsx! {
+                        div { class: "alert alert-error", role: "alert",
+                            {user_error_message(i18n, error)}
+                        }
+                    },
+                    Some(Ok(ref tenants)) => rsx! {
+                        div { class: "form-field platform-target-field",
+                            label { class: "form-label", r#for: "routing-debug-tenant",
+                                {i18n.t("node_gateway.target_label")}
+                            }
+                            select {
+                                id: "routing-debug-tenant",
+                                class: "input-field",
+                                value: "{routing_tenant}",
+                                onchange: move |event| routing_tenant.set(event.value()),
+                                option { value: "", {i18n.t("node_gateway.target_placeholder")} }
+                                for tenant in tenants.iter() {
+                                    option { value: "{tenant.id}", "{tenant.name} · {tenant.slug}" }
+                                }
+                            }
+                            p { class: "form-hint", {i18n.t("node_gateway.target_safety_hint")} }
+                        }
+                    },
+                }
+                if Uuid::parse_str(routing_tenant().trim()).ok().filter(|tenant_id| !tenant_id.is_nil()).is_none() {
                     p { class: "text-secondary", {i18n.t("tenant.selection_required")} }
                 } else {
                     match routing_info() {

@@ -757,11 +757,26 @@ impl AdminApi {
     /// 计算费用
     pub async fn calculate_cost(
         &self,
+        tenant_id: uuid::Uuid,
         req: &CalculateCostRequest,
         token: &str,
     ) -> Result<CostCalculationResponse> {
+        PricingTarget::Tenant { tenant_id }.validate()?;
+        if let Some(request_tenant) = req.tenant_id.as_deref() {
+            let request_tenant = uuid::Uuid::parse_str(request_tenant)
+                .map_err(|_| crate::ClientError::Config("Invalid pricing tenant ID".into()))?;
+            if request_tenant != tenant_id {
+                return Err(crate::ClientError::Config(
+                    "Pricing request tenant does not match the route".into(),
+                ));
+            }
+        }
         self.client
-            .post_json("/api/v1/pricing/calculate", req, Some(token))
+            .post_json(
+                &format!("/api/v1/platform/tenants/{tenant_id}/pricing/calculate"),
+                req,
+                Some(token),
+            )
             .await
     }
 

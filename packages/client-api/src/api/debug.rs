@@ -6,6 +6,7 @@ use crate::client::ApiClient;
 use crate::error::Result;
 use serde::Deserialize;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// 调试 API 客户端
 #[derive(Debug, Clone)]
@@ -24,10 +25,17 @@ impl DebugApi {
     /// 获取路由调试信息
     ///
     /// # 参数
+    /// - `tenant_id`: 要模拟路由的明确租户
     /// - `model`: 模型名称，用于模拟路由决策
     /// - `token`: 认证令牌
-    pub async fn debug_routing(&self, model: &str, token: &str) -> Result<RoutingDebugInfo> {
-        self.debug_routing_request(model, None, token).await
+    pub async fn debug_routing(
+        &self,
+        tenant_id: Uuid,
+        model: &str,
+        token: &str,
+    ) -> Result<RoutingDebugInfo> {
+        self.debug_routing_request(tenant_id, model, None, token)
+            .await
     }
 
     /// 获取指定入口协议的路由调试信息。
@@ -35,20 +43,31 @@ impl DebugApi {
     /// `entry` 只应传入服务端支持的稳定协议标识（当前为 `openai` / `anthropic`）。
     pub async fn debug_routing_for_entry(
         &self,
+        tenant_id: Uuid,
         model: &str,
         entry: &str,
         token: &str,
     ) -> Result<RoutingDebugInfo> {
-        self.debug_routing_request(model, Some(entry), token).await
+        self.debug_routing_request(tenant_id, model, Some(entry), token)
+            .await
     }
 
     async fn debug_routing_request(
         &self,
+        tenant_id: Uuid,
         model: &str,
         entry: Option<&str>,
         token: &str,
     ) -> Result<RoutingDebugInfo> {
-        let mut path = format!("/api/v1/debug/routing?model={}", urlencoding::encode(model));
+        if tenant_id.is_nil() {
+            return Err(crate::ClientError::Config(
+                "A nonzero routing tenant is required".into(),
+            ));
+        }
+        let mut path = format!(
+            "/api/v1/platform/tenants/{tenant_id}/debug/routing?model={}",
+            urlencoding::encode(model)
+        );
         if let Some(entry) = entry {
             path.push_str("&entry=");
             path.push_str(&urlencoding::encode(entry));
@@ -59,10 +78,16 @@ impl DebugApi {
     /// Simulate a route in an explicit access family without executing it.
     pub async fn debug_routing_for_mode(
         &self,
+        tenant_id: Uuid,
         model: &str,
         mode: crate::api::admin::ModelAccessMode,
         token: &str,
     ) -> Result<RoutingDebugInfo> {
+        if tenant_id.is_nil() {
+            return Err(crate::ClientError::Config(
+                "A nonzero routing tenant is required".into(),
+            ));
+        }
         let mode = match mode {
             crate::api::admin::ModelAccessMode::AccountPool => "account_pool",
             crate::api::admin::ModelAccessMode::Passthrough => "passthrough",
@@ -71,7 +96,7 @@ impl DebugApi {
         self.client
             .get_json(
                 &format!(
-                    "/api/v1/debug/routing?model={}&mode={mode}",
+                    "/api/v1/platform/tenants/{tenant_id}/debug/routing?model={}&mode={mode}",
                     urlencoding::encode(model)
                 ),
                 Some(token),

@@ -928,9 +928,12 @@ async fn test_delete_pricing_success() {
 async fn test_calculate_cost_success() {
     let (client, mock_server) = create_test_client().await;
     let admin_api = AdminApi::new(&client);
+    let tenant_id = uuid::Uuid::new_v4();
 
     Mock::given(method("POST"))
-        .and(path("/api/v1/pricing/calculate"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant_id}/pricing/calculate"
+        )))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "model": "gpt-4",
             "input_tokens": 1000,
@@ -951,7 +954,7 @@ async fn test_calculate_cost_success() {
         mode: None,
     };
     let result = admin_api
-        .calculate_cost(&req, fixtures::TEST_ACCESS_TOKEN)
+        .calculate_cost(tenant_id, &req, fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(result.is_ok());

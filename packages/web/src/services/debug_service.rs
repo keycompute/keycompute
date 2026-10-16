@@ -8,13 +8,19 @@ use client_api::{
         ResetHealthResponse, RoutingDebugInfo,
     },
 };
+use uuid::Uuid;
 
 use super::api_client::get_client;
 
-pub async fn routing(model: &str, entry: &str, token: &str) -> Result<RoutingDebugInfo> {
+pub async fn routing(
+    tenant_id: Uuid,
+    model: &str,
+    entry: &str,
+    token: &str,
+) -> Result<RoutingDebugInfo> {
     let client = get_client();
     DebugApi::new(&client)
-        .debug_routing_for_entry(model, entry, token)
+        .debug_routing_for_entry(tenant_id, model, entry, token)
         .await
 }
 

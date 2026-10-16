@@ -128,7 +128,15 @@ fn expect(r: HttpResult, status: StatusCode) -> Value {
     r.body
 }
 
-async fn scoped_jwt(state: &AppState, user: &TenantActor) -> String {
+async fn scoped_jwt(state: &AppState, db: &DatabaseConnection, user: &TenantActor) -> String {
+    let tenant = keycompute_db::Tenant::find_by_id(db, user.tenant_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let membership = keycompute_db::TenantMembership::find(db, user.tenant_id, user.id)
+        .await
+        .unwrap()
+        .unwrap();
     let global = state
         .auth
         .get_jwt_validator()
@@ -137,8 +145,8 @@ async fn scoped_jwt(state: &AppState, user: &TenantActor) -> String {
             user.id,
             Some(user.tenant_id),
             user.token_version,
-            Some(1),
-            Some(1),
+            Some(tenant.authz_version),
+            Some(membership.authz_version),
             3600,
         )
         .unwrap();
@@ -184,6 +192,13 @@ impl Fixture {
         let cleanup = TestDataGuard::new(db.clone(), run.clone());
         let tenant = create_test_tenant(&db, "nt-consumer", &run).await;
         let user = create_test_user(&db, tenant.id, "nt-consumer", &run).await;
+        db.execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "UPDATE tenant_memberships SET tenant_role='admin' WHERE tenant_id=$1 AND user_id=$2",
+            [tenant.id.into(), user.id.into()],
+        ))
+        .await
+        .unwrap();
         UserBalance::recharge(
             &db,
             user.tenant_id,
@@ -231,7 +246,7 @@ impl Fixture {
                         priority: Some(0),
                         models_supported: vec![shared.clone(), pool_only.clone()],
                         api_capabilities: vec!["chat_completions".into()],
-                        pool_enabled: Some(true),
+                        pool_enabled: Some(channel == "pool"),
                     },
                 )
                 .await
@@ -325,7 +340,7 @@ impl Fixture {
             state.node_gateway.is_some(),
             "this fixture requires the redis node backend"
         );
-        let admin = scoped_jwt(&state, &user).await;
+        let admin = scoped_jwt(&state, &db, &user).await;
         let key = ProduceAiKeyValidator::generate_key();
         let key_id = integration_tests::db::create_test_api_key(
             &db,
@@ -429,6 +444,30 @@ impl Fixture {
         .await
         .expect("request settlement must finish before fixture cleanup");
         self.cleanup.cleanup().await.unwrap();
+    }
+    async fn wait_for_traces(&self) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let unfinished = self
+                    .db
+                    .query_one(Statement::from_sql_and_values(
+                        DbBackend::Postgres,
+                        "SELECT COUNT(*)::BIGINT AS n FROM gateway_requests WHERE tenant_id=$1 AND user_id=$2 AND finished_at IS NULL",
+                        [self.user.tenant_id.into(), self.user.id.into()],
+                    ))
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .try_get::<i64>("", "n")
+                    .unwrap();
+                if unfinished == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("request traces must finish before fixture cleanup");
     }
     async fn node_models(&self) -> Vec<String> {
         let list = expect(
@@ -809,7 +848,7 @@ async fn pricing_preview_uses_mode_not_the_raw_model_name() {
         let result = http(
             f.app.clone(),
             Method::POST,
-            "/api/v1/pricing/calculate",
+            &format!("/api/v1/tenants/{}/pricing/calculate", f.user.tenant_id),
             Some(&f.admin),
             Some(json!({"model":f.shared,"mode":mode,"input_tokens":1000,"output_tokens":1000})),
         )
@@ -896,8 +935,8 @@ async fn disabled_node_service_fails_before_execution_budgets() {
     );
     assert!(models["data"].as_array().unwrap().is_empty());
     let debug = format!(
-        "/api/v1/debug/routing?mode=node_dispatch&model={}",
-        f.shared
+        "/api/v1/tenants/{}/debug/routing?mode=node_dispatch&model={}",
+        f.user.tenant_id, f.shared
     );
     expect(
         http(app, Method::GET, &debug, Some(&f.admin), None).await,
@@ -963,8 +1002,8 @@ async fn routing_debug_validates_mode_and_protocol_before_planning() {
     for mode in ["node_dispatch", "passthrough"] {
         for entry in ["invalid"] {
             let path = format!(
-                "/api/v1/debug/routing?mode={mode}&entry={entry}&model={}",
-                f.shared
+                "/api/v1/tenants/{}/debug/routing?mode={mode}&entry={entry}&model={}",
+                f.user.tenant_id, f.shared
             );
             expect(
                 http(f.app.clone(), Method::GET, &path, Some(&f.admin), None).await,
@@ -974,8 +1013,8 @@ async fn routing_debug_validates_mode_and_protocol_before_planning() {
     }
     for mode in ["node_dispatch", "passthrough"] {
         let path = format!(
-            "/api/v1/debug/routing?mode={mode}&entry=anthropic&model={}",
-            f.shared
+            "/api/v1/tenants/{}/debug/routing?mode={mode}&entry=anthropic&model={}",
+            f.user.tenant_id, f.shared
         );
         let result = expect(
             http(f.app.clone(), Method::GET, &path, Some(&f.admin), None).await,
@@ -987,8 +1026,8 @@ async fn routing_debug_validates_mode_and_protocol_before_planning() {
         );
     }
     let path = format!(
-        "/api/v1/debug/routing?mode=node_dispatch&entry=openai&model={}",
-        f.shared
+        "/api/v1/tenants/{}/debug/routing?mode=node_dispatch&entry=openai&model={}",
+        f.user.tenant_id, f.shared
     );
     let response = expect(
         http(f.app.clone(), Method::GET, &path, Some(&f.admin), None).await,
@@ -1084,6 +1123,7 @@ async fn unknown_prefixed_models_use_normal_responses_and_messages_errors() {
     }
     assert_eq!(f.tasks().await, 0);
     assert!(f.calls.lock().unwrap().is_empty());
+    f.wait_for_traces().await;
     f.finish().await;
 }
 

@@ -7,15 +7,16 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::{AuthExtractor, ConsoleAuth},
+    extractors::{AuthExtractor, ConsoleAuth, GlobalConsoleAuth},
     state::AppState,
+    tenant_access::TenantMember,
 };
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
 };
 use chrono::{DateTime, Utc};
-use keycompute_auth::Permission;
+use keycompute_auth::{AuthorizationAction, Permission};
 use keycompute_db::models::usage_log::UserUsageScope;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -279,7 +280,7 @@ pub struct CalculateCostRequest {
     pub input_tokens: u32,
     /// 输出 token 数
     pub output_tokens: u32,
-    /// 可选的预览租户；普通用户只能使用自己的租户。
+    /// 兼容字段：显式租户路由可省略；旧平台路由必须提供。
     #[serde(default)]
     pub tenant_id: Option<Uuid>,
 }
@@ -303,29 +304,62 @@ pub struct CalculateCostResponse {
     pub currency: String,
 }
 
-fn resolve_preview_tenant(auth: &AuthExtractor, requested_tenant: Option<Uuid>) -> Result<Uuid> {
-    match requested_tenant {
-        Some(tenant_id)
-            if tenant_id != auth.tenant_id
-                && !auth.has_permission(&keycompute_auth::Permission::ManageUsers) =>
-        {
-            Err(crate::error::ApiError::Forbidden(
-                "Cannot calculate pricing for another tenant".to_string(),
-            ))
-        }
-        Some(tenant_id) => Ok(tenant_id),
-        None => Ok(auth.tenant_id),
+fn checked_preview_tenant(route_tenant: Uuid, requested_tenant: Option<Uuid>) -> Result<Uuid> {
+    if route_tenant.is_nil() {
+        return Err(ApiError::BadRequest("tenant_id must be a real UUID".into()));
     }
+    if requested_tenant.is_some_and(|tenant_id| tenant_id != route_tenant) {
+        return Err(ApiError::BadRequest(
+            "tenant_id does not match the route".into(),
+        ));
+    }
+    Ok(route_tenant)
 }
 
-/// 计算费用（基于 PricingSnapshot）
+/// Legacy platform pricing preview. Platform identities have no selected
+/// tenant, so the target must be explicit in the request.
 pub async fn calculate_cost(
     State(state): State<AppState>,
-    auth: AuthExtractor,
+    auth: GlobalConsoleAuth,
     Json(request): Json<CalculateCostRequest>,
 ) -> Result<Json<CalculateCostResponse>> {
-    // 预览应按调用方租户解析。管理员可显式指定目标租户，普通用户不能越权。
-    let tenant_id = resolve_preview_tenant(&auth, request.tenant_id)?;
+    auth.require_platform(AuthorizationAction::ManagePlatform)
+        .map_err(ApiError::from)?;
+    let tenant_id = request
+        .tenant_id
+        .ok_or_else(|| ApiError::BadRequest("tenant_id is required".into()))?;
+    calculate_cost_for_tenant(state, checked_preview_tenant(tenant_id, None)?, request).await
+}
+
+pub async fn calculate_platform_tenant_cost(
+    auth: GlobalConsoleAuth,
+    Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(request): Json<CalculateCostRequest>,
+) -> Result<Json<CalculateCostResponse>> {
+    auth.require_platform(AuthorizationAction::ManagePlatform)
+        .map_err(ApiError::from)?;
+    let tenant_id = checked_preview_tenant(tenant_id, request.tenant_id)?;
+    calculate_cost_for_tenant(state, tenant_id, request).await
+}
+
+pub async fn calculate_tenant_cost(
+    access: TenantMember,
+    Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Json(request): Json<CalculateCostRequest>,
+) -> Result<Json<CalculateCostResponse>> {
+    access.require_path_tenant(tenant_id)?;
+    access.require(AuthorizationAction::View)?;
+    let tenant_id = checked_preview_tenant(tenant_id, request.tenant_id)?;
+    calculate_cost_for_tenant(state, tenant_id, request).await
+}
+
+async fn calculate_cost_for_tenant(
+    state: AppState,
+    tenant_id: Uuid,
+    request: CalculateCostRequest,
+) -> Result<Json<CalculateCostResponse>> {
     let provider = keycompute_pricing::resolve_pricing_provider(request.mode);
     let pricing = state
         .pricing
@@ -373,41 +407,26 @@ mod tests {
     }
 
     #[test]
-    fn preview_tenant_cannot_be_overridden_by_regular_users() {
+    fn route_tenant_cannot_be_overridden_by_payload() {
         let own_tenant = Uuid::new_v4();
         let other_tenant = Uuid::new_v4();
-        let auth = AuthExtractor::new(
-            Uuid::new_v4(),
-            own_tenant,
-            Uuid::new_v4(),
-            keycompute_types::CredentialKind::Jwt,
-        );
 
-        assert_eq!(resolve_preview_tenant(&auth, None).unwrap(), own_tenant);
         assert_eq!(
-            resolve_preview_tenant(&auth, Some(own_tenant)).unwrap(),
+            checked_preview_tenant(own_tenant, None).unwrap(),
+            own_tenant
+        );
+        assert_eq!(
+            checked_preview_tenant(own_tenant, Some(own_tenant)).unwrap(),
             own_tenant
         );
         assert!(matches!(
-            resolve_preview_tenant(&auth, Some(other_tenant)),
-            Err(crate::error::ApiError::Forbidden(_))
+            checked_preview_tenant(own_tenant, Some(other_tenant)),
+            Err(crate::error::ApiError::BadRequest(_))
         ));
     }
 
     #[test]
-    fn admin_can_preview_an_explicit_tenant() {
-        let target_tenant = Uuid::new_v4();
-        let auth = AuthExtractor::new(
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            keycompute_types::CredentialKind::Jwt,
-        )
-        .with_permissions(vec![keycompute_auth::Permission::ManageUsers]);
-
-        assert_eq!(
-            resolve_preview_tenant(&auth, Some(target_tenant)).unwrap(),
-            target_tenant
-        );
+    fn nil_route_tenant_is_rejected() {
+        assert!(checked_preview_tenant(Uuid::nil(), None).is_err());
     }
 }

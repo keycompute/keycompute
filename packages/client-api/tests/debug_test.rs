@@ -12,9 +12,12 @@ use common::{create_test_client, fixtures};
 async fn test_debug_routing_success() {
     let (client, mock_server) = create_test_client().await;
     let debug_api = DebugApi::new(&client);
+    let tenant_id = uuid::Uuid::new_v4();
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/debug/routing"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant_id}/debug/routing"
+        )))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "request_id": "550e8400-e29b-41d4-a716-446655440000",
             "routed": true,
@@ -44,7 +47,7 @@ async fn test_debug_routing_success() {
         .await;
 
     let result = debug_api
-        .debug_routing("gpt-4o", fixtures::TEST_ACCESS_TOKEN)
+        .debug_routing(tenant_id, "gpt-4o", fixtures::TEST_ACCESS_TOKEN)
         .await;
 
     assert!(result.is_ok());
@@ -58,9 +61,12 @@ async fn test_debug_routing_success() {
 async fn test_debug_routing_preserves_the_entry_protocol() {
     let (client, mock_server) = create_test_client().await;
     let debug_api = DebugApi::new(&client);
+    let tenant_id = uuid::Uuid::new_v4();
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/debug/routing"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant_id}/debug/routing"
+        )))
         .and(query_param("model", "claude-3-5-sonnet"))
         .and(query_param("entry", "anthropic"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -82,6 +88,7 @@ async fn test_debug_routing_preserves_the_entry_protocol() {
 
     let result = debug_api
         .debug_routing_for_entry(
+            tenant_id,
             "claude-3-5-sonnet",
             "anthropic",
             fixtures::TEST_ACCESS_TOKEN,
@@ -224,16 +231,21 @@ async fn test_check_provider_health_success() {
 async fn test_debug_endpoints_unauthorized() {
     let (client, mock_server) = create_test_client().await;
     let debug_api = DebugApi::new(&client);
+    let tenant_id = uuid::Uuid::new_v4();
 
     Mock::given(method("GET"))
-        .and(path("/api/v1/debug/routing"))
+        .and(path(format!(
+            "/api/v1/platform/tenants/{tenant_id}/debug/routing"
+        )))
         .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
             "error": "Unauthorized"
         })))
         .mount(&mock_server)
         .await;
 
-    let result = debug_api.debug_routing("gpt-4o", "invalid_token").await;
+    let result = debug_api
+        .debug_routing(tenant_id, "gpt-4o", "invalid_token")
+        .await;
 
     assert!(matches!(result.unwrap_err(), ClientError::Unauthorized(_)));
 }

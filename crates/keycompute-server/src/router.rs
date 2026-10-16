@@ -618,6 +618,10 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/v1/pricing/calculate", post(calculate_cost))
         .route(
+            "/api/v1/platform/tenants/{tenant_id}/pricing/calculate",
+            post(crate::handlers::billing::calculate_platform_tenant_cost),
+        )
+        .route(
             "/api/v1/platform/pricing",
             get(list_pricing).post(create_pricing),
         )
@@ -760,6 +764,10 @@ pub fn create_router(state: AppState) -> Router {
     // ==================== 7. 调试接口（仅 Admin 使用） ====================
     let debug_routes = Router::new()
         .route("/api/v1/debug/routing", get(debug_routing))
+        .route(
+            "/api/v1/platform/tenants/{tenant_id}/debug/routing",
+            get(crate::handlers::routing::debug_platform_tenant_routing),
+        )
         .route("/api/v1/debug/providers", get(get_provider_health))
         .route("/api/v1/debug/providers/reset", post(reset_health))
         .route(
@@ -865,6 +873,7 @@ pub fn create_router(state: AppState) -> Router {
         .merge(crate::handlers::tenant_nodes::router())
         .merge(crate::handlers::tenant_tasks::router())
         .merge(crate::handlers::tenant_pricing::router())
+        .merge(crate::handlers::routing::tenant_router())
         .merge(crate::handlers::tenant_providers::router())
         .merge(crate::handlers::tenant_bindings::router())
         .merge(crate::handlers::tenant_reporting::router())

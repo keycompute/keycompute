@@ -228,6 +228,10 @@ pub fn router() -> Router<AppState> {
             post(batch_defaults),
         )
         .route(
+            "/api/v1/tenants/{tenant_id}/pricing/calculate",
+            post(crate::handlers::billing::calculate_tenant_cost),
+        )
+        .route(
             "/api/v1/tenants/{tenant_id}/pricing/{id}",
             get(detail).patch(update).delete(remove),
         )

@@ -1,7 +1,7 @@
 //! 入口协议隔离端到端测试
 //!
 //! 验证本次路由协议隔离改动的两个 HTTP 面：
-//! - `/api/v1/debug/routing?entry=`：entry 参数按入口协议隔离模拟路由
+//! - `/api/v1/tenants/{tenant_id}/debug/routing?entry=`：entry 参数按入口协议隔离模拟路由
 //!   （Anthropic 入口只从 anthropic 协议账号选路，无同协议候选时不跨协议兜底）
 //! - `/v1/models?protocol=`：模型列表按入口协议过滤
 //!   （缺省按 openai 入口过滤，只列出该协议账号声明的模型）
@@ -156,10 +156,16 @@ async fn build_admin_app(
 }
 
 /// 调用 debug_routing 并解析响应（期望 200，诊断接口路由失败也返回 200）
-async fn get_debug_routing(app: &Router, token: &str, model: &str, entry: Option<&str>) -> Value {
+async fn get_debug_routing(
+    app: &Router,
+    token: &str,
+    tenant_id: Uuid,
+    model: &str,
+    entry: Option<&str>,
+) -> Value {
     let uri = match entry {
-        Some(e) => format!("/api/v1/debug/routing?model={model}&entry={e}"),
-        None => format!("/api/v1/debug/routing?model={model}"),
+        Some(e) => format!("/api/v1/tenants/{tenant_id}/debug/routing?model={model}&entry={e}"),
+        None => format!("/api/v1/tenants/{tenant_id}/debug/routing?model={model}"),
     };
     let response = app
         .clone()
@@ -242,7 +248,7 @@ async fn test_debug_routing_entry_parameter_isolates_protocol() {
     let (app, token) = build_admin_app(&pool, tenant.id, &test_id).await;
 
     // openai 入口（缺省 entry）：primary 必须是 openai 协议账号
-    let body = get_debug_routing(&app, &token, model, None).await;
+    let body = get_debug_routing(&app, &token, tenant.id, model, None).await;
     assert_eq!(body["routed"], true, "openai entry should route");
     assert_eq!(
         body["primary"]["provider"], "openai",
@@ -250,7 +256,7 @@ async fn test_debug_routing_entry_parameter_isolates_protocol() {
     );
 
     // anthropic 入口（entry=anthropic）：primary 必须是 anthropic 协议账号
-    let body = get_debug_routing(&app, &token, model, Some("anthropic")).await;
+    let body = get_debug_routing(&app, &token, tenant.id, model, Some("anthropic")).await;
     assert_eq!(body["routed"], true, "anthropic entry should route");
     assert_eq!(
         body["primary"]["provider"], "anthropic",
@@ -285,13 +291,13 @@ async fn test_debug_routing_anthropic_entry_does_not_fallback_across_protocols()
     let (app, token) = build_admin_app(&pool, tenant.id, &test_id).await;
 
     // 对照组：openai 入口正常路由
-    let body = get_debug_routing(&app, &token, model, None).await;
+    let body = get_debug_routing(&app, &token, tenant.id, model, None).await;
     assert_eq!(body["routed"], true, "openai entry should route");
     assert_eq!(body["primary"]["provider"], "openai");
 
     // anthropic 入口：本协议无账号 → 不跨协议兜底到 openai，
     // routed=false 且返回带模型名的诊断提示（非静默 500）
-    let body = get_debug_routing(&app, &token, model, Some("anthropic")).await;
+    let body = get_debug_routing(&app, &token, tenant.id, model, Some("anthropic")).await;
     assert_eq!(
         body["routed"], false,
         "anthropic entry without anthropic accounts must not fall back to openai"

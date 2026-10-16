@@ -4,13 +4,16 @@
 
 use crate::{
     error::{ApiError, Result},
-    extractors::AuthExtractor,
+    extractors::GlobalConsoleAuth,
     state::AppState,
+    tenant_access::TenantAdmin,
 };
 use axum::{
-    Extension, Json,
+    Json, Router,
     extract::{Path, Query, State},
+    routing::get,
 };
+use keycompute_auth::AuthorizationAction;
 use keycompute_types::{ExecutionTarget, RequestContext};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -44,6 +47,9 @@ fn extract_target_info(target: &ExecutionTarget) -> Option<RoutingTargetInfo> {
 pub struct RoutingDebugQuery {
     /// 模型名称
     pub model: String,
+    /// Legacy platform route target. Tenant routes derive this from the path.
+    #[serde(default)]
+    pub tenant_id: Option<Uuid>,
     #[serde(default)]
     pub mode: keycompute_types::ModelAccessMode,
     /// 入口协议（openai / anthropic），默认 openai；
@@ -154,10 +160,90 @@ fn routing_debug_failure_message(model: &str, mode: keycompute_types::ModelAcces
 ///
 /// 模拟一个请求，返回路由决策结果（不实际执行）
 /// 即使路由失败也会返回 200，包含详细的诊断信息
+#[derive(Clone, Copy)]
+struct RoutingDebugIdentity {
+    tenant_id: Uuid,
+    user_id: Uuid,
+    produce_ai_key_id: Uuid,
+}
+
 pub async fn debug_routing(
     State(state): State<AppState>,
-    Extension(auth): Extension<AuthExtractor>,
+    auth: GlobalConsoleAuth,
     Query(query): Query<RoutingDebugQuery>,
+) -> Result<Json<RoutingDebugResponse>> {
+    auth.require_platform(AuthorizationAction::Diagnostics)
+        .map_err(ApiError::from)?;
+    let tenant_id = query
+        .tenant_id
+        .ok_or_else(|| ApiError::BadRequest("tenant_id is required".into()))?;
+    debug_routing_for(
+        state,
+        RoutingDebugIdentity {
+            tenant_id,
+            user_id: auth.user_id,
+            produce_ai_key_id: Uuid::nil(),
+        },
+        query,
+    )
+    .await
+}
+
+pub async fn debug_platform_tenant_routing(
+    auth: GlobalConsoleAuth,
+    Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Query(query): Query<RoutingDebugQuery>,
+) -> Result<Json<RoutingDebugResponse>> {
+    auth.require_platform(AuthorizationAction::Diagnostics)
+        .map_err(ApiError::from)?;
+    if query.tenant_id.is_some_and(|value| value != tenant_id) {
+        return Err(ApiError::BadRequest(
+            "tenant_id does not match the route".into(),
+        ));
+    }
+    debug_routing_for(
+        state,
+        RoutingDebugIdentity {
+            tenant_id,
+            user_id: auth.user_id,
+            produce_ai_key_id: Uuid::nil(),
+        },
+        query,
+    )
+    .await
+}
+
+pub async fn debug_tenant_routing(
+    access: TenantAdmin,
+    Path(tenant_id): Path<Uuid>,
+    State(state): State<AppState>,
+    Query(query): Query<RoutingDebugQuery>,
+) -> Result<Json<RoutingDebugResponse>> {
+    access.require_path_tenant(tenant_id)?;
+    access.require(AuthorizationAction::ManageTenantResource)?;
+    if query.tenant_id.is_some_and(|value| value != tenant_id) {
+        return Err(ApiError::BadRequest(
+            "tenant_id does not match the route".into(),
+        ));
+    }
+    let auth = access.auth();
+    debug_routing_for(
+        state,
+        RoutingDebugIdentity {
+            tenant_id,
+            user_id: auth.user_id,
+            produce_ai_key_id: auth.produce_ai_key_id,
+        },
+        query,
+    )
+    .await
+}
+
+async fn debug_routing_for(
+    state: AppState,
+    auth: RoutingDebugIdentity,
+    query: RoutingDebugQuery,
 ) -> Result<Json<RoutingDebugResponse>> {
     use keycompute_db::models::Account;
 
@@ -204,7 +290,9 @@ pub async fn debug_routing(
         .ok_or_else(|| ApiError::Internal("Database not configured".to_string()))?;
 
     // 获取所有启用的账号
-    let all_accounts = Account::find_enabled_all(pool).await.unwrap_or_default();
+    let all_accounts = Account::find_enabled_by_tenant(pool, auth.tenant_id)
+        .await
+        .unwrap_or_default();
 
     // 按协议统计账号数量；健康与路由资格都取决于具体账号。
     let mut provider_account_counts: std::collections::HashMap<String, usize> =
@@ -356,6 +444,13 @@ pub async fn debug_routing(
         }
         Err(e) => Err(ApiError::Internal(format!("Routing failed: {}", e))),
     }
+}
+
+pub fn tenant_router() -> Router<AppState> {
+    Router::new().route(
+        "/api/v1/tenants/{tenant_id}/debug/routing",
+        get(debug_tenant_routing),
+    )
 }
 
 /// 协议入口下的账号路由健康摘要。
