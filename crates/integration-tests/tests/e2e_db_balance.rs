@@ -3182,13 +3182,11 @@ mod tests {
         )
         .await
         .expect("administrator should be created");
-        pool.execute(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "INSERT INTO tenant_memberships (tenant_id, user_id, tenant_role, status) VALUES ($1, $2, 'admin', 'active')",
-            [tenant.id.into(), admin.id.into()],
-        ))
-        .await
-        .expect("administrator membership should be created");
+        make_fixture_operator(&pool, admin.id).await;
+        let admin = keycompute_db::User::find_by_id(&pool, admin.id)
+            .await
+            .expect("administrator refresh should succeed")
+            .expect("administrator should still exist");
         let target = create_test_user(&pool, tenant.id, "admin-balance-api-target", &test_id).await;
         let service = BalanceService::new(DbRouter::single(pool.clone()));
         service
@@ -3205,14 +3203,7 @@ mod tests {
             .auth
             .get_jwt_validator()
             .expect("JWT validator should be configured")
-            .generate_identity_token(
-                admin.id,
-                Some(tenant.id),
-                admin.token_version,
-                Some(1),
-                Some(1),
-                3600,
-            )
+            .generate_identity_token(admin.id, None, admin.token_version, None, None, 3600)
             .expect("administrator token should be generated");
         let app = create_router(state);
         let freeze_uri = format!("/api/v1/users/{}/balance/freeze", target.id);
