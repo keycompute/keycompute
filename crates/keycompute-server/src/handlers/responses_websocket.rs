@@ -2503,7 +2503,7 @@ mod tests {
     async fn websocket_warmup_is_rejected_when_tenant_rpm_is_exhausted() {
         let fixture = crate::test_support::TestIdentity::member().await;
         let state = fixture.state.clone();
-        let auth = fixture.auth.clone();
+        let auth = fixture.auth.clone().expect("member fixture auth");
         // JWT-authenticated WebSocket events have no Produce AI key, so the
         // revalidated event identity uses the nil API-key component.
         let rate_key = keycompute_ratelimit::RateLimitKey::new(
@@ -3163,7 +3163,7 @@ mod tests {
     async fn websocket_connection_rejects_controls_then_handles_response_create() {
         let fixture = crate::test_support::TestIdentity::member().await;
         let state = fixture.state.clone();
-        let auth = fixture.auth.clone();
+        let auth = fixture.auth.clone().expect("member fixture auth");
         let jwt = fixture.token.clone();
         let mut connection_headers = HeaderMap::new();
         connection_headers.insert(

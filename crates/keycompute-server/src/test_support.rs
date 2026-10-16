@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 pub(crate) struct TestIdentity {
     pub state: AppState,
-    pub auth: AuthExtractor,
+    pub auth: Option<AuthExtractor>,
     pub token: String,
     admin: DatabaseConnection,
     database_name: String,
@@ -53,6 +53,15 @@ impl TestIdentity {
             actor_tenant_role: None,
             request_id: None,
         };
+        let owner = User::create(
+            &tx,
+            &CreateUserRequest {
+                email: "owner@unit.invalid".into(),
+                name: None,
+            },
+        )
+        .await
+        .unwrap();
         let tenant = Tenant::create_owned(
             &tx,
             &CreateTenantRequest {
@@ -62,48 +71,73 @@ impl TestIdentity {
                 default_rpm_limit: None,
                 default_tpm_limit: None,
             },
-            root.id,
+            owner.id,
             &root_actor,
         )
         .await
         .unwrap();
-        let user = User::create(
-            &tx,
-            &CreateUserRequest {
-                email: "member@unit.invalid".into(),
-                name: None,
-            },
-        )
-        .await
-        .unwrap();
-        let user = if platform != PlatformRole::None {
-            User::set_security(&tx, user.id, platform, UserStatus::Active, &root_actor)
+        let user = match platform {
+            PlatformRole::Root => root,
+            PlatformRole::Operator => {
+                let operator = User::create(
+                    &tx,
+                    &CreateUserRequest {
+                        email: "operator@unit.invalid".into(),
+                        name: None,
+                    },
+                )
+                .await
+                .unwrap();
+                User::set_security(
+                    &tx,
+                    operator.id,
+                    PlatformRole::Operator,
+                    UserStatus::Active,
+                    &root_actor,
+                )
                 .await
                 .unwrap()
-        } else {
-            user
+            }
+            PlatformRole::None => User::create(
+                &tx,
+                &CreateUserRequest {
+                    email: "member@unit.invalid".into(),
+                    name: None,
+                },
+            )
+            .await
+            .unwrap(),
         };
-        tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
-            "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,$3,'active')",
-            [tenant.id.into(),user.id.into(),tenant_role.as_str().into()],
-        )).await.unwrap();
+        if platform == PlatformRole::None {
+            tx.execute(Statement::from_sql_and_values(DbBackend::Postgres,
+                "INSERT INTO tenant_memberships(tenant_id,user_id,tenant_role,status) VALUES($1,$2,$3,'active')",
+                [tenant.id.into(),user.id.into(),tenant_role.as_str().into()],
+            )).await.unwrap();
+        }
         tx.commit().await.unwrap();
         let state = AppState::with_pool(DbRouter::single(db));
+        let selected_tenant = (platform == PlatformRole::None).then_some(tenant.id);
         let token = state
             .auth
             .get_jwt_validator()
             .unwrap()
             .generate_identity_token(
                 user.id,
-                Some(tenant.id),
+                selected_tenant,
                 user.token_version,
-                Some(tenant.authz_version),
-                Some(1),
+                selected_tenant.map(|_| tenant.authz_version),
+                selected_tenant.map(|_| 1),
                 3600,
             )
             .unwrap();
-        let auth = AuthExtractor::from_auth_context(state.auth.verify_token(&token).await.unwrap())
-            .unwrap();
+        let auth = if selected_tenant.is_some() {
+            Some(
+                AuthExtractor::from_auth_context(state.auth.verify_token(&token).await.unwrap())
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
         Self {
             state,
             auth,
