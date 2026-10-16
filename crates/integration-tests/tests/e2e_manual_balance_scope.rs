@@ -172,6 +172,15 @@ fn audit(id: Uuid) -> AuditContext {
         request_id: Some(Uuid::new_v4()),
     }
 }
+fn tenant_admin_audit(id: Uuid) -> AuditContext {
+    AuditContext {
+        actor_user_id: id,
+        credential_kind: CredentialKind::Jwt,
+        actor_platform_role: PlatformRole::None,
+        actor_tenant_role: Some(TenantRole::Admin),
+        request_id: Some(Uuid::new_v4()),
+    }
+}
 fn command(user_id: Uuid, kind: Kind, key: &str) -> ManualBalanceCommand<'_> {
     ManualBalanceCommand {
         kind,
@@ -636,8 +645,9 @@ async fn tenant_recovery_is_expired_only_and_stays_with_the_original_owner() {
     let row = reserve(&f, 4).await;
     let scope = tenant_admin_scope(&f).await;
     let cmd = release_command(&row);
+    let audit = tenant_admin_audit(f.admin);
     assert!(
-        keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit(f.admin), &cmd)
+        keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit, &cmd)
             .await
             .unwrap()
             .is_none()
@@ -646,19 +656,17 @@ async fn tenant_recovery_is_expired_only_and_stays_with_the_original_owner() {
     f.db.execute(Statement::from_sql_and_values(DbBackend::Postgres,
         "UPDATE balance_reservations SET expires_at=clock_timestamp()-interval '1 second' WHERE tenant_id=$1 AND user_id=$2 AND request_id=$3",
         [f.tenant.into(),f.user.into(),row.request_id.into()])).await.unwrap();
-    let first =
-        keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit(f.admin), &cmd)
-            .await
-            .unwrap()
-            .unwrap();
+    let first = keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit, &cmd)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(first.released_reservation.tenant_id, f.tenant);
     assert_eq!(first.released_reservation.user_id, f.user);
     assert_eq!(first.released_reservation.released_by, Some(f.admin));
-    let replay =
-        keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit(f.admin), &cmd)
-            .await
-            .unwrap()
-            .unwrap();
+    let replay = keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit, &cmd)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(
         replay.released_reservation.id,
         first.released_reservation.id
@@ -675,7 +683,7 @@ async fn tenant_recovery_is_expired_only_and_stays_with_the_original_owner() {
     .await
     .unwrap();
     assert!(
-        keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit(f.admin), &cmd)
+        keycompute_db::BalanceReservation::admin_release(&f.db, scope, &audit, &cmd)
             .await
             .is_err()
     );
